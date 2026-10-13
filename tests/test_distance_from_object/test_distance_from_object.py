@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import anndata as ad
+import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pytest
 from scipy import sparse
-from shapely.geometry import Polygon
+from shapely.geometry import Point, Polygon
 
 from merxen.config import DistanceFromObjectCohortConfig, DistanceFromObjectConfig
 from merxen.cortical_depth.assign_cells import CellCoordinateTable
+from merxen.cortical_depth.frames import BoundaryFrameMismatchError
 from merxen.distance_from_object.annotations import (
     ObjectAnnotation,
     load_object_annotations,
@@ -346,6 +350,139 @@ def test_distance_pipeline_writes_sidecars_and_preserves_obs(
         "D",
     ]
     assert "distance_to_object_edge_um" in written_tables[0].obs
+
+
+def _aligned_merscope_store(*, with_table_spatial: bool) -> tuple[Any, ad.AnnData]:
+    """MERSCOPE store holding native shapes and an aligned variant mirrored in
+    x plus a 3 mm offset (the shape of the real native -> Xenium affine)."""
+    cells = {
+        "c1": (5.0, 5.0),
+        "c2": (20.0, 5.0),
+        "c3": (150.0, 5.0),
+        "c4": (180.0, 5.0),
+    }
+
+    def shapes(points: dict[str, tuple[float, float]]) -> gpd.GeoDataFrame:
+        return gpd.GeoDataFrame(
+            geometry=[Point(xy).buffer(1.0) for xy in points.values()],
+            index=pd.Index(list(points)),
+        )
+
+    table = ad.AnnData(
+        X=sparse.csr_matrix(
+            np.asarray([[1, 0], [2, 1], [0, 3], [1, 4]], dtype=np.int64)
+        ),
+        obs=pd.DataFrame(
+            {
+                "cell_id": list(cells),
+                "region": pd.Categorical(["MOSAIK_proseg"] * len(cells)),
+                "cortical_depth_annotation": ["grey_matter"] * len(cells),
+            },
+            index=list(cells),
+        ),
+        var=pd.DataFrame(index=["GeneA", "GeneB"]),
+    )
+    table.uns["spatialdata_attrs"] = {
+        "region": "MOSAIK_proseg",
+        "region_key": "region",
+        "instance_key": "cell_id",
+    }
+    if with_table_spatial:
+        table.obsm["spatial"] = np.asarray(list(cells.values()))
+    store = SimpleNamespace(
+        tables={"table_MOSAIK_proseg": table},
+        shapes={
+            "MOSAIK_proseg": shapes(cells),
+            "MOSAIK_proseg_aligned_nonrigid": shapes(
+                {key: (5000.0 - x, y + 3000.0) for key, (x, y) in cells.items()}
+            ),
+        },
+    )
+    return store, table
+
+
+def _merscope_distance_config(tmp_path: Path) -> DistanceFromObjectConfig:
+    latest_path = tmp_path / "latest.zarr"
+    latest_path.mkdir()
+    object_path = tmp_path / "objects.geojson"
+    object_path.write_text(
+        json.dumps(
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"object_id": "p1", "object_type": "plaque"},
+                        "geometry": {
+                            "type": "Polygon",
+                            "coordinates": [
+                                [[0, 0], [10, 0], [10, 10], [0, 10], [0, 0]]
+                            ],
+                        },
+                    }
+                ],
+            }
+        )
+    )
+    return DistanceFromObjectConfig.model_validate(
+        {
+            "pair_id": "block_1",
+            "dataset_name": "block_1_MERSCOPE",
+            "platform": "MERSCOPE",
+            "latest_zarr_path": latest_path,
+            "output_dir": tmp_path / "out",
+            "object_annotation_path": object_path,
+            "tables": [
+                {
+                    "segmentation": "cellpose",
+                    "table_key": "table_MOSAIK_proseg",
+                    "shape_key": "MOSAIK_proseg",
+                }
+            ],
+            "min_cells_per_pseudobulk": 1,
+        }
+    )
+
+
+def test_distance_refuses_aligned_merscope_cells(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A MERSCOPE table without obsm['spatial'] on an aligned store would be
+    read from the mirrored aligned element; refused until the object frame
+    is explicit."""
+    store, _ = _aligned_merscope_store(with_table_spatial=False)
+    monkeypatch.setattr(
+        "merxen.distance_from_object.pipeline.sd.read_zarr", lambda _path: store
+    )
+
+    with pytest.raises(BoundaryFrameMismatchError, match="aligned element"):
+        run_distance_from_object(_merscope_distance_config(tmp_path))
+
+
+def test_distance_native_merscope_table_keeps_its_native_region(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A MERSCOPE table with obsm['spatial'] is read in the native frame and
+    written back with its native region, not the aligned element."""
+    store, _ = _aligned_merscope_store(with_table_spatial=True)
+    written: list[ad.AnnData] = []
+    monkeypatch.setattr(
+        "merxen.distance_from_object.pipeline.sd.read_zarr", lambda _path: store
+    )
+    monkeypatch.setattr(
+        "merxen.distance_from_object.pipeline.write_or_replace_element",
+        lambda _sdata, _key, _kind, value, **_kwargs: written.append(value),
+    )
+
+    paths = run_distance_from_object(_merscope_distance_config(tmp_path))
+
+    cells = pd.read_parquet(paths["cellpose_cells"])
+    np.testing.assert_allclose(cells["x"], [5.0, 20.0, 150.0, 180.0])
+    assert cells["inside_object"].tolist() == [True, False, False, False]
+    assert len(written) == 1
+    assert written[0].uns["spatialdata_attrs"]["region"] == "MOSAIK_proseg"
 
 
 def test_distance_cohort_pipeline_discovers_pair_outputs(

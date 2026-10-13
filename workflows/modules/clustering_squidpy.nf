@@ -190,3 +190,81 @@ JSON
         --output-dir clustering_squidpy_out
     """
 }
+
+// CLUSTERING_SQUIDPY_COMPUTE_CPU: the map_first hierarchy of one pair x
+// segmentation (plan §3.5, §6). The compute CLI of the legacy COMPUTE runs in
+// the main environment on the CPU (no GPU queue, no GPU lock) with
+// --mode map_first and RESOLVE's label tables. It emits FINALIZE's input
+// shape. Called only by CLUSTERING_MAP_FIRST (subworkflows/clustering_map_first.nf,
+// hook H5); legacy runs never reach it.
+process CLUSTERING_SQUIDPY_COMPUTE_CPU {
+    tag "${pair_id}:${segmentation}"
+
+    // RESOLVE's annotation_resolve_out is byte-deterministic for given
+    // inputs (no clock, wall time or absolute input path; the run record is
+    // a separate output), so a RESOLVE re-run with unchanged labels leaves
+    // this task cached when it hashes the staged content (plan §3.4, M4
+    // review). "deep" hashes file content but a directory by its metadata,
+    // so the RESOLVE outputs are staged as files
+    // (AnnotationReferences.computeLabelFiles). compute_spec carries the
+    // hierarchy-code fingerprint, so a hierarchy change re-runs it.
+    cache "deep"
+
+    input:
+    // compute_spec: AnnotationReferences.computeSpec(params, src) (table-key
+    // suffix, MENDER unassigned-state policy, hierarchy fingerprint);
+    // label_files: RESOLVE's pair summary and each sample's label table and
+    // annotation manifest, staged flat.
+    tuple val(pair_id),
+        val(segmentation),
+        val(compute_spec),
+        val(samples_json),
+        path(clustering_config, stageAs: "compute_inputs/clustering_squidpy_config.json"),
+        path(prepared_dir, stageAs: "compute_inputs/clustering_prepare_out"),
+        path(label_files, stageAs: "compute_inputs/annotation_resolve_out/*")
+
+    output:
+    tuple val(pair_id),
+        val(segmentation),
+        val(samples_json),
+        path("clustering_compute_out")
+
+    script:
+    def computeArgs = AnnotationReferences.computeArguments(compute_spec)
+    """
+    set -euo pipefail
+    export PYTHONPATH="${projectDir}/../src:\${PYTHONPATH:-}"
+    export CUDA_VISIBLE_DEVICES=""
+    export OMP_NUM_THREADS="${task.cpus}"
+    export OPENBLAS_NUM_THREADS="${task.cpus}"
+    export MKL_NUM_THREADS="${task.cpus}"
+    export NUMEXPR_NUM_THREADS="${task.cpus}"
+    export NUMBA_NUM_THREADS="${task.cpus}"
+    export VECLIB_MAXIMUM_THREADS="${task.cpus}"
+    export BLIS_NUM_THREADS="${task.cpus}"
+    export RAYON_NUM_THREADS="${task.cpus}"
+    export POLARS_MAX_THREADS="${task.cpus}"
+    export DASK_NUM_WORKERS="${task.cpus}"
+
+    python -m merxen.clustering_squidpy_stages compute \\
+        --config compute_inputs/clustering_squidpy_config.json \\
+        --input-dir compute_inputs/clustering_prepare_out \\
+        --output-dir clustering_compute_out \\
+        ${computeArgs}
+    """
+
+    stub:
+    def stubManifest = AnnotationReferences.stubComputeManifestJson(
+        pair_id,
+        segmentation,
+        compute_spec,
+        samples_json,
+    )
+    """
+    mkdir -p clustering_compute_out
+    cat > clustering_compute_out/stub_compute_manifest.json <<'JSON'
+${stubManifest}
+JSON
+    ls compute_inputs/annotation_resolve_out > clustering_compute_out/stub_labels_listing.txt
+    """
+}

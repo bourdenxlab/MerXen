@@ -1545,13 +1545,73 @@ def save_clustered_adata(adata: ad.AnnData, output_path: Path | str) -> Path:
 def _clustered_spatialdata_table_key(
     source_table_key: str,
     segmentation: str | None,
+    table_key_suffix: str = "",
 ) -> str:
     """Return the derived SpatialData table key for a clustered AnnData table.
 
     Delegates to ``merxen.table_keys.clustered_table_key``, which mirrors
-    ``clusteredSpatialdataTableKey`` in ``workflows/main.nf``.
+    ``clusteredSpatialdataTableKey`` in ``workflows/main.nf``; the suffix
+    (``""`` in legacy runs) gives map_first runs of a species that has not
+    flipped their own ``*_mapfirst`` table (plan §4.8).
     """
-    return clustered_table_key(source_table_key, segmentation)
+    return clustered_table_key(source_table_key, segmentation, table_key_suffix)
+
+
+def _check_recorded_table_key_suffix(adata: ad.AnnData, table_key_suffix: str) -> None:
+    """Refuse to write a map_first table under another table-key suffix.
+
+    A map_first clustered H5AD records the suffix it was clustered for in
+    ``uns["merxen_hierarchical_clustering"]["table_key_suffix"]``; writing it
+    with a different suffix (above all ``""``) would overwrite the legacy
+    clustered table (R3, plan §4.8). Legacy H5ADs record none.
+
+    Raises:
+        ValueError: If the recorded and the requested suffix differ.
+    """
+    record = adata.uns.get(HIERARCHICAL_UNS_KEY)
+    if not isinstance(record, dict) or record.get("mode") != "map_first":
+        return
+    recorded = record.get("table_key_suffix")
+    if recorded is None:
+        return
+    if str(recorded) != str(table_key_suffix):
+        raise ValueError(
+            "this map_first clustered table was built for table-key suffix "
+            f"{str(recorded)!r} but is being written with {table_key_suffix!r}; "
+            "refusing to overwrite another clustered table (plan §4.8)"
+        )
+
+
+def finalize_table_key_suffix(
+    adata: ad.AnnData, config: ClusteringSquidpyConfig
+) -> str:
+    """Return the table-key suffix FINALIZE writes a clustered table under.
+
+    CLUSTERING_SQUIDPY_FINALIZE's Nextflow script is the legacy one (its text
+    is pinned so legacy -resume keeps working), so its config names no mode
+    and no suffix. A map_first clustered H5AD records the suffix it was
+    clustered for (``"mapfirst"`` before its species flips): FINALIZE writes
+    it under that suffix. A config that sets a map_first mode or an explicit
+    suffix wins, and ``write_clustered_spatialdata_table`` still refuses a
+    suffix that differs from the recorded one (plan §4.8).
+
+    Args:
+        adata: The clustered AnnData.
+        config: FINALIZE's config.
+
+    Returns:
+        The suffix (``""`` for legacy tables).
+    """
+    if config.mode == "map_first" or "table_key_suffix" in config.model_fields_set:
+        return str(config.table_key_suffix)
+    record = adata.uns.get(HIERARCHICAL_UNS_KEY)
+    if (
+        isinstance(record, dict)
+        and record.get("mode") == "map_first"
+        and record.get("table_key_suffix") is not None
+    ):
+        return str(record["table_key_suffix"])
+    return str(config.table_key_suffix)
 
 
 def build_clustered_spatialdata_table(
@@ -1621,9 +1681,26 @@ def write_clustered_spatialdata_table(
     adata: ad.AnnData,
     *,
     segmentation: str | None,
+    table_key_suffix: str = "",
 ) -> tuple[Path, str]:
-    """Attach the final clustered AnnData object as a SpatialData table."""
+    """Attach the final clustered AnnData object as a SpatialData table.
+
+    Args:
+        zarr_path: The SpatialData zarr.
+        adata: The clustered AnnData.
+        segmentation: Segmentation branch (decides the source-table family).
+        table_key_suffix: Clustered table-key suffix (``""`` in legacy runs;
+            ``"mapfirst"`` for map_first runs before the species flips).
+
+    Returns:
+        ``(zarr_path, written table key)``.
+
+    Raises:
+        ValueError: If a map_first table is written with another suffix
+            than it was clustered for.
+    """
     zarr_path = Path(zarr_path)
+    _check_recorded_table_key_suffix(adata, table_key_suffix)
     clustering_meta = dict(adata.uns.get("merxen_clustering_squidpy", {}))
     source_table_key = str(clustering_meta.get("table_key") or "table")
     spatial_attrs = dict(adata.uns.get("spatialdata_attrs", {}))
@@ -1638,6 +1715,7 @@ def write_clustered_spatialdata_table(
     output_table_key = _clustered_spatialdata_table_key(
         source_table_key,
         segmentation,
+        table_key_suffix,
     )
     parsed_table = build_clustered_spatialdata_table(
         adata,
@@ -2796,14 +2874,120 @@ def _safe_token(value: str) -> str:
     return token or "value"
 
 
+@dataclass(frozen=True)
+class MapFirstComputeOptions:
+    """Run settings of a map_first compute that ``ClusteringSquidpyConfig`` lacks.
+
+    Attributes:
+        mender_unassigned_state_policy: The run's MENDER unassigned-state
+            policy, recorded in each clustered table so MENDER applies it
+            (plan §4.9); ``None`` records none.
+    """
+
+    mender_unassigned_state_policy: str | None = None
+
+
+def _cluster_map_first(
+    adata: ad.AnnData,
+    config: ClusteringSquidpyConfig,
+    *,
+    sample: Any,
+    sample_dir: Path,
+    options: MapFirstComputeOptions,
+    cross_platform: Any,
+) -> tuple[ad.AnnData, dict[str, Path | str]]:
+    """Build the map_first hierarchy of one prepared section (plan §3.5, §6.2).
+
+    The label table and its provenance come from RESOLVE's output
+    (``config.labels_dir``); control features are removed as legacy
+    ``run_scanpy_clustering`` removes them, so the table cells are the same
+    objects (plan §4.4). The QC histograms and the clustered H5AD keep the
+    legacy file names, so FINALIZE, MENDER and cortical depth read them as
+    they read legacy outputs.
+    """
+    from merxen.annotation.config import resolve_table_key_suffix
+    from merxen.clustering.map_first import (
+        label_table_species,
+        load_label_inputs,
+        run_map_first_hierarchy,
+    )
+
+    if config.labels_dir is None:
+        raise ValueError(
+            "map_first clustering needs labels_dir (RESOLVE's annotation_resolve_out)"
+        )
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    qc_plot = plot_qc_histograms(
+        adata,
+        _plot_output_dir(sample_dir, "qc") / f"{sample.sample_id}_qc_histograms.png",
+        sample_label=sample.sample_id,
+        platform=sample.platform,
+        dpi=config.figure_dpi,
+    )
+    qc_csv = save_qc_metrics(adata, sample_dir / f"{sample.sample_id}_qc_metrics.csv")
+    inputs = load_label_inputs(config.labels_dir, sample.sample_id, sample.platform)
+    # Before the species' flip an empty suffix would overwrite the legacy
+    # clustered table (OD-A3); the preflight refuses it too.
+    resolve_table_key_suffix(
+        label_table_species(inputs.labels), "map_first", config.table_key_suffix
+    )
+    if config.drop_control_features:
+        prepared = remove_control_features(adata)
+    else:
+        prepared = adata.copy()
+        _record_control_feature_filter(
+            prepared,
+            removed_features=[],
+            n_features_before=prepared.n_vars,
+            enabled=False,
+        )
+    clustered, result = run_map_first_hierarchy(
+        prepared,
+        inputs.labels,
+        config,
+        sample_dir / f"{sample.sample_id}_hierarchical",
+        sample.sample_id,
+        provenance=inputs.provenance,
+        mender_unassigned_state_policy=options.mender_unassigned_state_policy,
+        cross_platform=cross_platform,
+    )
+    del prepared
+    h5ad = save_clustered_adata(
+        clustered,
+        sample_dir / f"{sample.sample_id}_clustered.h5ad",
+    )
+    return clustered, {
+        "qc_plot": qc_plot,
+        "qc_csv": qc_csv,
+        "labels": inputs.labels_path,
+        "h5ad": h5ad,
+        **result.artifacts,
+    }
+
+
 def _cluster_loaded_adata(
     adata: ad.AnnData,
     config: ClusteringSquidpyConfig,
     *,
     sample: Any,
     sample_dir: Path,
+    map_first_options: MapFirstComputeOptions | None = None,
+    cross_platform: Any = None,
 ) -> tuple[ad.AnnData, dict[str, Path | str]]:
-    """Cluster one prepared AnnData object and write non-SpatialData artifacts."""
+    """Cluster one prepared AnnData object and write non-SpatialData artifacts.
+
+    ``config.mode == "map_first"`` builds the map-first hierarchy from
+    RESOLVE's label table (``_cluster_map_first``); legacy mode is unchanged.
+    """
+    if config.mode == "map_first":
+        return _cluster_map_first(
+            adata,
+            config,
+            sample=sample,
+            sample_dir=sample_dir,
+            options=map_first_options or MapFirstComputeOptions(),
+            cross_platform=cross_platform,
+        )
     sample_dir.mkdir(parents=True, exist_ok=True)
     qc_plot = plot_qc_histograms(
         adata,
@@ -2921,12 +3105,37 @@ def compute_clustering_squidpy(
     config: ClusteringSquidpyConfig,
     prepared_dir: Path | str,
     output_dir: Path | str,
+    *,
+    map_first_options: MapFirstComputeOptions | None = None,
 ) -> dict[str, dict[str, Path | str]]:
-    """Run clustering from H5AD inputs without importing SpatialData."""
+    """Run clustering from H5AD inputs without importing SpatialData.
+
+    Args:
+        config: The run's clustering config (``mode`` selects legacy or
+            map_first clustering).
+        prepared_dir: CLUSTERING_SQUIDPY_PREPARE's output.
+        output_dir: Where the clustered H5ADs and artifacts go.
+        map_first_options: map_first run settings (ignored in legacy mode).
+
+    Returns:
+        The artifacts per sample id.
+    """
     prepared_dir = Path(prepared_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest = json.loads((prepared_dir / "manifest.json").read_text())["samples"]
+    # Legacy calls keep their exact arguments; map_first adds its options and
+    # the pair's cross-platform scope (one RESOLVE pair summary per pair).
+    map_first_arguments: dict[str, Any] = {}
+    if config.mode == "map_first" and config.labels_dir is not None:
+        from merxen.clustering.cross_platform import load_cross_platform_scope
+
+        map_first_arguments = {
+            "map_first_options": map_first_options or MapFirstComputeOptions(),
+            "cross_platform": load_cross_platform_scope(
+                config.labels_dir, config.pair_id
+            ),
+        }
     results: dict[str, dict[str, Path | str]] = {}
     for sample in config.samples:
         log_status(f"[{sample.sample_id}] Starting isolated clustering compute")
@@ -2936,6 +3145,7 @@ def compute_clustering_squidpy(
             config,
             sample=sample,
             sample_dir=output_dir / sample.platform.lower(),
+            **map_first_arguments,
         )
         results[sample.sample_id] = artifacts
         del adata, clustered
@@ -2967,6 +3177,7 @@ def finalize_clustering_squidpy(
                 sample.zarr_path,
                 clustered,
                 segmentation=sample.segmentation,
+                table_key_suffix=finalize_table_key_suffix(clustered, config),
             )
             sample_results.update(
                 spatialdata_zarr=zarr_path,
@@ -3004,6 +3215,7 @@ def run_clustering_squidpy(
                 sample.zarr_path,
                 clustered,
                 segmentation=sample.segmentation,
+                table_key_suffix=config.table_key_suffix,
             )
             artifacts.update(
                 spatialdata_zarr=zarr_path,

@@ -28,6 +28,8 @@ from merxen.annotation.vocab import (
     primary_vocab,
 )
 
+from .conftest import PROMOTION_CONSTRAINTS, assert_same_emission
+
 T = AnnotationThresholds()
 GRID = (10, 15, 30, 60, 120, 250)
 MakeDecisions = Callable[..., pd.DataFrame]
@@ -1188,3 +1190,135 @@ def test_published_table_cells_below_min_counts_are_below_floor(
     assert result.status("lineage")[2] == CellStatus.BELOW_FLOOR.value
     assert result.in_table.all()
     assert not result.flags[Columns.FLAG_LOW_COUNTS].any()
+
+
+# --------------------------------------------------------------------------
+# Promotion by simulation never changes what is emitted (plan §8.2, §14; M13)
+
+PROMOTION_NAMES: tuple[str | None, ...] = (
+    EXC,
+    INH,
+    ASTRO,
+    MICRO,
+    OPC_SUPC,
+    COP_SUPERCLUSTER,
+    "Oligodendrocyte",
+    "Vascular",
+    "Splatter",
+    None,
+)
+
+
+def random_cells(rng: np.random.Generator, n: int) -> list[Cell]:
+    """Seeded random objects: calls, depths, scores and second votes."""
+
+    def pick(values: Sequence[Any]) -> Any:
+        return values[int(rng.integers(len(values)))]
+
+    return [
+        Cell(
+            pick(PROMOTION_NAMES),
+            counts=int(rng.integers(3, 400)),
+            bp=float(rng.uniform(0.3, 1.0)),
+            lineage_raw=float(rng.uniform(0.6, 1.0)),
+            broad_raw=float(rng.uniform(0.6, 1.0)),
+            nt_raw=float(rng.uniform(0.6, 1.0)),
+            sea_broad=pick(("same", "same", "same", "Astrocytes", "Neurons", None)),
+            sea_raw=float(rng.uniform(0.2, 1.0)),
+            sea_subclass=pick(("same", "same", None)),
+            sea_subclass_raw=float(rng.uniform(0.2, 1.0)),
+            cluster=pick(("C1", "C2", None)),
+            cluster_bp=float(rng.uniform(0.5, 1.0)),
+        )
+        for _ in range(n)
+    ]
+
+
+def promotion_decisions(make_decisions: MakeDecisions) -> pd.DataFrame:
+    """A decisions table whose provisional regime differs from the validated one.
+
+    The provisional rows carry the margins (raised thresholds, bins left
+    unemitted, deeper simulated floors); a promotion that switched a
+    simulation family to the validated regime would change the statuses.
+    """
+    provisional = {
+        ("provisional", "lineage", "Immune", 30): {"threshold": 0.92},
+        ("provisional", "broad", "Exc", 15): {"status": "not_resolvable"},
+        ("provisional", "broad", "Astro", 60): {"threshold": 0.90},
+        ("provisional", "broad", "Inh", 10): {"status": "not_resolvable"},
+        ("provisional", "broad", "Inh", 15): {"status": "not_resolvable"},
+        ("provisional", "nt", "Inh", 60): {"status": "not_resolvable"},
+        ("provisional", "supercluster", "Exc", 30): {"status": "not_resolvable"},
+        ("provisional", "supercluster", "Oligo", 120): {"threshold": 0.95},
+        ("provisional", "supercluster", "Astro", 250): {"extrapolated": True},
+        ("provisional", "cluster", "Exc", 250): {"threshold": 0.95},
+    }
+    validated = {
+        ("validated", "broad", "Vascular", 30): {"extrapolated": True},
+        ("validated", "supercluster", "Exc", 15): {"status": "not_resolvable"},
+    }
+    return make_decisions(overrides=provisional | validated)
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+@pytest.mark.parametrize("constraint", PROMOTION_CONSTRAINTS)
+def test_promotion_by_simulation_never_changes_what_resolve_human_emits(
+    promotion_trust: Callable[..., tuple[Any, Any]],
+    make_decisions: MakeDecisions,
+    human_level_meta: list[LevelMeta],
+    constraint: str,
+    seed: int,
+) -> None:
+    """Provisional -> simulation-validated trust: only validation marks change.
+
+    Both trust decisions come from ``trust_state`` on the same panel and
+    bundle, before and after a gate-P PR lists the family; only
+    ``ct_<L>_validated``, the banner and the gate warning may differ.
+    """
+    rng = np.random.default_rng(seed)
+    cells = random_cells(rng, 300)
+    calls = calls_of([*cells, *[FILLER] * 30])
+    primary = promotion_trust(constraint)
+    secondary = promotion_trust(constraint, role="secondary")
+    has_tables = constraint != "no_self_map"
+    thresholds = AnnotationThresholds(allow_fine_levels=True)
+    results = []
+    for trust, sea_trust in zip(primary, secondary, strict=True):
+        setup = Setup(
+            platform="MERSCOPE",
+            trust=trust,
+            secondary_trust=sea_trust,
+            decisions=promotion_decisions(make_decisions) if has_tables else None,
+            meta=human_level_meta if has_tables else (),
+            thresholds=thresholds,
+            n_segmented=len(calls) + 40,
+            fine_seed_stability={"cluster": 0.0} if has_tables else None,
+        )
+        results.append(cs.resolve_human(calls, setup.settings()))
+    before, after = results
+    before_trust, after_trust = primary
+    assert_same_emission(before, after)
+    assert not any(result.validated.any() for result in before.levels.values())
+    if constraint == "resolvable":
+        assert (before_trust.state, after_trust.state) == ("provisional", "validated")
+        assert after_trust.validation_basis == "simulation"
+        # The promotion marks validated labels, lifts the banner and replaces
+        # the provisional warning by the unvalidated-share rule.
+        assert after.levels["broad"].validated.any()
+        assert before_trust.banner and not after_trust.banner
+        assert any(r.startswith("panel_provisional") for r in before.gate.reasons)
+        assert not any(r.startswith("panel_provisional") for r in after.gate.reasons)
+        assert before.floor_warnings and not after.floor_warnings
+        assert before.gate.level == "full"
+        assert (before.levels["supercluster"].status == "confident").any()
+    else:
+        assert before_trust.state == after_trust.state
+        assert before_trust.effects() == after_trust.effects()
+        assert not any(result.validated.any() for result in after.levels.values())
+        assert before.gate.warning_reasons == after.gate.warning_reasons
+        assert before.floor_warnings == after.floor_warnings
+    if constraint in ("no_self_map", "broad_only"):
+        assert after_trust.state == "broad_only" and after.gate.level == "broad_only"
+        assert set(after.levels["supercluster"].status[after.in_table]) <= {
+            "not_attempted_gate"
+        }

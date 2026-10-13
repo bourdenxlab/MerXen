@@ -42,8 +42,23 @@ EXPECTED_SHA256: dict[str, str] = {
     "CLUSTERING_SQUIDPY_FINALIZE": (
         "f432a219dc76a850d0faac2261fe02fe0e6e39b2aab4ab1a2706f22c6f84c8d3"
     ),
+    # M5 (hook H5): the legacy PREPARE -> COMPUTE statements moved into the
+    # else-branch of the map_first switch; process texts and defaults are
+    # unchanged, so legacy task hashes, -resume and the legacy DAG are too.
+    # M8 flip (pre-registration §20 D15): only the map_first branch and the
+    # hook comment changed (legacy rows of a run with a map_first row reach
+    # the legacy COMPUTE from it); the else-branch statements, the process
+    # texts and the legacy inputs are unchanged.
+    # M13 C15: the map_first branch also builds RESOLVE's registration
+    # checks from the QC stage and passes them to CLUSTERING_MAP_FIRST; the
+    # else-branch, the process texts and the legacy inputs are unchanged.
+    # 2026-10-13: the map_first branch falls back to the published
+    # registration checks when the QC stage does not run for a branch; the
+    # else-branch, the process texts and the legacy inputs are unchanged.
+    # 2026-10-13: that fallback is narrowed to rows whose QC stage does not
+    # run at all; again only the map_first branch changed.
     "main.nf wiring": (
-        "b5bdef3c908d907fa7be0f204cd50f942f1e2817f5944cde3393608b3dd20f50"
+        "65ea609bc42e7f079a6a805ddb61d6b9140ef4ad39842dc88593178af6696d4a"
     ),
     "param defaults": (
         "fe4ca1ed06ba1c74dba06b3a50219cfac58a719376ead6792ae7ae0568c5f3c2"

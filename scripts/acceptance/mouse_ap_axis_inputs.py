@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""M6b inputs: gene sets, section subsamples and prepared queries (§17).
+"""M6b inputs: gene sets, section subsamples and prepared queries (§24).
 
-Pre-registration §17 (``docs/acceptance/annotation-v1-preregistration.md``)
+Pre-registration §24 (``docs/acceptance/annotation-v1-preregistration.md``)
 and plan §7.8 item 1. Three steps, each writing under ``--out``:
 
 1. ``gene-sets``: the three WMB panel gene sets, MERFISH 500 (the 500
@@ -149,7 +149,7 @@ def draw_subsample(
     n_cells: int = SUBSAMPLE_CELLS,
     seed: int = SUBSAMPLE_SEED,
 ) -> list[str]:
-    """Draw the pre-registered subsample of one section (§17).
+    """Draw the pre-registered subsample of one section (§24).
 
     Args:
         cell_labels: The section's candidate cells (any order).

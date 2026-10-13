@@ -6,6 +6,7 @@ include { CELLPOSE_NUCLEI_SEGMENT; SEGMENT } from "./modules/segmentation"
 include { ENRICH } from "./modules/enrichment"
 include { VIEWER_CACHE } from "./modules/viewer_cache"
 include { MASK_IMAGE_QUANTIFICATION } from "./modules/mask_image_quantification"
+include { REGISTER_IMAGES } from "./modules/register_images"
 include { COMPUTE_CORTICAL_DEPTH } from "./modules/compute_cortical_depth"
 include {
     DISTANCE_FROM_OBJECT_ANNOTATE;
@@ -32,6 +33,7 @@ include {
 // rca-hook:H1: reference-based annotation (plan §2.4); nothing runs in legacy mode.
 include { ANNOTATION_PREPARE_ONLY } from "./subworkflows/annotation_references"
 include { CLUSTERING_MAP_FIRST } from "./subworkflows/clustering_map_first"
+include { ANNOTATION_REPORTING } from "./subworkflows/annotation_report"
 
 def parseChannels(rawValue, defaults) {
     if (rawValue == null) {
@@ -567,7 +569,7 @@ def corticalDepthConfigForPlatform(
             segmentation: segmentation,
             table_key: layerKeys.table_key,
             shape_key: layerKeys.shape_key,
-        ]
+        ] + AnnotationSettings.clusteredTableFields(row, params) // rca-site:H2
     }
     return [
         dataset_name: "${pairId}_${platform}",
@@ -593,6 +595,7 @@ def corticalDepthConfigForPlatform(
         annotation_path: optionalNormalizedPathString(
             corticalDepthAnnotationPath(row, platform, "annotation")
         ),
+        boundary_frame: corticalDepthBoundaryFrame(row, platform, params),
         coordinate_unit_um: params.cortical_depth_coordinate_unit_um,
         raster_resolution_um: params.cortical_depth_raster_resolution_um,
         raster_padding_um: params.cortical_depth_raster_padding_um,
@@ -679,6 +682,10 @@ def normalizeStage(rawValue, paramName) {
         "nuclei_cellpose": "segment_nuclei",
         "enrich": "enrich",
         "enrichment": "enrich",
+        "register_images": "register_images",
+        "register_image": "register_images",
+        "image_registration": "register_images",
+        "registered_images": "register_images",
         "build_viewer_caches": "build_viewer_caches",
         "viewer_caches": "build_viewer_caches",
         "viewer_cache": "build_viewer_caches",
@@ -726,7 +733,7 @@ def normalizeStage(rawValue, paramName) {
     if (!aliases.containsKey(key)) {
         throw new IllegalArgumentException(
             "Unknown ${paramName} '${raw}'. Valid stages: " +
-            "build_spatialdata, segment_nuclei, segment, enrich, " +
+            "build_spatialdata, segment_nuclei, segment, enrich, register_images, " +
             "build_viewer_caches, mask_image_quantification, " +
             "compute_cortical_depth, distance_from_object, qc, align, align_qc, " +
             "compare, visualize, spatial_gene_analysis, mecr, " +
@@ -745,9 +752,15 @@ def activeStageOrder(
     distanceFromObjectEnabled,
     viewerCacheEnabled,
     mecrEnabled,
-    menderEnabled
+    menderEnabled,
+    registerImagesEnabled
 ) {
     def stages = ["build_spatialdata", "segment_nuclei", "segment", "enrich"]
+    // Registered images join the zarr before the viewer cache and quantification
+    // so both see the new channels.
+    if (registerImagesEnabled) {
+        stages += ["register_images"]
+    }
     if (viewerCacheEnabled) {
         stages += ["build_viewer_caches"]
     }
@@ -812,6 +825,9 @@ def validateStage(
         }
         if (stage == "mender" && !menderEnabled) {
             hint = " Pass --mender_enabled true to use MENDER."
+        }
+        if (stage == "register_images") {
+            hint = " Set xenium_registered_images_csv for this Xenium row to register images."
         }
         throw new IllegalArgumentException(
             "${paramName} '${stage}' is not active for this run.${hint} " +
@@ -1137,6 +1153,24 @@ def corticalDepthAnnotationPath(row, platform, role) {
     return chooseField(row, candidatesByRole[role] ?: [])
 }
 
+// Frame the platform's depth boundary GeoJSONs are drawn in: "native" (the
+// section's own dataset microns, the default and how the annotations are
+// drawn) or "aligned" (the pair's fixed-section frame). A row-level
+// <platform>_cortical_depth_boundary_frame / cortical_depth_boundary_frame
+// value overrides --cortical_depth_boundary_frame.
+def corticalDepthBoundaryFrame(row, platform, params) {
+    def prefix = platform.toString().toLowerCase()
+    def raw = chooseField(row, [
+        "${prefix}_cortical_depth_boundary_frame",
+        "cortical_depth_boundary_frame",
+    ])
+    if (raw == null) {
+        raw = params.cortical_depth_boundary_frame
+    }
+    def frame = raw == null ? "" : raw.toString().trim().toLowerCase()
+    return frame ?: "native"
+}
+
 def alignmentTissueAnnotationPath(row, platform) {
     def prefix = platform.toString().toLowerCase()
     return chooseField(row, [
@@ -1166,6 +1200,13 @@ def appendCorticalDepthPreflightChecks(errors, row, settings, _params) {
     }
     settings.active_platforms.each { platform ->
         def labelPrefix = "COMPUTE_CORTICAL_DEPTH ${settings.pair_id}:${platform}"
+        def boundaryFrame = corticalDepthBoundaryFrame(row, platform, _params)
+        if (!(boundaryFrame in ["native", "aligned"])) {
+            errors << (
+                "${labelPrefix} cortical_depth_boundary_frame must be " +
+                "'native' or 'aligned', got '${boundaryFrame}'"
+            )
+        }
         def annotationPath = corticalDepthAnnotationPath(row, platform, "annotation")
         if (!isBlankPath(annotationPath)) {
             appendPreflightFileCheck(
@@ -1341,8 +1382,12 @@ def appendMenderPreflightChecks(errors, settings, params) {
                 publishedPairPath(
                     params.outdir,
                     settings.pair_id,
-                    "${segmentation}/clustering_squidpy/" +
-                    "clustering_squidpy_out/${platform.toLowerCase()}/" +
+                    "${segmentation}/" +
+                    AnnotationSettings.publishedClusteringDir(
+                        params.outdir, settings.pair_id, segmentation, platform, sampleId,
+                        settings.clustering_squidpy_table_key_suffix, // rca-site:H2
+                    ) +
+                    "/clustering_squidpy_out/${platform.toLowerCase()}/" +
                     "${sampleId}_clustered.h5ad",
                 )
             )
@@ -1385,8 +1430,88 @@ def appendMenderPreflightChecks(errors, settings, params) {
     }
 }
 
+def registeredImageSpecs(rawCsvPath) {
+    // One row per image: image_key, image_path, alignment_matrix, and optional
+    // channel_names (";"-separated) and registration_channel ("none" disables
+    // refinement). Relative paths resolve against the CSV's own directory.
+    def csvPath = normalizedPath(rawCsvPath)
+    def manifestRows = csvPath.splitCsv(header: true, strip: true)
+    if (!manifestRows) {
+        throw new IllegalArgumentException(
+            "Registered-images CSV ${csvPath} lists no images"
+        )
+    }
+    def specs = []
+    manifestRows.eachWithIndex { manifestRow, index ->
+        def label = "${csvPath} row ${index + 2}"
+        def imageKey = chooseField(manifestRow, ["image_key"])
+        def imagePath = chooseField(manifestRow, ["image_path"])
+        def matrixPath = chooseField(
+            manifestRow,
+            ["alignment_matrix", "alignment_matrix_path"],
+        )
+        if (!imageKey || !imagePath || !matrixPath) {
+            throw new IllegalArgumentException(
+                "${label} must set image_key, image_path and alignment_matrix"
+            )
+        }
+        def channelNames = chooseField(manifestRow, ["channel_names"])
+        def registrationChannel = chooseField(
+            manifestRow,
+            ["registration_channel"],
+        ) ?: "DAPI"
+        specs << [
+            image_key: imageKey,
+            image_path: csvPath.parent.resolve(imagePath).normalize().toString(),
+            alignment_matrix_path: csvPath.parent.resolve(matrixPath).normalize().toString(),
+            channel_names: channelNames
+                ? channelNames.split(";").collect { name -> name.trim() }.findAll { name -> name }
+                : null,
+            registration_channel: registrationChannel.toLowerCase() == "none"
+                ? null
+                : registrationChannel,
+        ]
+    }
+    return specs
+}
+
+def appendRegisterImagesPreflightChecks(errors, settings) {
+    if (!settings.run_register_images) {
+        return
+    }
+    def csvPath = settings.registered_images_csv
+    if (!normalizedPath(csvPath).toFile().exists()) {
+        errors << "Missing xenium_registered_images_csv: ${csvPath}"
+        return
+    }
+    def specs = []
+    try {
+        specs = registeredImageSpecs(csvPath)
+    } catch (IllegalArgumentException exc) {
+        errors << exc.message
+        return
+    }
+    def keys = specs.collect { spec -> spec.image_key }
+    if (keys.unique(false).size() != keys.size()) {
+        errors << "Duplicate image_key values in ${csvPath}: ${keys}"
+    }
+    specs.each { spec ->
+        appendPreflightFileCheck(
+            errors,
+            spec.image_path,
+            "registered image ${spec.image_key}",
+        )
+        appendPreflightFileCheck(
+            errors,
+            spec.alignment_matrix_path,
+            "alignment matrix for ${spec.image_key}",
+        )
+    }
+}
+
 def runPreflightChecks(row, settings, params) {
     def errors = []
+    appendRegisterImagesPreflightChecks(errors, settings)
     appendClusteringSquidpyPreflightChecks(errors, settings, params)
     appendMapMyCellsPreflightChecks(errors, settings, params)
     appendAlignmentAnnotationPreflightChecks(errors, row, settings, params)
@@ -1475,6 +1600,12 @@ def rowSampleSettings(row, params) {
         ),
         true,
         "viewer_cache_enabled for ${pairId}",
+    )
+    def registeredImagesCsv = optionalNormalizedPathString(
+        chooseField(row, ["xenium_registered_images_csv"])
+    )
+    def registerImagesEnabled = (
+        activePlatforms.contains("XENIUM") && registeredImagesCsv != null
     )
     def spatialGeneAnalysisEnabled = boolOrDefault(
         rowFieldOrDefault(
@@ -1567,6 +1698,7 @@ def rowSampleSettings(row, params) {
         viewerCacheEnabled,
         mecrEnabled,
         menderEnabled,
+        registerImagesEnabled,
     )
     def startStage = normalizeStage(startStageRaw, startParamName)
     def stopStage = normalizeStage(stopStageRaw, stopParamName)
@@ -1615,6 +1747,12 @@ def rowSampleSettings(row, params) {
     )
     def runSegment = stageInRange("segment", startStage, stopStage, stageOrder)
     def runEnrich = stageInRange("enrich", startStage, stopStage, stageOrder)
+    def runRegisterImages = stageInRange(
+        "register_images",
+        startStage,
+        stopStage,
+        stageOrder,
+    )
     def runBuildViewerCaches = stageInRange(
         "build_viewer_caches",
         startStage,
@@ -1745,6 +1883,8 @@ def rowSampleSettings(row, params) {
         run_segment_nuclei: runSegmentNuclei,
         run_segment: runSegment,
         run_enrich: runEnrich,
+        run_register_images: runRegisterImages,
+        registered_images_csv: registeredImagesCsv,
         run_build_viewer_caches: runBuildViewerCaches,
         run_mask_image_quantification: runMaskImageQuantification,
         run_compute_cortical_depth: runComputeCorticalDepth,
@@ -1772,6 +1912,7 @@ def rowSampleSettings(row, params) {
         ),
         need_build_results: runSegmentNuclei || runSegment || runEnrich,
         need_enriched_zarrs: (
+            runRegisterImages ||
             runBuildViewerCaches ||
             runMaskImageQuantification ||
             runComputeCorticalDepth ||
@@ -1925,6 +2066,34 @@ workflow {
         .fromPath(params.samplesheet, checkIfExists: true)
         .splitCsv(header: true, sep: ",", quote: '"', strip: true)
 
+    // rca-site:H5 (pre-registration §20 D15): each row's clustering_squidpy_mode
+    // column, read once here because the clustering wiring is chosen before
+    // any channel runs. A run takes the map_first wiring when any row
+    // resolves to map_first; a run whose rows are all legacy keeps the legacy
+    // DAG.
+    def samplesheetRows = file(params.samplesheet, checkIfExists: true)
+        .splitCsv(header: true, sep: ",", quote: '"', strip: true)
+    AnnotationSettings.useRowModes(
+        samplesheetRows.collect { row -> row[AnnotationDefaults.ROW_MODE_COLUMN] }
+    )
+    def nearMissModeColumns = AnnotationSettings.nearMissModeColumns(
+        samplesheetRows ? samplesheetRows[0].keySet() : []
+    )
+    if (nearMissModeColumns) {
+        log.warn(
+            "Samplesheet column(s) ${nearMissModeColumns.join(', ')} are ignored: the " +
+            "per-row mode column is '${AnnotationDefaults.ROW_MODE_COLUMN}' (exact name). " +
+            "Those rows follow the run's clustering mode."
+        )
+    }
+    if (AnnotationSettings.usesDeprecatedHumanLegacy(params)) {
+        log.warn(
+            "Human legacy clustering (clustering_squidpy_mode legacy) is deprecated: " +
+            "human runs map_first by default since M8 (pre-registration §20). " +
+            "The legacy mode stays available until it is removed in a later release."
+        )
+    }
+
     sample_rows_raw_ch = samplesheet_ch.map { row ->
         def settings = rowSampleSettings(row, params)
         log.info(
@@ -1975,7 +2144,7 @@ workflow {
     annotationCompletionWorkflow.onComplete {
         def annotationSummary = AnnotationSettings.completionSummary(
             annotationCompletionParams,
-            [success: annotationCompletionWorkflow.success],
+            AnnotationRunRecord.runInfo() + [success: annotationCompletionWorkflow.success],
         )
         if (annotationSummary) {
             log.info(annotationSummary)
@@ -2450,6 +2619,66 @@ workflow {
             )
     }
 
+    // Register externally acquired images (e.g. post-Xenium IF) onto the Xenium
+    // mask grid. This writer of the shared store runs before the viewer cache and
+    // mask image quantification, which then pick up the new image channels.
+    register_images_inputs_ch = enriched_zarrs_ch
+        .join(
+            sample_rows_ch.flatMap { pairId, _row, settings ->
+                settings.run_register_images
+                    ? [tuple("${pairId}|XENIUM", settings.registered_images_csv)]
+                    : []
+            }
+        )
+        .map { key, pairId, platform, enrichedLatestZarr, registeredImagesCsv ->
+            def registerImagesConfig = [
+                dataset_name: "${pairId}_${platform}",
+                platform: platform,
+                latest_zarr_path: "latest_input.zarr",
+                output_dir: "register_images_out",
+                images: registeredImageSpecs(registeredImagesCsv),
+                refine_affine: params.register_images_refine_affine,
+                build_viewer_pyramid: params.viewer_cache_build_image_pyramid,
+            ]
+
+            tuple(
+                key,
+                pairId,
+                platform,
+                groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(registerImagesConfig)),
+                enrichedLatestZarr,
+            )
+        }
+
+    register_images_results_ch = REGISTER_IMAGES(register_images_inputs_ch)
+
+    registered_zarrs_ch = register_images_results_ch.map {
+        key, pairId, platform, registeredLatestZarr, _registerImagesOutDir ->
+            tuple(
+                key,
+                pairId,
+                platform,
+                java.nio.file.Paths.get(registeredLatestZarr.toString()).toRealPath().toString(),
+            )
+    }
+
+    register_images_passthrough_ch = enriched_zarrs_ch
+        .join(
+            sample_rows_ch.flatMap { pairId, _row, settings ->
+                settings.active_platforms
+                    .findAll { platform ->
+                        settings.need_enriched_zarrs &&
+                            !(settings.run_register_images && platform == "XENIUM")
+                    }
+                    .collect { platform -> tuple("${pairId}|${platform}", true) }
+            }
+        )
+        .map { key, pairId, platform, enrichedLatestZarr, _runFlag ->
+            tuple(key, pairId, platform, enrichedLatestZarr)
+        }
+
+    post_registration_zarrs_ch = registered_zarrs_ch.mix(register_images_passthrough_ch)
+
     // Pre-build the napari viewer's derived caches (label masks + label/outline
     // pyramids + image pyramid) into the enriched latest zarr. This is a separate
     // writer of the shared store, so it is serialized into the post-enrich chain:
@@ -2479,7 +2708,7 @@ workflow {
         }
     }
 
-    viewer_cache_inputs_ch = enriched_zarrs_ch
+    viewer_cache_inputs_ch = post_registration_zarrs_ch
         .join(viewer_cache_gate_ch)
         .join(viewer_cache_transform_ch)
         .map { key, pairId, platform, enrichedLatestZarr, _runFlag, transformPath ->
@@ -2531,7 +2760,7 @@ workflow {
         }
     }
 
-    viewer_cache_passthrough_ch = enriched_zarrs_ch
+    viewer_cache_passthrough_ch = post_registration_zarrs_ch
         .join(viewer_cache_passthrough_gate_ch)
         .map { key, pairId, platform, enrichedLatestZarr, _runFlag ->
             tuple(key, pairId, platform, enrichedLatestZarr)
@@ -3371,8 +3600,180 @@ workflow {
             .mix(clustering_after_visualize_ch)
             .mix(clustering_after_spatial_gene_analysis_ch)
 
-    clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE(clustering_inputs_ch)
-    clustering_computed_ch = CLUSTERING_SQUIDPY_COMPUTE(clustering_prepared_ch)
+    // rca-hook:H5: map_first clustering (plan §2.4, §3.1). The mode is one per
+    // row (its clustering_squidpy_mode column, else the run's; §20 D15). With
+    // any map_first row, rows are prepared once (a legacy row's PREPARE hash
+    // is unchanged) and legacy rows go on to the legacy COMPUTE; a run whose
+    // rows are all legacy runs exactly the legacy PREPARE -> COMPUTE
+    // statements of the else-branch, keeping its DAG and task hashes.
+    // CLUSTERING_MAP_FIRST emits FINALIZE's input, so FINALIZE, the MENDER
+    // barrier and every downstream stage are shared by both modes.
+    if (AnnotationSettings.isMapFirstRun(params)) {
+        row_is_map_first_ch = sample_rows_ch.map { pairId, _row, settings ->
+            tuple(pairId, AnnotationSettings.isMapFirst(settings))
+        }
+        clustering_inputs_ch
+            .combine(row_is_map_first_ch, by: 0)
+            .filter { _pairId, _segmentation, _samplesJson, mapFirst -> mapFirst }
+            .subscribe { pairId, segmentation, _samplesJson, _mapFirst ->
+                AnnotationRunRecord.expect(pairId, segmentation)
+            }
+        clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE(
+            clustering_inputs_ch
+                .combine(sample_rows_ch, by: 0)
+                .map { pairId, segmentation, samplesJson, row, settings ->
+                    tuple(
+                        pairId,
+                        segmentation,
+                        AnnotationSettings.samplesJsonWithRowColumns(samplesJson, row, settings),
+                    )
+                }
+        )
+        clustering_prepared_by_mode_ch = clustering_prepared_ch
+            .combine(row_is_map_first_ch, by: 0)
+            .branch { _pairId, _segmentation, _samplesJson, _config, _preparedDir, mapFirst ->
+                map_first: mapFirst
+                legacy: true
+            }
+        // The registration checks RESOLVE reads (G1: the mouse gate's, the
+        // human real-data QC's NR9; M13 C15): per pair x segmentation, the
+        // *_registration_qc.json of each active platform. A branch whose QC
+        // stage runs in this launch (qc_inputs_ch's filter: run_qc and an
+        // analysis segmentation) takes its own QC tasks' checks, released
+        // once all of them have finished (groupKey), and never a published
+        // one, even when its QC wrote none. Every branch of a row whose QC
+        // stage does not run at all (settings.run_qc false: a start_stage
+        // after qc or an only_stage, the run's or the row's) takes the checks
+        // an earlier launch's QC published under params.outdir for the
+        // outputs this launch starts from, or none. A segmentation that is
+        // not an analysis segmentation of a row whose QC runs (a MENDER-only
+        // one) takes none and never a published one: the launch's earlier
+        // stages may have re-segmented it, so a published check could be an
+        // older launch's. Without a check, mouse RESOLVE refuses and human G1
+        // is not_evaluable. The source of each branch's checks, or why none
+        // was looked up, goes to the end-of-run summary (hook H6).
+        map_first_registration_from_qc_ch = qc_results_ch
+            .map { _key, pairId, _platform, segmentation, _latestZarr, qcOutDir, _tableKey, _shapeKey ->
+                tuple(pairId, segmentation, qcOutDir)
+            }
+            .combine(
+                sample_rows_ch.map { pairId, _row, settings ->
+                    tuple(pairId, settings.active_platforms.size())
+                },
+                by: 0,
+            )
+            .map { pairId, segmentation, qcOutDir, nPlatforms ->
+                tuple(
+                    groupKey(AnnotationReferences.branchKey(pairId, segmentation), nPlatforms),
+                    pairId,
+                    segmentation,
+                    qcOutDir,
+                    nPlatforms,
+                )
+            }
+            .groupTuple(remainder: true)
+            .map { _branchKey, pairIds, segmentations, qcOutDirs, nPlatforms ->
+                tuple(
+                    pairIds[0],
+                    segmentations[0],
+                    AnnotationReferences.registrationQcFiles(qcOutDirs),
+                    nPlatforms[0],
+                    AnnotationRunRecord.REGISTRATION_QC_STAGE,
+                )
+            }
+        map_first_registration_published_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
+            settings.analysis_input_segmentations
+                .findAll { segmentation ->
+                    !(settings.run_qc && settings.analysis_segmentations.contains(segmentation))
+                }
+                .collect { segmentation ->
+                    def nPlatforms = settings.active_platforms.size()
+                    if (settings.run_qc) {
+                        if (AnnotationSettings.isMapFirst(settings)) {
+                            log.warn(
+                                "${pairId}:${segmentation}: the row's QC stage runs in this launch " +
+                                "but not for this segmentation (not an analysis_segmentation), so " +
+                                "RESOLVE stages no registration check and published ones are not " +
+                                "used (mouse RESOLVE refuses, human registration G1 is not_evaluable)"
+                            )
+                        }
+                        tuple(
+                            pairId,
+                            segmentation,
+                            [],
+                            nPlatforms,
+                            AnnotationRunRecord.REGISTRATION_ROW_RUNS_QC,
+                        )
+                    } else {
+                        def publishedChecks = AnnotationReferences.publishedRegistrationQcFiles(
+                            params.outdir,
+                            pairId,
+                            settings.active_platforms,
+                            segmentation,
+                        )
+                        if (AnnotationSettings.isMapFirst(settings)) {
+                            def branchText = "${pairId}:${segmentation}: the QC stage does not run in this launch"
+                            if (publishedChecks) {
+                                log.info(
+                                    "${branchText}; RESOLVE stages the published registration checks " +
+                                    publishedChecks.join(", ")
+                                )
+                            } else {
+                                def searched = AnnotationReferences.publishedQcOutDirs(
+                                    params.outdir,
+                                    pairId,
+                                    settings.active_platforms,
+                                    segmentation,
+                                )
+                                log.warn(
+                                    "${branchText} and no registration check is published in " +
+                                    "${searched.join(', ')} (mouse RESOLVE refuses, human " +
+                                    "registration G1 is not_evaluable)"
+                                )
+                            }
+                        }
+                        tuple(
+                            pairId,
+                            segmentation,
+                            publishedChecks,
+                            nPlatforms,
+                            AnnotationRunRecord.REGISTRATION_PUBLISHED,
+                        )
+                    }
+                }
+        }
+        map_first_registration_sources_ch = map_first_registration_from_qc_ch
+            .mix(map_first_registration_published_ch)
+        map_first_registration_sources_ch.subscribe { pairId, segmentation, registrationFiles, nPlatforms, source ->
+            AnnotationRunRecord.registrationChecks(pairId, segmentation, source, registrationFiles, nPlatforms)
+        }
+        map_first_registration_ch = map_first_registration_sources_ch
+            .map { pairId, segmentation, registrationFiles, _nPlatforms, _source ->
+                tuple(pairId, segmentation, registrationFiles)
+            }
+        map_first_alignment_ch = alignment_results_ch
+            .map { pairId, _merscopeLatest, _xeniumLatest, _transformJson, _coordsDir, alignOut ->
+                tuple(pairId, AnnotationReferences.alignmentFiles(alignOut))
+            }
+            .mix(
+                sample_rows_ch
+                    .filter { _pairId, _row, settings -> !settings.need_alignment_results }
+                    .map { pairId, _row, _settings -> tuple(pairId, []) }
+            )
+        clustering_computed_ch = CLUSTERING_MAP_FIRST(
+            clustering_prepared_by_mode_ch.map_first.map { item -> item.take(5) },
+            map_first_alignment_ch,
+            map_first_registration_ch,
+        ).computed
+            .mix(
+                CLUSTERING_SQUIDPY_COMPUTE(
+                    clustering_prepared_by_mode_ch.legacy.map { item -> item.take(5) }
+                )
+            )
+    } else {
+        clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE(clustering_inputs_ch)
+        clustering_computed_ch = CLUSTERING_SQUIDPY_COMPUTE(clustering_prepared_ch)
+    }
     clustering_results_ch = CLUSTERING_SQUIDPY_FINALIZE(clustering_computed_ch)
 
     // Cortical depth runs after clustering so the per-cell broad_class and
@@ -3772,16 +4173,34 @@ workflow {
         .mix(clustering_terminal_events_ch)
         .mix(mender_extra_clustering_terminal_events_ch)
 
-    pair_terminal_grouped_ch = pair_terminal_events_ch
-        .join(pair_terminal_specs_ch)
-        .filter { _pairId, eventStage, _done, expectedStage, _expectedCount ->
-            eventStage == expectedStage
-        }
-        .map { pairId, _eventStage, _done, _expectedStage, expectedCount ->
-            tuple(groupKey(pairId, expectedCount as int), true)
-        }
-        .groupTuple()
-        .map { pairKey, _doneFlags -> tuple(pairKey.getGroupTarget(), true) }
+    // map_first runs pair every terminal event with the pair's one spec:
+    // combine keeps the spec, whereas join pairs items one to one, so the
+    // pair's first terminal event (FINALIZE's) would consume it and the
+    // events MENDER waits for would be dropped (M5 exit run). Legacy runs
+    // keep the join, so their channels and DAG are unchanged.
+    if (AnnotationSettings.isMapFirstRun(params)) { // rca-site:H3
+        pair_terminal_grouped_ch = pair_terminal_events_ch
+            .combine(pair_terminal_specs_ch, by: 0)
+            .filter { _pairId, eventStage, _done, expectedStage, _expectedCount ->
+                eventStage == expectedStage
+            }
+            .map { pairId, _eventStage, _done, _expectedStage, expectedCount ->
+                tuple(groupKey(pairId, expectedCount as int), true)
+            }
+            .groupTuple()
+            .map { pairKey, _doneFlags -> tuple(pairKey.getGroupTarget(), true) }
+    } else {
+        pair_terminal_grouped_ch = pair_terminal_events_ch
+            .join(pair_terminal_specs_ch)
+            .filter { _pairId, eventStage, _done, expectedStage, _expectedCount ->
+                eventStage == expectedStage
+            }
+            .map { pairId, _eventStage, _done, _expectedStage, expectedCount ->
+                tuple(groupKey(pairId, expectedCount as int), true)
+            }
+            .groupTuple()
+            .map { pairKey, _doneFlags -> tuple(pairKey.getGroupTarget(), true) }
+    }
 
     pair_terminal_token_ch = pair_terminal_immediate_ch.mix(
         pair_terminal_grouped_ch
@@ -3854,8 +4273,12 @@ workflow {
                             publishedPairPath(
                                 params.outdir,
                                 pairId,
-                                "${segmentation}/clustering_squidpy/" +
-                                "clustering_squidpy_out/" +
+                                "${segmentation}/" +
+                                AnnotationSettings.publishedClusteringDir(
+                                    params.outdir, pairId, segmentation, platform, sampleId,
+                                    settings.clustering_squidpy_table_key_suffix, // rca-site:H2
+                                ) +
+                                "/clustering_squidpy_out/" +
                                 "${platform.toLowerCase()}/" +
                                 "${sampleId}_clustered.h5ad",
                             )
@@ -3999,4 +4422,29 @@ workflow {
         }
     mender_finalized_ch = MENDER_FINALIZE(mender_finalize_inputs_ch)
     MENDER_IMPORT(mender_finalized_ch)
+    // Hook H6's record of skipped MENDER runs (no assigned state; map_first only).
+    if (AnnotationSettings.isMapFirstRun(params)) { // rca-site:H6
+        MENDER_IMPORT.out.subscribe { _taskKey, pairId, segmentation, platform, importManifest ->
+            AnnotationRunRecord.menderImported(pairId, segmentation, platform, importManifest)
+        }
+    }
+
+    // rca-hook:H11: the annotation QC report (plan §3.6, §9; M7), map_first runs only:
+    // after FINALIZE, the pair's cortical depth and the branch's MENDER when they run.
+    if (AnnotationSettings.isMapFirstRun(params) && AnnotationReport.enabled(params)) {
+        ANNOTATION_REPORTING(
+            CLUSTERING_MAP_FIRST.out.labels,
+            CLUSTERING_MAP_FIRST.out.alignment,
+            clustering_results_ch,
+            compute_cortical_depth_results_ch.map { _key, pairId, platform, _latestZarr, corticalDepthOut ->
+                tuple(pairId, platform, corticalDepthOut)
+            },
+            mender_finalized_ch.map {
+                _taskKey, pairId, segmentation, platform, _sampleId, _spatialdataPath,
+                _sourceSpatialdataTable, _nativeShapeKey, _sourceH5adPath, _menderConfig, menderDir ->
+                    tuple(pairId, segmentation, platform, menderDir)
+            },
+            sample_rows_ch.map { pairId, _row, settings -> tuple(pairId, AnnotationReport.pairSpec(settings, params)) },
+        )
+    }
 }

@@ -7,15 +7,19 @@
  * CLUSTERING_SQUIDPY_ANNOTATE_MAP maps each sample of a pair x segmentation
  * onto its bundles with MapMyCells; CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE turns
  * the mapping into one label table per sample (thresholds, floors, gate,
- * consensus, flags, compositions). All run on the CPU in the main
- * environment and take no GPU lock. COMPUTE_CPU arrives in M5,
- * ANNOTATION_REPORT in M7.
+ * consensus, flags, compositions); ANNOTATION_REPORT (M7) builds the QC
+ * report of one pair x segmentation from those and the downstream outputs
+ * (plan §3.6, §9). All run on the CPU in the main environment and take no
+ * GPU lock. COMPUTE_CPU (M5) is in clustering_squidpy.nf.
  * workflows/subworkflows/annotation_references.nf wires PANEL and PREP, only
  * for --annotation_prepare_only runs (hook H10) and map_first runs;
  * workflows/subworkflows/clustering_map_first.nf wires MAP after them
- * (CLUSTERING_ANNOTATE_MAP) and RESOLVE after MAP (CLUSTERING_ANNOTATE), and
- * CLUSTERING_MAP_FIRST (hook H5, M5) is their only caller. Legacy runs never
- * call any of them.
+ * (CLUSTERING_ANNOTATE_MAP), RESOLVE after MAP (CLUSTERING_ANNOTATE) and
+ * COMPUTE_CPU after RESOLVE (CLUSTERING_MAP_FIRST, called by hook H5 in
+ * map_first runs only); workflows/subworkflows/annotation_report.nf wires
+ * the report after FINALIZE, cortical depth and MENDER (ANNOTATION_REPORTING,
+ * called by hook H11 in map_first runs only). Legacy runs never call any of
+ * them.
  *
  * Resources are in conf/annotation.config, host concurrency in
  * conf/dwight.annotation.config.
@@ -281,7 +285,12 @@ process CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE {
     // src) (species, panel status and size, annotation config, rules
     // fingerprint); bundle_refs: the refs MAP mapped with; alignment_files:
     // the pair's shared tissue mask and registration summary from ALIGN (M5),
-    // or none.
+    // or none; registration_files: the QC stage's registration checks of the
+    // pair x segmentation, one per platform (G1: the mouse gate's, the human
+    // real-data QC's; M13 C15), from this launch's QC tasks or the published
+    // QC outputs (main.nf hook H5), or none. Staged under their own names,
+    // and hashed by content, so an identical check from either source keeps
+    // RESOLVE cached.
     tuple val(pair_id),
         val(segmentation),
         val(resolve_spec),
@@ -291,7 +300,8 @@ process CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE {
         path(panel_dir, stageAs: "resolve_inputs/annotation_panel_out"),
         path(bundle_refs, arity: "0..*", stageAs: "resolve_inputs/bundle_refs/bundle_ref_?.json"),
         path(map_dir, stageAs: "resolve_inputs/annotation_map_out"),
-        path(alignment_files, arity: "0..*", stageAs: "resolve_inputs/align_out/*")
+        path(alignment_files, arity: "0..*", stageAs: "resolve_inputs/align_out/*"),
+        path(registration_files, arity: "0..*", stageAs: "resolve_inputs/registration_qc/*")
 
     output:
     // annotation_resolve_out/<platform>/<sid>_celltype_labels.parquet (plan
@@ -313,6 +323,7 @@ process CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE {
         resolve_spec,
         bundle_refs as List,
         alignment_files as List,
+        registration_files as List,
     )
     """
     set -euo pipefail
@@ -346,6 +357,7 @@ JSON
         resolve_spec,
         bundle_refs as List,
         alignment_files as List,
+        registration_files as List,
     )
     def summaryFile = AnnotationReferences.resolveSummaryFile(pair_id)
     def copyRefs = (bundle_refs as List).collect { ref ->
@@ -362,5 +374,99 @@ ${annotationConfigJson}
 JSON
     cp resolve_inputs/annotation_map_out/${AnnotationReferences.MAP_MANIFEST_FILE} annotation_resolve_out/stub_map_manifest.json
     echo '{"stub": true}' > annotation_resolve_run.json
+    """
+}
+
+// ANNOTATION_REPORT: the annotation QC report of one pair x segmentation
+// (plan §3.6, §9; M7): report.html, PNG + PDF figures with one CSV each, the
+// item tables and acceptance_metrics.json. It reads RESOLVE's label tables,
+// MAP's and PANEL's outputs, FINALIZE's clustered H5ADs, the pair's
+// cortical-depth outputs and the branch's MENDER outputs when those stages
+// run, the pair's ALIGN files, and the bundles RESOLVE's manifests name
+// (read in place, never staged: RESOLVE's outputs carry their hashes).
+// Metrics only: no pass / fail against the pre-registered thresholds (M8).
+// A failed report item is recorded in the report (status failed) and the
+// end-of-run summary, not as a failed task. Called only by
+// ANNOTATION_REPORTING (subworkflows/annotation_report.nf, hook H11).
+process ANNOTATION_REPORT {
+    tag "${pair_id}:${segmentation}"
+
+    publishDir { "${params.outdir}/${pair_id}/${segmentation}/annotation_report" }, mode: "copy", overwrite: true
+
+    input:
+    // report_spec: AnnotationReport.reportSpec(params, src) (species, report
+    // code fingerprint); depth_platforms / mender_platforms: the platforms
+    // of the staged depth and MENDER outputs, in their order.
+    tuple val(pair_id),
+        val(segmentation),
+        val(report_spec),
+        val(samples_json),
+        path(resolve_dir, stageAs: "report_inputs/annotation_resolve_out"),
+        path(map_dir, stageAs: "report_inputs/annotation_map_out"),
+        path(panel_dir, stageAs: "report_inputs/annotation_panel_out"),
+        path(clustering_dir, stageAs: "report_inputs/clustering_squidpy_out"),
+        val(depth_platforms),
+        path(depth_dirs, arity: "0..*", stageAs: "report_inputs/cortical_depth_?/*"),
+        val(mender_platforms),
+        path(mender_dirs, arity: "0..*", stageAs: "report_inputs/mender_?/*"),
+        path(alignment_files, arity: "0..*", stageAs: "report_inputs/align_out/*")
+
+    output:
+    // annotation_report_out/: report.html, figures/, tables/,
+    // acceptance_metrics.json (deterministic) and report_run.json (wall
+    // time, version, item statuses).
+    tuple val(pair_id),
+        val(segmentation),
+        path("annotation_report_out")
+
+    script:
+    def reportArgs = AnnotationReport.reportArguments(
+        report_spec,
+        pair_id,
+        segmentation,
+        samples_json,
+        depth_platforms as List,
+        depth_dirs as List,
+        mender_platforms as List,
+        mender_dirs as List,
+        alignment_files as List,
+    )
+    """
+    set -euo pipefail
+    export PYTHONPATH="${projectDir}/../src:\${PYTHONPATH:-}"
+    export CUDA_VISIBLE_DEVICES=""
+    export MPLBACKEND=Agg
+    export OMP_NUM_THREADS="${task.cpus}"
+    export OPENBLAS_NUM_THREADS="${task.cpus}"
+    export MKL_NUM_THREADS="${task.cpus}"
+    export NUMEXPR_NUM_THREADS="${task.cpus}"
+    export NUMBA_NUM_THREADS="${task.cpus}"
+
+    merxen annotation-report \\
+        ${reportArgs}
+    """
+
+    stub:
+    def reportArgs = AnnotationReport.reportArguments(
+        report_spec,
+        pair_id,
+        segmentation,
+        samples_json,
+        depth_platforms as List,
+        depth_dirs as List,
+        mender_platforms as List,
+        mender_dirs as List,
+        alignment_files as List,
+    )
+    def stubRecord = AnnotationReport.stubReportJson(pair_id, segmentation, report_spec, reportArgs)
+    """
+    mkdir -p annotation_report_out
+    cat > annotation_report_out/stub_report.json <<'JSON'
+${stubRecord}
+JSON
+    (cd report_inputs && find -L . -maxdepth 3 | LC_ALL=C sort) > annotation_report_out/stub_inputs_listing.txt
+    echo '{"stub": true}' > annotation_report_out/acceptance_metrics.json
+    echo '{"stub": true, "items": {}}' > annotation_report_out/${AnnotationReport.RUN_FILE}
+    echo '<html><body>stub</body></html>' > annotation_report_out/report.html
     """
 }

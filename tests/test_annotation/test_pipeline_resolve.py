@@ -655,6 +655,10 @@ class _FakeTables:
     def depth_grid(self) -> list[int]:
         return [10, 15, 30, 60, 120, 250]
 
+    @property
+    def version(self) -> int | None:
+        return None
+
     def decisions(
         self, *, composition: Any = None, settings: Any = None
     ) -> pd.DataFrame:
@@ -681,8 +685,16 @@ def test_resolvability_tables_are_reweighted_and_trust_sets_the_regime(
         for depth in (10, 15, 30, 60, 120, 250)
     }
     tables = _FakeTables(make_decisions(overrides=overrides), human_level_meta)
-    monkeypatch.setattr(resolvability, "load_resolvability", lambda path: tables)
+    declared: list[bool] = []
+
+    def load(path: Path, *, allow_version_7: bool = False) -> _FakeTables:
+        declared.append(allow_version_7)
+        return tables
+
+    monkeypatch.setattr(resolvability, "load_resolvability", load)
     validated = _resolve(setup, make_trust, "validated")
+    # RESOLVE declares version-7 support (the M3c follow-up).
+    assert declared and all(declared)
     assert all(isinstance(call, DatasetComposition) for call in tables.calls)
     composition = tables.calls[0]
     assert sum(composition.overall.values()) > 0
@@ -704,7 +716,7 @@ def test_resolvability_tables_are_reweighted_and_trust_sets_the_regime(
     # A real-data-validated family keeps its pre-registered emission: the
     # provisional raises in the table change nothing, so the statuses equal
     # a run without resolvability tables.
-    monkeypatch.setattr(resolvability, "load_resolvability", lambda path: None)
+    monkeypatch.setattr(resolvability, "load_resolvability", lambda path, **_: None)
     untabled = _resolve(setup, make_trust, "untabled")
     for sample_id, sample in validated.samples.items():
         for level in ("lineage", "broad", "nt", "supercluster"):
@@ -732,6 +744,64 @@ def test_resolvability_tables_are_reweighted_and_trust_sets_the_regime(
         second = provisional.samples[sample_id].provenance
         assert second.thresholds is not None
         assert "resolvability_local" in str(second.thresholds.threshold_source)
+
+
+def test_the_panel_provenance_without_the_panel_file_keeps_the_trust_fields(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    """RESOLVE's fallback record without panel diagnostics (M13 C11).
+
+    Without the primary's panel file there are no gene-ID diagnostics, but
+    the record still carries the trust decision's family, basis, validated
+    level and table digests, the pair's panel mode and the validated share
+    per level, as the record built from the diagnostics does.
+    """
+    from merxen.annotation.diagnostics import (
+        VALIDATED_PANEL_LEVELS_FILE,
+        VALIDATED_PANELS_FILE,
+    )
+    from merxen.annotation.panel import REQUIRED_BUNDLES_FILE
+
+    setup = _setup(tmp_path, fake_mmc)
+    bare = tmp_path / "bare_panel"
+    bare.mkdir()
+    shutil.copy(setup.panel_dir / REQUIRED_BUNDLES_FILE, bare / REQUIRED_BUNDLES_FILE)
+    digests = {VALIDATED_PANELS_FILE: "1" * 64, VALIDATED_PANEL_LEVELS_FILE: "2" * 64}
+    simulation = make_trust(
+        "validated_simulation",
+        level_records=[
+            {
+                "level": "broad",
+                "class": "Exc",
+                "status": "validated",
+                "validated_min_depth": 15,
+                "tested_max_depth": 250,
+            }
+        ],
+    ).model_copy(update={"tables_sha256": digests})
+    trusts = {**_trusts(make_trust), "whb_frontal_supc_clus": simulation}
+    result = _resolve(setup, make_trust, panel_dir=bare, trust_overrides=trusts)
+    manifest = pl.load_map_manifest(setup.map_dir / MAP_MANIFEST_NAME)
+    for sample_id, sample in result.samples.items():
+        record = sample.provenance.panel
+        assert record is not None
+        assert record.panel_hash == manifest.samples[sample_id].declared_panel_hash
+        assert (record.panel_family, record.family_basis) == ("sim_family", "listed")
+        assert record.panel_trust == "validated" and record.banner is False
+        assert record.validation_basis == "simulation"
+        assert record.validated_max_level == "broad"
+        assert record.validated_panels_sha256 == "1" * 64
+        assert record.validated_panel_levels_sha256 == "2" * 64
+        assert record.panel_mode == "intersection"
+        shares = {
+            level: float(value["validated_share"])
+            for level, value in sample.summary["resolution"]["levels"].items()
+            if value["validated_share"] is not None
+        }
+        assert shares and record.validated_share == shares
+        assert record.n_declared_genes is None and record.gene_id_resolution == {}
+        _, stored = read_label_table(sample.labels_path)
+        assert stored is not None and stored.panel == record
 
 
 def test_a_refused_panel_writes_statuses_only(

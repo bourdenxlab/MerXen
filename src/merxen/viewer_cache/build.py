@@ -22,7 +22,7 @@ from spatialdata import read_zarr
 from spatialdata.models import Image2DModel, Labels2DModel
 from spatialdata.transformations import Affine, get_transformation
 
-from merxen.io.image_source import image_to_cyx
+from merxen.io.image_source import image_to_cyx, registered_image_keys
 from merxen.io.spatialdata_io import (
     write_or_replace_element,
     write_spatialdata_metadata,
@@ -199,8 +199,15 @@ def _resolve_base_image(sdata: Any) -> tuple[str, Any, list[str], Any, str]:
     Skips derived image caches so the label grid is never sized off a downsampled
     cache -- the same rule the viewer's ``_image_grid_for_labels`` uses.
     """
+    # Registered post-run images share the grid but may sort before the
+    # instrument image, so they must never become the base image.
+    registered = registered_image_keys(sdata)
     image_key = next(
-        (str(k) for k in sdata.images if not is_derived_cache_key(str(k))),
+        (
+            str(k)
+            for k in sdata.images
+            if not is_derived_cache_key(str(k)) and str(k) not in registered
+        ),
         None,
     )
     if image_key is None:

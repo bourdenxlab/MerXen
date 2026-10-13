@@ -24,8 +24,8 @@ import java.util.concurrent.ConcurrentHashMap
  * rules fingerprint.
  *
  * Nothing here runs in a legacy run: main.nf calls ANNOTATION_PREPARE_ONLY
- * only with --annotation_prepare_only, and CLUSTERING_MAP_FIRST (map_first)
- * has no caller before milestone M5.
+ * only with --annotation_prepare_only, and CLUSTERING_MAP_FIRST (hook H5)
+ * only in map_first runs.
  */
 class AnnotationReferences {
 
@@ -54,7 +54,38 @@ class AnnotationReferences {
     // annotation_resolve_out/, published under
     // <outdir>/<pair>/<seg>/annotation_resolve/.
     static final String RESOLVE_INPUT_DIR = "resolve_inputs"
+    static final String RESOLVE_OUTPUT_DIR = "annotation_resolve_out"
     static final String RESOLVE_SUMMARY_SUFFIX = "_resolve_summary.json"
+
+    // CLUSTERING_SQUIDPY_COMPUTE_CPU: staged-input directory (the task
+    // writes clustering_compute_out/, FINALIZE's input) and the per-sample
+    // RESOLVE outputs it stages (merxen.annotation.schema.label_table_filename,
+    // merxen.annotation.provenance.annotation_manifest_filename).
+    static final String COMPUTE_INPUT_DIR = "compute_inputs"
+    static final List<String> LABEL_FILE_SUFFIXES = [
+        "_celltype_labels.parquet",
+        "_annotation_manifest.json",
+    ].asImmutable()
+
+    // The ALIGN outputs ANNOTATE_PANEL (label-free set c) and RESOLVE (the
+    // pair JSD's shared-mask restriction) read (merxen.annotation.pipeline
+    // .load_pair_mask).
+    static final String SHARED_TISSUE_MASK_FILE = "shared_tissue_mask.npy"
+    static final String REGISTRATION_SUMMARY_FILE = "registration_summary.json"
+
+    // The QC stage's registration checks RESOLVE reads as gate G1 (mouse) and
+    // the real-data QC's registration G1 (human, NR9; M13 C15): each
+    // platform's <pair>_<platform lower-case>_registration_qc.json
+    // (merxen.qc.metrics.save_qc_results; mouse_gate.REGISTRATION_JSON_SUFFIX),
+    // staged under RESOLVE_INPUT_DIR/RESOLVE_REGISTRATION_DIR.
+    static final String REGISTRATION_QC_SUFFIX = "_registration_qc.json"
+    static final String RESOLVE_REGISTRATION_DIR = "registration_qc"
+    // Where the QC process publishes a branch's qc_out (modules/qc.nf:
+    // <outdir>/<pair_id>/<platform lower-case>/<segmentation>/qc/qc_out, a
+    // symlink to the task's qc_out): the registration checks hook H5 stages
+    // for a branch whose QC stage does not run in the launch.
+    static final String QC_PUBLISH_DIR = "qc"
+    static final String QC_OUTPUT_DIR = "qc_out"
 
     // What the RESOLVE rules fingerprint covers, relative to this checkout's
     // src/: the threshold, floor, trust, consensus, flag and composition code
@@ -62,17 +93,55 @@ class AnnotationReferences {
     // genes), the cell-set rule and the annotate-resolve command. The task
     // hash cannot see Python code or packaged files, so the fingerprint
     // travels in RESOLVE's resolve_spec: a rule change re-runs RESOLVE
-    // (minutes) under -resume and never MAP (plan §3.1).
+    // (minutes) under -resume and never MAP (plan §3.1). Of merxen.clustering
+    // RESOLVE runs only the cell-set rule; the map_first hierarchy is
+    // COMPUTE_CPU's (HIERARCHY_SOURCES), so its edits do not re-run RESOLVE.
     static final List<String> RESOLVE_RULE_SOURCES = [
         "merxen/annotation",
         "merxen/assets/annotation",
-        "merxen/clustering",
+        "merxen/clustering/cellset.py",
         "merxen/cli/run_annotation.py",
     ].asImmutable()
 
-    // One fingerprint per source root and run: every RESOLVE task of a run
-    // reads the same code.
-    private static final Map<String, String> RULES_FINGERPRINTS = new ConcurrentHashMap<String, String>()
+    // Files under RESOLVE_RULE_SOURCES the fingerprint leaves out (relative
+    // path prefixes): the annotation report (merxen/annotation/report.py and
+    // report_*.py, M7) reads RESOLVE's outputs and RESOLVE never imports it
+    // (test-enforced), so a report edit must not re-run RESOLVE; the
+    // fingerprint of a checkout is then the one it had before the report.
+    static final List<String> RESOLVE_RULE_EXCLUDES = [
+        "merxen/annotation/report",
+    ].asImmutable()
+
+    // What the map_first hierarchy fingerprint covers (COMPUTE_CPU, plan
+    // §3.5): the hierarchy, QC embedding, stability and cross-platform code,
+    // the label-table schema, vocabularies and provenance it reads, the
+    // table-key suffix rule, the compute command and the clustering module
+    // it runs through (control-feature removal and its registry, plots,
+    // H5AD writing), and merxen/config.py, whose ClusteringSquidpyConfig
+    // defaults set the map_first fields no Nextflow param or PREPARE config
+    // writes (qc_leiden_resolution, leaf_source, adaptive_split; M5 review:
+    // an edit there re-runs COMPUTE_CPU, also for unrelated fields). Like
+    // RESOLVE's, it travels in the task inputs (compute_spec): a hierarchy
+    // change re-runs COMPUTE_CPU under -resume, and a RESOLVE re-run with
+    // byte-identical labels leaves it cached (cache "deep" on the labels).
+    static final List<String> HIERARCHY_SOURCES = [
+        "merxen/clustering",
+        "merxen/annotation/schema.py",
+        "merxen/annotation/vocab.py",
+        "merxen/annotation/provenance.py",
+        "merxen/annotation/config.py",
+        "merxen/assets/annotation/whb_supercluster_vocab.csv",
+        "merxen/assets/annotation/seaad_mr_subclass_vocab.csv",
+        "merxen/assets/annotation/wmb_class_vocab.csv",
+        "merxen/analysis/clustering_squidpy.py",
+        "merxen/clustering_squidpy_stages.py",
+        "merxen/control_features.py",
+        "merxen/config.py",
+    ].asImmutable()
+
+    // One fingerprint per (source root, source list) and run: every task of
+    // a run reads the same code.
+    private static final Map<String, String> SOURCE_FINGERPRINTS = new ConcurrentHashMap<String, String>()
 
     // Share of the PREP memory given to cell_type_mapper's --max_gb (the
     // reference-marker step; 40 GB of the 64 GB reserve, as validated).
@@ -626,13 +695,25 @@ class AnnotationReferences {
      * lookup), and takes the shared tissue mask only from staged ALIGN files
      * (M5), never from a published align_out ALIGN may still be writing.
      *
+     * The QC stage's registration checks, when staged, are read with
+     * --registration-qc-dir (mouse gate G1; human real-data QC G1, NR9):
+     * each sample takes its own <sample_id lower-case>_registration_qc.json.
+     *
      * @param spec resolveSpec result.
      * @param bundleRefs Staged bundle_ref.json paths.
      * @param alignmentFiles Staged [shared_tissue_mask.npy,
      *     registration_summary.json], or an empty list.
+     * @param registrationFiles Staged *_registration_qc.json files (this
+     *     launch's QC tasks' or the published ones), or an empty list (no
+     *     check for the branch).
      * @return Shell-quoted arguments (without --annotation-config and --out).
      */
-    static String resolveArguments(Map spec, List bundleRefs, List alignmentFiles) {
+    static String resolveArguments(
+        Map spec,
+        List bundleRefs,
+        List alignmentFiles,
+        List registrationFiles = []
+    ) {
         def args = [
             "--species", spec.species.toString(),
             "--map-dir", "${RESOLVE_INPUT_DIR}/${MAP_OUTPUT_DIR}".toString(),
@@ -646,7 +727,100 @@ class AnnotationReferences {
         if (alignmentFiles) {
             args += ["--alignment-dir", "${RESOLVE_INPUT_DIR}/align_out".toString()]
         }
+        if (registrationFiles) {
+            args += [
+                "--registration-qc-dir",
+                "${RESOLVE_INPUT_DIR}/${RESOLVE_REGISTRATION_DIR}".toString(),
+            ]
+        }
         return args.collect { arg -> shellQuote(arg) }.join(" ")
+    }
+
+    /**
+     * Return the registration checks of a pair x segmentation's QC tasks.
+     *
+     * Each QC task (one per platform) writes its check to the top of its
+     * qc_out directory when the registration check ran; RESOLVE stages them
+     * (M13 C15: without them the human real-data QC's registration G1 is
+     * not_evaluable, and a pipeline mouse RESOLVE refuses the sample).
+     *
+     * @param qcOutDirs The branch's qc_out directories (or one directory).
+     * @return The *_registration_qc.json files, sorted by name; an empty list
+     *     when none exists.
+     */
+    static List registrationQcFiles(Object qcOutDirs) {
+        def directories = qcOutDirs instanceof Collection ? qcOutDirs as List : [qcOutDirs]
+        def files = []
+        directories.findAll { item -> item != null }.each { item ->
+            def directory = asPath(item)
+            if (Files.isDirectory(directory)) {
+                directory.toFile().listFiles()?.each { File file ->
+                    if (file.isFile() && file.name.endsWith(REGISTRATION_QC_SUFFIX)) {
+                        files << file.toPath()
+                    }
+                }
+            }
+        }
+        return files.sort { Path path -> path.fileName.toString() }
+    }
+
+    /**
+     * Return the published qc_out directories of a pair x segmentation.
+     *
+     * One per active platform, where the QC process publishes it
+     * (QC_PUBLISH_DIR, QC_OUTPUT_DIR). A relative outdir resolves against
+     * the launch directory, as publishDir resolves it.
+     *
+     * @param outdir params.outdir (null: "results").
+     * @param pairId Pair id.
+     * @param platforms The row's active platforms.
+     * @param segmentation Segmentation.
+     * @return Absolute directories in platform order; they need not exist.
+     */
+    static List<Path> publishedQcOutDirs(
+        Object outdir,
+        Object pairId,
+        Collection platforms,
+        Object segmentation
+    ) {
+        return (platforms ?: []).collect { platform ->
+            Paths.get(
+                (outdir ?: "results").toString(),
+                pairId.toString(),
+                platform.toString().toLowerCase(),
+                segmentation.toString(),
+                QC_PUBLISH_DIR,
+                QC_OUTPUT_DIR,
+            ).toAbsolutePath().normalize()
+        }
+    }
+
+    /**
+     * Return the published registration checks of a pair x segmentation.
+     *
+     * Hook H5 stages them into RESOLVE only for the branches of a row whose
+     * QC stage does not run in the launch (run_qc false: a start_stage after
+     * qc or an only_stage): the checks an earlier launch's QC published for
+     * the outputs this launch starts from. A branch whose QC runs takes its
+     * own QC tasks' checks (registrationQcFiles) and never these; nor does a
+     * segmentation that is not an analysis segmentation of a row whose QC
+     * runs, which the launch may have re-segmented (it takes none). A qc_out
+     * whose work directory is gone (a dangling symlink) gives none.
+     *
+     * @param outdir params.outdir.
+     * @param pairId Pair id.
+     * @param platforms The row's active platforms.
+     * @param segmentation Segmentation.
+     * @return The *_registration_qc.json files, sorted by name; an empty list
+     *     when none is published.
+     */
+    static List publishedRegistrationQcFiles(
+        Object outdir,
+        Object pairId,
+        Collection platforms,
+        Object segmentation
+    ) {
+        return registrationQcFiles(publishedQcOutDirs(outdir, pairId, platforms, segmentation))
     }
 
     /** Return RESOLVE's <pair>_resolve_summary.json name. */
@@ -666,13 +840,37 @@ class AnnotationReferences {
      *     sources (an installed package without its checkout).
      */
     static String resolveRulesFingerprint(Object sourceRoot) {
-        def root = asPath(sourceRoot).toAbsolutePath().normalize()
-        return RULES_FINGERPRINTS.computeIfAbsent(root.toString()) { String key -> rulesFingerprint(root) }
+        return sourcesFingerprint(sourceRoot, RESOLVE_RULE_SOURCES, RESOLVE_RULE_EXCLUDES)
     }
 
-    private static String rulesFingerprint(Path root) {
+    /**
+     * Return the fingerprint of the map_first hierarchy code (HIERARCHY_SOURCES).
+     *
+     * @param sourceRoot This checkout's src/ (${projectDir}/../src).
+     * @return The hex digest, or "missing" (see resolveRulesFingerprint).
+     */
+    static String hierarchyFingerprint(Object sourceRoot) {
+        return sourcesFingerprint(sourceRoot, HIERARCHY_SOURCES)
+    }
+
+    /**
+     * Return the fingerprint of source files under a root.
+     *
+     * @param sourceRoot Root the sources are relative to.
+     * @param sources Files or directories (directories are walked).
+     * @param excludes Relative path prefixes of walked files to leave out.
+     * @return The hex digest of each file's relative path and content, in
+     *     path order, or "missing" when none exists.
+     */
+    static String sourcesFingerprint(Object sourceRoot, List<String> sources, List<String> excludes = []) {
+        def root = asPath(sourceRoot).toAbsolutePath().normalize()
+        def key = "${root}|${sources.join(',')}|${excludes.join(',')}".toString()
+        return SOURCE_FINGERPRINTS.computeIfAbsent(key) { String ignored -> fingerprint(root, sources, excludes) }
+    }
+
+    private static String fingerprint(Path root, List<String> sources, List<String> excludes) {
         def files = [:] as TreeMap<String, Path>
-        RESOLVE_RULE_SOURCES.each { String source ->
+        sources.each { String source ->
             def path = root.resolve(source)
             if (Files.isRegularFile(path)) {
                 files[source] = path
@@ -680,7 +878,8 @@ class AnnotationReferences {
                 path.toFile().eachFileRecurse(groovy.io.FileType.FILES) { File file ->
                     def relative = root.relativize(file.toPath()).toString().replace(File.separator, "/")
                     def compiled = relative.endsWith(".pyc") || relative.endsWith(".pyo")
-                    if (!compiled && !relative.split("/").contains("__pycache__")) {
+                    def excluded = excludes.any { String prefix -> relative.startsWith(prefix) }
+                    if (!compiled && !excluded && !relative.split("/").contains("__pycache__")) {
                         files[relative] = file.toPath()
                     }
                 }
@@ -700,6 +899,134 @@ class AnnotationReferences {
     }
 
     /**
+     * Return what CLUSTERING_SQUIDPY_COMPUTE_CPU needs to know before it runs.
+     *
+     * The map_first rows' table-key suffix and MENDER unassigned-state policy (both
+     * recorded in each clustered table, which FINALIZE and MENDER_PREPARE
+     * read: their scripts are the legacy ones) and the fingerprint of the
+     * hierarchy code. All are task inputs, so -resume sees them.
+     *
+     * @param params Pipeline params.
+     * @param sourceRoot This checkout's src/ (${projectDir}/../src).
+     * @return [table_key_suffix, mender_unassigned_state_policy,
+     *     hierarchy_fingerprint].
+     */
+    static Map computeSpec(Map params, Object sourceRoot) {
+        def species = AnnotationDefaults.normalizeSpecies(params?.get("species"))
+        // COMPUTE_CPU runs for map_first rows only, so its suffix is that of a
+        // map_first row, also in a run whose own mode is legacy and that a
+        // row's clustering_squidpy_mode column opts in (§20 D15): forRow
+        // gives the row the same suffix.
+        def mapFirstParams = AnnotationDefaults.withRowMode(AnnotationDefaults.MAP_FIRST, params)
+        return [
+            table_key_suffix: AnnotationDefaults.tableKeySuffix(mapFirstParams, species),
+            mender_unassigned_state_policy: textOr(
+                params?.get("mender_unassigned_state_policy"),
+                AnnotationSettings.MAP_FIRST_MENDER_UNASSIGNED_STATE_POLICY,
+            ).toLowerCase(),
+            hierarchy_fingerprint: hierarchyFingerprint(sourceRoot),
+        ]
+    }
+
+    /**
+     * Return the compute arguments of one COMPUTE_CPU task (after --config,
+     * --input-dir and --output-dir).
+     *
+     * @param spec computeSpec result.
+     * @return Shell-quoted arguments.
+     */
+    static String computeArguments(Map spec) {
+        def args = [
+            "--mode", AnnotationDefaults.MAP_FIRST,
+            "--labels-dir", "${COMPUTE_INPUT_DIR}/${RESOLVE_OUTPUT_DIR}".toString(),
+            "--table-key-suffix", spec.table_key_suffix.toString(),
+            "--mender-unassigned-state-policy", spec.mender_unassigned_state_policy.toString(),
+        ]
+        return args.collect { arg -> shellQuote(arg) }.join(" ")
+    }
+
+    /**
+     * Return the stub compute manifest of a COMPUTE_CPU task (for -stub-run).
+     *
+     * @param pairId Pair id.
+     * @param segmentation Segmentation.
+     * @param spec computeSpec result.
+     * @param samplesJson The samples JSON the task received.
+     * @return The JSON text.
+     */
+    static String stubComputeManifestJson(Object pairId, Object segmentation, Map spec, Object samplesJson) {
+        return JsonOutput.prettyPrint(JsonOutput.toJson([
+            stub: true,
+            step: "compute_cpu",
+            pair_id: pairId.toString(),
+            segmentation: segmentation.toString(),
+            mode: AnnotationDefaults.MAP_FIRST,
+            table_key_suffix: spec.table_key_suffix,
+            mender_unassigned_state_policy: spec.mender_unassigned_state_policy,
+            hierarchy_fingerprint: spec.hierarchy_fingerprint,
+            samples: new JsonSlurperClassic().parseText(samplesJson.toString()),
+        ]))
+    }
+
+    /**
+     * Return the RESOLVE outputs COMPUTE_CPU stages, as files (plan §3.4, §3.5).
+     *
+     * The pair summary and each sample's label table and annotation manifest,
+     * staged flat into compute_inputs/annotation_resolve_out/ (sample ids
+     * are unique within a pair; merxen.clustering.map_first reads the flat
+     * layout). Files, not the directory: cache "deep" hashes a file's
+     * content but a directory only by its metadata, so a RESOLVE re-run
+     * with byte-identical outputs would otherwise re-run COMPUTE_CPU. The
+     * copied annotation_config.json is left out: a RESOLVE setting reaches
+     * COMPUTE_CPU only through the labels, manifests or summary it changes.
+     *
+     * @param resolveDir RESOLVE's annotation_resolve_out.
+     * @return The files, sorted by name.
+     */
+    static List computeLabelFiles(Object resolveDir) {
+        def root = asPath(resolveDir)
+        def files = []
+        Files.list(root).withCloseable { entries ->
+            entries.each { Path entry ->
+                def name = entry.fileName.toString()
+                if (Files.isRegularFile(entry) && name.endsWith(RESOLVE_SUMMARY_SUFFIX)) {
+                    files << entry
+                } else if (Files.isDirectory(entry)) {
+                    Files.list(entry).withCloseable { children ->
+                        children.each { Path child ->
+                            def childName = child.fileName.toString()
+                            if (Files.isRegularFile(child) && LABEL_FILE_SUFFIXES.any { suffix -> childName.endsWith(suffix) }) {
+                                files << child
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return files.sort { Path path -> path.fileName.toString() }
+    }
+
+    /**
+     * Return the ALIGN files a pair's map_first annotation reads (plan §3.2, §3.4).
+     *
+     * The pair's alignment comes from alignment_results_ch: the ALIGN task
+     * of this run, or the published align_out when ALIGN does not run in
+     * it, so the files never race with an ALIGN still writing them.
+     *
+     * @param alignOut The pair's align_out directory.
+     * @return [shared_tissue_mask.npy, registration_summary.json] when both
+     *     exist, else an empty list.
+     */
+    static List alignmentFiles(Object alignOut) {
+        if (alignOut == null) {
+            return []
+        }
+        def directory = asPath(alignOut)
+        def files = [SHARED_TISSUE_MASK_FILE, REGISTRATION_SUMMARY_FILE].collect { name -> directory.resolve(name) }
+        return files.every { path -> Files.isRegularFile(path) } ? files : []
+    }
+
+    /**
      * Return the stub <pair>_resolve_summary.json of a RESOLVE task (for -stub-run).
      *
      * @param pairId Pair id.
@@ -707,6 +1034,7 @@ class AnnotationReferences {
      * @param spec resolveSpec result.
      * @param bundleRefs Staged bundle_ref.json paths.
      * @param alignmentFiles Staged ALIGN files.
+     * @param registrationFiles Staged registration checks.
      * @return The JSON text.
      */
     static String stubResolveSummaryJson(
@@ -714,7 +1042,8 @@ class AnnotationReferences {
         Object segmentation,
         Map spec,
         List bundleRefs,
-        List alignmentFiles
+        List alignmentFiles,
+        List registrationFiles = []
     ) {
         return JsonOutput.prettyPrint(JsonOutput.toJson([
             stub: true,
@@ -725,8 +1054,13 @@ class AnnotationReferences {
             panel_status: spec.panel_status,
             n_required: spec.n_required,
             rules_fingerprint: spec.rules_fingerprint,
+            // As the real summary's thresholds and flags config: a RESOLVE
+            // setting changes the summary COMPUTE_CPU stages.
+            annotation_config: spec.annotation_config,
             bundle_refs: (bundleRefs ?: []).collect { ref -> ref.toString() },
             alignment_files: (alignmentFiles ?: []).collect { item -> item.toString() },
+            registration_files: (registrationFiles ?: []).collect { item -> item.toString() },
+            resolve_arguments: resolveArguments(spec, bundleRefs, alignmentFiles, registrationFiles),
             samples: [:],
         ]))
     }

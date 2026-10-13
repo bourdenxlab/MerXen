@@ -28,7 +28,7 @@ merxen/
 ```
 
 The subpackage structure mirrors the Nextflow stage graph:
-`build → segment-nuclei → segment → enrich → mask-image-quantification → qc → align →
+`build → segment-nuclei → segment → enrich → register-images → mask-image-quantification → qc → align →
 materialize-alignment → alignment-qc → compare → visualize → spatial-gene-analysis →
 clustering-squidpy → compute-cortical-depth → distance-from-object →
 mapmycells`. Cortical depth is skipped unless `--cortical_depth_enabled true`
@@ -163,6 +163,24 @@ with Groovy.
 - `sanitize_table_key`, `resolve_points_cols`, `ensure_shape_has_cell_id`,
   `build_gene_list_from_base_table`, `clone_table_for_region`.
 
+## `merxen.image_registration`
+
+### `image_registration` — [image_registration.py](../src/merxen/image_registration.py)
+- `load_alignment_matrix(path)` — read and validate a Xenium Explorer 3×3 affine.
+- `check_matrix_scale(matrix, *, image_pixel_size_um, reference_pixel_size_um, tolerance)`
+  — reject inverted or micron-based matrices by their scale.
+- `measure_local_shifts(reference, moving, valid, *, window_px)` — windowed
+  phase-correlation residual shifts.
+- `fit_affine_displacement(centers_xy, shifts_xy)` — robust affine fit to a
+  shift field.
+- `run_image_registration(config, *, force_rerun)` — stage entry point.
+
+### `io.ome_tiff` — [ome_tiff.py](../src/merxen/io/ome_tiff.py)
+- `read_ome_tiff_info(path)` — levels, channel names, and pixel size without
+  reading pixels.
+- `open_ome_tiff_level(info, level, *, channel_names)` — lazy `(c, y, x)`
+  DataArray of one pyramid level.
+
 ## `merxen.mask_image_quantification`
 
 ### `mask_image_quantification` — [mask_image_quantification.py](../src/merxen/mask_image_quantification.py)
@@ -172,7 +190,8 @@ with Groovy.
   features to hybrid cells by their shared identifier without quantifying
   hybrid polygons.
 - `run_mask_image_quantification(config, *, force_rerun)` — stage entry point
-  that writes the SpatialData table and sidecar outputs.
+  that writes the SpatialData table and sidecar outputs. An existing table is
+  reused only when it covers exactly the zarr's current source images.
 
 ## `merxen.cortical_depth`
 
@@ -181,6 +200,10 @@ with Groovy.
 
 ### Internal modules
 - `boundaries.py` — read role-labelled GeoJSON boundaries and masks.
+- `frames.py` — `resolve_cell_coordinate_frame(...)`: pick the native or
+  `*_aligned_nonrigid` cell element matching `boundary_frame`, or refuse;
+  `frame_consistency_metrics(...)`: tissue-edge-to-cell distance and ribbon
+  occupancy behind the `frame_mismatch_suspected` QC warning.
 - `ribbon.py` — construct/rasterize the cortical ribbon.
 - `laplace.py` — sparse 2D Laplace solve and bilinear interpolation.
 - `streamlines.py` — normalized-gradient streamlines.
@@ -466,6 +489,42 @@ M3 shadow evaluation (plan §5.2–§5.5, §14):
   E2's or the 7-class LL comparison.
 
 See [Reference-based annotation](stages/annotation.md).
+
+### `annotation.report` — [report.py](../src/merxen/annotation/report.py)
+
+The annotation QC report (plan §9; M7):
+
+- `build_annotation_report(sources, out_dir, options=..., allow_results_output=False)`
+  (`ReportResult`); `check_output_dir` and `guarded_directories` (the output
+  stays out of every input's results tree, the store, the recorded bundles
+  and the held-out CSV's directory); `ITEM_BUILDERS`.
+- Inputs (`report_inputs`): `discover_sources` (the published layout),
+  `ReportSources`, `load_report_inputs` (`ReportInputs`, `SampleData`),
+  `read_clustered_table`, `load_heldout`, `depth_cells_file` (a
+  segmentation's cell table in a `compute_cortical_depth_out`),
+  `report_results_root` (the results root of any published input),
+  `recorded_bundle_dirs`.
+- Metrics (`report_metrics`, numpy / pandas only): `soft_level_matrix`,
+  `one_hot_matrix`, `block_bootstrap_shares` (`ShareResult`),
+  `jensen_shannon_distance`, `aligned_bin_density_correlation`,
+  `median_block_ci` (`MedianCi`), `depth_ordering` (`OrderingResult`),
+  `depth_replication` (`ReplicationResult`), `share_contrast`,
+  `depth_profile`, `profile_gradient`, `platform_gene_log2_ratios`,
+  `group_mean_counts`, `log_cpm`, `nearest_centroid`,
+  `agreement_by_quantile`, `histogram_2d`, `tile_mean_map`,
+  `self_thinning_eligibility`, `tangential_block_codes` (the H12 bootstrap
+  unit), `depth_input_agreement` (`DepthAgreement`; the label-free depth
+  check).
+- Panel card (`report_panel`): `build_panel_card` (`PanelCard`),
+  `trust_banners` (`Banner`), `resolvability_curves`, `resolvability_bins`,
+  `bundle_marker_rows`, `v7_notes`.
+- Items: `report_items` (1, 2, 3, 5, 6, 8, 11, 12; `sink_rows_of`,
+  `reference_node_shares`), `report_expression` (4, 7; `broad_profiles`,
+  `canonical_marker_genes`, `cross_platform_basis`), `report_depth` (9;
+  `depth_validity`), `report_mouse` (10; `ap_fields`,
+  `subclass_region_table`, `window_composition`).
+- Model (`report_model`): `AcceptanceMetrics`, `MetricRecord`, `metric`,
+  `CriterionCoverage`, `ReportItem`, `ReportOptions`.
 
 ### `annotation.likelihood` — [likelihood.py](../src/merxen/annotation/likelihood.py)
 

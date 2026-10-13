@@ -30,6 +30,7 @@ from merxen.annotation.config import (
     MouseRegionConfig,
     check_clustering_mode_settings,
     default_depth_grid,
+    default_mapmycells_stage,
     default_references,
     normalise_mouse_section_regions,
     resolve_clustering_mode,
@@ -39,14 +40,32 @@ from merxen.annotation.config import (
 from merxen.annotation.vocab import load_vocab
 
 
-def test_defaults_are_inert_and_legacy() -> None:
+def test_defaults_flip_human_only() -> None:
+    """Human runs map_first by default since M8 (§20); mouse stays legacy."""
     config = AnnotationConfig()
     assert config.enabled is False
-    assert DEFAULT_CLUSTERING_MODE == {"human": "legacy", "mouse": "legacy"}
-    assert frozenset() == FLIPPED_SPECIES
-    assert resolve_clustering_mode("human") == "legacy"
+    assert DEFAULT_CLUSTERING_MODE == {"human": "map_first", "mouse": "legacy"}
+    assert frozenset({"human"}) == FLIPPED_SPECIES
+    assert resolve_clustering_mode("human") == "map_first"
     assert resolve_clustering_mode("mouse") == "legacy"
     assert resolve_table_key_suffix("human", "legacy") == ""
+    assert resolve_table_key_suffix("human", "map_first") == ""
+    assert resolve_table_key_suffix("mouse", "map_first") == "mapfirst"
+    assert default_mapmycells_stage("human") == "skip"
+    assert default_mapmycells_stage("mouse") == "legacy"
+
+
+def test_a_rows_mode_wins_over_every_param() -> None:
+    """The samplesheet column clustering_squidpy_mode (§20 D15)."""
+    assert resolve_clustering_mode("human", row_mode="legacy") == "legacy"
+    assert (
+        resolve_clustering_mode("mouse", mode="legacy", row_mode=" Map_First ")
+        == "map_first"
+    )
+    assert resolve_clustering_mode("human", row_mode="  ") == "map_first"
+    assert resolve_clustering_mode("mouse", row_mode=None) == "legacy"
+    with pytest.raises(ValueError, match="clustering mode"):
+        resolve_clustering_mode("human", row_mode="map-first")
 
 
 def test_human_defaults() -> None:
@@ -369,6 +388,30 @@ def test_resolvability_and_gate_p_settings() -> None:
         GatePStressRecipe(spill_fraction=1.5)
 
 
+def test_version_7_ensemble_settings() -> None:
+    # Amendment of 2026-09-29 (pre-registration §22.3): the members default to
+    # the family-type rule (None), the spread route's margin is one SE.
+    settings = AnnotationResolvabilityConfig()
+    assert settings.ensemble_r1_seeds is None
+    assert settings.ensemble_r3_seeds is None
+    assert settings.ensemble_spread_wilson_margin_se == 1.0
+    assert settings.ensemble_spread_se_multiplier == 3.5
+    explicit = AnnotationResolvabilityConfig(
+        ensemble_r1_seeds=[0, 1, 2], ensemble_r3_seeds=[0]
+    )
+    assert explicit.ensemble_r1_seeds == [0, 1, 2]
+    for name, value in (
+        ("ensemble_r1_seeds", []),
+        ("ensemble_r1_seeds", [1, 1]),
+        ("ensemble_r3_seeds", []),
+        ("ensemble_r3_seeds", [2, 2]),
+    ):
+        with pytest.raises(ValidationError, match=name):
+            AnnotationResolvabilityConfig(**{name: value})
+    with pytest.raises(ValidationError, match="ensemble_spread_wilson_margin_se"):
+        AnnotationResolvabilityConfig(ensemble_spread_wilson_margin_se=-0.5)
+
+
 def test_gates() -> None:
     gate = AnnotationGate()
     assert (gate.min_frac_ge30, gate.min_table_broad_coverage) == (0.30, 0.25)
@@ -445,7 +488,9 @@ def test_config_section_regions_are_normalised() -> None:
 
 
 @pytest.mark.parametrize("species", ["human", "mouse"])
-def test_mode_resolution(species: str) -> None:
+def test_mode_resolution(species: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The precedence of the params, from a legacy species default.
+    monkeypatch.setitem(DEFAULT_CLUSTERING_MODE, species, "legacy")
     per_species = {f"mode_{species}": "map_first"}
     assert resolve_clustering_mode(species) == "legacy"  # type: ignore[arg-type]
     assert resolve_clustering_mode(species, **per_species) == "map_first"  # type: ignore[arg-type]

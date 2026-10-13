@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
+from typing import Any
 
 import anndata as ad
 import dask.dataframe as dd
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import pytest
 import spatialdata as sd
 from scipy import sparse
 from shapely.geometry import Point, box
@@ -215,10 +218,8 @@ def test_overlap_assignment_uses_proseg_only_inside_overlap() -> None:
     ]
 
 
-def test_hybrid_refinement_roundtrips_spatialdata(
-    tmp_path: Path,
-) -> None:
-    """Hybrid shapes, point assignments, and counts should persist together."""
+def _write_hybrid_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Write a two-cell Proseg zarr, its Cellpose mask and transforms."""
     coordinates = [
         (x, y, assignment)
         for assignment, x_offset in [(0, 1.0), (1, 8.0)]
@@ -296,6 +297,14 @@ def test_hybrid_refinement_roundtrips_spatialdata(
         )
     )
 
+    return zarr_path, mask_path, transforms_path
+
+
+def test_hybrid_refinement_roundtrips_spatialdata(
+    tmp_path: Path,
+) -> None:
+    """Hybrid shapes, point assignments, and counts should persist together."""
+    zarr_path, mask_path, transforms_path = _write_hybrid_inputs(tmp_path)
     config = ProsegHybridConfig(min_transcripts=10)
     run_proseg_hybrid_refinement(
         zarr_path,
@@ -327,3 +336,34 @@ def test_hybrid_refinement_roundtrips_spatialdata(
         result.attrs[ALIGNMENT_MANIFEST_ATTR]["invalidation_reason"]
         == "ProSeg-hybrid points, shapes, and table replaced"
     )
+
+
+def test_hybrid_refinement_writes_temporary_parts_in_the_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Partition files must not go to the system temporary directory."""
+    import merxen.segmentation.proseg_hybrid as hybrid_module
+
+    zarr_path, mask_path, transforms_path = _write_hybrid_inputs(tmp_path)
+    work = tmp_path / "task_work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    monkeypatch.delenv("MERXEN_TMPDIR", raising=False)
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "system_tmp_must_stay_unused"))
+    seen: list[Path] = []
+    real_temporary_directory = hybrid_module.tempfile.TemporaryDirectory
+
+    def recording_temporary_directory(
+        *args: Any, **kwargs: Any
+    ) -> tempfile.TemporaryDirectory[str]:
+        seen.append(Path(str(kwargs.get("dir"))))
+        return real_temporary_directory(*args, **kwargs)
+
+    monkeypatch.setattr(
+        hybrid_module.tempfile, "TemporaryDirectory", recording_temporary_directory
+    )
+    run_proseg_hybrid_refinement(
+        zarr_path, mask_path, transforms_path, ProsegHybridConfig(min_transcripts=10)
+    )
+    assert seen == [work]
+    assert not (tmp_path / "system_tmp_must_stay_unused").exists()

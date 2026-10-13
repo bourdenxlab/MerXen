@@ -48,12 +48,28 @@ LeafSource = Literal["mapped", "denovo"]
 UnassignedStatePolicy = Literal["state", "exclude_from_features"]
 LEGACY_UNASSIGNED_STATE_POLICY: Final = "state"
 MAP_FIRST_UNASSIGNED_STATE_POLICY: Final = "exclude_from_features"
+# Whether a species gate (human H, mouse M) has merged into ``main`` (M13
+# decision D20 (b)); the seeded real-data families only warn while pending.
+SpeciesGateState = Literal["pending", "merged"]
+# How the human marker referee derives its per-panel marker sets (M13 C13,
+# ``human_referee``): ``node`` is mouse G2's rule on the WHB superclusters
+# (each group's mean node profile against every other node), ``class`` the
+# n_cells-weighted broad-class ``expected_fraction`` profile against the
+# other broad classes.
+MarkerRefereeComparator = Literal["node", "class"]
 # A clustered table-key suffix: "" or one lower-case token (§4.8).
 TableKeySuffix = Annotated[str, AfterValidator(validate_table_key_suffix)]
 # Default clustering mode per species. Only the flip PRs (M8 human, M9 mouse)
-# change these, together with ``FLIPPED_SPECIES``.
-DEFAULT_CLUSTERING_MODE: Final[dict[str, str]] = {"human": "legacy", "mouse": "legacy"}
-FLIPPED_SPECIES: Final[frozenset[str]] = frozenset()
+# change these, together with ``FLIPPED_SPECIES``. Human flipped at M8
+# (pre-registration §20).
+DEFAULT_CLUSTERING_MODE: Final[dict[str, str]] = {
+    "human": "map_first",
+    "mouse": "legacy",
+}
+FLIPPED_SPECIES: Final[frozenset[str]] = frozenset({"human"})
+# The optional samplesheet column that sets one row's clustering mode
+# (pre-registration §20 D15; ``AnnotationDefaults.ROW_MODE_COLUMN``).
+ROW_MODE_COLUMN: Final = "clustering_squidpy_mode"
 # Table-key suffix of a map_first run of a species that has not flipped yet, so
 # the legacy clustered table is never overwritten (OD-A3, plan §4.8).
 MAP_FIRST_TABLE_KEY_SUFFIX: Final = "mapfirst"
@@ -477,6 +493,11 @@ class AnnotationPanelConfig(_AnnotationModel):
         xplat_min_intersection_genes: A ``per_platform`` intersection panel
             with fewer genes supports broad-level cross-platform statistics
             only (plan §8.5).
+        panel_chemistry: The panel's chemistry for measured simulation
+            inputs (M3c, plan §8.3 v7.4): ``auto`` (MERSCOPE -> ``merscope``;
+            a Xenium panel with Jaccard >= 0.95 to a pinned public Prime list
+            -> ``xenium_prime``; else unknown, which has no factor table) or
+            a declared value.
     """
 
     panel_mode: Literal["auto", "intersection", "per_platform"] = "auto"
@@ -508,6 +529,7 @@ class AnnotationPanelConfig(_AnnotationModel):
     setc_max_abs_log2_deviation: float = Field(default=2.0, gt=0.0)
     setc_log2_pseudocount: float = Field(default=1e-3, gt=0.0)
     xplat_min_intersection_genes: int = Field(default=100, ge=1)
+    panel_chemistry: Literal["auto", "xenium_prime", "xenium_v1", "merscope"] = "auto"
 
     @field_validator(
         "intersection_min_jaccard",
@@ -583,6 +605,10 @@ class AnnotationResolvabilityConfig(_AnnotationModel):
             non-neuronal supertype.
         holdout_donor: Human held-out donor (``auto`` = the frontal donor
             with the fewest cells, H19.30.002).
+        holdout_other_region_donor_only: Draw the held-out test set's
+            other-region top-up cells only from the held-out donor (gate P's
+            leave-one-donor-out sets, pre-registration §23.2 D2 (d)); off for
+            every production test set, which draws them from every donor.
         threshold_rule: Always ``local_isotonic`` (never the set-level rule,
             E2 verdict 3).
         threshold_cap: Cap on local thresholds.
@@ -615,6 +641,41 @@ class AnnotationResolvabilityConfig(_AnnotationModel):
         gate_p_spread_se_multiplier: Replicate spread allowed, in standard
             errors.
         gate_p_min_coverage: Coverage gate P requires.
+        version: Resolvability version (M3c, plan §8.3 v7.1): ``auto`` (6 for
+            the families of ``validated_panels.csv`` and
+            ``resolvability_v6_pins.csv``, else 7), or 6 / 7 explicitly;
+            forcing 7 on a version-6 family is refused outside the
+            diagnostic (``annotation-panel-simulate --resolvability-version
+            7``).
+        ensemble_r1_seeds: Seeds of the ``R1_contam_HO`` emission members
+            (``None``: the family-type default of plan §8.3 v7.3 as amended
+            on 2026-09-29, ``[0, 6, 7, 8, 9, 10]`` where the species x
+            chemistry has a measured factor table, else ``[0, 6, ..., 12]``;
+            ``resolvability.default_member_seeds``).
+        ensemble_r3_seeds: Seeds of the ``R3_measured_HO`` emission members
+            where a measured table exists (``None``: ``[2, 3]``).
+        ensemble_spread_floor: E2's smallest allowed member spread.
+        ensemble_spread_se_multiplier: E2's spread limit in standard errors.
+        ensemble_member_min_confident: Confident check-half calls (Kish n)
+            each member needs for the spread test.
+        ensemble_spread_wilson_margin_se: The spread route of E2 needs the
+            pooled Wilson bound to clear ``target - wilson_margin`` by this
+            many standard errors ``sqrt(p (1 - p) / n_eff)`` of the pooled
+            precision (amendment of 2026-09-29, pre-registration §22.3; the
+            unanimous route is unaffected).
+        saturated_bp_share: Fit-half share at ``bp = 1`` above which a set
+            without a local threshold is judged at the cap (v7.8).
+        monotone_depth: Apply the monotone-in-depth fill (v7.9).
+        nonneuronal_monotone_max_depth: Non-neuronal bins at or above this
+            depth are never filled.
+        topup_min_class_test_cells: Classes with fewer test cells are topped
+            up to this many before mapping (v7.6).
+        r3_table_rule: ``R3_measured_HO`` table rule (``all_measured`` only
+            for the D3 regression).
+        r3_residual_sd_log2: R3 residual SD of measured genes (log2).
+        neighbour_structured_spill: Experimental neighbour-structured spill
+            (user decision 7: behind a flag, off by default; not implemented
+            in M3c, so turning it on is refused).
     """
 
     enabled: bool = True
@@ -624,6 +685,7 @@ class AnnotationResolvabilityConfig(_AnnotationModel):
     n_test_cells: int | None = Field(default=None, ge=1)
     mouse_nonneuronal_extra_per_supertype: int = Field(default=30, ge=0)
     holdout_donor: str = "auto"
+    holdout_other_region_donor_only: bool = False
     threshold_rule: Literal["local_isotonic"] = "local_isotonic"
     threshold_cap: float = 0.99
     min_cells_per_bin: int = Field(default=50, ge=1)
@@ -648,6 +710,33 @@ class AnnotationResolvabilityConfig(_AnnotationModel):
     gate_p_topup_max_cluster_frac: float = 0.05
     gate_p_spread_se_multiplier: float = Field(default=3.5, gt=0.0)
     gate_p_min_coverage: float = 0.30
+    version: Literal["auto", 6, 7] = "auto"
+    ensemble_r1_seeds: list[int] | None = None
+    ensemble_r3_seeds: list[int] | None = None
+    ensemble_spread_floor: float = Field(default=0.03, ge=0.0)
+    ensemble_spread_se_multiplier: float = Field(default=3.5, gt=0.0)
+    ensemble_member_min_confident: int = Field(default=10, ge=1)
+    ensemble_spread_wilson_margin_se: float = Field(default=1.0, ge=0.0)
+    saturated_bp_share: float = 0.90
+    monotone_depth: bool = True
+    nonneuronal_monotone_max_depth: int = Field(default=1000, ge=1)
+    topup_min_class_test_cells: int = Field(default=200, ge=0)
+    r3_table_rule: Literal["restricted", "all_measured"] = "restricted"
+    r3_residual_sd_log2: float = Field(default=0.20, ge=0.0)
+    neighbour_structured_spill: bool = False
+
+    @field_validator("neighbour_structured_spill")
+    @classmethod
+    def _refuse_neighbour_spill(
+        cls: type[AnnotationResolvabilityConfig], value: bool
+    ) -> bool:
+        if value:
+            raise ValueError(
+                "neighbour_structured_spill is experimental and not implemented "
+                "(user decision 7, OD-E17: behind a flag, off by default; it needs "
+                "a vectorised form and the MERFISH-638850 neighbour table)"
+            )
+        return value
 
     @field_validator("threshold_rule", mode="before")
     @classmethod
@@ -667,6 +756,7 @@ class AnnotationResolvabilityConfig(_AnnotationModel):
         "seed_stability_max_change",
         "gate_p_topup_max_cluster_frac",
         "gate_p_min_coverage",
+        "saturated_bp_share",
     )
     @classmethod
     def _check_share(
@@ -680,6 +770,10 @@ class AnnotationResolvabilityConfig(_AnnotationModel):
     ) -> AnnotationResolvabilityConfig:
         if not self.gate_p_seeds:
             raise ValueError("gate_p_seeds must not be empty")
+        for name in ("ensemble_r1_seeds", "ensemble_r3_seeds"):
+            seeds = getattr(self, name)
+            if seeds is not None and (not seeds or len(set(seeds)) != len(seeds)):
+                raise ValueError(f"{name} must be distinct and not empty")
         if self.gate_p_replicate_min_confident_n > self.gate_p_min_confident_n:
             raise ValueError(
                 "gate_p_replicate_min_confident_n cannot exceed gate_p_min_confident_n"
@@ -699,7 +793,8 @@ class AnnotationGate(_AnnotationModel):
         warn_segmented_broad_coverage: Below this coverage of segmented
             objects the warning flag is set.
         warn_unvalidated_share: Simulation-validated families warn when more
-            of a dataset's confident labels fall outside the validated region.
+            of a dataset's confident labels at a chain level fall outside the
+            validated region; the mouse gate applies the same limit (§8.2).
     """
 
     depth_counts: int = Field(default=30, ge=1)
@@ -794,37 +889,150 @@ class MouseGateConfig(_AnnotationModel):
         return self
 
 
+def _pending_species_gates() -> dict[Species, SpeciesGateState]:
+    """Return the species gate record of D20 (b): no species gate has merged."""
+    return {"human": "pending", "mouse": "pending"}
+
+
+# The families whose marker referee comparator the user ruled on. C1 (b) of
+# 2026-10-07 (pre-registration §23.18, §23.19): "the user decides NR5 for
+# this family", the new-panel human MERSCOPE family (D16's family id of the
+# frozen D17 panel). Every other family keeps the default comparator.
+RULED_REFEREE_COMPARATORS: Final[dict[str, MarkerRefereeComparator]] = {
+    "human_merscope_aa25d5a241d0": "class",
+}
+
+
+def _ruled_referee_comparators() -> dict[str, MarkerRefereeComparator]:
+    """Return a copy of the families' ruled referee comparators."""
+    return dict(RULED_REFEREE_COMPARATORS)
+
+
 class AnnotationRealQcConfig(_AnnotationModel):
     """Downgrade-only QC on real in-house datasets (plan §8.8; rev3).
 
     Attributes:
+        enabled: Run the real-data QC in human RESOLVE (M13 C15). ``false``
+            gives the QC-free run that pre-registration NR1 compares with:
+            no check runs, nothing is lowered and the summary records the QC
+            as disabled. Mouse RESOLVE does not run it yet: its gate keeps
+            G1-G5 (§7.6), and the mouse wiring follows M6b (M13 C22).
         marker_consistency_warn: Marker-referee warning threshold; ``None``
             selects the species default (human 0.75; mouse G2's 0.80).
         marker_consistency_broad_only: Human: below this the dataset becomes
             ``broad_only``.
+        marker_referee_min_group_markers: Human referee (M13 C13, D18 (a)):
+            broad classes with fewer derived markers are left out; with
+            fewer than two classes left the referee is ``not_evaluable``.
+            Mouse G2 reads ``mouse_gate.g2_min_group_markers``.
+        marker_referee_min_marker_units: Units the top class of a marker
+            pseudo-label needs (``data/P1212``'s rule, as mouse G2).
+        marker_referee_min_marker_share: Its share of the summed units.
+        marker_referee_min_pseudo_confident: The referee is
+            ``not_evaluable`` with fewer scored cells (marker-pseudo-labelled
+            table cells with a confident ``ct_broad``).
+        marker_referee_comparator: How the per-panel marker sets are derived
+            from the WHB profiles with the §8.6 specificity rule: ``node``
+            (mouse G2's rule as ported: each broad class's mean supercluster
+            profile against every other supercluster; the M13 C13
+            specification and the default, ``not_evaluable`` on every set a
+            sample) or ``class`` (the broad-class profile, the
+            ``n_cells``-weighted mean of its superclusters'
+            ``expected_fraction``, against the other broad classes). A
+            family listed in ``marker_referee_comparator_by_family`` takes
+            its own.
+        marker_referee_comparator_by_family: The comparator of each family
+            the user ruled on, by family id (``referee_comparator``). By
+            default the new-panel human MERSCOPE family
+            (``human_merscope_aa25d5a241d0``) takes ``class``: the user's
+            ruling C1 (b) of 2026-10-07 decides NR5 "for this family"
+            (pre-registration §23.18, §23.19), with the thresholds
+            unchanged. Every other family, the seeded set a sections
+            included, keeps ``marker_referee_comparator``.
         paired_broad_jsd_warn: Paired-platform soft broad JSD warning.
         uninformative_strata_warn_frac: Warn when more flag strata are
             uninformative.
         genes_per_count_gap_warn: Warn when native cells carry this much more
             genes than simulated cells.
+        gene_complexity_matching: Which simulated cells a native depth bin
+            is compared with (NR7): ``interpolated`` (the user's ruling C3
+            (b) of 2026-10-07, pre-registration §23.19: inside the grid,
+            each test cell's simulated genes interpolated, linearly in log
+            depth, between the bin's edges to the bin's native median total;
+            the open top bin at its lower edge) or ``lower_edge`` (the
+            simulated cells at the bin's lower edge, as M13 C16 first built
+            it; native cells in a bin carry more counts than its lower edge,
+            so it shows a gap without one).
         prefilter_spotcheck_min_agreement: 5K prefilter spot-check agreement.
-        seeded_families_warn_only_until_gate: The seeded real-data families
-            only warn until their species gate has merged.
+        seeded_families_warn_only_until_gate: Per species, whether its gate
+            (human: gate H; mouse: gate M) has merged: ``pending`` or
+            ``merged``. While ``pending``, the checks of plan §8.8 that
+            ``real_qc`` adds (marker referee, paired concordance, flag rates,
+            gene complexity, prefilter spot check) only warn on the seeded
+            ``real_data`` families of that species. A gate counts as merged
+            only after its acceptance-gate PR into ``main`` (M13 decision D20
+            (b), 2026-10-06), so both stay ``pending`` until then. The rev3
+            bool is accepted: ``true`` is both ``pending``, ``false`` both
+            ``merged``.
+        registration_g1_effect: What human registration G1's fail rule
+            does (§8.8; M0a's guard with §7.6's rules, read from
+            ``mouse_gate``): ``gate_failed`` (§8.8's effect: the dataset
+            gate fails, every cell ``not_attempted_gate`` and
+            ``exclude_hard``), the default since the user's ruling C2 of
+            2026-10-07 (pre-registration §23.19: the set a regression, M13
+            C17, showed no false G1 failure; a tightening), or ``warning``
+            (warn-only, decision D23 (b) of 2026-10-06, the M13 setting
+            until then). §7.6's warning rule (density ratio below
+            ``g1_density_ratio_warn``) is a warning under either setting.
+        coverage_warn_margin: M3c (user decision 4): warn per (level, called
+            class) when the real confident share is below the class-depth
+            prediction at the dataset's own per-class depth by more than
+            this (``real_qc.coverage_vs_simulation``; never an offset).
+        coverage_min_cells: Dataset cells a (level, class) needs for that
+            warning. Below ``real_qc.CLASS_DEPTH_MIN_CLASS_CELLS`` (100) the
+            warning would also judge classes whose prediction takes the
+            label-free depth histogram instead of their own depth.
+        factor_remeasure_min_r: M3c: warn when the first in-house dataset's
+            re-measured per-gene factors correlate below this with the
+            stored factor table on the informative genes
+            (``real_qc.factor_remeasure``).
+        nonneuronal_high_depth_counts: M3c (§8.3 v7.9): total counts from
+            which a non-neuronal cell of a ``nonneuronal_high_depth`` bin is
+            flagged (report-only).
     """
 
+    enabled: bool = True
     marker_consistency_warn: float | None = None
     marker_consistency_broad_only: float = 0.70
+    marker_referee_min_group_markers: int = Field(default=3, ge=1)
+    marker_referee_min_marker_units: float = Field(default=1.5, gt=0.0)
+    marker_referee_min_marker_share: float = Field(default=0.6, gt=0.0, le=1.0)
+    marker_referee_min_pseudo_confident: int = Field(default=200, ge=1)
+    marker_referee_comparator: MarkerRefereeComparator = "node"
+    marker_referee_comparator_by_family: dict[str, MarkerRefereeComparator] = Field(
+        default_factory=_ruled_referee_comparators
+    )
     paired_broad_jsd_warn: float = 0.20
     uninformative_strata_warn_frac: float = 0.5
     genes_per_count_gap_warn: float = Field(default=0.45, ge=0.0)
+    gene_complexity_matching: Literal["interpolated", "lower_edge"] = "interpolated"
     prefilter_spotcheck_min_agreement: float = 0.95
-    seeded_families_warn_only_until_gate: bool = True
+    seeded_families_warn_only_until_gate: dict[Species, SpeciesGateState] = Field(
+        default_factory=_pending_species_gates
+    )
+    registration_g1_effect: Literal["warning", "gate_failed"] = "gate_failed"
+    coverage_warn_margin: float = 0.10
+    coverage_min_cells: int = Field(default=200, ge=1)
+    factor_remeasure_min_r: float = 0.9
+    nonneuronal_high_depth_counts: int = Field(default=1000, ge=1)
 
     @field_validator(
         "marker_consistency_broad_only",
         "paired_broad_jsd_warn",
         "uninformative_strata_warn_frac",
         "prefilter_spotcheck_min_agreement",
+        "coverage_warn_margin",
+        "factor_remeasure_min_r",
     )
     @classmethod
     def _check_share(
@@ -840,6 +1048,58 @@ class AnnotationRealQcConfig(_AnnotationModel):
         return (
             None if value is None else _check_fraction(value, "marker_consistency_warn")
         )
+
+    @field_validator("seeded_families_warn_only_until_gate", mode="before")
+    @classmethod
+    def _species_gate_record(cls: type[AnnotationRealQcConfig], value: Any) -> Any:
+        # The rev3 bool meant "warn-only until the species gate": true keeps
+        # every species pending, false declares every gate merged.
+        if isinstance(value, bool):
+            return dict.fromkeys(SPECIES, "pending" if value else "merged")
+        return value
+
+    @field_validator("seeded_families_warn_only_until_gate")
+    @classmethod
+    def _fill_species_gates(
+        cls: type[AnnotationRealQcConfig], value: dict[str, str]
+    ) -> dict[str, str]:
+        # A species left out keeps the safe state: its gate has not merged.
+        return {species: value.get(species, "pending") for species in SPECIES}
+
+    def referee_comparator(
+        self: AnnotationRealQcConfig, family_id: str | None
+    ) -> MarkerRefereeComparator:
+        """Return the marker referee comparator of a family.
+
+        Args:
+            family_id: The panel's family id (``None``: unknown).
+
+        Returns:
+            The family's ruled comparator
+            (``marker_referee_comparator_by_family``), else
+            ``marker_referee_comparator``.
+        """
+        if family_id is not None:
+            ruled = self.marker_referee_comparator_by_family.get(str(family_id))
+            if ruled is not None:
+                return ruled
+        return self.marker_referee_comparator
+
+    def seeded_warn_only(self: AnnotationRealQcConfig, species: str) -> bool:
+        """Return whether the seeded families of ``species`` only warn.
+
+        Args:
+            species: ``"human"`` or ``"mouse"``.
+
+        Returns:
+            ``True`` while the species gate is ``pending`` (D20 (b)).
+        """
+        merged = {
+            key
+            for key, value in self.seeded_families_warn_only_until_gate.items()
+            if value == "merged"
+        }
+        return species not in merged
 
 
 class AnnotationFlagsConfig(_AnnotationModel):
@@ -1521,18 +1781,22 @@ def resolve_clustering_mode(
     mode: str | None = None,
     mode_human: str | None = None,
     mode_mouse: str | None = None,
+    row_mode: str | None = None,
 ) -> str:
-    """Resolve the clustering mode of a run (mirrors ``resolveMode``).
+    """Resolve the clustering mode of a run or row (``resolveRowMode``).
 
     As in Groovy, values are case-insensitive and stripped, and a blank value
-    counts as unset: a blank override falls through to the species param,
-    and a blank species param to the species default.
+    counts as unset: a blank row value falls through to the override, a blank
+    override to the species param, and a blank species param to the species
+    default.
 
     Args:
         species: Run species.
         mode: ``clustering_squidpy_mode``, an override for both species.
         mode_human: ``clustering_squidpy_mode_human`` (``None`` = default).
         mode_mouse: ``clustering_squidpy_mode_mouse`` (``None`` = default).
+        row_mode: The samplesheet row's ``clustering_squidpy_mode`` column,
+            which wins over every param (``None`` = the run's mode).
 
     Returns:
         ``"legacy"`` or ``"map_first"``.
@@ -1543,7 +1807,8 @@ def resolve_clustering_mode(
     _check_species(species)
     per_species = mode_human if species == "human" else mode_mouse
     chosen = (
-        _mode_or_none(mode)
+        _mode_or_none(row_mode)
+        or _mode_or_none(mode)
         or _mode_or_none(per_species)
         or DEFAULT_CLUSTERING_MODE[species]
     )
@@ -1559,6 +1824,24 @@ def _mode_or_none(value: str | None) -> str | None:
     if value is None:
         return None
     return str(value).strip().lower() or None
+
+
+def default_mapmycells_stage(
+    species: Species, *, flipped_species: frozenset[str] = FLIPPED_SPECIES
+) -> str:
+    """Default ``annotation_mode_mapmycells_stage`` (``defaultMapmycellsStage``).
+
+    A flipped species no longer runs the legacy MAPMYCELLS stage beside
+    map_first (``"skip"``); a species that has not flipped keeps it.
+
+    Args:
+        species: Run species.
+        flipped_species: Species whose default is already ``map_first``.
+
+    Returns:
+        ``"skip"`` or ``"legacy"``.
+    """
+    return "skip" if _check_species(species) in flipped_species else "legacy"
 
 
 def resolve_table_key_suffix(

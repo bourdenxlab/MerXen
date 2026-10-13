@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "merxen"
-version = "0.1.0"
+version = "0.2.0"
 description = "Pre-processing, segmentation, and comparative analysis of paired MERSCOPE and Xenium spatial transcriptomics datasets"
 readme = "README.md"
 license = "MIT"
@@ -16,6 +16,7 @@ dependencies = [
     "anndata>=0.10.9,<0.13.0",
     "pyarrow>=15.0.0,<24",
     "imagecodecs>=2024.12.30",
+    "tifffile>=2025.1",
     "dask[dataframe]>=2025.1,<2027",
     "spatialdata>=0.8.0,<0.9",
     "spatialdata-io>=0.6,<0.7",
@@ -95,10 +96,13 @@ merxen = [
     "assets/annotation/*.csv",
     "assets/annotation/*.yaml",
     "assets/annotation/NOTICE",
+    "assets/annotation/sim_inputs/*.csv",
+    "assets/annotation/sim_inputs/*.json",
+    "assets/annotation/sim_inputs/NOTICE",
 ]
 
 [tool.bumpversion]
-current_version = "0.1.0"
+current_version = "0.2.0"
 parse = "(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)"
 serialize = ["{major}.{minor}.{patch}"]
 commit = false

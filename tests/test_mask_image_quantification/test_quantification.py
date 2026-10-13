@@ -406,3 +406,139 @@ def test_run_quantification_persists_hybrid_feature_join(
     updated = sdata.tables["table_MOSAIK_proseg_hybrid"]
     assert HYBRID_IMAGE_QUANTIFICATION_OBSM_KEY in updated.obsm
     np.testing.assert_array_equal(updated.X, np.asarray([[5], [7]]))
+
+
+def _patch_in_memory_zarr(
+    monkeypatch: pytest.MonkeyPatch,
+    sdata: SimpleNamespace,
+) -> list[str]:
+    writes: list[str] = []
+
+    def _fake_write(
+        sdata_obj: SimpleNamespace,
+        key: str,
+        element_type: str,
+        value: object,
+        *,
+        overwrite: bool = True,
+    ) -> bool:
+        del overwrite
+        writes.append(key)
+        getattr(sdata_obj, element_type)[key] = value
+        return True
+
+    monkeypatch.setattr(
+        "merxen.mask_image_quantification.sd.read_zarr", lambda _: sdata
+    )
+    monkeypatch.setattr(
+        "merxen.mask_image_quantification.TableModel.parse",
+        lambda table, **_: table,
+    )
+    monkeypatch.setattr(
+        "merxen.mask_image_quantification.write_or_replace_element",
+        _fake_write,
+    )
+    return writes
+
+
+def test_existing_quantification_is_reused_when_images_are_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A rerun with the same source images must not rewrite the table."""
+    latest = tmp_path / "latest.zarr"
+    latest.mkdir()
+    mask_path = tmp_path / "mask.npy"
+    np.save(mask_path, np.array([[1, 1], [2, 0]], dtype=np.uint32))
+    sdata = SimpleNamespace(
+        images={"img": _image(np.ones((2, 2, 1)), ["DAPI"])},
+        tables={},
+    )
+    writes = _patch_in_memory_zarr(monkeypatch, sdata)
+    cfg = MaskImageQuantificationConfig(
+        dataset_name="P1_XENIUM",
+        platform="XENIUM",
+        latest_zarr_path=latest,
+        mask_path=mask_path,
+        output_dir=tmp_path / "quant_out",
+    )
+
+    run_mask_image_quantification(cfg)
+    run_mask_image_quantification(cfg)
+
+    assert writes == [MASK_IMAGE_QUANTIFICATION_TABLE_KEY]
+
+
+def test_newly_registered_image_triggers_requantification(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Channels of an image added after quantification must not be skipped."""
+    latest = tmp_path / "latest.zarr"
+    latest.mkdir()
+    mask_path = tmp_path / "mask.npy"
+    np.save(mask_path, np.array([[1, 1], [2, 0]], dtype=np.uint32))
+    sdata = SimpleNamespace(
+        images={"morphology_focus": _image(np.ones((2, 2, 1)), ["DAPI"])},
+        tables={},
+    )
+    writes = _patch_in_memory_zarr(monkeypatch, sdata)
+    cfg = MaskImageQuantificationConfig(
+        dataset_name="P1_XENIUM",
+        platform="XENIUM",
+        latest_zarr_path=latest,
+        mask_path=mask_path,
+        output_dir=tmp_path / "quant_out",
+    )
+    run_mask_image_quantification(cfg)
+
+    sdata.images["post_xenium_if"] = _image(
+        np.arange(4, dtype=np.float64).reshape(2, 2, 1),
+        ["p62"],
+    )
+    run_mask_image_quantification(cfg)
+
+    assert writes == [MASK_IMAGE_QUANTIFICATION_TABLE_KEY] * 2
+    table = sdata.tables[MASK_IMAGE_QUANTIFICATION_TABLE_KEY]
+    assert set(table.var["image_key"]) == {"morphology_focus", "post_xenium_if"}
+    assert "post_xenium_if__p62__mean" in table.var_names
+
+
+def test_aligned_counterpart_image_is_not_quantified(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An aligned image lives on the counterpart grid, not this mask's grid.
+
+    Alignment materializes ``MERSCOPE_z_projection_aligned_nonrigid`` into the
+    MERSCOPE store after quantification has run. A rerun must neither treat it
+    as a newly registered image nor try to quantify it over the native masks.
+    """
+    latest = tmp_path / "latest.zarr"
+    latest.mkdir()
+    mask_path = tmp_path / "mask.npy"
+    np.save(mask_path, np.array([[1, 1], [2, 0]], dtype=np.uint32))
+    sdata = SimpleNamespace(
+        images={"MERSCOPE_z_projection": _image(np.ones((2, 2, 1)), ["DAPI"])},
+        tables={},
+    )
+    writes = _patch_in_memory_zarr(monkeypatch, sdata)
+    cfg = MaskImageQuantificationConfig(
+        dataset_name="P1_MERSCOPE",
+        platform="MERSCOPE",
+        latest_zarr_path=latest,
+        mask_path=mask_path,
+        output_dir=tmp_path / "quant_out",
+    )
+    run_mask_image_quantification(cfg)
+
+    sdata.images["MERSCOPE_z_projection_aligned_nonrigid"] = _image(
+        np.ones((3, 3, 1)),
+        ["DAPI"],
+    )
+    run_mask_image_quantification(cfg)
+    assert writes == [MASK_IMAGE_QUANTIFICATION_TABLE_KEY]
+
+    run_mask_image_quantification(cfg, force_rerun=True)
+    table = sdata.tables[MASK_IMAGE_QUANTIFICATION_TABLE_KEY]
+    assert set(table.var["image_key"]) == {"MERSCOPE_z_projection"}

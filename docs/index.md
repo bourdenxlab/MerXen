@@ -34,11 +34,15 @@ converge at alignment; dashed stations are governed by a parameter. See
 - [Configuration](configuration.md) — environment variables, `nextflow.config`
   parameters, and Pydantic config models.
 - [Outputs](outputs.md) — directory layout and artifacts produced by each stage.
+- [Cell-type annotation overview](annotation-overview.md) — what the map-first
+  annotation does, its outputs, how panels are trusted, and the exact rule
+  behind each cell-type level.
 
 ### Pipeline stages
 - [SpatialData build](stages/spatialdata-build.md)
 - [Segmentation](stages/segmentation.md) (Cellpose-SAM + ProSeg)
 - [Enrichment](stages/enrichment.md)
+- [Image registration](stages/register-images.md) (post-Xenium IF onto the mask grid)
 - [Mask image quantification](stages/mask-image-quantification.md)
 - [Cortical depth](stages/cortical-depth.md)
 - [QC](stages/qc.md)
@@ -50,7 +54,9 @@ converge at alignment; dashed stations are governed by a parameter. See
 - [Squidpy clustering](stages/clustering-squidpy.md)
 - [Distance from object](stages/distance-from-object.md)
 - [MapMyCells](stages/mapmycells.md)
-- [Reference-based annotation](stages/annotation.md) (in development)
+- [Reference-based annotation](stages/annotation.md) (in development); start
+  with the [annotation overview and method](annotation-overview.md) for what
+  the annotation does and how each cell type is defined.
 
 ### Developer reference
 - [Pipeline architecture](pipeline.md) — stage graph and data flow.

@@ -1,4 +1,4 @@
-"""Tests for the M6b input script (gene sets, subsamples, prepared queries; §17)."""
+"""Tests for the M6b input script (gene sets, subsamples, prepared queries; §24)."""
 
 from __future__ import annotations
 

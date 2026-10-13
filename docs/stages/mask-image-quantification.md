@@ -9,7 +9,9 @@ polygon-rasterized masks.
 
 1. Read the enriched `latest_spatialdata.zarr`.
 2. Load the final nonzero labels from `cellpose_masks_tiled.npy`.
-3. Iterate every SpatialData image element and every image channel.
+3. Iterate every SpatialData source image element and every image channel.
+   Viewer-cache pyramids and `*_aligned_nonrigid` images, which alignment
+   resamples onto the counterpart platform's grid, are skipped.
 4. Fail if an image's native `(y, x)` shape differs from the mask shape.
 5. Compute exact `min`, `median`, `mean`, `max`, and `iqr` for each
    cellpose label/channel.
@@ -43,6 +45,12 @@ enriched zarr as before.
 
 Rows are named `cellpose_<label_id>`. Feature names use
 `{image_key}__{channel}__{stat}`.
+
+Images registered by [`REGISTER_IMAGES`](register-images.md), such as
+post-Xenium IF, are ordinary source images on the mask grid and are quantified
+the same way. An existing quantification table is reused only when its
+`image_key` set matches the zarr's current source images; registering or
+removing an image triggers re-quantification.
 
 When `table_MOSAIK_proseg_hybrid` exists, the stage joins these Cellpose-mask
 measurements onto hybrid cells by their shared `instance_id`. It does not

@@ -111,7 +111,14 @@ STORE_SCHEMA_VERSION: Final = 2
 # (build_hash_payload) of every builder that finds markers.
 # Simulation recipes of the resolvability self-map and their versions (§8.3).
 # They enter build_hash once a builder writes resolvability outputs (M3b).
-RESOLVABILITY_RECIPE_VERSIONS: Final[dict[str, int]] = {"R1_contam_HO": 1}
+# Version 7 (M3c) adds the measured-efficiency member and the cross-tissue
+# human stress recipe; a version-7 build_hash holds each member's recipe and
+# table sha256 (resolvability.v7_simulation_payload).
+RESOLVABILITY_RECIPE_VERSIONS: Final[dict[str, int]] = {
+    "R1_contam_HO": 1,
+    "R3_measured_HO": 1,
+    "R1_xtissue_lung_stress": 1,
+}
 
 HEAD_TAIL_BYTES: Final = 64 * 1024 * 1024
 _READ_CHUNK_BYTES: Final = 8 * 1024 * 1024
@@ -555,6 +562,12 @@ class BundleBuilder:
         refuse: Optional ``(panel, config) -> reason | None``: why the
             builder refuses a panel (``large_panel_refusal``). Not part of
             ``build_hash``.
+        panel_params: Optional ``panel -> params | None``: parameters that
+            depend on the panel's family (M3c: the resolvability version-7
+            inputs of a family outside ``validated_panels.csv``, plan §8.3
+            v7.1). They update ``params`` in ``build_hash``; ``None`` or an
+            empty result (every version-6 family) leaves the payload
+            unchanged.
     """
 
     name: str
@@ -566,6 +579,23 @@ class BundleBuilder:
     source_patterns: Mapping[str, str] = field(default_factory=dict)
     finds_markers: bool = True
     refuse: Callable[[AnnotationPanel, AnnotationConfig], str | None] | None = None
+    panel_params: Callable[[AnnotationPanel], Mapping[str, Any] | None] | None = None
+
+    def params_for(self, panel: AnnotationPanel | None) -> dict[str, Any]:
+        """Return the hashed builder parameters for a panel.
+
+        Args:
+            panel: The declared panel (``None``: panel-independent).
+
+        Returns:
+            ``params`` updated by ``panel_params(panel)`` when it gives any.
+        """
+        params = dict(self.params)
+        if self.panel_params is not None and panel is not None and self.uses_panel:
+            extra = self.panel_params(panel)
+            if extra:
+                params.update(extra)
+        return params
 
 
 BuilderFactory = Callable[
@@ -758,7 +788,7 @@ def build_hash_payload(
         "schema_version": STORE_SCHEMA_VERSION,
         "builder_version": ANNOTATION_BUILDER_VERSION,
         "builder": builder.name,
-        "builder_params": _json_native(dict(builder.params)),
+        "builder_params": _json_native(builder.params_for(panel)),
         "reference_id": spec.reference_id,
         "species": spec.species,
         "role": spec.role,

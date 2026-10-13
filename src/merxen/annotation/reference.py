@@ -68,7 +68,7 @@ import shutil
 import statistics
 import time
 import uuid
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -101,6 +101,7 @@ from merxen.annotation.store import (
 )
 from merxen.annotation.vocab import (
     ASSET_DIR,
+    COP_SUPERCLUSTER,
     NEURONS,
     UNASSIGNED_LABEL,
     VOCAB_FILES,
@@ -176,6 +177,12 @@ SOURCE_WHB_WHOLE_PRECOMPUTE: Final = "whb_whole_precompute"
 SOURCE_WHB_REGION_CELL_METADATA: Final = "whb_region_cell_metadata"
 SOURCE_WHB_REGION_DIR: Final = "whb_region_dir"
 REGION_CELL_METADATA_FILE: Final = "region_cell_metadata.csv"
+# Gate P's leave-one-donor-out test sets (M13; pre-registration §23.2 D2 (d)):
+# the cells such a test set may not hold, i.e. every cell of the default
+# held-out test set (that bundle's ``test_cells.parquet``). Only gate P passes
+# it, with ``resolvability.holdout_other_region_donor_only``; its file
+# identity enters the build_hash as every source's does.
+SOURCE_GATE_P_EXCLUDED_TEST_CELLS: Final = "gate_p_excluded_test_cells"
 
 # WHB (Siletti) taxonomy CCN202210140 and the frontal region (plan §3.2).
 WHB_TAXONOMY_ID: Final = "CCN202210140"
@@ -324,6 +331,25 @@ HO_OTHER_REGION_ROI_LABELS: Final[tuple[str, ...]] = (
 )
 HO_OTHER_REGION_MATRIX: Final = "WHB-10Xv3-Nonneurons"
 HO_OTHER_REGION_SEED: Final = 1
+# What the human self-maps simulate of the held-out test set (plan §8.3 step
+# 1; pre-registration §18). Revision 1 (user decision 2026-09-30, M8 D1):
+# the other-region test cells of the COP supercluster are left out. In the
+# set a self-map almost every wrong broad Oligodendrocyte call is a COP test
+# cell called Oligodendrocyte, and 132 of its 152 COP test cells are
+# other-region ones; their share of the lineage (7.1% at 10 counts) is 14x
+# the frontal reference's. The held-out bundle and its test cells stay as
+# built (HO_OTHER_REGION_VERSION is unchanged): the cells are left out when
+# a self-map loads them, and the revision enters every human self-map
+# bundle's build_hash through its test-set params. RESOLVABILITY_VERSION
+# stays 6 (7 is M3c's version-7 ensemble; a bump would rehash the mouse
+# bundles too). The drop changes the registered test set after the results
+# were known, so it was approved in writing (caveat C1).
+HO_SELF_MAP_TEST_SET_REVISION: Final = 1
+HO_SELF_MAP_EXCLUDED_SUPERCLUSTERS: Final[tuple[str, ...]] = (COP_SUPERCLUSTER,)
+HO_SELF_MAP_EXCLUSION_RULE: Final = (
+    "held-out test cells of the other-region top-up whose truth supercluster is "
+    "one of excluded_superclusters are left out of the self-map"
+)
 # Held-out donor cells whose truth supercluster no production call can name
 # are not test cells (M3b review 2; E2 research/insilico/02_make_queries.py
 # kept only Neurons-class superclusters other than Amygdala excitatory): the
@@ -3157,6 +3183,17 @@ def _markers_output(
     }
 
 
+def _bundle_depth_grid(context: BuildContext, n_genes: int | None) -> list[int]:
+    """Return a bundle's depth grid: version 7's for a version-7 self-map."""
+    from merxen.annotation import resolvability as res
+
+    if context.panel is not None and _resolvability_enabled(context):
+        plan = resolvability_plan(context.spec, context.panel, _config_of(context))
+        if plan.version == res.RESOLVABILITY_VERSION_V7:
+            return list(plan.grid)
+    return context.spec.resolved_depth_grid(n_genes)
+
+
 def _write_common_files(
     context: BuildContext,
     tree: TaxonomyTreeView,
@@ -3168,7 +3205,7 @@ def _write_common_files(
     _write_json(context.work_dir / MAPPING_TREE_FILE, tree.to_json())
     vocab = node_vocab_table(tree, taxonomy_id)
     vocab.to_csv(context.work_dir / VOCAB_SNAPSHOT_FILE, index=False)
-    grid = context.spec.resolved_depth_grid(n_genes)
+    grid = _bundle_depth_grid(context, n_genes)
     _write_json(
         context.work_dir / DEPTH_GRID_FILE,
         {
@@ -4752,23 +4789,42 @@ def read_panel_counts(
 
 def _ho_region_metadata(context: BuildContext) -> pd.DataFrame:
     """Return the frontal WHB cells (donor, cluster alias) of the test set."""
+    return ho_region_metadata(
+        {name: Path(record.path) for name, record in context.sources.items()},
+        context.scratch_dir,
+    )
+
+
+def ho_region_metadata(sources: Mapping[str, Path], scratch_dir: Path) -> pd.DataFrame:
+    """Return the frontal WHB cells (donor, cluster alias) of the held-out test set.
+
+    Args:
+        sources: The held-out test set's source paths by name: the region
+            cell metadata, or the WHB cell metadata and its ROI map.
+        scratch_dir: Where the region cell metadata is written when it is
+            derived from the WHB cell metadata.
+
+    Returns:
+        ``cell_label``, ``feature_matrix_label``, ``donor_label``,
+        ``cluster_alias`` and ``region_of_interest_label`` per frontal cell.
+
+    Raises:
+        ReferenceBuildError: If neither source is given.
+    """
     columns = ["cell_label", "feature_matrix_label", "donor_label", "cluster_alias"]
-    if SOURCE_WHB_REGION_CELL_METADATA in context.sources:
-        path = _source_path(context, SOURCE_WHB_REGION_CELL_METADATA)
+    if SOURCE_WHB_REGION_CELL_METADATA in sources:
+        path = Path(sources[SOURCE_WHB_REGION_CELL_METADATA])
         return pd.read_csv(path, usecols=columns + ["region_of_interest_label"])
-    if (
-        SOURCE_WHB_CELL_METADATA in context.sources
-        and SOURCE_WHB_ROI_MAP in context.sources
-    ):
+    if SOURCE_WHB_CELL_METADATA in sources and SOURCE_WHB_ROI_MAP in sources:
         from merxen.analysis.mapmycells import _write_region_cell_metadata
 
-        path = context.scratch_dir / REGION_CELL_METADATA_FILE
+        path = Path(scratch_dir) / REGION_CELL_METADATA_FILE
         _write_region_cell_metadata(
-            cell_metadata_path=_source_path(context, SOURCE_WHB_CELL_METADATA),
+            cell_metadata_path=Path(sources[SOURCE_WHB_CELL_METADATA]),
             output_path=path,
             region_labels=list(WHB_FRONTAL_ROI_LABELS),
             min_cells_per_leaf=WHB_FRONTAL_MIN_CELLS_PER_LEAF,
-            roi_map_path=_source_path(context, SOURCE_WHB_ROI_MAP),
+            roi_map_path=Path(sources[SOURCE_WHB_ROI_MAP]),
             region_column="region_of_interest_label",
         )
         return pd.read_csv(path, usecols=columns + ["region_of_interest_label"])
@@ -4780,20 +4836,29 @@ def _ho_region_metadata(context: BuildContext) -> pd.DataFrame:
 
 
 def _other_region_metadata(context: BuildContext, labels: pd.DataFrame) -> pd.DataFrame:
+    """Return the WHB cells of the other-region dissections (context sources)."""
+    return other_region_metadata(
+        _source_path(context, SOURCE_WHB_CELL_METADATA), labels
+    )
+
+
+def other_region_metadata(
+    cell_metadata: Path | str, labels: pd.DataFrame
+) -> pd.DataFrame:
     """Return the WHB cells of the other-region dissections, with WHB levels.
 
     Reads the WHB cell metadata (only the columns the draw needs) and keeps
     the non-neuronal nuclei of ``HO_OTHER_REGION_ROI_LABELS``.
 
     Args:
-        context: The build context (``whb_cell_metadata`` source).
+        cell_metadata: The WHB cell metadata (``whb_cell_metadata`` source).
         labels: WHB level labels per cluster alias (``membership_labels``).
 
     Returns:
         ``cell_label``, ``feature_matrix_label``, ``donor_label``,
         ``cluster_alias``, ``region_of_interest_label`` and the WHB levels.
     """
-    path = _source_path(context, SOURCE_WHB_CELL_METADATA)
+    path = Path(cell_metadata)
     frame = pd.read_csv(
         path,
         usecols=[
@@ -4931,6 +4996,150 @@ def ho_truth_exclusions(labels: Iterable[str], region: str) -> dict[str, str]:
     return excluded
 
 
+def other_region_candidates(
+    cell_metadata: pd.DataFrame,
+    *,
+    reference_cells: set[str],
+    training_superclusters: Iterable[str],
+    training_clusters: set[str],
+    roi_labels: Sequence[str] = HO_OTHER_REGION_ROI_LABELS,
+    feature_matrix: str = HO_OTHER_REGION_MATRIX,
+) -> tuple[pd.DataFrame, pd.DataFrame, set[str], int, int]:
+    """Return the admissible other-region candidates (``other_region_test_cells``).
+
+    Non-neuronal nuclei (``feature_matrix``) of the dissections
+    ``roi_labels``, of non-neuronal superclusters the training reference
+    holds, not reference cells, of training clusters only
+    (``HO_OTHER_REGION_VERSION`` 2), one row per cell label.
+
+    Returns:
+        ``(candidates indexed by cell label, candidates of clusters the
+        training reference lacks, eligible superclusters, cells in the ROIs,
+        reference cells dropped)``.
+    """
+    frame = cell_metadata[
+        cell_metadata["region_of_interest_label"].astype(str).isin(list(roi_labels))
+        & (cell_metadata["feature_matrix_label"].astype(str) == feature_matrix)
+    ]
+    frame = frame.dropna(subset=list(WHB_SOURCE_HIERARCHY))
+    mappable = {str(label) for label in training_superclusters}
+    eligible = set(nonneuronal_superclusters(frame[WHB_SUPC].astype(str))) & mappable
+    frame = frame[frame[WHB_SUPC].astype(str).isin(eligible)]
+    n_in_rois = int(len(frame))
+    is_reference = frame["cell_label"].astype(str).isin(reference_cells)
+    n_reference = int(is_reference.sum())
+    frame = frame[~is_reference]
+    is_unseen = ~frame[WHB_CLUS].astype(str).isin(training_clusters)
+    unseen_candidates = frame[is_unseen]
+    frame = frame[~is_unseen]
+    frame = frame.drop_duplicates("cell_label").set_index("cell_label", drop=False)
+    frame.index = frame.index.astype(str)
+    return frame, unseen_candidates, eligible, n_in_rois, n_reference
+
+
+def whb_supercluster_classes(labels: Iterable[str]) -> dict[str, str | None]:
+    """Return the leaf-level class of each WHB supercluster label (COP apart)."""
+    from merxen.annotation.vocab import floor_class_for
+
+    label_to_name = load_vocab("whb_supercluster").label_to_name()
+    result: dict[str, str | None] = {}
+    for label in {str(value) for value in labels}:
+        name = label_to_name.get(label)
+        try:
+            result[label] = (
+                None
+                if name is None
+                else floor_class_for(name, species="human", level="supercluster")
+            )
+        except (KeyError, ValueError):
+            result[label] = None
+    return result
+
+
+def whb_class_top_up(
+    test_rows: pd.DataFrame,
+    *,
+    donor_pool: pd.DataFrame,
+    other_candidates: pd.DataFrame,
+    rule: Mapping[str, Any],
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Top the human test set's thin classes up (plan §8.3 v7.6; version 7).
+
+    Classes are the supercluster level's classes (the E2 floor classes, COP
+    apart). Pools in order: the held-out donor's cells the test set does not
+    hold (``donor_pool``: its admissible cells), then, for non-neuronal
+    classes only, the other-region candidates not yet drawn
+    (``other_region_candidates``: training clusters only, never a frontal
+    reference or other donor's cell); stratified by supercluster.
+
+    Args:
+        test_rows: The test cells so far (``cell_label``, WHB levels,
+            ``TEST_SOURCE_COLUMN``).
+        donor_pool: The held-out donor's admissible cells.
+        other_candidates: The admissible other-region cells.
+        rule: ``top_up_rule("human", config)``.
+
+    Returns:
+        ``(test rows with the top-up appended, record)``.
+    """
+    from merxen.annotation import resolvability as res
+    from merxen.annotation import sim_inputs as si
+
+    held = set(test_rows["cell_label"].astype(str))
+    donor = donor_pool[~donor_pool["cell_label"].astype(str).isin(held)].copy()
+    donor["_pool"] = "holdout_donor"
+    other = other_candidates[
+        ~other_candidates["cell_label"].astype(str).isin(held)
+    ].copy()
+    other["_pool"] = "other_region"
+    columns = list(test_rows.columns.drop(TEST_SOURCE_COLUMN, errors="ignore"))
+    candidates = pd.concat(
+        [donor.reset_index(drop=True), other.reset_index(drop=True)],
+        ignore_index=True,
+    )
+    classes = whb_supercluster_classes(
+        list(candidates[WHB_SUPC].astype(str)) + list(test_rows[WHB_SUPC].astype(str))
+    )
+    candidates["_class"] = candidates[WHB_SUPC].astype(str).map(classes)
+    candidates = candidates.dropna(subset=["_class"])
+    candidates = candidates.set_index(candidates["cell_label"].astype(str), drop=False)
+    have_classes = test_rows[WHB_SUPC].astype(str).map(classes).dropna()
+    have = {str(k): int(v) for k, v in have_classes.value_counts().items()}
+    non_neuronal = sorted(
+        str(cls)
+        for cls in classes.values()
+        if cls is not None and si.is_neuronal_class(str(cls), "human") is False
+    )
+    chosen, record = res.class_top_up(
+        candidates,
+        class_column="_class",
+        leaf_column=WHB_SUPC,
+        have=have,
+        target=int(rule["target"]),
+        seed=int(rule["seed"]),
+        pool_column="_pool",
+        pool_order=["holdout_donor", "other_region"],
+        pool_classes={"other_region": non_neuronal},
+    )
+    added = candidates.loc[list(chosen)].reset_index(drop=True)
+    added[TEST_SOURCE_COLUMN] = np.where(
+        added["_pool"].astype(str) == "holdout_donor",
+        TOP_UP_SOURCE,
+        TOP_UP_SOURCE_OTHER_REGION,
+    )
+    record["rule"] = {**dict(rule), "summary": record["rule"]}
+    record["disjoint_from_test_cells"] = not (
+        set(added["cell_label"].astype(str)) & held
+    )
+    record["per_pool"] = {
+        str(k): int(v) for k, v in added["_pool"].astype(str).value_counts().items()
+    }
+    rows = pd.concat(
+        [test_rows, added[[*columns, TEST_SOURCE_COLUMN]]], ignore_index=True
+    )
+    return rows, record
+
+
 def other_region_test_cells(
     cell_metadata: pd.DataFrame,
     *,
@@ -4993,24 +5202,17 @@ def other_region_test_cells(
     from merxen.annotation import resolvability as res
 
     reference = {str(label) for label in reference_cells}
-    frame = cell_metadata[
-        cell_metadata["region_of_interest_label"].astype(str).isin(list(roi_labels))
-        & (cell_metadata["feature_matrix_label"].astype(str) == feature_matrix)
-    ]
-    frame = frame.dropna(subset=list(WHB_SOURCE_HIERARCHY))
-    mappable = {str(label) for label in training_superclusters}
-    eligible = set(nonneuronal_superclusters(frame[WHB_SUPC].astype(str))) & mappable
-    frame = frame[frame[WHB_SUPC].astype(str).isin(eligible)]
-    n_in_rois = int(len(frame))
-    is_reference = frame["cell_label"].astype(str).isin(reference)
-    n_reference = int(is_reference.sum())
-    frame = frame[~is_reference]
     kept_clusters = {str(label) for label in training_clusters}
-    is_unseen = ~frame[WHB_CLUS].astype(str).isin(kept_clusters)
-    unseen_candidates = frame[is_unseen]
-    frame = frame[~is_unseen]
-    frame = frame.drop_duplicates("cell_label").set_index("cell_label", drop=False)
-    frame.index = frame.index.astype(str)
+    frame, unseen_candidates, eligible, n_in_rois, n_reference = (
+        other_region_candidates(
+            cell_metadata,
+            reference_cells=reference,
+            training_superclusters=training_superclusters,
+            training_clusters=kept_clusters,
+            roi_labels=roi_labels,
+            feature_matrix=feature_matrix,
+        )
+    )
     chosen = res.top_up_test_cells(
         frame, stratum=WHB_SUPC, have=have, cap=cap, room=room, seed=seed
     )
@@ -5068,6 +5270,299 @@ def other_region_test_cells(
     return rows, record
 
 
+def read_test_cell_ids(path: Path | str) -> frozenset[str]:
+    """Read the cell ids of a held-out test set's cell table.
+
+    Args:
+        path: A test-set bundle's ``test_cells.parquet`` (its ``cell_id``
+            column), or any ``read_cell_label_list`` file.
+
+    Returns:
+        The cell ids.
+    """
+    file_path = Path(path)
+    if file_path.suffix.lower() == ".parquet":
+        frame = pd.read_parquet(file_path)
+        column = "cell_id" if "cell_id" in frame.columns else frame.columns[0]
+        return frozenset(frame[column].dropna().astype(str))
+    return frozenset(read_cell_label_list(file_path))
+
+
+def _gate_p_excluded_test_cells(context: BuildContext) -> frozenset[str] | None:
+    """The cells a gate-P leave-one-donor-out test set may not hold (D2 (d)).
+
+    Returns:
+        ``None`` for every production test set; the excluded cell ids when
+        both ``resolvability.holdout_other_region_donor_only`` and the
+        ``gate_p_excluded_test_cells`` source are set.
+
+    Raises:
+        ReferenceBuildError: When only one of them is set.
+    """
+    donor_only = bool(_config_of(context).resolvability.holdout_other_region_donor_only)
+    listed = SOURCE_GATE_P_EXCLUDED_TEST_CELLS in context.sources
+    if not donor_only and not listed:
+        return None
+    if donor_only != listed:
+        raise ReferenceBuildError(
+            f"{HO_REFERENCE_ID}: a gate-P leave-one-donor-out test set needs both "
+            "resolvability.holdout_other_region_donor_only and the "
+            f"{SOURCE_GATE_P_EXCLUDED_TEST_CELLS!r} source (pre-registration §23.2 "
+            "D2 (d)); got only one"
+        )
+    return read_test_cell_ids(_source_path(context, SOURCE_GATE_P_EXCLUDED_TEST_CELLS))
+
+
+def _leave_one_donor_out_cells(
+    other: pd.DataFrame, *, donor: str, excluded: frozenset[str] | None
+) -> tuple[pd.DataFrame, dict[str, Any] | None]:
+    """Keep the held-out donor's own other-region cells, none of them excluded.
+
+    Gate P's leave-one-donor-out sets (pre-registration §23.2 D2 (d)): each
+    extra donor draws its own non-frontal non-neuronal cells, never a cell
+    of the default held-out test set. Production test sets
+    (``excluded is None``) keep every donor's cells.
+
+    Args:
+        other: ``other_region_metadata`` rows.
+        donor: The held-out donor.
+        excluded: The excluded cell ids, or ``None``.
+
+    Returns:
+        ``(rows, record)``; the record is ``None`` for a production set.
+    """
+    if excluded is None:
+        return other, None
+    own = (other["donor_label"].astype(str) == donor).to_numpy(bool)
+    listed = other["cell_label"].astype(str).isin(excluded).to_numpy(bool)
+    kept = other[own & ~listed]
+    return kept, {
+        "rule": (
+            "other-region cells of the held-out donor only, none of the "
+            "default held-out test set (pre-registration §23.2 D2 (d))"
+        ),
+        "holdout_donor": donor,
+        "n_excluded_listed": len(excluded),
+        "n_other_region_cells": int(len(other)),
+        "n_left_out_other_donors": int((~own).sum()),
+        "n_left_out_excluded": int((own & listed).sum()),
+        "n_kept": int(len(kept)),
+    }
+
+
+# Gate P's per-donor pool sizes (M13; pre-registration §23.10 open item 2).
+GATE_P_POOL_COLUMNS: Final[tuple[str, ...]] = (
+    "donor",
+    "class",
+    "superclusters",
+    "n_frontal",
+    "n_other_region_own",
+    "n_other_region_own_dropped",
+    "n_other_region_all_donors",
+    "n_available",
+    "n_default_test",
+    "target",
+    "judged",
+    "meets",
+)
+
+
+def whb_frontal_composition(
+    sources: Mapping[str, Path], scratch_dir: Path
+) -> dict[str, float]:
+    """Return the WHB frontal reference's share of cells per supercluster.
+
+    Gate P's NP3 ``natural`` weighting (plan §14 NP3: "the reference's
+    natural composition") and the reference shares of C_P's excluded
+    classes: every frontal WHB cell of the held-out test set's region
+    metadata (all donors), by its supercluster label. The other-region
+    top-up types are training superclusters of the frontal reference, so
+    each has a share.
+
+    Args:
+        sources: The held-out test set's sources (``held_out_test_set_spec``).
+        scratch_dir: Scratch for a derived region cell metadata table.
+
+    Returns:
+        Supercluster label -> share of the frontal cells (summing to 1).
+
+    Raises:
+        ReferenceBuildError: If a source is missing or no cell has a label.
+    """
+    if SOURCE_WHB_CLUSTER_MEMBERSHIP not in sources:
+        raise ReferenceBuildError(
+            f"the reference composition needs the {SOURCE_WHB_CLUSTER_MEMBERSHIP!r} "
+            "source"
+        )
+    metadata = ho_region_metadata(sources, scratch_dir)
+    labels = membership_labels(
+        sources[SOURCE_WHB_CLUSTER_MEMBERSHIP], WHB_SOURCE_HIERARCHY
+    )
+    supercluster = metadata.join(labels, on="cluster_alias")[WHB_SUPC].dropna()
+    counts = supercluster.astype(str).value_counts()
+    total = int(counts.sum())
+    if total == 0:
+        raise ReferenceBuildError("no frontal WHB cell has a supercluster label")
+    return {str(label): int(count) / total for label, count in counts.items()}
+
+
+def _class_counts(
+    superclusters: Iterable[str], classes: Mapping[str, str | None]
+) -> dict[str, int]:
+    """Cells per class of WHB supercluster labels (``whb_supercluster_classes``)."""
+    mapped = pd.Series([classes.get(str(value)) for value in superclusters])
+    counts = mapped.dropna().astype(str).value_counts()
+    return {str(key): int(value) for key, value in counts.items()}
+
+
+def ho_donor_pool_sizes(
+    sources: Mapping[str, Path],
+    *,
+    donors: Sequence[str],
+    excluded_cells: Collection[str],
+    default_test_superclusters: Iterable[str],
+    region: str,
+    target: int,
+    scratch_dir: Path,
+) -> pd.DataFrame:
+    """Return each donor's own test-cell pools per non-neuronal class (D2 (d)).
+
+    Pre-registration §23.10 (open item 2): before any leave-one-donor-out
+    set is built, the per-donor pool sizes are reported from the reference
+    metadata, without any mapping. Each donor's pools are counted as
+    ``build_whb_frontal_ho`` draws them when that donor is held out under
+    D2 (d) (``holdout_other_region_donor_only``): its frontal cells of
+    superclusters a call can name (``ho_truth_exclusions``) and its own
+    admissible other-region non-neuronal cells (``other_region_candidates``
+    against that donor's training reference), neither of them a cell of
+    the default held-out test set (``excluded_cells``). The other-region
+    pool of every donor is reported beside them (the production draw, and
+    the D2 (c) fallback's pool).
+
+    Both other-region counts leave out the cells every human self-map then
+    drops (M8 D1, extended to every gate-P set by M13 D1 (a): the
+    other-region cells of ``HO_SELF_MAP_EXCLUDED_SUPERCLUSTERS``, COP), so
+    ``n_available`` counts only cells a leave-one-donor-out replicate
+    simulates; the donor's own dropped cells are reported in
+    ``n_other_region_own_dropped``.
+
+    A class is judged when the default held-out test set holds it; it meets
+    the per-class top-up rule when the donor's pools hold ``target`` cells
+    of it (``topup_min_class_test_cells``, 200: the class minimum of v7.6,
+    pre-registration §21.3). That reading of "a donor's own pool cannot meet
+    the per-class top-up rule" is this function's (§23.10 gives none); the
+    user decides (d) as it stands or the fallback (c) with the sizes in
+    view.
+
+    Args:
+        sources: The held-out test set's sources (``held_out_test_set_spec``).
+        donors: The donors to report (gate P's extra donors).
+        excluded_cells: Every cell of the default held-out test set.
+        default_test_superclusters: The default test set's truth
+            superclusters, one per test cell.
+        region: The anatomical region of the truth exclusions.
+        target: The per-class minimum.
+        scratch_dir: Scratch for a derived region cell metadata table.
+
+    Returns:
+        One row per (donor, non-neuronal class), columns
+        ``GATE_P_POOL_COLUMNS``.
+
+    Raises:
+        ReferenceBuildError: If a donor has no frontal cell, or a source is
+            missing.
+    """
+    from merxen.annotation import sim_inputs as si
+
+    for name in (SOURCE_WHB_CLUSTER_MEMBERSHIP, SOURCE_WHB_CELL_METADATA):
+        if name not in sources:
+            raise ReferenceBuildError(f"the pool-size report needs the {name!r} source")
+    metadata = ho_region_metadata(sources, scratch_dir)
+    frontal_cells = set(metadata["cell_label"].astype(str))
+    labels = membership_labels(
+        sources[SOURCE_WHB_CLUSTER_MEMBERSHIP], WHB_SOURCE_HIERARCHY
+    )
+    metadata = metadata.join(labels, on="cluster_alias")
+    metadata = metadata.dropna(subset=list(WHB_SOURCE_HIERARCHY))
+    other = other_region_metadata(sources[SOURCE_WHB_CELL_METADATA], labels)
+    excluded = {str(cell) for cell in excluded_cells}
+    dropped_labels = ho_self_map_excluded_labels()
+    defaults = [str(label) for label in default_test_superclusters]
+    known = set(metadata["donor_label"].astype(str))
+    missing = sorted(set(donors) - known)
+    if missing:
+        raise ReferenceBuildError(
+            f"the donors {missing} have no frontal WHB cell (donors: {sorted(known)})"
+        )
+    records: list[dict[str, Any]] = []
+    for donor in donors:
+        is_donor = (metadata["donor_label"].astype(str) == donor).to_numpy(bool)
+        training = metadata[~is_donor]
+        per_cluster = training[WHB_CLUS].value_counts()
+        kept = per_cluster[per_cluster >= HO_MIN_TRAINING_CELLS_PER_CLUSTER].index
+        training = training[training[WHB_CLUS].isin(kept)]
+        pool = metadata[is_donor]
+        truth_excluded = ho_truth_exclusions(pool[WHB_SUPC].astype(str), region)
+        pool = pool[~pool[WHB_SUPC].astype(str).isin(list(truth_excluded))]
+        pool = pool[~pool["cell_label"].astype(str).isin(excluded)]
+        candidates, _unseen, _eligible, _n_rois, _n_reference = other_region_candidates(
+            other,
+            reference_cells=frontal_cells | set(training["cell_label"].astype(str)),
+            training_superclusters=training[WHB_SUPC].astype(str).unique(),
+            training_clusters={str(value) for value in kept},
+        )
+        listed = candidates["cell_label"].astype(str).isin(excluded).to_numpy(bool)
+        every = candidates[~listed]
+        own = every[(every["donor_label"].astype(str) == donor).to_numpy(bool)]
+        # M8 D1 / M13 D1 (a): the self-map leaves these other-region cells out.
+        own_dropped = own[WHB_SUPC].astype(str).isin(dropped_labels).to_numpy(bool)
+        every = every[~every[WHB_SUPC].astype(str).isin(dropped_labels).to_numpy(bool)]
+        supercluster_labels = (
+            list(pool[WHB_SUPC].astype(str))
+            + list(own[WHB_SUPC].astype(str))
+            + list(every[WHB_SUPC].astype(str))
+            + defaults
+        )
+        classes = whb_supercluster_classes(supercluster_labels)
+
+        frontal = _class_counts(pool[WHB_SUPC].astype(str), classes)
+        own_counts = _class_counts(own[~own_dropped][WHB_SUPC].astype(str), classes)
+        dropped_counts = _class_counts(own[own_dropped][WHB_SUPC].astype(str), classes)
+        every_counts = _class_counts(every[WHB_SUPC].astype(str), classes)
+        default_counts = _class_counts(defaults, classes)
+        names = sorted(
+            {
+                str(cls)
+                for cls in classes.values()
+                if cls is not None and si.is_neuronal_class(str(cls), "human") is False
+            }
+        )
+        for cls in names:
+            available = frontal.get(cls, 0) + own_counts.get(cls, 0)
+            judged = default_counts.get(cls, 0) > 0
+            records.append(
+                {
+                    "donor": donor,
+                    "class": cls,
+                    "superclusters": ";".join(
+                        sorted(
+                            label for label, value in classes.items() if value == cls
+                        )
+                    ),
+                    "n_frontal": frontal.get(cls, 0),
+                    "n_other_region_own": own_counts.get(cls, 0),
+                    "n_other_region_own_dropped": dropped_counts.get(cls, 0),
+                    "n_other_region_all_donors": every_counts.get(cls, 0),
+                    "n_available": available,
+                    "n_default_test": default_counts.get(cls, 0),
+                    "target": int(target),
+                    "judged": judged,
+                    "meets": available >= int(target),
+                }
+            )
+    return pd.DataFrame.from_records(records, columns=list(GATE_P_POOL_COLUMNS))
+
+
 def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
     """Build the ``whb_frontal_supc_clus_ho`` bundle (human, resolvability).
 
@@ -5092,17 +5587,32 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
     ``bundle.json`` (``test_set.other_region``: the rule, what it left out)
     and per cell (``test_source``).
 
+    Gate P's leave-one-donor-out sets (M13; pre-registration §23.2 D2 (d);
+    ``resolvability.holdout_other_region_donor_only`` with the
+    ``gate_p_excluded_test_cells`` source): the other-region top-up (and the
+    version-7 class top-up's other-region pool) draws only the held-out
+    donor's own cells and never a cell of the default held-out test set, so
+    the replicates are disjoint. The rule is recorded in
+    ``test_set.gate_p_leave_one_donor_out``; production test sets never set
+    it.
+
     Args:
         context: The build context.
 
     Returns:
         ``bundle.json`` builder output.
+
+    Raises:
+        ReferenceBuildError: If a leave-one-donor-out build is half
+            configured, or its held-out donor's own frontal cells are listed
+            as excluded (the default donor cannot be held out again).
     """
     from merxen.annotation import resolvability as res
 
     spec = context.spec
     panel = _panel_of(context)
     config = _config_of(context)
+    excluded = _gate_p_excluded_test_cells(context)
     timer = _StepTimer(context.work_dir / CTM_LOG_DIR)
     output: dict[str, Any] = {
         "reference": "WHB frontal region without the held-out donor (E2 HO recipe)"
@@ -5127,6 +5637,16 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
     dropped_clusters = sorted(set(per_cluster.index) - set(kept_clusters))
     training = training[training[WHB_CLUS].isin(kept_clusters)]
     pool = metadata[is_test_donor].set_index("cell_label", drop=False)
+    if excluded is not None:
+        listed = pool["cell_label"].astype(str).isin(excluded).to_numpy(bool)
+        if bool(listed.any()):
+            raise ReferenceBuildError(
+                f"{HO_REFERENCE_ID}: {int(listed.sum())} frontal cells of the "
+                f"held-out donor {donor!r} are in "
+                f"{SOURCE_GATE_P_EXCLUDED_TEST_CELLS!r}: a leave-one-donor-out "
+                "set holds out another donor than the "
+                "default test set's (gate P, pre-registration §23.2 D2 (d))"
+            )
     region = config.anatomical_region or WHB_WHOLE_CORTEX_REGION
     exclusions = ho_truth_exclusions(pool[WHB_SUPC].astype(str), region)
     is_excluded = pool[WHB_SUPC].astype(str).isin(list(exclusions)).to_numpy()
@@ -5179,9 +5699,13 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
         HO_MAX_TEST_CELLS_PER_SUPERCLUSTER,
         n_test,
     )
+    loo_record: dict[str, Any] | None = None
     with timer.step("other_region_cells"):
+        other_metadata, loo_record = _leave_one_donor_out_cells(
+            _other_region_metadata(context, labels), donor=donor, excluded=excluded
+        )
         other_rows, other_record = other_region_test_cells(
-            _other_region_metadata(context, labels),
+            other_metadata,
             reference_cells=frontal_cells | set(training["cell_label"].astype(str)),
             training_superclusters=training[WHB_SUPC].astype(str).unique(),
             training_clusters=[str(value) for value in kept_clusters],
@@ -5203,6 +5727,50 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
     test_rows = pd.concat(
         [test_rows, other_rows[list(test_rows.columns)]], ignore_index=True
     )
+    plan = (
+        resolvability_plan(spec, panel, config)
+        if config.resolvability.enabled
+        else None
+    )
+    top_up_record: dict[str, Any] | None = None
+    if (
+        plan is not None
+        and plan.version == res.RESOLVABILITY_VERSION_V7
+        and plan.top_up is not None
+    ):
+        with timer.step("class_top_up"):
+            candidates, _unseen, _eligible, _n_rois, _n_reference = (
+                other_region_candidates(
+                    _leave_one_donor_out_cells(
+                        _other_region_metadata(context, labels),
+                        donor=donor,
+                        excluded=excluded,
+                    )[0],
+                    reference_cells=frontal_cells
+                    | set(training["cell_label"].astype(str)),
+                    training_superclusters=training[WHB_SUPC].astype(str).unique(),
+                    training_clusters={str(value) for value in kept_clusters},
+                )
+            )
+            test_rows, top_up_record = whb_class_top_up(
+                test_rows,
+                donor_pool=pool.reset_index(drop=True),
+                other_candidates=candidates.reset_index(drop=True),
+                rule=plan.top_up,
+            )
+        logger.info(
+            "%s: class top-up added %d test cells",
+            HO_REFERENCE_ID,
+            top_up_record["n_cells"],
+        )
+    if excluded is not None and loo_record is not None:
+        shared = sorted(set(test_rows["cell_label"].astype(str)) & excluded)
+        if shared:  # pragma: no cover - guarded by the filters above
+            raise ReferenceBuildError(
+                f"{HO_REFERENCE_ID}: the leave-one-donor-out test set holds "
+                f"{len(shared)} excluded cells, e.g. {shared[:5]}"
+            )
+        loo_record["disjoint_from_excluded"] = True
     matrices = {
         "WHB-10Xv3-Neurons": _source_path(context, SOURCE_WHB_NEURONS_H5AD),
         "WHB-10Xv3-Nonneurons": _source_path(context, SOURCE_WHB_NONNEURONS_H5AD),
@@ -5333,6 +5901,15 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
             for key, value in test_rows[TEST_SOURCE_COLUMN].value_counts().items()
         },
         "other_region": other_record,
+        **(
+            {}
+            if plan is None or plan.version != res.RESOLVABILITY_VERSION_V7
+            else {
+                "resolvability_version": plan.version,
+                "class_top_up": top_up_record,
+            }
+        ),
+        **({} if loo_record is None else {"gate_p_leave_one_donor_out": loo_record}),
         "truth_exclusion": truth_exclusion,
         "seed": TEST_SET_SEED,
         "per_supercluster": {
@@ -5347,6 +5924,101 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
     }
     output.update(timer.to_json())
     return output
+
+
+def wmb_class_top_up(
+    cells: pd.DataFrame,
+    meta: pd.DataFrame,
+    sampled: pd.DataFrame,
+    used: Iterable[str],
+    rule: Mapping[str, Any],
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Top the mouse test set's thin WMB classes up (plan §8.3 v7.6; version 7).
+
+    Candidates: 10Xv3 cells of the available matrices that neither the
+    marker build trained on (``sampled``, the ``wmb_panel`` training sample)
+    nor the test set holds (``used`` and ``cells``), only of clusters with
+    at least ``min_training_cells_per_cluster`` marker-training cells (the
+    training-cluster rule), at most ``max_cluster_frac`` of a cluster's
+    10Xv3 cells each (the gate-P bound); ``resolvability.class_top_up``
+    draws them per class, stratified by subclass.
+
+    Args:
+        cells: The test cells so far (``cell_label``, WMB levels,
+            ``cluster_alias``).
+        meta: Every candidate 10Xv3 cell with its WMB levels.
+        sampled: The marker-training sample.
+        used: Cell labels already excluded (self-map list and training).
+        rule: ``top_up_rule("mouse", config)``.
+
+    Returns:
+        ``(cells with the top-up appended, record)``.
+
+    Raises:
+        ReferenceBuildError: If a drawn cell is a training or test cell or of
+            a cluster outside the training-cluster rule.
+    """
+    from merxen.annotation import resolvability as res
+
+    training = set(sampled["cell_label"].astype(str))
+    test_ids = set(cells["cell_label"].astype(str))
+    per_cluster = sampled["cluster_alias"].astype(int).value_counts()
+    minimum = int(rule["min_training_cells_per_cluster"])
+    kept = {int(alias) for alias, count in per_cluster.items() if count >= minimum}
+    excluded = set(used) | training | test_ids
+    is_candidate = ~meta["cell_label"].astype(str).isin(excluded)
+    n_before_rule = int(is_candidate.sum())
+    in_training_cluster = meta["cluster_alias"].astype(int).isin(kept)
+    candidates = meta[is_candidate & in_training_cluster]
+    candidates = candidates.set_index(candidates["cell_label"].astype(str), drop=False)
+    sizes = meta["cluster_alias"].astype(int).value_counts()
+    fraction = float(rule["max_cluster_frac"])
+    caps = {
+        str(alias): int(math.floor(fraction * size)) for alias, size in sizes.items()
+    }
+    have = {
+        str(key): int(value)
+        for key, value in cells[WMB_CLAS].astype(str).value_counts().items()
+    }
+    chosen, record = res.class_top_up(
+        candidates.assign(_cluster=candidates["cluster_alias"].astype(int).astype(str)),
+        class_column=WMB_CLAS,
+        leaf_column=WMB_SUBC,
+        have=have,
+        target=int(rule["target"]),
+        seed=int(rule["seed"]),
+        cluster_column="_cluster",
+        cluster_cap=caps,
+    )
+    added = candidates.loc[list(chosen)].reset_index(drop=True)
+    leaked = sorted(set(added["cell_label"].astype(str)) & (training | test_ids))
+    outside = sorted(set(added["cluster_alias"].astype(int)) - kept)
+    if leaked or outside:  # pragma: no cover - guarded by the filters above
+        raise ReferenceBuildError(
+            f"class top-up drew training / test cells {leaked[:5]} or cells of "
+            f"clusters outside the training-cluster rule {outside[:5]}"
+        )
+    taken = added["cluster_alias"].astype(int).value_counts()
+    record.update(
+        {
+            "rule": {**dict(rule), "summary": record["rule"]},
+            "n_candidates_before_cluster_rule": n_before_rule,
+            "n_excluded_cluster_not_in_training": int(
+                (is_candidate & ~in_training_cluster).sum()
+            ),
+            "max_cluster_share_taken": float(
+                max((taken[alias] / sizes[alias] for alias in taken.index), default=0.0)
+            ),
+            "disjoint_from_training": not (
+                set(added["cell_label"].astype(str)) & training
+            ),
+            "disjoint_from_test_cells": not (
+                set(added["cell_label"].astype(str)) & test_ids
+            ),
+        }
+    )
+    added = added.assign(test_source=TOP_UP_SOURCE)
+    return pd.concat([cells, added[list(cells.columns)]], ignore_index=True), record
 
 
 def build_wmb_selfmap_testset(context: BuildContext) -> dict[str, Any]:
@@ -5437,6 +6109,30 @@ def build_wmb_selfmap_testset(context: BuildContext) -> dict[str, Any]:
     extra = pd.concat(parts) if parts else pool.iloc[0:0]
     extra = extra.assign(test_source="nonneuronal_extra")
     cells = pd.concat([base_rows, extra], ignore_index=True)
+    plan = (
+        resolvability_plan(spec, panel, config)
+        if config.resolvability.enabled
+        else None
+    )
+    top_up_record: dict[str, Any] | None = None
+    if (
+        plan is not None
+        and plan.version == res.RESOLVABILITY_VERSION_V7
+        and plan.top_up is not None
+    ):
+        with timer.step("class_top_up"):
+            cells, top_up_record = wmb_class_top_up(
+                cells, meta, sampled, used, plan.top_up
+            )
+        logger.info(
+            "%s: class top-up added %d test cells (%s)",
+            WMB_TESTSET_REFERENCE_ID,
+            top_up_record["n_cells"],
+            ", ".join(
+                f"{cls} {item['before']} -> {item['after']}"
+                for cls, item in top_up_record["per_class"].items()
+            ),
+        )
     reference_genes = set(_matrix_genes(next(iter(matrices.values()))))
     genes = sorted(gene for gene in panel.ensembl_ids if gene in reference_genes)
     if not genes:
@@ -5464,10 +6160,15 @@ def build_wmb_selfmap_testset(context: BuildContext) -> dict[str, Any]:
     )
     test = res.HeldOutCells(counts=counts, genes=list(genes), obs=obs)
     written = res.write_test_cells(test, context.work_dir)
+    grid = (
+        list(plan.grid)
+        if plan is not None and plan.version == res.RESOLVABILITY_VERSION_V7
+        else spec.resolved_depth_grid(panel.n_genes)
+    )
     _write_json(
         context.work_dir / DEPTH_GRID_FILE,
         {
-            "depth_grid": spec.resolved_depth_grid(panel.n_genes),
+            "depth_grid": grid,
             "source": "spec" if spec.depth_grid is not None else "default",
             "species": spec.species,
             "n_panel_genes": panel.n_genes,
@@ -5475,6 +6176,13 @@ def build_wmb_selfmap_testset(context: BuildContext) -> dict[str, Any]:
     )
     native = test.native_counts
     per_class = pd.Series(truth_class).value_counts().sort_index()
+    version_7: dict[str, Any] = {}
+    if plan is not None and plan.version == res.RESOLVABILITY_VERSION_V7:
+        version_7 = {
+            "resolvability_version": plan.version,
+            "class_top_up": top_up_record,
+            "n_class_top_up": int((obs["test_source"] == TOP_UP_SOURCE).sum()),
+        }
     return {
         "reference": "WMB self-map test cells (10Xv3), panel-restricted",
         "test_set": {
@@ -5496,8 +6204,9 @@ def build_wmb_selfmap_testset(context: BuildContext) -> dict[str, Any]:
             },
             "per_class": {str(key): int(value) for key, value in per_class.items()},
             "native_counts_median": float(np.median(native)) if len(native) else None,
+            **version_7,
         },
-        "depth_grid": spec.resolved_depth_grid(panel.n_genes),
+        "depth_grid": grid,
         **timer.to_json(),
     }
 
@@ -5513,21 +6222,36 @@ def _test_set_sources(
     Raises:
         ReferenceBuildError: If a test-set source is missing.
     """
-    available = {
-        name: Path(context.sources[name].path)
-        for name in names
-        if name in context.sources
-    }
+    return _test_set_source_paths(
+        {name: Path(record.path) for name, record in context.sources.items()},
+        owner=context.spec.reference_id,
+        reference_id=reference_id,
+        names=names,
+    )
+
+
+def _test_set_source_paths(
+    sources: Mapping[str, Path],
+    *,
+    owner: str,
+    reference_id: str,
+    names: Sequence[str],
+) -> dict[str, Path]:
+    """Return a test set's source paths among a primary's source paths.
+
+    Raises:
+        ReferenceBuildError: If a test-set source is missing.
+    """
+    available = {name: Path(sources[name]) for name in names if name in sources}
     if reference_id == HO_REFERENCE_ID:
         has_metadata = SOURCE_WHB_REGION_CELL_METADATA in available or (
-            SOURCE_WHB_CELL_METADATA in context.sources
-            and SOURCE_WHB_ROI_MAP in context.sources
+            SOURCE_WHB_CELL_METADATA in sources and SOURCE_WHB_ROI_MAP in sources
         )
         missing = [] if has_metadata else [SOURCE_WHB_REGION_CELL_METADATA]
         if SOURCE_WHB_REGION_CELL_METADATA not in available:
             for name in (SOURCE_WHB_CELL_METADATA, SOURCE_WHB_ROI_MAP):
-                if name in context.sources:
-                    available[name] = Path(context.sources[name].path)
+                if name in sources:
+                    available[name] = Path(sources[name])
         missing += [
             name
             for name in names
@@ -5537,7 +6261,7 @@ def _test_set_sources(
         missing = [name for name in names if name not in available]
     if missing:
         raise ReferenceBuildError(
-            f"{context.spec.reference_id}: the resolvability self-map (enabled) "
+            f"{owner}: the resolvability self-map (enabled) "
             f"needs the test-set source(s) {missing} for {reference_id}; pass the "
             "WHB h5ad and metadata directories (annotation_whb_h5ad_dir, "
             "annotation_whb_metadata_dir, annotation_whb_region_precompute_source) "
@@ -5564,8 +6288,21 @@ def _test_set_spec(
     reference settings, so the WHB and SEA-AD self-maps share one held-out
     bundle.
     """
-    config = _config_of(context)
-    available = _test_set_sources(context, reference_id, names)
+    return _spec_of_test_set(
+        context.spec,
+        _config_of(context),
+        _test_set_sources(context, reference_id, names),
+        reference_id,
+    )
+
+
+def _spec_of_test_set(
+    primary: AnnotationReferenceSpec,
+    config: AnnotationConfig,
+    available: Mapping[str, Path],
+    reference_id: str,
+) -> AnnotationReferenceSpec:
+    """The test set's spec from its primary's spec and sources (``_test_set_spec``)."""
     template_id = (
         "whb_frontal_supc_clus" if reference_id == HO_REFERENCE_ID else "wmb_panel"
     )
@@ -5573,8 +6310,8 @@ def _test_set_spec(
         (item for item in config.references if item.reference_id == template_id),
         None,
     )
-    if template is None or context.spec.reference_id == template_id:
-        template = context.spec
+    if template is None or primary.reference_id == template_id:
+        template = primary
     known = KNOWN_REFERENCES[reference_id]
     return AnnotationReferenceSpec(
         reference_id=reference_id,
@@ -5589,6 +6326,37 @@ def _test_set_spec(
         rng_seed=template.rng_seed,
         depth_grid=template.depth_grid,
     )
+
+
+def held_out_test_set_spec(
+    primary: AnnotationReferenceSpec, config: AnnotationConfig
+) -> AnnotationReferenceSpec:
+    """Return the held-out test set's spec of a prepared human primary spec.
+
+    The spec the WHB primary's self-map builds its held-out test set from
+    (``_test_set_spec``), for gate P's leave-one-donor-out builds (M13),
+    which change only the config (``resolvability.holdout_donor``) and, under
+    pre-registration §23.2 D2 (d), add the ``gate_p_excluded_test_cells``
+    source.
+
+    Args:
+        primary: The prepared ``whb_frontal_supc_clus`` spec (sources are
+            files, ``prepare_reference_spec``).
+        config: The annotation config.
+
+    Returns:
+        The ``whb_frontal_supc_clus_ho`` spec.
+
+    Raises:
+        ReferenceBuildError: If a held-out source is missing.
+    """
+    sources = _test_set_source_paths(
+        {name: Path(path) for name, path in primary.sources.items()},
+        owner=primary.reference_id,
+        reference_id=HO_REFERENCE_ID,
+        names=HO_SOURCES,
+    )
+    return _spec_of_test_set(primary, config, sources, HO_REFERENCE_ID)
 
 
 def _work_bundle(
@@ -5770,6 +6538,122 @@ def _resolvability_enabled(context: BuildContext) -> bool:
     )
 
 
+def ho_self_map_exclusion_params() -> dict[str, Any]:
+    """Return what the human self-maps leave out of the held-out test set (hashed).
+
+    Every human self-map on the held-out test set hashes it through its
+    test-set params (``_resolvability_params``), so a new revision gives the
+    WHB and SEA-AD bundles new build hashes; the held-out bundle's own
+    params (``_ho_params``) do not carry it, because its test cells are
+    unchanged.
+
+    Returns:
+        The revision, the rule, the test source and the supercluster names.
+    """
+    return {
+        "revision": HO_SELF_MAP_TEST_SET_REVISION,
+        "rule": HO_SELF_MAP_EXCLUSION_RULE,
+        "test_source": TEST_SOURCE_OTHER_REGION,
+        "excluded_superclusters": list(HO_SELF_MAP_EXCLUDED_SUPERCLUSTERS),
+    }
+
+
+def ho_self_map_excluded_labels() -> list[str]:
+    """Return the WHB supercluster labels of ``HO_SELF_MAP_EXCLUDED_SUPERCLUSTERS``.
+
+    The other-region test cells of these superclusters are left out of every
+    human held-out self-map (M8 D1; M13 D1 (a)).
+
+    Returns:
+        The labels, sorted.
+    """
+    name_to_label = {
+        name: label
+        for label, name in load_vocab("whb_supercluster").label_to_name().items()
+    }
+    return sorted(
+        name_to_label[name]
+        for name in HO_SELF_MAP_EXCLUDED_SUPERCLUSTERS
+        if name in name_to_label
+    )
+
+
+def self_map_test_cells(
+    test: Any, test_reference_id: str
+) -> tuple[Any, dict[str, Any] | None]:
+    """Return the test cells a self-map simulates, and what it left out.
+
+    User decision 2026-09-30 (M8 D1; pre-registration §18): the self-maps on
+    the human held-out test set (``HO_REFERENCE_ID``) leave out the
+    other-region test cells (``test_source``) whose truth supercluster is one
+    of ``HO_SELF_MAP_EXCLUDED_SUPERCLUSTERS`` (the COP supercluster), as the
+    M8-prep ``resimdrop`` rebuild did. The remaining cells are simulated
+    with the keyed draws, so only a host whose spill partner was a dropped
+    cell gets a new spill. The mouse test set is returned unchanged.
+
+    Args:
+        test: ``resolvability.HeldOutCells`` of the test-set bundle.
+        test_reference_id: The test-set reference.
+
+    Returns:
+        ``(cells, record)``: the cells to simulate and, for the human
+        held-out test set, what ``resolvability_summary.json`` and
+        ``bundle.json`` record (revision, rule, cells left out per
+        supercluster); ``(test, None)`` for other test sets.
+    """
+    from merxen.annotation import resolvability as res
+
+    if test_reference_id != HO_REFERENCE_ID:
+        return test, None
+    obs = test.obs
+    labels = ho_self_map_excluded_labels()
+    truth_column = f"{res.TRUTH_PREFIX}{WHB_SUPC}"
+    if truth_column not in obs.columns:
+        truth_column = res.TRUTH_LEAF_COLUMN
+    truth = obs[truth_column].astype(str)
+    if TEST_SOURCE_COLUMN in obs.columns:
+        source = obs[TEST_SOURCE_COLUMN].astype(str)
+    else:
+        source = pd.Series(TEST_SOURCE_DONOR, index=obs.index)
+    dropped = (source == TEST_SOURCE_OTHER_REGION) & truth.isin(labels)
+    record = {
+        **ho_self_map_exclusion_params(),
+        "excluded_labels": labels,
+        "n_test_cells_in_bundle": int(len(obs)),
+        "n_excluded": int(dropped.sum()),
+        "n_test_cells": int((~dropped).sum()),
+        "excluded_per_supercluster": {
+            str(key): int(value)
+            for key, value in truth[dropped].value_counts().sort_index().items()
+        },
+        "kept_per_source_of_excluded_superclusters": {
+            str(key): int(value)
+            for key, value in source[truth.isin(labels) & ~dropped]
+            .value_counts()
+            .sort_index()
+            .items()
+        },
+    }
+    if not dropped.any():
+        return test, record
+    keep = np.flatnonzero(~dropped.to_numpy())
+    logger.info(
+        "%s: %d of %d held-out test cells left out of the self-map (other-region "
+        "cells of %s; revision %d)",
+        HO_REFERENCE_ID,
+        int(dropped.sum()),
+        len(obs),
+        ", ".join(HO_SELF_MAP_EXCLUDED_SUPERCLUSTERS),
+        HO_SELF_MAP_TEST_SET_REVISION,
+    )
+    kept = res.HeldOutCells(
+        counts=test.counts[keep].tocsr(),
+        genes=list(test.genes),
+        obs=obs.iloc[keep].copy(),
+    )
+    return kept, record
+
+
 def _run_self_map(
     context: BuildContext,
     *,
@@ -5811,9 +6695,28 @@ def _run_self_map(
     test_spec = _test_set_spec(context, test_reference_id, test_sources)
     with timer.step("resolvability_test_set"):
         test_ref = context.store.get_or_build(test_spec, panel, config=config)
-    test = res.load_test_cells(Path(test_ref.path))
+    test, exclusion = self_map_test_cells(
+        res.load_test_cells(Path(test_ref.path)), test_reference_id
+    )
     mapped_engine = engine if engine is not None else MmcBundle.from_dir(test_ref.path)
     runs: list[dict[str, Any]] = []
+    plan = resolvability_plan(context.spec, panel, config)
+    exclusion_provenance = (
+        {} if exclusion is None else {"test_set_exclusion": exclusion}
+    )
+    if plan.version == res.RESOLVABILITY_VERSION_V7:
+        return _run_self_map_v7(
+            context,
+            plan=plan,
+            test=test,
+            test_ref=test_ref,
+            engine=engine,
+            mapped_engine=mapped_engine,
+            specs_for=specs_for,
+            timer=timer,
+            cells_rules=cells_rules,
+            exclusion_provenance=exclusion_provenance,
+        )
     grid = context.spec.resolved_depth_grid(panel.n_genes)
     settings = self_map_rule_settings(config)
     with timer.step("resolvability_self_map"):
@@ -5840,6 +6743,7 @@ def _run_self_map(
                     "build_hash": test_ref.build_hash,
                     "path": test_ref.path,
                 },
+                **exclusion_provenance,
                 "mapping_runs": runs,
                 "decisions_note": (
                     "decision settings are recorded, not hashed; RESOLVE "
@@ -5854,7 +6758,105 @@ def _run_self_map(
         "reference_id": test_ref.reference_id,
         "build_hash": test_ref.build_hash,
     }
+    output["resolvability"].update(exclusion_provenance)
     output["resolvability"]["mapping_runs"] = runs
+    if result.trust.state is not None:
+        output["panel_trust"] = result.trust.state
+    return output
+
+
+def _run_self_map_v7(
+    context: BuildContext,
+    *,
+    plan: ResolvabilityPlan,
+    test: Any,
+    test_ref: Any,
+    engine: Any | None,
+    mapped_engine: Any,
+    specs_for: Any,
+    timer: _StepTimer,
+    cells_rules: Sequence[Any] = (),
+    exclusion_provenance: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run a version-7 self-map (plan §8.3 v7) and write its tables.
+
+    ``exclusion_provenance`` records the test cells the self-map left out
+    (M8 D1, ``self_map_test_cells``), as the version-6 path does.
+
+    The plan's members are simulated on the (topped-up) test set and mapped
+    one at a time; ``resolvability.run_resolvability_v7`` decides the
+    ensemble, applies the saturated-bp rule and the monotone fill, and
+    writes the four version-7 files (``resolvability_class_depth.parquet``
+    included). Floors and the trust constraint come from the decisions before
+    the fill.
+    """
+    from merxen.annotation import resolvability as res
+    from merxen.annotation import sim_inputs as si
+    from merxen.annotation.store import BUNDLE_MANIFEST_NAME
+    from merxen.annotation.vocab import load_floor_table
+
+    config = _config_of(context)
+    runs: list[dict[str, Any]] = []
+    manifest_path = Path(test_ref.path) / BUNDLE_MANIFEST_NAME
+    test_output = (
+        json.loads(manifest_path.read_text(encoding="utf-8")).get("builder_output")
+        or {}
+        if manifest_path.is_file()
+        else {}
+    )
+    top_up = (test_output.get("test_set") or {}).get("class_top_up")
+    profile = (
+        si.profile_from_asset(plan.profile_asset)
+        if plan.profile_asset is not None
+        else None
+    )
+    ensemble = res.EnsembleSettings.from_config(config.resolvability)
+    with timer.step("resolvability_self_map"):
+        result = res.run_resolvability_v7(
+            test,
+            specs=specs_for(mapped_engine),
+            depths=list(plan.grid),
+            members=list(plan.members),
+            map_fn=_mmc_map_function(context, mapped_engine, runs),
+            settings=self_map_rule_settings(config),
+            ensemble=ensemble,
+            species=context.spec.species,
+            floor_table=load_floor_table(context.spec.species),
+            fine_seed_check=bool(config.thresholds.allow_fine_levels),
+            cells_rules=cells_rules,
+            profile=profile,
+            provenance={
+                "reference_id": context.spec.reference_id,
+                "engine": {
+                    "reference_id": mapped_engine.reference_id,
+                    "build_hash": mapped_engine.build_hash,
+                    "self": engine is not None,
+                },
+                "test_set_bundle": {
+                    "reference_id": test_ref.reference_id,
+                    "build_hash": test_ref.build_hash,
+                    "path": test_ref.path,
+                },
+                "mapping_runs": runs,
+                "v7_inputs": plan.summary_record(),
+                "top_up": top_up,
+                **(exclusion_provenance or {}),
+                "decisions_note": (
+                    "decision settings are recorded, not hashed; version-7 "
+                    "decisions are re-derived from resolvability_cells.parquet "
+                    "with ensemble_decide (RESOLVE: M3c follow-up, plan §12)"
+                ),
+            },
+        )
+        result.write(context.work_dir)
+    output: dict[str, Any] = {"resolvability": result.bundle_output()}
+    output["resolvability"]["test_set_bundle"] = {
+        "reference_id": test_ref.reference_id,
+        "build_hash": test_ref.build_hash,
+    }
+    output["resolvability"]["mapping_runs"] = runs
+    output["resolvability"]["top_up"] = top_up
+    output["resolvability"].update(exclusion_provenance or {})
     if result.trust.state is not None:
         output["panel_trust"] = result.trust.state
     return output
@@ -5896,6 +6898,309 @@ def _wmb_specs(engine: Any, config: AnnotationConfig) -> list[Any]:
     )
 
 
+# --------------------------------------------------------------------------
+# Resolvability version 7 (M3c; plan §8.3 v7.1): per-family selection and the
+# version-7 inputs of a self-map. A version-6 family's payload never changes
+# (``BundleBuilder.panel_params`` returns nothing for it).
+
+# The reference a measured factor table is measured against, per self-map.
+V7_MEMBER_TABLE_REFERENCE: Final[dict[str, str]] = {
+    "wmb_panel": "wmb_10xv3",
+    WMB_TESTSET_REFERENCE_ID: "wmb_10xv3",
+}
+# Test-set references and the primary references whose self-map they serve.
+V7_TEST_SET_OF: Final[dict[str, str]] = {
+    "whb_frontal_supc_clus": HO_REFERENCE_ID,
+    "seaad_mr_panel": HO_REFERENCE_ID,
+    "wmb_panel": WMB_TESTSET_REFERENCE_ID,
+}
+TOP_UP_SOURCE: Final = "class_top_up"
+TOP_UP_SOURCE_OTHER_REGION: Final = "class_top_up_other_region"
+
+
+@dataclass(frozen=True)
+class ResolvabilityPlan:
+    """What a panel's self-map runs (plan §8.3 v7.1-v7.6).
+
+    Attributes:
+        version: 6 or 7.
+        family_id: The panel's family (after trust inheritance), if known.
+        chemistry: ``sim_inputs.ChemistryResolution`` (version 7).
+        members: The ensemble members (version 7).
+        grid: The depth grid.
+        assets: The simulation-input assets the self-map uses.
+        profile_asset: The ``profile`` asset of the family's species x
+            chemistry (class-depth predictions), if any.
+        top_up: The test-set top-up rule (version 7; ``None`` when off).
+    """
+
+    version: int
+    family_id: str | None
+    chemistry: Any | None = None
+    members: tuple[Any, ...] = ()
+    grid: tuple[int, ...] = ()
+    assets: tuple[Any, ...] = ()
+    profile_asset: Any | None = None
+    top_up: dict[str, Any] | None = None
+
+    def simulation_payload(self) -> dict[str, Any]:
+        """Return ``resolvability.v7_simulation_payload`` of the plan."""
+        from merxen.annotation import resolvability as res
+
+        return res.v7_simulation_payload(
+            members=self.members,
+            assets=self.assets,
+            chemistry=self.chemistry.to_json()
+            if self.chemistry is not None
+            else "unknown",
+            depth_grid=self.grid,
+            top_up=self.top_up,
+        )
+
+    def summary_record(self) -> dict[str, Any]:
+        """Return what the version-7 summary records of the plan."""
+        from merxen.annotation import sim_inputs as si
+
+        return {
+            "family_id": self.family_id,
+            "chemistry": None if self.chemistry is None else self.chemistry.to_json(),
+            "assets": si.asset_hashes(self.assets),
+            "profile_asset": None
+            if self.profile_asset is None
+            else self.profile_asset.asset_id,
+            "top_up_rule": self.top_up,
+            "depth_grid_v7": list(self.grid),
+        }
+
+
+def panel_resolvability_version(panel: Any, config: AnnotationConfig) -> int:
+    """Return the resolvability version of a panel (plan §8.3 v7.1).
+
+    ``auto``: 6 for the families of ``validated_panels.csv`` (by the panel's
+    family after trust inheritance, or its listed hash) and the pins of
+    ``resolvability_v6_pins.csv``; 7 for every other family.
+
+    Args:
+        panel: The declared panel (``AnnotationPanel``; any object with a
+            ``panel_hash`` and optionally a ``panel_family``).
+        config: The annotation config (``resolvability.version``).
+
+    Returns:
+        6 or 7.
+
+    Raises:
+        ReferenceBuildError: When version 7 is forced on a version-6 family
+            (refused outside the diagnostic, which writes to an output
+            directory, never to the store).
+    """
+    from merxen.annotation import resolvability as res
+    from merxen.annotation.diagnostics import load_validated_panels
+
+    family = getattr(getattr(panel, "panel_family", None), "family_id", None)
+    automatic = res.resolvability_version_for(
+        family,
+        getattr(panel, "panel_hash", None),
+        validated=load_validated_panels(config.panel.validated_panels_path),
+    )
+    requested = config.resolvability.version
+    if requested == "auto":
+        return automatic
+    if int(requested) == res.RESOLVABILITY_VERSION_V7 and automatic == (
+        res.RESOLVABILITY_VERSION_V6
+    ):
+        raise ReferenceBuildError(
+            f"resolvability version 7 is refused for the version-6 family "
+            f"{family or getattr(panel, 'panel_hash', '?')!s} (its decisions are "
+            "pre-registered for gates H and M, plan §8.3 v7.1); compute it as a "
+            "diagnostic with annotation-panel-simulate --resolvability-version 7"
+        )
+    return int(requested)
+
+
+def _panel_platform(panel: Any) -> str | None:
+    platforms = [str(item).upper() for item in getattr(panel, "platforms", []) or []]
+    if not platforms:
+        return None
+    return platforms[0] if len(set(platforms)) == 1 else "MIXED"
+
+
+def top_up_rule(species: str, config: AnnotationConfig) -> dict[str, Any] | None:
+    """Return the test-set top-up rule a version-7 self-map hashes (v7.6).
+
+    Args:
+        species: ``human`` or ``mouse``.
+        config: The annotation config.
+
+    Returns:
+        The rule, or ``None`` when ``topup_min_class_test_cells`` is 0.
+    """
+    from merxen.annotation import resolvability as res
+
+    target = int(config.resolvability.topup_min_class_test_cells)
+    if target <= 0:
+        return None
+    common = {
+        "version": res.TOP_UP_VERSION,
+        "target": target,
+        "seed": TEST_SET_SEED,
+        "stratified_by": "leaf type (water filling)",
+        "draw": "lowest draw_key(seed, class_top_up, cell id) first",
+    }
+    if species == "mouse":
+        return {
+            **common,
+            "class_level": WMB_CLAS,
+            "leaf_level": WMB_SUBC,
+            "pool": "10Xv3 cells neither marker-training nor test cells",
+            "min_training_cells_per_cluster": HO_MIN_TRAINING_CELLS_PER_CLUSTER,
+            "max_cluster_frac": float(
+                config.resolvability.gate_p_topup_max_cluster_frac
+            ),
+        }
+    return {
+        **common,
+        "class_level": "supercluster floor class (COP separate)",
+        "leaf_level": WHB_SUPC,
+        "pools": ["holdout_donor", "other_region"],
+        "other_region": {
+            "version": HO_OTHER_REGION_VERSION,
+            "classes": "non-neuronal",
+            "training_clusters_only": True,
+        },
+    }
+
+
+def resolvability_plan(
+    spec: AnnotationReferenceSpec, panel: Any, config: AnnotationConfig
+) -> ResolvabilityPlan:
+    """Return the self-map plan of a reference on a panel (plan §8.3 v7).
+
+    Version 6: nothing beyond the version-6 grid. Version 7: the panel's
+    chemistry (``sim_inputs.resolve_chemistry`` with ``panel_chemistry``),
+    the members (eight emission members, plan §8.3 v7.3 as amended on
+    2026-09-29: R1 x 6 + R3 x 2 where a measured table of the species x
+    chemistry x reference exists, else R1 x 8, unless ``ensemble_r1_seeds``
+    / ``ensemble_r3_seeds`` set them; ``clean``; the human Prime lung stress
+    member, reported only), the grid (13 values above 1,000 genes), the
+    assets (member and stress tables, the class-depth profile) and the
+    top-up rule.
+
+    Args:
+        spec: The reference spec (primary, secondary or test set).
+        panel: The declared panel.
+        config: The annotation config.
+
+    Returns:
+        The plan.
+    """
+    from merxen.annotation import resolvability as res
+    from merxen.annotation import sim_inputs as si
+
+    version = panel_resolvability_version(panel, config)
+    family = getattr(getattr(panel, "panel_family", None), "family_id", None)
+    n_genes = int(getattr(panel, "n_genes", 0) or 0)
+    if version == res.RESOLVABILITY_VERSION_V6:
+        return ResolvabilityPlan(
+            version=version,
+            family_id=family,
+            grid=tuple(spec.resolved_depth_grid(n_genes)),
+        )
+    species = str(spec.species)
+    chemistry = si.resolve_chemistry(
+        getattr(panel, "ensembl_ids", []) or [],
+        species=species,
+        platform=_panel_platform(panel),
+        declared=str(config.panel.panel_chemistry),
+    )
+    reference = V7_MEMBER_TABLE_REFERENCE.get(
+        spec.reference_id
+    ) or V7_MEMBER_TABLE_REFERENCE.get(V7_TEST_SET_OF.get(spec.reference_id, ""))
+    member_table = (
+        None
+        if reference is None
+        else si.member_table_for(species, chemistry.chemistry, reference)
+    )
+    stress_table = (
+        si.get_asset(si.STRESS_HUMAN_LUNG)
+        if species == "human" and chemistry.chemistry == "xenium_prime"
+        else None
+    )
+    r1_seeds = config.resolvability.ensemble_r1_seeds
+    r3_seeds = config.resolvability.ensemble_r3_seeds
+    members = res.ensemble_members(
+        config.resolvability,
+        species=species,
+        chemistry=chemistry.chemistry,
+        member_table=member_table,
+        stress_table=stress_table,
+        r1_seeds=None if r1_seeds is None else tuple(r1_seeds),
+        r3_seeds=None if r3_seeds is None else tuple(r3_seeds),
+        table_rule=config.resolvability.r3_table_rule,
+        residual_sd_log2=config.resolvability.r3_residual_sd_log2,
+    )
+    profiles = si.find_assets(
+        role="profile", species=species, chemistry=chemistry.chemistry
+    )
+    profile_asset = (
+        sorted(profiles, key=lambda item: item.asset_id)[0] if profiles else None
+    )
+    assets = [
+        item for item in (member_table, stress_table, profile_asset) if item is not None
+    ]
+    return ResolvabilityPlan(
+        version=version,
+        family_id=family,
+        chemistry=chemistry,
+        members=tuple(members),
+        grid=tuple(res.v7_depth_grid(species, n_genes, spec.depth_grid)),
+        assets=tuple(assets),
+        profile_asset=profile_asset,
+        top_up=top_up_rule(species, config),
+    )
+
+
+def _v7_primary_params(
+    spec: AnnotationReferenceSpec, config: AnnotationConfig, test_reference_id: str
+) -> Any:
+    """Return ``panel -> params`` of a primary or secondary version-7 self-map."""
+
+    def params(panel: Any) -> dict[str, Any] | None:
+        if not config.resolvability.enabled or spec.role not in (
+            "primary",
+            "secondary",
+        ):
+            return None
+        from merxen.annotation import resolvability as res
+
+        plan = resolvability_plan(spec, panel, config)
+        if plan.version != res.RESOLVABILITY_VERSION_V7:
+            return None
+        base = _resolvability_params(spec, config, test_reference_id)
+        base.pop("recipes", None)
+        base["resolvability_version"] = plan.version
+        base["test_set"] = {**base["test_set"], "top_up": plan.top_up}
+        base["v7"] = plan.simulation_payload()
+        return {"resolvability": base}
+
+    return params
+
+
+def _v7_test_set_params(spec: AnnotationReferenceSpec, config: AnnotationConfig) -> Any:
+    """Return ``panel -> params`` of a version-7 test set (the top-up rule)."""
+
+    def params(panel: Any) -> dict[str, Any] | None:
+        if not config.resolvability.enabled:
+            return None
+        from merxen.annotation import resolvability as res
+
+        plan = resolvability_plan(spec, panel, config)
+        if plan.version != res.RESOLVABILITY_VERSION_V7:
+            return None
+        return {"resolvability_version": plan.version, "top_up": plan.top_up}
+
+    return params
+
+
 def _resolvability_params(
     spec: AnnotationReferenceSpec, config: AnnotationConfig, test_reference_id: str
 ) -> dict[str, Any]:
@@ -5906,7 +7211,10 @@ def _resolvability_params(
         return {"enabled": False}
     test_params: dict[str, Any]
     if test_reference_id == HO_REFERENCE_ID:
-        test_params = _ho_params(spec, config)
+        test_params = {
+            **_ho_params(spec, config),
+            "self_map_exclusion": ho_self_map_exclusion_params(),
+        }
     else:
         test_params = _wmb_testset_params(spec, config)
     return {
@@ -5952,6 +7260,13 @@ def _ho_params(
             "roi_labels": list(HO_OTHER_REGION_ROI_LABELS),
             "feature_matrix": HO_OTHER_REGION_MATRIX,
             "seed": HO_OTHER_REGION_SEED,
+            # Gate P's leave-one-donor-out sets only (D2 (d)); absent from
+            # every production payload, so no production build_hash changes.
+            **(
+                {"donor_only": True}
+                if config.resolvability.holdout_other_region_donor_only
+                else {}
+            ),
         },
     }
 
@@ -6127,14 +7442,32 @@ class _BuilderRecipe:
     source_patterns: Mapping[str, str] = field(default_factory=dict)
     finds_markers: bool = True
     refuse: Any = None
+    # (spec, config) -> (panel -> params | None): the version-7 inputs.
+    panel_params: Any = None
+
+
+def _ho_primary_v7(spec: AnnotationReferenceSpec, config: AnnotationConfig) -> Any:
+    return _v7_primary_params(spec, config, HO_REFERENCE_ID)
+
+
+def _wmb_primary_v7(spec: AnnotationReferenceSpec, config: AnnotationConfig) -> Any:
+    return _v7_primary_params(spec, config, WMB_TESTSET_REFERENCE_ID)
 
 
 BUILDER_RECIPES: Final[dict[str, _BuilderRecipe]] = {
     "whb_frontal_supc_clus": _BuilderRecipe(
-        "whb_frontal_supc_clus", build_whb_frontal, WHB_TAXONOMY_ID, _whb_params
+        "whb_frontal_supc_clus",
+        build_whb_frontal,
+        WHB_TAXONOMY_ID,
+        _whb_params,
+        panel_params=_ho_primary_v7,
     ),
     "seaad_mr_panel": _BuilderRecipe(
-        "seaad_mr_panel", build_seaad_mr, SEAAD_TAXONOMY_ID, _seaad_params
+        "seaad_mr_panel",
+        build_seaad_mr,
+        SEAAD_TAXONOMY_ID,
+        _seaad_params,
+        panel_params=_ho_primary_v7,
     ),
     "wmb_panel": _BuilderRecipe(
         "wmb_panel",
@@ -6145,6 +7478,7 @@ BUILDER_RECIPES: Final[dict[str, _BuilderRecipe]] = {
         # the legacy downloader's .lock and .tmp files (mapmycells.py).
         source_patterns={SOURCE_WMB_H5AD_DIR: f"*{WMB_H5AD_SUFFIX}"},
         refuse=_wmb_large_panel_refusal,
+        panel_params=_wmb_primary_v7,
     ),
     "wmb_region_share": _BuilderRecipe(
         "wmb_region_share",
@@ -6162,7 +7496,11 @@ BUILDER_RECIPES: Final[dict[str, _BuilderRecipe]] = {
         refuse=_whole_ctx_refusal,
     ),
     HO_REFERENCE_ID: _BuilderRecipe(
-        HO_REFERENCE_ID, build_whb_frontal_ho, WHB_TAXONOMY_ID, _ho_params
+        HO_REFERENCE_ID,
+        build_whb_frontal_ho,
+        WHB_TAXONOMY_ID,
+        _ho_params,
+        panel_params=_v7_test_set_params,
     ),
     WMB_TESTSET_REFERENCE_ID: _BuilderRecipe(
         WMB_TESTSET_REFERENCE_ID,
@@ -6171,6 +7509,7 @@ BUILDER_RECIPES: Final[dict[str, _BuilderRecipe]] = {
         _wmb_testset_params,
         source_patterns={SOURCE_WMB_H5AD_DIR: f"*{WMB_H5AD_SUFFIX}"},
         finds_markers=False,
+        panel_params=_v7_test_set_params,
     ),
 }
 
@@ -6205,6 +7544,9 @@ def builder_for(
         source_patterns=dict(recipe.source_patterns),
         finds_markers=recipe.finds_markers,
         refuse=recipe.refuse,
+        panel_params=None
+        if recipe.panel_params is None
+        else recipe.panel_params(spec, config),
     )
 
 

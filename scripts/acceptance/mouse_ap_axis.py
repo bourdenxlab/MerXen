@@ -1,7 +1,8 @@
 #!/usr/bin/env python
-"""M6b AP-axis scoring: the region rule on MERFISH-638850, out of sample (§17).
+"""M6b AP-axis scoring: the region rule on MERFISH-638850, out of sample (§24).
 
-Pre-registration §17 (``docs/acceptance/annotation-v1-preregistration.md``),
+Pre-registration §24 (``docs/acceptance/annotation-v1-preregistration.md``;
+numbered §17 on the M6b branch and in the M6b evidence under ``$A/m6b``),
 plan §7.8 items 1, 2 and 4, MO10 (§14). The inputs are stage A's unpruned
 production WMB mappings of the 38 in-scope sections' 30k subsamples on the
 three gene sets (``--mouse-section-regions none``) and the M6 MAP outputs of
@@ -35,7 +36,7 @@ ag7 proseg_hybrid and VZG2 original_seg. Subcommands, each writing under
    and the bin-mean T2 <= 0.1% in every bin; ties: fewer changes from v1,
    then fewer drop decisions differing from v1, then the label).
 5. ``mo10``: MO10 on the selected candidate, per gene set; refuses to run
-   unless the pre-registration names the selected candidate (§17 "order of
+   unless the pre-registration names the selected candidate (§24 "order of
    record").
 6. ``ap-estimate``: ``mouse_ap.estimate_ap`` on held-out MERFISH sections
    (each section left out of the reference): with the Allen labels of every
@@ -115,7 +116,7 @@ REAL_DATASETS: tuple[str, ...] = ("ag7", "vzg2")
 CLASS_LEVEL = "CCN20230722_CLAS"
 SUBCLASS_LEVEL = "CCN20230722_SUBC"
 PRIMARY_RUN = "wmb_panel"
-# Harm (§17): confident Allen label and our class bp.
+# Harm (§24): confident Allen label and our class bp.
 ALLEN_ACS_MIN = 0.6
 CLASS_BP_MIN = 0.9
 # CCF truth per section (E7 09_autoregion_v2.py): present >= 1%, any > 0.2%.
@@ -151,7 +152,7 @@ CCF_COLUMNS: tuple[str, ...] = (
 SECTION_PREFIX = "C57BL6J-638850."
 
 # --------------------------------------------------------------------------
-# Candidate rules (§17 "Candidates")
+# Candidate rules (§24 "Candidates")
 
 COMPONENTS: dict[str, dict[str, Any]] = {
     "a": {"coupled_regions": {"OB": ["OLF"]}},
@@ -188,7 +189,7 @@ V1_TILE = (150.0, 3)
 
 @dataclass(frozen=True)
 class Candidate:
-    """One candidate region rule (§17).
+    """One candidate region rule (§24).
 
     Attributes:
         components: Of ``a``-``d``, sorted.
@@ -250,7 +251,7 @@ class Candidate:
 
 
 def all_candidates() -> list[Candidate]:
-    """Return v1 followed by the 95 candidates (§17)."""
+    """Return v1 followed by the 95 candidates (§24)."""
     result = [Candidate((), *V1_TILE)]
     for size in range(len(COMPONENTS) + 1):
         for components in itertools.combinations(sorted(COMPONENTS), size):
@@ -481,7 +482,7 @@ def load_sections(out: Path) -> pd.DataFrame:
 def section_shares(
     counts: MerfishRegionCounts, sections: pd.DataFrame, section: str
 ) -> RegionShares:
-    """Return a MERFISH section's leave-neighbours-out region shares (§17).
+    """Return a MERFISH section's leave-neighbours-out region shares (§24).
 
     Args:
         counts: The CCF-view count tables.
@@ -809,7 +810,7 @@ def t2_values(
     """Return T2 (MO2's definition) and T2 without the conditionally kept nodes.
 
     T2 is ``mouse_gate.t2_share`` with the static never-drop classes (MO2 /
-    G3 as pre-registered, §17), so a (b) or (c) keep that retains
+    G3 as pre-registered, §24), so a (b) or (c) keep that retains
     region-implausible calls counts; the second value leaves the section's
     kept nodes out as well (``effective_never_drop``; diagnostic).
 
@@ -1341,7 +1342,7 @@ def candidate_table(
 
 
 def select_candidate(table: pd.DataFrame) -> dict[str, Any]:
-    """Apply the pre-registered selection rule (§17) to the candidate table.
+    """Apply the pre-registered selection rule (§24) to the candidate table.
 
     Returns:
         ``{"selected": label or None, "reason": ..., "ties": [...]}``.
@@ -1443,7 +1444,7 @@ def candidates_report(
 ) -> str:
     """Plain-text candidate table and selection."""
     lines = [
-        "M6b candidate table (pre-registration §17; S = max direct harm over "
+        "M6b candidate table (pre-registration §24; S = max direct harm over "
         "38 sections x 3 gene sets)",
         f"selection: {selection.get('selected')} ({selection.get('reason')}); "
         f"complete={selection.get('complete')}",
@@ -1540,7 +1541,7 @@ def mo10_command(args: argparse.Namespace) -> int:
     if marker not in text:
         raise SystemExit(
             f"the pre-registration does not record {marker!r}; commit the "
-            "selection first (§17)"
+            "selection first (§24)"
         )
     sections = pd.read_parquet(out / "summary" / "sections.parquet")
     bins = pd.read_csv(out / "summary" / "bins.csv")

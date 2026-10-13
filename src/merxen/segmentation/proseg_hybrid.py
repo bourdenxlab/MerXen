@@ -50,6 +50,7 @@ from merxen.io.spatialdata_schema import (
 from merxen.io.transcript_io import background_mask, first_existing_col
 from merxen.memory import force_release, log_status
 from merxen.segmentation.mask_geometry import masks_to_labeled_polygons
+from merxen.segmentation.tempdirs import large_temp_root
 
 logger = logging.getLogger(__name__)
 
@@ -1026,6 +1027,7 @@ def run_proseg_hybrid_refinement(
     cellpose_mask_path: Path | str,
     transforms_path: Path | str,
     config: ProsegHybridConfig,
+    temp_root: Path | str | None = None,
 ) -> dict[str, int | float | str]:
     """Build and persist the hybrid shape, assignments, and count table.
 
@@ -1034,6 +1036,10 @@ def run_proseg_hybrid_refinement(
         cellpose_mask_path: Original Cellpose label image used as the prior.
         transforms_path: JSON file containing pixel-to-micron affine terms.
         config: Hybrid refinement configuration.
+        temp_root: Directory for the partitioned transcript files written
+            during the refinement (several GB for a full section). Defaults to
+            ``$MERXEN_TMPDIR`` or the working directory, never the system
+            temporary directory (see ``tempdirs.large_temp_root``).
 
     Returns:
         Run-level refinement summary.
@@ -1137,7 +1143,9 @@ def run_proseg_hybrid_refinement(
     hybrid_counts: defaultdict[int, int] = defaultdict(int)
     polygons = [cell_results[cell_id].geometry for cell_id in cell_ids]
 
-    with tempfile.TemporaryDirectory(prefix="merxen-proseg-hybrid-") as temp_dir:
+    with tempfile.TemporaryDirectory(
+        prefix="merxen-proseg-hybrid-", dir=large_temp_root(temp_root)
+    ) as temp_dir:
         temp_path = Path(temp_dir)
         for partition_index, partition in enumerate(_iter_point_partitions(points_obj)):
             augmented = assign_transcripts_to_hybrid_masks(

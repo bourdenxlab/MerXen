@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "a712532a2708305f3f569d9f441ec570e961a4437898610cfcd14eb53a48caea",
+    3: "2d960816289f217e14d24f40510e95c12e97959cc38bf09df974b62236cfba06",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -116,6 +116,128 @@ PIN_HISTORY = (
     "build_hash through the resolvability builder params, so those bundles "
     "get new hashes without a builder bump; the test-set bundles are "
     "unchanged",
+    "3: resolvability version 7 simulation added (M3c stage B: exact-total "
+    "thinning, the totals grid, ensemble members, the R3 and lung-stress "
+    "efficiencies from sim_inputs.py (pinned from here on), version "
+    "selection); additive: no builder calls it yet, the version-6 path and "
+    "every version-6 build_hash are byte-identical "
+    "(test_resolvability_v6_golden), so no bundle changes",
+    "3: resolvability version 7 wired into PREP per family (M3c stage C: the "
+    "ensemble decisions, saturated-bp rule, monotone fill, class-depth table, "
+    "test-set class top-up, BundleBuilder.panel_params); a version-7 family's "
+    "build_hash gains its version-7 inputs through panel_params (so its "
+    "bundles are new build directories), a version-6 family's payload and "
+    "every version-6 output are byte-identical (test_resolvability_v6_golden), "
+    "so no existing bundle changes",
+    "3: the version-7 trust constraint guarded against simulation-input assets "
+    "(M3c stage D, pre-registration §21 (v): the more severe of the full "
+    "ensemble's and the asset-free members' constraint; the summary records "
+    "trust_asset_guard); it changes the trust of version-7 bundles with an "
+    "asset member only, none of which existed in any store (the 5K mouse "
+    "build was stopped before its self-map for this change); other version-7 "
+    "bundles gain only that summary record; the version-6 path is "
+    "byte-identical (test_resolvability_v6_golden), so no existing bundle "
+    "changes",
+    "3: the version-7 ensemble amended (M3c amendment of 2026-09-29, "
+    "pre-registration §22: eight emission members per family and a "
+    "one-standard-error margin on the spread route); ensemble_rule_version 2 "
+    "and the new members enter every version-7 build_hash (panel_params), so "
+    "the new decisions go only into new build directories and the stage-D "
+    "version-7 bundles are never reused by the amended code; those bundles "
+    "re-derive their decisions as built (no recorded margin: 0); the "
+    "version-6 path and payload are byte-identical "
+    "(test_resolvability_v6_golden), so no existing bundle changes",
+    "3: the human self-maps leave the held-out test set's other-region COP "
+    "cells out (user decision 2026-09-30, M8 D1; "
+    "HO_SELF_MAP_TEST_SET_REVISION 1): the revision and its rule enter every "
+    "human self-map bundle's build_hash through its test-set params, so "
+    "those bundles get new hashes without a builder bump; the held-out "
+    "test-set bundle, RESOLVABILITY_VERSION and the mouse bundles are "
+    "unchanged",
+    "3: thin_and_contaminate takes an optional efficiency_seed for the M8 "
+    "draw-spread grid (user decision 2026-09-30, M8 D2); every builder "
+    "leaves it unset, so the efficiency stays the recipe seed's and no "
+    "bundle content or build_hash changes",
+    "3: M3c merged after M8 (2026-10-01): the builder carries both the "
+    "version-7 ensemble (M3c) and the human test-set revision and "
+    "efficiency_seed of M8 D1 / D2; each change keeps its own build_hash rule "
+    "above, so no bundle built by either branch changes",
+    "3: the version-7 self-map records M8 D1's test_set_exclusion in its "
+    "summary and bundle output, as the version-6 path does (its test cells "
+    "already followed D1); provenance only. The version-7 human bundles "
+    "built before the merge (two WHB, two SEA-AD) lack D1's revision in their "
+    "hashed test-set params, so the merged code never reuses them and builds "
+    "new ones; no existing bundle changes",
+    "3: the version-7 summary's per-regime and per-level bin counts moved "
+    "into ensemble_bin_counts, which RESOLVE reuses (refactor; the summary "
+    "is unchanged), so no bundle content changes",
+    "3: load_resolvability and ResolvabilityTables refuse a resolvability "
+    "version the code does not know (checked_resolvability_version; reading "
+    "only, the RESOLVE follow-up of M3c); no bundle content changes",
+    "3: gate_p_tested_sets takes its confident calls from the new public "
+    "frozen_confident_mask (M13 gate P, which scores at frozen thresholds "
+    "and never runs in a builder); the same rule, moved, so no bundle "
+    "content or build_hash changes",
+    "3: the M13 branch merged with the RESOLVE version-7 follow-up "
+    "(2026-10-06): resolvability.py carries both frozen_confident_mask "
+    "and the version guard and ensemble_bin_counts above; each change "
+    "keeps its own rule, so no bundle content or build_hash changes",
+    "3: sim_inputs.py gains gate P's cross-platform stress efficiency and "
+    "the provenance rule of in-house assets (a source path in place of a "
+    "URL; M13 C4); no builder reads either, the packaged assets a bundle "
+    "hashes are unchanged, so no bundle content or build_hash changes",
+    "3: gate P's NP6 stress recipes in resolvability.py (M13 C4: "
+    "R1_stress_spill, R1_stress_lognormal, R1_stress_xplatform, "
+    "R3_stress_spill, gate_p_stress_members; thin_and_contaminate reads a "
+    "table recipe's efficiency); no builder simulates them, the R1, R3, clean "
+    "and lung recipe records are unchanged (factor_cap_log2 only when set) and "
+    "every lognormal recipe's draw is the same, so no bundle content or "
+    "build_hash changes (test_resolvability_v6_golden)",
+    "3: the held-out test set's region metadata, other-region metadata and "
+    "test-set sources are read from source paths (ho_region_metadata, "
+    "other_region_metadata, _test_set_source_paths, _spec_of_test_set; M13 "
+    "C8 refactor): the same files are read and the same specs built, so no "
+    "bundle content or build_hash changes (test_resolvability_v6_golden)",
+    "3: gate P's leave-one-donor-out held-out test sets (M13 C8, D2 (d)): "
+    "build_whb_frontal_ho draws the other-region top-up from the held-out "
+    "donor only and never a cell of the default test set when "
+    "resolvability.holdout_other_region_donor_only and the "
+    "gate_p_excluded_test_cells source are both set; the flag enters the "
+    "held-out params only when set and the source only when given, so every "
+    "production payload, bundle and build_hash is unchanged "
+    "(test_resolvability_v6_golden); the pool-size and composition reports "
+    "and held_out_test_set_spec are added (no builder output changes)",
+    "3: the D1 drop's supercluster labels move to ho_self_map_excluded_labels "
+    "(the same labels, read by self_map_test_cells as before), and gate P's "
+    "pool-size report (ho_donor_pool_sizes, which no builder calls) leaves "
+    "the self-map's dropped other-region cells out of its counts (M13 C8 "
+    "review); no bundle content or build_hash changes "
+    "(test_resolvability_v6_golden)",
+    "3: version-7 self-maps store the simulated n_genes per member, test "
+    "cell and depth on the test cells' genes (M13 chunk C16, decision D19 "
+    "(a): resolvability_sim_genes.parquet and the summary's "
+    "simulated_n_genes record); SIM_GENES_VERSION 1 enters every version-7 "
+    "build_hash through v7_simulation_payload (panel_params), so the new "
+    "content goes only into new build directories and no version-7 bundle "
+    "built before it is reused (it stays readable; its gene-complexity "
+    "check is not_evaluable); the version-7 test-set bundles, the version-6 "
+    "path and payload (test_resolvability_v6_golden) and so every seeded "
+    "family's build_hash are unchanged",
+    "3: C16 review: load_simulated_genes checks the stored table against "
+    "its summary record (row counts in total and per member, emission "
+    "members present, depths on the grid, one row per member, cell and "
+    "depth, gene counts in range); a reader-side check, so no bundle "
+    "content or build_hash changes",
+    "3: merge of M13 C4/C8 (gate P's stress recipes and leave-one-donor-out "
+    "test sets) with M13 C16 (version-7 simulated n_genes): each side keeps "
+    "its own rule and neither changes the other's code, so the merged "
+    "fingerprint differs from both without any bundle content or build_hash "
+    "change (test_resolvability_v6_golden)",
+    "3: sim_inputs.py gains the gate_p_profile role and FamilyDepthProfile "
+    "(M13 D8 with CHECK K7: a new family's own NP5 depth profile, which only "
+    "gate P reads); resolvability_plan selects profile assets only, so no "
+    "PREP reads the role, no such asset is registered yet, and no bundle "
+    "content or build_hash changes (test_resolvability_v6_golden)",
 )
 
 
@@ -146,12 +268,16 @@ def builder_code_fingerprint() -> str:
     secondary bundles (M3b), so it is covered too; a change there that
     alters those tables also bumps ``RESOLVABILITY_VERSION`` (hashed).
     ``prefilter.py`` chooses the marker candidates of large panels (M3b
-    stage D); its version and settings are hashed.
+    stage D); its version and settings are hashed. ``sim_inputs.py`` (M3c)
+    turns the simulation-input assets into version-7 member efficiencies and
+    depth profiles; the assets' sha256 enter a version-7 ``build_hash``, the
+    code is covered here.
     """
     parts = [
         _dump(ast.parse((SRC / "reference.py").read_text())),
         _dump(ast.parse((SRC / "resolvability.py").read_text())),
         _dump(ast.parse((SRC / "prefilter.py").read_text())),
+        _dump(ast.parse((SRC / "sim_inputs.py").read_text())),
     ]
     store_tree = ast.parse((SRC / "store.py").read_text())
     by_name = {

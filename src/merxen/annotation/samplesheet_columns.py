@@ -1,10 +1,13 @@
 """Optional annotation columns of the pipeline samplesheet (plan §3.7, hook H9).
 
-Two optional per-row columns override the global annotation params:
+Three optional per-row columns override the global annotation params:
 
 - ``anatomical_region`` (human; default ``annotation_human_region``);
 - ``mouse_section_regions`` (mouse; ``auto``, ``none`` or ``;``-separated CCF
-  divisions; default ``annotation_mouse_section_regions``).
+  divisions; default ``annotation_mouse_section_regions``);
+- ``clustering_squidpy_mode`` (``legacy`` or ``map_first``; default the run's
+  mode, ``clustering_squidpy_mode*``; pre-registration §20 D15). Groovy's
+  ``AnnotationDefaults.resolveRowMode`` applies it in the pipeline.
 
 Blank or missing values inherit the global param, so existing samplesheets
 parse unchanged. ``merxen.io.samplesheet`` calls ``parse_optional_columns``
@@ -31,13 +34,19 @@ from typing import Annotated, Any, Final
 
 from pydantic import BeforeValidator
 
-from merxen.annotation.config import normalise_mouse_section_regions
+from merxen.annotation.config import (
+    CLUSTERING_MODES,
+    ROW_MODE_COLUMN,
+    normalise_mouse_section_regions,
+)
 
 ANATOMICAL_REGION_COLUMN: Final = "anatomical_region"
 MOUSE_SECTION_REGIONS_COLUMN: Final = "mouse_section_regions"
+CLUSTERING_MODE_COLUMN: Final = ROW_MODE_COLUMN
 OPTIONAL_ANNOTATION_COLUMNS: Final[tuple[str, ...]] = (
     ANATOMICAL_REGION_COLUMN,
     MOUSE_SECTION_REGIONS_COLUMN,
+    CLUSTERING_MODE_COLUMN,
 )
 _REGION_TOKEN_PATTERN: Final = re.compile(r"^[a-z0-9_]+$")
 
@@ -51,10 +60,13 @@ class OptionalAnnotationColumns:
             to inherit the global param.
         mouse_section_regions: ``auto``, ``none`` or canonical
             ``;``-separated divisions, or ``None`` to inherit.
+        clustering_squidpy_mode: ``legacy`` or ``map_first``, or ``None``
+            for the run's mode.
     """
 
     anatomical_region: str | None = None
     mouse_section_regions: str | None = None
+    clustering_squidpy_mode: str | None = None
 
     def as_dict(self) -> dict[str, str | None]:
         """Return the fields as a plain mapping (for ``SamplePair`` kwargs).
@@ -106,6 +118,29 @@ def parse_mouse_section_regions(value: str | None) -> str | None:
     return normalise_mouse_section_regions(str(value))
 
 
+def parse_clustering_mode(value: str | None) -> str | None:
+    """Normalise a ``clustering_squidpy_mode`` cell (as Groovy ``checkedMode``).
+
+    Args:
+        value: Raw cell text, case insensitive.
+
+    Returns:
+        ``legacy`` or ``map_first``, or ``None`` for a blank cell.
+
+    Raises:
+        ValueError: On another value.
+    """
+    if value is None or not str(value).strip():
+        return None
+    mode = str(value).strip().lower()
+    if mode not in CLUSTERING_MODES:
+        raise ValueError(
+            f"invalid clustering_squidpy_mode {value!r}: use one of "
+            f"{', '.join(CLUSTERING_MODES)}"
+        )
+    return mode
+
+
 def _parse_anatomical_region_value(value: Any) -> str | None:
     return None if value is None else parse_anatomical_region(str(value))
 
@@ -143,6 +178,7 @@ def parse_optional_columns(
         mouse_section_regions=parse_mouse_section_regions(
             row.get(MOUSE_SECTION_REGIONS_COLUMN)
         ),
+        clustering_squidpy_mode=parse_clustering_mode(row.get(CLUSTERING_MODE_COLUMN)),
     )
 
 

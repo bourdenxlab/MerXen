@@ -21,7 +21,11 @@ class AnnotationDefaults {
     // Species whose default clustering mode is map_first. Only the flip PRs
     // change it (human at M8 / gate H, mouse at M9 / gate M), together with
     // DEFAULT_CLUSTERING_MODE and FLIPPED_SPECIES in merxen.annotation.config.
-    static final List<String> FLIPPED_SPECIES = [].asImmutable()
+    static final List<String> FLIPPED_SPECIES = ["human"].asImmutable()
+
+    // The optional samplesheet column that sets one row's clustering mode
+    // (pre-registration §20 D15): legacy or map_first, blank = the run's mode.
+    static final String ROW_MODE_COLUMN = "clustering_squidpy_mode"
 
     // Suffix of the clustered table written by a map_first run of a species
     // that has not flipped, so the legacy table is never overwritten (OD-A3).
@@ -119,6 +123,66 @@ class AnnotationDefaults {
             return checkedMode(perSpecies, paramName)
         }
         return defaultMode(speciesName, flippedSpecies)
+    }
+
+    /**
+     * Resolve one samplesheet row's clustering mode.
+     *
+     * A non-blank clustering_squidpy_mode column wins over every param (it is
+     * the most specific setting); a blank one gives the run's mode
+     * (resolveMode).
+     *
+     * @param rowMode The row's clustering_squidpy_mode value (may be null).
+     * @param params Pipeline params.
+     * @param species Species name or alias.
+     * @param flippedSpecies Species whose default is map_first.
+     * @return "legacy" or "map_first".
+     * @throws IllegalArgumentException On an unknown mode or species.
+     */
+    static String resolveRowMode(
+        Object rowMode,
+        Map params,
+        Object species,
+        Collection flippedSpecies = FLIPPED_SPECIES
+    ) {
+        def speciesName = normalizeSpecies(species)
+        def explicit = blankToNull(rowMode)
+        if (explicit != null) {
+            return checkedMode(explicit, "samplesheet column ${ROW_MODE_COLUMN}")
+        }
+        return resolveMode(params, speciesName, flippedSpecies)
+    }
+
+    /**
+     * Return params with a row's mode applied (resolveMode then gives it).
+     *
+     * @param rowMode The row's clustering_squidpy_mode value (may be null).
+     * @param params Pipeline params.
+     * @return params itself for a blank row mode, else a copy whose
+     *     clustering_squidpy_mode is the row's.
+     */
+    static Map withRowMode(Object rowMode, Map params) {
+        def explicit = blankToNull(rowMode)
+        if (explicit == null) {
+            return params
+        }
+        def copy = new LinkedHashMap(params ?: [:])
+        copy.put("clustering_squidpy_mode", explicit.toString())
+        return copy
+    }
+
+    /**
+     * Return the default of annotation_mode_mapmycells_stage for a species.
+     *
+     * A flipped species no longer runs the legacy MAPMYCELLS stage beside
+     * map_first ("skip"); a species that has not flipped keeps it ("legacy").
+     *
+     * @param species Species name or alias.
+     * @param flippedSpecies Species whose default is map_first.
+     * @return "skip" or "legacy".
+     */
+    static String defaultMapmycellsStage(Object species, Collection flippedSpecies = FLIPPED_SPECIES) {
+        return normalizeSpecies(species) in flippedSpecies ? "skip" : LEGACY
     }
 
     /**

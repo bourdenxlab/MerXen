@@ -80,6 +80,7 @@ class SamplePair:
     # rca-site:H9: optional annotation columns (plan §3.7); None inherits the param.
     anatomical_region: str | None = None
     mouse_section_regions: str | None = None
+    clustering_squidpy_mode: str | None = None
 
 
 def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
@@ -184,6 +185,7 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
                 ) from exc
             pair.anatomical_region = annotation_columns.anatomical_region
             pair.mouse_section_regions = annotation_columns.mouse_section_regions
+            pair.clustering_squidpy_mode = annotation_columns.clustering_squidpy_mode
             pairs.append(pair)
             logger.info("Parsed sample pair %d: %s", row_num - 1, pair.pair_id)
 

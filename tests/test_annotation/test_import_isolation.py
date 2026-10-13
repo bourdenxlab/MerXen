@@ -19,6 +19,8 @@ MODULES = (
     "merxen.annotation.config",
     "merxen.annotation.provenance",
     "merxen.annotation.samplesheet_columns",
+    # M3c: the downgrade-only real-data QC (plan §8.8), used by RESOLVE.
+    "merxen.annotation.real_qc",
 )
 BLOCKED = (
     "anndata",

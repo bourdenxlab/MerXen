@@ -16,6 +16,19 @@ logger = logging.getLogger(__name__)
 
 MERSCOPE_ZPROJ_IMAGE_NAME = "MERSCOPE_z_projection"
 
+# SpatialData attrs entry recording images added by ``merxen register-images``.
+REGISTERED_IMAGES_ATTR = "merxen_registered_images"
+
+
+def registered_image_keys(sdata_obj: Any) -> set[str]:
+    """Return image keys that were registered onto the grid from external files.
+
+    Registered images share the reference image grid but are never the primary
+    instrument image, so callers that pick "the" dataset image must skip them.
+    """
+    registry = getattr(sdata_obj, "attrs", {}).get(REGISTERED_IMAGES_ATTR, {})
+    return {str(key) for key in registry} if isinstance(registry, dict) else set()
+
 
 def list_plane_keys(
     images: dict[str, Any],

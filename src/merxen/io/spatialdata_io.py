@@ -22,6 +22,7 @@ import dask.dataframe as dd
 import numpy as np
 import pandas as pd
 import spatialdata as sd
+import zarr
 from spatialdata.models import PointsModel, ShapesModel, TableModel
 from spatialdata.transformations import get_transformation
 
@@ -65,16 +66,33 @@ _ELEMENT_TYPE_ALIASES = {
 
 
 def spatialdata_write_lock_path(zarr_path: Path | str) -> Path:
-    """Return the shared, store-adjacent MerXen writer lock path."""
-    return Path(f"{Path(zarr_path)}.merxen-write.lock")
+    """Return the shared MerXen writer lock path beside the real store.
+
+    Every path that reaches one store must map to one lock file, or concurrent
+    writers are not serialized. Nextflow stages a store into each task's work
+    directory as a symlink (some modules add a second hop), so a lock derived
+    from the unresolved path would sit beside each task's own symlink. The
+    path is therefore made absolute and every symlink in it is resolved before
+    the lock name is derived. A store that does not exist yet resolves through
+    its existing ancestors, so it gets the lock it keeps once written.
+
+    Args:
+        zarr_path: SpatialData Zarr path, possibly relative or through symlinks.
+
+    Returns:
+        ``<real store path>.merxen-write.lock``.
+    """
+    store_path = Path(zarr_path).resolve()
+    return store_path.with_name(f"{store_path.name}.merxen-write.lock")
 
 
 @contextmanager
 def spatialdata_write_lock(zarr_path: Path | str) -> Iterator[Path]:
     """Serialize all additive MerXen writes to one SpatialData store.
 
-    The lock deliberately lives beside the Zarr so it is visible to every
-    process and cluster node that can mutate the shared store. Callers must
+    The lock deliberately lives beside the real Zarr (symlinks resolved) so it
+    is visible to every process and cluster node that can mutate the shared
+    store, whichever staged or symlinked path each one was given. Callers must
     acquire it before reading SpatialData and retain it until persistence is
     complete, preventing a stale read/modify/write cycle from dropping columns
     written by another terminal analysis.
@@ -164,6 +182,8 @@ def write_or_replace_element(
                     element_type,
                 )
                 write_element(element_key, overwrite=False)
+        if _ELEMENT_TYPE_ALIASES.get(str(element_type).lower()) == "labels":
+            _deduplicate_written_labels(sdata_obj, element_key)
     else:
         path = getattr(sdata_obj, "path", None)
         write = getattr(sdata_obj, "write", None)
@@ -198,9 +218,112 @@ def _write_element_with_recoverable_backup(
         if element_path.exists() or element_path.is_symlink():
             remove_path(element_path)
         os.replace(backup_path, element_path)
+        _reconsolidate_metadata(sdata_obj, element_key, raise_errors=False)
         raise
     remove_path(backup_path)
+    # write_element consolidated the root metadata while the hidden backup group still
+    # existed; without this the root zarr.json keeps entries for the deleted backup.
+    _reconsolidate_metadata(sdata_obj, element_key, raise_errors=True)
     return True
+
+
+def _reconsolidate_metadata(
+    sdata_obj: Any,
+    element_key: str,
+    *,
+    raise_errors: bool,
+) -> None:
+    """Rewrite consolidated metadata after a backup removal or a metadata fix."""
+    has_consolidated = getattr(sdata_obj, "has_consolidated_metadata", None)
+    write_consolidated = getattr(sdata_obj, "write_consolidated_metadata", None)
+    if not callable(has_consolidated) or not callable(write_consolidated):
+        return
+    try:
+        if has_consolidated():
+            write_consolidated()
+    except Exception:
+        if raise_errors:
+            raise
+        logger.warning(
+            "Could not re-consolidate SpatialData metadata after restoring %s.",
+            element_key,
+            exc_info=True,
+        )
+
+
+def _deduplicate_written_labels(sdata_obj: Any, element_key: str) -> None:
+    """Drop the ``ome.labels`` repeat that ome-zarr adds when a label is rewritten."""
+    path = getattr(sdata_obj, "path", None)
+    if path is None:
+        return
+    removed = deduplicate_ome_labels_metadata(path)
+    if removed:
+        logger.debug(
+            "Removed %d repeated ome.labels entries after writing %s.",
+            len(removed),
+            element_key,
+        )
+        # write_element consolidated the root metadata with the repeated list.
+        _reconsolidate_metadata(sdata_obj, element_key, raise_errors=True)
+
+
+def deduplicate_ome_labels_metadata(
+    zarr_path: Path | str,
+    *,
+    dry_run: bool = False,
+) -> list[str]:
+    """Drop repeated names from the labels group's OME ``labels`` list.
+
+    ome-zarr's label writer appends the element name to this list on every
+    write, so each replacement of a stored label used to add another copy. The
+    first occurrence of each name is kept, so the list order is otherwise
+    unchanged. Only the ``labels`` group metadata is rewritten; the caller is
+    responsible for refreshing consolidated metadata in the root group.
+
+    Args:
+        zarr_path: SpatialData Zarr store whose ``labels`` group to check.
+        dry_run: Report the repeated entries without rewriting the metadata.
+
+    Returns:
+        The repeated entries that were removed (or, with ``dry_run``, would be),
+        in list order. Empty when the list is already unique or the store has no
+        labels list.
+    """
+    labels_path = Path(zarr_path) / "labels"
+    if not labels_path.is_dir():
+        return []
+    group = zarr.open_group(
+        str(labels_path),
+        mode="r" if dry_run else "r+",
+        use_consolidated=False,
+    )
+    attrs: dict[str, Any] = dict(group.attrs.asdict())
+    ome: dict[str, Any] = attrs["ome"] if isinstance(attrs.get("ome"), dict) else {}
+    # NGFF 0.5 (Zarr v3) nests the list under "ome"; NGFF 0.4 keeps it top-level.
+    is_nested = isinstance(ome.get("labels"), list)
+    names: list[str]
+    if is_nested:
+        names = ome["labels"]
+    elif isinstance(attrs.get("labels"), list):
+        names = attrs["labels"]
+    else:
+        return []
+
+    seen: set[str] = set()
+    removed: list[str] = []
+    for name in names:
+        if name in seen:
+            removed.append(name)
+        seen.add(name)
+    if not removed or dry_run:
+        return removed
+
+    unique = list(dict.fromkeys(names))
+    if is_nested:
+        group.attrs["ome"] = {**ome, "labels": unique}
+    else:
+        group.attrs["labels"] = unique
+    return removed
 
 
 def _delete_element_from_disk_or_path(
@@ -234,6 +357,23 @@ def _delete_element_from_disk_or_path(
             f"Cannot find on-disk SpatialData element store: {element_path}"
         )
     remove_path(element_path)
+
+
+def delete_element(sdata_obj: Any, key: str, element_type: str) -> None:
+    """Remove one element from disk and memory, keeping root metadata consistent.
+
+    Args:
+        sdata_obj: Disk-backed SpatialData object that holds the element.
+        key: Element name.
+        element_type: Element group, e.g. ``"images"`` or ``"tables"``.
+    """
+    element_key = str(key)
+    _delete_element_from_disk_or_path(sdata_obj, element_key, element_type)
+    container = _get_element_container(sdata_obj, element_type)
+    if element_key in container:
+        del container[element_key]
+    # Consolidated root metadata still lists the deleted group until rewritten.
+    _reconsolidate_metadata(sdata_obj, element_key, raise_errors=True)
 
 
 def write_spatialdata_metadata(

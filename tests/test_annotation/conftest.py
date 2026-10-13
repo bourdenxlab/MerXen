@@ -672,6 +672,281 @@ def make_decisions() -> Callable[..., pd.DataFrame]:
 
 
 # --------------------------------------------------------------------------
+# Promotion by simulation (M13 C10): trust decided by ``trust_state``
+
+# The bundle's resolvability constraint before and after a gate-P PR:
+# ``resolvable`` (a self-map without a constraint), ``no_self_map``, or the
+# self-map's ``broad_only`` / ``refused`` verdict.
+PROMOTION_CONSTRAINTS: tuple[str, ...] = (
+    "resolvable",
+    "no_self_map",
+    "broad_only",
+    "refused",
+)
+PROMOTION_REFERENCE: dict[str, str] = {
+    "human": "whb_frontal_supc_clus",
+    "mouse": "wmb_panel",
+}
+# (level, class, status, validated_min_depth, in_class_set) of the
+# simulation family's ``validated_panel_levels.csv``; classes are RESOLVE's
+# class keys (human E2 floor classes, mouse WMB classes).
+PROMOTION_LEVEL_RECORDS: dict[
+    str, tuple[tuple[str, str, str, int | None, bool], ...]
+] = {
+    "human": (
+        ("lineage", "Exc", "validated", 10, True),
+        ("lineage", "Astro", "validated", 30, True),
+        ("broad", "Exc", "validated", 15, True),
+        ("broad", "Astro", "validated", 60, True),
+        ("broad", "Oligo", "validated", 30, True),
+        ("broad", "Immune", "not_evaluable", None, False),
+        ("nt", "Exc", "validated", 60, True),
+        ("supercluster", "Exc", "validated", 120, True),
+        ("supercluster", "Astro", "failed:NP4", None, True),
+    ),
+    "mouse": (
+        ("broad", "01 IT-ET Glut", "validated", 20, True),
+        ("broad", "30 Astro-Epen", "validated", 30, True),
+        ("class", "01 IT-ET Glut", "validated", 30, True),
+        ("class", "30 Astro-Epen", "validated", 60, True),
+        ("class", "24 MY Glut", "not_evaluable", None, False),
+        ("subclass", "01 IT-ET Glut", "validated", 120, True),
+        ("subclass", "19 MB Glut", "failed:NP3", None, True),
+    ),
+}
+PROMOTION_MAX_LEVEL: dict[str, str] = {"human": "broad", "mouse": "class"}
+
+
+def promotion_gene_ids(species: str, n: int = 100) -> tuple[str, ...]:
+    """Return the synthetic panel of the promotion tests."""
+    prefix = "ENSG" if species == "human" else "ENSMUSG"
+    return tuple(f"{prefix}{index:011d}" for index in range(9000, 9000 + n))
+
+
+def promotion_table(
+    species: str, gene_ids: Sequence[str], *, platform: str = "MERSCOPE"
+) -> Any:
+    """Return the validated tables after a gate-P PR promoted the panel.
+
+    One ``validated_panels.csv`` row with ``validation_basis = simulation``
+    for the panel (validated up to broad / class) and its
+    ``PROMOTION_LEVEL_RECORDS``: validated classes with their
+    ``validated_min_depth``, a failed and an unevaluable class.
+    """
+    from merxen.annotation.diagnostics import (
+        ValidatedLevelRecord,
+        ValidatedPanelRecord,
+        ValidatedPanelTable,
+    )
+    from merxen.annotation.panel import compute_panel_hash
+
+    panel_hash = compute_panel_hash(sorted(gene_ids))
+    family_id = f"{species}_sim_family"
+    record = ValidatedPanelRecord(
+        panel_id=f"{species}_sim_panel",
+        family_id=family_id,
+        panel_hash=panel_hash,
+        panel_role="sample_panel",
+        species=species,  # type: ignore[arg-type]
+        platforms=(platform,),
+        n_genes=len(set(gene_ids)),
+        validated_max_level=PROMOTION_MAX_LEVEL[species],
+        validation_basis="simulation",
+        evidence="gate_p/test",
+        date="2026-10-06",
+        approving_pr="#0",
+    )
+    levels = tuple(
+        ValidatedLevelRecord.model_validate(
+            {
+                "family_id": family_id,
+                "panel_hash": panel_hash,
+                "level": level,
+                "class": cls,
+                "in_class_set": in_class_set,
+                "status": status,
+                "validated_min_depth": min_depth,
+                "tested_max_depth": 120 if status == "validated" else None,
+                "evidence": "gate_p/test",
+            }
+        )
+        for level, cls, status, min_depth, in_class_set in PROMOTION_LEVEL_RECORDS[
+            species
+        ]
+    )
+    return ValidatedPanelTable(records=(record,), levels=levels, source="test")
+
+
+@pytest.fixture
+def promotion_trust() -> Callable[..., tuple[Any, Any]]:
+    """Return a factory of trust decisions before and after a promotion.
+
+    ``factory(constraint, *, species="human", role="primary", gene_ids=None,
+    rules=None, platform="MERSCOPE")`` returns ``(before, after)``:
+    ``diagnostics.trust_state`` of
+    one panel and bundle (coverage passing every refusal rule, the
+    resolvability ``constraint`` of ``PROMOTION_CONSTRAINTS``), decided
+    against no validated family (``before``: the panel's own family) and
+    against ``promotion_table`` (``after``: the family listed with
+    ``validation_basis = simulation``). Only the validated tables differ.
+    """
+    from merxen.annotation.diagnostics import (
+        CoverageDiagnostics,
+        ResolvabilityTrust,
+        TrustDecision,
+        TrustRules,
+        ValidatedPanelTable,
+        trust_state,
+    )
+    from merxen.annotation.panel import compute_panel_hash, panel_family
+
+    def factory(
+        constraint: str,
+        *,
+        species: str = "human",
+        role: str = "primary",
+        gene_ids: Sequence[str] | None = None,
+        rules: TrustRules | None = None,
+        platform: str = "MERSCOPE",
+    ) -> tuple[TrustDecision, TrustDecision]:
+        if constraint not in PROMOTION_CONSTRAINTS:
+            raise ValueError(constraint)
+        panel = tuple(gene_ids) if gene_ids is not None else promotion_gene_ids(species)
+        reference_id = (
+            PROMOTION_REFERENCE[species] if role == "primary" else "seaad_mr_panel"
+        )
+        resolvability = (
+            None
+            if constraint == "no_self_map"
+            else ResolvabilityTrust(
+                state=None if constraint == "resolvable" else constraint,  # type: ignore[arg-type]
+                reasons=() if constraint == "resolvable" else (f"{constraint}: x",),
+            )
+        )
+        coverage = CoverageDiagnostics(
+            reference_id=reference_id,
+            n_panel_genes=len(panel),
+            n_query_genes_used=max(len(panel), 100),
+            root_markers=50,
+        )
+        decisions = []
+        for table in (
+            ValidatedPanelTable(records=()),
+            promotion_table(species, panel, platform=platform),
+        ):
+            decisions.append(
+                trust_state(
+                    reference_id=reference_id,
+                    role=role,  # type: ignore[arg-type]
+                    species=species,  # type: ignore[arg-type]
+                    panel_hash=compute_panel_hash(sorted(panel)),
+                    n_panel_genes=len(panel),
+                    family=panel_family(
+                        panel,
+                        species=species,
+                        platforms=[platform],
+                        known_families=table.known_families(),
+                    ),
+                    validated=table,
+                    rules=rules,
+                    coverage=coverage,
+                    resolvability=resolvability,
+                )
+            )
+        before, after = decisions
+        assert before.family_basis == "own" and after.family_basis == "listed"
+        return before, after
+
+    return factory
+
+
+LEVEL_RESULT_FIELDS: tuple[str, ...] = (
+    "name",
+    "raw",
+    "conf",
+    "corr",
+    "runner_up",
+    "margin",
+    "status",
+    "threshold",
+    "floor",
+    "class_key",
+    "extrapolated",
+)
+EMISSION_FIELDS: tuple[str, ...] = (
+    "emitted",
+    "threshold",
+    "default_threshold",
+    "local_threshold",
+    "extrapolated",
+    "depth_bin",
+    "reason",
+)
+
+
+def _same_values(first: Any, second: Any) -> bool:
+    return bool(pd.Series(np.asarray(first)).equals(pd.Series(np.asarray(second))))
+
+
+def assert_same_emission(before: Any, after: Any) -> None:
+    """Assert two RESOLVE results emit the same (human or mouse; plan §8.2, §14).
+
+    Names, scores, statuses, thresholds, floors, class keys, the final
+    label, the tier, the flags, the gate level and its reasons, the depth
+    bins and every level's emission must be identical. Only
+    ``ct_<L>_validated``, the gate's warning flag and reasons, its trust
+    state and the floor warnings may differ, and ``ct_<L>_validated`` only
+    ever marks confident labels.
+
+    Args:
+        before: ``HumanResolution`` or ``MouseResolution`` before promotion.
+        after: The same after promotion.
+    """
+    assert list(before.levels) == list(after.levels)
+    for level, first in before.levels.items():
+        second = after.levels[level]
+        for name in LEVEL_RESULT_FIELDS:
+            assert _same_values(getattr(first, name), getattr(second, name)), (
+                level,
+                name,
+            )
+        for result in (first, second):
+            assert not (result.validated & ~result.confident).any(), level
+    for name in (
+        "final_level",
+        "final_name",
+        "consensus_tier",
+        "depth_bin",
+        "resolvability_extrapolated",
+        "in_table",
+    ):
+        assert _same_values(getattr(before, name), getattr(after, name)), name
+    assert list(before.flags) == list(after.flags)
+    for name, values in before.flags.items():
+        assert _same_values(values, after.flags[name]), name
+    assert before.gate.level == after.gate.level
+    assert before.gate.level_reasons == after.gate.level_reasons
+    assert before.gate.attempts_leaf == after.gate.attempts_leaf
+    assert list(before.emissions) == list(after.emissions)
+    for level, first_emission in before.emissions.items():
+        second_emission = after.emissions[level]
+        assert first_emission.regime == second_emission.regime, level
+        assert first_emission.threshold_source == second_emission.threshold_source
+        for name in EMISSION_FIELDS:
+            assert _same_values(
+                getattr(first_emission, name), getattr(second_emission, name)
+            ), (level, name)
+    validated_columns = {
+        name for name in before.to_columns() if name.endswith("_validated")
+    }
+    first_columns, second_columns = before.to_columns(), after.to_columns()
+    assert list(first_columns) == list(second_columns)
+    for name, values in first_columns.items():
+        if name not in validated_columns:
+            assert _same_values(values, second_columns[name]), name
+
+
+# --------------------------------------------------------------------------
 # A mouse section for the region step and mouse RESOLVE (M6 tests)
 
 MOUSE_LEVELS: tuple[str, ...] = (

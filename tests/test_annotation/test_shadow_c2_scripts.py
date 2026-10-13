@@ -153,6 +153,8 @@ def test_heldout_h4_rows_count_passing_classes(scripts: dict[str, ModuleType]) -
     )
     [row] = scripts["heldout_genes"].h4_rows(enrichment)
     assert row["n_pass"] == 6 and row["h4_pass"] and row["failing"] == "G"
+    # M8 D6: H4 is scored on resolve_criteria.py's WHB-only set, not here.
+    assert row["h4_assigned_class"] is False
 
 
 def test_x1_labelling_matrices_have_the_three_kinds(

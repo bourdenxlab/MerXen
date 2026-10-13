@@ -82,6 +82,7 @@ Each stage is one Nextflow module and one `merxen` subcommand, sharing a Pydanti
 | [Segmentation](docs/stages/segmentation.md) | DAPI-only Cellpose nuclei → GPU Cellpose-SAM cells → ProSeg 3.2.0 refinement from Cellpose logits | always |
 | [Segmentation — hybrid](docs/stages/segmentation.md) | Transcript-supported local-convex branch with growth-only boundary smoothing | on (`proseg_hybrid_enabled`) |
 | [Enrichment](docs/stages/enrichment.md) | Shape layers and per-shape gene tables | always |
+| [Image registration](docs/stages/register-images.md) | Registers post-Xenium images (e.g. IF) onto the Xenium mask grid with Xenium Explorer matrices and a DAPI affine refinement | off (per-row `xenium_registered_images_csv`) |
 | [Mask image quantification](docs/stages/mask-image-quantification.md) | Quantifies every SpatialData image channel over the final Cellpose masks | always |
 | [Cortical depth](docs/stages/cortical-depth.md) | Laplace / equal-area cortical-depth coordinates from boundary annotations | off (`--cortical_depth_enabled`) |
 | [QC](docs/stages/qc.md) | Per-dataset geometry and transcript-assignment metrics | always |

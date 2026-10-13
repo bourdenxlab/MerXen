@@ -27,6 +27,7 @@ each pair x segmentation is released with exactly its required bundles
 
 from __future__ import annotations
 
+import ast
 import csv
 import fcntl
 import hashlib
@@ -74,6 +75,7 @@ PROCESSES = (
     "ANNOTATE_REFERENCE_PREP",
     "CLUSTERING_SQUIDPY_ANNOTATE_MAP",
     "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE",
+    "ANNOTATION_REPORT",
 )
 PREP = "ANNOTATE_REFERENCE_PREP"
 MAP = "CLUSTERING_SQUIDPY_ANNOTATE_MAP"
@@ -102,7 +104,7 @@ def _with_name_block(config_text: str, name: str) -> str:
 # Process contract (string tests)
 
 
-def test_annotation_module_defines_panel_prep_map_and_resolve() -> None:
+def test_annotation_module_defines_panel_prep_map_resolve_and_report() -> None:
     text = MODULE.read_text()
     assert re.findall(r"^process (\w+) \{", text, re.M) == list(PROCESSES)
     assert "merxen annotation-panel" in _process_block(text, "ANNOTATE_PANEL")
@@ -150,8 +152,11 @@ def test_annotation_processes_run_on_the_cpu_with_current_code(name: str) -> Non
     block = _process_block(MODULE.read_text(), name)
     assert 'export CUDA_VISIBLE_DEVICES=""' in block
     assert 'export PYTHONPATH="${projectDir}/../src:\\${PYTHONPATH:-}"' in block
+    # One BLAS thread per worker, except the report: one Python process
+    # whose bootstraps use the task's CPUs (plan §3.6: 4 CPUs).
+    threads = '"${task.cpus}"' if name == "ANNOTATION_REPORT" else "1"
     for variable in ("OMP", "OPENBLAS", "MKL", "NUMBA"):
-        assert f"export {variable}_NUM_THREADS=1" in block
+        assert f"export {variable}_NUM_THREADS={threads}" in block
     code = re.sub(r"^\s*(//|#)[^\n]*", "", block, flags=re.M)
     for token in ("flock", "MERXEN_GPU_LOCK_FILE", "gpu", "queue", "clusterOptions"):
         assert token not in code.replace("CUDA_VISIBLE_DEVICES", ""), token
@@ -218,8 +223,14 @@ def test_resolve_caches_on_content_and_publishes_under_the_segmentation() -> Non
     assert (
         'path(alignment_files, arity: "0..*", stageAs: "resolve_inputs/align_out/*")'
     ) in block
+    # The QC stage's registration checks (G1; M13 C15).
+    assert (
+        'path(registration_files, arity: "0..*", '
+        'stageAs: "resolve_inputs/registration_qc/*")'
+    ) in block
     script = block[block.index("script:") : block.index("stub:")]
     assert "AnnotationReferences.resolveConfigJson(resolve_spec)" in script
+    assert "registration_files as List," in script
     assert "--out annotation_resolve_out" in script
     assert "--run-record annotation_resolve_run.json" in script
     stub = block[block.index("stub:") :]
@@ -324,7 +335,8 @@ def test_prep_max_gb_fraction_matches_the_python_reserve() -> None:
     assert float(match.group(1)) == reference_module.PREP_MAX_GB_FRACTION
 
 
-def test_main_nf_calls_only_the_prepare_only_entry() -> None:
+def test_main_nf_calls_the_annotation_steps_only_through_their_entries() -> None:
+    """--annotation_prepare_only (H10) and CLUSTERING_MAP_FIRST (H5), nothing else."""
     main_text = MAIN_NF.read_text()
     assert main_text.count("ANNOTATION_PREPARE_ONLY(sample_rows_raw_ch)") == 1
     for name in (
@@ -336,11 +348,11 @@ def test_main_nf_calls_only_the_prepare_only_entry() -> None:
         "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE(",
         "CLUSTERING_ANNOTATE_MAP(",
         "CLUSTERING_ANNOTATE(",
-        "CLUSTERING_MAP_FIRST(",
     ):
         assert name not in main_text
-    # CLUSTERING_MAP_FIRST still refuses to run until M5.
-    assert "error(" in MAP_FIRST.read_text()
+    assert main_text.count("CLUSTERING_MAP_FIRST(") == 1
+    # CLUSTERING_MAP_FIRST runs COMPUTE_CPU (M5): no guard left.
+    assert "error(" not in MAP_FIRST.read_text()
 
 
 def test_bundle_collection_waits_for_each_branch_own_count() -> None:
@@ -416,6 +428,18 @@ def _rule_sources() -> list[str]:
     return re.findall(r'"([^"]+)"', match.group(1))
 
 
+def _rule_excludes() -> list[str]:
+    match = re.search(
+        r"RESOLVE_RULE_EXCLUDES = \[(.*?)\]\.asImmutable\(\)", REFERENCES_SOURCE, re.S
+    )
+    assert match is not None
+    return re.findall(r'"([^"]+)"', match.group(1))
+
+
+def _excluded(relative: str) -> bool:
+    return any(relative.startswith(prefix) for prefix in _rule_excludes())
+
+
 # Modules the RESOLVE rule sources import from outside them, and why a change
 # there needs no RESOLVE re-run of its own: they shape the counts and the
 # query MAP loaded, which RESOLVE reloads and checks against MAP's sample
@@ -426,18 +450,13 @@ RULE_IMPORT_EXEMPTIONS = {
     "merxen.control_features": "control registry (query loading)",
     "merxen.gene_ids": "Ensembl ID pattern (query loading)",
     "merxen.table_keys": "table-key suffix validator (COMPUTE_CPU, FINALIZE)",
+    # Of merxen.clustering, RESOLVE runs cellset.select_table_cells only; the
+    # map_first hierarchy is COMPUTE_CPU's (HIERARCHY_SOURCES, M5).
 }
 
 
-def test_resolve_rule_sources_exist_and_cover_their_imports() -> None:
-    """The RESOLVE rules fingerprint must see every module the rules run on."""
-    sources = _rule_sources()
-    assert sources == [
-        "merxen/annotation",
-        "merxen/assets/annotation",
-        "merxen/clustering",
-        "merxen/cli/run_annotation.py",
-    ]
+def _sources_outside(sources: list[str], excludes: list[str] | None = None) -> set[str]:
+    """Modules the source files import from outside the sources."""
     for source in sources:
         assert (SRC / source).exists(), source
     files = [
@@ -445,6 +464,11 @@ def test_resolve_rule_sources_exist_and_cover_their_imports() -> None:
         for source in sources
         for path in (
             [SRC / source] if (SRC / source).is_file() else (SRC / source).rglob("*.py")
+        )
+        if path.suffix == ".py"
+        and not any(
+            path.relative_to(SRC).as_posix().startswith(prefix)
+            for prefix in excludes or []
         )
     ]
     covered = [source.removesuffix(".py").replace("/", ".") for source in sources]
@@ -455,12 +479,134 @@ def test_resolve_rule_sources_exist_and_cover_their_imports() -> None:
             r"^\s*(?:from|import) (merxen(?:\.\w+)+)", path.read_text(), re.M
         )
     }
-    outside = {
+    return {
         module
         for module in imported
         if not any(module == root or module.startswith(root + ".") for root in covered)
     }
-    assert outside == set(RULE_IMPORT_EXEMPTIONS)
+
+
+def test_resolve_rule_sources_exist_and_cover_their_imports() -> None:
+    """The RESOLVE rules fingerprint must see every module the rules run on."""
+    sources = _rule_sources()
+    assert sources == [
+        "merxen/annotation",
+        "merxen/assets/annotation",
+        "merxen/clustering/cellset.py",
+        "merxen/cli/run_annotation.py",
+    ]
+    assert _rule_excludes() == ["merxen/annotation/report"]
+    assert _sources_outside(sources, _rule_excludes()) == set(RULE_IMPORT_EXEMPTIONS)
+    # The excluded report modules exist and no rule source imports them, so
+    # leaving them out of the fingerprint cannot hide a rule change.
+    reports = sorted((SRC / "merxen/annotation").glob("report*.py"))
+    assert reports and all(_excluded(p.relative_to(SRC).as_posix()) for p in reports)
+    for source in sources:
+        root = SRC / source
+        for path in [root] if root.is_file() else root.rglob("*.py"):
+            if path.suffix != ".py" or _excluded(path.relative_to(SRC).as_posix()):
+                continue
+            assert not _imports_a_report_module(path), path
+
+
+def _imports_a_report_module(path: Path, *, in_annotation: bool | None = None) -> bool:
+    """Whether a module imports ``merxen.annotation.report*`` in any spelling.
+
+    ``import merxen.annotation.report_x``, ``from merxen.annotation.report_x
+    import y``, ``from merxen.annotation import report_x`` (also inside
+    parentheses) and the relative ``from .report_x import y`` / ``from .
+    import report_x`` of a module in ``merxen/annotation``.
+    """
+    tree = ast.parse(path.read_text(), filename=str(path))
+    if in_annotation is None:
+        in_annotation = path.parent == SRC / "merxen" / "annotation"
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(
+                alias.name.startswith("merxen.annotation.report")
+                for alias in node.names
+            ):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            names = [alias.name for alias in node.names]
+            if node.level == 0:
+                if module.startswith("merxen.annotation.report"):
+                    return True
+                if module == "merxen.annotation" and any(
+                    name.startswith("report") for name in names
+                ):
+                    return True
+            elif in_annotation and node.level == 1:
+                if module.startswith("report") or (
+                    not module and any(name.startswith("report") for name in names)
+                ):
+                    return True
+    return False
+
+
+def test_the_report_import_check_sees_every_spelling(tmp_path: Path) -> None:
+    """The RESOLVE-exclusion guard catches each way to import a report module."""
+    spellings = [
+        "import merxen.annotation.report_items",
+        "from merxen.annotation.report_items import item_composition",
+        "from merxen.annotation import report_items",
+        "from merxen.annotation import (\n    consensus,\n    report_items,\n)",
+        "from .report_items import item_composition",
+        "from . import report",
+    ]
+    for index, code in enumerate(spellings):
+        path = tmp_path / f"probe_{index}.py"
+        path.write_text(code + "\n")
+        # A relative import names a report module only inside the package.
+        assert _imports_a_report_module(path, in_annotation=True), code
+        if code.startswith("from ."):
+            assert not _imports_a_report_module(path, in_annotation=False), code
+    clean = tmp_path / "clean.py"
+    clean.write_text(
+        "from merxen.annotation import consensus\nimport merxen.gene_ids\n"
+    )
+    assert not _imports_a_report_module(clean, in_annotation=True)
+
+
+def _hierarchy_sources() -> list[str]:
+    match = re.search(
+        r"HIERARCHY_SOURCES = \[(.*?)\]\.asImmutable\(\)", REFERENCES_SOURCE, re.S
+    )
+    assert match is not None
+    return re.findall(r'"([^"]+)"', match.group(1))
+
+
+# Modules the map_first hierarchy code imports from outside its sources, and
+# why a change there needs no COMPUTE_CPU re-run of its own.
+HIERARCHY_IMPORT_EXEMPTIONS = {
+    "merxen.analysis.mapmycells": "gene-ID fallback tables (annotation config only)",
+    "merxen.annotation.samplesheet_columns": (
+        "samplesheet column parsers (their values are in samples_json)"
+    ),
+    "merxen.gene_ids": "Ensembl ID pattern (PREPARE's var metadata)",
+    "merxen.io.spatialdata_io": "SpatialData writes (FINALIZE, PREPARE)",
+    "merxen.io.transcript_io": "column lookups (PREPARE's SpatialData reads)",
+    "merxen.memory": "memory logging",
+    "merxen.plotting": "figure saving",
+    "merxen.table_keys": "FINALIZE's key (the suffix is in compute_spec)",
+}
+
+
+def test_hierarchy_sources_exist_and_cover_their_imports() -> None:
+    """The COMPUTE_CPU fingerprint must see every module the hierarchy runs on."""
+    sources = _hierarchy_sources()
+    assert "merxen/clustering" in sources
+    assert "merxen/analysis/clustering_squidpy.py" in sources
+    # The config defaults of the map_first fields that no param or PREPARE
+    # config sets reach COMPUTE_CPU only through this file (M5 review).
+    assert "merxen/config.py" in sources
+    assert _sources_outside(sources) == set(HIERARCHY_IMPORT_EXEMPTIONS)
+    # The vocabularies the hierarchy reads (merxen.annotation.vocab).
+    from merxen.annotation import vocab
+
+    for filename in vocab.VOCAB_FILES.values():
+        assert f"merxen/assets/annotation/{filename}" in sources, filename
 
 
 # --------------------------------------------------------------------------
@@ -736,8 +882,10 @@ class AnnotationModuleHarness {
                 )
             case "resolveArguments":
                 return AnnotationReferences.resolveArguments(
-                    c.spec, c.refs, c.alignment
+                    c.spec, c.refs, c.alignment, c.registration ?: []
                 )
+            case "registrationQcFiles":
+                return AnnotationReferences.registrationQcFiles(c.qc_out)*.toString()
             case "resolveRulesFingerprint":
                 return AnnotationReferences.resolveRulesFingerprint(c.source_root)
             case "resolveSummaryFile":
@@ -783,6 +931,16 @@ class AnnotationModuleHarness {
                 return AnnotationReferences.mapReuseDir(
                     c.params, c.pair_id, c.segmentation
                 )
+            case "hierarchyFingerprint":
+                return AnnotationReferences.hierarchyFingerprint(c.source_root)
+            case "computeSpec":
+                return AnnotationReferences.computeSpec(c.params, c.source_root)
+            case "computeArguments":
+                return AnnotationReferences.computeArguments(c.spec)
+            case "computeLabelFiles":
+                return AnnotationReferences.computeLabelFiles(c.resolve_dir)*.toString()
+            case "alignmentFiles":
+                return AnnotationReferences.alignmentFiles(c.align_out)*.toString()
         }
         throw new IllegalStateException("unknown case function ${c.fn}")
     }
@@ -838,12 +996,13 @@ workflow {
         .collect()
         .subscribe { rows -> AnnotationModuleHarness.write(params.fixture_out, rows) }
 
+    // No ALIGN files: the published align_out must not be looked up.
     prepared_ch = channel
         .fromList(AnnotationModuleHarness.readList(params.prepared_inputs))
         .map { item ->
             tuple(
                 item.pair_id, item.segmentation, item.samples_json,
-                file(item.config), file(item.prepared_dir),
+                file(item.config), file(item.prepared_dir), [],
             )
         }
     mapped = ANNOTATION_PREPARED_REFERENCES(prepared_ch)
@@ -1175,6 +1334,7 @@ def _cases(root: Path, params: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "params": {"annotation_prepare_only": "true"},
         },
         **_resolve_cases(root, human),
+        **_compute_cases(root, human),
     }
 
 
@@ -1208,6 +1368,9 @@ def _resolve_cases(root: Path, human: dict[str, Any]) -> dict[str, dict[str, Any
     (cache / "merxen/annotation/stale.pyc").write_bytes(b"x")
     outside = _write_rule_tree(trees / "outside")
     (outside / "merxen/other.py").write_text("changed\n")
+    report = _write_rule_tree(trees / "report")
+    (report / "merxen/annotation/report.py").write_text("report\n")
+    (report / "merxen/annotation/report_metrics.py").write_text("metrics\n")
     single = {**human, "annotation_allow_single_method": True}
     spec = {"species": "human"}
     refs = ["resolve_inputs/bundle_refs/bundle_ref_1.json"]
@@ -1253,6 +1416,16 @@ def _resolve_cases(root: Path, human: dict[str, Any]) -> dict[str, dict[str, Any
                 "resolve_inputs/align_out/registration_summary.json",
             ],
         },
+        "resolve_arguments_registration": {
+            "fn": "resolveArguments",
+            "spec": spec,
+            "refs": refs,
+            "alignment": [],
+            "registration": [
+                "resolve_inputs/registration_qc/p1_merscope_registration_qc.json",
+                "resolve_inputs/registration_qc/p1_xenium_registration_qc.json",
+            ],
+        },
         "fingerprint_base": {"fn": "resolveRulesFingerprint", "source_root": str(base)},
         "fingerprint_same": {"fn": "resolveRulesFingerprint", "source_root": str(same)},
         "fingerprint_floor": {
@@ -1271,8 +1444,118 @@ def _resolve_cases(root: Path, human: dict[str, Any]) -> dict[str, dict[str, Any
             "fn": "resolveRulesFingerprint",
             "source_root": str(trees / "nothing"),
         },
+        "fingerprint_report": {
+            "fn": "resolveRulesFingerprint",
+            "source_root": str(report),
+        },
         "fingerprint_repo": {"fn": "resolveRulesFingerprint", "source_root": str(SRC)},
         "resolve_summary_file": {"fn": "resolveSummaryFile", "pair_id": "P7513"},
+    }
+
+
+def _compute_cases(root: Path, human: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Cases of the COMPUTE_CPU helpers (spec, arguments, staged files)."""
+    resolve_dir = root / "compute" / "annotation_resolve_out"
+    for platform, sample_id in (("merscope", "P1_MERSCOPE"), ("xenium", "P1_XENIUM")):
+        folder = resolve_dir / platform
+        folder.mkdir(parents=True)
+        (folder / f"{sample_id}_celltype_labels.parquet").write_bytes(b"x")
+        (folder / f"{sample_id}_annotation_manifest.json").write_text("{}")
+        (folder / "notes.txt").write_text("not staged")
+    (resolve_dir / "P1_resolve_summary.json").write_text("{}")
+    (resolve_dir / "annotation_config.json").write_text("{}")
+    align_out = root / "compute" / "align_out"
+    align_out.mkdir()
+    (align_out / "shared_tissue_mask.npy").write_bytes(b"x")
+    (align_out / "registration_summary.json").write_text("{}")
+    half_align = root / "compute" / "half_align_out"
+    half_align.mkdir()
+    (half_align / "shared_tissue_mask.npy").write_bytes(b"x")
+    # QC task outputs (M13 C15): the registration checks at the top of each
+    # qc_out, not the QC summary or a nested file.
+    qc_merscope = root / "compute" / "qc_merscope" / "qc_out"
+    qc_xenium = root / "compute" / "qc_xenium" / "qc_out"
+    for qc_out, stem in ((qc_merscope, "p1_merscope"), (qc_xenium, "p1_xenium")):
+        (qc_out / "nested").mkdir(parents=True)
+        (qc_out / f"{stem}_registration_qc.json").write_text("{}")
+        (qc_out / f"{stem}_qc_summary.csv").write_text("x")
+        (qc_out / "nested" / f"{stem}_registration_qc.json").write_text("{}")
+    map_first = {**human, "clustering_squidpy_mode": "map_first"}
+    spec = {
+        "table_key_suffix": "mapfirst",
+        "mender_unassigned_state_policy": "exclude_from_features",
+    }
+    return {
+        "hierarchy_fingerprint_repo": {
+            "fn": "hierarchyFingerprint",
+            "source_root": str(SRC),
+        },
+        "compute_spec_map_first": {
+            "fn": "computeSpec",
+            "params": map_first,
+            "source_root": str(SRC),
+        },
+        # §20 D15: a map_first row of a legacy-mode run gets a map_first
+        # row's suffix (as forRow gives it), not the run's legacy "".
+        "compute_spec_mouse_row_opt_in": {
+            "fn": "computeSpec",
+            "params": {
+                **map_first,
+                "species": "mouse",
+                "clustering_squidpy_mode": "legacy",
+            },
+            "source_root": str(SRC),
+        },
+        "compute_spec_human_legacy_run_suffix": {
+            "fn": "computeSpec",
+            "params": {
+                **map_first,
+                "clustering_squidpy_mode": "legacy",
+                "clustering_squidpy_table_key_suffix": "mapfirst",
+            },
+            "source_root": str(SRC),
+        },
+        "compute_spec_policy": {
+            "fn": "computeSpec",
+            "params": {
+                **map_first,
+                "clustering_squidpy_table_key_suffix": "trial",
+                "mender_unassigned_state_policy": "state",
+            },
+            "source_root": str(SRC),
+        },
+        "compute_spec_empty_suffix": {
+            "fn": "computeSpec",
+            # Mouse has not flipped (human has, §20): "" is refused.
+            "params": {
+                **map_first,
+                "species": "mouse",
+                "clustering_squidpy_table_key_suffix": "",
+            },
+            "source_root": str(SRC),
+        },
+        "compute_arguments": {"fn": "computeArguments", "spec": spec},
+        "compute_label_files": {
+            "fn": "computeLabelFiles",
+            "resolve_dir": str(resolve_dir),
+        },
+        "alignment_files": {"fn": "alignmentFiles", "align_out": str(align_out)},
+        "alignment_files_half": {
+            "fn": "alignmentFiles",
+            "align_out": str(half_align),
+        },
+        "registration_qc_files": {
+            "fn": "registrationQcFiles",
+            "qc_out": [str(qc_xenium), str(qc_merscope)],
+        },
+        "registration_qc_files_one": {
+            "fn": "registrationQcFiles",
+            "qc_out": str(qc_merscope),
+        },
+        "registration_qc_files_none": {
+            "fn": "registrationQcFiles",
+            "qc_out": [str(root / "compute" / "no_qc_out")],
+        },
     }
 
 
@@ -1760,6 +2043,15 @@ def test_resolve_arguments(harness: dict[str, Any]) -> None:
     masked = _value(harness, "resolve_arguments_mask").split(" ")
     assert "--bundle-ref" not in masked
     assert masked[-2:] == ["--alignment-dir", "resolve_inputs/align_out"]
+    # Staged registration checks (M13 C15): each sample takes its own from
+    # the staged directory; none staged, no option.
+    registered = _value(harness, "resolve_arguments_registration").split(" ")
+    assert registered == [
+        *args,
+        "--registration-qc-dir",
+        "resolve_inputs/registration_qc",
+    ]
+    assert "--registration-qc" not in args + masked
     # Never a store lookup, an override or a results-tree mask lookup.
     for option in ("--store", "--current-bundles", "--bundle ", "--results-root"):
         assert option not in _value(harness, "resolve_arguments") + " "
@@ -1782,6 +2074,7 @@ def _python_rules_fingerprint(root: Path) -> str:
                     item.is_file()
                     and not relative.endswith((".pyc", ".pyo"))
                     and "__pycache__" not in relative.split("/")
+                    and not _excluded(relative)
                 ):
                     files[relative] = item
     if not files:
@@ -1808,8 +2101,114 @@ def test_resolve_rules_fingerprint_follows_the_rule_sources(
     assert _value(harness, "fingerprint_cache") == base
     assert _value(harness, "fingerprint_outside") == base
     assert _value(harness, "fingerprint_missing") == "missing"
+    # The annotation report is left out: adding or editing it keeps RESOLVE cached.
+    assert _value(harness, "fingerprint_report") == base
     assert base == _python_rules_fingerprint(harness["root"] / "rule_trees" / "base")
     assert _value(harness, "fingerprint_repo") == _python_rules_fingerprint(SRC)
+
+
+def _python_sources_fingerprint(root: Path, sources: list[str]) -> str:
+    """A sources fingerprint, computed as AnnotationReferences.sourcesFingerprint."""
+    files: dict[str, Path] = {}
+    for source in sources:
+        path = root / source
+        if path.is_file():
+            files[source] = path
+        elif path.is_dir():
+            for item in path.rglob("*"):
+                relative = item.relative_to(root).as_posix()
+                if (
+                    item.is_file()
+                    and not relative.endswith((".pyc", ".pyo"))
+                    and "__pycache__" not in relative.split("/")
+                ):
+                    files[relative] = item
+    if not files:
+        return "missing"
+    digest = hashlib.sha256()
+    for relative in sorted(files):
+        digest.update(relative.encode())
+        digest.update(b"\0")
+        digest.update(files[relative].read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+@needs_nextflow
+def test_compute_spec_carries_suffix_policy_and_hierarchy_fingerprint(
+    harness: dict[str, Any],
+) -> None:
+    """COMPUTE_CPU's task inputs see the run settings and the hierarchy code."""
+    fingerprint = _value(harness, "hierarchy_fingerprint_repo")
+    assert fingerprint == _python_sources_fingerprint(SRC, _hierarchy_sources())
+    assert fingerprint != _value(harness, "fingerprint_repo")
+    assert _value(harness, "compute_spec_map_first") == {
+        "table_key_suffix": "",  # human has flipped (§20): unsuffixed
+        "mender_unassigned_state_policy": "exclude_from_features",
+        "hierarchy_fingerprint": fingerprint,
+    }
+    mouse_row = _value(harness, "compute_spec_mouse_row_opt_in")
+    assert mouse_row["table_key_suffix"] == "mapfirst"
+    human_row = _value(harness, "compute_spec_human_legacy_run_suffix")
+    assert human_row["table_key_suffix"] == "mapfirst"
+    policy = _value(harness, "compute_spec_policy")
+    assert policy["table_key_suffix"] == "trial"
+    assert policy["mender_unassigned_state_policy"] == "state"
+    # Before the flip an empty suffix would overwrite the legacy table.
+    assert "overwrite the legacy one" in _error(harness, "compute_spec_empty_suffix")
+
+
+@needs_nextflow
+def test_compute_arguments_select_map_first_on_the_staged_labels(
+    harness: dict[str, Any],
+) -> None:
+    assert _value(harness, "compute_arguments").split(" ") == [
+        "--mode",
+        "map_first",
+        "--labels-dir",
+        "compute_inputs/annotation_resolve_out",
+        "--table-key-suffix",
+        "mapfirst",
+        "--mender-unassigned-state-policy",
+        "exclude_from_features",
+    ]
+
+
+@needs_nextflow
+def test_compute_stages_the_resolve_outputs_as_files(harness: dict[str, Any]) -> None:
+    """Label tables, manifests and the pair summary; never the directory."""
+    names = [Path(path).name for path in _value(harness, "compute_label_files")]
+    assert names == [
+        "P1_MERSCOPE_annotation_manifest.json",
+        "P1_MERSCOPE_celltype_labels.parquet",
+        "P1_XENIUM_annotation_manifest.json",
+        "P1_XENIUM_celltype_labels.parquet",
+        "P1_resolve_summary.json",
+    ]
+
+
+@needs_nextflow
+def test_registration_qc_files_are_the_top_level_checks(
+    harness: dict[str, Any],
+) -> None:
+    """RESOLVE stages each QC task's registration check, sorted (M13 C15)."""
+    files = _value(harness, "registration_qc_files")
+    assert [Path(path).name for path in files] == [
+        "p1_merscope_registration_qc.json",
+        "p1_xenium_registration_qc.json",
+    ]
+    assert all(Path(path).parent.name == "qc_out" for path in files)
+    assert [
+        Path(path).name for path in _value(harness, "registration_qc_files_one")
+    ] == ["p1_merscope_registration_qc.json"]
+    assert _value(harness, "registration_qc_files_none") == []
+
+
+@needs_nextflow
+def test_alignment_files_need_both_align_outputs(harness: dict[str, Any]) -> None:
+    files = [Path(path).name for path in _value(harness, "alignment_files")]
+    assert files == ["shared_tissue_mask.npy", "registration_summary.json"]
+    assert _value(harness, "alignment_files_half") == []
 
 
 @needs_nextflow

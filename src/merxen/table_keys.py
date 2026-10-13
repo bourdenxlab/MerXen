@@ -172,3 +172,28 @@ def clustered_table_key(
         base_key = source_key
     suffix_fragment = f"_{suffix_token}" if suffix_token else ""
     return f"{base_key}{CLUSTERED_TABLE_KEY_TAG}{suffix_fragment}"
+
+
+def clustered_table_key_suffix(table_key: str) -> str | None:
+    """Return the suffix a clustered table key carries.
+
+    The inverse of ``clustered_table_key`` on its suffix: the text after the
+    last ``_clustering_squidpy`` tag, without its leading ``_``.
+
+    Args:
+        table_key: A SpatialData table key.
+
+    Returns:
+        ``""`` for an unsuffixed clustered key
+        (``<...>_clustering_squidpy``), the suffix for a suffixed one
+        (``"mapfirst"`` for ``<...>_clustering_squidpy_mapfirst``), or
+        ``None`` when ``table_key`` is not a clustered table key.
+    """
+    head, tag, tail = str(table_key).rpartition(CLUSTERED_TABLE_KEY_TAG)
+    if not tag or not head:
+        return None
+    if not tail:
+        return ""
+    if not tail.startswith("_") or not TABLE_KEY_SUFFIX_PATTERN.match(tail[1:]):
+        return None
+    return tail[1:] or None

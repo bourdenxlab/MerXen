@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import itertools
 import json
+import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -33,18 +34,22 @@ from merxen.annotation.diagnostics import (
     ResolvabilityTrust,
     TrustDecision,
     TrustRules,
+    ValidatedLevelRecord,
     ValidatedPanelRecord,
     ValidatedPanelsError,
     ValidatedPanelTable,
     family_validation_preview,
+    level_class_keys,
     level_rank,
     load_validated_panels,
+    own_family_id,
     panel_diagnostics,
     panel_provenance,
     read_validated_panels,
     trust_for_panel,
     trust_state,
     validated_share_by_class,
+    write_simulation_family,
 )
 from merxen.annotation.panel import (
     PANEL_GENES_FILE,
@@ -58,6 +63,7 @@ from merxen.annotation.panel import (
 )
 from merxen.annotation.provenance import AnnotationProvenance
 from merxen.annotation.schema import CellStatus
+from merxen.annotation.vocab import asset_path
 
 # First 16 hex digits of each seeded panel hash (the loader re-hashes the
 # gene lists, so the full digests are checked there).
@@ -459,6 +465,345 @@ def test_level_ranks() -> None:
 
 
 # --------------------------------------------------------------------------
+# Writing a gate-P family (M13; plan §14 gate-P rule, §4.7)
+
+
+def _sim_family(
+    gene_ids: Sequence[str] | None = None,
+    *,
+    max_level: str = "nt",
+    platforms: tuple[str, ...] = ("MERSCOPE",),
+    **updates: Any,
+) -> tuple[ValidatedPanelRecord, list[ValidatedLevelRecord], PanelGeneList]:
+    """A simulation family validated up to NT, with a failing supercluster class."""
+    genes_used = list(gene_ids or ids(120, offset=7000))
+    panel_hash = compute_panel_hash(sorted(genes_used))
+    family_id = own_family_id("human", platforms, panel_hash)
+    record = ValidatedPanelRecord(
+        panel_id="human_merscope_test_120",
+        family_id=family_id,
+        panel_hash=panel_hash,
+        panel_role="sample_panel",
+        species="human",
+        platforms=platforms,
+        n_genes=len(genes_used),
+        validated_max_level=max_level,
+        validation_basis="simulation",
+        root_marker_source="bundle:whb_frontal_supc_clus/test",
+        evidence="m13/gate_p/test",
+        date="2026-10-07",
+        approving_pr="#0",
+        note="gate-P test family, with a comma",
+    ).model_copy(update=updates)
+
+    def level(
+        name: str, cls: str, status: str = "validated", in_set: bool = True
+    ) -> ValidatedLevelRecord:
+        validated = status == "validated"
+        return ValidatedLevelRecord.model_validate(
+            {
+                "family_id": record.family_id,
+                "panel_hash": record.panel_hash,
+                "level": name,
+                "class": cls,
+                "in_class_set": in_set,
+                "status": status,
+                "validated_min_depth": 30 if validated else None,
+                "tested_max_depth": 120 if validated else None,
+                "evidence": "m13/gate_p/test",
+            }
+        )
+
+    levels = [
+        *(
+            level(name, cls)
+            for name in ("lineage", "broad")
+            for cls in ("Exc", "Astro")
+        ),
+        level("nt", "Exc"),
+        level("supercluster", "Exc"),
+        level("supercluster", "Astro", "failed:NP6"),
+        level("broad", "Vascular", "not_evaluable", in_set=False),
+    ]
+    genes = PanelGeneList(
+        panel_id=record.panel_id,
+        ensembl_ids=tuple(sorted(genes_used)),
+        symbols={gene: f"SYM{index}" for index, gene in enumerate(genes_used)},
+        root_markers=frozenset(genes_used[:12]),
+    )
+    return record, levels, genes
+
+
+def _packaged_copy(tmp_path: Path) -> Path:
+    """A copy of the packaged validated tables."""
+    assert load_validated_panels().source == "packaged"
+    directory = tmp_path / "tables"
+    directory.mkdir()
+    for name in (
+        VALIDATED_PANELS_FILE,
+        VALIDATED_PANEL_LEVELS_FILE,
+        VALIDATED_PANEL_GENES_FILE,
+    ):
+        (directory / name).write_bytes(asset_path(name).read_bytes())
+    return directory
+
+
+def test_write_simulation_family_round_trips_through_load_validated_panels(
+    tmp_path: Path,
+) -> None:
+    directory = _packaged_copy(tmp_path)
+    before = {
+        name: (directory / name).read_text()
+        for name in (
+            VALIDATED_PANELS_FILE,
+            VALIDATED_PANEL_LEVELS_FILE,
+            VALIDATED_PANEL_GENES_FILE,
+        )
+    }
+    record, levels, genes = _sim_family()
+    written = write_simulation_family(
+        directory, record, levels, genes, self_map=ResolvabilityTrust()
+    )
+    table = load_validated_panels(directory / VALIDATED_PANELS_FILE)
+    assert table.records == written.records and table.levels == written.levels
+    # The seeded rows are kept line for line; the family's rows are appended.
+    for name, text in before.items():
+        assert (directory / name).read_text().startswith(text)
+    assert set(table.family_ids()) == {
+        *load_validated_panels().family_ids(),
+        record.family_id,
+    }
+    (reread,) = table.family_records(record.family_id)
+    assert reread == record
+    assert tuple(table.level_records(record.family_id)) == tuple(levels)
+    assert table.genes[record.panel_id] == genes
+    assert not list(directory.glob(".validated_*"))
+    # A panel of the family inherits it (OD-E7) and is validated per class.
+    family = panel_family(
+        list(genes.ensembl_ids),
+        species="human",
+        platforms=["MERSCOPE"],
+        known_families=table.known_families(),
+    )
+    assert family.basis == "listed" and family.family_id == record.family_id
+    decision = trust_state(
+        reference_id="whb_frontal_supc_clus",
+        role="primary",
+        species="human",
+        panel_hash=record.panel_hash,
+        n_panel_genes=record.n_genes,
+        family=family,
+        validated=table,
+        coverage=CoverageDiagnostics.from_bundle_manifest(
+            bundle_manifest(n_query_genes_used=record.n_genes)
+        ),
+        resolvability=ResolvabilityTrust(),
+    )
+    assert decision.state == "validated" and decision.validation_basis == "simulation"
+    assert decision.is_validated("nt", "Exc", 30)
+    assert not decision.is_validated("supercluster", "Astro", 300)
+    assert decision.is_validated("supercluster", "Exc", 300)
+
+
+def test_write_simulation_family_creates_the_tables_in_an_empty_directory(
+    tmp_path: Path,
+) -> None:
+    record, levels, genes = _sim_family()
+    table = write_simulation_family(
+        tmp_path / "new", record, levels, genes, self_map=ResolvabilityTrust()
+    )
+    assert table.family_ids() == [record.family_id]
+    header = (tmp_path / "new" / VALIDATED_PANEL_LEVELS_FILE).read_text().splitlines()
+    assert header[0] == ",".join(VALIDATED_LEVELS_COLUMNS)
+
+
+def test_write_simulation_family_replaces_the_panels_table_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The family is listed only once its level and gene rows are in place."""
+    names = (
+        VALIDATED_PANELS_FILE,
+        VALIDATED_PANEL_LEVELS_FILE,
+        VALIDATED_PANEL_GENES_FILE,
+    )
+    real_replace = os.replace
+    order: list[str] = []
+
+    def recording(source: Any, target: Any) -> None:
+        order.append(Path(target).name)
+        real_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", recording)
+    record, levels, genes = _sim_family()
+    write_simulation_family(
+        _packaged_copy(tmp_path), record, levels, genes, self_map=ResolvabilityTrust()
+    )
+    assert sorted(order) == sorted(names) and order[-1] == VALIDATED_PANELS_FILE
+
+
+@pytest.mark.parametrize("existing", [True, False])
+def test_write_simulation_family_restores_the_tables_when_a_replace_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing: bool
+) -> None:
+    """A failure between the replacements leaves the tables as they were."""
+    directory = _packaged_copy(tmp_path) if existing else tmp_path / "new"
+    before = (
+        {path.name: path.read_bytes() for path in directory.iterdir()}
+        if existing
+        else {}
+    )
+    real_replace = os.replace
+    calls: list[str] = []
+
+    def failing(source: Any, target: Any) -> None:
+        calls.append(Path(target).name)
+        if len(calls) == 2:
+            raise OSError("disk full")
+        real_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", failing)
+    record, levels, genes = _sim_family()
+    with pytest.raises(OSError, match="disk full"):
+        write_simulation_family(
+            directory, record, levels, genes, self_map=ResolvabilityTrust()
+        )
+    monkeypatch.setattr(os, "replace", real_replace)
+    # The first table was replaced, then restored; the panels table never was.
+    assert VALIDATED_PANELS_FILE not in calls[:2]
+    assert {path.name: path.read_bytes() for path in directory.iterdir()} == before
+    if existing:
+        table = load_validated_panels(directory / VALIDATED_PANELS_FILE)
+        assert record.family_id not in table.family_ids()
+
+
+def test_write_simulation_family_refuses_a_family_without_a_self_map(
+    tmp_path: Path,
+) -> None:
+    """M13 D13 (a): a simulation family without a self-map stays broad_only."""
+    record, levels, genes = _sim_family()
+    with pytest.raises(ValidatedPanelsError, match="no resolvability self-map"):
+        write_simulation_family(tmp_path, record, levels, genes, self_map=None)
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize(
+    ("case", "match"),
+    [
+        ("real_data", "simulation rows only"),
+        ("family_id", "hash-derived id"),
+        ("nt_glia", "not a consensus class key"),
+        ("seaad", "not a consensus class key"),
+        ("cop_at_broad", "not a consensus class key"),
+        ("other_family", "not the record's"),
+        ("no_levels", "needs its"),
+        ("other_genes", "gene list is of"),
+        ("genes_hash", "does not hash to panel_hash"),
+        ("rank_rule", "gate-P rule"),
+        ("duplicate", "already in"),
+        ("seeded_hash", "duplicated panel_hash"),
+    ],
+)
+def test_write_simulation_family_refuses_rows_it_must_not_write(
+    tmp_path: Path, case: str, match: str
+) -> None:
+    directory = _packaged_copy(tmp_path)
+    record, levels, genes = _sim_family()
+    if case == "real_data":
+        record = record.model_copy(update={"validation_basis": "real_data"})
+    elif case == "family_id":
+        record = record.model_copy(update={"family_id": "human_merscope_custom"})
+    elif case == "nt_glia":
+        levels.append(
+            levels[0].model_copy(update={"level": "nt", "class_name": "Astro"})
+        )
+    elif case == "seaad":
+        levels.append(levels[0].model_copy(update={"level": "seaad_subclass"}))
+    elif case == "cop_at_broad":
+        levels.append(levels[2].model_copy(update={"class_name": "COP"}))
+    elif case == "other_family":
+        levels.append(levels[0].model_copy(update={"family_id": "human_set_a"}))
+    elif case == "no_levels":
+        levels = []
+    elif case == "other_genes":
+        genes = PanelGeneList(
+            panel_id="other",
+            ensembl_ids=genes.ensembl_ids,
+            symbols=genes.symbols,
+            root_markers=genes.root_markers,
+        )
+    elif case == "genes_hash":
+        genes = PanelGeneList(
+            panel_id=genes.panel_id,
+            ensembl_ids=genes.ensembl_ids[1:],
+            symbols=genes.symbols,
+            root_markers=frozenset(genes.ensembl_ids[1:5]),
+        )
+    elif case == "rank_rule":
+        record = record.model_copy(update={"validated_max_level": "supercluster"})
+    elif case == "duplicate":
+        write_simulation_family(
+            directory, record, levels, genes, self_map=ResolvabilityTrust()
+        )
+    elif case == "seeded_hash":
+        seeded = load_validated_panels().records[1]
+        assert seeded.panel_id == "human_set_a_297"
+        record = record.model_copy(
+            update={
+                "panel_hash": seeded.panel_hash,
+                "family_id": own_family_id("human", ("MERSCOPE",), seeded.panel_hash),
+            }
+        )
+        levels = [
+            item.model_copy(
+                update={"family_id": record.family_id, "panel_hash": seeded.panel_hash}
+            )
+            for item in levels
+        ]
+        genes = PanelGeneList(
+            panel_id=genes.panel_id,
+            ensembl_ids=(),
+            symbols={},
+            root_markers=frozenset(),
+        )
+    before = {path.name: path.read_bytes() for path in directory.iterdir()}
+    with pytest.raises(ValidatedPanelsError, match=match):
+        write_simulation_family(
+            directory, record, levels, genes, self_map=ResolvabilityTrust()
+        )
+    # Nothing is written on a refusal (the staging directory is removed).
+    assert {path.name: path.read_bytes() for path in directory.iterdir()} == before
+
+
+def test_level_class_keys_follow_the_consensus_class_keys() -> None:
+    """D14 (a): NT holds the neuron classes only; SEA-AD and fine levels none."""
+    broad = level_class_keys("human", "broad")
+    assert broad == {
+        "Exc",
+        "Inh",
+        "Astro",
+        "Oligo",
+        "OPC",
+        "Immune",
+        "Vascular",
+        "Fibroblast",
+    }
+    assert level_class_keys("human", "lineage") == broad
+    assert level_class_keys("human", "supercluster") == broad | {"COP"}
+    assert level_class_keys("human", "nt") == {"Exc", "Inh"}
+    for level in ("seaad_subclass", "cluster", "supertype"):
+        assert level_class_keys("human", level) == frozenset()
+    mouse_class = level_class_keys("mouse", "class")
+    assert "01 IT-ET Glut" in mouse_class and len(mouse_class) == 34
+    assert level_class_keys("mouse", "broad") == mouse_class
+    mouse_nt = level_class_keys("mouse", "nt")
+    assert "01 IT-ET Glut" in mouse_nt and mouse_nt < mouse_class
+    assert level_class_keys("fish", "broad") == frozenset()
+    assert own_family_id("human", ["XENIUM", "MERSCOPE"], "ab" * 32) == (
+        "human_merscope_xenium_" + "ab" * 6
+    )
+
+
+# --------------------------------------------------------------------------
 # Diagnostics
 
 
@@ -792,20 +1137,22 @@ def test_trust_state_truth_table(
 
 
 def test_every_trust_combination_has_exactly_one_state(
-    real_table: tuple[ValidatedPanelTable, list[str]],
+    real_table: tuple[ValidatedPanelTable, list[str]], tmp_path: Path
 ) -> None:
-    table, gene_ids = real_table
+    real, gene_ids = real_table
+    simulation, _ = simulation_table(tmp_path)
+    tables = {"real_data": real, "simulation": simulation, None: real}
     order = ["refused", "broad_only", "provisional", "validated"]
-    for listed, gene_status, mapped, root, resolvability in itertools.product(
-        (True, False),
+    for basis, gene_status, mapped, root, resolvability in itertools.product(
+        ("real_data", "simulation", None),
         ("ok", "refused"),
         (49, 50),
         (9, 10),
         ("none", "refused", "broad_only", None),
     ):
         decision = decide(
-            table,
-            gene_ids if listed else ids(100, offset=500),
+            tables[basis],
+            gene_ids if basis is not None else ids(100, offset=500),
             gene_status=gene_status,
             mapped=mapped,
             root=root,
@@ -819,12 +1166,16 @@ def test_every_trust_combination_has_exactly_one_state(
         )
         if refused:
             expected = "refused"
-        elif resolvability == "broad_only" or (resolvability is None and not listed):
+        elif resolvability == "broad_only" or (
+            # The fail-safe spares only real-data-validated families (D13 (a)).
+            resolvability is None and basis != "real_data"
+        ):
             expected = "broad_only"
         else:
-            expected = "validated" if listed else "provisional"
-        assert decision.state == expected
+            expected = "validated" if basis is not None else "provisional"
+        assert decision.state == expected, (basis, gene_status, mapped, root)
         assert decision.state in order
+        assert decision.validation_basis == (basis if expected == "validated" else None)
 
 
 def test_other_platform_or_species_never_inherits_validated(
@@ -936,6 +1287,81 @@ def test_missing_coverage_or_resolvability_is_recorded(
     assert sensitivity.state == "provisional" and sensitivity.complete
 
 
+def test_a_real_data_family_without_a_self_map_stays_validated_with_the_h18_note(
+    real_table: tuple[ValidatedPanelTable, list[str]],
+) -> None:
+    """Real-data trust rests on real datasets: a missing self-map is a note."""
+    table, gene_ids = real_table
+    for rules in (None, TrustRules(resolvability_enabled=False)):
+        decision = decide(table, gene_ids, resolvability=None, rules=rules)
+        assert (decision.state, decision.validation_basis) == (
+            "validated",
+            "real_data",
+        )
+        assert decision.reason_codes == ["family_validated"]
+        (note,) = decision.notes
+        assert note.code == "resolvability_not_run" and "H18" in note.detail
+        assert decision.complete is False
+        for level in ("lineage", "broad", "nt", "supercluster", "seaad_subclass"):
+            assert decision.emission_regime(level) == "validated"
+            assert decision.level_status_override(level) is None
+        assert decision.gate_level_cap is None
+        assert not decision.banner and not decision.gate_warning
+
+
+def test_a_simulation_family_without_a_self_map_stays_broad_only(
+    tmp_path: Path,
+) -> None:
+    """D13 (a): the provisional fail-safe, with the family verdict as a note.
+
+    Before the fix the family's listing lifted the fail-safe, so a gate-P
+    promotion turned ``broad_only`` into ``validated`` and changed what is
+    emitted (plan §8.2, §14).
+    """
+    table, gene_ids = simulation_table(tmp_path)
+    empty = ValidatedPanelTable(records=())
+    levels = ("lineage", "broad", "nt", "supercluster", "seaad_subclass", "cluster")
+    for rules in (None, TrustRules(resolvability_enabled=False)):
+        before = decide_sim(empty, gene_ids, self_map=False, rules=rules)
+        after = decide_sim(table, gene_ids, self_map=False, rules=rules)
+        assert before.state == after.state == "broad_only"
+        assert before.reason_codes == after.reason_codes == ["resolvability_not_run"]
+        assert "validated by simulation" in after.reasons[0].detail
+        assert [note.code for note in after.notes] == ["family_validated"]
+        assert "simulation" in after.notes[0].detail
+        assert after.validation_basis is None and after.level_records == ()
+        assert after.family_basis == "listed"
+        assert after.validated_panel_ids == ("sim_panel",)
+        assert after.effects() == before.effects()
+        assert (after.gate_level_cap, after.gate_reason) == (
+            "broad_only",
+            "panel_broad_only",
+        )
+        for level in levels:
+            assert after.level_status_override(level) == (
+                before.level_status_override(level)
+            )
+            assert after.emission_regime(level) == "provisional"
+            assert after.floor_source(level) == before.floor_source(level)
+        assert not after.validated_mask("broad", ["Exc"], [500], [True]).any()
+        assert after.unvalidated_share_warning({"broad": 0.0}) == (False, [])
+        record = json.loads(json.dumps(after.to_json()))
+        assert record["state"] == "broad_only"
+        assert record["validation_basis"] is None
+    disabled = decide_sim(
+        table, gene_ids, self_map=False, rules=TrustRules(resolvability_enabled=False)
+    )
+    assert "disabled" in disabled.reasons[0].detail
+    # With its self-map the family is validated; before PREP (no bundle) it
+    # previews as validated, as an unlisted panel previews as provisional.
+    assert decide_sim(table, gene_ids).state == "validated"
+    preview = decide_sim(table, gene_ids, self_map=False, coverage=False)
+    assert preview.state == "validated" and not preview.complete
+    # Roles without a self-map are not held to the fail-safe.
+    sensitivity = decide_sim(table, gene_ids, self_map=False, role="likelihood")
+    assert sensitivity.state == "validated"
+
+
 def test_trust_rules_follow_the_config() -> None:
     config = AnnotationConfig(species="human")
     rules = TrustRules.from_config(config)
@@ -1023,8 +1449,20 @@ def test_regimes_thresholds_and_floors(
 
 
 def decide_sim(
-    table: ValidatedPanelTable, gene_ids: Sequence[str], **kwargs: Any
+    table: ValidatedPanelTable,
+    gene_ids: Sequence[str],
+    *,
+    self_map: bool = True,
+    rules: TrustRules | None = None,
+    coverage: bool = True,
+    role: str = "primary",
+    **kwargs: Any,
 ) -> TrustDecision:
+    """Decide a panel's trust; ``kwargs`` is its bundle's resolvability constraint.
+
+    ``self_map=False`` decides for a bundle without a resolvability self-map
+    (``kwargs`` unused) and ``coverage=False`` before PREP (no bundle).
+    """
     family = panel_family(
         gene_ids,
         species="human",
@@ -1033,16 +1471,21 @@ def decide_sim(
     )
     return trust_state(
         reference_id="whb_frontal_supc_clus",
-        role="primary",
+        role=role,  # type: ignore[arg-type]
         species="human",
         panel_hash=compute_panel_hash(sorted(gene_ids)),
         n_panel_genes=len(gene_ids),
         family=family,
         validated=table,
-        coverage=CoverageDiagnostics.from_bundle_manifest(
-            bundle_manifest(n_query_genes_used=len(gene_ids))
+        rules=rules,
+        coverage=(
+            CoverageDiagnostics.from_bundle_manifest(
+                bundle_manifest(n_query_genes_used=len(gene_ids))
+            )
+            if coverage
+            else None
         ),
-        resolvability=ResolvabilityTrust(**kwargs),
+        resolvability=ResolvabilityTrust(**kwargs) if self_map else None,
     )
 
 
@@ -1106,14 +1549,18 @@ def test_promotion_by_simulation_never_changes_what_is_emitted(tmp_path: Path) -
     empty = ValidatedPanelTable(records=())
     rng = np.random.default_rng(0)
     levels = ["lineage", "broad", "nt", "supercluster", "seaad_subclass", "cluster"]
-    for constraint in ({}, {"state": "broad_only", "reasons": ("x",)}):
+    cases: list[tuple[dict[str, Any], tuple[str, str]]] = [
+        ({}, ("provisional", "validated")),
+        # Resolvability's verdicts win over any validation.
+        ({"state": "broad_only", "reasons": ("x",)}, ("broad_only", "broad_only")),
+        ({"state": "refused", "reasons": ("x",)}, ("refused", "refused")),
+        # No self-map: the provisional fail-safe holds after promotion (D13).
+        ({"self_map": False}, ("broad_only", "broad_only")),
+    ]
+    for constraint, states in cases:
         before = decide_sim(empty, gene_ids, **constraint)
         after = decide_sim(sim_table, gene_ids, **constraint)
-        if constraint:
-            # Resolvability's broad-only verdict wins over any validation.
-            assert before.state == after.state == "broad_only"
-        else:
-            assert (before.state, after.state) == ("provisional", "validated")
+        assert (before.state, after.state) == states
         for level in levels:
             assert before.emission_regime(level) == after.emission_regime(level)
             assert before.threshold_source(level) == after.threshold_source(level)
@@ -1142,6 +1589,9 @@ def test_promotion_by_simulation_never_changes_what_is_emitted(tmp_path: Path) -
             assert after_mask.any()
             assert before.banner and not after.banner
             assert before.gate_warning and not after.gate_warning
+        else:
+            assert not after_mask.any()
+            assert before.effects() == after.effects()
 
 
 # --------------------------------------------------------------------------
@@ -1187,6 +1637,65 @@ def test_panel_provenance_round_trips(
     refused = decide(table, ids(100, offset=500), root=3)
     refused_provenance = panel_provenance(refused, diagnostics)
     assert refused_provenance.panel_trust == "refused" and refused_provenance.banner
+
+
+def test_panel_provenance_without_diagnostics_keeps_the_trust_fields(
+    real_table: tuple[ValidatedPanelTable, list[str]],
+) -> None:
+    """RESOLVE's fallback (no panel file or diagnostics; M13 C11).
+
+    The record keeps every field the trust decision holds (family, basis,
+    validated level, table digests), the panel mode and the validated
+    shares, records the given panel hash, and leaves the gene-ID fields
+    empty; with diagnostics the given hash is ignored.
+    """
+    table, gene_ids = real_table
+    family = family_of(table, gene_ids)
+    panel = annotation_panel(gene_ids, family)
+    diagnostics = panel_diagnostics(
+        panel,
+        panel_report={"declared_panels": {"S_X": report_entry()}},
+        bundles=[bundle_manifest(panel_hash=panel.panel_hash, n_query_genes_used=100)],
+    )
+    decision = trust_for_panel(
+        diagnostics,
+        reference_id="whb_frontal_supc_clus",
+        role="primary",
+        validated=table,
+    )
+    options: dict[str, Any] = {
+        "panel_mode": "per_platform",
+        "validated_share": {"broad": 0.8, "nt": 1.0},
+        "n_missing_panel_genes": 2,
+    }
+    full = panel_provenance(decision, diagnostics, panel_hash="f" * 64, **options)
+    assert full == panel_provenance(decision, diagnostics, **options)
+    assert full.panel_hash == panel.panel_hash
+    fallback = panel_provenance(decision, None, panel_hash="f" * 64, **options)
+    assert fallback.panel_hash == "f" * 64
+    gene_fields = {
+        "n_declared_genes",
+        "gene_id_resolution",
+        "n_unmapped",
+        "controls_removed",
+    }
+    assert fallback.model_dump(exclude=gene_fields | {"panel_hash"}) == (
+        full.model_dump(exclude=gene_fields | {"panel_hash"})
+    )
+    assert (fallback.panel_family, fallback.family_basis) == (
+        decision.family_id,
+        "listed",
+    )
+    assert fallback.validation_basis == "real_data"
+    assert fallback.validated_max_level == decision.validated_max_level
+    assert fallback.validated_panels_sha256 == table.sha256[VALIDATED_PANELS_FILE]
+    assert fallback.panel_mode == "per_platform"
+    assert fallback.validated_share == {"broad": 0.8, "nt": 1.0}
+    assert fallback.n_missing_panel_genes == 2
+    assert fallback.n_declared_genes is None and fallback.n_unmapped is None
+    assert fallback.gene_id_resolution == {} and fallback.controls_removed == {}
+    # Without a hash, the decision's.
+    assert panel_provenance(decision, None).panel_hash == decision.panel_hash
 
 
 def test_the_panel_report_records_the_family_validation(tmp_path: Path) -> None:

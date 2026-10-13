@@ -61,10 +61,25 @@ def extract_cell_coordinates(
     *,
     sdata_obj: Any | None = None,
     shape_key: str | None = None,
+    use_table_spatial: bool = True,
 ) -> CellCoordinateTable:
-    """Extract per-cell centroid coordinates from an AnnData table or shapes."""
+    """Extract per-cell centroid coordinates from an AnnData table or shapes.
+
+    Args:
+        table: Cell table.
+        sdata_obj: SpatialData object holding ``shape_key``.
+        shape_key: Shape element whose centroids are used when the table's
+            ``obsm['spatial']`` is absent or not used.
+        use_table_spatial: Use ``obsm['spatial']`` when present. Pass ``False``
+            when it is in another frame than ``shape_key`` (a native table read
+            against an aligned shape element).
+
+    Returns:
+        Cell IDs, x/y coordinates and their source (``obsm:spatial`` or
+        ``shapes:<key>``).
+    """
     cell_ids = _table_cell_ids(table)
-    if "spatial" in table.obsm:
+    if use_table_spatial and "spatial" in table.obsm:
         coords = np.asarray(table.obsm["spatial"], dtype=float)
         if coords.ndim == 2 and coords.shape[0] == table.n_obs and coords.shape[1] >= 2:
             return CellCoordinateTable(

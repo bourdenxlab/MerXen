@@ -1,36 +1,47 @@
-"""CLUSTERING_ANNOTATE: MAP after the bundles, RESOLVE after MAP (plan §3.1-§3.4).
+"""CLUSTERING_MAP_FIRST: MAP -> RESOLVE -> COMPUTE_CPU (plan §3.1-§3.5).
 
 ``workflows/subworkflows/clustering_map_first.nf`` runs
 ``ANNOTATION_PREPARED_REFERENCES`` (ANNOTATE_PANEL, one ANNOTATE_REFERENCE_PREP
 per unique bundle, the per pair x segmentation ``groupKey`` collection),
 then ``CLUSTERING_SQUIDPY_ANNOTATE_MAP`` on each released pair x
-segmentation (``CLUSTERING_ANNOTATE_MAP``) and
+segmentation (``CLUSTERING_ANNOTATE_MAP``),
 ``CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE`` after each MAP
-(``CLUSTERING_ANNOTATE``). When ``nextflow`` is installed, a harness runs it
-with ``-stub-run`` (PREP, MAP and RESOLVE write stub outputs; ANNOTATE_PANEL
-runs for real on synthetic prepared H5ADs, or, for the fixture branches, a
-fake ``merxen annotation-panel`` writes hand-written ``required_bundles.json``
-files: same-panel set c, ``per_platform``, mouse, refused, a failing and a
-slow PREP, a large panel) and checks that:
+(``CLUSTERING_ANNOTATE``) and ``CLUSTERING_SQUIDPY_COMPUTE_CPU`` after each
+RESOLVE (``CLUSTERING_MAP_FIRST``, main.nf hook H5). When ``nextflow`` is
+installed, a harness runs ``CLUSTERING_MAP_FIRST`` with ``-stub-run`` (PREP,
+MAP, RESOLVE and COMPUTE_CPU write stub outputs; ANNOTATE_PANEL runs for real
+on synthetic prepared H5ADs, or, for the fixture branches, a fake ``merxen
+annotation-panel`` writes hand-written ``required_bundles.json`` files:
+same-panel set c, ``per_platform``, mouse, refused, a failing and a slow
+PREP, a large panel) and checks that:
 
 * MAP starts for a pair x segmentation only after every PREP it needs has
   completed, and never waits for another branch's bundles;
 * MAP receives exactly the bundle refs its ``required_bundles.json`` lists
   (none for a refused panel), and a failed PREP drops only its branches;
 * RESOLVE runs once per pair x segmentation, after its own MAP, on that
-  MAP's output and the same bundle refs;
-* MAP's and RESOLVE's resources follow the plan (6 CPUs, 24 GB / 48 GB above
-  1,000 genes; 2 CPUs, 16 GB / 32 GB);
-* a ``-resume`` run re-runs PREP (never cached) but keeps MAP and RESOLVE
-  cached, because both hash their inputs' content (``cache "deep"``);
+  MAP's output, the same bundle refs, the pair's ALIGN files and the
+  branch's registration checks from the QC stage (read with
+  ``--registration-qc-dir``; a branch without an entry still resolves);
+* COMPUTE_CPU runs once per pair x segmentation, after its own RESOLVE, on
+  the RESOLVE output, in the main environment without a GPU lock, and emits
+  FINALIZE's input shape;
+* MAP's, RESOLVE's and COMPUTE_CPU's resources follow the plan (6 CPUs,
+  24 GB / 48 GB above 1,000 genes; 2 CPUs, 16 GB / 32 GB; 8 CPUs, 32 GB);
+* a ``-resume`` run re-runs PREP (never cached) but keeps MAP, RESOLVE and
+  COMPUTE_CPU cached, because they hash their inputs' content
+  (``cache "deep"``);
 * a ``-resume`` run after a RESOLVE-only change (``annotation_allow_single_method``)
-  re-runs every RESOLVE and no MAP or ANNOTATE_PANEL.
+  re-runs every RESOLVE and no MAP or ANNOTATE_PANEL, and COMPUTE_CPU, whose
+  staged labels changed; a RESOLVE re-run with byte-identical outputs leaves
+  COMPUTE_CPU cached;
+* the end-of-run summary (hook H6) lists the branch whose PREP failed and the
+  refused panels.
 
 A second run executes the real MAP and RESOLVE scripts (no ``-stub-run``)
 with a fake ``merxen`` that records their command lines and environments;
-for the refused panel both run the real commands (slow).
-``CLUSTERING_MAP_FIRST`` itself still refuses to run until M5, and
-``main.nf`` never calls any of it (legacy runs are unchanged).
+for the refused panel both run the real commands (slow). ``main.nf`` calls
+``CLUSTERING_MAP_FIRST`` only in map_first runs (hook H5).
 """
 
 from __future__ import annotations
@@ -171,7 +182,73 @@ def _prepared_branch(
         "samples_json": json.dumps(samples),
         "config": str(config),
         "prepared_dir": str(prepared),
+        "alignment_files": [],
     }
+
+
+# The pair whose ALIGN files the harness passes (every other pair has none).
+ALIGNED_PAIR = "F1"
+ALIGN_FILES = ("shared_tissue_mask.npy", "registration_summary.json")
+# The branch whose QC registration checks the harness passes (M13 C15), the
+# branch with no registration entry (it must still resolve, without checks)
+# and an entry of a branch that is never mapped (it must be left out).
+REGISTERED_BRANCH = ("F1", "proseg_hybrid")
+REGISTRATION_FILES = (
+    "f1_merscope_registration_qc.json",
+    "f1_xenium_registration_qc.json",
+)
+UNREGISTERED_BRANCH = ("PFEW", "proseg_hybrid")
+STRAY_REGISTRATION_BRANCH = ("F9", "proseg_hybrid")
+
+
+def _write_alignment(root: Path, pair_ids: list[str]) -> list[str]:
+    """Write one ALIGN entry per pair: F1's align_out files, [] for the others."""
+    align_out = root / "align" / ALIGNED_PAIR / "align_out"
+    align_out.mkdir(parents=True)
+    files = [str(align_out / name) for name in ALIGN_FILES]
+    for path in files:
+        Path(path).write_text("{}")
+    entries = [
+        {"pair_id": pair_id, "files": files if pair_id == ALIGNED_PAIR else []}
+        for pair_id in sorted(set(pair_ids))
+    ]
+    (root / "alignment_inputs.json").write_text(json.dumps(entries))
+    return files
+
+
+def _write_registration(root: Path, branches: list[tuple[str, str]]) -> list[str]:
+    """Write one registration entry per branch (M13 C15).
+
+    ``REGISTERED_BRANCH`` gets its two QC checks, ``UNREGISTERED_BRANCH`` no
+    entry at all, a branch that is never mapped a stray entry, and every
+    other branch ``[]`` (no QC stage).
+    """
+    qc_out = root / "qc" / "_".join(REGISTERED_BRANCH) / "qc_out"
+    qc_out.mkdir(parents=True)
+    files = [str(qc_out / name) for name in REGISTRATION_FILES]
+    for path in files:
+        Path(path).write_text(json.dumps({"status": "PASS", "density_ratio": 3.0}))
+    stray = root / "qc" / "stray" / "f9_merscope_registration_qc.json"
+    stray.parent.mkdir(parents=True)
+    stray.write_text("{}")
+    entries = [
+        {
+            "pair_id": pair_id,
+            "segmentation": segmentation,
+            "files": files if (pair_id, segmentation) == REGISTERED_BRANCH else [],
+        }
+        for pair_id, segmentation in sorted(set(branches))
+        if (pair_id, segmentation) != UNREGISTERED_BRANCH
+    ]
+    entries.append(
+        {
+            "pair_id": STRAY_REGISTRATION_BRANCH[0],
+            "segmentation": STRAY_REGISTRATION_BRANCH[1],
+            "files": [str(stray)],
+        }
+    )
+    (root / "registration_inputs.json").write_text(json.dumps(entries))
+    return files
 
 
 def _write_fixture_panels(root: Path) -> Path:
@@ -247,6 +324,9 @@ if command == "annotation-panel":
     fixture = FIXTURES / f"{value('--pair-id')}_{value('--segmentation')}"
     if fixture.is_dir():
         shutil.copytree(fixture, value("--output-dir"))
+        (Path(value("--output-dir")) / "fake_panel_argv.json").write_text(
+            json.dumps(args)
+        )
         sys.exit(0)
 elif command == "annotation-reference-prep":
     from merxen.annotation.store import BundleRef
@@ -366,11 +446,59 @@ class MapHarness {
     static Map labelRow(List item) {
         return mapRow(item[0..7]) + [resolve_dir: item[8].toString()]
     }
+
+    static Map computedRow(List item) {
+        def (pairId, segmentation, samplesJson, computedDir) = item[0..3]
+        return [
+            pair_id: pairId,
+            segmentation: segmentation,
+            samples_json: samplesJson,
+            computed_dir: computedDir.toString(),
+        ]
+    }
+
+    static void writeText(Object path, String text) {
+        new File(path.toString()).text = text
+    }
 }
 """
 
-HARNESS_MAIN = """
-include { __ENTRY__ } from '__SUBWORKFLOW__'
+# The registration checks per pair x segmentation, as hook H5 builds them.
+REGISTRATION_CHANNEL = """registration_ch = channel
+        .fromList(MapHarness.readList(params.registration_inputs))
+        .map { item ->
+            tuple(
+                item.pair_id, item.segmentation,
+                item.files.collect { path -> file(path) },
+            )
+        }"""
+
+# CLUSTERING_ANNOTATE takes PREPARE's tuple plus the pair's ALIGN files, and
+# the registration checks.
+HARNESS_ANNOTATE = """
+include { CLUSTERING_ANNOTATE } from '__SUBWORKFLOW__'
+
+workflow {
+    prepared_ch = channel
+        .fromList(MapHarness.readList(params.prepared_inputs))
+        .map { item ->
+            tuple(
+                item.pair_id, item.segmentation, item.samples_json,
+                file(item.config), file(item.prepared_dir),
+                item.alignment_files.collect { path -> file(path) },
+            )
+        }
+    __REGISTRATION__
+    mapped = CLUSTERING_ANNOTATE(prepared_ch, registration_ch)
+    __EMIT__
+}
+"""
+
+# CLUSTERING_MAP_FIRST, as main.nf's hook H5 calls it: PREPARE's tuple, one
+# ALIGN entry per pair, the registration checks per pair x segmentation, and
+# the end-of-run summary of hook H6.
+HARNESS_MAP_FIRST = """
+include { CLUSTERING_MAP_FIRST } from '__SUBWORKFLOW__'
 
 workflow {
     prepared_ch = channel
@@ -381,8 +509,30 @@ workflow {
                 file(item.config), file(item.prepared_dir),
             )
         }
-    mapped = __ENTRY__(prepared_ch)
+    alignment_ch = channel
+        .fromList(MapHarness.readList(params.alignment_inputs))
+        .map { item -> tuple(item.pair_id, item.files.collect { path -> file(path) }) }
+    __REGISTRATION__
+    prepared_ch.subscribe { pairId, segmentation, _samplesJson, _config, _preparedDir ->
+        AnnotationRunRecord.expect(pairId, segmentation)
+    }
+    mapped = CLUSTERING_MAP_FIRST(prepared_ch, alignment_ch, registration_ch)
     __EMIT__
+    mapped.computed
+        .map { item -> MapHarness.computedRow(item) }
+        .collect()
+        .subscribe { rows -> MapHarness.write(params.computed_out, rows) }
+    def harnessParams = params
+    def harnessWorkflow = workflow
+    harnessWorkflow.onComplete {
+        MapHarness.writeText(
+            harnessParams.summary_out,
+            AnnotationSettings.completionSummary(
+                harnessParams,
+                AnnotationRunRecord.runInfo() + [success: harnessWorkflow.success],
+            ),
+        )
+    }
 }
 """
 
@@ -396,16 +546,18 @@ EMIT_LABELS = """mapped.maps
         .subscribe { rows -> MapHarness.write(params.labels_out, rows) }"""
 
 
-def _write_harness(root: Path, *, entry: str = "CLUSTERING_ANNOTATE") -> None:
+def _write_harness(root: Path, *, entry: str = "CLUSTERING_MAP_FIRST") -> None:
     (root / "lib").mkdir(parents=True)
     for source in LIB_DIR.glob("*.groovy"):
         shutil.copy(source, root / "lib" / source.name)
     (root / "lib" / "MapHarness.groovy").write_text(HARNESS_CLASS)
-    emit = EMIT_LABELS if entry == "CLUSTERING_ANNOTATE" else ""
+    template = (
+        HARNESS_MAP_FIRST if entry == "CLUSTERING_MAP_FIRST" else HARNESS_ANNOTATE
+    )
     (root / "main.nf").write_text(
-        HARNESS_MAIN.replace("__ENTRY__", entry)
-        .replace("__SUBWORKFLOW__", str(SUBWORKFLOW))
-        .replace("__EMIT__", emit)
+        template.replace("__SUBWORKFLOW__", str(SUBWORKFLOW))
+        .replace("__EMIT__", EMIT_LABELS)
+        .replace("__REGISTRATION__", REGISTRATION_CHANNEL)
     )
 
 
@@ -419,6 +571,10 @@ def _write_inputs(root: Path) -> list[dict[str, str]]:
         for (pair_id, segmentation), n_genes in REAL_BRANCHES.items()
     ]
     (root / "prepared_inputs.json").write_text(json.dumps(items))
+    _write_alignment(root, [item["pair_id"] for item in items])
+    _write_registration(
+        root, [(item["pair_id"], item["segmentation"]) for item in items]
+    )
     return items
 
 
@@ -452,9 +608,14 @@ params {{
     outdir = "{root / "results"}"
     annotation_reference_store = "{root / "store"}"
     prepared_inputs = "{root / "prepared_inputs.json"}"
+    alignment_inputs = "{root / "alignment_inputs.json"}"
+    registration_inputs = "{root / "registration_inputs.json"}"
     maps_out = "{root / "maps_out.json"}"
     labels_out = "{root / "labels_out.json"}"
+    computed_out = "{root / "computed_out.json"}"
+    summary_out = "{root / "summary_out.txt"}"
     annotation_allow_single_method = {str(single_method).lower()}
+    clustering_squidpy_mode = "map_first"
 }}
 executor {{
     cpus = 64
@@ -469,7 +630,7 @@ trace {{
     overwrite = true
     raw = true
     file = "{root / "trace.tsv"}"
-    fields = "task_id,process,tag,status,submit,start,complete,cpus,memory"
+    fields = "task_id,process,tag,status,submit,start,complete,cpus,memory,workdir"
 }}
 """
     )
@@ -506,16 +667,26 @@ def _published_resolve(root: Path) -> dict[str, dict[str, Any]]:
 
 
 def _collect(root: Path) -> dict[str, Any]:
-    """Read one run's trace, emitted rows and published RESOLVE outputs."""
+    """Read one run's trace, emitted rows, published RESOLVE outputs, summary."""
     results = {
         "trace": _read_trace(root / "trace.tsv"),
         "maps": json.loads((root / "maps_out.json").read_text()),
         "labels": json.loads((root / "labels_out.json").read_text()),
+        "computed": json.loads((root / "computed_out.json").read_text()),
+        "summary": (root / "summary_out.txt").read_text(),
         "resolve": _published_resolve(root),
     }
-    (root / "maps_out.json").unlink()
-    (root / "labels_out.json").unlink()
+    for name in ("maps_out.json", "labels_out.json", "computed_out.json"):
+        (root / name).unlink()
+    (root / "summary_out.txt").unlink()
     return results
+
+
+def _move_resolve_work_dirs(trace: list[dict[str, str]]) -> None:
+    """Move RESOLVE's task directories aside: -resume must re-run RESOLVE."""
+    for row in _rows(trace, RESOLVE):
+        work = Path(row["workdir"])
+        work.rename(work.with_name(work.name + ".moved"))
 
 
 def _run_harness(root: Path) -> dict[str, Any]:
@@ -542,19 +713,36 @@ def _run_harness(root: Path) -> dict[str, Any]:
     third = _run(root, env, "-stub-run", "-resume")
     assert third.returncode == 0, third.stdout + third.stderr
     runs["resolve_change"] = _collect(root)
+    # RESOLVE re-runs (its task directories are gone) and writes the same
+    # bytes: COMPUTE_CPU, which hashes the staged labels, stays cached.
+    _move_resolve_work_dirs(runs["resolve_change"]["trace"])
+    fourth = _run(root, env, "-stub-run", "-resume")
+    assert fourth.returncode == 0, fourth.stdout + fourth.stderr
+    runs["resolve_rerun"] = _collect(root)
     return {
         "root": str(root),
         "trace": runs["first"]["trace"],
         "maps": runs["first"]["maps"],
         "labels": runs["first"]["labels"],
+        "computed": runs["first"]["computed"],
+        "summary": runs["first"]["summary"],
         "resolve": runs["first"]["resolve"],
         "resume_trace": runs["resume"]["trace"],
         "resume_maps": runs["resume"]["maps"],
         "resume_labels": runs["resume"]["labels"],
+        "resume_computed": runs["resume"]["computed"],
         "change_trace": runs["resolve_change"]["trace"],
         "change_maps": runs["resolve_change"]["maps"],
         "change_labels": runs["resolve_change"]["labels"],
+        "change_computed": runs["resolve_change"]["computed"],
         "change_resolve": runs["resolve_change"]["resolve"],
+        "rerun_trace": runs["resolve_rerun"]["trace"],
+        "rerun_labels": runs["resolve_rerun"]["labels"],
+        "rerun_computed": runs["resolve_rerun"]["computed"],
+        "align_files": [
+            str(root / "align" / ALIGNED_PAIR / "align_out" / name)
+            for name in ALIGN_FILES
+        ],
         "outdir": str(root / "results"),
     }
 
@@ -825,8 +1013,26 @@ def test_resolve_reads_its_own_map_output_and_bundle_refs(
         ]
         staged = sorted((output / "stub_bundle_refs").glob("*.json"))
         assert sorted(_refs([str(path) for path in staged])) == sorted(expected)
-        # No shared tissue mask before M5 wires ALIGN's.
-        assert summary["alignment_files"] == []
+        # The pair's ALIGN files come from the ALIGN channel (M5).
+        assert summary["alignment_files"] == (
+            [f"resolve_inputs/align_out/{name}" for name in ALIGN_FILES]
+            if branch[0] == ALIGNED_PAIR
+            else []
+        )
+        # The branch's registration checks (M13 C15) are staged and read with
+        # --registration-qc-dir; a branch without checks, or without an
+        # entry at all, resolves without them.
+        registered = branch == REGISTERED_BRANCH
+        assert summary["registration_files"] == (
+            [f"resolve_inputs/registration_qc/{name}" for name in REGISTRATION_FILES]
+            if registered
+            else []
+        )
+        arguments = summary["resolve_arguments"].split(" ")
+        assert ("--registration-qc-dir" in arguments) is registered
+        if registered:
+            option = arguments.index("--registration-qc-dir")
+            assert arguments[option + 1] == "resolve_inputs/registration_qc"
         assert summary["panel_status"] == ("refused" if not expected else "ok")
         config = AnnotationConfig.model_validate_json(
             (output / "annotation_config.json").read_text()
@@ -909,17 +1115,175 @@ def test_a_resolve_only_change_reruns_resolve_alone(harness: dict[str, Any]) -> 
 
 
 @needs_nextflow
-def test_map_first_still_refuses_to_run(tmp_path: Path) -> None:
-    """CLUSTERING_MAP_FIRST fails before any task until M5 wires COMPUTE_CPU."""
-    _write_harness(tmp_path, entry="CLUSTERING_MAP_FIRST")
-    _write_inputs(tmp_path)
-    _write_config(tmp_path, failing=False, slow=False)
-    completed = _run(tmp_path, _nextflow_env(), "-stub-run")
-    assert completed.returncode != 0
-    output = completed.stdout + completed.stderr
-    assert "CLUSTERING_MAP_FIRST has no COMPUTE_CPU (M5) yet" in output
-    work = tmp_path / "work"
-    assert not work.exists() or not any(work.iterdir())
+def test_panel_stages_the_pairs_align_files(harness: dict[str, Any]) -> None:
+    """ANNOTATE_PANEL gets the ALIGN files from the channel, never a lookup."""
+    maps = {(row["pair_id"], row["segmentation"]): row for row in harness["maps"]}
+    for branch, row in maps.items():
+        if branch not in FIXTURE_BRANCHES:
+            continue
+        argv = json.loads((Path(row["panel_dir"]) / "fake_panel_argv.json").read_text())
+        if branch[0] == ALIGNED_PAIR:
+            assert argv[argv.index("--shared-tissue-mask") + 1] == (
+                "panel_inputs/shared_tissue_mask.npy"
+            )
+            assert argv[argv.index("--registration-summary") + 1] == (
+                "panel_inputs/registration_summary.json"
+            )
+        else:
+            assert "--shared-tissue-mask" not in argv, branch
+        assert "--require-shared-tissue-mask" in argv
+
+
+# --------------------------------------------------------------------------
+# COMPUTE_CPU after RESOLVE (stub runs)
+
+
+COMPUTE = "CLUSTERING_SQUIDPY_COMPUTE_CPU"
+
+
+@needs_nextflow
+def test_compute_runs_once_per_branch_after_its_own_resolve(
+    harness: dict[str, Any],
+) -> None:
+    trace = harness["trace"]
+    computes = _rows(trace, COMPUTE)
+    tags = Counter(tuple(row["tag"].split(":")) for row in computes)
+    assert set(tags) == EXPECTED_BRANCHES
+    assert all(count == 1 for count in tags.values()), tags
+    assert all(row["status"] == "COMPLETED" for row in computes)
+    resolves = {tuple(row["tag"].split(":")): row for row in _rows(trace, RESOLVE)}
+    for row in computes:
+        branch = tuple(row["tag"].split(":"))
+        assert int(row["submit"]) >= int(resolves[branch]["complete"]), branch
+
+
+@needs_nextflow
+def test_compute_emits_finalize_input_and_reads_its_own_labels(
+    harness: dict[str, Any],
+) -> None:
+    """tuple(pair, segmentation, samples_json, clustering_compute_out) per branch."""
+    labels = {(row["pair_id"], row["segmentation"]): row for row in harness["labels"]}
+    computed = {
+        (row["pair_id"], row["segmentation"]): row for row in harness["computed"]
+    }
+    assert set(computed) == EXPECTED_BRANCHES
+    for branch, row in computed.items():
+        output = Path(row["computed_dir"])
+        assert output.name == "clustering_compute_out"
+        assert row["samples_json"] == labels[branch]["samples_json"]
+        manifest = json.loads((output / "stub_compute_manifest.json").read_text())
+        assert (manifest["pair_id"], manifest["segmentation"]) == branch
+        assert manifest["mode"] == "map_first"
+        # The run's suffix (empty for human since its flip) and MENDER policy
+        # travel in each clustered table (FINALIZE and MENDER_PREPARE keep
+        # their legacy scripts).
+        assert manifest["table_key_suffix"] == ""  # human has flipped (§20)
+        assert manifest["mender_unassigned_state_policy"] == "exclude_from_features"
+        # The harness has no src/ next to its project directory; the
+        # fingerprint of the real sources is tested in test_annotation_module.
+        assert manifest["hierarchy_fingerprint"] == "missing"
+        # COMPUTE_CPU staged this branch's RESOLVE output.
+        listing = (output / "stub_labels_listing.txt").read_text().split()
+        assert f"{branch[0]}_resolve_summary.json" in listing
+
+
+@needs_nextflow
+def test_compute_resources_and_no_gpu(harness: dict[str, Any]) -> None:
+    gib = 1024**3
+    for row in _rows(harness["trace"], COMPUTE):
+        assert row["cpus"] == "8"
+        assert int(row["memory"]) == 32 * gib
+        command = (Path(row["workdir"]) / ".command.run").read_text()
+        assert "MERXEN_GPU_LOCK_FILE" not in command
+        assert "--gpus" not in command
+
+
+@needs_nextflow
+def test_resume_keeps_compute_cached(harness: dict[str, Any]) -> None:
+    computes = _rows(harness["resume_trace"], COMPUTE)
+    assert {tuple(row["tag"].split(":")) for row in computes} == EXPECTED_BRANCHES
+    assert {row["status"] for row in computes} == {"CACHED"}
+    first = {
+        (r["pair_id"], r["segmentation"]): r["computed_dir"]
+        for r in harness["computed"]
+    }
+    again = {
+        (r["pair_id"], r["segmentation"]): r["computed_dir"]
+        for r in harness["resume_computed"]
+    }
+    assert first == again
+
+
+@needs_nextflow
+def test_compute_reruns_when_its_labels_change(harness: dict[str, Any]) -> None:
+    """A RESOLVE-only change rewrote annotation_resolve_out: COMPUTE_CPU re-runs."""
+    computes = _rows(harness["change_trace"], COMPUTE)
+    assert {tuple(row["tag"].split(":")) for row in computes} == EXPECTED_BRANCHES
+    assert {row["status"] for row in computes} == {"COMPLETED"}
+
+
+def _tree(root: Path) -> dict[str, bytes]:
+    """Relative path -> bytes of every file under ``root`` (links followed)."""
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+@needs_nextflow
+def test_compute_stays_cached_when_resolve_reruns_with_the_same_labels(
+    harness: dict[str, Any],
+) -> None:
+    """The M4 review note: a deep cache on annotation_resolve_out (plan §3.4)."""
+    trace = harness["rerun_trace"]
+    resolves = _rows(trace, RESOLVE)
+    assert {row["status"] for row in resolves} == {"COMPLETED"}
+    assert {row["status"] for row in _rows(trace, MAP)} == {"CACHED"}
+    computes = _rows(trace, COMPUTE)
+    assert {tuple(row["tag"].split(":")) for row in computes} == EXPECTED_BRANCHES
+    assert {row["status"] for row in computes} == {"CACHED"}
+    before = {(r["pair_id"], r["segmentation"]): r for r in harness["change_labels"]}
+    for row in harness["rerun_labels"]:
+        branch = (row["pair_id"], row["segmentation"])
+        # RESOLVE re-ran (its old task directory was moved aside) and wrote
+        # the same bytes: new files with new timestamps, identical content.
+        output = Path(row["resolve_dir"])
+        old_dir = Path(before[branch]["resolve_dir"])
+        moved = old_dir.parent.with_name(old_dir.parent.name + ".moved") / old_dir.name
+        assert moved.is_dir()
+        assert _tree(output) == _tree(moved)
+    assert {
+        (r["pair_id"], r["segmentation"]): r["computed_dir"]
+        for r in harness["rerun_computed"]
+    } == {
+        (r["pair_id"], r["segmentation"]): r["computed_dir"]
+        for r in harness["change_computed"]
+    }
+
+
+@needs_nextflow
+def test_end_of_run_summary_lists_the_failed_pair_and_refused_panels(
+    harness: dict[str, Any],
+) -> None:
+    """Hook H6: F7's PREP failed, so F7 has no label tables and is listed."""
+    summary = harness["summary"]
+    lines = {
+        line.split(":", 1)[0].strip(): line.split(":", 1)[1].strip()
+        for line in summary.splitlines()[1:]
+        if ":" in line
+    }
+    assert summary.splitlines()[0].startswith(
+        "Annotation summary (human, clustering_squidpy_mode map_first)"
+    )
+    assert lines["pair x segmentation branches clustered"] == str(
+        len(EXPECTED_BRANCHES) + 1
+    )
+    failed = lines["failed annotations (no label tables; see the failed tasks above)"]
+    assert failed == "F7:proseg_hybrid"
+    assert lines["failed hierarchies (label tables, no COMPUTE_CPU output)"] == "none"
+    refused = lines["refused panels"]
+    assert "F4:proseg_hybrid" in refused and "PFEW:proseg_hybrid" in refused
 
 
 # --------------------------------------------------------------------------
@@ -936,13 +1300,23 @@ def test_map_is_connected_after_the_required_bundle_join() -> None:
     assert body.index("ANNOTATION_PREPARED_REFERENCES(") < body.index(
         "CLUSTERING_SQUIDPY_ANNOTATE_MAP("
     )
-    # CLUSTERING_MAP_FIRST keeps its guard until M5.
-    guard = re.sub(
+    # CLUSTERING_MAP_FIRST = CLUSTERING_ANNOTATE -> COMPUTE_CPU (M5).
+    map_first = re.sub(
         r"//[^\n]*", "", text[text.index("workflow CLUSTERING_MAP_FIRST {") :]
     )
-    assert "error(" in guard
-    assert "CLUSTERING_ANNOTATE_MAP(" not in guard
-    assert "CLUSTERING_ANNOTATE(" not in guard
+    assert "error(" not in map_first
+    assert (
+        "annotated = CLUSTERING_ANNOTATE(prepared_ch.combine(alignment_ch, by: 0), "
+        "registration_ch)" in map_first
+    )
+    assert "CLUSTERING_SQUIDPY_COMPUTE_CPU(compute_inputs_ch)" in map_first
+    assert (
+        'AnnotationReferences.computeSpec(params, "${projectDir}/../src")' in map_first
+    )
+    assert map_first.index("CLUSTERING_ANNOTATE(") < map_first.index(
+        "CLUSTERING_SQUIDPY_COMPUTE_CPU("
+    )
+    assert "computed = computed_ch" in map_first
 
 
 def test_resolve_is_connected_after_map() -> None:
@@ -952,7 +1326,11 @@ def test_resolve_is_connected_after_map() -> None:
         r"//[^\n]*", "", body[: body.index("workflow CLUSTERING_MAP_FIRST {")]
     )
     assert "mapped = CLUSTERING_ANNOTATE_MAP(prepared_ch)" in body
-    assert "resolve_inputs_ch = mapped.maps.map {" in body
+    assert "resolve_inputs_ch = mapped.maps\n" in body
+    assert ".join(alignment_by_branch_ch)" in body
+    # Never an inner join on the registration checks: it would drop a branch.
+    assert ".join(registration_by_branch_ch, remainder: true)" in body
+    assert "registrationFiles ?: []" in body
     assert (
         'AnnotationReferences.resolveSpec(params, panelDir, "${projectDir}/../src")'
         in body
@@ -970,23 +1348,572 @@ def test_resolve_is_connected_after_map() -> None:
             assert "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE(" not in path.read_text(), path
 
 
-def test_main_nf_never_calls_the_map_or_resolve_step() -> None:
-    """Legacy runs are unchanged: main.nf only includes CLUSTERING_MAP_FIRST (H1)."""
+def test_main_nf_calls_map_first_only_through_hook_h5() -> None:
+    """Legacy runs are unchanged: H5's map_first branch calls CLUSTERING_MAP_FIRST."""
     main_text = MAIN_NF.read_text()
     for name in (
         "CLUSTERING_SQUIDPY_ANNOTATE_MAP",
         "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE",
+        "CLUSTERING_SQUIDPY_COMPUTE_CPU",
         "CLUSTERING_ANNOTATE_MAP",
         "CLUSTERING_ANNOTATE(",
-        "CLUSTERING_MAP_FIRST(",
     ):
         assert name not in main_text, name
     include = (
         'include { CLUSTERING_MAP_FIRST } from "./subworkflows/clustering_map_first"'
     )
     assert main_text.count(include) == 1
+    assert main_text.count("CLUSTERING_MAP_FIRST(") == 1
+    branch = main_text.index("    if (AnnotationSettings.isMapFirstRun(params)) {")
+    legacy = main_text.index("\n    } else {\n", branch)
+    assert branch < main_text.index("CLUSTERING_MAP_FIRST(") < legacy
     preflight = (LIB_DIR / "AnnotationPreflight.groovy").read_text()
-    assert re.search(r"static final boolean MAP_FIRST_WIRED = false\b", preflight)
+    assert "MAP_FIRST_WIRED" not in preflight
+    # Only the subworkflow calls COMPUTE_CPU.
+    for path in WORKFLOWS.rglob("*.nf"):
+        if path != SUBWORKFLOW:
+            assert "CLUSTERING_SQUIDPY_COMPUTE_CPU(" not in path.read_text(), path
+
+
+# RESOLVE's registration input (modules/annotation.nf): the harness stages the
+# checks with the same declaration, so a staged check keeps its name.
+RESOLVE_REGISTRATION_INPUT = (
+    'path(registration_files, arity: "0..*", '
+    'stageAs: "resolve_inputs/registration_qc/*")'
+)
+# Hook H5's registration block in main.nf, from its comment to the ALIGN files.
+REGISTRATION_BLOCK_START = "        // The registration checks RESOLVE reads"
+REGISTRATION_BLOCK_END = "        map_first_alignment_ch = alignment_results_ch"
+# The run record's source of a branch whose row runs QC in the launch but not
+# for that segmentation (AnnotationRunRecord.REGISTRATION_SOURCE_TEXT).
+ROW_RUNS_QC_TEXT = "row runs QC, not for this segmentation; published checks not used"
+
+REGISTRATION_MAIN = r'''
+process STAGE_AS_RESOLVE {
+    tag "${pair_id}:${segmentation}"
+
+    input:
+    tuple val(pair_id), val(segmentation), __RESOLVE_INPUT__
+
+    output:
+    tuple val(pair_id), val(segmentation), path("staged.txt")
+
+    script:
+    def arguments = AnnotationReferences.resolveArguments(
+        [species: "mouse"], [], [], registration_files as List
+    )
+    def directory = arguments.contains("--registration-qc-dir")
+        ? "with-dir"
+        : "without-dir"
+    """
+    echo "${directory}" > staged.txt
+    for check in resolve_inputs/registration_qc/*; do
+        if [ -e "\$check" ]; then
+            echo "\$(basename "\$check") \$(cat "\$check")" >> staged.txt
+        fi
+    done
+    """
+}
+
+workflow {
+    def rows = new groovy.json.JsonSlurperClassic().parseText(params.rows)
+    sample_rows_ch = channel.fromList(
+        rows.collect { row -> tuple(row.pair_id, row, row.settings) }
+    )
+    // QC's tuple: key, pair, platform, segmentation, zarr, qc_out, table and
+    // shape keys.
+    def qcRows = new groovy.json.JsonSlurperClassic().parseText(params.qc)
+    qc_results_ch = channel.fromList(
+        qcRows.collect { item ->
+            tuple(
+                "key", item.pair_id, item.platform, item.segmentation, "x.zarr",
+                file(item.qc_out), "table", "shape",
+            )
+        }
+    )
+    // Every branch enters clustering, as hook H5 records it.
+    AnnotationRunRecord.reset()
+    rows.each { row ->
+        row.settings.analysis_input_segmentations.each { segmentation ->
+            AnnotationRunRecord.expect(row.pair_id, segmentation)
+        }
+    }
+    // params is out of scope in the handler, as in main.nf's hook H6.
+    def runInfoPath = params.run_info
+    def harnessWorkflow = workflow
+    harnessWorkflow.onComplete {
+        new File(runInfoPath).text = groovy.json.JsonOutput.toJson(
+            AnnotationRunRecord.runInfo()
+        )
+    }
+__REGISTRATION__
+    map_first_registration_ch
+        .map { pairId, segmentation, files ->
+            [pairId, segmentation, files.collect { f -> f.toString() }]
+        }
+        .collect(flat: false)
+        .ifEmpty([])
+        .subscribe { items ->
+            new File(params.out).text = groovy.json.JsonOutput.toJson(items)
+        }
+    STAGE_AS_RESOLVE(map_first_registration_ch)
+        .map { pairId, segmentation, staged ->
+            [pairId, segmentation, staged.text.readLines()]
+        }
+        .collect(flat: false)
+        .ifEmpty([])
+        .subscribe { items ->
+            new File(params.staged).text = groovy.json.JsonOutput.toJson(items)
+        }
+}
+'''
+
+
+def _main_nf_block(main_text: str, start: str, end: str) -> str:
+    """Return main.nf from the line starting with ``start`` up to ``end``."""
+    begin = main_text.index(start)
+    return main_text[begin : main_text.index(end, begin)]
+
+
+def _registration_block() -> str:
+    return _main_nf_block(
+        MAIN_NF.read_text(), REGISTRATION_BLOCK_START, REGISTRATION_BLOCK_END
+    )
+
+
+def _write_qc_out(
+    qc_out: Path, prefix: str, files: list[str], content: str = "{}"
+) -> Path:
+    """Write a QC task's qc_out: ``files`` and a nested check never staged."""
+    qc_out.mkdir(parents=True)
+    for file_name in files:
+        (qc_out / file_name).write_text(content)
+    (qc_out / "nested").mkdir()
+    (qc_out / "nested" / f"{prefix}_registration_qc.json").write_text("{}")
+    return qc_out
+
+
+def _publish_qc_out(
+    work: Path,
+    outdir: Path,
+    pair_id: str,
+    platform: str,
+    segmentation: str,
+    files: list[str],
+) -> Path:
+    """Publish an earlier launch's QC output as the QC process does.
+
+    ``<outdir>/<pair>/<platform lower-case>/<segmentation>/qc/qc_out``, a
+    symlink to the task's qc_out (publishDir mode "symlink").
+    """
+    prefix = f"{pair_id.lower()}_{platform.lower()}"
+    target = _write_qc_out(
+        work / f"{pair_id}_{platform}_{segmentation}" / "qc_out",
+        prefix,
+        files,
+        content="published",
+    )
+    published = outdir / pair_id / platform.lower() / segmentation / "qc"
+    published.mkdir(parents=True)
+    (published / "qc_out").symlink_to(target, target_is_directory=True)
+    return published / "qc_out"
+
+
+def _run_registration_block(
+    root: Path,
+    rows: list[dict[str, Any]],
+    qc: list[dict[str, str]],
+    outdir: Path,
+) -> tuple[list[Any], list[Any], dict[str, Any], str]:
+    """Run hook H5's own registration block, then stage as RESOLVE does.
+
+    Returns:
+        The registration tuples (pair, segmentation, paths), the staged
+        checks per branch (directory flag, then "name content" lines), the
+        run record's facts and the Nextflow log.
+    """
+    assert NEXTFLOW is not None
+    assert RESOLVE_REGISTRATION_INPUT in MODULE.read_text()
+    (root / "lib").mkdir()
+    for source in LIB_DIR.glob("*.groovy"):
+        shutil.copy(source, root / "lib" / source.name)
+    (root / "main.nf").write_text(
+        REGISTRATION_MAIN.replace("__REGISTRATION__", _registration_block()).replace(
+            "__RESOLVE_INPUT__", RESOLVE_REGISTRATION_INPUT
+        )
+    )
+    out = root / "registration.json"
+    staged = root / "staged.json"
+    run_info = root / "run_info.json"
+    (root / "nextflow.config").write_text(
+        f"params.rows = '{json.dumps(rows)}'\n"
+        f"params.qc = '{json.dumps(qc)}'\n"
+        f"params.outdir = '{outdir}'\n"
+        f"params.out = '{out}'\n"
+        f"params.staged = '{staged}'\n"
+        f"params.run_info = '{run_info}'\n"
+    )
+    completed = subprocess.run(
+        [NEXTFLOW, "-log", str(root / "nextflow.log"), "run", "main.nf"],
+        cwd=root,
+        env=_nextflow_env(),
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    return (
+        sorted(json.loads(out.read_text())),
+        sorted(json.loads(staged.read_text())),
+        json.loads(run_info.read_text()),
+        (root / "nextflow.log").read_text() + completed.stdout,
+    )
+
+
+def _settings(
+    platforms: list[str],
+    *,
+    run_qc: bool,
+    analysis: list[str],
+    inputs: list[str],
+    start_stage: str = "build_spatialdata",
+) -> dict[str, Any]:
+    """Return the row settings hook H5's registration block reads."""
+    return {
+        "clustering_squidpy_mode": "map_first",
+        "active_platforms": platforms,
+        "start_stage": start_stage,
+        "run_qc": run_qc,
+        "analysis_segmentations": analysis,
+        "analysis_input_segmentations": inputs,
+    }
+
+
+def test_the_registration_branches_complement_the_qc_stage() -> None:
+    """Hook H5 covers exactly the branches qc_inputs_ch leaves out.
+
+    A branch that took a published check although its QC runs in the launch
+    could resolve on an older check (or before its own arrives), so the two
+    predicates must stay each other's negation. Of those branches, only a row
+    whose QC stage does not run looks up published checks: a segmentation
+    the QC of a running row skips may have been re-segmented in the launch.
+    """
+    main_text = MAIN_NF.read_text()
+    qc_filter = _main_nf_block(
+        main_text, "    qc_inputs_ch = analysis_layer_validation_results_ch", ".map {"
+    )
+    assert (
+        "settings.run_qc && settings.analysis_segmentations.contains(_segmentation)"
+        in qc_filter
+    )
+    block = _registration_block()
+    assert (
+        "!(settings.run_qc && settings.analysis_segmentations.contains(segmentation))"
+        in block
+    )
+    assert "settings.analysis_input_segmentations" in block
+    assert "groupKey(" in block and ".groupTuple(remainder: true)" in block
+    assert "AnnotationReferences.registrationQcFiles(qcOutDirs)" in block
+    assert "AnnotationReferences.publishedRegistrationQcFiles(" in block
+    assert "AnnotationRunRecord.registrationChecks(" in block
+    row_runs_qc = block.index("                    if (settings.run_qc) {")
+    published = block.index("AnnotationReferences.publishedRegistrationQcFiles(")
+    assert (
+        row_runs_qc
+        < block.index("AnnotationRunRecord.REGISTRATION_ROW_RUNS_QC")
+        < block.index("                    } else {", row_runs_qc)
+        < published
+    )
+    branch = main_text.index("    if (AnnotationSettings.isMapFirstRun(params)) {")
+    legacy = main_text.index("\n    } else {\n", branch)
+    assert branch < main_text.index(block) < legacy
+    assert "            map_first_registration_ch,\n        ).computed" in main_text
+
+
+def test_the_published_registration_checks_follow_the_qc_publish_dir() -> None:
+    """The fallback reads where the QC process publishes its qc_out."""
+    qc_module = (WORKFLOWS / "modules" / "qc.nf").read_text()
+    process = qc_module[qc_module.index("process QC {") :]
+    assert (
+        'publishDir { "${params.outdir}/${pair_id}/${platform.toLowerCase()}'
+        '/${segmentation}/qc" }, mode: "symlink"'
+    ) in process
+    assert 'path("qc_out"),' in process
+    references = (LIB_DIR / "AnnotationReferences.groovy").read_text()
+    assert 'static final String QC_PUBLISH_DIR = "qc"' in references
+    assert 'static final String QC_OUTPUT_DIR = "qc_out"' in references
+
+
+@needs_nextflow
+def test_map_first_registration_gives_one_tuple_per_branch(tmp_path: Path) -> None:
+    """Hook H5's registration checks (M13 C15): main.nf's own block.
+
+    Per pair x segmentation: the QC tasks' ``*_registration_qc.json`` (one
+    per active platform, released once all have finished), ``[]`` for a row
+    whose QC stage does not run when nothing is published, for a segmentation
+    that is not an analysis segmentation of a row whose QC runs, and for a QC
+    output without a registration check. The QC summary CSV is never staged.
+    """
+    outputs = {
+        name: _write_qc_out(tmp_path / name / "qc_out", name, files)
+        for name, files in (
+            (
+                "p1_merscope",
+                ["p1_merscope_registration_qc.json", "p1_merscope_qc_summary.csv"],
+            ),
+            ("p1_xenium", ["p1_xenium_registration_qc.json"]),
+            ("p3_merscope", ["p3_merscope_qc_summary.csv"]),
+        )
+    }
+    both = ["MERSCOPE", "XENIUM"]
+    analysis = ["proseg_hybrid"]
+    rows = [
+        {
+            "pair_id": "P1",
+            "settings": _settings(
+                both, run_qc=True, analysis=analysis, inputs=["proseg_hybrid", "reseg"]
+            ),
+        },
+        {
+            "pair_id": "P2",
+            "settings": _settings(
+                both, run_qc=False, analysis=analysis, inputs=analysis
+            ),
+        },
+        {
+            "pair_id": "P3",
+            "settings": _settings(
+                ["MERSCOPE"], run_qc=True, analysis=analysis, inputs=analysis
+            ),
+        },
+    ]
+    qc = [
+        {
+            "pair_id": pair_id,
+            "platform": platform,
+            "segmentation": "proseg_hybrid",
+            "qc_out": str(outputs[f"{pair_id.lower()}_{platform.lower()}"]),
+        }
+        for pair_id, platform in (
+            ("P1", "MERSCOPE"),
+            ("P3", "MERSCOPE"),
+            ("P1", "XENIUM"),
+        )
+    ]
+    items, _staged, info, _log = _run_registration_block(
+        tmp_path, rows, qc, tmp_path / "results"
+    )
+    assert items == [
+        [
+            "P1",
+            "proseg_hybrid",
+            [
+                str(outputs["p1_merscope"] / "p1_merscope_registration_qc.json"),
+                str(outputs["p1_xenium"] / "p1_xenium_registration_qc.json"),
+            ],
+        ],
+        ["P1", "reseg", []],
+        ["P2", "proseg_hybrid", []],
+        ["P3", "proseg_hybrid", []],
+    ]
+    assert info["registration_published"] == []
+    assert info["registration_missing"] == [
+        f"P1:reseg (0 of 2; {ROW_RUNS_QC_TEXT})",
+        "P2:proseg_hybrid (0 of 2; published QC outputs)",
+        "P3:proseg_hybrid (0 of 1; QC stage of this launch)",
+    ]
+
+
+@needs_nextflow
+def test_map_first_registration_falls_back_to_the_published_checks(
+    tmp_path: Path,
+) -> None:
+    """A row whose QC stage does not run takes the published checks.
+
+    The usual re-annotation of published results starts after qc
+    (``start_stage clustering_squidpy``): the row's QC stage does not run,
+    and RESOLVE stages each active platform's check from the QC stage's
+    publish location under ``params.outdir`` (VZG2 mouse, 2026-10-13: all
+    four segmentations refused for want of G1), for every segmentation of
+    the row. A branch whose QC runs in the launch takes its own QC tasks'
+    checks, never the published ones. A segmentation that is not an
+    analysis segmentation of a row whose QC runs (a MENDER-only one) gets
+    none even when a check is published: the launch may have re-segmented
+    it, and the published check would be an older launch's. A branch with
+    neither gets none, as before. The run record lists the published and the
+    missing checks, with the reason.
+    """
+    outdir = tmp_path / "results"
+    work = tmp_path / "earlier_work"
+    both = ["MERSCOPE", "XENIUM"]
+    analysis = ["proseg_hybrid"]
+    names = {
+        (pair_id, platform): f"{pair_id}_{platform}_registration_qc.json".lower()
+        for pair_id in ("P1", "P2", "P5")
+        for platform in both
+    }
+    summary = "{}_qc_summary.csv"
+
+    def publish(pair_id: str, platform: str, segmentation: str, check: bool) -> Path:
+        prefix = f"{pair_id.lower()}_{platform.lower()}"
+        files = [summary.format(prefix)]
+        if check:
+            files.append(f"{prefix}_registration_qc.json")
+        return _publish_qc_out(work, outdir, pair_id, platform, segmentation, files)
+
+    # P1: QC runs for proseg_hybrid in this launch (and an earlier launch
+    # published it too); reseg is not an analysis segmentation (MENDER-only),
+    # so its QC does not run although the row's does, and its published
+    # checks, an older launch's, are not staged.
+    launch = {
+        platform: _write_qc_out(
+            tmp_path / "launch" / f"p1_{platform.lower()}" / "qc_out",
+            f"p1_{platform.lower()}",
+            [names[("P1", platform)]],
+            content="qc_stage",
+        )
+        for platform in both
+    }
+    published = {
+        (pair_id, platform, segmentation): publish(
+            pair_id, platform, segmentation, check
+        )
+        for pair_id, platform, segmentation, check in (
+            ("P1", "MERSCOPE", "proseg_hybrid", True),
+            ("P1", "XENIUM", "proseg_hybrid", True),
+            ("P1", "MERSCOPE", "reseg", True),
+            ("P1", "XENIUM", "reseg", True),
+            # P2: a paired row started at clustering_squidpy; reseg is not
+            # one of its analysis segmentations.
+            ("P2", "MERSCOPE", "proseg_hybrid", True),
+            ("P2", "XENIUM", "proseg_hybrid", True),
+            ("P2", "MERSCOPE", "reseg", True),
+            ("P2", "XENIUM", "reseg", True),
+            # P5: only its MERSCOPE QC output holds a check.
+            ("P5", "MERSCOPE", "proseg_hybrid", True),
+            ("P5", "XENIUM", "proseg_hybrid", False),
+        )
+    }
+    # P4: its published qc_out points at a removed work directory.
+    dangling = outdir / "P4" / "merscope" / "proseg_hybrid" / "qc"
+    dangling.mkdir(parents=True)
+    (dangling / "qc_out").symlink_to(work / "removed" / "qc_out")
+    restarted = {"run_qc": False, "start_stage": "clustering_squidpy"}
+    rows = [
+        {
+            "pair_id": "P1",
+            "settings": _settings(
+                both, run_qc=True, analysis=analysis, inputs=["proseg_hybrid", "reseg"]
+            ),
+        },
+        {
+            "pair_id": "P2",
+            "settings": _settings(
+                both,
+                analysis=analysis,
+                inputs=["proseg_hybrid", "reseg"],
+                **restarted,
+            ),
+        },
+        # P3: a mouse section started at clustering_squidpy, nothing published.
+        {
+            "pair_id": "P3",
+            "settings": _settings(
+                ["MERSCOPE"], analysis=analysis, inputs=analysis, **restarted
+            ),
+        },
+        {
+            "pair_id": "P4",
+            "settings": _settings(
+                ["MERSCOPE"], analysis=analysis, inputs=analysis, **restarted
+            ),
+        },
+        {
+            "pair_id": "P5",
+            "settings": _settings(
+                both, analysis=analysis, inputs=analysis, **restarted
+            ),
+        },
+    ]
+    qc = [
+        {
+            "pair_id": "P1",
+            "platform": platform,
+            "segmentation": "proseg_hybrid",
+            "qc_out": str(launch[platform]),
+        }
+        for platform in both
+    ]
+    items, staged, info, log = _run_registration_block(tmp_path, rows, qc, outdir)
+
+    def published_check(pair_id: str, platform: str, segmentation: str) -> str:
+        return str(
+            published[(pair_id, platform, segmentation)] / names[(pair_id, platform)]
+        )
+
+    assert items == [
+        [
+            "P1",
+            "proseg_hybrid",
+            [str(launch[platform] / names[("P1", platform)]) for platform in both],
+        ],
+        ["P1", "reseg", []],
+        [
+            "P2",
+            "proseg_hybrid",
+            [published_check("P2", platform, "proseg_hybrid") for platform in both],
+        ],
+        [
+            "P2",
+            "reseg",
+            [published_check("P2", platform, "reseg") for platform in both],
+        ],
+        ["P3", "proseg_hybrid", []],
+        ["P4", "proseg_hybrid", []],
+        ["P5", "proseg_hybrid", [published_check("P5", "MERSCOPE", "proseg_hybrid")]],
+    ]
+    # RESOLVE stages each check under its own name (it matches
+    # <sample_id lower-case>_registration_qc.json) and reads the directory.
+    assert staged == [
+        [
+            "P1",
+            "proseg_hybrid",
+            ["with-dir", *(f"{names[('P1', p)]} qc_stage" for p in both)],
+        ],
+        ["P1", "reseg", ["without-dir"]],
+        [
+            "P2",
+            "proseg_hybrid",
+            ["with-dir", *(f"{names[('P2', p)]} published" for p in both)],
+        ],
+        ["P2", "reseg", ["with-dir", *(f"{names[('P2', p)]} published" for p in both)]],
+        ["P3", "proseg_hybrid", ["without-dir"]],
+        ["P4", "proseg_hybrid", ["without-dir"]],
+        [
+            "P5",
+            "proseg_hybrid",
+            ["with-dir", f"{names[('P5', 'MERSCOPE')]} published"],
+        ],
+    ]
+    assert info["registration_published"] == [
+        f"P2:proseg_hybrid ({names[('P2', 'MERSCOPE')]}; {names[('P2', 'XENIUM')]})",
+        f"P2:reseg ({names[('P2', 'MERSCOPE')]}; {names[('P2', 'XENIUM')]})",
+        f"P5:proseg_hybrid ({names[('P5', 'MERSCOPE')]})",
+    ]
+    assert info["registration_missing"] == [
+        f"P1:reseg (0 of 2; {ROW_RUNS_QC_TEXT})",
+        "P3:proseg_hybrid (0 of 1; published QC outputs)",
+        "P4:proseg_hybrid (0 of 1; published QC outputs)",
+        "P5:proseg_hybrid (1 of 2; published QC outputs)",
+    ]
+    assert "P2:proseg_hybrid: the QC stage does not run in this launch" in log
+    assert str(dangling / "qc_out") in log
+    assert (
+        "P1:reseg: the row's QC stage runs in this launch but not for this segmentation"
+    ) in log
+    # P1:reseg's published checks are never looked up.
+    assert str(published[("P1", "MERSCOPE", "reseg")]) not in log
 
 
 # --------------------------------------------------------------------------
@@ -1006,7 +1933,7 @@ def test_map_runs_the_real_script_with_the_pipeline_arguments(tmp_path: Path) ->
     """
     fixtures = _write_fixture_panels(tmp_path)
     env = _fake_merxen_env(tmp_path, fixtures)
-    _write_harness(tmp_path)
+    _write_harness(tmp_path, entry="CLUSTERING_ANNOTATE")
     items = [
         _prepared_branch(tmp_path / "prepared", pair_id, segmentation, 60)
         for pair_id, segmentation in (
@@ -1016,6 +1943,9 @@ def test_map_runs_the_real_script_with_the_pipeline_arguments(tmp_path: Path) ->
         )
     ]
     (tmp_path / "prepared_inputs.json").write_text(json.dumps(items))
+    _write_registration(
+        tmp_path, [(item["pair_id"], item["segmentation"]) for item in items]
+    )
     _write_config(tmp_path, failing=False, slow=False)
     # F1 has a published MAP output: its task reuses from there.
     published = tmp_path / "results/F1/proseg_hybrid/annotation_map/annotation_map_out"
@@ -1111,6 +2041,7 @@ def test_map_runs_the_real_script_with_the_pipeline_arguments(tmp_path: Path) ->
     }
     assert set(labels) == set(maps)
     resolve_records = {}
+    record_path_dirs = {}
     for path in (tmp_path / "work").glob("*/*/fake_annotate_resolve.json"):
         required = json.loads(
             (
@@ -1118,9 +2049,9 @@ def test_map_runs_the_real_script_with_the_pipeline_arguments(tmp_path: Path) ->
                 / "resolve_inputs/annotation_panel_out/required_bundles.json"
             ).read_text()
         )
-        resolve_records[(required["pair_id"], required["segmentation"])] = json.loads(
-            path.read_text()
-        )
+        key = (required["pair_id"], required["segmentation"])
+        resolve_records[key] = json.loads(path.read_text())
+        record_path_dirs[key] = path.parent
     assert set(resolve_records) == set(maps)
     for branch, record in resolve_records.items():
         argv, environment = record["argv"], record["env"]
@@ -1137,6 +2068,16 @@ def test_map_runs_the_real_script_with_the_pipeline_arguments(tmp_path: Path) ->
             assert argv[argv.index(option) + 1] == staged, (branch, option)
         assert "--require-bundle-refs" in argv and "--no-alignment-lookup" in argv
         assert "--alignment-dir" not in argv
+        # The QC stage's registration checks (G1; M13 C15), when staged.
+        if branch == REGISTERED_BRANCH:
+            option = argv.index("--registration-qc-dir")
+            assert argv[option + 1] == "resolve_inputs/registration_qc"
+            staged = record_path_dirs[branch] / "resolve_inputs" / "registration_qc"
+            assert sorted(path.name for path in staged.iterdir()) == sorted(
+                REGISTRATION_FILES
+            )
+        else:
+            assert "--registration-qc-dir" not in argv, branch
         for name in (
             "OMP_NUM_THREADS",
             "OPENBLAS_NUM_THREADS",

@@ -39,7 +39,8 @@ SEA-AD Multiregion second vote into one status per level (``CellStatus``,
    neurons is a recorded M4 deviation (pre-registration §15): the final
    label is the deepest confident level of a contiguous chain (lineage ->
    broad -> NT -> supercluster; ``schema`` final-chain check), so a neuron
-   supercluster above an unresolved NT would skip a level.
+   supercluster above an unresolved NT would skip a level. The user
+   accepted it as a tightening on 2026-09-30 (M8 D9, pre-registration §18).
 5. **SEA-AD subclass** (secondary name, never in ``ct_final``): gate level
    ``full``, a confident WHB broad that SEA-AD's 7-class call agrees with,
    the supercluster floor of the broad class, SEA's raw threshold (0.55
@@ -88,6 +89,11 @@ from merxen.annotation.config import (
     AnnotationConfig,
     AnnotationGate,
     AnnotationThresholds,
+)
+from merxen.annotation.real_qc import (
+    QcEffects,
+    apply_qc_to_gate,
+    qc_withheld_levels,
 )
 from merxen.annotation.schema import (
     NAMELESS_STATUSES,
@@ -500,6 +506,14 @@ class HumanResolveSettings:
             lower on its ``min_cells``-filtered genes (MAP's
             ``n_below_min_in_clustered``); they stay table cells and are
             ``below_floor`` at every level.
+        qc: The dataset's real-data QC effects (plan §8.8; M13 C15), applied
+            in the pass: a gate cap lowers the dataset gate before the leaf
+            levels read it (the gate-level invariance still holds), a
+            withheld level is not emitted for the dataset (its confident
+            cells become ``not_resolvable``), and the QC warning and level
+            reasons join the gate's. The emission plan, the floor plan, the
+            thresholds and trust are not touched. ``None``: no QC (the
+            QC-free run of pre-registration NR1).
     """
 
     platform: str
@@ -516,6 +530,22 @@ class HumanResolveSettings:
     use_likelihood_vote: bool = False
     n_segmented: int | None = None
     allow_table_below_min_counts: bool = False
+    qc: QcEffects | None = None
+
+    def __post_init__(self) -> None:
+        """Refuse QC effects ``resolve_human`` cannot apply.
+
+        Raises:
+            ValueError: For a trust downgrade (it lowers the trust decision
+                before RESOLVE, which then derives emission and floors from
+                it; no real-data check of M13 downgrades trust).
+        """
+        if self.qc is not None and self.qc.trust_cap is not None:
+            raise ValueError(
+                "resolve_human applies QC gate caps, withheld levels and warnings; "
+                f"a trust downgrade ({self.qc.trust_cap}) must lower the trust "
+                "decision itself"
+            )
 
     @classmethod
     def from_config(
@@ -825,6 +855,33 @@ def final_label(
         final_level[confident] = level
         final_name[confident] = result.name[confident]
     return final_level, final_name
+
+
+def chain_validated_share(
+    levels: Mapping[str, LevelResult], chain: Sequence[str]
+) -> dict[str, float | None]:
+    """Return the share of confident labels inside the validated region per level.
+
+    The input of the simulation-family gate warning (``warn_unvalidated_share``,
+    plan §8.2), read on the emitted chain levels only, as ``ct_final`` is;
+    report-only fine and secondary levels are left out.
+
+    Args:
+        levels: Per-level results with ``validated`` set (``ct_<L>_validated``).
+        chain: The species' chain (``HUMAN_CHAIN`` or ``MOUSE_CHAIN``).
+
+    Returns:
+        Level to the share of its confident labels that are validated
+        (``None``: no confident label at the level), in chain order.
+    """
+    shares: dict[str, float | None] = {}
+    for level in chain:
+        result = levels[level]
+        confident = result.confident
+        shares[level] = (
+            float(result.validated[confident].mean()) if confident.any() else None
+        )
+    return shares
 
 
 def consensus_tier(
@@ -1220,6 +1277,16 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
     def emit(level: str, keys: np.ndarray) -> LevelEmission:
         return emission.level(level, keys, counts)
 
+    # Real-data QC (plan §8.8; M13 C15): a withheld level is not emitted for
+    # this dataset. The emission plan and its per-level records are left as
+    # they are (``emissions``); only the statuses read the withheld mask.
+    withheld = qc_withheld_levels(settings.qc, "human")
+
+    def qc_emitted(level: str, em: LevelEmission) -> np.ndarray:
+        if level in withheld:
+            return np.zeros(n, dtype=bool)
+        return np.asarray(em.emitted, dtype=bool)
+
     emissions: dict[str, LevelEmission] = {}
     levels: dict[str, LevelResult] = {}
 
@@ -1233,7 +1300,7 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
     builder.fail(info.implausible & ~votes.rescued, CellStatus.IMPLAUSIBLE)
     builder.fail(~_in(info.lineage, HUMAN_LINEAGES), CellStatus.IMPLAUSIBLE)
     builder.fail(counts < floor, CellStatus.BELOW_FLOOR)
-    builder.fail(~em.emitted, CellStatus.NOT_RESOLVABLE)
+    builder.fail(~qc_emitted("lineage", em), CellStatus.NOT_RESOLVABLE)
     lineage_raw = whb.lineage.raw if whb is not None else np.full(n, np.nan)
     builder.fail(~meets_threshold(lineage_raw, em.threshold), CellStatus.LOW_CONFIDENCE)
     for status in (CellStatus.SINGLE_METHOD, CellStatus.METHOD_DISAGREE):
@@ -1279,7 +1346,7 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
     builder.fail(~lineage_confident, CellStatus.PARENT_UNRESOLVED)
     builder.fail(~_in(info.broad, HUMAN_BROAD_CLASSES), CellStatus.IMPLAUSIBLE)
     builder.fail(counts < floor, CellStatus.BELOW_FLOOR)
-    builder.fail(~em.emitted, CellStatus.NOT_RESOLVABLE)
+    builder.fail(~qc_emitted("broad", em), CellStatus.NOT_RESOLVABLE)
     broad_raw = whb.broad.raw if whb is not None else np.full(n, np.nan)
     builder.fail(~meets_threshold(broad_raw, em.threshold), CellStatus.LOW_CONFIDENCE)
     cop_decides = builder.unset() & cop_rule_fails
@@ -1311,7 +1378,7 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
     builder.fail(info.implausible, CellStatus.IMPLAUSIBLE)
     builder.fail(~broad_confident, CellStatus.PARENT_UNRESOLVED)
     builder.fail(counts < floor, CellStatus.BELOW_FLOOR)
-    builder.fail(~em.emitted, CellStatus.NOT_RESOLVABLE)
+    builder.fail(~qc_emitted("nt", em), CellStatus.NOT_RESOLVABLE)
     nt_raw = whb.nt.raw if whb is not None else np.full(n, np.nan)
     builder.fail(~meets_threshold(nt_raw, em.threshold), CellStatus.LOW_CONFIDENCE)
     levels["nt"] = _level_result(
@@ -1335,6 +1402,10 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
         gate=settings.gate,
         trust=settings.trust,
     )
+    # A real-data QC gate cap lowers the gate before the leaf levels read it
+    # (never raises it; ``real_qc.apply_qc_to_gate``).
+    if settings.qc is not None:
+        gate_first = apply_qc_to_gate(gate_first, settings.qc)
     leaf_gated = np.full(n, not gate_first.attempts_leaf, dtype=bool) & table
 
     # 4. Supercluster
@@ -1347,7 +1418,7 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
     builder.fail(info.implausible, CellStatus.IMPLAUSIBLE)
     builder.fail(~leaf_parent, CellStatus.PARENT_UNRESOLVED)
     builder.fail(counts < floor, CellStatus.BELOW_FLOOR)
-    builder.fail(~em.emitted, CellStatus.NOT_RESOLVABLE)
+    builder.fail(~qc_emitted("supercluster", em), CellStatus.NOT_RESOLVABLE)
     builder.fail(
         ~meets_threshold(supercluster_raw, em.threshold), CellStatus.LOW_CONFIDENCE
     )
@@ -1378,7 +1449,7 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
     )
     builder.fail(~broad_confident, CellStatus.PARENT_UNRESOLVED)
     builder.fail(counts < floor, CellStatus.BELOW_FLOOR)
-    builder.fail(~em.emitted, CellStatus.NOT_RESOLVABLE)
+    builder.fail(~qc_emitted("seaad_subclass", em), CellStatus.NOT_RESOLVABLE)
     sea_raw = sea.subclass.scores.raw if sea is not None else np.full(n, np.nan)
     builder.fail(~meets_threshold(sea_raw, em.threshold), CellStatus.LOW_CONFIDENCE)
     # SEA-AD's 7-class call must agree with ct_broad: the level's
@@ -1414,7 +1485,7 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
         builder.fail(info.implausible, CellStatus.IMPLAUSIBLE)
         builder.fail(~levels["supercluster"].confident, CellStatus.PARENT_UNRESOLVED)
         builder.fail(counts < floor, CellStatus.BELOW_FLOOR)
-        builder.fail(~em.emitted, CellStatus.NOT_RESOLVABLE)
+        builder.fail(~qc_emitted("cluster", em), CellStatus.NOT_RESOLVABLE)
         cluster_raw = cluster.scores.raw if cluster is not None else np.full(n, np.nan)
         builder.fail(
             ~meets_threshold(cluster_raw, em.threshold), CellStatus.LOW_CONFIDENCE
@@ -1446,17 +1517,12 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
 
     # ct_<L>_validated (§4.1) and the simulation-family gate warning.
     validated_share: dict[str, float | None] = {}
-    for level, result in levels.items():
-        if settings.trust is None:
-            continue
-        result.validated = settings.trust.validated_mask(
-            level, result.class_key, counts, result.confident
-        )
-        if level in HUMAN_CHAIN:
-            confident = result.confident
-            validated_share[level] = (
-                float(result.validated[confident].mean()) if confident.any() else None
+    if settings.trust is not None:
+        for level, result in levels.items():
+            result.validated = settings.trust.validated_mask(
+                level, result.class_key, counts, result.confident
             )
+        validated_share = chain_validated_share(levels, HUMAN_CHAIN)
     gate = dataset_gate(
         counts[table],
         broad_confident[table],
@@ -1465,6 +1531,8 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
         trust=settings.trust,
         validated_share=validated_share,
     )
+    if settings.qc is not None:
+        gate = apply_qc_to_gate(gate, settings.qc)
     if gate.level != gate_first.level:
         raise AssertionError("the gate level cannot depend on the leaf levels")
 

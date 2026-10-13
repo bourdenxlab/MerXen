@@ -1253,6 +1253,328 @@ def test_locate_bundle_prefers_the_current_resolvability_version(
         locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash)
 
 
+def test_locate_bundle_prefers_the_current_human_self_map_test_set(
+    tmp_path: Path, fake_mmc: FakeMmc, caplog: pytest.LogCaptureFixture
+) -> None:
+    # M8 D1: the rebuilt human self-maps (other-region COP test cells left
+    # out) keep RESOLVABILITY_VERSION and sit next to the older bundles on
+    # the same panel; standalone runs take the current test-set revision.
+    from merxen.annotation.reference import (
+        HO_REFERENCE_ID,
+        HO_SELF_MAP_TEST_SET_REVISION,
+    )
+    from merxen.annotation.resolvability import RESOLVABILITY_VERSION
+
+    panel = _panel(GENE_IDS)
+    common: dict[str, Any] = {
+        "role": "primary",
+        "species": "human",
+        "panel_hash": panel.panel_hash,
+        "n_genes": panel.n_genes,
+        "levels": WHB_LEVELS,
+        "nodes": WHB_NODES,
+    }
+
+    def with_test_set(
+        path: Path, revision: int | None, test_reference: str = HO_REFERENCE_ID
+    ) -> Path:
+        manifest_path = path / "bundle.json"
+        manifest = json.loads(manifest_path.read_text())
+        record: dict[str, Any] = {
+            "resolvability_version": RESOLVABILITY_VERSION,
+            "test_set_bundle": {"reference_id": test_reference, "build_hash": "0"},
+        }
+        if revision is not None:
+            record["test_set_exclusion"] = {"revision": revision}
+        manifest["builder_output"]["resolvability"] = record
+        manifest_path.write_text(json.dumps(manifest))
+        return path
+
+    older = with_test_set(
+        fake_mmc.bundle("whb_frontal_supc_clus", build_hash="a" * 64, **common), None
+    )
+    store = ReferenceStore(fake_mmc.root)
+    # Only the pre-D1 bundle: kept, with a warning that names its revision 0.
+    with caplog.at_level(logging.WARNING, logger="merxen.annotation.pipeline"):
+        found = locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash)
+    assert found.path == older
+    warned = [r for r in caplog.records if "self-map test set" in r.getMessage()]
+    assert len(warned) == 1
+    assert "has revision 0" in warned[0].getMessage()
+    current = with_test_set(
+        fake_mmc.bundle("whb_frontal_supc_clus", build_hash="b" * 64, **common),
+        HO_SELF_MAP_TEST_SET_REVISION,
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="merxen.annotation.pipeline"):
+        found = locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash)
+        subset = store_subset_bundle_finder(store)(
+            "whb_frontal_supc_clus", panel.panel_hash
+        )
+    assert found.path == current
+    assert subset is not None and subset.path == current
+    assert not [r for r in caplog.records if "self-map test set" in r.getMessage()]
+    with_test_set(
+        fake_mmc.bundle("whb_frontal_supc_clus", build_hash="c" * 64, **common),
+        HO_SELF_MAP_TEST_SET_REVISION,
+    )
+    with pytest.raises(MapError, match="2 bundles"):
+        locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash)
+
+
+def test_locate_bundle_prefers_the_current_version_7_simulation(
+    tmp_path: Path, fake_mmc: FakeMmc, caplog: pytest.LogCaptureFixture
+) -> None:
+    """C16 review 1: a hash-only version-7 rebuild must not make lookups ambiguous.
+
+    SIM_GENES_VERSION (M13 C16) and ENSEMBLE_RULE_VERSION enter only the
+    version-7 build_hash: the rebuilt bundle keeps the builder version,
+    resolvability version 7 and the test-set revision, so it sits next to
+    its older bundle on the same panel. locate_bundle, locate_bundle_path,
+    the subset finder and current_store_bundles take the current one.
+    """
+    from merxen.annotation.pipeline import current_store_bundles, locate_bundle_path
+    from merxen.annotation.reference import (
+        HO_REFERENCE_ID,
+        ho_self_map_exclusion_params,
+    )
+    from merxen.annotation.resolvability import (
+        ENSEMBLE_RULE_VERSION,
+        RESOLVABILITY_VERSION_V7,
+        SIM_GENES_VERSION,
+    )
+
+    panel = _panel(GENE_IDS)
+    common: dict[str, Any] = {
+        "role": "primary",
+        "species": "human",
+        "panel_hash": panel.panel_hash,
+        "n_genes": panel.n_genes,
+        "levels": WHB_LEVELS,
+        "nodes": WHB_NODES,
+    }
+
+    def v7_bundle(
+        build_hash: str, *, rule: int | None, genes: int | None, v7: bool = True
+    ) -> Path:
+        path = fake_mmc.bundle("whb_frontal_supc_clus", build_hash=build_hash, **common)
+        manifest = json.loads((path / "bundle.json").read_text())
+        manifest["builder_output"]["resolvability"] = {
+            "resolvability_version": RESOLVABILITY_VERSION_V7
+        }
+        params: dict[str, Any] = {
+            "enabled": True,
+            "resolvability_version": RESOLVABILITY_VERSION_V7,
+            "test_set": {
+                "reference_id": HO_REFERENCE_ID,
+                "self_map_exclusion": ho_self_map_exclusion_params(),
+            },
+        }
+        if v7:
+            payload: dict[str, Any] = {
+                "resolvability_version": RESOLVABILITY_VERSION_V7
+            }
+            if rule is not None:
+                payload["ensemble_rule_version"] = rule
+            if genes is not None:
+                payload["simulated_n_genes_version"] = genes
+            params["v7"] = payload
+        manifest["build_hash_payload"] = {"builder_params": {"resolvability": params}}
+        (path / "bundle.json").write_text(json.dumps(manifest))
+        return path
+
+    def found() -> Path:
+        return locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash).path
+
+    def warnings() -> list[str]:
+        return [
+            record.getMessage()
+            for record in caplog.records
+            if "simulated genes per cell" in record.getMessage()
+        ]
+
+    store = ReferenceStore(fake_mmc.root)
+    older_rule = v7_bundle("a" * 64, rule=ENSEMBLE_RULE_VERSION - 1, genes=None)
+    pre_c16 = v7_bundle("b" * 64, rule=ENSEMBLE_RULE_VERSION, genes=None)
+    # The ensemble-rule rebuild (the Prime 5K store's case): the current rule
+    # wins; it predates C16, so a warning says NR7 is not evaluable.
+    with caplog.at_level(logging.WARNING, logger="merxen.annotation.pipeline"):
+        assert found() == pre_c16
+    assert len(warnings()) == 1
+    assert f"{pre_c16.name[:16]} has version 0" in warnings()[0]
+    assert older_rule.name[:16] not in warnings()[0]
+    # The C16 rebuild sits next to the pre-C16 bundle: every standalone
+    # lookup takes it, and nothing warns.
+    current = v7_bundle("c" * 64, rule=ENSEMBLE_RULE_VERSION, genes=SIM_GENES_VERSION)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="merxen.annotation.pipeline"):
+        assert found() == current
+        assert (
+            locate_bundle_path(store, "whb_frontal_supc_clus", panel.panel_hash)
+            == current
+        )
+        assert (
+            current_store_bundles(store)("whb_frontal_supc_clus", panel.panel_hash)
+            == current
+        )
+        subset = store_subset_bundle_finder(store)(
+            "whb_frontal_supc_clus", panel.panel_hash
+        )
+    assert subset is not None and subset.path == current
+    assert not warnings()
+    # A future artefact version this code does not write is not current.
+    v7_bundle("d" * 64, rule=ENSEMBLE_RULE_VERSION, genes=SIM_GENES_VERSION + 1)
+    assert found() == current
+    # A bundle without a version-7 payload is never dropped by this rule.
+    v7_bundle("e" * 64, rule=None, genes=None, v7=False)
+    with pytest.raises(MapError, match="2 bundles"):
+        found()
+
+
+def test_two_current_version_7_bundles_stay_ambiguous(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    from merxen.annotation.resolvability import (
+        ENSEMBLE_RULE_VERSION,
+        RESOLVABILITY_VERSION_V7,
+        SIM_GENES_VERSION,
+    )
+
+    panel = _panel(GENE_IDS)
+    for build_hash in ("a" * 64, "b" * 64):
+        path = fake_mmc.bundle(
+            "whb_frontal_supc_clus",
+            build_hash=build_hash,
+            role="primary",
+            species="human",
+            panel_hash=panel.panel_hash,
+            n_genes=panel.n_genes,
+            levels=WHB_LEVELS,
+            nodes=WHB_NODES,
+        )
+        manifest = json.loads((path / "bundle.json").read_text())
+        manifest["builder_output"]["resolvability"] = {
+            "resolvability_version": RESOLVABILITY_VERSION_V7
+        }
+        manifest["build_hash_payload"] = {
+            "builder_params": {
+                "resolvability": {
+                    "v7": {
+                        "ensemble_rule_version": ENSEMBLE_RULE_VERSION,
+                        "simulated_n_genes_version": SIM_GENES_VERSION,
+                    }
+                }
+            }
+        }
+        (path / "bundle.json").write_text(json.dumps(manifest))
+    store = ReferenceStore(fake_mmc.root)
+    with pytest.raises(MapError, match="2 bundles"):
+        locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash)
+
+
+def test_self_map_test_set_revision_is_read_from_the_hashed_params(
+    tmp_path: Path, fake_mmc: FakeMmc, caplog: pytest.LogCaptureFixture
+) -> None:
+    """M8 review: a D1 bundle whose builder wrote no test_set_exclusion record.
+
+    Another self-map path (M3c's version-7 ensembles) hashes the revision
+    through the shared test-set params but writes none of M8's provenance:
+    the hashed params are authoritative.
+    """
+    from types import SimpleNamespace
+
+    from merxen.annotation.pipeline import _self_map_test_set_revision
+    from merxen.annotation.reference import (
+        HO_REFERENCE_ID,
+        HO_SELF_MAP_TEST_SET_REVISION,
+        ho_self_map_exclusion_params,
+    )
+    from merxen.annotation.resolvability import RESOLVABILITY_VERSION
+
+    panel = _panel(GENE_IDS)
+    common: dict[str, Any] = {
+        "role": "primary",
+        "species": "human",
+        "panel_hash": panel.panel_hash,
+        "n_genes": panel.n_genes,
+        "levels": WHB_LEVELS,
+        "nodes": WHB_NODES,
+    }
+
+    def bundle(build_hash: str, test_set: dict[str, Any] | None) -> Path:
+        path = fake_mmc.bundle("whb_frontal_supc_clus", build_hash=build_hash, **common)
+        manifest = json.loads((path / "bundle.json").read_text())
+        manifest["builder_output"]["resolvability"] = {
+            "resolvability_version": RESOLVABILITY_VERSION,
+            "test_set_bundle": {"reference_id": HO_REFERENCE_ID, "build_hash": "0"},
+        }
+        if test_set is not None:
+            manifest.setdefault("build_hash_payload", {}).setdefault(
+                "builder_params", {}
+            )["resolvability"] = {"enabled": True, "test_set": test_set}
+        (path / "bundle.json").write_text(json.dumps(manifest))
+        return path
+
+    current = bundle(
+        "a" * 64,
+        {
+            "reference_id": HO_REFERENCE_ID,
+            "self_map_exclusion": ho_self_map_exclusion_params(),
+        },
+    )
+    older = bundle("b" * 64, {"reference_id": HO_REFERENCE_ID})
+    unhashed = bundle("c" * 64, None)
+    mouse = bundle("d" * 64, {"reference_id": "wmb_selfmap_testset"})
+
+    def revision(path: Path) -> int | None:
+        return _self_map_test_set_revision(SimpleNamespace(path=path))
+
+    # No builder_output test_set_exclusion on any of them: the current
+    # revision comes from the hashed params alone.
+    assert revision(current) == HO_SELF_MAP_TEST_SET_REVISION
+    assert revision(older) == 0
+    assert revision(unhashed) == 0  # the builder_output record, pre-D1
+    assert revision(mouse) is None
+    store = ReferenceStore(fake_mmc.root)
+    with caplog.at_level(logging.WARNING, logger="merxen.annotation.pipeline"):
+        found = locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash)
+    assert found.path == current
+    assert not [r for r in caplog.records if "self-map test set" in r.getMessage()]
+
+
+def test_self_map_test_set_revision_applies_only_to_the_human_held_out_set(
+    tmp_path: Path, fake_mmc: FakeMmc, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A mouse self-map (its own test set) has no human test-set revision:
+    # two current mouse bundles stay ambiguous and nothing warns about it.
+    from merxen.annotation.resolvability import RESOLVABILITY_VERSION
+
+    panel = _panel(GENE_IDS)
+    common: dict[str, Any] = {
+        "role": "primary",
+        "species": "human",
+        "panel_hash": panel.panel_hash,
+        "n_genes": panel.n_genes,
+        "levels": WHB_LEVELS,
+        "nodes": WHB_NODES,
+    }
+    for build_hash in ("a" * 64, "b" * 64):
+        path = fake_mmc.bundle("whb_frontal_supc_clus", build_hash=build_hash, **common)
+        manifest = json.loads((path / "bundle.json").read_text())
+        manifest["builder_output"]["resolvability"] = {
+            "resolvability_version": RESOLVABILITY_VERSION,
+            "test_set_bundle": {"reference_id": "wmb_selfmap_testset"},
+        }
+        (path / "bundle.json").write_text(json.dumps(manifest))
+    store = ReferenceStore(fake_mmc.root)
+    with (
+        caplog.at_level(logging.WARNING, logger="merxen.annotation.pipeline"),
+        pytest.raises(MapError, match="2 bundles"),
+    ):
+        locate_bundle(store, "whb_frontal_supc_clus", panel.panel_hash)
+    assert not [r for r in caplog.records if "self-map test set" in r.getMessage()]
+
+
 def test_locate_bundle_warns_when_only_stale_self_map_tables_exist(
     tmp_path: Path, fake_mmc: FakeMmc, caplog: pytest.LogCaptureFixture
 ) -> None:

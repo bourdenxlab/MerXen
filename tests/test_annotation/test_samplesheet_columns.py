@@ -32,8 +32,24 @@ def test_missing_and_blank_columns_inherit_the_params() -> None:
     assert parse_optional_columns({ANATOMICAL_REGION_COLUMN: None}).as_dict() == {
         "anatomical_region": None,
         "mouse_section_regions": None,
+        "clustering_squidpy_mode": None,
     }
-    assert OPTIONAL_ANNOTATION_COLUMNS == ("anatomical_region", "mouse_section_regions")
+    assert OPTIONAL_ANNOTATION_COLUMNS == (
+        "anatomical_region",
+        "mouse_section_regions",
+        "clustering_squidpy_mode",
+    )
+
+
+def test_a_rows_clustering_mode_is_checked_and_normalised() -> None:
+    """The per-row mode column (pre-registration §20 D15)."""
+    parsed = parse_optional_columns({"clustering_squidpy_mode": " Legacy "})
+    assert parsed.clustering_squidpy_mode == "legacy"
+    assert parse_optional_columns({"clustering_squidpy_mode": " "}) == (
+        OptionalAnnotationColumns()
+    )
+    with pytest.raises(ValueError, match="invalid clustering_squidpy_mode"):
+        parse_optional_columns({"clustering_squidpy_mode": "map-first"})
 
 
 def test_example_samplesheet_rows_parse_unchanged() -> None:

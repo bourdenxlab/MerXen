@@ -2813,7 +2813,10 @@ def test_holdout_bundle_trains_without_the_donor_and_keeps_its_cells_as_tests(
         "whb_cluster_membership",
     }
     panel = make_panel(GENES)
-    config = AnnotationConfig(species="human", resolvability={"n_test_cells": 20})
+    # The version-6 test set (M3b); version 7 adds the class top-up (M3c).
+    config = AnnotationConfig(
+        species="human", resolvability={"n_test_cells": 20, "version": 6}
+    )
     store = ReferenceStore(tmp_path / "store")
     bundle = store.get_or_build(
         spec, panel, builder=builder_for(spec, config), config=config
@@ -3026,6 +3029,268 @@ def test_holdout_test_set_leaves_out_excluded_truth_superclusters(
     assert len(donor) == HO_DONORS["H_small"] - n_micro
 
 
+# Gate P's leave-one-donor-out sets (M13; pre-registration §23.2 D2 (d)):
+# H_mid's own c5 cells are eligible only when H_mid is held out (c5 then has
+# enough training cells: H_big's 3 and H_small's), so the default set
+# (H_small held out) never draws them.
+LOO_OTHER_REGION = (
+    *HO_OTHER_REGION,
+    ("mid_c5", 3, 7, "WHB-10Xv3-Nonneurons", "Human MTG", "H_mid"),
+)
+
+
+def _loo_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, AnnotationConfig, ReferenceStore, Path]:
+    """The held-out spec, its config, a store and the default held-out bundle."""
+    import sys
+
+    monkeypatch.setattr(
+        sys.modules[__name__], "HO_OTHER_REGION", LOO_OTHER_REGION, raising=True
+    )
+    sources = write_ho_sources(tmp_path)
+    FakeCtm(ho_lookup).install(monkeypatch).precompute = ho_precompute
+    spec = prepare_reference_spec(
+        AnnotationReferenceSpec(
+            reference_id=reference.HO_REFERENCE_ID,
+            species="human",
+            role="resolvability",
+            hierarchy=[SUPC, CLUS],
+            sources=ho_spec_sources(sources),
+        )
+    )
+    config = AnnotationConfig(
+        species="human", resolvability={"n_test_cells": 1000, "version": 6}
+    )
+    store = ReferenceStore(tmp_path / "store")
+    default = store.get_or_build(
+        spec, make_panel(GENES), builder=builder_for(spec, config), config=config
+    )
+    return spec, config, store, Path(default.path)
+
+
+def _loo(
+    config: AnnotationConfig, donor: str, *, donor_only: bool = True
+) -> AnnotationConfig:
+    resolvability = config.resolvability.model_copy(
+        update={"holdout_donor": donor, "holdout_other_region_donor_only": donor_only}
+    )
+    return config.model_copy(update={"resolvability": resolvability})
+
+
+def test_leave_one_donor_out_set_draws_only_the_donors_own_other_region_cells(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    spec, config, store, default_dir = _loo_setup(tmp_path, monkeypatch)
+    default_cells = set(res.load_test_cells(default_dir).obs.index.astype(str))
+    excluded = default_dir / res.TEST_CELLS_OBS_FILE
+    loo_spec = spec.model_copy(
+        update={
+            "sources": {
+                **spec.sources,
+                reference.SOURCE_GATE_P_EXCLUDED_TEST_CELLS: excluded,
+            }
+        }
+    )
+    loo_config = _loo(config, "H_mid")
+    bundle = store.get_or_build(
+        loo_spec,
+        make_panel(GENES),
+        builder=builder_for(loo_spec, loo_config),
+        config=loo_config,
+    )
+    bundle_dir = Path(bundle.path)
+    assert bundle.build_hash != default_dir.name
+    manifest = json.loads((bundle_dir / BUNDLE_MANIFEST_NAME).read_text())
+    test_set = manifest["builder_output"]["test_set"]
+    assert test_set["holdout_donor"] == "H_mid"
+    test = res.load_test_cells(bundle_dir)
+    other = test.obs[
+        test.obs[reference.TEST_SOURCE_COLUMN] == reference.TEST_SOURCE_OTHER_REGION
+    ]
+    # Only H_mid's own other-region cells; none of the default test set.
+    assert sorted(other.index) == [f"mid_c5-{index}" for index in range(3)]
+    assert set(other["donor_label"]) == {"H_mid"}
+    assert not set(test.obs.index) & default_cells
+    rule = test_set["gate_p_leave_one_donor_out"]
+    assert rule["holdout_donor"] == "H_mid" and rule["disjoint_from_excluded"]
+    assert rule["n_left_out_other_donors"] > 0
+    assert rule["n_excluded_listed"] == len(default_cells)
+    payload = manifest["build_hash_payload"]
+    assert payload["builder_params"]["other_region"]["donor_only"] is True
+    assert reference.SOURCE_GATE_P_EXCLUDED_TEST_CELLS in payload["sources"]
+    # The production draw for the same donor takes every donor's cells.
+    plain_config = _loo(config, "H_mid", donor_only=False)
+    plain = store.get_or_build(
+        spec,
+        make_panel(GENES),
+        builder=builder_for(spec, plain_config),
+        config=plain_config,
+    )
+    plain_test = res.load_test_cells(Path(plain.path))
+    plain_other = plain_test.obs[
+        plain_test.obs[reference.TEST_SOURCE_COLUMN]
+        == reference.TEST_SOURCE_OTHER_REGION
+    ]
+    assert set(plain_other["donor_label"]) > {"H_mid"}
+    plain_manifest = json.loads((Path(plain.path) / BUNDLE_MANIFEST_NAME).read_text())
+    plain_params = plain_manifest["build_hash_payload"]["builder_params"]
+    assert "donor_only" not in plain_params["other_region"]
+    assert (
+        "gate_p_leave_one_donor_out" not in plain_manifest["builder_output"]["test_set"]
+    )
+    # The production config's held-out params carry no gate-P key at all.
+    default_payload = json.loads((default_dir / BUNDLE_MANIFEST_NAME).read_text())[
+        "build_hash_payload"
+    ]["builder_params"]
+    assert "donor_only" not in default_payload["other_region"]
+
+
+def test_leave_one_donor_out_builds_refuse_half_a_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    spec, config, store, default_dir = _loo_setup(tmp_path, monkeypatch)
+    excluded = default_dir / res.TEST_CELLS_OBS_FILE
+    listed = spec.model_copy(
+        update={
+            "sources": {
+                **spec.sources,
+                reference.SOURCE_GATE_P_EXCLUDED_TEST_CELLS: excluded,
+            }
+        }
+    )
+    panel = make_panel(GENES)
+    with pytest.raises(ReferenceBuildError, match="needs both"):
+        only_flag = _loo(config, "H_mid")
+        store.get_or_build(
+            spec, panel, builder=builder_for(spec, only_flag), config=only_flag
+        )
+    with pytest.raises(ReferenceBuildError, match="needs both"):
+        only_source = _loo(config, "H_mid", donor_only=False)
+        store.get_or_build(
+            listed, panel, builder=builder_for(listed, only_source), config=only_source
+        )
+    # The default donor cannot be held out again against its own test set.
+    again = _loo(config, "H_small")
+    with pytest.raises(ReferenceBuildError, match="holds out another donor"):
+        store.get_or_build(
+            listed, panel, builder=builder_for(listed, again), config=again
+        )
+
+
+def test_pool_sizes_count_each_donors_own_pools_from_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    spec, config, store, default_dir = _loo_setup(tmp_path, monkeypatch)
+    default = res.load_test_cells(default_dir)
+    pools = reference.ho_donor_pool_sizes(
+        spec.sources,
+        donors=["H_big", "H_mid"],
+        excluded_cells=set(default.obs.index.astype(str)),
+        default_test_superclusters=default.obs[res.TRUTH_LEAF_COLUMN].astype(str),
+        region="frontal_cortex",
+        target=40,
+        scratch_dir=tmp_path / "scratch",
+    )
+    assert list(pools.columns) == list(reference.GATE_P_POOL_COLUMNS)
+    # Only non-neuronal classes (the other-region pool serves no neurons).
+    assert set(pools["class"]) == {"Astro", "Immune"}
+    by = pools.set_index(["donor", "class"])
+    # H_mid's own eligible c5 cells; H_big's c5 cluster has too few training
+    # cells when H_big is held out, so it has none of its own.
+    assert by.loc[("H_mid", "Immune"), "n_other_region_own"] == 3
+    assert by.loc[("H_big", "Immune"), "n_other_region_own"] == 0
+    # Frontal cells per donor and class (no truth exclusion in the fixture).
+    frontal = pd.read_csv(spec.sources["whb_region_cell_metadata"])
+    supercluster = frontal["cluster_alias"].map(
+        lambda alias: CLUS_TO_SUPC[SUBC_TO_CLUS[f"s{alias}"]]
+    )
+    mid_astro = (frontal["donor_label"] == "H_mid") & (supercluster == ASTRO)
+    assert by.loc[("H_mid", "Astro"), "n_frontal"] == int(mid_astro.sum())
+    for donor, cls in by.index:
+        row = by.loc[(donor, cls)]
+        assert row["n_available"] == row["n_frontal"] + row["n_other_region_own"]
+        assert bool(row["meets"]) == (row["n_available"] >= 40)
+        assert bool(row["judged"]) == (row["n_default_test"] > 0)
+    # The pool report counts what the leave-one-donor-out build then draws.
+    excluded = default_dir / res.TEST_CELLS_OBS_FILE
+    loo_spec = spec.model_copy(
+        update={
+            "sources": {
+                **spec.sources,
+                reference.SOURCE_GATE_P_EXCLUDED_TEST_CELLS: excluded,
+            }
+        }
+    )
+    loo_config = _loo(config, "H_mid")
+    bundle = store.get_or_build(
+        loo_spec,
+        make_panel(GENES),
+        builder=builder_for(loo_spec, loo_config),
+        config=loo_config,
+    )
+    drawn = res.load_test_cells(Path(bundle.path)).obs
+    other = drawn[
+        drawn[reference.TEST_SOURCE_COLUMN] == reference.TEST_SOURCE_OTHER_REGION
+    ]
+    assert len(other) == (
+        by.loc[("H_mid", "Immune"), "n_other_region_own"]
+        + by.loc[("H_mid", "Immune"), "n_other_region_own_dropped"]
+    )
+    with pytest.raises(ReferenceBuildError, match="no frontal WHB cell"):
+        reference.ho_donor_pool_sizes(
+            spec.sources,
+            donors=["H_none"],
+            excluded_cells=(),
+            default_test_superclusters=(),
+            region="frontal_cortex",
+            target=40,
+            scratch_dir=tmp_path / "scratch",
+        )
+    shares = reference.whb_frontal_composition(spec.sources, tmp_path / "scratch")
+    assert sum(shares.values()) == pytest.approx(1.0)
+    assert set(shares) == {UL_IT, ASTRO, MICRO}
+
+
+def test_pool_sizes_leave_out_the_other_region_cells_the_self_map_drops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    # M13 C8 review: M13 D1 (a) drops every leave-one-donor-out set's
+    # other-region COP cells from the self-map, so they never count toward a
+    # donor's pool. Microglia stand in for COP (the fixture's other-region
+    # cells are Astrocytes and Microglia).
+    spec, _config, _store, default_dir = _loo_setup(tmp_path, monkeypatch)
+    default = res.load_test_cells(default_dir)
+
+    def pools() -> pd.DataFrame:
+        return reference.ho_donor_pool_sizes(
+            spec.sources,
+            donors=["H_big", "H_mid"],
+            excluded_cells=set(default.obs.index.astype(str)),
+            default_test_superclusters=default.obs[res.TRUTH_LEAF_COLUMN].astype(str),
+            region="frontal_cortex",
+            target=40,
+            scratch_dir=tmp_path / "scratch",
+        ).set_index(["donor", "class"])
+
+    before = pools()
+    assert (before["n_other_region_own_dropped"] == 0).all()
+    monkeypatch.setattr(reference, "HO_SELF_MAP_EXCLUDED_SUPERCLUSTERS", ("Microglia",))
+    after = pools()
+    immune = after.loc[("H_mid", "Immune")]
+    assert before.loc[("H_mid", "Immune"), "n_other_region_own"] == 3
+    assert immune["n_other_region_own"] == 0
+    assert immune["n_other_region_own_dropped"] == 3
+    assert immune["n_available"] == immune["n_frontal"]
+    assert bool(immune["meets"]) == (immune["n_frontal"] >= 40)
+    assert (after.xs("Immune", level="class")["n_other_region_all_donors"] == 0).all()
+    assert before.loc[("H_mid", "Immune"), "n_other_region_all_donors"] > 0
+    # A class the self-map keeps is counted as before.
+    pd.testing.assert_series_equal(
+        before.loc[("H_mid", "Astro")], after.loc[("H_mid", "Astro")]
+    )
+
+
 def test_other_region_draw_never_takes_a_reference_cell() -> None:
     labels = pd.DataFrame(
         {SUPC: [ASTRO, MICRO], CLUS: ["c3", "c4"], SUBC: ["s4", "s6"]},
@@ -3154,7 +3419,7 @@ def test_whb_primary_self_maps_the_held_out_cells_onto_the_held_out_bundle(
         )
     )
     panel = make_panel(GENES)
-    config = AnnotationConfig(species="human")
+    config = AnnotationConfig(species="human", resolvability={"version": 6})
     store = ReferenceStore(tmp_path / "store", scratch_root=tmp_path / "scratch")
     (tmp_path / "scratch").mkdir()
     bundle = store.get_or_build(
@@ -3224,6 +3489,202 @@ def test_whb_primary_self_maps_the_held_out_cells_onto_the_held_out_bundle(
     assert sea_summary["engine"]["self"] is True
     assert [level["level"] for level in sea_summary["levels"]] == ["broad"]
     assert sea_summary["test_set_bundle"]["build_hash"] == ho_dir.name
+
+
+COP = "CS202210140_468"  # Committed oligodendrocyte precursor
+OPC_SUPC = "CS202210140_467"  # Oligodendrocyte precursor
+
+
+def _held_out_cells(rows: Sequence[tuple[str, str, str]]) -> res.HeldOutCells:
+    """Held-out test cells from (cell id, truth supercluster, test source)."""
+    from scipy import sparse
+
+    ids = [row[0] for row in rows]
+    truth = [row[1] for row in rows]
+    obs = pd.DataFrame(
+        {
+            f"{res.TRUTH_PREFIX}{SUPC}": truth,
+            res.TRUTH_LEAF_COLUMN: truth,
+            res.SPILL_GROUP_COLUMN: ["g"] * len(rows),
+            reference.TEST_SOURCE_COLUMN: [row[2] for row in rows],
+        },
+        index=pd.Index(ids, name="cell_id"),
+    )
+    counts = sparse.csr_matrix(
+        np.arange(1, 2 * len(rows) + 1, dtype=float).reshape(-1, 2)
+    )
+    return res.HeldOutCells(counts=counts, genes=["g1", "g2"], obs=obs)
+
+
+def test_self_map_test_cells_leave_out_only_other_region_cop_cells() -> None:
+    donor, other = reference.TEST_SOURCE_DONOR, reference.TEST_SOURCE_OTHER_REGION
+    test = _held_out_cells(
+        [
+            ("donor_cop", COP, donor),
+            ("other_cop_1", COP, other),
+            ("donor_opc", OPC_SUPC, donor),
+            ("other_opc", OPC_SUPC, other),
+            ("other_cop_2", COP, other),
+            ("other_astro", ASTRO, other),
+        ]
+    )
+    kept, record = reference.self_map_test_cells(test, reference.HO_REFERENCE_ID)
+    # M8 D1: the other-region COP cells go; the donor's own COP cells and the
+    # other-region cells of every other supercluster stay.
+    assert list(kept.obs.index) == [
+        "donor_cop",
+        "donor_opc",
+        "other_opc",
+        "other_astro",
+    ]
+    np.testing.assert_array_equal(
+        kept.counts.toarray(), test.counts.toarray()[[0, 2, 3, 5]]
+    )
+    np.testing.assert_array_equal(kept.native_counts, test.native_counts[[0, 2, 3, 5]])
+    assert record is not None
+    assert record["revision"] == reference.HO_SELF_MAP_TEST_SET_REVISION == 1
+    assert record["rule"] == reference.HO_SELF_MAP_EXCLUSION_RULE
+    assert record["test_source"] == other
+    assert record["excluded_superclusters"] == ["Committed oligodendrocyte precursor"]
+    assert record["excluded_labels"] == [COP]
+    assert record["n_test_cells_in_bundle"] == 6
+    assert record["n_excluded"] == 2
+    assert record["n_test_cells"] == 4
+    assert record["excluded_per_supercluster"] == {COP: 2}
+    assert record["kept_per_source_of_excluded_superclusters"] == {donor: 1}
+    # The input is untouched (the held-out bundle's cells stay as built).
+    assert len(test.obs) == 6
+
+
+def test_self_map_test_cells_keep_other_test_sets_and_donor_only_sets() -> None:
+    donor, other = reference.TEST_SOURCE_DONOR, reference.TEST_SOURCE_OTHER_REGION
+    test = _held_out_cells([("a", COP, other), ("b", ASTRO, donor)])
+    # The mouse test set has no exclusion (and no record).
+    same, record = reference.self_map_test_cells(
+        test, reference.WMB_TESTSET_REFERENCE_ID
+    )
+    assert same is test and record is None
+    # A held-out set without other-region COP cells is returned as it is.
+    donor_only = _held_out_cells([("a", COP, donor), ("b", ASTRO, other)])
+    same, record = reference.self_map_test_cells(donor_only, reference.HO_REFERENCE_ID)
+    assert same is donor_only
+    assert record is not None and record["n_excluded"] == 0
+    # A held-out set built before the top-up has no test_source: all donor.
+    legacy = _held_out_cells([("a", COP, donor)])
+    legacy.obs.drop(columns=[reference.TEST_SOURCE_COLUMN], inplace=True)
+    same, record = reference.self_map_test_cells(legacy, reference.HO_REFERENCE_ID)
+    assert same is legacy and record is not None and record["n_excluded"] == 0
+
+
+def test_whb_self_map_leaves_the_excluded_other_region_cells_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    # The fixture's other-region cells are Astrocytes and Microglia (no COP),
+    # so exclude Astrocyte to see the rule act end to end.
+    monkeypatch.setattr(reference, "HO_SELF_MAP_EXCLUDED_SUPERCLUSTERS", ("Astrocyte",))
+    sources, ho, _ = whb_resolvability_setup(tmp_path, monkeypatch)
+    markers = {node: GENES[index] for node, index in MARKER_OF_SUPC.items()}
+    calls = install_self_map(monkeypatch, markers)
+    spec = prepare_reference_spec(
+        whb_spec(
+            region_precompute=sources["region_dir"],
+            seaad_precomputed_stats=sources["seaad"],
+            whb_h5ad_dir=ho["h5ad_dir"],
+            whb_metadata_dir=ho["metadata"],
+            whb_region_cell_metadata=ho["region_dir"]
+            / reference.REGION_CELL_METADATA_FILE,
+        )
+    )
+    config = AnnotationConfig(species="human")
+    store = ReferenceStore(tmp_path / "store", scratch_root=tmp_path / "scratch")
+    (tmp_path / "scratch").mkdir()
+    bundle = store.get_or_build(
+        spec, make_panel(GENES), builder=builder_for(spec, config), config=config
+    )
+    bundle_dir = Path(bundle.path)
+    (ho_dir,) = (tmp_path / "store" / reference.HO_REFERENCE_ID).glob("[0-9a-f]*")
+    test = res.load_test_cells(ho_dir)
+    source = test.obs[reference.TEST_SOURCE_COLUMN]
+    truth = test.obs[res.TRUTH_LEAF_COLUMN]
+    dropped = set(
+        test.obs.index[
+            (source == reference.TEST_SOURCE_OTHER_REGION) & (truth == ASTRO)
+        ]
+    )
+    assert len(dropped) == 4  # the held-out bundle keeps them
+    cells = pd.read_parquet(bundle_dir / res.RESOLVABILITY_CELLS_FILE)
+    simulated = set(cells["cell_id"].astype(str))
+    assert not simulated & dropped
+    # The donor's Astrocytes and the other-region Microglia are simulated.
+    assert (
+        set(test.obs.index[(truth == ASTRO) & (source == "holdout_donor")]) <= simulated
+    )
+    assert (
+        set(test.obs.index[(truth == MICRO) & (source != "holdout_donor")]) <= simulated
+    )
+    # Every mapped query holds only kept cells.
+    assert all(call["n_cells"] > 0 for call in calls)
+    record = {
+        **reference.ho_self_map_exclusion_params(),
+        "excluded_labels": [ASTRO],
+    }
+    summary = json.loads((bundle_dir / res.RESOLVABILITY_SUMMARY_FILE).read_text())
+    recorded = summary["test_set_exclusion"]
+    assert {key: recorded[key] for key in record} == record
+    assert recorded["n_excluded"] == 4
+    assert recorded["n_test_cells"] == len(test.obs) - 4
+    assert recorded["excluded_per_supercluster"] == {ASTRO: 4}
+    manifest = json.loads((bundle_dir / BUNDLE_MANIFEST_NAME).read_text())
+    output = manifest["builder_output"]["resolvability"]
+    assert output["test_set_exclusion"]["n_excluded"] == 4
+    payload = manifest["build_hash_payload"]["builder_params"]["resolvability"]
+    assert payload["test_set"]["self_map_exclusion"] == (
+        reference.ho_self_map_exclusion_params()
+    )
+
+
+def test_self_map_test_set_revision_changes_only_the_self_map_hashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = AnnotationConfig(species="human")
+    spec = whb_spec(region_precompute=tmp_path)
+    seaad = AnnotationReferenceSpec(
+        reference_id="seaad_mr_panel", species="human", role="secondary"
+    )
+    ho_spec = AnnotationReferenceSpec(
+        reference_id=reference.HO_REFERENCE_ID,
+        species="human",
+        role="resolvability",
+        hierarchy=[SUPC, CLUS],
+    )
+    wmb = AnnotationReferenceSpec(
+        reference_id="wmb_panel", species="mouse", role="primary"
+    )
+    mouse = AnnotationConfig(species="mouse")
+
+    def params() -> tuple[Any, ...]:
+        return (
+            builder_for(spec, config).params,
+            builder_for(seaad, config).params,
+            builder_for(ho_spec, config).params,
+            builder_for(wmb, mouse).params,
+        )
+
+    before = params()
+    hashed = before[0]["resolvability"]["test_set"]["self_map_exclusion"]
+    assert hashed["revision"] == reference.HO_SELF_MAP_TEST_SET_REVISION
+    assert hashed["excluded_superclusters"] == ["Committed oligodendrocyte precursor"]
+    monkeypatch.setattr(reference, "HO_SELF_MAP_TEST_SET_REVISION", 0)
+    after = params()
+    # The WHB and SEA-AD self-maps get new hashes; the held-out bundle (its
+    # test cells are unchanged) and the mouse bundles keep theirs.
+    assert after[0]["resolvability"] != before[0]["resolvability"]
+    assert after[1]["resolvability"] != before[1]["resolvability"]
+    assert after[2] == before[2]
+    assert after[3] == before[3]
+    assert "self_map_exclusion" not in before[3]["resolvability"]["test_set"]
+    # The resolvability algorithm version is not bumped (7 is M3c's).
+    assert before[0]["resolvability"]["resolvability_version"] == 6
 
 
 def test_self_map_settings_that_change_its_output_change_the_build_hash(
@@ -3568,9 +4029,11 @@ def test_tiny_real_wmb_bundle_self_maps_through_real_mapmycells(
             },
         )
     )
+    # The version-6 path (R1 + clean) through real MapMyCells; a tiny
+    # unlisted family would otherwise get version 7's ensemble (M3c).
     config = AnnotationConfig(
         species="mouse",
-        resolvability={"min_cells_per_bin": 5, "min_confident_n": 5},
+        resolvability={"min_cells_per_bin": 5, "min_confident_n": 5, "version": 6},
     )
     panel = make_panel(genes[:30], species="mouse")
     store = ReferenceStore(tmp_path / "store", scratch_root=tmp_path / "scratch")

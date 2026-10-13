@@ -1704,15 +1704,16 @@ def test_prepare_compute_finalize_clustering_process_boundary(
     compute_clustering_squidpy(cfg, prepared_dir, computed_dir)
     assert (computed_dir / "merscope/pair1_MERSCOPE_clustered.h5ad").exists()
 
-    writes: list[tuple[Path, str | None]] = []
+    writes: list[tuple[Path, str | None, str]] = []
 
     def _fake_write(
         zarr_path: Path,
         clustered: ad.AnnData,
         *,
         segmentation: str | None,
+        table_key_suffix: str,
     ) -> tuple[Path, str]:
-        writes.append((Path(zarr_path), segmentation))
+        writes.append((Path(zarr_path), segmentation, table_key_suffix))
         return Path(zarr_path), "table_clustered"
 
     monkeypatch.setattr(
@@ -1723,5 +1724,6 @@ def test_prepare_compute_finalize_clustering_process_boundary(
     results = finalize_clustering_squidpy(cfg, computed_dir)
 
     assert (tmp_path / "final/merscope/pair1_MERSCOPE_clustered.h5ad").exists()
-    assert writes == [(tmp_path / "latest.zarr", "reseg")]
+    # Legacy runs write the unsuffixed clustered table (plan §4.8).
+    assert writes == [(tmp_path / "latest.zarr", "reseg", "")]
     assert results["pair1_MERSCOPE"]["spatialdata_table_key"] == "table_clustered"

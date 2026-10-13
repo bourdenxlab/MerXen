@@ -1215,6 +1215,7 @@ threadpoolctl==3.6.0
     # via scikit-learn
 tifffile==2026.4.11
     # via
+    #   merxen (pyproject.toml)
     #   cellpose
     #   dask-image
     #   pims

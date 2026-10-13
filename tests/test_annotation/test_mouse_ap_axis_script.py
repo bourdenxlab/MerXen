@@ -1,4 +1,4 @@
-"""Tests for the M6b AP-axis scoring script (pre-registration §17)."""
+"""Tests for the M6b AP-axis scoring script (pre-registration §24)."""
 
 from __future__ import annotations
 
@@ -554,13 +554,13 @@ def test_mo10_refuses_before_the_selection_is_recorded(tmp_path: Path) -> None:
         ]
     ).to_csv(summary / "real.csv", index=False)
     prereg = tmp_path / "prereg.md"
-    prereg.write_text("## 17\nno selection yet\n")
+    prereg.write_text("## 24\nno selection yet\n")
     args = module.build_parser().parse_args(
         ["mo10", "--out", str(tmp_path), "--preregistration", str(prereg)]
     )
     with pytest.raises(SystemExit, match="commit the selection first"):
         module.mo10_command(args)
-    prereg.write_text("## 17\nSelected candidate (M6b): `a+b` (2026-09-30)\n")
+    prereg.write_text("## 24\nSelected candidate (M6b): `a+b` (2026-09-30)\n")
     assert module.mo10_command(args) == 0
     verdict = json.loads((tmp_path / "mo10" / "mo10.json").read_text())
     assert verdict["candidate"] == "a+b" and not verdict["pass"]

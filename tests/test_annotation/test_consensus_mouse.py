@@ -20,6 +20,8 @@ from merxen.annotation.mouse_gate import (
 )
 from merxen.annotation.schema import CellStatus, Columns
 
+from .conftest import PROMOTION_CONSTRAINTS, assert_same_emission
+
 MakeTrust = Callable[..., Any]
 
 
@@ -279,6 +281,34 @@ def test_supertype_is_report_only(make_trust: MakeTrust) -> None:
     assert result.final_level.tolist() == ["subclass"]
 
 
+def test_chain_validated_share_reads_the_confident_chain_labels(
+    make_trust: MakeTrust,
+) -> None:
+    """The input of the 10% rule (§8.2; M13 D15 (a)): the chain levels only.
+
+    Per chain level (broad, class, nt, subclass) the share of confident
+    labels that are ``ct_<L>_validated``; ``None`` without a confident
+    label; the report-only supertype is never read.
+    """
+    limits = AnnotationThresholds(allow_fine_levels=True)
+    result = resolve([Cell(), Cell(), ASTRO, ASTRO], make_trust, thresholds=limits)
+    levels = result.levels
+    assert "supertype" in levels
+    for level in ("broad", "class", "subclass"):
+        assert levels[level].confident.all(), level
+    assert levels["nt"].confident.tolist() == [True, True, False, False]
+    levels["class"].validated[:] = [True, False, True, False]
+    levels["nt"].validated[:] = [False, True, False, False]
+    # A confident, unvalidated supertype would read 0.0 if it were counted.
+    levels["supertype"].status[:] = CellStatus.CONFIDENT.value
+    levels["supertype"].validated[:] = False
+    shares = cs.chain_validated_share(levels, cs.MOUSE_CHAIN)
+    assert cs.MOUSE_CHAIN == ("broad", "class", "nt", "subclass")
+    assert shares == {"broad": 1.0, "class": 0.5, "nt": 0.5, "subclass": 1.0}
+    astro_only = resolve([ASTRO, ASTRO], make_trust)
+    assert cs.chain_validated_share(astro_only.levels, cs.MOUSE_CHAIN)["nt"] is None
+
+
 def test_mouse_calls_need_one_value_per_object() -> None:
     with pytest.raises(ValueError, match="one value per object"):
         cs.MouseCalls(
@@ -364,3 +394,178 @@ def test_a_cell_implausible_at_every_attempted_level_is_excluded(
     # Kept at broad: the neuron's broad call is confident.
     assert statuses(result, 2)["broad"] == "confident"
     assert result.flags[Columns.EXCLUDE_HARD].tolist() == [True, False, False]
+
+
+# --------------------------------------------------------------------------
+# Promotion by simulation never changes what is emitted (plan §8.2, §14; M13)
+
+MOUSE_GRID: tuple[int, ...] = (10, 20, 50, 100, 250, 500, 1000, 2000)
+# (level, role, default threshold, base target, floor level) as PREP's
+# mouse level specs record them.
+MOUSE_TABLE_LEVELS: tuple[tuple[str, str, float, float, str | None], ...] = (
+    ("broad", "broad", 0.90, 0.90, "class"),
+    ("class", "class", 0.90, 0.90, "class"),
+    ("nt", "nt", 0.90, 0.90, "class"),
+    ("subclass", "leaf", 0.80, 0.85, "subclass"),
+    ("supertype", "fine", 0.80, 0.85, "subclass"),
+)
+MOUSE_CLASS_CALLS: dict[str, tuple[str, str | None, str, str]] = {
+    # class: (broad, nt, subclass, supertype)
+    "01 IT-ET Glut": ("Neurons", "Excitatory", "007 L2/3 IT CTX Glut", "0023 IT"),
+    "19 MB Glut": ("Neurons", "Excitatory", "19 MB Glut 1", "19 MB Glut 1_1"),
+    "24 MY Glut": ("Neurons", "Excitatory", "24 MY Glut 1", "24 MY Glut 1_1"),
+    "30 Astro-Epen": ("Astrocytes/Ependymal", None, "319 Astro-TE NN", "1162 Astro"),
+}
+
+
+def promotion_decisions(make_decisions: Callable[..., Any]) -> Any:
+    """A mouse decisions table whose provisional regime carries the margins."""
+    overrides = {
+        ("provisional", "class", "01 IT-ET Glut", 20): {"status": "not_resolvable"},
+        ("provisional", "class", "30 Astro-Epen", 50): {"threshold": 0.95},
+        ("provisional", "broad", "19 MB Glut", 10): {"status": "not_resolvable"},
+        ("provisional", "nt", "24 MY Glut", 100): {"threshold": 0.97},
+        ("provisional", "subclass", "01 IT-ET Glut", 100): {"status": "not_resolvable"},
+        ("provisional", "subclass", "30 Astro-Epen", 250): {"threshold": 0.92},
+        ("provisional", "supertype", "01 IT-ET Glut", 500): {"extrapolated": True},
+        ("validated", "subclass", "19 MB Glut", 50): {"status": "not_resolvable"},
+    }
+    return make_decisions(
+        levels=MOUSE_TABLE_LEVELS,
+        classes=tuple(MOUSE_CLASS_CALLS),
+        grid=MOUSE_GRID,
+        overrides=overrides,
+    )
+
+
+def random_mouse_calls(rng: np.random.Generator, n: int) -> cs.MouseCalls:
+    """Seeded random mouse objects (class calls, scores, depths, re-maps)."""
+    names = [*MOUSE_CLASS_CALLS, None]
+    picked = [names[int(rng.integers(len(names)))] for _ in range(n)]
+
+    def part(index: int) -> list[Any]:
+        return [
+            None if cls is None else MOUSE_CLASS_CALLS[cls][index] for cls in picked
+        ]
+
+    def scores(low: float) -> list[float]:
+        return [float(value) for value in rng.uniform(low, 1.0, size=n)]
+
+    counts = rng.integers(5, 1500, size=n)
+    corr = [float(value) for value in rng.uniform(0.3, 0.8, size=n)]
+    dropped = [
+        (None, None, None, "class", "subclass")[int(rng.integers(5))] for _ in range(n)
+    ]
+    wmb = cs.WmbCalls(
+        klass=cs.LevelCall.of(picked, scores(0.8), corr=corr),
+        broad=cs.LevelCall.of(part(0), scores(0.85), corr=corr),
+        nt=cs.LevelCall.of(part(1), scores(0.85), corr=corr),
+        subclass=cs.LevelCall.of(part(2), scores(0.7)),
+        supertype=cs.LevelCall.of(part(3), scores(0.7)),
+    )
+    return cs.MouseCalls(
+        total_counts=counts,
+        in_table=counts >= 10,
+        wmb=wmb,
+        region_dropped=np.array(dropped, dtype=object),
+    )
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+@pytest.mark.parametrize("constraint", PROMOTION_CONSTRAINTS)
+def test_promotion_by_simulation_never_changes_what_resolve_mouse_emits(
+    promotion_trust: Callable[..., tuple[Any, Any]],
+    make_decisions: Callable[..., Any],
+    constraint: str,
+    seed: int,
+) -> None:
+    """Provisional -> simulation-validated trust: only validation marks change.
+
+    The trust decisions come from ``trust_state`` before and after a gate-P
+    PR lists the family; the gate verdict, the class correlation floor
+    (``mouse_resolve.class_corr_floor``), the emission plan and the floors
+    are derived from each the way mouse RESOLVE derives them.
+    """
+    from merxen.annotation.config import AnnotationConfig
+    from merxen.annotation.mouse_resolve import class_corr_floor
+    from merxen.annotation.resolvability import LevelMeta
+
+    rng = np.random.default_rng(seed)
+    calls = random_mouse_calls(rng, 400)
+    trusts = promotion_trust(constraint, species="mouse")
+    has_tables = constraint != "no_self_map"
+    limits = AnnotationThresholds(allow_fine_levels=True, wmb_class_min_corr=0.5)
+    config = AnnotationConfig(species="mouse", thresholds=limits)
+    meta = tuple(
+        LevelMeta(level, "CLAS", role, default, target, floor)  # type: ignore[arg-type]
+        for level, role, default, target, floor in MOUSE_TABLE_LEVELS
+    )
+    signals = MouseGateSignals(
+        registration=RegistrationSignal(density_ratio=2.9, shift_um=0.0),
+        referee=MarkerReferee(
+            consistency=0.9, n_pseudo_confident=500, n_cells=600, markers={}
+        ),
+        t2_share=0.004,
+        spillover_rate=0.08,
+    )
+    results = []
+    for trust in trusts:
+        emission = th.EmissionPlan(
+            species="mouse",
+            thresholds=limits,
+            decisions=promotion_decisions(make_decisions) if has_tables else None,
+            levels=meta if has_tables else (),
+            grid=MOUSE_GRID if has_tables else (),
+            trust=trust,
+            fine_seed_stability={"supertype": 0.0} if has_tables else None,
+        )
+        floors = th.FloorPlan.build(
+            species="mouse",
+            platform="MERSCOPE",
+            hard_floor=10,
+            trust=trust,
+            thresholds=limits,
+            emission=emission,
+        )
+        corr_floor, _ = class_corr_floor(config, trust)
+        assert corr_floor is None  # real-data-validated families only (§16)
+        settings = cs.MouseResolveSettings(
+            platform="MERSCOPE",
+            min_counts=10,
+            emission=emission,
+            floors=floors,
+            thresholds=limits,
+            trust=trust,
+            class_min_corr=corr_floor,
+            allow_fine_levels=True,
+        )
+        verdict = evaluate_mouse_gate(signals, MouseGateConfig(), trust=trust)
+        results.append(cs.resolve_mouse(calls, settings, verdict))
+    before, after = results
+    before_trust, after_trust = trusts
+    assert_same_emission(before, after)
+    assert before.class_min_corr == after.class_min_corr
+    assert not any(result.validated.any() for result in before.levels.values())
+    table = before.in_table
+    subclass_confident = before.levels["subclass"].confident
+    if constraint == "resolvable":
+        assert (before_trust.state, after_trust.state) == ("provisional", "validated")
+        assert after.levels["class"].validated.any()
+        assert before.gate.warning and before_trust.banner
+        assert not after_trust.banner
+        assert before.floor_warnings and not after.floor_warnings
+        assert before.gate.level == "full" and subclass_confident.any()
+        # The provisional subclass floor (60) holds after promotion too.
+        assert (before.levels["subclass"].floor[table] >= 60).all()
+        assert (after.levels["supertype"].floor[table] >= 60).all()
+    else:
+        assert before_trust.state == after_trust.state
+        assert before_trust.effects() == after_trust.effects()
+        assert not any(result.validated.any() for result in after.levels.values())
+        assert before.gate.warning_reasons == after.gate.warning_reasons
+    if constraint in ("no_self_map", "broad_only"):
+        assert after.gate.level == "broad_only"
+        assert set(after.levels["subclass"].status[table]) <= {
+            "not_attempted_gate",
+            "low_counts",
+        }
