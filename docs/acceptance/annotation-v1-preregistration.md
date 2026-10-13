@@ -1610,3 +1610,93 @@ The family stays `provisional`: gate P did not pass (§23.25), and real data nev
 - NR8's shortfall is large and family-wide: simulation over-predicts real coverage in 21–24 (level, class) rows per section, by up to 0.54 at broad and 0.60 at supercluster. At broad only Oligo (all four), Exc on P3518 and Fibroblast on P5822 are within 0.10.
 - NR9 was never evaluated in the run.
 - NR13's prediction was not made before the outputs were read.
+
+### 23.27 M13 closed; follow-ups of the new-panel family (recorded 2026-10-13)
+
+**Status.** Recorded after §23.26, with the user's answers of 2026-10-13 to the numbered list of next steps put to the user that day. It changes no threshold, target, criterion or verdict, and no published output. The analyses below read the family's and the human sections' published outputs and wrote only under `$A/m13/followups_20261013/`; each states what it read. Where an analysis proposes a change, the proposal is labelled and its status stated.
+
+**1. The user's decisions of 2026-10-13** (verbatim):
+- Closing M13: "1 - yes this is now complete, close M13".
+- The new-panel family's follow-ups: "3 - proceed as you see fit, but on the depth test sides - exclude these. The tissue annotations wont come for some time and you should hold up completing this based on that."
+- The two cortical-depth drawings of P7513_IF: "for 2 the later drawing is correct".
+
+**2. M13 is closed on the human path** (the exit of §23.19, D3 (b)).
+- The exit items are met: the set a dry run passed on the revised code in both versions (§23.23); the family's NP report and its documented gate-P failure (§23.25); onboarding accepted (§23.26); the human rows of the real-data QC regression (C17, §23.18). The code and records are on the integration branch (PR #42, 2026-10-08).
+- The family stays `provisional`, `validated_max_level` none, with no `validated_panels.csv` row (§23.25). Real data never promote it (§23.3 rule 1).
+- Not part of M13, by the user's answer: the human Xenium Prime 5K and Xenium Human Brain (266) gate-P runs (D4 (a), "after this family"; §23.2 listed them as unanswered). They are a later step with no milestone yet, and the user starts each run (D25).
+- The mouse path (C20–C22) is M13b, after M6b (§23.19).
+
+**3. §23.22's per-bin reading of R3 (c) is adopted** ("proceed as you see fit", item 3).
+- It is the reading the code scored: the set a dry run (§23.23) and the family's gate P (§23.25) both ran under it, so no verdict changes.
+- It holds each call of a tested set to the threshold the replicate applies at that call's own bin. §23.22 states that it is not nested with the first implementation's shallowest-bin reading: it is the stricter of the two where a deeper bin's threshold is lower than the shallowest bin's, and the looser where it is higher. On set a version 7 no set fails under either (smallest margin +0.116).
+- No threshold, target or criterion changes, so §1 rule 2 is not engaged.
+
+**4. NR9 evaluated: registration G1 fails on none of the 16 section × segmentation rows.**
+- **Method.** A `git archive` export of the integration branch at `1164b2f` (`$A/m13/followups_20261013/code/head_1164b2f`). The QC stage's own `compute_segmentation_registration_qc` ran with `merscope_cell_boundaries` as the reference, on the published stores, reading only the shapes and points parquets. A full-store `sd.read_zarr` run on P5822 proseg_hybrid matches the written record exactly, and all 16 records match the read-only values behind §23.26's NR9 row. The stores and RESOLVE were not written to or re-run.
+- **proseg_hybrid** (the scored segmentation):
+
+| Section | M0a status | Density ratio | Shift | G1 |
+|---|---|---|---|---|
+| P5822 | pass | 1.749 | 0.0 µm (8 of 8 windows) | warning (< 2.0) |
+| P4815 | pass | 3.055 | 0.0 µm | pass |
+| P3518 | pass | 2.185 | 0.0 µm | pass |
+| P7417 | pass | 3.157 | 0.0 µm | pass |
+
+- **The other segmentations** (P5822 / P4815 / P3518 / P7417): reseg 1.915 / 2.864 / 2.299 / 3.011 and proseg_mask 1.724 / 3.004 / 2.143 / 3.087, shift 0.0 µm on both; original_seg 2.781 / 2.882 / 2.179 / 3.166, shift not measured (its reference is its own shapes). Only P5822 on reseg, proseg_mask and proseg_hybrid is below 2.0, and its lowest ratio, 1.724, is above the fail line of 1.5.
+- **NR9: pass.** The fail rule (ratio < 1.5 or shift > 5 µm; effect `gate_failed`, §23.19 C2) fires on none, so C2 has nothing to act on.
+- **What G1 means for the gate levels.** The gate stays `full` on all 16, with no `exclude_hard` and no label change. P5822 on the three segmentations above would carry a G1 warning flag on its dataset gate; the other 13 rows would be clean. The gate-P and onboarding verdicts (§23.25, §23.26) stand, and §23.26's NR9 row stays as recorded ("not evaluable" in the run).
+- **Published outputs.** They still hold no G1 outcome: no registration check file is in the family's results (§23.26), and RESOLVE was not re-run. The 16 records are evidence in the form RESOLVE's lookup reads, `nr9/<segmentation>/p<id>_merscope_registration_qc.json`, with `nr9_g1_summary.{csv,json}`, `compute_nr9.py` and `qc_stage_crosscheck.py` beside them, under `$A/m13/followups_20261013/nr9/`.
+
+**5. NP7's lineage sink rule: a proposal for future families, not adopted.** It reads the family's gate-P outputs and set a's version 6 and version 7 outputs (`v7_rev1`, 8 members; `v6_rev1`); it reproduces §23.25's NP7 rows exactly for all 8 members and re-scores nothing (`$A/m13/followups_20261013/np7_sink/`).
+- **Why lineage fails and the other levels do not.** The same 1,727 cells (member @0) reach a sink at every level. Under §23.13 item 1 a sink call is confident on the larger of its own bp and its supercluster bp. At lineage the cell keeps its own lineage call, Neurons, with median bp 0.90 against 0.43 on its supercluster bp, so 1,407 of the 1,727 (81%) are confident there, against 83 at broad, 81 at NT and 114 at supercluster (5–7%).
+- **Who they are.** Across the 8 members, 93% of the lineage-confident sink calls (11,701 of 12,637) are confident on that own bp alone. By truth class: Exc 91.9%, Inh 7.4%, non-Neuron truth 86 calls (0.7%); Miscellaneous takes 97%. So 99.3% are neurons whose lineage label, Neurons, is correct.
+- **The family differs from set a.** Exc to a sink is 2.9–3.2% of Exc rows at every depth; on set a it falls from 1.3% to 0.11%. Three excitatory superclusters supply 89% of the family's calls.
+- **Candidate readings** (lineage share over the 8 members; set a's, as scored: 0.00–0.016%):
+
+| Reading | Lineage share | Label |
+|---|---|---|
+| As scored (§23.13 item 1) | 1.00–2.92%, 7 of 8 fail | reference |
+| Count every call, whatever its bp (item 1's stricter reading) | 1.21–3.39%; set a v7 NT and supercluster fail in 3 of 8 members | tightening |
+| Judge on supercluster bp only | 0.06–0.29%; counts 0 of the 86 non-Neuron calls | loosening, post-hoc |
+| Count only the calls whose truth is not Neurons | 0.003–0.024%; counts all 86 | loosening, post-hoc |
+| Leave lineage out of NP7's 1% part | not tested | loosening, post-hoc |
+
+  Broad, NT and supercluster stay at 0.08–0.69% as scored.
+- **Recommendation:** count only truth-not-Neurons at lineage, the one reading that still sees glia sent to a neuron sink. The single-wrong-node view with the excluded calls (§23.13 item 4) needs the same change: member @10 fails Exc sets 10–120 on a "Neurons" node that is the correct lineage.
+- **Status.** Not adopted. It is a loosening (§1 rule 2) and post-hoc for this family, so it applies to future families only, after a new set a dry run (§9, CK2) and the user's written approval. §23.25 stands: the family's lineage failure is not revised.
+
+**6. NR8's over-prediction: investigated; proposal of no criterion change.** All numbers are proseg_hybrid at broad, classes with at least 200 cells, unless stated (`$A/m13/followups_20261013/tables/`).
+- **Depth does not explain it.** The gap is in every bin. 70% of its weight is in the open bin of 250 counts or more, where real coverage is 0.72 against 0.93 simulated; real cells there have median counts of 421–553, and the simulation is matched at 250, so that bin is conservative. P5822 Astro lineage confidence is 0.15 at 60 counts against a simulated 0.81.
+- **By class.** Oligo is within ±0.03. Astro −0.45, Inh −0.35, Vascular −0.32, Immune −0.32, Exc −0.18.
+- **Reweighting does not explain it.** An unweighted predictor warns more: 31 of 32 section × class rows, against 25 of 32.
+- **Gene complexity (NR7) does not explain it.** Native cells have 4–25% fewer genes than simulated at 10–120 counts and match at 120, so it cannot account for the gap at 120 counts and above.
+- **Segmentation does.** At 250–499 counts, non-Oligo lineage coverage falls from 0.84–0.96 in the smallest-area quintile to 0.25–0.51 in the largest. The median gap is −0.25 on proseg_hybrid, −0.26 on original_seg, −0.22 on proseg_mask and −0.13 on reseg. The same cells in reseg have 30–60% fewer counts and a higher confident share (+0.04 to +0.25 for non-Oligo), so the extra ProSeg counts behave like contamination.
+- **Not specific to the new panel.** NR8 was `not_applicable` on set a; the equivalent on set a (version-6 bundle, validated regime) has 40 of 64 rows below −0.10 on proseg_hybrid (median −0.18) and 15 of 62 on reseg (median +0.06), with the same class pattern.
+- **Proposed follow-up (no criterion changes; none adopted).**
+  1. Diagnostic, about 0.5 day: add an area-quintile NR8 table and a paired hybrid-versus-reseg table to the acceptance script, and score NR8 on reseg too for future families.
+  2. Optional report-only QC note, about 1 day: shown when the largest-minus-smallest area-quintile gap is 0.15 or more (here 0.26). RESOLVE would need the mask area.
+  3. Mixed-cell stress recipe, held: real mixing is roughly 4 times the simulated. It would apply to later families only, after a set a dry run (§9); about 2–3 days and 3 h of CPU per family.
+- **Reference-store finding.** The family's WHB bundle `0e32a8f6` in the SSD1 reference store (§2) has six files whose sha256 no longer matches its `bundle.json`; the `.h5` file and three parquets cannot be read. An intact copy is at `$A/m13/gate_p_store/whb_frontal_supc_clus/0e32a8f6…` (`bundle_integrity_check.txt`). A re-run from the SSD1 store fails until it is restored; nothing was written to the store.
+
+**7. Depth checks.** By the user's answer on item 3 (quoted in 1 above), the family's depth checks are not run and not planned. NR15's depth check stays `not_run` until the pia / WM boundaries exist, and nothing in §23.27 waits on them. The text of NR15 and D26 (§23.2, §23.6) is otherwise unchanged.
+
+**8. P7513_IF: the August drawing is correct.**
+- **Which drawing.** The user's answer ("for 2 the later drawing is correct") makes the August drawing the correct one: `/srv/storage/MerXen/results/P7513_IF/merscope/annotations/cortical_depth_annotations.geojson` (sha256 `dd620957…`). The IF batch of 2026-10-02 (task `work_if/d0/4518cd…`) used the July drawing (`…/SSD2/MerXen/merscope/P7513_IF/cortical_depth/P7513_IF_cortical_depth_annotations.geojson`), so its published depth results are July-based.
+- **Method.** Code export `head_57c8488` (the batch's), the batch task's config with only `annotation_path` changed, standalone `merxen compute-cortical-depth` with `write_spatialdata_table=false`, 6 workers instead of 8, all 4 segmentations; then the annotation-report checks per segmentation. A control run on the July drawing reproduces the published outputs exactly (per-cell depth max difference 0.0, identical ribbon membership, all 141 report metrics unchanged). Nothing under the results store or `acceptance/` was written.
+- **The drawings differ** by a median of about 31–59 µm for the pia, WM and side lines (p95 up to 188 µm; side line max 735 µm). Piece_1 ribbon area is 53.96 mm² in August against 54.54 mm² in July.
+- **Depth changes** (proseg_hybrid; the other three move the same way):
+
+| | July | August |
+|---|---|---|
+| Streamlines (flagged) | 611 (17) | 609 (18) |
+| Cells inside the ribbon | 149,224 (0.7527) | 148,008 (0.7466) |
+| Upper IT median depth | 0.242 | 0.227 |
+| Deep IT median depth | 0.645 | 0.648 |
+| Deep NP/CT/6b median depth | 0.822 | 0.823 |
+| Oligo WM - GM | 0.629 | 0.627 |
+
+  Per-cell equivolumetric depth moves a median of 0.021 (Spearman 0.995), a median of 0.009 deeper in July than in August.
+- **Check verdicts.** The H12 ordering (Upper IT < Deep IT < Deep NP/CT/6b) passes on all 4 segmentations with both the tangential-block and the square-tile CIs, and Oligodendrocytes WM > GM passes on all 4, as they did with July. The depth QC warning `abnormal_local_thickness_variation` persists on all 4. The structural checks (8 violins, `map_first`, table keys, cell-wise equal labels) find 0 problems. Gate and report item statuses are unchanged; only depth-derived metrics move, by the amounts above.
+- **Outputs and status.** `$A/m13/followups_20261013/p7513_if_depth/` (`aug/compute_cortical_depth_out/`, `reports_aug/<segmentation>/`, `depth_comparison.json`, `report_comparison_reports_aug.json`, `check_structure_aug.txt`, `README.txt`). They are evidence only: the published P7513_IF results and `acceptance/` still hold the July-based outputs, and replacing them has not been done.
+
+**9. Open after this record.** The user's ruling on the NP7 proposal (item 5) and on the NR8 proposal (item 6); restoring the WHB bundle `0e32a8f6` in the SSD1 store (item 6); whether the published P7513_IF results are replaced by the August-based outputs (item 8); the human Prime 5K and Xenium Human Brain (266) gate-P runs, a later step (item 2); the family's depth checks, which wait for the boundaries (item 7).
