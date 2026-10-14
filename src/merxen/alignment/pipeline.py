@@ -179,7 +179,6 @@ def _write_moving_alignment_to_zarr(
 
     coordinate_system = _alignment_coordinate_system(result)
     rigid = _rigid_affine_transformation(result)
-    nonrigid_identity = Identity()
 
     shape_keys = (
         [
@@ -198,11 +197,7 @@ def _write_moving_alignment_to_zarr(
         )
         aligned_key = _nonrigid_element_key(key)
         aligned_shapes = _transform_shapes(sdata_obj.shapes[key], result)
-        set_transformation(
-            aligned_shapes,
-            nonrigid_identity,
-            to_coordinate_system=coordinate_system,
-        )
+        _place_in_alignment_frame(aligned_shapes, coordinate_system)
         write_or_replace_element(
             sdata_obj,
             aligned_key,
@@ -228,11 +223,7 @@ def _write_moving_alignment_to_zarr(
         )
         aligned_key = _nonrigid_element_key(key)
         aligned_points = _transform_points(sdata_obj.points[key], result)
-        set_transformation(
-            aligned_points,
-            nonrigid_identity,
-            to_coordinate_system=coordinate_system,
-        )
+        _place_in_alignment_frame(aligned_points, coordinate_system)
         write_or_replace_element(
             sdata_obj,
             aligned_key,
@@ -468,6 +459,25 @@ def _detach_attrs(element: Any) -> Any:
     element.attrs.clear()
     element.attrs.update(detached)
     return element
+
+
+def _place_in_alignment_frame(element: Any, coordinate_system: str) -> None:
+    """Give an aligned vector element only its Identity to the alignment frame.
+
+    An aligned copy holds coordinates in the fixed platform's frame, but it
+    inherits every transformation of its native element. The inherited
+    ``global`` entry maps into the moving platform's own frame (for the vendor
+    MERSCOPE boundaries, the micron-to-mosaic-pixel scale), so it would draw the
+    aligned element unwarped on top of the native data. Aligned labels and
+    images already carry only the alignment frame; this makes the aligned
+    shapes and points match them. Call it on an element whose attrs no longer
+    alias the native element's (see :func:`_detach_attrs`).
+
+    Args:
+        element: Aligned points or shapes element.
+        coordinate_system: Name of the alignment coordinate system.
+    """
+    set_transformation(element, {coordinate_system: Identity()}, set_all=True)
 
 
 def _add_registered_table_centroids(

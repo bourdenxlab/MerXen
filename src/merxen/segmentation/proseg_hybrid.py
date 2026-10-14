@@ -26,7 +26,12 @@ from shapely.geometry import MultiPoint, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import nearest_points, unary_union
 from spatialdata.models import PointsModel, ShapesModel, TableModel
-from spatialdata.transformations import get_transformation
+from spatialdata.transformations import (
+    Affine,
+    BaseTransformation,
+    Identity,
+    get_transformation,
+)
 
 from merxen.alignment.manifest import invalidate_alignment_materialization
 from merxen.config import ProsegHybridConfig
@@ -807,6 +812,55 @@ def _cellpose_polygons_in_microns(
     return polygons
 
 
+def _planar_transformations(
+    transformations: dict[str, BaseTransformation],
+) -> dict[str, BaseTransformation] | None:
+    """Restrict the transcripts' transformations to x/y for 2D shapes.
+
+    Points read back from a store carry their transformations over x, y and z,
+    which SpatialData would otherwise attach to 2D shapes as an x/y -> z/x/y
+    map. Each transformation keeps its coordinate system and its exact x/y
+    part. ``Identity`` stays ``Identity``.
+
+    Args:
+        transformations: Every transformation of the transcripts element.
+
+    Returns:
+        The planar transformations, or ``None`` when there are none, so the
+        shapes parser applies its default.
+
+    Raises:
+        ValueError: If a transformation makes x or y depend on z, because 2D
+            shapes cannot carry it exactly.
+    """
+    planar: dict[str, BaseTransformation] = {}
+    for coordinate_system, transformation in transformations.items():
+        if isinstance(transformation, Identity):
+            planar[str(coordinate_system)] = Identity()
+            continue
+        matrix_xyz = np.asarray(
+            transformation.to_affine_matrix(
+                input_axes=("x", "y", "z"),
+                output_axes=("x", "y", "z"),
+            ),
+            dtype=np.float64,
+        )
+        if not np.allclose(matrix_xyz[:2, 2], 0.0):
+            raise ValueError(
+                f"The transcripts' transformation to {coordinate_system!r} makes "
+                "x/y depend on z, so it cannot place the 2D hybrid shapes."
+            )
+        planar[str(coordinate_system)] = Affine(
+            transformation.to_affine_matrix(
+                input_axes=("x", "y"),
+                output_axes=("x", "y"),
+            ),
+            input_axes=("x", "y"),
+            output_axes=("x", "y"),
+        )
+    return planar or None
+
+
 def _proseg_assignment_to_instance_ids(sdata_obj: Any) -> dict[int, int]:
     """Map stored ProSeg assignments to canonical positive instance IDs."""
     if "table" not in sdata_obj.tables:
@@ -1141,13 +1195,14 @@ def _refine_and_persist_hybrid_branch(
         dtype="uint64",
         name=INSTANCE_ID_COLUMN,
     )
-    shape_transformations = None
-    if len(sdata_obj.shapes) > 0:
-        template_shape = sdata_obj.shapes[list(sdata_obj.shapes.keys())[0]]
-        shape_transformations = get_transformation(template_shape, get_all=True)
+    # The hybrid geometry is built from the transcripts' x/y, so it lives in
+    # their intrinsic frame and takes their transformations, not those of
+    # whichever shapes element the store happens to list first.
     hybrid_shapes = ShapesModel.parse(
         shape_gdf,
-        transformations=shape_transformations,
+        transformations=_planar_transformations(
+            get_transformation(points_obj, get_all=True)
+        ),
     )
 
     x_col, y_col, gene_col, assignment_col, _ = _points_columns(points_obj)

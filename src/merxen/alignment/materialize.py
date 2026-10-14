@@ -14,12 +14,7 @@ import pandas as pd
 import spatialdata as sd
 import xarray as xr
 import zarr
-from spatialdata.transformations import (
-    Affine,
-    Identity,
-    get_transformation,
-    set_transformation,
-)
+from spatialdata.transformations import Affine, get_transformation
 
 from merxen.alignment.image_warp import materialize_warped_image
 from merxen.alignment.manifest import (
@@ -35,7 +30,11 @@ from merxen.alignment.manifest import (
 )
 from merxen.alignment.mapping import AlignmentCoordinateMapper, load_alignment_mapper
 from merxen.alignment.models import TransformResult
-from merxen.alignment.pipeline import _transform_points, _transform_shapes
+from merxen.alignment.pipeline import (
+    _place_in_alignment_frame,
+    _transform_points,
+    _transform_shapes,
+)
 from merxen.config import AlignmentConfig
 from merxen.enrichment.assignment import clone_table_for_region
 from merxen.io.image_source import image_to_cyx
@@ -483,7 +482,7 @@ def _materialize_vectors_and_tables(
     for shape_key in native_shape_keys:
         output_key = f"{shape_key}{NONRIGID_ELEMENT_SUFFIX}"
         aligned = _transform_shapes(moving_sdata.shapes[shape_key], result)
-        set_transformation(aligned, Identity(), to_coordinate_system=coordinate_system)
+        _place_in_alignment_frame(aligned, coordinate_system)
         write_or_replace_element(
             moving_sdata,
             output_key,
@@ -514,7 +513,7 @@ def _materialize_vectors_and_tables(
         detached_attrs = deepcopy(dict(aligned.attrs))
         aligned.attrs.clear()
         aligned.attrs.update(detached_attrs)
-        set_transformation(aligned, Identity(), to_coordinate_system=coordinate_system)
+        _place_in_alignment_frame(aligned, coordinate_system)
         write_or_replace_element(
             moving_sdata,
             output_key,

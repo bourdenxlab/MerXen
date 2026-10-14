@@ -430,6 +430,17 @@ def test_materializer_reconciles_vectors_tables_labels_image_and_manifest(
         ),
         np.asarray(manifest["fixed_grid"]["pixel_to_world_affine"]),
     )
+    # Aligned vectors carry only the alignment frame, like the aligned rasters;
+    # the native elements keep their own 'global' entry.
+    for aligned_element in (
+        moving.shapes["cells_aligned_nonrigid"],
+        moving.points["transcripts_aligned_nonrigid"],
+    ):
+        transformations = get_transformation(aligned_element, get_all=True)
+        assert set(transformations) == {"merxen_xenium"}
+        assert isinstance(transformations["merxen_xenium"], Identity)
+    for native_element in (moving.shapes["cells"], moving.points["transcripts"]):
+        assert set(get_transformation(native_element, get_all=True)) == {"global"}
 
     image_pyramid = derived_image_pyramid_cache_key(
         "MERSCOPE_z_projection_aligned_nonrigid",
