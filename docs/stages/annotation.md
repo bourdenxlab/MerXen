@@ -2830,7 +2830,7 @@ both field sets against this table.
 ```bash
 merxen annotation-report --pair P7513 --segmentation proseg_hybrid \
   --results-root /srv/storage/MerXen/results \
-  --store /media/mathieubo/SSD1/MerXen/annotation_references \
+  --store /srv/storage/MerXen/annotation_references \
   --out /path/outside/results/P7513_proseg_hybrid_report
 ```
 

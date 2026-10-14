@@ -460,7 +460,7 @@ for.
 ```bash
 merxen annotation-reference-prep --reference-id whb_frontal_supc_clus \
   --species human --panel-genes annotation_panel/panel_genes.json \
-  --store /media/mathieubo/SSD1/MerXen/annotation_references \
+  --store /srv/storage/MerXen/annotation_references \
   --store-large /srv/storage/MerXen/annotation_references_large \
   --source region_precompute=/path/to/region_frontal_a44_a45_a46_a32_acc \
   --auto-download --n-processors 8 --max-gb 40 --output bundle_ref.json
@@ -548,7 +548,7 @@ The in-silico design aid for a panel before its data exist (plan §8.8,
 ```bash
 merxen annotation-panel-simulate --public-panel xenium_prime_5k_mouse \
   --panel-dir /srv/storage/MerXen/annotation_dev/evidence_20260926/m3b/panels \
-  --store /media/mathieubo/SSD1/MerXen/annotation_references \
+  --store /srv/storage/MerXen/annotation_references \
   --store-large /srv/storage/MerXen/annotation_references_large \
   --annotation-config mouse.annotation_config.json \
   --param annotation_wmb_h5ad_dir=/path/WMB-10Xv3/20230630 \
@@ -675,7 +675,7 @@ under a `<root>/<pair>/<seg>/<step>/` layout (`clustering_squidpy`,
 merxen annotate --species human \
   --from-clustered-h5ad results/P7513/proseg_hybrid/clustering_squidpy/clustering_squidpy_out/merscope/P7513_MERSCOPE_clustered.h5ad \
   --from-clustered-h5ad results/P7513/proseg_hybrid/clustering_squidpy/clustering_squidpy_out/xenium/P7513_XENIUM_clustered.h5ad \
-  --store /media/mathieubo/SSD1/MerXen/annotation_references \
+  --store /srv/storage/MerXen/annotation_references \
   --gene-id-fallback-csv /path/to/WHB/gene.csv \
   --out shadow/P7513/proseg_hybrid
 ```
@@ -693,8 +693,8 @@ load (136k cells: 32 minutes), and peaks at 3.4 GB.
 ```bash
 merxen annotate --species mouse \
   --from-clustered-h5ad results/ag7/proseg_hybrid/clustering_squidpy/clustering_squidpy_out/merscope/ag7_MERSCOPE_clustered.h5ad \
-  --store /media/mathieubo/SSD1/MerXen/annotation_references \
-  --gene-id-fallback-csv /media/mathieubo/SSD1/MerXen/mapmycells/abc_atlas/metadata/WMB-10X/20241115/gene.csv \
+  --store /srv/storage/MerXen/annotation_references \
+  --gene-id-fallback-csv /srv/storage/MerXen/references/abc_atlas/metadata/WMB-10X/20241115/gene.csv \
   --out shadow/ag7/proseg_hybrid
 ```
 
@@ -770,7 +770,7 @@ not below a `--results-root`:
 ```bash
 merxen annotate-resolve \
   --map-dir shadow/P7513/proseg_hybrid \
-  --current-bundles --store /media/mathieubo/SSD1/MerXen/annotation_references \
+  --current-bundles --store /srv/storage/MerXen/annotation_references \
   --gene-id-fallback-csv /path/to/WHB/gene.csv \
   --n-segmented P7513_MERSCOPE=211744 --n-segmented P7513_XENIUM=167738 \
   --out resolve/P7513/proseg_hybrid
@@ -786,7 +786,7 @@ composition window (G4); 1–5 minutes and at most 3.2 GB per section:
 ```bash
 merxen annotate-resolve \
   --map-dir shadow/ag7/proseg_hybrid \
-  --gene-id-fallback-csv /media/mathieubo/SSD1/MerXen/mapmycells/abc_atlas/metadata/WMB-10X/20241115/gene.csv \
+  --gene-id-fallback-csv /srv/storage/MerXen/references/abc_atlas/metadata/WMB-10X/20241115/gene.csv \
   --registration-qc results/ag7/merscope/proseg_hybrid/qc/qc_out/ag7_merscope_registration_qc.json \
   --mouse-g4-sections C57BL6J-638850.31,C57BL6J-638850.32,C57BL6J-638850.33 \
   --out resolve/ag7/proseg_hybrid
@@ -861,7 +861,7 @@ publishes `<pair>/<seg>/annotation_report/annotation_report_out/` (see
 ```bash
 merxen annotation-report --pair P1212 --segmentation proseg_hybrid \
   --results-root /srv/storage/MerXen/results \
-  --store /media/mathieubo/SSD1/MerXen/annotation_references \
+  --store /srv/storage/MerXen/annotation_references \
   --out reports/P1212_proseg_hybrid
 ```
 

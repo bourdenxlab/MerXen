@@ -316,8 +316,9 @@ def test_dwight_runs_one_prep_at_a_time() -> None:
     block = _with_name_block(text, PREP)
     assert "maxForks = params.annotation_prep_max_forks" in block
     assert re.search(r"annotation_prep_max_forks = 1\b", text)
+    # Both stores are on /srv/storage (U6 (a), 2026-10-14: SSD1 is failing).
     assert (
-        'annotation_reference_store = "/media/mathieubo/SSD1/MerXen/'
+        'annotation_reference_store = "/srv/storage/MerXen/'
         'annotation_references"' in text
     )
     # Panels above 1,000 genes go to their own store on /srv/storage (§8.7).
