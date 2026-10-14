@@ -19,12 +19,13 @@ coherence, spill-over checks, the mouse gate G1-G5) and the label table:
 read from the mouse gate's nested ``ap_estimate`` (``ap_mm``, ``ap_bin``;
 written by RESOLVE, ``mouse_ap.ApEstimate.to_json``), or from the flat keys
 ``ap_estimate_mm`` and ``ap_bin`` when a record carries them; the M6b rule
-variant is the ``rule_variant`` the MAP region record names (``v1``, the
-production rule, or ``m6b``; the variant fields are in its ``params``), or a
-flat ``m6b_rule_variant``. A field no record carries is reported as
-``pending`` and nothing is inferred from it: the gate has no estimate when
-G4 uses an explicit window, when ``g4_ap_estimate`` is off, or when too few
-confident neurons (or no region-share bundle) leave nothing to estimate from.
+variant is the ``rule_variant`` the MAP region record names (``m6b``, the
+production rule ``a+f:tile200,nn2`` since M6b-R, or ``v1``; the variant
+fields are in its ``params``), or a flat ``m6b_rule_variant``. A field no
+record carries is reported as ``pending`` and nothing is inferred from it:
+the gate has no estimate when G4 uses an explicit window, when
+``g4_ap_estimate`` is off, or when too few confident neurons (or no
+region-share bundle) leave nothing to estimate from.
 """
 
 from __future__ import annotations
