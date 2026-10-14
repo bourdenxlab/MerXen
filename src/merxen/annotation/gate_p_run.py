@@ -12,8 +12,8 @@ set, the store and the prepared specs) and:
    (``precheck_gate_p``, which ``run_panel_simulation`` calls before the
    panel is computed or PREP builds anything; registered with
    ``gate_p_precheck``): the species is the one selected when the check
-   started (M13 D4: a required argument; the mouse path waits for the
-   second WMB draw, M13 C20, after M6b) and the config's; the store is not
+   started (M13 D4: a required argument; the mouse path needs the family's
+   second WMB test draw, M13b C20, below) and the config's; the store is not
    a production store (D11 (b): no root is or lies in the config's
    ``reference_store`` or ``reference_store_large``); the output lies
    outside every store and holds no earlier run or its replicates (a run
@@ -83,6 +83,29 @@ set, the store and the prepared specs) and:
    criterion table (``gate_p.write_gate_p_report``) and ``gate_p_run.json``
    (the run's record). With ``dry_run`` the seeded family's dry-run rule is
    scored too (``gate_p.dry_run_verdict``; M13 D28; R5).
+
+**The mouse path** (M13b C20b; the mouse roadmap of 2026-10-13, U7). The
+Allen means hold every WMB donor, so a mouse family's replicates are its two
+disjoint WMB test draws (plan §14 NP4), both mapped onto PREP's own
+``wmb_panel`` (the self-map maps onto the bundle itself): draw 1, the
+production self-map's test set, scored on its check half; and draw 2, a
+``wmb_selfmap_testset`` bundle built before the run with
+``resolvability.gate_p_wmb_draw`` 2 (``reference.wmb_second_draw``,
+``scripts/annotation/build_wmb_draw2.py``) and passed as
+``GatePOptions.wmb_draw2_bundle``. ``check_supported`` lifts the mouse path
+only when that bundle exists; after PREP and before any mapping
+``_check_draw2`` checks it against PREP (files, panel, the ``build_hash``
+PREP's test-set spec gives with draw 2, draw 1's cell digest, disjointness
+from draw 1 and from the marker-training cells). Steps 2 and 3 become draw
+2's availability per class (``gate_p_draw2_availability.csv``; nothing
+stops on it) and loading draw 2; NP3's natural composition is the WMB 10Xv3
+subclass composition (``reference.wmb_reference_facts``); NP7 is scored
+without the vocab (its 1% sink part is human); NP6 takes the human offsets
+with every mouse gene resampled (A27 (a)); NP4's per-donor spread from the
+ABC ``donor_label`` is reported only (``gate_p.np4_donor_spread``); NP9's
+time adds draw 2's build; the dry run has no exemption. The readings are
+listed in ``GATE_P_RUN_READINGS_MOUSE``. A forced version 7, the human D2
+options and the human donors do not apply to mouse.
 
 Resolvability version 7 forced on a version-6 family (M13 D5 (c) and CHECK
 K11, pre-registration §21 (vii)'s diagnostic path) simulates the version-7
@@ -165,6 +188,29 @@ GATE_P_RUN_JSON: Final = "gate_p_run.json"
 POOL_SIZES_CSV: Final = "gate_p_pool_sizes.csv"
 REPLICATES_DIR: Final = "replicates"
 PRIMARY_REFERENCE: Final = "whb_frontal_supc_clus"
+# The primary reference gate P scores, per species (the bundle whose frozen
+# thresholds and self-map test set the run starts from).
+PRIMARY_REFERENCES: Final[dict[str, str]] = {
+    "human": PRIMARY_REFERENCE,
+    "mouse": "wmb_panel",
+}
+# Mouse (M13b C20b): the groups are the two disjoint WMB test draws, both
+# mapped onto PREP's own wmb_panel (the production bundle; the Allen means
+# hold every donor, so no donor can be held out, plan §14 NP4).
+MOUSE_DRAW_GROUPS: Final[tuple[str, str]] = ("draw1", "draw2")
+MOUSE_TEST_DRAWS: Final = 2
+DRAW2_AVAILABILITY_CSV: Final = "gate_p_draw2_availability.csv"
+DRAW2_AVAILABILITY_COLUMNS: Final[tuple[str, ...]] = (
+    "class",
+    "n_reference_10xv3",
+    "n_draw1",
+    "n_draw1_check_half",
+    "n_draw2",
+    "n_pooled",
+    "n_available_under_cap",
+    "reaches_target",
+    "ran_out",
+)
 STATUS_SCORED: Final = "scored"
 # NP5's depth source when a family's own gate_p_profile asset gives it.
 FAMILY_PROFILE_SOURCE: Final = "family_profile_asset"
@@ -202,10 +248,42 @@ GATE_P_RUN_READINGS: Final[tuple[str, ...]] = (
     "its lookup key, node label or node name; outside a dry run an unaccepted "
     "parent stops gate P before any build (ruling B2 (b), 2026-10-07)",
 )
+# The readings the mouse path adds (M13b C20b; the roadmap's U7 readings,
+# recorded with the draw-2 bundles before any mouse gate-P output); listed in
+# a mouse run's record only.
+GATE_P_RUN_READINGS_MOUSE: Final[tuple[str, ...]] = (
+    "C20 groups: the two disjoint WMB test draws, both mapped onto PREP's own "
+    "wmb_panel; draw 1 (the self-map's test set, whose fit half the frozen "
+    "thresholds came from) on its check half, draw 2 in full",
+    "C20 draw 2: the self-map list's design (<= 10 cells per supertype and the "
+    "non-neuronal extra) on cells no earlier set holds, each class topped up "
+    "to gate_p_class_min_test_cells pooled with draw 1's check half, <= "
+    "gate_p_topup_max_cluster_frac of any cluster's 10Xv3 cells (U7 (ii))",
+    "C20 NP3 natural composition: each subclass's share of the WMB 10Xv3 "
+    "cells of the available matrices with full truth (the cells the draws "
+    "come from)",
+    "C20 NP4 [L]: the per-donor spread (ABC donor_label) of the pooled "
+    "seed-0 held-out calls at every tested set, reported only",
+    "C20 NP6: the measured human cross-platform offsets with every mouse gene "
+    "resampled (A27 (a)); C20 NP7: the single-wrong-node part only (§14: the "
+    "1% sink part is human), so no vocab",
+    "C20 NP9: the measured time adds draw 2's build (its bundle.json timings) "
+    "to PREP and the replicates, as the human leave-one-donor-out builds count",
+    "C20 dry run: no mouse exemption (any narrowing of H18's classes would be "
+    "a loosening)",
+)
 
 
 class GatePRunError(SimulationError):
     """Gate P cannot run on this request (refused before any gate-P compute)."""
+
+
+# The user's approved exemption of the human dry run (pre-registration §18
+# C1: supercluster COP, removed from H18's scope by M8 D1); a mouse family
+# has none.
+HUMAN_DRY_RUN_EXEMPTIONS: Final[tuple[tuple[str, str], ...]] = (
+    ("supercluster", "COP"),
+)
 
 
 @dataclass(frozen=True)
@@ -256,6 +334,12 @@ class GatePOptions:
             offsets; optional).
         overwrite: Replace an earlier gate-P run's report in the output
             directory (refused by default).
+        wmb_draw2_bundle: The second disjoint WMB test draw of a mouse
+            family (M13b C20a): the ``wmb_selfmap_testset`` bundle directory
+            ``scripts/annotation/build_wmb_draw2.py`` built with
+            ``resolvability.gate_p_wmb_draw`` 2 from the family's PREP
+            inputs. Required for mouse (the gate-P path is lifted only when
+            it exists) and refused for human.
     """
 
     species: Species
@@ -263,7 +347,7 @@ class GatePOptions:
     accept_small_pools: bool = False
     resolvability_version: Literal["auto", 7] = "auto"
     dry_run: bool = False
-    dry_run_exemptions: tuple[tuple[str, str], ...] = (("supercluster", "COP"),)
+    dry_run_exemptions: tuple[tuple[str, str], ...] = HUMAN_DRY_RUN_EXEMPTIONS
     time_reference_seconds: float | None = None
     time_reference_basis: str = ""
     dry_run_seconds: float | None = None
@@ -275,18 +359,52 @@ class GatePOptions:
     prep_identity: bool = True
     x1_factors: Path | None = None
     overwrite: bool = False
+    wmb_draw2_bundle: Path | None = None
 
     def __post_init__(self) -> None:
         """Validate the options.
 
+        A mouse family has no approved dry-run exemption (the human default,
+        supercluster COP, is dropped; any other is refused), and the human
+        D2 options and a human draw-2 bundle are refused.
+
         Raises:
             GatePRunError: For an unknown species, other-region mode or
-                version, a non-positive time, or a dry-run time without its
-                simulated cells (or the reverse).
+                version, a non-positive time, a dry-run time without its
+                simulated cells (or the reverse), a mouse exemption or D2
+                option, or a draw-2 bundle for human.
         """
         if self.species not in ("human", "mouse"):
             raise GatePRunError(
                 f"gate P needs the species (human or mouse), got {self.species!r}"
+            )
+        if self.species == "mouse":
+            exemptions = tuple(tuple(item) for item in self.dry_run_exemptions)
+            if exemptions == HUMAN_DRY_RUN_EXEMPTIONS:
+                object.__setattr__(self, "dry_run_exemptions", ())
+            elif exemptions:
+                raise GatePRunError(
+                    f"no dry-run exemption is approved for a mouse family (got "
+                    f"{list(exemptions)}): narrowing H18's classes is a loosening "
+                    "that needs the user's written approval (pre-registration §1)"
+                )
+            if self.other_region != OTHER_REGION_DONOR_OWN or self.accept_small_pools:
+                raise GatePRunError(
+                    "other_region and accept_small_pools are the human leave-one-"
+                    "donor-out options (D2); a mouse family's groups are its two "
+                    "disjoint WMB test draws"
+                )
+            if self.resolvability_version == 7:
+                raise GatePRunError(
+                    "a forced version 7 on a mouse family needs a separate "
+                    "version-7 test set with the v7.6 top-up (the roadmap's U7 "
+                    "(iii)), which this path does not build; the mouse dry run is "
+                    "version 6"
+                )
+        elif self.wmb_draw2_bundle is not None:
+            raise GatePRunError(
+                "wmb_draw2_bundle is the mouse path's second WMB test draw; a human "
+                "family's replicates are its leave-one-donor-out sets"
             )
         if self.other_region not in OTHER_REGION_MODES:
             raise GatePRunError(
@@ -314,19 +432,19 @@ class GatePOptions:
             raise GatePRunError("dry_run_simulated_cells must be >= 1")
 
     def check_supported(self) -> None:
-        """Refuse a species whose gate-P path is not built yet (before compute).
+        """Refuse a species whose gate-P path cannot run (before compute).
+
+        The mouse path (M13b C20b) is lifted only when the family's second
+        disjoint WMB test draw exists: ``wmb_draw2_bundle`` must be a
+        complete ``wmb_selfmap_testset`` bundle of draw 2
+        (``draw2_manifest``). Whether it is the draw of this family's PREP
+        (panel, inputs, draw 1) is checked after PREP.
 
         Raises:
-            GatePUnavailableError: For mouse: the second disjoint WMB test
-                draw and the ag7 / VZG2 dry run come with M13 C20-C21, after
-                M6b.
+            GatePUnavailableError: For mouse without such a bundle.
         """
         if self.species == "mouse":
-            raise GatePUnavailableError(
-                "gate P for a mouse family needs the second disjoint WMB test draw "
-                "and the ag7 / VZG2 dry run (M13 C20-C21, after M6b); only the "
-                "human path is available"
-            )
+            draw2_manifest(self.wmb_draw2_bundle)
 
     def to_json(self) -> dict[str, Any]:
         """Return the options as JSON-native values."""
@@ -348,7 +466,65 @@ class GatePOptions:
             "prep_identity": self.prep_identity,
             "x1_factors": None if self.x1_factors is None else str(self.x1_factors),
             "overwrite": self.overwrite,
+            # Mouse only, so a human run's record is unchanged.
+            **(
+                {}
+                if self.species != "mouse"
+                else {
+                    "wmb_draw2_bundle": None
+                    if self.wmb_draw2_bundle is None
+                    else str(self.wmb_draw2_bundle)
+                }
+            ),
         }
+
+
+def draw2_manifest(bundle_dir: Path | None) -> dict[str, Any]:
+    """Return the manifest of a mouse family's second WMB test draw (M13b C20).
+
+    Args:
+        bundle_dir: The draw-2 bundle directory (``GatePOptions``).
+
+    Returns:
+        Its ``bundle.json``.
+
+    Raises:
+        GatePUnavailableError: Without a directory, or when it is not a
+            complete ``wmb_selfmap_testset`` bundle of draw 2.
+    """
+    from merxen.annotation import reference as ref
+    from merxen.annotation.store import BUNDLE_MANIFEST_NAME
+
+    if bundle_dir is None:
+        raise GatePUnavailableError(
+            "gate P for a mouse family needs its second disjoint WMB test draw "
+            "(M13b C20a): build it with scripts/annotation/build_wmb_draw2.py from "
+            "the family's PREP inputs and pass the bundle (--gate-p-wmb-draw2)"
+        )
+    manifest = _read_json(Path(bundle_dir) / BUNDLE_MANIFEST_NAME)
+    test_set = (manifest.get("builder_output") or {}).get("test_set") or {}
+    problems = [
+        text
+        for failed, text in (
+            (manifest.get("status") != "complete", "not a complete bundle"),
+            (
+                manifest.get("reference_id") != ref.WMB_TESTSET_REFERENCE_ID,
+                f"not a {ref.WMB_TESTSET_REFERENCE_ID} bundle",
+            ),
+            (
+                test_set.get("draw") != ref.WMB_DRAW_2
+                or not isinstance(test_set.get("gate_p_draw"), Mapping),
+                "not the second WMB test draw",
+            ),
+        )
+        if failed
+    ]
+    if problems:
+        raise GatePUnavailableError(
+            f"{bundle_dir}: {'; '.join(problems)}; gate P for a mouse family needs "
+            "its second disjoint WMB test draw (scripts/annotation/build_wmb_draw2.py)"
+        )
+    return manifest
 
 
 def gate_p_hook(options: GatePOptions) -> GatePHook:
@@ -392,6 +568,9 @@ class _Group:
     map_fn: res.MapFunction
     runs: list[dict[str, Any]]
     manifest: dict[str, Any]
+    # The engine's bundle.json (human: the held-out bundle itself; mouse:
+    # PREP's wmb_panel, which holds the marker record).
+    engine_manifest: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -449,12 +628,25 @@ def _gate_levels(species: str) -> tuple[str, ...]:
     return gp.gate_p_levels(species)
 
 
-def _primary_build(request: GatePRequest) -> Any:
+def primary_reference(species: str) -> str:
+    """Return the primary reference gate P scores for a species.
+
+    Args:
+        species: ``human`` or ``mouse``.
+
+    Returns:
+        ``whb_frontal_supc_clus`` or ``wmb_panel``.
+    """
+    return PRIMARY_REFERENCES[species]
+
+
+def _primary_build(request: GatePRequest, species: str = "human") -> Any:
+    reference_id = primary_reference(species)
     for item in request.builds:
-        if item.spec.reference_id == PRIMARY_REFERENCE:
+        if item.spec.reference_id == reference_id:
             return item
     raise GatePRunError(
-        f"gate P needs the prepared {PRIMARY_REFERENCE} spec of the base "
+        f"gate P needs the prepared {reference_id} spec of the base "
         "simulation (simulate.GatePRequest.builds)"
     )
 
@@ -541,6 +733,58 @@ def _check_out_dir(out: Path, store: ReferenceStore, options: GatePOptions) -> N
         )
 
 
+def _check_draws_and_seeds(config: AnnotationConfig) -> tuple[list[str], list[int]]:
+    """Check a mouse family's test draws and mapping seeds (no bundle needed).
+
+    Returns:
+        ``(groups, seeds)``: the two draws (``MOUSE_DRAW_GROUPS``), the seeds
+        sorted.
+
+    Raises:
+        GatePRunError: If ``gate_p_mouse_test_draws`` is not 2 (plan §14 NP4:
+            "the two disjoint test draws"), the config asks for a test draw
+            other than the production one, or the seeds do not hold 0 and
+            another seed (D6).
+    """
+    from merxen.annotation import reference as ref
+
+    resolvability = config.resolvability
+    if int(resolvability.gate_p_mouse_test_draws) != MOUSE_TEST_DRAWS:
+        raise GatePRunError(
+            f"gate_p_mouse_test_draws is {resolvability.gate_p_mouse_test_draws}; "
+            f"the mouse path scores the {MOUSE_TEST_DRAWS} disjoint WMB test draws "
+            "of plan §14 NP4"
+        )
+    if int(resolvability.gate_p_wmb_draw) != ref.WMB_DRAW_1:
+        raise GatePRunError(
+            "the family's config builds test draw "
+            f"{resolvability.gate_p_wmb_draw}: gate P's PREP must be the "
+            f"production self-map on draw {ref.WMB_DRAW_1} (draw 2 is passed as "
+            "its own bundle)"
+        )
+    return list(MOUSE_DRAW_GROUPS), _check_seeds(config)
+
+
+def _check_seeds(config: AnnotationConfig) -> list[int]:
+    """The configured mapping seeds, sorted; 0 and another one (D6)."""
+    seeds = sorted({int(seed) for seed in config.resolvability.gate_p_seeds})
+    if 0 not in seeds or len(seeds) < 2:
+        raise GatePRunError(
+            f"gate_p_seeds must hold 0 (the frozen run) and another mapping seed "
+            f"(D6), got {seeds}"
+        )
+    return seeds
+
+
+def _check_groups_and_seeds(
+    config: AnnotationConfig, species: str
+) -> tuple[list[str], list[int]]:
+    """The species' replicate groups (donors or draws) and seeds, checked."""
+    if species == "mouse":
+        return _check_draws_and_seeds(config)
+    return _check_donors_and_seeds(config)
+
+
 def _check_donors_and_seeds(config: AnnotationConfig) -> tuple[list[str], list[int]]:
     """Check the configured gate-P donors and mapping seeds (no bundle needed).
 
@@ -587,7 +831,9 @@ def precheck_gate_p(plan: GatePPlan, options: GatePOptions) -> None:
     (D11 (b): not a production store), the output (outside every store,
     without an earlier run or its replicates), the configured donors and
     mapping seeds (D6), and NP5's expected-depth source (D8, CHECK K7; a
-    family profile must record its primary bundle). What needs the built
+    family profile must record its primary bundle). A mouse family needs a
+    complete draw-2 bundle, ``gate_p_mouse_test_draws`` 2 and a production
+    config (draw 1) instead of the donors. What needs the built
     bundle (its self-map, held-out donor and frontal donors, the recorded
     worker count, the held-out ``build_hash``, a family profile's primary
     ``build_hash``) is checked by ``run_gate_p`` after PREP and before any
@@ -604,7 +850,7 @@ def precheck_gate_p(plan: GatePPlan, options: GatePOptions) -> None:
     _check_species(plan.species, plan.config.species, options)
     _check_store(plan.store, plan.config)
     _check_out_dir(Path(plan.out_dir) / GATE_P_RUN_DIR, plan.store, options)
-    _check_donors_and_seeds(plan.config)
+    _check_groups_and_seeds(plan.config, options.species)
     _, _, depth_record, _ = np5_depth_source(
         expected_depth=plan.expected_depth,
         depth_profile=plan.depth_profile,
@@ -634,7 +880,8 @@ def _check_request(request: GatePRequest, options: GatePOptions) -> dict[str, An
     """Check the request before any gate-P compute; return the run's facts.
 
     The checks of ``precheck_gate_p`` run again here, then those that need
-    the built bundle.
+    the built bundle. A mouse family's draw-2 bundle is checked against the
+    PREP it was drawn for in ``_check_draw2``.
 
     Raises:
         GatePRunError: For every refusal of the module docstring's step 1.
@@ -647,11 +894,13 @@ def _check_request(request: GatePRequest, options: GatePOptions) -> dict[str, An
         raise GatePRunError("gate P needs the simulation's scratch directory")
     out = Path(request.out_dir) / GATE_P_RUN_DIR
     _check_out_dir(out, request.store, options)
-    donors, seeds = _check_donors_and_seeds(request.config)
-    bundle = request.bundles.get(PRIMARY_REFERENCE)
+    mouse = options.species == "mouse"
+    donors, seeds = _check_groups_and_seeds(request.config, options.species)
+    reference_id = primary_reference(options.species)
+    bundle = request.bundles.get(reference_id)
     if bundle is None:
         raise GatePRunError(
-            f"gate P scores the primary reference {PRIMARY_REFERENCE}, which the "
+            f"gate P scores the primary reference {reference_id}, which the "
             f"base simulation did not build (built: {sorted(request.bundles)}; "
             f"simulation status {request.report.get('status')!r})"
         )
@@ -664,7 +913,15 @@ def _check_request(request: GatePRequest, options: GatePOptions) -> dict[str, An
         )
     summary = tables.summary
     engine = summary.get("engine") or {}
-    if engine.get("self", False):
+    if mouse and not (
+        engine.get("self", False)
+        and str(engine.get("build_hash")) == _bundle_hash(bundle_dir)
+    ):
+        raise GatePRunError(
+            f"{bundle_dir}: the mouse self-map did not map onto the bundle itself; "
+            "gate P maps both WMB test draws onto PREP's own wmb_panel"
+        )
+    if not mouse and engine.get("self", False):
         raise GatePRunError(
             f"{bundle_dir}: the self-map mapped onto the bundle itself, not onto "
             "its held-out bundle; gate P maps each donor onto its own held-out "
@@ -675,6 +932,25 @@ def _check_request(request: GatePRequest, options: GatePOptions) -> dict[str, An
         raise GatePRunError(f"{bundle_dir}: the held-out test-set bundle is missing")
     test_output = _manifest(test_dir).get("builder_output") or {}
     test_set = test_output.get("test_set") or {}
+    if mouse:
+        if test_set.get("draw", ref.WMB_DRAW_1) != ref.WMB_DRAW_1:
+            raise GatePRunError(
+                f"{test_dir}: PREP's self-map test set is not the production draw 1"
+            )
+        return {
+            **_worker_facts(summary, tables, options),
+            "bundle_dir": bundle_dir,
+            "tables": tables,
+            "test_dir": test_dir,
+            "test_build_hash": str(
+                (summary.get("test_set_bundle") or {}).get("build_hash")
+            ),
+            "default_donor": donors[0],
+            "donor_cells": {},
+            "extras": donors[1:],
+            "out": out,
+            "seeds": seeds,
+        }
     default_donor = test_set.get("holdout_donor")
     donor_cells = {
         str(key): int(value)
@@ -696,6 +972,38 @@ def _check_request(request: GatePRequest, options: GatePOptions) -> dict[str, An
             f"donor) is not among the gate-P donors {donors}"
         )
     extras = [donor for donor in donors if donor != default_donor]
+    facts = _worker_facts(summary, tables, options)
+    return {
+        "bundle_dir": bundle_dir,
+        "tables": tables,
+        "test_dir": test_dir,
+        "test_build_hash": str(
+            (summary.get("test_set_bundle") or {}).get("build_hash")
+        ),
+        "default_donor": str(default_donor),
+        "donor_cells": donor_cells,
+        "extras": extras,
+        "out": out,
+        "workers": facts["workers"],
+        "seeds": seeds,
+    }
+
+
+def _worker_facts(
+    summary: Mapping[str, Any],
+    tables: res.ResolvabilityTables,
+    options: GatePOptions,
+) -> dict[str, Any]:
+    """Check the self-map's recorded MapMyCells worker count (§18 item 2).
+
+    Returns:
+        ``{"workers": the recorded counts, sorted}``.
+
+    Raises:
+        GatePRunError: If this run would map with another count.
+    """
+    from merxen.annotation import reference as ref
+
     workers = _mapping_workers(summary)
     current = ref.prep_resources().n_processors
     if workers and workers != {current}:
@@ -710,20 +1018,124 @@ def _check_request(request: GatePRequest, options: GatePOptions) -> dict[str, An
         and tables.version == res.RESOLVABILITY_VERSION_V7
     ):
         logger.info("gate P: the bundle is version 7 already; scoring it as built")
-    return {
-        "bundle_dir": bundle_dir,
-        "tables": tables,
-        "test_dir": test_dir,
-        "test_build_hash": str(
-            (summary.get("test_set_bundle") or {}).get("build_hash")
-        ),
-        "default_donor": str(default_donor),
-        "donor_cells": donor_cells,
-        "extras": extras,
-        "out": out,
-        "workers": sorted(workers),
-        "seeds": seeds,
+    return {"workers": sorted(workers)}
+
+
+def _bundle_hash(bundle_dir: Path) -> str:
+    """A bundle's build_hash (its manifest's, else its directory name)."""
+    return str(_manifest(bundle_dir).get("build_hash") or Path(bundle_dir).name)
+
+
+def _check_draw2(
+    request: GatePRequest,
+    options: GatePOptions,
+    facts: Mapping[str, Any],
+    test_spec: AnnotationReferenceSpec,
+) -> dict[str, Any]:
+    """Check a mouse family's second WMB test draw against its PREP (C20b).
+
+    After PREP and before any mapping: the draw-2 bundle (``draw2_manifest``)
+    is complete and its files verify against ``bundle.json``; it is of this
+    panel; its ``build_hash`` is the one PREP's test-set spec gives with
+    ``gate_p_wmb_draw`` 2 (the same inputs, config and panel as PREP's draw
+    1, only the draw differs); the draw-1 digest it recorded is that of
+    PREP's draw-1 test cells; and its cells hold no draw-1 and no
+    marker-training cell of PREP's bundle.
+
+    Returns:
+        The draw-2 facts (``draw2_dir``, ``draw2_build_hash``,
+        ``draw2_record``, ``draw2_seconds``).
+
+    Raises:
+        GatePRunError: For each failed check.
+    """
+    from merxen.annotation import reference as ref
+
+    draw2_dir = Path(cast(Path, options.wmb_draw2_bundle))
+    manifest = draw2_manifest(draw2_dir)
+    unverified = _unverified_files(draw2_dir, manifest)
+    if unverified:
+        raise GatePRunError(
+            f"{draw2_dir}: files differ from bundle.json ({unverified[:5]})"
+        )
+    panel_hash = str((manifest.get("panel") or {}).get("panel_hash"))
+    if panel_hash != request.panel.panel_hash:
+        raise GatePRunError(
+            f"{draw2_dir} is the second draw of panel {panel_hash[:16]}, not of "
+            f"this family's panel {request.panel.panel_hash[:16]}"
+        )
+    config = request.config
+    draw2_config = config.model_copy(
+        update={
+            "resolvability": config.resolvability.model_copy(
+                update={"gate_p_wmb_draw": ref.WMB_DRAW_2}
+            )
+        }
+    )
+    derived = request.store.prepare_request(
+        test_spec,
+        request.panel,
+        builder=ref.builder_for(test_spec, draw2_config),
+        config=draw2_config,
+    ).build_hash
+    built = str(manifest.get("build_hash"))
+    if derived != built:
+        raise GatePRunError(
+            f"{draw2_dir} has build_hash {built[:16]}, but PREP's test-set spec "
+            f"gives draw 2 the build_hash {derived[:16]}: it was drawn from other "
+            "inputs than this PREP (rebuild it with scripts/annotation/"
+            "build_wmb_draw2.py from the same inputs and download cache)"
+        )
+    test_set = (manifest.get("builder_output") or {}).get("test_set") or {}
+    record = dict(test_set.get("gate_p_draw") or {})
+    first = {
+        str(cell) for cell in res.load_test_cells(Path(facts["test_dir"])).obs.index
     }
+    recorded = (record.get("first_draw") or {}).get("cell_digest")
+    if recorded != ref.test_cell_digest(first):
+        raise GatePRunError(
+            f"{draw2_dir} was drawn against another draw 1 than PREP's test set "
+            f"{Path(facts['test_dir']).name[:16]} (cell digests differ)"
+        )
+    second = {str(cell) for cell in res.load_test_cells(draw2_dir).obs.index}
+    training_file = Path(facts["bundle_dir"]) / ref.MARKER_TRAINING_CELLS_FILE
+    training: set[str] = set()
+    if training_file.is_file():
+        listed = pd.read_csv(training_file, usecols=["cell_label"])["cell_label"]
+        training = set(listed.astype(str))
+    shared = sorted(second & first)
+    trained = sorted(second & training)
+    if shared or trained or not training_file.is_file():
+        raise GatePRunError(
+            f"draw 2 is not disjoint: {len(shared)} draw-1 and {len(trained)} "
+            f"marker-training cells of {Path(facts['bundle_dir']).name[:16]}"
+            + ("" if training_file.is_file() else " (no training-cell list)")
+        )
+    timings = (manifest.get("builder_output") or {}).get("timings_s") or {}
+    return {
+        "draw2_dir": draw2_dir,
+        "draw2_build_hash": built,
+        "draw2_record": record,
+        "draw2_seconds": float(
+            sum(float(value) for value in timings.values() if value is not None)
+        ),
+    }
+
+
+def _unverified_files(bundle_dir: Path, manifest: Mapping[str, Any]) -> list[str]:
+    """The files of a bundle whose size or sha256 differ from ``bundle.json``."""
+    from merxen.annotation.store import file_sha256
+
+    failed: list[str] = []
+    for item in manifest.get("files") or []:
+        path = bundle_dir / str(item.get("path"))
+        if (
+            not path.is_file()
+            or path.stat().st_size != int(item.get("size", -1))
+            or file_sha256(path) != item.get("sha256")
+        ):
+            failed.append(str(item.get("path")))
+    return failed
 
 
 def check_profile_bundle(
@@ -925,7 +1337,21 @@ def _base(
     if tables.version == res.RESOLVABILITY_VERSION_V7:
         names = [str(name) for name in tables.summary.get("emission_members") or []]
         emission = res.members_from_names(
-            names, config.resolvability, stress_table=lung, role="emission"
+            names,
+            config.resolvability,
+            stress_table=lung,
+            role="emission",
+            # A mouse family's R3 members read its measured factor table, as
+            # PREP's plan does (resolvability_plan); human has none.
+            **(
+                {
+                    "member_table": _member_table(species, chemistry),
+                    "table_rule": config.resolvability.r3_table_rule,
+                    "residual_sd_log2": config.resolvability.r3_residual_sd_log2,
+                }
+                if species == "mouse"
+                else {}
+            ),
         )
         ensemble = res.EnsembleSettings.from_json(
             tables.summary.get("ensemble_settings")
@@ -1014,6 +1440,34 @@ def _base(
     )
 
 
+def _member_table(species: str, chemistry: str) -> Any:
+    """The measured factor table of a family's R3 members (``None``: none)."""
+    from merxen.annotation import reference as ref
+    from merxen.annotation import sim_inputs as si
+
+    reference = ref.V7_MEMBER_TABLE_REFERENCE.get(primary_reference(species))
+    if reference is None:
+        return None
+    return si.member_table_for(species, chemistry, reference)
+
+
+def draw2_availability(record: Mapping[str, Any]) -> pd.DataFrame:
+    """Draw 2's availability per class, as its bundle recorded it (C20a).
+
+    Args:
+        record: The draw-2 bundle's ``gate_p_draw`` record.
+
+    Returns:
+        One row per class (``DRAW2_AVAILABILITY_COLUMNS``), sorted.
+    """
+    columns = DRAW2_AVAILABILITY_COLUMNS[1:]
+    rows = [
+        {"class": str(cls), **{key: item.get(key) for key in columns}}
+        for cls, item in sorted((record.get("per_class") or {}).items())
+    ]
+    return pd.DataFrame.from_records(rows, columns=list(DRAW2_AVAILABILITY_COLUMNS))
+
+
 def _gate_rows(frame: pd.DataFrame, levels: Iterable[str]) -> pd.DataFrame:
     """Keep the rows of gate P's levels (the fine levels are report-only)."""
     keep = frame["level"].astype(str).isin(list(levels)).to_numpy(bool)
@@ -1044,8 +1498,11 @@ class _Runner:
         self.species = species
         self.version7 = version7
         self.grid = list(grid)
-        self.primary_spec: AnnotationReferenceSpec = _primary_build(request).spec
-        self.rules = ref.cells_rules_for(PRIMARY_REFERENCE, request.config)
+        self.reference_id = primary_reference(species)
+        self.primary_spec: AnnotationReferenceSpec = _primary_build(
+            request, species
+        ).spec
+        self.rules = ref.cells_rules_for(self.reference_id, request.config)
         self.levels = set(_gate_levels(species))
         self.chemistry = si.resolve_chemistry(
             request.panel.ensembl_ids,
@@ -1264,27 +1721,38 @@ def _group(
     bundle_dir: Path,
     *,
     config: AnnotationConfig,
+    engine_dir: Path | None = None,
 ) -> _Group:
-    """Load one donor's held-out bundle: test cells (D1 drop), engine, mapper."""
+    """Load one group: its test cells (D1 drop), engine and mapper.
+
+    Human: a donor's held-out bundle is both the test set and the engine.
+    Mouse: a WMB test draw (``bundle_dir``) mapped onto PREP's own
+    ``wmb_panel`` (``engine_dir``), as the production self-map maps draw 1.
+    """
     from merxen.annotation import reference as ref
     from merxen.annotation.mapmycells_engine import MmcBundle
 
+    mouse = runner.species == "mouse"
     test, exclusion = ref.self_map_test_cells(
-        res.load_test_cells(bundle_dir), ref.HO_REFERENCE_ID
+        res.load_test_cells(bundle_dir),
+        ref.WMB_TESTSET_REFERENCE_ID if mouse else ref.HO_REFERENCE_ID,
     )
-    engine = MmcBundle.from_dir(bundle_dir)
+    engine = MmcBundle.from_dir(engine_dir if engine_dir is not None else bundle_dir)
     runs: list[dict[str, Any]] = []
     return _Group(
         name=name,
         bundle_dir=bundle_dir,
-        build_hash=engine.build_hash,
+        build_hash=_bundle_hash(bundle_dir) if mouse else engine.build_hash,
         test=test,
         exclusion=exclusion,
         engine=engine,
-        specs=ref.level_specs_for(PRIMARY_REFERENCE, engine, config),
+        specs=ref.level_specs_for(runner.reference_id, engine, config),
         map_fn=runner.map_function(engine, name, runs),
         runs=runs,
         manifest=_manifest(bundle_dir),
+        engine_manifest=_manifest(engine_dir)
+        if engine_dir is not None
+        else _manifest(bundle_dir),
     )
 
 
@@ -1496,10 +1964,11 @@ def _score_member(
     expected_depth: Mapping[str, Any],
     default_depth: float | list[float] | None,
     depth_histogram: Mapping[int, float] | None,
-    vocab: pd.DataFrame,
+    vocab: pd.DataFrame | None,
     config: AnnotationConfig,
     species: Species,
     ensemble: _EnsembleNp5 | None = None,
+    donor_of: Mapping[str, str] | None = None,
 ) -> _MemberScore:
     """Score NP3-NP7 of one emission member (§14; every member for version 7).
 
@@ -1511,6 +1980,11 @@ def _score_member(
     ``validated_min_depth`` come from one depth walk over NP3-NP7 (R2). The
     readings they replace are written beside them (NP3's own walk
     ``np3_depths``, the t* spread, each member's own NP5 agreement).
+
+    A mouse family (M13b C20b) passes no vocab (NP7's 1% sink part is
+    human) and the ABC donor of each test cell (``donor_of``): NP4's
+    per-donor spread is then reported beside NP4 (``np4_donor_stats``,
+    ``np4_donor_spread``; §14 NP4 [L]).
     """
     resolvability = config.resolvability
     recipe, name = base.selector(member)
@@ -1577,6 +2051,24 @@ def _score_member(
         recipe=recipe,
         member=name,
     )
+    donor_tables: dict[str, pd.DataFrame] = {}
+    if donor_of:
+        donor_stats, donor_spread = gp.np4_donor_spread(
+            pooled,
+            decisions,
+            tested,
+            default_group=default_group,
+            donor_of=donor_of,
+            targets=targets,
+            settings=np4_settings,
+            regime=GATE_P_REGIME,
+            recipe=recipe,
+            member=name,
+        )
+        donor_tables = {
+            "np4_donor_stats": donor_stats,
+            "np4_donor_spread": donor_spread,
+        }
     # NP5.
     np5_settings = gp.Np5Settings.from_config(resolvability)
     saturated = base.ensemble.saturated_bp_share if base.ensemble is not None else None
@@ -1722,6 +2214,7 @@ def _score_member(
         "np4_stats": np4_stats,
         "np4_sets": np4_sets,
         "np4_seed": np4_seed,
+        **donor_tables,
         # The member's own re-derivation (scored in version 6 only, R7).
         "np5_agreement": np5_member_agreement,
         "np5_thresholds": np5_thresholds,
@@ -2259,11 +2752,13 @@ def bundle_differences(first: Path, second: Path) -> list[str]:
     return differences
 
 
-def _prep_identity(request: GatePRequest, facts: Mapping[str, Any]) -> dict[str, Any]:
+def _prep_identity(
+    request: GatePRequest, facts: Mapping[str, Any], species: str = "human"
+) -> dict[str, Any]:
     """Rebuild PREP's primary bundle in a scratch store and compare it (K13)."""
     from merxen.annotation.store import ReferenceStore
 
-    build = _primary_build(request)
+    build = _primary_build(request, species)
     scratch = cast(Path, request.scratch_dir)
     root = scratch / "gate_p_identity_store"
     builds = scratch / "gate_p_identity_scratch"
@@ -2375,8 +2870,13 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
         version7=version7,
         grid=tables.depth_grid,
     )
-    primary = _primary_build(request)
-    test_spec = ref.held_out_test_set_spec(primary.spec, config)
+    mouse = options.species == "mouse"
+    primary = _primary_build(request, options.species)
+    test_spec = (
+        ref.wmb_test_set_spec(primary.spec, config)
+        if mouse
+        else ref.held_out_test_set_spec(primary.spec, config)
+    )
     expected_hash = facts["test_build_hash"]
     derived = request.store.prepare_request(
         test_spec,
@@ -2386,13 +2886,27 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
     ).build_hash
     if derived != expected_hash:
         raise GatePRunError(
-            f"the held-out spec derived from {PRIMARY_REFERENCE} has build_hash "
+            f"the held-out spec derived from {runner.reference_id} has build_hash "
             f"{derived[:16]}, not the bundle's {expected_hash[:16]}: the "
-            "leave-one-donor-out builds would differ from PREP's in more than the "
-            "donor"
+            + (
+                "second WMB test draw would differ from PREP's draw 1 in more "
+                "than the draw"
+                if mouse
+                else "leave-one-donor-out builds would differ from PREP's in more "
+                "than the donor"
+            )
         )
+    draw2: dict[str, Any] = (
+        _check_draw2(request, options, facts, test_spec) if mouse else {}
+    )
     started = time.monotonic()
-    default = _group(runner, facts["default_donor"], facts["test_dir"], config=config)
+    default = _group(
+        runner,
+        facts["default_donor"],
+        facts["test_dir"],
+        config=config,
+        engine_dir=Path(facts["bundle_dir"]) if mouse else None,
+    )
     default_all = {
         str(cell) for cell in res.load_test_cells(facts["test_dir"]).obs.index
     }
@@ -2423,31 +2937,71 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
         "readings": list(GATE_P_RUN_READINGS),
         "readings_ruled": list(gp.GATE_P_READINGS_RULED),
     }
+    if mouse:
+        # The groups are draws (M13b C20b); the record names them so.
+        record["default_draw"] = record.pop("default_donor")
+        record["extra_draws"] = record.pop("extra_donors")
+        record["readings"] = [*GATE_P_RUN_READINGS, *GATE_P_RUN_READINGS_MOUSE]
+        record["draw2"] = {
+            "path": str(draw2["draw2_dir"]),
+            "build_hash": draw2["draw2_build_hash"],
+            "rule": draw2["draw2_record"].get("rule"),
+            "n_cells": draw2["draw2_record"].get("n_cells"),
+            "cell_digest": draw2["draw2_record"].get("cell_digest"),
+            "first_draw_cell_digest": (
+                draw2["draw2_record"].get("first_draw") or {}
+            ).get("cell_digest"),
+            "build_seconds": draw2["draw2_seconds"],
+            "checks": {
+                "files_verified": True,
+                "panel_hash": True,
+                "build_hash_derived_from_prep": True,
+                "first_draw_digest": True,
+                "disjoint_from_first_draw": True,
+                "disjoint_from_training": True,
+            },
+        }
     # B2 (b) of 2026-10-07: NP2's weak and collapsed parents (reference data
     # only), before any leave-one-donor-out build.
     np2 = np2_inputs(Path(facts["bundle_dir"]))
     acceptance = np2_acceptance(np2, options.accepted_parents)
     record["np2_parents"] = acceptance.to_json()
     # D2: the per-donor pool sizes, before any leave-one-donor-out build.
+    # Mouse: draw 2's availability per class (recorded at its build).
     donor_own = options.other_region == OTHER_REGION_DONOR_OWN
-    pools = ref.ho_donor_pool_sizes(
-        test_spec.sources,
-        donors=facts["extras"],
-        excluded_cells=default_all,
-        default_test_superclusters=default.test.obs[res.TRUTH_LEAF_COLUMN].astype(str),
-        region=config.anatomical_region or ref.WHB_WHOLE_CORTEX_REGION,
-        target=int(config.resolvability.topup_min_class_test_cells),
-        scratch_dir=cast(Path, request.scratch_dir),
-    )
-    pools.to_csv(out / POOL_SIZES_CSV, index=False)
-    short = pools[pools["judged"].astype(bool) & ~pools["meets"].astype(bool)]
-    record["pool_sizes"] = {
-        "file": POOL_SIZES_CSV,
-        "target": int(config.resolvability.topup_min_class_test_cells),
-        "short": _jsonable(short.to_dict(orient="records")),
-    }
+    if mouse:
+        pools = draw2_availability(draw2["draw2_record"])
+        pools.to_csv(out / DRAW2_AVAILABILITY_CSV, index=False)
+        short = pools[~pools["reaches_target"].astype(bool)]
+        record["draw2_availability"] = {
+            "file": DRAW2_AVAILABILITY_CSV,
+            "target": (draw2["draw2_record"].get("rule") or {}).get("class_target"),
+            "short": _jsonable(short.to_dict(orient="records")),
+            "pooled_share_in_classes_reaching_target": draw2["draw2_record"].get(
+                "pooled_share_in_classes_reaching_target"
+            ),
+        }
+    else:
+        pools = ref.ho_donor_pool_sizes(
+            test_spec.sources,
+            donors=facts["extras"],
+            excluded_cells=default_all,
+            default_test_superclusters=default.test.obs[res.TRUTH_LEAF_COLUMN].astype(
+                str
+            ),
+            region=config.anatomical_region or ref.WHB_WHOLE_CORTEX_REGION,
+            target=int(config.resolvability.topup_min_class_test_cells),
+            scratch_dir=cast(Path, request.scratch_dir),
+        )
+        pools.to_csv(out / POOL_SIZES_CSV, index=False)
+        short = pools[pools["judged"].astype(bool) & ~pools["meets"].astype(bool)]
+        record["pool_sizes"] = {
+            "file": POOL_SIZES_CSV,
+            "target": int(config.resolvability.topup_min_class_test_cells),
+            "short": _jsonable(short.to_dict(orient="records")),
+        }
     stops: dict[str, str] = {}
-    if donor_own and not short.empty and not options.accept_small_pools:
+    if not mouse and donor_own and not short.empty and not options.accept_small_pools:
         stops[STOP_POOL_SIZES] = (
             f"{len(short)} (donor, class) pools cannot meet the per-class top-up "
             "rule under D2 (d); gate P stops before any replicate is mapped "
@@ -2478,7 +3032,11 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
             "stop_reasons": list(stops),
             "reason": record["reason"],
             "run": str(out / GATE_P_RUN_JSON),
-            "pool_sizes": str(out / POOL_SIZES_CSV),
+            **(
+                {"draw2_availability": str(out / DRAW2_AVAILABILITY_CSV)}
+                if mouse
+                else {"pool_sizes": str(out / POOL_SIZES_CSV)}
+            ),
         }
     with ProcessTreeSampler() as sampler:
         # Leave-one-donor-out bundles (D2 (d) or (c)), in the request's store.
@@ -2488,7 +3046,19 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
         loo_records = []
         groups = [default]
         loo_wall = 0.0
-        for donor in facts["extras"]:
+        if mouse:
+            # Draw 2, built before the run (M13b C20a), on PREP's wmb_panel.
+            for name in facts["extras"]:
+                groups.append(
+                    _group(
+                        runner,
+                        name,
+                        Path(draw2["draw2_dir"]),
+                        config=config,
+                        engine_dir=Path(facts["bundle_dir"]),
+                    )
+                )
+        for donor in [] if mouse else facts["extras"]:
             loo_started = time.monotonic()
             bundle_dir, loo = _build_loo(
                 request,
@@ -2502,12 +3072,29 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
             loo["self_map_exclusion"] = group.exclusion
             loo_records.append(loo)
             groups.append(group)
-        record["leave_one_donor_out"] = loo_records
+        if not mouse:
+            record["leave_one_donor_out"] = loo_records
         # C_P from the test cells, before any cell is mapped.
         test_cells = _test_cell_table(groups, _gate_levels(options.species))
-        composition = ref.whb_frontal_composition(
-            test_spec.sources, cast(Path, request.scratch_dir)
-        )
+        donor_of: dict[str, str] | None = None
+        if mouse:
+            # NP3's natural composition and NP4's per-donor report (§14).
+            wmb = ref.wmb_reference_facts(
+                test_spec.sources,
+                {str(cell) for group in groups for cell in group.test.obs.index},
+            )
+            composition = wmb.composition
+            donor_of = wmb.donor_of
+            record["reference_composition"] = {
+                "source": "WMB 10Xv3 cells of the available matrices with full "
+                "truth, by subclass",
+                "n_cells": wmb.n_cells,
+                "n_subclasses": len(wmb.composition),
+            }
+        else:
+            composition = ref.whb_frontal_composition(
+                test_spec.sources, cast(Path, request.scratch_dir)
+            )
         class_sets = gp.gate_p_class_sets(
             test_cells,
             species=options.species,
@@ -2526,6 +3113,12 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
             species=options.species,
             chemistry=runner.chemistry,
             xplatform_table=si.get_asset(si.STRESS_HUMAN_XPLATFORM),
+            # A mouse version-7 family's R3 members (spill 0.35 only, §14).
+            **(
+                {"member_table": _member_table(options.species, runner.chemistry)}
+                if mouse
+                else {}
+            ),
             lung_table=si.get_asset(si.STRESS_HUMAN_LUNG)
             if runner.chemistry == "xenium_prime"
             else None,
@@ -2563,7 +3156,7 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
             second = res.restore_labels(res.coerce_cells(second))
             replicate_identical[member.name] = _same_rows(first, second)
         prep: dict[str, Any] = (
-            _prep_identity(request, facts)
+            _prep_identity(request, facts, options.species)
             if options.prep_identity
             else {"identical": None, "reason": "not run (prep_identity off)"}
         )
@@ -2572,7 +3165,8 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
     record["replicate_identity"] = replicate_identical
     record["prep_identity"] = prep
     # Score every emission member (one at a time from the parquet files).
-    vocab = _union_vocab(groups)
+    # Mouse: NP7's single-wrong-node part only, without the vocab (§14).
+    vocab = None if mouse else _union_vocab(groups)
     histogram = _depth_histogram(profile, base.grid)
     clean_tables = {
         (group.name, 0): runner.load(group.name, base.clean, 0) for group in groups
@@ -2623,6 +3217,7 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
             config=config,
             species=options.species,
             ensemble=ensemble_np5,
+            donor_of=donor_of,
         )
         for criterion, values in score.verdicts.items():
             verdicts[criterion][member.name] = values
@@ -2631,7 +3226,7 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
         for name, frame in score.tables.items():
             report_tables[f"{name}__{tag}"] = frame
         del replicates, stresses
-    report_tables["pool_sizes"] = pools
+    report_tables["draw2_availability" if mouse else "pool_sizes"] = pools
     if options.x1_factors is not None:
         x1 = pd.read_csv(options.x1_factors)
         factors = si.xplatform_factors(si.get_asset(si.STRESS_HUMAN_XPLATFORM))
@@ -2648,15 +3243,21 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
     measured = (
         None if prep_seconds is None else float(prep_seconds) + float(gate_p_seconds)
     )
+    if mouse and measured is not None:
+        # Draw 2 was built before the run; its build counts as the human
+        # leave-one-donor-out builds do (GATE_P_RUN_READINGS_MOUSE).
+        measured += float(draw2["draw2_seconds"])
     reference_seconds, basis = np9_time_reference(
         options,
         version7=base.is_v7,
         forced_v7=base.forced_v7,
         simulated_cells=runner.scaling_cells,
     )
-    engine_markers = (default.manifest.get("builder_output") or {}).get("markers") or {}
+    engine_markers = (default.engine_manifest.get("builder_output") or {}).get(
+        "markers"
+    ) or {}
     prefilter = (
-        (request.report.get("references") or {}).get(PRIMARY_REFERENCE) or {}
+        (request.report.get("references") or {}).get(runner.reference_id) or {}
     ).get("prefilter_comparison") or {}
     np9 = gp.np9_resources(
         gp.Np9Inputs(
@@ -2735,6 +3336,11 @@ def run_gate_p(request: GatePRequest, options: GatePOptions) -> dict[str, Any]:
             "prep_seconds": prep_seconds,
             "gate_p_seconds": round(gate_p_seconds, 1),
             "leave_one_donor_out_seconds": round(loo_wall, 1),
+            **(
+                {"draw2_build_seconds": round(float(draw2["draw2_seconds"]), 1)}
+                if mouse
+                else {}
+            ),
             "replicate_seconds": round(runner.wall_s, 1),
             "simulated_cells": runner.scaling_cells,
             "simulated_cells_this_run": runner.simulated_cells,

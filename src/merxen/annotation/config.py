@@ -633,6 +633,12 @@ class AnnotationResolvabilityConfig(_AnnotationModel):
         gate_p_seeds: Gate-P seeds.
         gate_p_human_donors: Gate-P leave-one-donor-out donors.
         gate_p_mouse_test_draws: Gate-P disjoint mouse test draws.
+        gate_p_wmb_draw: The WMB test draw a ``wmb_selfmap_testset`` build
+            makes: 1, the production self-map's test set, or 2, gate P's
+            second disjoint draw (M13b C20a; pre-registration §14 C_P and
+            NP4). Draw 2 enters the test set's ``build_hash`` only when set,
+            so every production payload is unchanged; a primary's self-map
+            refuses it.
         gate_p_stress: Gate-P stress recipe.
         gate_p_min_confident_n: Confident calls per tested set (pooled).
         gate_p_replicate_min_confident_n: Confident calls per replicate.
@@ -703,6 +709,7 @@ class AnnotationResolvabilityConfig(_AnnotationModel):
         default_factory=lambda: ["H19.30.002", "H19.30.001", "H18.30.002"]
     )
     gate_p_mouse_test_draws: int = Field(default=2, ge=1)
+    gate_p_wmb_draw: int = Field(default=1, ge=1, le=2)
     gate_p_stress: GatePStressRecipe = Field(default_factory=GatePStressRecipe)
     gate_p_min_confident_n: int = Field(default=200, ge=1)
     gate_p_replicate_min_confident_n: int = Field(default=100, ge=1)

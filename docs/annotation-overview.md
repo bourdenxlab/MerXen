@@ -976,8 +976,11 @@ below 100 counts).
 - **Mouse real-data QC** (milestone M13b, chunk C22) runs warn-only (see
   [above](#mouse-real-data-qc-warn-only)). Its ag7 and VZG2 regression rows
   are pending until the gate M runs write their RESOLVE outputs.
-- **Mouse gate P** (milestone M13b): not available; gate P refuses mouse
-  families until a second disjoint WMB test draw exists.
+- **Mouse gate P** (milestone M13b, chunk C20): the second disjoint WMB
+  test draw is built for the ag7 and VZG2 panels, and gate P runs a mouse
+  family only when it is given one (`--gate-p-wmb-draw2`; see
+  `docs/stages/annotation.md`, "The mouse path"). The ag7 / VZG2 dry run
+  (C21) has not run; pre-registration §26 records its readings.
 - **Validated mouse families are MERSCOPE only** (ag7, VZG2). A mouse Xenium
   or new panel runs in the provisional regime.
 

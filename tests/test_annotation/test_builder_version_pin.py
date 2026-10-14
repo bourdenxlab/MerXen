@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "be9a3794068ea33ca14a9ff36be95aea27bb3e8fff830c6c17e3e300a059a8b4",
+    3: "e425900f3e058bcbd8d46441f07e4d26ec0899c6eea8223a7bc35b50c4a57a5d",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -245,6 +245,19 @@ PIN_HISTORY = (
     "builder's build_hash through its params, so the region-share bundle gets "
     "a new hash without a builder bump and a revision-1 bundle is never "
     "reused; every other bundle's payload and build_hash are unchanged",
+    "3: gate P's second disjoint WMB test draw (M13b C20a): "
+    "build_wmb_selfmap_testset draws it (wmb_second_draw) only when "
+    "resolvability.gate_p_wmb_draw is 2, whose rule enters the test set's "
+    "params only then; wmb_panel refuses draw 2; wmb_test_set_spec and "
+    "wmb_reference_facts (gate P's reads, no builder calls them) are added. "
+    "Draw 1's selection, output and every production payload are unchanged "
+    "(test_resolvability_v6_golden, test_reference_draw2), so no bundle "
+    "content or build_hash changes",
+    "3: merge of M6b-R (the region-share structure homes) with M13b C20a "
+    "(the second WMB draw): each side keeps its own rule and neither changes "
+    "the other's code, so the merged fingerprint differs from both without "
+    "any bundle content or build_hash change (test_resolvability_v6_golden, "
+    "test_reference_draw2)",
 )
 
 

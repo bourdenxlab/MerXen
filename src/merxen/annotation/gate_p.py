@@ -1027,6 +1027,159 @@ def np4_set_verdicts(
     return pd.DataFrame.from_records(records, columns=list(NP4_COLUMNS))
 
 
+NP4_DONOR_SPREAD_COLUMNS: Final[tuple[str, ...]] = (
+    "level",
+    "class",
+    "set",
+    "pooled",
+    "target",
+    "n_donors",
+    "n_donors_evaluated",
+    "p_min",
+    "p_max",
+    "donor_range",
+    "p_bar",
+    "n_bar",
+    "pooled_se",
+    "limit",
+    "range_ok",
+    "floor_ok",
+    "floor_failures",
+    "passed",
+)
+
+
+def np4_donor_spread(
+    replicates: Mapping[ReplicateKey, pd.DataFrame],
+    decisions: pd.DataFrame,
+    tested: Mapping[tuple[str, str], Sequence[res.GatePTestedSet] | None],
+    *,
+    default_group: str | None,
+    donor_of: Mapping[str, str],
+    targets: Mapping[str, float],
+    settings: Np4Settings,
+    regime: res.Regime = "provisional",
+    recipe: str | None = res.DECISION_RECIPE,
+    member: str | None = None,
+    seed: int = 0,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """NP4's per-donor spread of a mouse family (§14 NP4 [L]; reported only).
+
+    §14 NP4: a mouse family's replicates are its two disjoint test draws
+    ("the Allen means contain every donor, so a mouse donor cannot be held
+    out; the per-donor spread is reported from the ABC ``donor_label``"; M13
+    CHECK K8). The pooled held-out calls of ``seed`` (``pooled_held_out_cells``:
+    the default draw's check half and the other draws) are split by the ABC
+    donor of their test cells, and each donor is counted as a replicate at
+    the tested sets, at the frozen thresholds (``replicate_set_stats``). Per
+    tested set, over the donors with at least ``replicate_min_confident_n``
+    confident calls there: NP4's floor (each such donor's point precision >=
+    target_L) and the range of their precisions against max(0.03, 3.5 x
+    pooled SE), with p_bar and n_bar the means over those donors (the range
+    needs two of them). Nothing is scored from it: the donors are inside the
+    reference, so the spread describes the draws, it holds out nothing.
+
+    Args:
+        replicates: Per (group, seed label), that replicate's cells table
+            (the pooled view NP3 uses).
+        decisions: The frozen decisions.
+        tested: The tested sets per (level, class).
+        default_group: The draw the frozen thresholds were fitted on.
+        donor_of: Each test cell's ABC ``donor_label``.
+        targets: target_L per level.
+        settings: The NP4 constants.
+        regime: The frozen regime.
+        recipe: The recipe of the scored rows.
+        member: The version-7 emission member of the scored rows.
+        seed: The seed label pooled (0).
+
+    Returns:
+        ``(stats, spread)``: one row per (tested set, donor) as
+        ``replicate_set_stats`` with the column ``donor`` for ``group``, and
+        one row per tested set, columns ``NP4_DONOR_SPREAD_COLUMNS``
+        (``passed`` = floor and range, reported only).
+
+    Raises:
+        ValueError: If a pooled test cell has no donor, or for the inputs of
+            ``pooled_held_out_cells`` and ``replicate_set_stats``.
+    """
+    empty = (
+        pd.DataFrame(columns=[*STATS_COLUMNS[:5], "donor", *STATS_COLUMNS[6:]]),
+        pd.DataFrame(columns=list(NP4_DONOR_SPREAD_COLUMNS)),
+    )
+    cells = pooled_held_out_cells(replicates, default_group=default_group, seed=seed)
+    cells = res.replicate_rows(cells, recipe=recipe, seed=None, member=member)
+    cells = cells.reset_index(drop=True)
+    donors = cells["cell_id"].astype(str).map(dict(donor_of))
+    if bool(donors.isna().any()):
+        missing = sorted(set(cells["cell_id"].astype(str)[donors.isna()]))
+        raise ValueError(
+            f"NP4's per-donor spread: {len(missing)} pooled test cells have no "
+            f"donor (e.g. {missing[:3]})"
+        )
+    tables = {
+        (str(donor), seed): rows.reset_index(drop=True)
+        for donor, rows in cells.groupby(donors.to_numpy(), sort=True)
+    }
+    if not tables:
+        return empty
+    stats = replicate_set_stats(
+        tables,
+        decisions,
+        tested,
+        default_group=None,
+        regime=regime,
+        recipe=recipe,
+        member=member,
+    ).rename(columns={"group": "donor"})
+    minimum = settings.replicate_min_confident_n
+    records: list[dict[str, object]] = []
+    for (level, cls, label), rows in stats.groupby(
+        ["level", "class", "set"], sort=True
+    ):
+        target = float(targets[str(level)])
+        evaluated = rows[rows["n_confident"].to_numpy(np.int64) >= minimum]
+        precision = evaluated["precision"].to_numpy(np.float64)
+        below = evaluated[precision < target - _TOLERANCE]
+        p_bar = n_bar = pooled_se = limit = donor_range = math.nan
+        range_ok = True
+        if len(evaluated) >= 2:
+            p_bar = float(precision.mean())
+            n_bar = float(evaluated["n_confident"].mean())
+            pooled_se = res.pooled_standard_error(p_bar, n_bar)
+            limit = max(
+                settings.spread_floor, settings.spread_se_multiplier * pooled_se
+            )
+            donor_range = float(precision.max() - precision.min())
+            range_ok = donor_range <= limit + _TOLERANCE
+        floor_ok = below.empty
+        records.append(
+            {
+                "level": level,
+                "class": cls,
+                "set": label,
+                "pooled": bool(rows["pooled"].iloc[0]),
+                "target": target,
+                "n_donors": int(len(rows)),
+                "n_donors_evaluated": int(len(evaluated)),
+                "p_min": float(precision.min()) if len(precision) else math.nan,
+                "p_max": float(precision.max()) if len(precision) else math.nan,
+                "donor_range": donor_range,
+                "p_bar": p_bar,
+                "n_bar": n_bar,
+                "pooled_se": pooled_se,
+                "limit": limit,
+                "range_ok": range_ok,
+                "floor_ok": floor_ok,
+                "floor_failures": ";".join(below["donor"].astype(str)),
+                "passed": floor_ok and range_ok,
+            }
+        )
+    return stats, pd.DataFrame.from_records(
+        records, columns=list(NP4_DONOR_SPREAD_COLUMNS)
+    )
+
+
 def _np4_seed_grid(
     replicates: Mapping[ReplicateKey, pd.DataFrame], base_seed: int
 ) -> tuple[list[str], list[int]]:
@@ -6288,6 +6441,9 @@ GATE_P_REPORTED_ONLY_TABLES: Final[tuple[str, ...]] = (
     "np3_depths",
     "np5_spread",
     "np5_class",
+    # A mouse family's per-donor spread (§14 NP4 [L], M13b C20b).
+    "np4_donor_stats",
+    "np4_donor_spread",
 )
 GATE_P_REPORTED_ONLY_TABLES_V7: Final[tuple[str, ...]] = (
     *GATE_P_REPORTED_ONLY_TABLES,
