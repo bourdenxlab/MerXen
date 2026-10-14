@@ -66,6 +66,11 @@
 - **Rule variants, inert.** `MouseRegionConfig.rule_variant = "m6b"` enables (a) OB–OLF coupling through AON-home tiles, (b) and (c) conditional never-drop nodes, (d) OB at 0.5% of the assigned tiles and (f) other tile settings; the default `v1` refuses the fields. `scripts/acceptance/mouse_ap_axis.py` scores them on MERFISH-638850 under pre-registration §24.
 - **The exit is unmet.** No candidate is admissible: every rule, `v1` included, leaves the bin-mean T2 above 0.1% in some AP bin. `v1` stays the production rule, and MO10 scored on it fails (bin 3.0–4.5 mm harm 0.16–0.21% against 0.10%, largest section harm 0.59–0.76% against 0.30%, T2, and the missed-region clause at three sections). The choice of rule goes to the user.
 
+### Fixed: Dwight mouse reference sources are off SSD1
+
+- The Dwight defaults of the mouse annotation sources (`annotation_wmb_h5ad_dir`, `annotation_wmb_metadata_dir`, `annotation_mouse_gene_table`, `annotation_wmb_selfmap_test_cells_path`, and now `annotation_merfish_ccf_metadata_path`) point at the verified download under `/srv/storage/MerXen/references` instead of the failing SSD1 disk. The paths are those of the VZG2 `map_first` run, so the `wmb_panel` and `wmb_region_share` bundles it built stay reusable.
+- `scripts/annotation_dev/launch_guard.sh` refuses a dev launch whose resolved configuration still reads from SSD1, and `scripts/annotation_dev/run_template.sh` is a launch script that calls it. The reference store and the human sources keep their SSD1 defaults until they move; a launch overrides the store.
+
 ### Acceptance
 
 - The human acceptance (gate H) is scored in `results/acceptance/2026-09-30/` on P7513, P1212, P7113 and P5011, all four segmentations:

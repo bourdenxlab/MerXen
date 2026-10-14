@@ -588,18 +588,18 @@ the dwight values in `workflows/conf/dwight.annotation.config`.
 | `annotation_resolvability` | `true` | Resolvability self-map (M3b): PREP simulates held-out reference cells on the panel and writes the resolvability tables into the WHB, SEA-AD and WMB bundles ([Annotation](stages/annotation.md#resolvability-self-map-m3b)). While true, `wmb_panel` needs `annotation_wmb_selfmap_test_cells_path`, and the WHB and SEA-AD bundles need `annotation_whb_region_precompute_source`, `annotation_whb_h5ad_dir` and `annotation_whb_metadata_dir` (the held-out test set; the preflight checks all three). The self-map recipe enters `build_hash`; the RESOLVE-time decision settings do not. |
 | `annotation_xplat_sensitivity`, `annotation_xplat_sensitivity_segmentations` | `geneset_c`; `proseg_hybrid` | Whether same-panel human pairs get a set-c bundle, and on which segmentations. |
 | `annotation_panel_mode` | `auto` | `auto` (intersection when the two platform panels have Jaccard ≥ 0.9, else `per_platform`; always `per_platform` when exactly one declared panel is refused, so the valid platform keeps its panel), `intersection` or `per_platform`. |
-| `annotation_human_gene_table`, `annotation_mouse_gene_table` | `null`; Dwight: the WHB-10Xv3 `var` (`WHB-10Xv3-Nonneurons-raw.h5ad`) and the WMB-10X `gene.csv` (20241115) | Local gene tables (Allen `gene.csv` layout or a reference `.h5ad` whose `var` index holds the IDs; nothing is downloaded). The run species' table is the symbol fallback and the release-drift reference of the gene-ID resolver (else `annotation_gene_id_fallback_csv`); both feed the exact-case species test, which refuses a mouse panel run as human and vice versa ([Annotation](stages/annotation.md#declared-panels-gene-ids-and-controls-m3b)). Preflight checks that set files exist. |
+| `annotation_human_gene_table`, `annotation_mouse_gene_table` | `null`; Dwight: the WHB-10Xv3 `var` (`WHB-10Xv3-Nonneurons-raw.h5ad`, still on SSD1) and the WMB-10X `gene.csv` (20241115; the md5-checked copy under `/srv/storage/MerXen/references/abc_atlas/metadata/WMB-10X/20241115/`) | Local gene tables (Allen `gene.csv` layout or a reference `.h5ad` whose `var` index holds the IDs; nothing is downloaded). The run species' table is the symbol fallback and the release-drift reference of the gene-ID resolver (else `annotation_gene_id_fallback_csv`); both feed the exact-case species test, which refuses a mouse panel run as human and vice versa ([Annotation](stages/annotation.md#declared-panels-gene-ids-and-controls-m3b)). Preflight checks that set files exist. |
 | `annotation_gene_alias_table`, `annotation_gene_id_overrides_csv` | `null` | Optional local HGNC / MGI alias table (previous and alias symbols; only single-target aliases resolve) and extra curated overrides (`symbol`, `ensembl_id`, `reason`, optional `species`) on top of the packaged `gene_id_overrides_<species>.csv`. |
 | `annotation_whb_region_precompute_source` | `null`; Dwight: the SSD1 frontal region reference | WHB frontal region precompute (directory or `precomputed_stats.h5`), copied into each WHB bundle. |
 | `annotation_whb_h5ad_dir`, `annotation_whb_metadata_dir` | `null`; Dwight: the SSD1 ABC WHB cache | Inputs to rebuild the region precompute when no source precompute is given, and the held-out resolvability test set's raw h5ads, taxonomy tables and WHB cell metadata (the other-region non-neuronal test cells; WHB and SEA-AD bundles) while `annotation_resolvability` is true. |
 | `annotation_seaad_precomputed_stats_path`, `annotation_seaad_metadata_dir` | `null` | Local SEA-AD Multiregion files; unset, they come from the pinned download cache. |
-| `annotation_wmb_h5ad_dir` | `null`; Dwight: the SSD1 WMB-10Xv3 matrices | Directory of `WMB-10Xv3-*-raw.h5ad`; only those files enter `build_hash`. |
-| `annotation_wmb_metadata_dir` | `null`; Dwight: the SSD1 ABC metadata | WMB-10X cell metadata and the WMB taxonomy tables. |
+| `annotation_wmb_h5ad_dir` | `null`; Dwight: `/srv/storage/MerXen/references/abc_atlas/expression_matrices/WMB-10Xv3/20230630` | Directory of `WMB-10Xv3-*-raw.h5ad`; only those files enter `build_hash`. |
+| `annotation_wmb_metadata_dir` | `null`; Dwight: `/srv/storage/MerXen/references/abc_atlas/metadata` | WMB-10X cell metadata and the WMB taxonomy tables. |
 | `annotation_wmb_mapping_stats_path` | `null`; Dwight: the Allen `precomputed_stats_ABC_revision_230821.h5` | Allen WMB means, copied as the mapping precompute. |
-| `annotation_wmb_selfmap_test_cells_path` | `null`; Dwight: `research/selfmap/truth.csv` of the evidence archive | The 11,913 self-map test cells kept out of the marker training cells. A copy matching the pinned sha256 is seeded into `<store>/.downloads/local/wmb_selfmap/`, and bundles hash that copy. Required while `annotation_resolvability` is true. |
+| `annotation_wmb_selfmap_test_cells_path` | `null`; Dwight: `/srv/storage/MerXen/references/wmb_selfmap/truth_20260925.csv`, a byte-identical copy of `research/selfmap/truth.csv` of the evidence archive | The 11,913 self-map test cells kept out of the marker training cells. A copy matching the pinned sha256 is seeded into `<store>/.downloads/local/wmb_selfmap/`, and bundles hash that copy. Required while `annotation_resolvability` is true. |
 | `annotation_wmb_marker_gene_universe_path` | `null` | Override of the `wmb_panel` marker gene universe. Unset, a panel inside the validated ag7 ∪ VZG2 union (899 genes) uses that union and any other panel its own genes. |
 | `annotation_wmb_max_cells_per_cluster` | `50` | Marker training cells per WMB cluster. |
-| `annotation_merfish_ccf_metadata_path` | `null` | Local MERFISH-C57BL6J-638850-CCF cell metadata; unset, it comes from the pinned download cache. |
+| `annotation_merfish_ccf_metadata_path` | `null`; Dwight: the verified `cell_metadata_with_parcellation_annotation.csv` under `/srv/storage/MerXen/references/abc_atlas/metadata/MERFISH-C57BL6J-638850-CCF/20231215/views/` | Local MERFISH-C57BL6J-638850-CCF cell metadata; unset, it comes from the pinned download cache. |
 | `annotation_prep_max_forks` | Dwight: `1` | Concurrent `ANNOTATE_REFERENCE_PREP` tasks. |
 | `annotation_max_forks` | `2` (applied on Dwight) | Concurrent `CLUSTERING_SQUIDPY_ANNOTATE_MAP` tasks (6 CPUs and 24 GB each, 48 GB above 1,000 panel genes). |
 | `annotation_resolve_max_forks` | Dwight: `4` | Concurrent `CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE` tasks (2 CPUs and 16 GB each, 32 GB above 1,000 panel genes; about a minute per pair × segmentation). |
@@ -613,6 +613,31 @@ the dwight values in `workflows/conf/dwight.annotation.config`.
 | `annotation_mode_mapmycells_stage` | `null` | The legacy `mapmycells` stage in `map_first` rows: `null` means `skip` for a species that has flipped (human) and `legacy` otherwise (mouse); set `legacy` or `skip` to choose. |
 | `annotation_reuse_published` | `true` | MAP copies a run from the published `<pair>/<seg>/annotation_map/annotation_map_out/map_manifest.json` instead of re-mapping when its query fingerprint, `build_hash`, engine parameters and ctm version are unchanged (Dwight prunes work directories, so `-resume` alone cannot). |
 | `annotation_keep_extended_json` | `false` | Keep each MapMyCells extended JSON, gzipped, next to its tidy parquet (by default it is parsed and deleted). |
+
+#### Dwight reference sources and the SSD1 launch guard
+
+SSD1 (`/media/mathieubo/SSD1`) is failing: most of the reference bundles and
+sources stored there no longer match their recorded hashes, and the store's
+reuse check compares only the size of files above 64 MB. The Dwight mouse
+sources therefore default to the verified ABC Atlas download under
+`/srv/storage/MerXen/references` (`annotation_wmb_h5ad_dir`,
+`annotation_wmb_metadata_dir`, `annotation_merfish_ccf_metadata_path`,
+`annotation_mouse_gene_table`, `annotation_wmb_selfmap_test_cells_path`; the
+strings of the VZG2 `map_first` run, because `build_hash` covers the resolved
+source paths). Still on SSD1 by default, until the human sources move: the
+reference store (`annotation_reference_store`; a launch passes its own),
+`annotation_whb_*`, the legacy `mecr_*`, `mapmycells_*` and
+`clustering_squidpy_*` sources, and the human gene table (only its `var` index
+is read).
+
+`scripts/annotation_dev/launch_guard.sh` refuses a launch whose resolved
+configuration reads from SSD1. Give it the arguments of the `nextflow run`
+call; it runs `nextflow config`, applies the launch's `--param` overrides and
+exits 1 if any value still contains `/media/mathieubo/SSD1`, before any task
+starts. Exceptions are the human gene table, the values or params named in
+`LAUNCH_GUARD_ALLOW` and `LAUNCH_GUARD_ALLOW_KEYS`, and, for `--species mouse`,
+the human WHB and SEA-AD source params. `scripts/annotation_dev/run_template.sh`
+is a launch script that calls it.
 
 #### Annotation config fields of milestone M3c (`--annotation-config`)
 
