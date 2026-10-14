@@ -584,6 +584,31 @@ def test_compare_legacy_reads_pairs_by_alias_or_data_id(
     )
 
 
+def test_compare_legacy_keeps_a_data_path_that_names_a_run(
+    legacy: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A manifest root below a pair may name another real form of the donor
+    # (a run folder; invented here). Only aliases are translated: the data
+    # path is kept as given, so the manifest walks the folder that exists.
+    _alias_table(tmp_path / "aliases.tsv", monkeypatch, INVENTED_PAIRS)
+    with (tmp_path / "aliases.tsv").open("a", encoding="utf-8") as table:
+        table.write("HD1\thuman_paired_donor\tmerscope_run\tliteral\tRUN-Q0101-07\n")
+    privacy.clear_cache()
+    run = tmp_path / "results" / "Q0101" / "merscope" / "RUN-Q0101-07"
+    run.mkdir(parents=True)
+    (run / "cells.csv").write_text("x\n")
+    assert legacy.data_id("Q0101/merscope/RUN-Q0101-07") == (
+        "Q0101/merscope/RUN-Q0101-07"
+    )
+    assert legacy.data_id("HD1/merscope/RUN-Q0101-07") == (
+        "Q0101/merscope/RUN-Q0101-07"
+    )
+    out = tmp_path / "manifest.tsv"
+    argv = ["manifest", "--results-root", str(tmp_path / "results"), "--out"]
+    assert legacy.main([*argv, str(out), "HD1/merscope/RUN-Q0101-07"]) == 0
+    assert "Q0101/merscope/RUN-Q0101-07/cells.csv" in out.read_text()
+
+
 def test_compare_legacy_help_runs(legacy: ModuleType) -> None:
     with pytest.raises(SystemExit) as excinfo:
         legacy.main(["--help"])

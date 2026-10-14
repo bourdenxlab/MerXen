@@ -69,7 +69,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from merxen.privacy import to_alias, to_real
+from merxen.privacy import to_real
 
 logger = logging.getLogger("compare_legacy")
 
@@ -536,10 +536,13 @@ def compare_dataset(
 def data_id(value: str) -> str:
     """Return a pair (or a root under the results root) as the data name it.
 
-    Aliases and the data's ids are both accepted: ``privacy.to_alias``, then
-    ``privacy.to_real`` (the samplesheet pair id).
+    Aliases and the data's ids are both accepted: each alias becomes its
+    samplesheet pair id (``privacy.to_real``) and every other part is kept as
+    given. A root is a path, so it is never translated to aliases first: a
+    folder named by another real form of a donor (a run id) would come back
+    as the pair id, and the manifest would silently walk nothing.
     """
-    return to_real(to_alias(value))
+    return to_real(value)
 
 
 def _manifest_command(args: argparse.Namespace) -> int:
