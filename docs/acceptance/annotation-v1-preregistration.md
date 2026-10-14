@@ -7,6 +7,7 @@
 - **Evidence root** (`$A`): `/srv/storage/MerXen/annotation_dev/evidence_20260926`. The item-1 baselines are in `$A/shadow/baselines/metrics/*.csv` (§10 lists the files); items 2–7 are in `$A/shadow/{e8,x1,heldout,flags,ll,glial_jsd}/` (§11), summarised in `$A/shadow/SHADOW_SUMMARY.txt`.
 - **M3c addendum (2026-09-28):** §14 pre-registers the acceptance tests of milestone M3c (Xenium Prime 5K measured efficiency, per-class depth and emission stability; plan §12 "M3c", as of `ce15cde`) before any M3c code, with your decisions of 2026-09-28 and the M3c scope decision. §9 stays the plan's §14 as of `06a04a1`; the plan's later "Version-7 families" paragraph is quoted in §14.1.
 - **M3c amendment (2026-09-29):** §15 records the orchestrator decisions D1–D7 of 2026-09-29, **pending your confirmation at PR review**, made after §14 (iii) failed in stage D: eight ensemble members, a one-standard-error margin on E2's spread route, the re-test of (iii) on two new keyed ensembles (stop if it fails), and the per-class warning, lung-scenario headline and panel-card changes. It is committed before any code of the amendment and before any new run; the stage-D failure stays on record (§15.1).
+- **Mouse decisions (2026-10-14):** the user's decisions of 2026-10-14 are recorded before any gate M score is read: §24's amendment (U1, the T2 reading of the M6b selection and of MO10), §25 (gate M's scoring protocol, U3 and U4) and §26 (the M13b readings, U7).
 - **M13 (2026-10-06):** §23 pre-registers the real-data acceptance of the new-panel human MERSCOPE family (P5822, P4815, P3518, P7417) and the gate-P definitions that apply to every family, before any measurement on the family. It records the user's decisions of 2026-10-02 (D1 (a), D2 (d), D3 (a), the same-species dry-run rule D4, D25, D26) and marks every item that depends on an unanswered decision as proposed.
 
 ## 1. Rules
@@ -1749,3 +1750,224 @@ Plan §7.8 ("M6b design (pre-registered now)"), §12 M6b, OD-C8 and MO10 (§9). 
 - Diagnostics of the T2 metric itself (the Allen labels scored with the same regions, the T2 calls' agreement with the Allen labels) are in `$A/m6b/STAGE_C_REPORT.txt`. They are not scores and no selection or MO10 value depends on them.
 
 Selected candidate (M6b): `v1`
+
+### Amendment of 2026-10-14 (U1): the T2 reading approved by the user
+
+*Recorded 2026-10-14. At this point the C1 diagnostics (`$A/m6b/STAGE_C_REPORT.txt`, `$A/m6b/stageC/t2diag/`) and MO10 scored on v1 (`$A/m6b/scoring/mo10/mo10.json`, FAIL) had been read. The selection has not been re-run under this reading, and MO10 has not been scored on any rule other than v1.* The quotations below are verbatim. Their source is `/srv/storage/MerXen/annotation_dev/mouse_roadmap_20261013/USER_DECISIONS_20261014.md`, which was extracted from the session transcript.
+
+**The question** (put in the chat on 2026-10-14 at 08:12 UTC):
+
+> 1. **M6b rule (U1).** Even a perfect annotation fails "T2 ≤ 0.1% in every bin": the Allen labels themselves fail 5 of 6 bins.
+>    - **Recommendation:** read the bound as "T2 no higher than the Allen labels' own T2, with the same regions". That selects rule `a+f:tile200,nn2` over v1. Gate M would still need one written MO10 exception.
+>    - This is a post-hoc loosening, so it needs your written approval.
+
+**The user's answer** (chat, 2026-10-14 at 08:20 UTC): "1. go with recommendation".
+
+**Label: LOOSENING, POST-HOC, approved in writing on 2026-10-14** (§1 rule 2). The gate M PR quotes the question and the answer.
+- *Loosening.* The Allen-label T2 bin means of the three diagnosed rules are 0.084–0.618% (STAGE_C_REPORT §2), so this bound admits rules that the 0.1% bound excluded. In one bin it is stricter than 0.1%: in 2.4–3.0 mm the Allen-label T2 is 0.084%.
+- *Post-hoc.* Before this record, C1 computed the reading for v1, `a+f:tile200,nn2` and `f:tile200,nn2`. Each meets it in all 18 (gene set × bin) cells (STAGE_C_REPORT §2 (c); `T2_DIAGNOSTIC.txt`). The effect on the selection is therefore known (see "Expected selection" below). The MO10 parts of `a+f:tile200,nn2` are also known from the candidate table ("roadmap" below is the mouse roadmap of 2026-10-13, `annotation_dev/mouse_roadmap_20261013/MOUSE_ROADMAP.md`; here its §1).
+
+**The approved reading, operationally.** For a rule R (v1 or any of the 95 candidates), a gene set g and an AP bin b:
+
+1. For each in-scope MERFISH section s of bin b, take:
+   - *the cells:* the table cells of s on g, the cells the registered T2 after pruning counts (n = `n_table_cells`);
+   - *the T2 subclass set* of the registered T2 after pruning for R on (g, s): `mouse_gate.t2_subclasses(regions, shares, subclass_class=…, never_drop_classes=…, min_merfish_cells=…)`, the subclasses with ≥ 20 MERFISH grey cells and < 25% of them in the regions. Its inputs:
+     - `regions` is R's `t2_regions` for (g, s): the present regions R infers, or, for a skipped section, the divisions the inference found;
+     - `shares` are the leave-neighbours-out shares of s;
+     - the never-drop classes are the static ones of R's configuration, and the cell minimum is its `min_merfish_cells_subclass`.
+2. `t2_after(R, g, s)` is the share of those cells whose pruned subclass call (after R's re-map) is in the set. This is the registered value.
+3. `t2_allen(R, g, s)` is the share of the same cells whose **Allen subclass label** is in the same set. Every table cell counts: no `average_correlation_score` or bootstrap-probability filter applies.
+4. The bin means `T2_after(R, g, b)` and `T2_allen(R, g, b)` are the unweighted means over the bin's sections, as for the registered bin mean.
+5. **R meets the bound** when `T2_after(R, g, b) ≤ T2_allen(R, g, b)` for every gene set g and every AP bin b.
+   - The values are compared as fractions in float64, with an absolute tolerance of 1e-12 for rounding only. The diagnostic and the scoring differ by at most 6.8e-17 (STAGE_C_REPORT §3).
+   - A missing value on either side fails.
+
+These are exactly the columns `t2_after` and `t2_allen_labels` of `$A/m6b/stageC/t2_diagnostic.py`: per section in `t2diag/t2_sections.csv`, and as bin means in `T2_DIAGNOSTIC.txt`. The class and subclass taxonomy comes from the verified `/srv` bundle, as in STAGE_C_REPORT §0; the SSD1 M6b bundles are never read.
+
+**What the reading replaces.**
+- **Selection constraint (ii).** "T2 ≤ 0.1% in every bin for every gene set" becomes "R meets the bound above". Nothing else in the selection changes:
+  - constraint (i), MO2 on ag7 proseg_hybrid and VZG2 original_seg: their own T2 after pruning ≤ 0.1%, class changes ≤ 0.25% and subclass changes ≤ 1.5% outside dropped nodes, on the subset re-map;
+  - the statistic S, the tie rule and the "no admissible candidate" path;
+  - the order of record;
+  - the inputs: the scoring outputs of 2026-09-29 in `$A/m6b/scoring`, with no new re-map.
+- **MO10's T2 clause. Reading adopted: "both".**
+  - The quoted bound, "T2 ≤ 0.1% in every bin", is selection constraint (ii) (the selection rule of this section). It is also MO10's T2 clause (§9: "T2 after pruning ≤ 0.1% in every bin").
+  - The question asked to read "the bound" as the Allen-relative one, and did not restrict that to the selection. MO10's T2 clause is therefore scored with the bound above too, per gene set as this section states.
+  - *Alternative, not adopted:* the reading replaces constraint (ii) only, and MO10's T2 clause keeps 0.1%. STAGE_C_REPORT §6 recommended this alternative. Under it the T2 clause fails for every rule, and the written MO10 exception would have to cover it as well.
+  - MO10's T2 is reported under both readings: the 0.1% verdict and the Allen-relative verdict per gene set and bin. The Allen-relative verdict is the scored one.
+- **Not changed:** MO2's own T2 bound on ag7 and VZG2 (0.1%), in constraint (i) and at gate M.
+
+**Expected selection: `a+f:tile200,nn2`** (from the C1 diagnostics).
+- It meets the bound (18/18) and MO2 (STAGE_C_REPORT §1, §4).
+- No candidate has a lower S than its 0.210%.
+- Of the 14 rules tied at that S, it comes first in the tie order. It has 3 changes, tying `d+f:tile200,nn2` and `b+f:tile200,nn2`, and 662 differing drop decisions, against their 694 and 990.
+
+This is why the amendment is POST-HOC.
+
+**How M6b-R applies it.**
+1. It implements the reading in `scripts/acceptance/mouse_ap_axis.py summarise`: the Allen-label T2 per section beside `t2_after`, its bin means in `bins.csv`, and the registered 0.1% check kept as a reported column.
+2. It computes the reading for all 96 rules, so that the candidate table is complete.
+3. It re-runs the selection on the scoring outputs of 2026-09-29.
+4. It records the result in this section as a new dated line naming the selected candidate. That is the line the `mo10` guard reads. The v1 line above records the outcome of 2026-10-13 and stays. This amendment adds no selection line.
+5. Only then does it score MO10 on the selected rule and re-check MO2 and MO3 on ag7 and VZG2.
+
+**Gate M carries one written MO10 exception** (U1). The gate M PR gives its text and numbers.
+- *Scope:* the MO10 parts that fail on the selected rule as M6b-R scores it, listed in the gate M PR.
+- *What the approval covers:* the parts expected when the question was put, the missed-region clause at two sections (roadmap §1):
+  - .35 (AP 7.6 mm): STR missed, harm 0.13–0.14%;
+  - .46 (AP 5.7 mm): CTXsp missed, harm 0.103%.
+- *Anything further goes back to the user* before the gate M PR. That means any other MO10 part that fails: a bin-mean harm, a section-maximum harm, the T2 clause under the adopted reading, or a missed region at another section.
+- MO11 and its banner are unchanged.
+
+## 25. Gate M scoring protocol (GM-PREREG; recorded 2026-10-14, before any gate M score is read)
+
+Gate M (plan §12 M9) scores the mouse criteria of §9 on ag7 and VZG2. This section fixes how, before any gate M run has produced a score. No gate M run has started: GM-RUNS starts after M6b-R, C22, A1 and the scorer (GM-SCORER). No §9 threshold, target or decision rule changes here, except through §24's amendment (U1).
+
+The sources are:
+- the user's answers of 2026-10-14, verbatim in `annotation_dev/mouse_roadmap_20261013/USER_DECISIONS_20261014.md`;
+- the roadmap's U4 readings (`annotation_dev/mouse_roadmap_20261013/MOUSE_ROADMAP.md` §3);
+- G0's memory probe (`$A/m9/mo8_probe/RESULT.txt`).
+
+The labels follow roadmap §3: tightening, neutral, LOOSENING, POST-HOC.
+
+### 25.1 MO8 (U4)
+
+**The question** (chat, 2026-10-14 at 08:12 UTC, verbatim):
+
+> 2. **Gate M memory limit (U4, MO8).**
+>    - The VZG2 mapping peaks at 14.0 GB with 6 processes, against a 12 GB limit. With 4 processes it peaks at 11.0 GB and stays within the time limit, at 0.60 h against 1.25 h.
+>    - The catch: with 4 processes, 293 of 2,848 cells in VZG2's region-step re-map get a different assignment. MapMyCells' bootstrap evidently depends on the process count.
+>    - **Recommendation:** run gate M's mapping with 4 processes, which meets the registered reading with no loosening, and record the process-count dependence as a known reproducibility caveat.
+
+**The user's answer** (chat, 2026-10-14 at 08:20 UTC, verbatim): "2. go with recommendation, its ok to use more RAM if needed".
+
+**Correction of fact.** The question's "293 of 2,848 cells" are 293 of 2,848 *level rows*: 712 re-mapped cells × 4 levels. Of the 712 cells, 29 change at class, 72 at subclass, 81 at supertype and 111 at cluster (RESULT.txt). The recommendation does not depend on this.
+
+**The reading: H14's, as registered (neutral).**
+- **MAP peak ≤ 12 GB.**
+  - Per section, the value is the largest `peak_rss` of its MAP tasks (`CLUSTERING_SQUIDPY_ANNOTATE_MAP`) over the four segmentations, from the Nextflow trace (GB = 1024³ bytes).
+  - This is gate H's reading of H14 (§18, "Stage B scoring as implemented", H14; `scripts/acceptance/run_acceptance.py` `h14_rows`).
+  - Nextflow's `peak_rss` is the peak over time of the summed VmHWM of the task's process tree (RESULT.txt, note 1).
+- **Gate M's MAP runs with 4 MapMyCells processes.**
+  - The MAP task's `cpus` is set to 4; it is passed as `--n-processors`, and the default is 6. MO7's standalone run maps with 4 processes too.
+  - If a MAP task of a scored section ran with another count (the trace's `cpus` or the MAP manifest), that section's MO8 rows are not scored and go back to the user.
+- **Time ≤ 1.25 h per 4-segmentation section.** This is H14's sum: the realtime of ANNOTATE_PANEL + MAP + RESOLVE over the section's four segmentations, from the trace (`h14_rows`).
+- **PREP ≤ 2 h per panel, resolvability included.**
+  - Measured as gate H measured it (§18, "Stage B scoring as implemented", H14: "per PREP bundle, its recorded build time incl. resolvability"; `h14_rows`, row `H14/prep_wall`): each `wmb_panel` bundle's recorded `wall_time_s` in its `bundle.json`.
+  - The gate M bundles are ag7 `97a086d1…` (built in B1) and VZG2 `af3fab09…`. The `wmb_region_share` and `wmb_selfmap_testset` builds are reported beside them.
+- **PREP peak ≤ 40 GB at 8 processes.**
+  - *Precedent:* gate H scored no PREP memory, because H14 has no such clause. Its memory reading, the trace `peak_rss`, is the summed memory of a task's process tree. The same reading for PREP is therefore the summed RSS of the build's process tree.
+  - *Scored value:* the larger of two values:
+    - the largest `peak_tree_rss_gb` over the ctm steps recorded in the bundle's `bundle.json` (`builder_output.ctm_steps`; `memory.ProcessTreeSampler`, GiB, sampled every 2 s);
+    - where the gate M run itself built the bundle, the trace `peak_rss` of that PREP task.
+  - *8 processes:* the bundle must have been built with 8 processes (`--n-processors 8`; its resolvability `mapping_runs` record 8).
+  - *Reported beside it:* the tree PSS (`peak_tree_pss_gb`), and the largest single process (`peak_rss_gb`, from GNU time). The single process is how MO8's basis, "query markers measured 20–27 GB at 16", was measured.
+  - Of these three readings, the scored one is the strictest.
+
+**G0's numbers** (VZG2 original_seg MAP: run3's task, re-run; RESULT.txt). These were seen before this record.
+
+| Processes | Trace-style peak (GiB) | Tree PSS (GiB) | MAP wall (min) | Projected H14 sum over 4 segmentations (h) |
+|---|---|---|---|---|
+| 6 | 13.97 (fails 12) | 7.29 | 10.27 | 0.758 (0.827 scaled by run3's ratio) |
+| 4 | 11.03 (passes, margin 1.0) | 5.64 | 7.85 | 0.597 (0.649 scaled) |
+
+- *run3's trace:* MAP `peak_rss` 13.99–14.72 GiB at 6 processes, and an H14 sum of 0.980 h.
+- *The largest segmentation at 4 processes:* projected at 11.6 GiB by run3's largest-to-original_seg ratio. This is an estimate.
+- *Host load:* the 6-process run overlapped a PREP (load1 mean 32), and the 4-process run had a quieter host (15). The wall times are therefore not comparable. The memory peaks do not depend on the load.
+
+**Reproducibility caveat (recorded with U4).** MapMyCells' bootstrap depends on the process count.
+- *What G0 found:* at 4 processes, 293 of the 2,848 level rows of VZG2 original_seg's region-step re-map differ from the 6-process run. The 112,158-cell main map is identical, and a 6-process re-run reproduces run3 exactly (RESULT.txt).
+- *Consequence for the baseline:* gate M's labels of the re-mapped cells are those of its 4-process runs. M6's and run3's 6-process outputs are not their baseline, and every gate M criterion is scored on gate M's own outputs.
+- *Consequence for the flip:* MO8's verdict holds for the configuration it measures, 4 processes. The flip PR states the mouse MAP process count it ships, and a count other than 4 goes to the user at GM-REVIEW.
+
+**PREP numbers seen before this record.** These come from the `bundle.json` of the two bundles. Roadmap §3 U4 gives VZG2's tree RSS; the ag7 values were read while this section was written.
+
+| Bundle | Wall | Summed tree RSS (query markers) | Tree PSS | Largest single process |
+|---|---|---|---|---|
+| VZG2 `af3fab09…` | 3,245 s (0.90 h) | 56.80 GiB | 25.54 GiB | 25.84 GiB |
+| ag7 `97a086d1…` | 3,101 s (0.86 h) | 47.70 GiB | 18.92 GiB | 19.26 GiB |
+
+Under the reading above, PREP time passes and **PREP peak is expected to fail on both panels**. Under the tree-PSS reading or the single-process reading it would pass. Adopting either of those now would be a LOOSENING, POST-HOC (roadmap §3 U4 (b)).
+
+**"its ok to use more RAM if needed".**
+- The sentence is recorded verbatim.
+- It is not read as a change to MO8, and it is not used to pass MO8. MO8 is scored under the registered reading above.
+- If MO8 fails, as the PREP peak is expected to, GM-REVIEW asks the user whether that sentence is the written MO8 exception. The gate M PR quotes the answer.
+
+### 25.2 Readings adopted before scoring (orchestrator; labels as in roadmap §3 U4)
+
+None of these readings is a loosening, so none needs written approval (§1 rule 2). The gate M PR lists them.
+- **MO2 (tightening).** Both the production (subset) re-map and the full re-map must pass: T2 after pruning ≤ 0.1%, class changes outside dropped nodes ≤ 0.25% and subclass changes ≤ 1.5%.
+  - Each re-map runs with the MAP run's own engine parameters, its 4 processes included, as §24's stage-B rule requires for re-maps.
+  - At M6, ag7's full re-map was .245%, against the .25% limit.
+- **MO4 (neutral).** The registered fixed window, MERFISH sections .31–.33, is scored for VZG2 original_seg and for ag7, with §9 MO4's bands.
+  - The AP-estimate window is reported beside it. For ag7 it is .32/.33/.35, with an Astro-Epen reference of 18.40%, against 17.36% for the fixed window (roadmap §3 U4). For VZG2 it equals the fixed window.
+- **MO7 (neutral).** The invalid VZG2 proseg_hybrid is scored as a standalone run (`merxen annotate` and `merxen annotate-resolve` on the merged code).
+  - *Input:* the legacy-snapshot clustered H5AD, `/srv/storage/MerXen/legacy_snapshot_20260926/mouse_vzg2_results/MsBrain_FF_V2Val_V2_D2M1763_rep2_R1/proseg_hybrid/clustering_squidpy/clustering_squidpy_out/merscope/MsBrain_FF_V2Val_V2_D2M1763_rep2_R1_MERSCOPE_clustered.h5ad`. These are the bytes M6 used.
+  - *G1:* M6's G1 JSON, `$A/m6/stageC/registration/vzg2_old_invalid_proseg_hybrid_ownrun_registration_qc.json`, as M6's MO7 run used it.
+  - The full pipeline results of this run were deleted on 2026-09-30.
+- **MO9 [L] (neutral, as registered).** Reported. It gates the use of the reseg and proseg outputs, not the flip.
+- **H18 mouse rows (neutral).** Recorded with their values and no exception (§18, "Not covered", CHECK M2). They are not in the mouse flip rule. They set M13b's H18 set under D28 (§26).
+- **MO10.** Scored as §24's amendment states: the Allen-relative T2 reading, scored by M6b-R on the selected rule, with the one written MO10 exception.
+- **MO1, MO3, MO5, MO6 and MO11** are scored as §9 registers them. No reading is adopted for them here.
+- **The mouse flip rule is unchanged:** MO1–MO8 and MO10, with the one written MO10 exception of §24. MO11 keeps its banner rule. Any other failure needs a fix, or a written, user-approved exception in the gate M PR.
+- **Left for GM-REVIEW** (roadmap §3):
+  - U8: OD-B7's mouse half;
+  - U9: the user's review of the ag7 and VZG2 original_seg reports, and the written exceptions;
+  - U10: the version label.
+
+### 25.3 Inputs (U3)
+
+- **Code.** Merged code only: the integration branch with PR #46, M6b (PR #52), M6b-R, C22 and the scorer.
+- **Datasets.**
+  - ag7: all four segmentations, run in place (below).
+  - VZG2: all four segmentations. RESOLVE and REPORT write into its results with the table suffix `gatem`, so run3's `_mapfirst` tables stay. MAP re-runs at 4 processes.
+  - MO7's standalone negative control (§25.2).
+- **Bundles.** Every bundle comes from the store `/srv/storage/MerXen/annotation_references`:
+  - ag7: `wmb_panel` `97a086d1…`, panel hash `f4c29186…`;
+  - VZG2: `wmb_panel` `af3fab09…`;
+  - `wmb_region_share` `1867f978…`, or the bundle that M6b-R builds if the selected rule needs component (a)'s structure homes;
+  - the self-map test sets of both panels.
+
+  No bundle from SSD1 is used, and no `bundle_ref.json` that points at SSD1. The scorer's provenance check fails any other bundle path.
+
+**ag7 runs in place (U3).**
+- *The route:* the user chose "Run in place, suffixed". This was the answer, given 2026-10-14 at 08:09 UTC, to the question of 2026-10-13 at 16:46 UTC. The option text read: "Write suffixed _mapfirst tables into their store; needs their agreement first."
+- *The owner's agreement:* asked "3. **ag7 in place (U3).** Writing suffixed tables into ag7's store needs [the ag7 data owner]'s agreement. Has she agreed?" (2026-10-14 at 08:12 UTC), the user answered "3. Yes she has" (08:20 UTC). In that quotation, "[the ag7 data owner]" replaces the owner's user name.
+- *What may be written:* writes into the ag7 zarr store are limited to:
+  - the suffixed `_mapfirst` tables;
+  - the zarr root metadata entries for them;
+  - the store's write-lock file.
+
+  Backups and a sha256 manifest are taken first. Pre-run and post-run manifests (run3's pattern) show that no other file of the store changed.
+
+## 26. M13b readings (U7; recorded 2026-10-14, before any mouse gate-P mapping)
+
+M13b (plan §12 M13b; the M13 chunks C20–C22) brings gate P to mouse:
+- C20a: the second WMB test draw;
+- C20b: the mouse gate-P path;
+- C21: the ag7 and VZG2 dry run;
+- C22: the mouse real-data QC in RESOLVE.
+
+The gate-P definitions and rulings of §23.9–§23.19 apply to it as they do to every family. These include CK1 (a), CK2 and A27 (a) (§23.19). No mouse gate-P cell has been mapped, and no mouse gate-P output exists. No threshold, target or criterion changes here.
+
+**The question** (put on 2026-10-13 at 16:46 UTC, verbatim): "U7, M13b (mouse gate P): start the mouse dry-run work (second WMB draw, ag7/VZG2 dry run) now in parallel with gate M, version 6 first, run as registered and revise under the CK2 path if it fails as predicted?"
+
+**The user's answer** (2026-10-14 at 08:09 UTC, verbatim): "Yes, start now (Recommended)". The option text read: "Run as registered; any revision comes back to you as a loosening; the mouse NP9 time reference (OD-E18 analogue) is decided before any mouse family is scored."
+
+**The readings** (roadmap §3 U7, with its labels):
+- **(i) C20 and C21 start before M6b closes (neutral).** Only C22 needs M6b; plan §12 said "after M6b". The answer approves this ("now in parallel with gate M").
+- **(ii) Draw 2's top-up (neutral; adopted by the orchestrator).** The top-up "up to 700" (§9, "Class set C_P") is read pooled with draw 1's check half.
+  - Feasibility was estimated read-only before this record (roadmap §1): draw 2 can top up 26 of the 34 classes to 700, and C_P then holds about 95% of the pooled test cells.
+- **(iii) Version 6 first (tightening).** A forced version 7 runs only when a mouse version-7 family is scored, on a separate version-7 test set with the v7.6 top-up. The answer approves this ("version 6 first").
+- **(iv) The predicted failure, disclosed now.**
+  - Roadmap §1 M13b, verbatim: "**the version-6 mouse dry run is predicted to fail by construction**: VZG2's frozen PREP emits nothing at class for `04 DG-IMN Glut` and `29 CB Glut`, and ag7's also nothing for `34 Immune`."
+  - The dry run runs as registered (§9, "Dry run"; §23.9 item 8, with D28 and CK1 (a)).
+  - If it fails, the criteria are revised only under CK2, with the user's approval: a revision memo, then a revision PR the user approves, then a re-run under the revised criteria that must pass. "A failed dry run is never re-scored under another reading" (§23.19).
+  - Any such revision is a LOOSENING, POST-HOC at that point.
+  - The answer approves this ("run as registered and revise under the CK2 path if it fails as predicted").
+- **(v) NP9's time reference for mouse version-7 families stays open.**
+  - OD-E18 / D10 (a) uses set a's ~0.63 ms per cell, against ~3.2 ms per cell for WMB mapping, so mouse families would fail it by design.
+  - The roadmap recommends 1.5 × the mouse dry run's time per cell. That is a LOOSENING.
+  - The user decides it in writing before C23, that is, before any mouse family is scored, as the answer's option text says.
+- **(vi) NP5's depth source for the dry run (neutral; adopted by the orchestrator).** ag7 proseg_hybrid and VZG2 original_seg, from their map_first profiles.
