@@ -15,6 +15,7 @@ import pytest
 from merxen.annotation import draw_spread as ds
 from merxen.annotation import resolvability as res
 
+from .test_acceptance_m8_scripts import INVENTED_PAIRS, _alias_table
 from .test_resolvability import (
     GRID,
     bootstrap_mapper,
@@ -636,11 +637,16 @@ def test_script_prep_family_is_the_datasets_trust_family(script: ModuleType) -> 
         script.prep_panel_family(None, {"a": "human_set_a", "b": "human_5k"})
 
 
+@pytest.mark.parametrize("pair", ["HD2", INVENTED_PAIRS["HD2"]])
 def test_script_resolve_rows_score_h7_and_the_expected_warning(
-    script: ModuleType,
+    script: ModuleType, pair: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from merxen.annotation.config import AnnotationConfig
 
+    # The pair by alias (no alias table) or by the id its data use (a table
+    # of invented ids): the thresholds and expectations are the alias's.
+    if pair != "HD2":
+        _alias_table(tmp_path / "aliases.tsv", monkeypatch, INVENTED_PAIRS)
     labels = pd.DataFrame(
         {
             "in_table": [True, True, True, False],
@@ -655,7 +661,7 @@ def test_script_resolve_rows_score_h7_and_the_expected_warning(
     gate = {"level": "broad_only", "warning": True, "broad_coverage_segmented": 0.148}
     result = SimpleNamespace(
         samples={
-            "HD2_MERSCOPE": SimpleNamespace(
+            f"{pair}_MERSCOPE": SimpleNamespace(
                 platform="MERSCOPE",
                 labels=labels,
                 summary={"resolution": {"gate": gate}},
@@ -663,7 +669,7 @@ def test_script_resolve_rows_score_h7_and_the_expected_warning(
         }
     )
     rows = script.resolve_rows(
-        ds.Draw(0, 0), result, "HD2", AnnotationConfig(species="human")
+        ds.Draw(0, 0), result, pair, AnnotationConfig(species="human")
     )
     by_metric = {row["metric"]: row for row in rows}
     h7 = by_metric["H7"]
@@ -673,6 +679,26 @@ def test_script_resolve_rows_score_h7_and_the_expected_warning(
     # §5.4 expects no warning on HD2_MERSCOPE: the D3 exception case.
     assert warning["value"] == 0.148 and warning["passes"] is False
     assert by_metric["H8/level"]["passes"] is True
+
+
+def test_script_reads_the_default_pairs_under_their_data_ids(
+    script: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _alias_table(tmp_path / "aliases.tsv", monkeypatch, INVENTED_PAIRS)
+    args = SimpleNamespace(
+        resolve_root=tmp_path, runs_root=tmp_path, pairs=",".join(script.PAIRS)
+    )
+    with caplog.at_level("WARNING", logger="draw_spread"):
+        assert script.dataset_compositions(args, [15], 1.0) == {}
+    skipped = {record.getMessage().split(":")[0] for record in caplog.records}
+    assert skipped == {
+        f"{real}_{platform}"
+        for real in INVENTED_PAIRS.values()
+        for platform in script.PLATFORMS
+    }
 
 
 def test_script_help_runs(script: ModuleType) -> None:

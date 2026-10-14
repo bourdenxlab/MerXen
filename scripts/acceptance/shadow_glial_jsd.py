@@ -42,10 +42,11 @@ from merxen.annotation.shadow import (
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from shadow_baselines import (  # noqa: E402
-    HELD_OUT_PAIRS,
     PAIRS,
     PLATFORMS,
     SectionTiles,
+    data_pairs,
+    is_held_out,
     load_sample,
 )
 
@@ -60,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runs-root", type=Path, required=True)
     parser.add_argument("--results-root", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--pairs", default=",".join(PAIRS))
+    parser.add_argument("--pairs", default=",".join(PAIRS), help="pair aliases or ids")
     parser.add_argument("--segmentations", default="proseg_hybrid,reseg")
     parser.add_argument("--n-bootstrap", type=int, default=200)
     args = parser.parse_args(argv)
@@ -70,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
     rows: list[dict[str, Any]] = []
     comp_rows: list[dict[str, Any]] = []
     for seg in [s for s in args.segmentations.split(",") if s]:
-        for pair in [p for p in args.pairs.split(",") if p]:
+        for pair in data_pairs(args.pairs):
             run_dir = args.runs_root / pair / seg
             if not (run_dir / "map_manifest.json").is_file():
                 continue
@@ -158,8 +159,7 @@ def main(argv: list[str] | None = None) -> int:
                         {
                             "pair": pair,
                             "segmentation": seg,
-                            "held_out": pair in HELD_OUT_PAIRS
-                            or seg != "proseg_hybrid",
+                            "held_out": is_held_out(pair) or seg != "proseg_hybrid",
                             "kind": kind,
                             "scope": scope,
                             "jsd_whb": result.first_jsd,

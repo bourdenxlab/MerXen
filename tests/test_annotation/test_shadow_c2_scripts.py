@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -181,6 +182,69 @@ def test_ll_decision_finds_the_development_pairs_by_alias(
     vote = scripts["shadow_ll"].decision_rows(metrics)[0]
     assert vote["max_coverage_gain_dev"] == pytest.approx(0.01)
     assert vote["max_coverage_gain_all"] == pytest.approx(0.5)
+
+
+class _FirstPairError(Exception):
+    """Raised by a stand-in loader with the first pair a script reads."""
+
+
+def _invented_alias_table(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # An alias table with invented pair ids (never real ones).
+    table = tmp_path / "aliases.tsv"
+    table.write_text(
+        "".join(
+            f"HD{n}\thuman_paired_donor\tpair_id\ttoken\tQ0{n}0{n}\n"
+            for n in range(1, 5)
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(privacy.ALIAS_FILE_VAR, str(table))
+    privacy.clear_cache()
+
+
+def _stop_at_first_pair(*args: object) -> None:
+    raise _FirstPairError([arg for arg in args if isinstance(arg, str)])
+
+
+@pytest.mark.parametrize(
+    ("name", "loader"),
+    [("shadow_flags", "human_inputs"), ("shadow_glial_jsd", "load_sample")],
+)
+def test_c2_scripts_read_the_default_pairs_under_their_data_ids(
+    scripts: dict[str, ModuleType],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    loader: str,
+) -> None:
+    _invented_alias_table(tmp_path, monkeypatch)
+    runs = tmp_path / "runs"
+    (runs / "Q0101" / "proseg_hybrid").mkdir(parents=True)
+    (runs / "Q0101" / "proseg_hybrid" / "map_manifest.json").write_text("{}")
+    (tmp_path / "research" / "lowcount").mkdir(parents=True)
+    (tmp_path / "research" / "lowcount" / "qc_summary.csv").write_text(
+        "sample,seg,platform,n_cells\n"
+    )
+    monkeypatch.setattr(scripts[name], loader, _stop_at_first_pair)
+    argv = ["--runs-root", str(runs), "--results-root", str(tmp_path)]
+    argv += ["--out", str(tmp_path / "out")]
+    if name == "shadow_flags":
+        argv += ["--evidence-root", str(tmp_path)]
+        argv += ["--gene-id-fallback-csv", "x.csv"]
+        argv += ["--mouse-gene-id-fallback-csv", "y.csv"]
+    with pytest.raises(_FirstPairError) as stopped:
+        scripts[name].main(argv)
+    assert "Q0101" in stopped.value.args[0]
+
+
+@pytest.mark.parametrize("name", [*NAMES, "draw_spread", "marker_referee"])
+def test_scripts_compare_pairs_with_the_alias_constants_by_alias(name: str) -> None:
+    # The pair constants of shadow_baselines are aliases; the scripts read
+    # pairs given as aliases or data ids (data_pairs) and look them up by
+    # alias (is_held_out, to_alias), never by the raw value.
+    source = (SCRIPTS / f"{name}.py").read_text(encoding="utf-8")
+    assert "args.pairs.split(" not in source
+    assert not re.search(r"[^)] in HELD_OUT_PAIRS", source)
 
 
 def test_heldout_h4_rows_count_passing_classes(scripts: dict[str, ModuleType]) -> None:

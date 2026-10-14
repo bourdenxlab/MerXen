@@ -287,6 +287,21 @@ def test_marker_referee_help_runs(referee: ModuleType) -> None:
     assert excinfo.value.code == 0
 
 
+def test_marker_referee_reads_the_default_pairs_under_their_data_ids(
+    referee: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _alias_table(tmp_path / "aliases.tsv", monkeypatch, INVENTED_PAIRS)
+    out = tmp_path / "out"
+    argv = ["--resolve-root", str(tmp_path), "--results-root", str(tmp_path)]
+    with caplog.at_level("WARNING", logger="marker_referee"):
+        assert referee.main([*argv, "--out", str(out), "--segmentations", "reseg"]) == 0
+    looked_for = {record.args[0] for record in caplog.records}
+    assert looked_for == set(INVENTED_PAIRS.values())
+
+
 # ---------------------------------------------------------------------------
 # compare_legacy.py
 
