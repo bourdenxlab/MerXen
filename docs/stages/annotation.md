@@ -2318,9 +2318,9 @@ still validate: it is an optional contract column
 ### Real-data QC in RESOLVE (M13)
 
 Human RESOLVE runs the downgrade-only real-data QC of plan §8.8 on every
-sample (`real_qc.enabled`, default `true`; M13 chunk C15). Mouse RESOLVE does
-not run it yet: the mouse gate keeps G1-G5 (§7.6), and the rest of the mouse
-wiring follows M6b.
+sample (`real_qc.enabled`, default `true`; M13 chunk C15). Mouse RESOLVE runs
+it warn-only (M13b chunk C22; see
+[Mouse real-data QC in RESOLVE](#mouse-real-data-qc-in-resolve-m13b-warn-only)).
 
 1. **Signals** (`pipeline.human_real_qc_signals`), all from the QC-free
    resolution and the primary bundle: the bundle's resolvability version and
@@ -2373,8 +2373,8 @@ wiring follows M6b.
    (`RealQcResult.summary`: the outcome per check, every outcome with its
    numbers, the effects, the downgrades, the flag-rate readings and the
    per-check tables) and `PanelProvenance.real_data_qc` in the label table
-   and annotation manifest; the pair's `real_qc_config` (human pairs only).
-   The summary's
+   and annotation manifest; the pair's `real_qc_config` (every pair; mouse
+   pairs since M13b C22). The summary's
    `schema_version` is 3. The report's panel card lists the outcomes
    (`panel_real_qc.csv`) and a note per fired check.
 
@@ -2412,6 +2412,74 @@ G1 needs the QC stage's registration check (`*_registration_qc.json`); the
 family's results hold none, so G1 was `not_evaluable` in every RESOLVE and
 its `gate_failed` effect could not act. Check that the QC stage has written
 these files before relying on G1.
+
+### Mouse real-data QC in RESOLVE (M13b, warn-only)
+
+Mouse RESOLVE runs the real-data QC of plan §8.8 on every sample
+(`real_qc.enabled`; M13b chunk C22), after the mouse gate, the statuses and
+the flags, and **warn-only**: it records outcomes and changes nothing.
+
+1. **Signals** (`mouse_resolve.mouse_real_qc_signals`), as for human from the
+   QC-free resolution and the primary bundle (`pipeline.real_qc_bundle_facts`,
+   `real_qc_prefilter_applied`, `real_qc_gene_complexity`,
+   `real_qc_version_7_signals`, `real_qc_emitted_levels`): the bundle facts
+   that decide applicability, whether the pair holds both platforms, the
+   flag strata (contamination, diffuse profile and spill-over), the
+   gene-complexity source of a version-7 bundle, the version-7 coverage and
+   depth-trend inputs, and the mouse gate verdict. Mouse G1 and the marker
+   referee (G2) are the gate's (§8.8), so the human referee and the human
+   registration input are not used.
+2. **G1–G5.** The gate's own outcomes are recorded as checks, never
+   re-applied (`real_qc.gate_outcomes`): `dataset_gate`, `registration_g1`
+   (G1), `marker_consistency` (G2), `g3_implausibility`, `g4_composition`
+   and `g5_spillover`. The `real_qc` block's `gate_signals` holds, per
+   signal, the check, the gate's status and outcome, the signal values and
+   the gate's reasons about it (`real_qc.mouse_gate_signal_records`); G4
+   adds its MERFISH `window`, `window_source` (`ap_estimate` when M6b's AP
+   estimate chose the window, the default; `g4_window_sections` when the
+   config names the sections; null without a window) and the `ap_estimate`.
+   The gate applied these signals itself: G1 and G2 can fail the section,
+   G3–G5 warn (§7.6).
+3. **The checks `real_qc` adds**, each `not_applicable` with its reason where
+   it does not apply:
+
+   | Check | Mouse outcome |
+   |---|---|
+   | Flag rates | evaluated (H16's 15% marking on the class × platform strata) |
+   | Gene complexity | evaluated on a version-7 bundle that stores simulated `n_genes`; `not_evaluable` on version-6 bundles such as ag7's and VZG2's (D19 (a)) |
+   | Per-class coverage, non-neuronal depth trend | version 7 only: `not_applicable` on version 6 |
+   | Prefilter spot check | `not_applicable` without a marker prefilter (panels of ≤ 1,000 genes); `not_evaluable` on a prefiltered bundle (no producer in RESOLVE) |
+   | Factor re-measure | `not_applicable` without an R3 member; `not_evaluable` otherwise (no producer in RESOLVE) |
+   | Paired concordance | `not_applicable` on a single-platform section; `not_evaluable` on a mouse pair with both platforms, because mouse RESOLVE computes no cross-platform composition in v1 |
+
+4. **Warn-only** (`real_qc.mouse_real_data_qc`). Every outcome that would
+   lower the section (a gate cap, a withheld level, withheld pair
+   statistics) becomes a warning that records the effect it would have had
+   (`details.warn_only_effect`), whatever the family and whatever
+   `real_qc.seeded_families_warn_only_until_gate` says: gate M counts as
+   merged only after its acceptance-gate PR into `main` (D20 (b)), and
+   applying mouse QC effects is not wired. Unlike human, the warnings do not
+   join the mouse gate's warning reasons. The label table, the statuses,
+   the flags, the mouse gate record and trust are those of the QC-free run
+   (`test_real_qc_resolve_mouse.py`).
+5. **Records.** The sample's `real_qc` block (`warn_only` true,
+   `effects_withheld` with the reason, `gate_signals`), the provenance's
+   `panel.real_data_qc` (no downgrades) and the pair's `real_qc_config`, at
+   `schema_version` 3. The report's panel card lists the outcomes as for
+   human. The mouse version-6 golden digests of `test_resolve_v7.py` moved
+   only in the provenance (`panel.real_data_qc`); the QC-free mouse run still
+   gives the digests from before the change.
+
+**Expected on ag7 and VZG2** (version-6 `wmb_panel` bundles of 500 and 815
+genes, MERSCOPE only, seeded): G1–G5 as their gates decide; flag rates
+evaluated; gene complexity `not_evaluable`; paired concordance, the prefilter
+spot check, the coverage and depth-trend checks and the factor re-measure
+`not_applicable`. Their regression rows
+(`scripts/acceptance/m13_real_qc_regression.py mouse --mouse-resolve
+<dataset>/<segmentation>=<annotation_resolve_out>`: ag7 on its four
+segmentations and VZG2 original_seg) stay pending until the gate M runs
+write those RESOLVE outputs; the step also reports any QC effect a mouse
+sample applied (`no_effect_problems`).
 
 ### Human rules v1 (`consensus.resolve_human`, §5.2)
 

@@ -170,7 +170,7 @@ failed a check (it is null only for `low_counts`, `not_applicable` and
 | Default thresholds | 0.73 (lineage, broad, NT), 0.69 (supercluster) | 0.90 (broad, class, NT), 0.80 (subclass) |
 | Region handling | A fixed list of superclusters implausible in frontal cortex; only `frontal_cortex` is supported | Divisions present in the section are inferred from confident neurons; implausible nodes are dropped and those cells re-mapped |
 | Dataset gate | Label-based: share of cells ≥ 30 counts, confident broad coverage | Label-free signals G1–G5 (registration, marker referee, implausibility, composition, spill-over) |
-| Real-data QC | Yes (downgrade-only) | Not yet (planned) |
+| Real-data QC | Yes (downgrade-only) | Yes, warn-only: records outcomes, changes nothing (M13b) |
 | Default mode | `map_first` | `legacy` (until the mouse switch) |
 
 ### 1.5 How far to trust a panel
@@ -214,7 +214,9 @@ Two more safeguards act per dataset, whatever the panel:
   the gate, withhold a level or warn. On the seeded real-data family
   (set a) the marker, concordance, flag-rate, gene-complexity and prefilter
   checks only warn until gate H merges into `main`; the registration check
-  can still fail the gate.
+  can still fail the gate. Mouse sections run the same QC warn-only
+  ([2.6](#mouse-real-data-qc-warn-only)): it records the mouse gate's G1–G5
+  and the other checks, and changes nothing.
 
 ### 1.6 Module map
 
@@ -300,7 +302,7 @@ others). They are not pipeline stages.
 | The self-map in full (recipes, versions 6 and 7) | [Resolvability self-map](stages/annotation.md#resolvability-self-map-m3b); plan §8.3 |
 | Panels, gene IDs, families, trust | [Declared panels](stages/annotation.md#declared-panels-gene-ids-and-controls-m3b), [Panel families and trust states](stages/annotation.md#panel-families-diagnostics-and-trust-states-m3b); plan §8.1–§8.2 |
 | Gate P and its first result | [Gate P](stages/annotation.md#gate-p-simulation-based-validation-of-a-panel-family-m13), [Gate P on the new-panel family](stages/annotation.md#gate-p-on-the-new-panel-human-merscope-family-m13); pre-registration §23 |
-| Real-data QC | [Real-data QC](stages/annotation.md#real-data-qc-m3c-downgrade-only), [in RESOLVE](stages/annotation.md#real-data-qc-in-resolve-m13); plan §8.8 |
+| Real-data QC | [Real-data QC](stages/annotation.md#real-data-qc-m3c-downgrade-only), [in RESOLVE](stages/annotation.md#real-data-qc-in-resolve-m13), [mouse, warn-only](stages/annotation.md#mouse-real-data-qc-in-resolve-m13b-warn-only); plan §8.8 |
 | MAP, mouse region step | [Mapping](stages/annotation.md#mapping-merxen-annotate), [Mouse region step](stages/annotation.md#mouse-region-step-m6) |
 | RESOLVE and the rules | [Resolving](stages/annotation.md#resolving-merxen-annotate-resolve-m4), [Human rules](stages/annotation.md#human-rules-v1-consensusresolve_human-52), [Mouse rules](stages/annotation.md#mouse-rules-v1-consensusresolve_mouse-73-m6); plan §5, §7 |
 | Pipeline wiring, table keys, MENDER | [Map-first clustering runs](stages/annotation.md#map-first-clustering-runs-m5), [Pipeline processes](stages/annotation.md#pipeline-processes) |
@@ -922,6 +924,22 @@ gate is evaluated again so that a simulation-validated family warns when
 cannot change). Unlike human, no coverage signal can fail or restrict the
 mouse gate.
 
+#### Mouse real-data QC (warn-only)
+
+After the gate, the statuses and the flags, `real_qc.mouse_real_data_qc`
+runs the real-data QC on the section (milestone M13b, chunk C22; details in
+[Mouse real-data QC in RESOLVE](stages/annotation.md#mouse-real-data-qc-in-resolve-m13b-warn-only)).
+It records the gate's own G1–G5 as checks (G4 with its MERFISH window and
+the AP estimate that chose it), the flag rates, and the checks that do not
+apply to the section as `not_applicable` with the reason (on ag7 and VZG2:
+paired concordance, the prefilter spot check, the version-7 coverage and
+depth-trend checks, the factor re-measure). It is **warn-only**: until gate M
+merges into `main` (D20 (b)) any effect that would lower the section becomes
+a warning, and no QC warning joins the mouse gate. Labels, statuses, flags,
+the gate and trust are exactly those of a run without the QC; only the
+summary's `real_qc` block and the provenance's `real_data_qc` record are
+added.
+
 #### Mouse final label and hierarchy
 
 `ct_final_*` is the deepest confident level of broad → class → NT →
@@ -948,8 +966,11 @@ below 100 counts).
   candidate (every rule leaves T2 above 0.1% in some AP bin), and MO10 scored
   on `v1` fails, so the choice of rule and a written MO10 exception go to
   the user (pre-registration §24).
-- **Mouse real-data QC and gate P** (milestone M13b): not run; gate P
-  refuses mouse families until a second disjoint WMB test draw exists.
+- **Mouse real-data QC** (milestone M13b, chunk C22) runs warn-only (see
+  [above](#mouse-real-data-qc-warn-only)). Its ag7 and VZG2 regression rows
+  are pending until the gate M runs write their RESOLVE outputs.
+- **Mouse gate P** (milestone M13b): not available; gate P refuses mouse
+  families until a second disjoint WMB test draw exists.
 - **Validated mouse families are MERSCOPE only** (ag7, VZG2). A mouse Xenium
   or new panel runs in the provisional regime.
 
