@@ -66,6 +66,17 @@
 - **Rule variants, inert.** `MouseRegionConfig.rule_variant = "m6b"` enables (a) OB–OLF coupling through AON-home tiles, (b) and (c) conditional never-drop nodes, (d) OB at 0.5% of the assigned tiles and (f) other tile settings; the default `v1` refuses the fields. `scripts/acceptance/mouse_ap_axis.py` scores them on MERFISH-638850 under pre-registration §24.
 - **The exit is unmet.** No candidate is admissible: every rule, `v1` included, leaves the bin-mean T2 above 0.1% in some AP bin. `v1` stays the production rule, and MO10 scored on it fails (bin 3.0–4.5 mm harm 0.16–0.21% against 0.10%, largest section harm 0.59–0.76% against 0.30%, T2, and the missed-region clause at three sections). The choice of rule goes to the user.
 
+### Added: mouse acceptance scorer for gate M (M9)
+
+- `scripts/acceptance/mouse_acceptance.py score` scores MO1–MO11 on ag7 and VZG2 under the gate M protocol (pre-registration §25, and §24's amendment of 2026-10-14 for MO10's T2 clause) and writes `summary.json` and `summary.html`. See [mouse acceptance scorer](docs/stages/annotation.md#mouse-acceptance-scorer-gate-m-m9).
+  - **Readings.** The registered readings are the defaults and are recorded in the summary. Another reading needs `--exploratory`, which stamps the summary "exploratory, not gate M".
+  - **MO8.** The trace `peak_rss` is scored, with the memory probe's process-tree PSS beside it. A section whose MAP did not run with 4 processes is not scored.
+  - **MO10.** Read from M6b-R's `mo10.json`.
+  - **Exceptions.** `--exceptions` takes the user's written exceptions. A failure becomes `FAIL (excepted)` only inside an exception's scope.
+  - **Provenance.** A bundle path that does not resolve inside `/srv/storage/MerXen/annotation_references` stops the scoring (exit status 3). An SSD1 path is refused without being read.
+  - **Flip rule.** The verdict covers MO1–MO8 and MO10. MO9 [L], MO11 and H18 are reported.
+- `mouse_acceptance.py full-remap` runs the full pruned re-map of one MAP output, which MO2's full-re-map reading needs. It uses the run's own engine parameters, process count included.
+
 ### Fixed: Dwight mouse reference sources are off SSD1
 
 - The Dwight defaults of the mouse annotation sources (`annotation_wmb_h5ad_dir`, `annotation_wmb_metadata_dir`, `annotation_mouse_gene_table`, `annotation_wmb_selfmap_test_cells_path`, and now `annotation_merfish_ccf_metadata_path`) point at the verified download under `/srv/storage/MerXen/references` instead of the failing SSD1 disk. The paths are those of the VZG2 `map_first` run, so the `wmb_panel` and `wmb_region_share` bundles it built stay reusable.
