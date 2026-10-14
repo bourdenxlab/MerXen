@@ -1,3 +1,7 @@
+# `pre-commit install` installs every type below (the privacy hooks run at
+# commit, merge, commit-msg and push; docs/local-configuration.md).
+default_install_hook_types: [pre-commit, pre-merge-commit, commit-msg, pre-push]
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
@@ -20,6 +24,28 @@ repos:
 
   - repo: local
     hooks:
+      # No host paths or sample names in anything committed (CLAUDE.md).
+      # Stdlib only, run by the system python3; the alias table and .env are
+      # found as described in docs/local-configuration.md.
+      - id: privacy-staged
+        name: no host paths or sample names (staged lines, file names)
+        entry: python3 scripts/privacy/check_private_text.py --staged
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit, pre-merge-commit]
+      - id: privacy-commit-msg
+        name: no host paths or sample names (commit message)
+        entry: python3 scripts/privacy/check_private_text.py --commit-msg
+        language: system
+        stages: [commit-msg]
+      - id: privacy-push
+        name: no host paths or sample names (pushed commits, branch name)
+        entry: python3 scripts/privacy/check_private_text.py --pre-push
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
       - id: local-ci
         name: local CI checks
         entry: scripts/run_ci_checks.sh
