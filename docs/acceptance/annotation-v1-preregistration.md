@@ -9,6 +9,7 @@
 - **M3c amendment (2026-09-29):** §15 records the orchestrator decisions D1–D7 of 2026-09-29, **pending your confirmation at PR review**, made after §14 (iii) failed in stage D: eight ensemble members, a one-standard-error margin on E2's spread route, the re-test of (iii) on two new keyed ensembles (stop if it fails), and the per-class warning, lung-scenario headline and panel-card changes. It is committed before any code of the amendment and before any new run; the stage-D failure stays on record (§15.1).
 - **M13 (2026-10-06):** §23 pre-registers the real-data acceptance of the new-panel human MERSCOPE family (P5822, P4815, P3518, P7417) and the gate-P definitions that apply to every family, before any measurement on the family. It records the user's decisions of 2026-10-02 (D1 (a), D2 (d), D3 (a), the same-species dry-run rule D4, D25, D26) and marks every item that depends on an unanswered decision as proposed.
 - **Mouse decisions (2026-10-14):** the user's decisions of 2026-10-14 are recorded before any gate M score is read: §24's amendment (U1, the T2 reading of the M6b selection and of MO10), §25 (gate M's scoring protocol, U3 and U4, with the orchestrator's readings and ag7's G1 recipe) and §26 (the M13b readings, U7, under the gate-P criteria as revised by §23.21 and §23.22).
+- **Afternoon records (2026-10-14, before any gate M run):** §25.1.1 records the user's written MO8 exception for the PREP memory peak, §25.2.1 corrects the scored segmentation of one mouse section (a tightening), and §25.3.1 records that the in-place run may proceed and names gate M's region-share bundle. These records name the two mouse sections by their aliases, MS1 and MS2 (§25.1.1, "Names").
 
 ## 1. Rules
 
@@ -1917,6 +1918,31 @@ Under the reading above, PREP time passes and **PREP peak is expected to fail on
 - It is not read as a change to MO8, and it is not used to pass MO8. MO8 is scored under the registered reading above.
 - If MO8 fails, as the PREP peak is expected to, GM-REVIEW asks the user whether that sentence is the written MO8 exception. The gate M PR quotes the answer.
 
+#### 25.1.1 The written MO8 exception for the PREP peak (recorded 2026-10-14, before any gate M run)
+
+**Names.** These afternoon records (§25.1.1, §25.2.1 and §25.3.1) name the two mouse sections by their aliases, under the privacy rule the user set on 2026-10-14 (`USER_DECISIONS_20261014.md` section F): **MS1** is the ageing-set section and **MS2** the Vizgen validation section, the two sections that §24–§26 name otherwise. Inside quotations, a name in square brackets is the alias standing for the original; the originals are kept in the private decisions file.
+
+**The question** (chat, 2026-10-14 at 13:25 UTC, item 2, verbatim):
+
+> 2. Gate M will probably fail MO8's reference-prep memory limit. Prep peaks at 48 GB for [MS1] and 57 GB for [MS2], against a 40 GB limit. At the gate M review I'll ask whether your "its ok to use more RAM if needed" counts as the written exception.
+
+**The user's answer** (chat, 2026-10-14 at 13:38 UTC, verbatim): "2. You are allowed to use more RAM for those processes."
+
+The source is `annotation_dev/mouse_roadmap_20261013/USER_DECISIONS_20261014.md` section E, which quotes the exchange verbatim.
+
+**The reading: the written MO8 exception. LOOSENING, POST-HOC, approved in writing on 2026-10-14.**
+- *What it covers.* Only MO8's part "PREP peak ≤ 40 GB at 8 processes", for the two gate M panels: the `wmb_panel` bundles `97a086d1…` (MS1) and `af3fab09…` (MS2) of §25.3. A scored PREP-peak row of either bundle that fails becomes `FAIL (excepted)`.
+- *What it does not cover.* The answer does not cover:
+  - MO8's MAP peak (≤ 12 GB, at 4 MapMyCells processes);
+  - MO8's time limits (≤ 1.25 h per 4-segmentation section; PREP ≤ 2 h per panel);
+  - the PREP peak of any other bundle.
+
+  A failure there goes back to the user.
+- *Post-hoc.* The peaks were known when the answer was given: 47.70 GiB (MS1) and 56.80 GiB (MS2) summed tree RSS (§25.1, "PREP numbers seen before this record"; the question rounds them to 48 and 57 GB).
+- *The reading of the value is unchanged.* The PREP peak is still scored under §25.1's registered reading: the summed tree RSS, the strictest of the three readings, for a bundle built with 8 processes. The exception changes the verdict of the rows it covers, not their value. A bundle not built with 8 processes stays `UNSCORED (process count)`, which no exception reaches.
+- *§25.1's open question is answered.* §25.1 left it to GM-REVIEW to ask whether "its ok to use more RAM if needed" is the written MO8 exception. The question was put before gate M instead, and this answer is the written exception for the PREP peak. The earlier sentence is still not read as a change to MO8.
+- *In the scorer.* One `--exceptions` entry per panel: `criterion` `MO8`, `scope` `{"part": "prep_peak", "bundle": "<the panel's full build hash>"}`, quoting this answer. The gate M PR quotes the answer with the approval.
+
 ### 25.2 Readings adopted before scoring (orchestrator; labels as in roadmap §3 U4)
 
 Each reading the orchestrator adopts here is labelled tightening or neutral. None of them is a loosening, so none needs written approval (§1 rule 2). The MO10 bullet is not one of them: it applies §24's amendment (U1), a LOOSENING, POST-HOC, approved in writing on 2026-10-14. The written MO10 exception that the flip-rule bullet names comes from the same approval. The gate M PR lists them all.
@@ -1933,6 +1959,7 @@ Each reading the orchestrator adopts here is labelled tightening or neutral. Non
 - **H18 mouse rows (neutral).** Recorded with their values and no exception (§18, "Not covered", CHECK M2). They are not in the mouse flip rule. They set M13b's H18 set under D28 (§26).
 - **MO10 (LOOSENING, POST-HOC, approved in writing on 2026-10-14; §24's amendment, U1; not an orchestrator reading).** Scored as §24's amendment states: the Allen-relative T2 reading, scored by M6b-R on the selected rule, with the one written MO10 exception.
 - **The scored VZG2 segmentation (neutral; added 2026-10-14, before any gate M run).** For VZG2, every MO that names no segmentation (MO2, MO3, MO5, MO6) is scored on original_seg. §9's default "on proseg_hybrid unless stated" cannot apply to VZG2: its proseg_hybrid is the invalid section that MO7 scores as the negative control, and MO1, MO4 and MO7 already name VZG2 original_seg. M6's exit scored VZG2 the same way. ag7 is scored on proseg_hybrid, as §9 registers.
+  - *Corrected on 2026-10-14 (§25.2.1): the justification above is wrong, and the reading is replaced by a tightening.*
 - **MO5's astrocyte FPR on ag7 too (tightening; added 2026-10-14, before any gate M run).** The astrocyte false-positive rate ≤ 0.5% must hold on ag7 proseg_hybrid as well as on VZG2 original_seg, as M6's exit scored it. The ≥ 10× enrichment of held-out microglial genes stays a VZG2 criterion, as registered.
 - These two bullets were added after the scorer was written and its smoke test ran on run3's outputs (pre-merge code, labelled "smoke test, not gate M"; no verdict was read). No gate M run had started.
 - **MO1, MO3, MO6 and MO11** are otherwise scored as §9 registers them.
@@ -1941,6 +1968,40 @@ Each reading the orchestrator adopts here is labelled tightening or neutral. Non
   - U8: OD-B7's mouse half;
   - U9: the user's review of the ag7 and VZG2 original_seg reports, and the written exceptions;
   - U10: the version label.
+
+#### 25.2.1 Correction of 2026-10-14: the scored segmentation of MS2 (tightening; recorded before any gate M run)
+
+This record corrects the bullet "The scored [MS2] segmentation" above, added in commit `c9486b9`. Names follow §25.1.1.
+
+**What was wrong.** The bullet reads §9's default "on proseg_hybrid unless stated" as impossible for MS2, because "its proseg_hybrid is the invalid section that MO7 scores as the negative control". That justification is wrong.
+- The invalid proseg_hybrid that MO7 scores is MS2's **old** proseg_hybrid. Its full pipeline results were deleted on 2026-09-30, and MO7 scores it from the legacy-snapshot clustered H5AD (§25.2, MO7).
+- MS2's **current** proseg_hybrid is the output of the M0a re-run. It is a valid output, and §9's MO9 [L] gates its use, not the flip.
+- §9's default therefore reads literally as MS2 proseg_hybrid for every criterion that names no segmentation.
+
+**The corrected reading.**
+- For MS2, every MO that names no segmentation is scored on **both** MS2 proseg_hybrid (§9's literal default) and MS2 original_seg (what M6's exit scored). Both must pass. The criteria are:
+  - MO2: both the production (subset) re-map and the full re-map (§25.2, MO2), so MS2 proseg_hybrid gets its own full re-map, made with its MAP run's own engine parameters;
+  - MO3;
+  - MO5: the held-out microglial-gene enrichment and the astrocyte FPR;
+  - MO6.
+- MO5's astrocyte FPR is also scored on MS1 proseg_hybrid. The bullet on MO5's astrocyte FPR, also added in `c9486b9`, stands.
+- MS1 is scored on proseg_hybrid, as §9 registers.
+- MO1, MO4 and MO7 name MS2 original_seg and are scored as registered. MO8 is per section and per PREP bundle. MO9 [L] is reported.
+- A scored row that cannot be measured on either MS2 segmentation is `NOT_AVAILABLE` and goes back to the user, as every scored row does.
+
+**Label: tightening.** No approval is needed (§1 rule 2).
+- Each criterion is scored on {proseg_hybrid, original_seg} for MS2, and all of them must pass.
+- This is no easier to pass than the literal reading (proseg_hybrid alone) or the reading of `c9486b9` (original_seg alone).
+- This record replaces the bullet's label (neutral) and its justification.
+
+**Order of record.**
+- No gate M run had started when this was recorded. The two gate M run directories were prepared but not launched; they hold staged inputs only, no gate M output.
+- *The scorer's smoke test.* It ran on run3's outputs (pre-merge code, labelled "smoke test, not gate M"; it scored MS2 on original_seg). It computed MO3, MO5 and MO6 rows for MS2 proseg_hybrid as reported rows. It computed no MO2 row for MS2 proseg_hybrid, because MO2 was measured on the scored segmentation only. `c9486b9` records that no verdict of it was read.
+  - For this record, only two things were looked at: the smoke test's row keys (criterion, dataset, segmentation), to establish which segmentations it covered, and the verdict totals its log prints over all rows.
+  - No value or verdict of an MS2 proseg_hybrid row was read.
+- *Disclosed prior knowledge.* M6's exit report (`$A/m6/M6_EXIT_REPORT.txt`, 2026-09-29) lists M6-era values of MS2's re-run proseg_hybrid beside the scored ones. Among them are MO3's inferred regions, MO5's two quantities and the F1 rate that MO6 bounds. They were seen at M6's review.
+  - They come from M6's own MAP and RESOLVE outputs: another MAP process count, the v1 region rule and bundles that gate M does not use.
+  - Gate M scores its own outputs (§25.1, reproducibility caveat), so none of them is a gate M value.
 
 ### 25.3 Inputs (U3)
 
@@ -1953,6 +2014,7 @@ Each reading the orchestrator adopts here is labelled tightening or neutral. Non
   - ag7: `wmb_panel` `97a086d1…`, panel hash `f4c29186…`;
   - VZG2: `wmb_panel` `af3fab09…`;
   - `wmb_region_share` `1867f978…`, or the bundle that M6b-R builds if the selected rule needs component (a)'s structure homes;
+    - *Replaced on 2026-10-14 by `2bf9c01c…`, revision 2 (§25.3.1).*
   - the self-map test sets of both panels.
 
   No bundle from SSD1 is used, and no `bundle_ref.json` that points at SSD1. The scorer's provenance check fails any other bundle path.
@@ -1995,6 +2057,35 @@ Each reading the orchestrator adopts here is labelled tightening or neutral. Non
   - *Post-hoc:* the recipe was chosen after both sets of values had been seen.
   - *Neutral, not a tightening:* it is G1's production input. It changes no G1 fail, so it changes no gate level. No gate M criterion reads a G1 warning on ag7: MO7 asks only that ag7 is not `failed`, "with or without the warning flag" (plan §7.6). So no criterion becomes harder to pass.
   - *Not a loosening:* on every segmentation its G1 status is at least as strict as the M6 recipe's. It adds the warnings on proseg_hybrid and reseg and removes none. Its ratio is the higher one only on original_seg (1.882 against 1.625), where both recipes warn.
+
+#### 25.3.1 The MS1 in-place run may proceed; the region-share bundle (recorded 2026-10-14, before any gate M run)
+
+Names follow §25.1.1.
+
+**The question** (chat, 2026-10-14 at 13:25 UTC, item 1, verbatim):
+
+> 1. Before the [MS1] run writes into the owner's store, have you told them when it will run? The store's `zarr.json` will become owned by you, still group-writable. If you'd rather I just go ahead, say so.
+
+**The user's answer** (chat, 2026-10-14 at 13:38 UTC, verbatim): "1. It's ok to go ahead with whatever is needed for this file. It is for a project we both work on"
+
+The source is `USER_DECISIONS_20261014.md` section E, which quotes the exchange verbatim.
+
+**The reading.**
+- The MS1 in-place run may proceed. The data owner co-works on the project, and no further notice to them is required.
+- "whatever is needed for this file" is read as the root `zarr.json` that the question names, including its change of owner. It is not read as wider write access. The writes stay those approved under U3 (above):
+  - the suffixed `_mapfirst` tables;
+  - the zarr root metadata entries for them;
+  - the store's write-lock file.
+
+  Backups and manifests are still taken first.
+- **Label: neutral.** The route is the one the user chose under U3. The answer removes a notice step. It changes no criterion, threshold or reading.
+
+**The region-share bundle (neutral).**
+- Gate M uses `wmb_region_share` `2bf9c01c…` (revision 2, built on 2026-10-14), from the store named above.
+- It replaces "`1867f978…`, or the bundle that M6b-R builds if the selected rule needs component (a)'s structure homes" in the bundle list above.
+- The selected rule `a+f:tile200,nn2` (§24's amendment) reads component (a)'s structure-level subclass homes (`region_structure_home.parquet`). Only revision 2 carries them (`REGION_SHARE_REVISION` in `src/merxen/annotation/reference.py`).
+- `1867f978…` (no revision field, built on 2026-10-13) is not used.
+- This is the bundle the earlier text anticipated, so the label is neutral.
 
 ## 26. M13b readings (U7; recorded 2026-10-14, before any mouse gate-P mapping)
 
