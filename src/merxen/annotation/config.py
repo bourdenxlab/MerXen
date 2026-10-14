@@ -840,8 +840,12 @@ class MouseGateConfig(_AnnotationModel):
         g3_t2_max_present_share: A subclass is T2 (G3) below this share of
             its MERFISH cells in the present divisions (E7).
         g4_window_sections: MERFISH-638850 sections of G4's window (e.g.
-            ``C57BL6J-638850.31``); empty: G4 is not evaluated until M6b's
-            AP estimate chooses the window.
+            ``C57BL6J-638850.31``); empty: the AP estimate chooses it
+            (``g4_ap_estimate``).
+        g4_ap_estimate: Without ``g4_window_sections``, choose G4's window
+            by the AP estimate (plan §7.8 item 4, ``mouse_ap.estimate_ap``:
+            the best-matching MERFISH section of all sections and its
+            neighbours); off: G4 is not evaluated without explicit sections.
     """
 
     g1_radius_um: float = Field(default=4.0, gt=0.0)
@@ -860,6 +864,7 @@ class MouseGateConfig(_AnnotationModel):
     g2_min_pseudo_confident: int = Field(default=200, ge=1)
     g3_t2_max_present_share: float = 0.25
     g4_window_sections: list[str] = Field(default_factory=list)
+    g4_ap_estimate: bool = True
 
     @field_validator(
         "g2_marker_consistency_fail",
@@ -1173,11 +1178,74 @@ class AnnotationFlagsConfig(_AnnotationModel):
         return _check_fraction(value, info.field_name)
 
 
+MOUSE_RULE_VARIANTS: Final[tuple[str, ...]] = ("v1", "m6b")
+# The structure-level home that evidences a coupled region (plan §7.8 (a):
+# OB is present with OLF when AON-home tiles hold >= 1% of assigned tiles).
+DEFAULT_COUPLING_HOME_STRUCTURES: Final[dict[str, tuple[str, ...]]] = {
+    "OB": ("AON",),
+}
+
+
+class ConditionalNeverDrop(_AnnotationModel):
+    """A node the two-tier rule keeps when regions are present (plan §7.8).
+
+    M6b variants (b) (class ``05 OB-IMN GABA`` when STR or OLF is present)
+    and (c) (subclass ``025 CA2-FC-IG Glut`` when Isocortex and STR are
+    present). A kept class keeps all its subclasses; a kept subclass is left
+    out of the drop list, so its class is never dropped as one node.
+
+    Attributes:
+        level: ``class`` or ``subclass``.
+        name: The WMB node name.
+        when_any_present: Kept when any of these divisions is present.
+        when_all_present: Kept when all of these divisions are present.
+    """
+
+    level: Literal["class", "subclass"]
+    name: str = Field(min_length=1)
+    when_any_present: list[str] = Field(default_factory=list)
+    when_all_present: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_condition(self: ConditionalNeverDrop) -> ConditionalNeverDrop:
+        if bool(self.when_any_present) == bool(self.when_all_present):
+            raise ValueError(
+                "a conditional never-drop node needs exactly one of "
+                "when_any_present and when_all_present"
+            )
+        unknown = sorted(
+            set(self.when_any_present + self.when_all_present) - set(MOUSE_CCF_REGIONS)
+        )
+        if unknown:
+            raise ValueError(
+                f"conditional never-drop {self.name!r} names unknown regions "
+                f"{unknown}; known: {MOUSE_CCF_REGIONS}"
+            )
+        return self
+
+    def applies(self, present: Any) -> bool:
+        """Return whether the node is kept for a set of present divisions.
+
+        Args:
+            present: The present divisions (any iterable of names).
+
+        Returns:
+            True when the condition holds.
+        """
+        regions = {str(region) for region in present}
+        if self.when_any_present:
+            return any(region in regions for region in self.when_any_present)
+        return all(region in regions for region in self.when_all_present)
+
+
 class MouseRegionConfig(_AnnotationModel):
     """Mouse region inference and two-tier pruning (plan §3.7, §7.2; E7).
 
-    M6b may change the tile parameters, ``never_drop_classes`` and
-    ``coupled_regions`` (§7.8).
+    The defaults are the v1 (E7 / M6) rule. M6b's candidate changes (§7.8)
+    are the tile parameters (variant (f)), ``coupled_regions`` with
+    ``coupling_home_structures`` (a), ``conditional_never_drop`` (b, c) and
+    ``region_min_tile_fraction`` (d); the last three need
+    ``rule_variant = "m6b"`` (``mouse_regions.check_rule_variant``).
 
     Attributes:
         tile_um: Tile size.
@@ -1198,14 +1266,28 @@ class MouseRegionConfig(_AnnotationModel):
             ``05c_hybrid_droplist.py``; ``15 HY Gnrh1 Glut`` has 55, so it
             never takes the strict rule).
         never_drop_classes: WMB classes pruning never drops.
-        coupled_regions: Region coupling (e.g. ``{"OB": ["OLF"]}``); off until
-            M6b.
+        coupled_regions: Region coupling, e.g. ``{"OB": ["OLF"]}`` (M6b
+            variant (a)): a division that is not present by the tile rule
+            counts as present when one of its coupled divisions is present
+            and the tiles whose majority structure-level home is one of its
+            ``coupling_home_structures`` hold at least
+            ``coupling_min_tile_fraction`` of the assigned tiles. Empty in
+            v1.
+        coupling_home_structures: CCF structures (``parcellation_structure``)
+            evidencing each coupled division (``OB``: ``AON``).
+        coupling_min_tile_fraction: Share of assigned tiles the evidencing
+            structures need.
+        conditional_never_drop: Nodes kept when regions are present (M6b
+            variants (b) and (c)); empty in v1.
+        region_min_tile_fraction: Per-division ``min_tile_fraction``
+            overrides (M6b variant (d): ``{"OB": 0.005}``); empty in v1.
         coherence_k: Neighbours for region coherence.
         coherence_min: Coherence below which a cell is flagged.
         coherence_max_conf: Only cells below this confidence are flagged.
         ap_scope_min_mm: The report warns in front of this AP estimate.
         ap_scope_max_mm: The report warns behind this AP estimate.
-        rule_variant: Region-rule variant (``v1`` until M6b selects one).
+        rule_variant: Region-rule variant: ``v1`` (default; the M6b fields
+            must stay empty) or ``m6b`` (any M6b candidate).
     """
 
     tile_um: float = Field(default=150.0, gt=0.0)
@@ -1229,6 +1311,15 @@ class MouseRegionConfig(_AnnotationModel):
         ]
     )
     coupled_regions: dict[str, list[str]] = Field(default_factory=dict)
+    coupling_home_structures: dict[str, list[str]] = Field(
+        default_factory=lambda: {
+            region: list(structures)
+            for region, structures in DEFAULT_COUPLING_HOME_STRUCTURES.items()
+        }
+    )
+    coupling_min_tile_fraction: float = 0.01
+    conditional_never_drop: list[ConditionalNeverDrop] = Field(default_factory=list)
+    region_min_tile_fraction: dict[str, float] = Field(default_factory=dict)
     coherence_k: int = Field(default=30, ge=1)
     coherence_min: float = 0.1
     coherence_max_conf: float = 0.8
@@ -1239,6 +1330,7 @@ class MouseRegionConfig(_AnnotationModel):
     @field_validator(
         "confident_neuron_min_bp",
         "min_tile_fraction",
+        "coupling_min_tile_fraction",
         "class_low_share",
         "subclass_share_in_low_class",
         "subclass_share_default",
@@ -1261,13 +1353,65 @@ class MouseRegionConfig(_AnnotationModel):
                 f"coupled_regions names unknown regions {unknown}; "
                 f"known: {MOUSE_CCF_REGIONS}"
             )
+        for key, regions in value.items():
+            if not regions or key in regions:
+                raise ValueError(
+                    f"coupled_regions[{key!r}] must name other divisions, got {regions}"
+                )
+        return value
+
+    @field_validator("region_min_tile_fraction")
+    @classmethod
+    def _check_region_fractions(
+        cls: type[MouseRegionConfig], value: dict[str, float]
+    ) -> dict[str, float]:
+        unknown = sorted(set(value) - set(MOUSE_CCF_REGIONS))
+        if unknown:
+            raise ValueError(
+                f"region_min_tile_fraction names unknown regions {unknown}; "
+                f"known: {MOUSE_CCF_REGIONS}"
+            )
+        for region, fraction in value.items():
+            _check_fraction(fraction, f"region_min_tile_fraction[{region!r}]")
         return value
 
     @model_validator(mode="after")
     def _check_ap_scope(self: MouseRegionConfig) -> MouseRegionConfig:
         if self.ap_scope_min_mm >= self.ap_scope_max_mm:
             raise ValueError("ap_scope_min_mm must be below ap_scope_max_mm")
+        missing = sorted(
+            region
+            for region in self.coupled_regions
+            if not self.coupling_home_structures.get(region)
+        )
+        if missing:
+            raise ValueError(
+                f"coupled_regions {missing} have no coupling_home_structures entry"
+            )
         return self
+
+    def tile_fraction_for(self, region: str) -> float:
+        """Return the share of assigned tiles a division needs to be present.
+
+        Args:
+            region: A division.
+
+        Returns:
+            ``region_min_tile_fraction[region]`` when set, else
+            ``min_tile_fraction``.
+        """
+        return float(self.region_min_tile_fraction.get(region, self.min_tile_fraction))
+
+    def uses_m6b_fields(self) -> list[str]:
+        """Return the M6b-only fields set away from their (empty) v1 values."""
+        used = []
+        if self.coupled_regions:
+            used.append("coupled_regions")
+        if self.conditional_never_drop:
+            used.append("conditional_never_drop")
+        if self.region_min_tile_fraction:
+            used.append("region_min_tile_fraction")
+        return used
 
 
 def normalise_mouse_section_regions(value: str) -> str:

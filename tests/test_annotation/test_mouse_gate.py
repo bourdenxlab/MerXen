@@ -815,6 +815,7 @@ def test_merfish_window_pools_sections_and_gives_point_offsets() -> None:
 def test_mouse_gate_config_checks_its_new_fields() -> None:
     config = MouseGateConfig()
     assert config.g4_window_sections == []
+    assert config.g4_ap_estimate  # M6b: the AP estimate chooses the window
     assert (config.g2_min_group_markers, config.g2_min_pseudo_confident) == (3, 200)
     assert config.g3_t2_max_present_share == 0.25
     with pytest.raises(ValueError):

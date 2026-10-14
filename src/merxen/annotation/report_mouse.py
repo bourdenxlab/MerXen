@@ -15,10 +15,16 @@ coherence, spill-over checks, the mouse gate G1-G5) and the label table:
   and without low-count cells, F1 rate, spill-over prevalence and its map
   (never a count), the derived spill-over gene set, and the gate.
 
-**M6b fields are optional and pending:** the AP estimate and bin (§7.8
-step 4) and the M6b rule variant are read when a record carries them
-(``ap_estimate_mm``, ``ap_bin``, ``m6b_rule_variant``); otherwise they are
-reported as ``pending`` and nothing is inferred from them.
+**M6b fields** (``ap_fields``): the AP estimate and bin (§7.8 step 4) are
+read from the mouse gate's nested ``ap_estimate`` (``ap_mm``, ``ap_bin``;
+written by RESOLVE, ``mouse_ap.ApEstimate.to_json``), or from the flat keys
+``ap_estimate_mm`` and ``ap_bin`` when a record carries them; the M6b rule
+variant is the ``rule_variant`` the MAP region record names (``v1``, the
+production rule, or ``m6b``; the variant fields are in its ``params``), or a
+flat ``m6b_rule_variant``. A field no record carries is reported as
+``pending`` and nothing is inferred from it: the gate has no estimate when
+G4 uses an explicit window, when ``g4_ap_estimate`` is off, or when too few
+confident neurons (or no region-share bundle) leave nothing to estimate from.
 """
 
 from __future__ import annotations
@@ -71,9 +77,16 @@ def ap_fields(
 ) -> dict[str, Any]:
     """Return the M6b AP estimate, bin and rule variant, or ``pending``.
 
+    The estimate is read from the gate's nested ``ap_estimate``
+    (``mouse_ap.ApEstimate.to_json``: ``ap_mm``, ``ap_bin``), which RESOLVE
+    writes when G4's window comes from the AP estimate; the flat keys
+    ``ap_estimate_mm`` and ``ap_bin`` of either record take precedence when
+    present. The rule variant is the region record's ``rule_variant``
+    (``v1`` or ``m6b``), unless a record carries ``m6b_rule_variant``.
+
     Args:
         record: The MAP region record (``mouse_regions``).
-        gate: The mouse gate record.
+        gate: The mouse gate record (``mouse_gate`` of the resolve summary).
 
     Returns:
         ``ap_estimate_mm``, ``ap_bin``, ``ap_status``, ``m6b_rule_variant``,
@@ -81,23 +94,29 @@ def ap_fields(
         ``ap_in_scope`` (``None`` while pending) and ``warnings``.
     """
     sources = [dict(record or {}), dict(gate or {})]
-    estimate = next(
+    nested: Mapping[str, Any] = next(
         (
-            s.get("ap_estimate_mm")
+            s["ap_estimate"]
             for s in sources
-            if s.get("ap_estimate_mm") is not None
+            if isinstance(s.get("ap_estimate"), Mapping)
         ),
-        None,
+        {},
+    )
+    estimate = next(
+        (s["ap_estimate_mm"] for s in sources if s.get("ap_estimate_mm") is not None),
+        nested.get("ap_mm"),
     )
     ap_bin = next(
-        (s.get("ap_bin") for s in sources if s.get("ap_bin") is not None), None
-    )
-    m6b_variant = next(
-        (s.get("m6b_rule_variant") for s in sources if s.get("m6b_rule_variant")), None
+        (s["ap_bin"] for s in sources if s.get("ap_bin") is not None),
+        nested.get("ap_bin"),
     )
     variant = (record or {}).get("rule_variant") or (
         (record or {}).get("params") or {}
     ).get("rule_variant")
+    m6b_variant = next(
+        (s["m6b_rule_variant"] for s in sources if s.get("m6b_rule_variant")),
+        variant,
+    )
     warnings = []
     in_scope = None
     if estimate is not None:
@@ -276,8 +295,9 @@ def item_mouse_regions(
             item.notes.append(f"{sample.sample_id}: {warning}")
         if ap["ap_status"] == PENDING:
             item.notes.append(
-                f"{sample.sample_id}: AP estimate and bin pending (M6b); G4 uses "
-                "the configured window"
+                f"{sample.sample_id}: AP estimate and bin pending (M6b): the gate "
+                "record has none (an explicit G4 window, g4_ap_estimate off, or too "
+                "few confident neurons to estimate from)"
             )
         estimate = ap["ap_estimate_mm"]
         if estimate is not None and float(estimate) < ANTERIOR_AP_MM:
@@ -363,7 +383,10 @@ def item_mouse_regions(
                     "MO11" if key == "ap_estimate_mm" else "MO10",
                     key,
                     ap[key],
-                    definition="M6b field (optional until M6b is merged)",
+                    definition=(
+                        "M6b field: the gate's AP estimate (MO11), or the region "
+                        "record's rule variant (MO10)"
+                    ),
                     source="map_manifest",
                     sample_id=sample.sample_id,
                     platform=sample.platform,

@@ -19,8 +19,10 @@ separate **warning flag** with reasons.
   classes, with < 25% of those cells in the present divisions): warning
   > 3%.
 - **G4 composition** (soft class shares vs a MERFISH window of
-  ``wmb_region_share`` sections): warning when Astro-Epen is outside ±5
-  points or Immune outside ±1 point.
+  ``wmb_region_share`` sections: ``g4_window_sections``, or else the
+  AP-estimated section and its neighbours among all sections, plan §7.8
+  item 4): warning when Astro-Epen is outside ±5 points or Immune outside
+  ±1 point.
 - **G5 spill-over** (``flag_microglial_spillover`` rate): warning > 15%.
 
 The primary panel's trust state caps the level as for human (``refused`` ->
@@ -32,8 +34,10 @@ chain level (broad, class, nt, subclass) fall outside its validated region
 ``resolve_mouse`` with those shares, and the level cannot change. A signal
 that cannot be evaluated is recorded with its reason; G1 and G2 then warn
 (the gate cannot confirm the data are valid), G3-G5 do not (G3: pruning
-disabled or skipped, which the region step reports; G4: no AP window until
-M6b's ``estimate_ap``; G5: the flag is null with a reason).
+disabled or skipped, which the region step reports; G4: no window, i.e. no
+explicit ``g4_window_sections`` and no AP estimate (``mouse_ap.estimate_ap``:
+too few confident neurons, or ``g4_ap_estimate`` off); G5: the flag is null
+with a reason).
 
 **G2's referee** (§8.6, [L]): six class groups (the WMB vocab's broad
 classes: Neurons, Astrocytes/Ependymal, Oligodendrocyte lineage, OEC,
@@ -465,6 +469,7 @@ def t2_subclasses(
     never_drop_classes: Sequence[str],
     min_merfish_cells: int = 20,
     max_present_share: float = 0.25,
+    never_drop_subclasses: Sequence[str] = (),
 ) -> set[str]:
     """Return E7's region-implausible (T2) subclasses of a section.
 
@@ -479,9 +484,13 @@ def t2_subclasses(
         present_regions: The section's present divisions.
         shares: The region-share bundle's shares.
         subclass_class: Subclass name to its class name (mapping tree).
-        never_drop_classes: ``MouseRegionConfig.never_drop_classes``.
+        never_drop_classes: ``MouseRegionConfig.never_drop_classes`` (G3
+            and MO2: the static list, also under an M6b rule).
         min_merfish_cells: ``MouseRegionConfig.min_merfish_cells_subclass``.
         max_present_share: E7's 0.25 (``g3_t2_max_present_share``).
+        never_drop_subclasses: Further subclasses not to count (the M6b
+            scoring's diagnostic T2 without the conditionally kept nodes;
+            empty for G3 and MO2).
 
     Returns:
         The T2 subclass names.
@@ -489,8 +498,12 @@ def t2_subclasses(
     present = shares.present_share("subclass", present_regions)
     n_grey = shares.subclass_n_grey.reindex(present.index).fillna(0)
     never = {str(name) for name in never_drop_classes}
+    kept = {str(name) for name in never_drop_subclasses}
     in_never = np.array(
-        [str(subclass_class.get(str(name), "")) in never for name in present.index],
+        [
+            str(subclass_class.get(str(name), "")) in never or str(name) in kept
+            for name in present.index
+        ],
         dtype=bool,
     )
     eligible = (n_grey.to_numpy() >= min_merfish_cells) & ~in_never
@@ -509,6 +522,7 @@ def t2_share(
     never_drop_classes: Sequence[str],
     min_merfish_cells: int = 20,
     max_present_share: float = 0.25,
+    never_drop_subclasses: Sequence[str] = (),
 ) -> float:
     """Return the T2 share (E7): table cells called to a T2 subclass.
 
@@ -523,6 +537,7 @@ def t2_share(
         never_drop_classes: Classes never counted.
         min_merfish_cells: Subclasses with fewer MERFISH cells are not counted.
         max_present_share: E7's 0.25.
+        never_drop_subclasses: Subclasses kept by the rule, not counted.
 
     Returns:
         The share of table cells whose subclass is T2.
@@ -534,6 +549,7 @@ def t2_share(
         never_drop_classes=never_drop_classes,
         min_merfish_cells=min_merfish_cells,
         max_present_share=max_present_share,
+        never_drop_subclasses=never_drop_subclasses,
     )
     names = [None if value is None else str(value) for value in unpruned_subclass]
     if not names:
@@ -662,6 +678,8 @@ class MouseGateSignals:
         g4_reason: Why G4 is not evaluated.
         spillover_rate: G5 (``None``: the flag is null).
         g5_reason: Why G5 is not evaluated.
+        ap_estimate: The AP estimate that chose G4's window
+            (``mouse_ap.ApEstimate.to_json``), when one did.
     """
 
     registration: RegistrationSignal | None = None
@@ -674,6 +692,7 @@ class MouseGateSignals:
     g4_reason: str | None = None
     spillover_rate: float | None = None
     g5_reason: str | None = None
+    ap_estimate: dict[str, Any] | None = None
 
     def values(self) -> dict[str, float | None]:
         """Return the signals keyed ``SIGNAL_KEYS`` (provenance ``signals``)."""
@@ -745,6 +764,7 @@ class MouseGateVerdict:
             ),
             "referee": None if signals.referee is None else signals.referee.to_json(),
             "window": None if signals.window is None else signals.window.to_json(),
+            "ap_estimate": signals.ap_estimate,
             "trust_state": self.trust_state,
         }
 

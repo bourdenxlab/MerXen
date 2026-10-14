@@ -865,7 +865,7 @@ so the mapped levels are class → subclass → cluster. There is no second vote
 #### Region step (in MAP)
 
 Mouse plausibility depends on where the section is, so MAP infers it
-(`mouse_regions.py`, rule variant `v1`):
+(`mouse_regions.py`, rule variant `v1`; the M6b variants are off):
 
 1. **Request** per sample: `auto` (default), `none`, or a `;`-separated list
    of CCF divisions (Isocortex, OLF, OB, HPF, CTXsp, STR, PAL, TH, HY, MB, P,
@@ -912,7 +912,7 @@ subclass.
 | G1 registration (the QC stage's check; required in pipeline runs) | density ratio < 1.5 or shift > 5 µm | ratio < 2.0, or no check |
 | G2 marker referee (marker-derived pseudo-labels vs class calls) | consistency < 0.70 | < 0.80, or < 200 pseudo-labelled cells |
 | G3 implausibility (share of table cells whose *unpruned* subclass has < 25% of its MERFISH cells in the present divisions; subclasses with ≥ 20 MERFISH cells, never-drop classes excluded) | – | > 3% |
-| G4 composition vs a MERFISH window | – | Astro-Epen off by > 5 points or Immune by > 1 point (not evaluated unless sections are given) |
+| G4 composition vs a MERFISH window (the AP estimate's section and its ± 1 neighbours, or `g4_window_sections`) | – | Astro-Epen off by > 5 points or Immune by > 1 point (not evaluated when there is no window: no estimate, because the region-share bundle has no section composition or too few neurons are confident, or `g4_ap_estimate` is off) |
 | G5 microglial spill-over flag rate | – | > 15% |
 
 Panel trust caps the level as for human (`refused` → `failed`, `broad_only`
@@ -938,10 +938,16 @@ below 100 counts).
   `map_first` mouse run writes the `_mapfirst` table beside the legacy one.
   The pre-registered mouse criteria (MO1–MO11) have not been scored as an
   acceptance (plan §14, milestone M9).
-- **AP-axis validation and rule hardening** (milestone M6b, on an unmerged
-  branch): an AP estimate per section, G4 windows for all sections, rule
-  variants. Until then G4 is not evaluated by default and only rule variant
-  `v1` is accepted.
+- **AP-axis rule choice** (milestone M6b; the exit is unmet). The AP
+  estimate per section (`mouse_ap.estimate_ap`, recorded under
+  `mouse_gate.ap_estimate`) and the G4 windows for all sections are in the
+  code, and G4 uses the estimate by default (warning only). The rule
+  variants (OB–OLF coupling, conditional never-drop classes, OB at 0.5% of
+  tiles, other tile settings) are inert behind `rule_variant = "m6b"`; `v1`
+  is the production rule. The pre-registered selection found no admissible
+  candidate (every rule leaves T2 above 0.1% in some AP bin), and MO10 scored
+  on `v1` fails, so the choice of rule and a written MO10 exception go to
+  the user (pre-registration §24).
 - **Mouse real-data QC and gate P** (milestone M13b): not run; gate P
   refuses mouse families until a second disjoint WMB test draw exists.
 - **Validated mouse families are MERSCOPE only** (ag7, VZG2). A mouse Xenium

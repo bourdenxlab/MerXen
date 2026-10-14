@@ -888,6 +888,27 @@ V6_GOLDEN: dict[str, dict[str, str]] = {
             "a41d55c3150a553be0d83cd97c442b02ba585fba50062d4e0d11851f8a2b1122"
         ),
     },
+    # Refreshed 2026-10-13 at the merge of the M6b branch (the AP-axis work):
+    # the ``summary`` and ``pair/summary`` digests of the two mouse scenarios
+    # changed; their ``labels`` and ``provenance`` digests did not. Cause:
+    # M6b's G4 window comes from the AP estimate (``MouseGateConfig.
+    # g4_ap_estimate``, on by default), so RESOLVE now tries to evaluate G4
+    # where it used to record "no window". The difference between the
+    # 7aa7c38 code and the merged code, in these scenarios and only there, is
+    # in each mouse gate record (``mouse_gate`` and ``resolution.gate``, in the
+    # sample summary and again in the pair summary): (1) the new key
+    # ``ap_estimate`` (null here: the fixture's ``wmb_region_share`` bundle has
+    # no ``section_composition``, so there is nothing to estimate from); (2)
+    # the text of the G4 "not evaluated" note, "no MERFISH window (AP
+    # estimate: M6b)" becoming "region-share bundle has no
+    # section_composition". No level, warning flag, signal value, signal
+    # status, label or provenance field moves. Why this is deliberate and
+    # safe: G4 is a warning only (OD-C4), so evaluating it cannot lower a
+    # level; mouse map_first stays opt-in (``clustering_squidpy_mode_mouse``
+    # is "legacy" until the mouse flip, M9), so no production mouse output
+    # changes with the merge; and a fixture that has a section composition
+    # gets its estimate and window (see
+    # ``test_mouse_g4_window_comes_from_the_ap_estimate``).
     "mouse_v6_provisional": {
         "AG_MERSCOPE/labels": (
             "b280d2188f45d21e5d9edda6a2b514d0f4bf18e94b89a5eea38437d78f87e4be"
@@ -896,10 +917,10 @@ V6_GOLDEN: dict[str, dict[str, str]] = {
             "786bbc3a774de00138da087690a1be95f3c64c94a710a41ac498a17d17f90e2f"
         ),
         "AG_MERSCOPE/summary": (
-            "d39764759fbf69b9593e55a23e6221a84fda9f4d9f85347eaffc3c87e75bd4ca"
+            "ad69c95bd0d26c56b9a69a5a82653fee0187cb94c636769cabe4bb3b7416d72a"
         ),
         "pair/summary": (
-            "2f57b043cfa436726ad1a5542457b27375c8f72ff4aac8d5e7df3571d7f4b2c6"
+            "d8c3a78a2b50b868d3e54478da8f506191cc29fa32b3d44039cf3808d65a996f"
         ),
     },
     "mouse_no_tables": {
@@ -910,10 +931,10 @@ V6_GOLDEN: dict[str, dict[str, str]] = {
             "da8f9f22b7e3317ebce2f55ef948f46b29eee438e90f3ea24bf8806ec567ad65"
         ),
         "AG_MERSCOPE/summary": (
-            "79e782b05be7d82beb1540b737834e97bb26bc1bf79744985bb5a76ffb963c0f"
+            "22d97886fc9e989da98574c678a81f75dbf8bc898c38b9f72df7187e08e4edc6"
         ),
         "pair/summary": (
-            "9c1288e10f3bfa446057d51eacbf3d6a369628f0cabbdab5b317af0ef19bce47"
+            "6c2d04de9c941c9bfe056638a15beb73a18e6270f913bd165679cc2d0356ab11"
         ),
     },
 }
