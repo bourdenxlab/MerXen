@@ -33,7 +33,15 @@ into the unpruned calls, plan §7.2), and in this order:
 5. **Composition** (§5.5): ``soft_class_<token>`` rows over the 34 WMB
    classes (class bootstrap probabilities of the call and its runner-ups);
    the section's soft, confident and argmax class shares.
-6. The **label table** (§4.1, validated), with the raw engine columns and
+6. **Real-data QC** (§8.8; M13b C22; ``real_qc.enabled``), warn-only:
+   ``real_qc.mouse_real_data_qc`` on the signals of ``mouse_real_qc_signals``
+   records the gate's G1-G5 (G4 with its MERFISH window and the AP estimate
+   that chose it) and the checks ``real_qc`` adds, ``not_applicable`` with a
+   reason where they do not apply. Every lowering outcome is demoted to a
+   warning (gate M is pending, D20 (b)) and none reaches the gate, a status,
+   a flag or trust: the QC only adds the sample's ``real_qc`` summary block
+   and ``PanelProvenance.real_data_qc``.
+7. The **label table** (§4.1, validated), with the raw engine columns and
    the region columns (``mmc_wmb_unpruned_*``, ``region_pruned_changed``,
    ``inferred_region``), and the **provenance** (§4.6, ``mouse_gate``; the
    panel record from ``diagnostics.panel_provenance``, as for human).
@@ -68,6 +76,12 @@ from merxen.annotation.pipeline import (
     current_merxen_version,
     engine_columns,
     masked_objects,
+    real_qc_bundle_facts,
+    real_qc_emitted_levels,
+    real_qc_gene_complexity,
+    real_qc_prefilter_applied,
+    real_qc_version_7_signals,
+    record_real_qc,
     reference_provenance,
     refused_trust,
     resolvability_provenance,
@@ -89,12 +103,15 @@ from merxen.annotation.vocab import (
 
 if TYPE_CHECKING:
     from merxen.annotation.config import AnnotationConfig
-    from merxen.annotation.consensus import LevelCall, MouseCalls
+    from merxen.annotation.consensus import LevelCall, MouseCalls, MouseResolution
     from merxen.annotation.diagnostics import TrustDecision
     from merxen.annotation.mouse_flags import MouseFlagProfiles
     from merxen.annotation.mouse_gate import MerfishWindow, RegistrationSignal
     from merxen.annotation.mouse_regions import RegionShareBundle
     from merxen.annotation.panel import AnnotationPanel
+    from merxen.annotation.pipeline import Version7Outputs
+    from merxen.annotation.real_qc import RealQcResult, RealQcSignals
+    from merxen.annotation.resolvability import ResolvabilityTables
 
 logger = logging.getLogger(__name__)
 
@@ -683,6 +700,68 @@ def class_corr_floor(
 
 
 # --------------------------------------------------------------------------
+# Real-data QC (plan §8.8; M13b chunk C22)
+
+
+def mouse_real_qc_signals(
+    loaded: LoadedSample,
+    resolution: MouseResolution,
+    *,
+    primary: ResolveRun | None,
+    tables: ResolvabilityTables | None,
+    version_7: Version7Outputs,
+    paired: bool,
+    flag_strata: Sequence[Any] | None,
+) -> RealQcSignals:
+    """Return the label-free inputs of one mouse sample's real-data QC (§8.8).
+
+    As ``pipeline.human_real_qc_signals``, from the QC-free resolution and
+    the primary bundle: the applicability facts (the bundle's resolvability
+    version and R3 member, ``pipeline.real_qc_bundle_facts``; whether its
+    marker lookup is prefiltered, ``pipeline.real_qc_prefilter_applied``;
+    whether the pair holds both platforms); the flag strata; the
+    gene-complexity source of a version-7 bundle; the version-7 coverage
+    and depth-trend inputs; and the mouse gate verdict, whose G1-G5 the QC
+    records. Mouse G1 and the marker referee (G2) are the gate's (§8.8), so
+    the human referee and the human registration input stay unset; the
+    prefilter spot check and the factor re-measure have no producer in
+    RESOLVE (``not_evaluable`` wherever they apply).
+
+    Args:
+        loaded: The sample's counts.
+        resolution: The QC-free resolution (its gate is the mouse gate).
+        primary: The primary run.
+        tables: The primary bundle's resolvability tables.
+        version_7: The sample's version-7 outputs.
+        paired: Whether the pair holds a section of the other platform.
+        flag_strata: The sample's flag strata (``FlagSet.strata``).
+
+    Returns:
+        The signals.
+    """
+    from merxen.annotation.real_qc import RealQcSignals
+
+    version, has_r3 = real_qc_bundle_facts(primary, tables)
+    coverage, trend = real_qc_version_7_signals(
+        loaded, resolution, version=version, version_7=version_7
+    )
+    return RealQcSignals(
+        resolvability_version=version,
+        paired=paired,
+        prefilter_applied=real_qc_prefilter_applied(primary),
+        has_r3_member=has_r3,
+        flag_strata=flag_strata,
+        gene_complexity=real_qc_gene_complexity(
+            loaded, resolution, primary=primary, tables=tables
+        ),
+        emitted_levels=real_qc_emitted_levels(resolution),
+        coverage=coverage,
+        nonneuronal_trend=trend,
+        gate=resolution.gate,
+    )
+
+
+# --------------------------------------------------------------------------
 # The sample
 
 
@@ -701,6 +780,7 @@ def resolve_mouse_sample(
     panel_mode: str | None = None,
     validate: bool = True,
     seed: int = 0,
+    paired: bool = False,
 ) -> SampleResolution:
     """Resolve one mouse sample (see the module docstring).
 
@@ -718,6 +798,8 @@ def resolve_mouse_sample(
         panel_mode: The pair's resolved panel mode (panel provenance).
         validate: Check the table with ``schema.validate_label_table``.
         seed: Seed of the diffuse-flag simulation.
+        paired: Whether the pair holds a section of the other platform (the
+            real-data QC's paired concordance; M13b C22).
 
     Returns:
         The sample's resolution.
@@ -1063,7 +1145,28 @@ def resolve_mouse_sample(
         ],
     )
 
-    # 6. The label table (§4.1).
+    # 6. Real-data QC (plan §8.8; M13b C22), warn-only: computed on the
+    # resolution above and recorded, never applied. Gate M is pending (D20
+    # (b)), so no outcome reaches the gate, a status, a flag or trust.
+    qc_result: RealQcResult | None = None
+    if config.real_qc.enabled:
+        from merxen.annotation.real_qc import mouse_real_data_qc
+
+        qc_result = mouse_real_data_qc(
+            mouse_real_qc_signals(
+                loaded,
+                resolution,
+                primary=primary,
+                tables=tables,
+                version_7=version_7,
+                paired=bool(paired),
+                flag_strata=flag_set.strata,
+            ),
+            trust,
+            config,
+        )
+
+    # 7. The label table (§4.1).
     branch = np.where(klass.confident, klass.name, UNASSIGNED_LABEL).astype(object)
     subclass = resolution.levels["subclass"]
     leaf = np.where(subclass.confident, subclass.name, UNRESOLVED_LABEL).astype(object)
@@ -1328,10 +1431,16 @@ def resolve_mouse_sample(
     }
     if version_7.summary is not None:
         sample_summary["resolvability_v7"] = version_7.summary
-    return SampleResolution(
+    result = SampleResolution(
         sample_id=sample_id,
         platform=platform,
         labels=frame,
         provenance=provenance,
         summary=sample_summary,
+        real_qc=qc_result,
+        paired=bool(paired),
     )
+    # The summary's real_qc block and PanelProvenance.real_data_qc; the
+    # mouse gate's records stay its own (``SampleResolution.gate`` unset).
+    record_real_qc(result, enabled=config.real_qc.enabled)
+    return result

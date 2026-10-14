@@ -912,11 +912,12 @@ class AnnotationRealQcConfig(_AnnotationModel):
     """Downgrade-only QC on real in-house datasets (plan §8.8; rev3).
 
     Attributes:
-        enabled: Run the real-data QC in human RESOLVE (M13 C15). ``false``
+        enabled: Run the real-data QC in RESOLVE: human (M13 C15) and mouse
+            (M13b C22, warn-only: the mouse gate's G1-G5 are recorded and no
+            outcome changes the mouse gate, a label or trust). ``false``
             gives the QC-free run that pre-registration NR1 compares with:
             no check runs, nothing is lowered and the summary records the QC
-            as disabled. Mouse RESOLVE does not run it yet: its gate keeps
-            G1-G5 (§7.6), and the mouse wiring follows M6b (M13 C22).
+            as disabled.
         marker_consistency_warn: Marker-referee warning threshold; ``None``
             selects the species default (human 0.75; mouse G2's 0.80).
         marker_consistency_broad_only: Human: below this the dataset becomes
@@ -973,7 +974,9 @@ class AnnotationRealQcConfig(_AnnotationModel):
             only after its acceptance-gate PR into ``main`` (M13 decision D20
             (b), 2026-10-06), so both stay ``pending`` until then. The rev3
             bool is accepted: ``true`` is both ``pending``, ``false`` both
-            ``merged``.
+            ``merged``. Mouse RESOLVE is warn-only for every family whatever
+            the mouse entry says (M13b C22): applying mouse QC effects is
+            not wired.
         registration_g1_effect: What human registration G1's fail rule
             does (§8.8; M0a's guard with §7.6's rules, read from
             ``mouse_gate``): ``gate_failed`` (§8.8's effect: the dataset

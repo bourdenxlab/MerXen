@@ -103,6 +103,16 @@ second pass, ``RealQcResult.replace_check`` scores paired concordance once the
 pair's JSD exists, and ``downgrade_only_violations`` compares a QC-applied
 RESOLVE with a QC-free re-run (pre-registration NR1).
 
+Mouse RESOLVE wires them in M13b chunk C22 (``mouse_resolve``
+``mouse_real_qc_signals``, ``mouse_real_data_qc``), warn-only: the mouse
+gate's G1-G5 are recorded as checks (``gate_outcomes``; in the summary
+``mouse_gate_signal_records``, with G4's MERFISH window and M6b's AP
+estimate that chose it), the checks above run where they apply and are
+``not_applicable`` with a reason where they do not, and every lowering
+outcome becomes a warning (``RealQcResult.with_effects_withheld``): gate M
+is pending (D20 (b)), so no QC outcome changes the mouse gate, a label or
+trust.
+
 This module imports only the standard library, numpy and pandas (and
 ``merxen.annotation.resolvability`` / ``schema`` / ``provenance``, which
 need no more), so it imports in the GPU clustering environment.
@@ -2574,6 +2584,26 @@ _SIGNAL_OUTCOME: Final[dict[str, str]] = {
     "fail": "fail",
     "not_evaluated": "not_evaluable",
 }
+# The mouse gate's signals (§7.6) and the check each records (M13b C22): G1
+# and G2 are §8.8's registration G1 and marker referee; G3-G5 keep the names
+# the gate gives their reasons.
+MOUSE_GATE_SIGNALS: Final[dict[str, str]] = {
+    "g1": "registration_g1",
+    "g2": "marker_consistency",
+    "g3": "g3_implausibility",
+    "g4": "g4_composition",
+    "g5": "g5_spillover",
+}
+# Per mouse gate signal: the prefix of its reasons and notes in the verdict
+# (``mouse_gate.evaluate_mouse_gate``) and its values
+# (``MouseGateSignals.values``).
+_MOUSE_SIGNAL_PARTS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
+    "g1": ("g1_registration", ("g1_density_ratio", "g1_shift_um")),
+    "g2": ("g2_marker_referee", ("g2_marker_consistency",)),
+    "g3": ("g3_implausibility", ("g3_implausible_share",)),
+    "g4": ("g4_composition", ("g4_astro_epen_points", "g4_immune_points")),
+    "g5": ("g5_spillover", ("g5_spillover_rate",)),
+}
 
 
 def gate_outcomes(verdict: Any) -> dict[str, str]:
@@ -2581,9 +2611,11 @@ def gate_outcomes(verdict: Any) -> dict[str, str]:
 
     The dataset gate applies its own effects (§5.4, §7.6); QC only records
     them: ``dataset_gate`` is ``fail`` below ``full``, ``warn`` with the
-    warning flag, else ``pass``. A mouse verdict also gives
-    ``registration_g1`` (G1) and ``marker_consistency`` (G2, the mouse
-    marker referee of §8.8) from its signal statuses.
+    warning flag, else ``pass``. A mouse verdict also gives one outcome per
+    signal from its signal statuses (``MOUSE_GATE_SIGNALS``):
+    ``registration_g1`` (G1), ``marker_consistency`` (G2, the mouse marker
+    referee of §8.8), ``g3_implausibility``, ``g4_composition`` and
+    ``g5_spillover`` (M13b C22).
 
     Args:
         verdict: ``GateVerdict`` or ``MouseGateVerdict`` before QC.
@@ -2599,11 +2631,66 @@ def gate_outcomes(verdict: Any) -> dict[str, str]:
     }
     signal_status = getattr(verdict, "signal_status", None)
     if isinstance(signal_status, Mapping):
-        for signal, check in (("g1", "registration_g1"), ("g2", "marker_consistency")):
+        for signal, check in MOUSE_GATE_SIGNALS.items():
             value = signal_status.get(signal)
             if value is not None:
                 record[check] = _SIGNAL_OUTCOME.get(str(value), "not_evaluable")
     return record
+
+
+def mouse_gate_signal_records(verdict: Any) -> dict[str, dict[str, Any]] | None:
+    """Return the G1-G5 records of a mouse gate verdict (§7.6; M13b C22).
+
+    Per signal: the check it records (``MOUSE_GATE_SIGNALS``), the gate's
+    status and its outcome token (``gate_outcomes``), the signal values and
+    the gate's reasons and notes about it. G4 adds its MERFISH window, where
+    the window came from (``window_source``: ``ap_estimate`` when M6b's AP
+    estimate chose it, ``g4_window_sections`` when the config named it,
+    ``None`` without a window) and the AP estimate itself. The gate applied
+    these signals (§7.6); the records only report them.
+
+    Args:
+        verdict: ``MouseGateVerdict`` (any other verdict, or ``None``, has
+            no signals).
+
+    Returns:
+        Signal (``g1`` ... ``g5``) -> record, or ``None`` for a verdict
+        without signal statuses (the human gate).
+    """
+    status = getattr(verdict, "signal_status", None)
+    if not isinstance(status, Mapping):
+        return None
+    signals = verdict.signals
+    values = signals.values()
+    reasons = [
+        str(reason)
+        for reason in (*verdict.level_reasons, *verdict.warning_reasons, *verdict.notes)
+    ]
+    records: dict[str, dict[str, Any]] = {}
+    for signal, check in MOUSE_GATE_SIGNALS.items():
+        prefix, keys = _MOUSE_SIGNAL_PARTS[signal]
+        token = status.get(signal)
+        record: dict[str, Any] = {
+            "check": check,
+            "status": None if token is None else str(token),
+            "outcome": None
+            if token is None
+            else _SIGNAL_OUTCOME.get(str(token), "not_evaluable"),
+            "values": {key: values.get(key) for key in keys},
+            "reasons": [item for item in reasons if item.startswith(f"{prefix}:")],
+        }
+        if signal == "g4":
+            window = signals.window
+            estimate = signals.ap_estimate
+            record["window"] = None if window is None else window.to_json()
+            record["window_source"] = (
+                None
+                if window is None
+                else ("ap_estimate" if estimate is not None else "g4_window_sections")
+            )
+            record["ap_estimate"] = None if estimate is None else dict(estimate)
+        records[signal] = record
+    return records
 
 
 def qc_to_provenance(
@@ -3613,10 +3700,16 @@ class RealQcResult:
         outcomes: Every outcome, after any warn-only demotion.
         seeded: Whether the family is a seeded ``real_data`` family.
         warn_only: Whether the checks of ``SEEDED_WARN_ONLY_CHECKS`` only
-            warn (a seeded family whose species gate is pending).
+            warn (a seeded family whose species gate is pending), or, with
+            ``effects_withheld``, every check.
         gate: The dataset gate verdict before QC, if given.
         flag_rates: The flag-rate summary, if strata were given.
         tables: Per-check tables (coverage, trend, gene complexity).
+        effects_withheld: Why no QC effect reaches the dataset, whatever the
+            check, family and species gate record (mouse RESOLVE, M13b C22:
+            ``MOUSE_RESOLVE_WARN_ONLY_NOTE``); every lowering outcome is then
+            a warning (``with_effects_withheld``). ``None``: the effects
+            apply as ``real_data_qc`` decides (human RESOLVE).
     """
 
     species: str
@@ -3626,6 +3719,7 @@ class RealQcResult:
     gate: Any = None
     flag_rates: FlagRateSummary | None = None
     tables: Mapping[str, pd.DataFrame] = field(default_factory=dict)
+    effects_withheld: str | None = None
 
     @property
     def effects(self) -> QcEffects:
@@ -3657,6 +3751,8 @@ class RealQcResult:
                 the result records no outcome of ``check``.
         """
         new = _demoted(outcomes, species=self.species, warn_only=self.warn_only)
+        if self.effects_withheld is not None:
+            new = tuple(outcome.warn_only(self.effects_withheld) for outcome in new)
         if not new:
             raise ValueError(f"no outcome given for {check!r}")
         if any(outcome.check != check for outcome in new):
@@ -3673,6 +3769,34 @@ class RealQcResult:
         merged = (*kept[:first], *new, *kept[first:])
         return dataclasses.replace(self, outcomes=merged)
 
+    def with_effects_withheld(self, reason: str) -> RealQcResult:
+        """Return the result with every lowering outcome demoted to a warning.
+
+        Mouse RESOLVE applies no QC effect (M13b C22): each outcome that
+        would lower the dataset becomes a warning prefixed with ``reason``
+        and records the effect it would have had (``QcOutcome.warn_only``),
+        whatever its check; ``warn_only`` is set and ``effects_withheld``
+        records ``reason``. Outcomes a seeded family's demotion already
+        turned into warnings keep their note.
+
+        Args:
+            reason: Why the effects are withheld.
+
+        Returns:
+            The new result.
+
+        Raises:
+            ValueError: If ``reason`` is empty.
+        """
+        if not reason:
+            raise ValueError("withholding the QC effects needs a reason")
+        return dataclasses.replace(
+            self,
+            outcomes=tuple(outcome.warn_only(reason) for outcome in self.outcomes),
+            warn_only=True,
+            effects_withheld=reason,
+        )
+
     def apply_to_gate(self, verdict: GateT) -> GateT:
         """Return ``verdict`` after QC (``apply_qc_to_gate``)."""
         return apply_qc_to_gate(verdict, self.effects)
@@ -3686,9 +3810,14 @@ class RealQcResult:
         return qc_to_provenance(self.outcomes, warn_only=self.warn_only, gate=self.gate)
 
     def summary(self) -> dict[str, Any]:
-        """Return a JSON-safe record (``<pair>_resolve_summary.json``)."""
+        """Return a JSON-safe record (``<pair>_resolve_summary.json``).
+
+        A mouse result adds ``gate_signals`` (the G1-G5 records of its gate,
+        ``mouse_gate_signal_records``) and, with its effects withheld,
+        ``effects_withheld`` (M13b C22); a human record has neither key.
+        """
         provenance = self.provenance()
-        return {
+        record: dict[str, Any] = {
             "version": REAL_QC_VERSION,
             "species": self.species,
             "seeded": self.seeded,
@@ -3702,6 +3831,12 @@ class RealQcResult:
             else self.flag_rates.summary(),
             "promotes": False,
         }
+        signals = mouse_gate_signal_records(self.gate)
+        if signals is not None:
+            record["gate_signals"] = _json_safe(signals)
+        if self.effects_withheld is not None:
+            record["effects_withheld"] = self.effects_withheld
+        return record
 
 
 WARN_ONLY_NOTE: Final = (
@@ -3925,7 +4060,7 @@ def real_data_qc(
     G1, paired concordance, flag rates, gene complexity, the prefilter spot
     check, per-class coverage against simulation, the non-neuronal depth
     trend and the factor re-measure. The dataset gate's own outcomes (and
-    mouse G1 / G2) come from ``signals.gate`` and are recorded, never
+    mouse G1-G5) come from ``signals.gate`` and are recorded, never
     re-applied (``not_evaluable`` without a verdict). On a seeded
     ``real_data`` family whose species gate is pending
     (``seeded_families_warn_only_until_gate``, D20 (b)), the lowering effects
@@ -4040,10 +4175,10 @@ def real_data_qc(
         )
     )
     if signals.gate is None:
-        # The dataset gate records its own outcomes (and mouse G1 / G2):
+        # The dataset gate records its own outcomes (and mouse G1-G5):
         # without its verdict they are recorded, not left out (P4).
         gate_checks = (
-            (DATASET_GATE_CHECK, REGISTRATION_G1_CHECK, MARKER_CONSISTENCY_CHECK)
+            (DATASET_GATE_CHECK, *MOUSE_GATE_SIGNALS.values())
             if species == "mouse"
             else (DATASET_GATE_CHECK,)
         )
@@ -4072,3 +4207,74 @@ def real_data_qc(
         ),
     )
     return result
+
+
+# --------------------------------------------------------------------------
+# Mouse RESOLVE (plan §8.8; M13b chunk C22)
+
+# Why mouse RESOLVE applies no QC effect (M13 decision D20 (b): gate M counts
+# as merged only after its acceptance-gate PR into main).
+MOUSE_RESOLVE_WARN_ONLY_NOTE: Final = (
+    "warn-only in mouse RESOLVE until gate M merges into main (D20 (b); M13b "
+    "C22): no real-data QC effect reaches the mouse gate, the labels or trust"
+)
+# Mouse RESOLVE computes no cross-platform composition in v1, so a mouse pair
+# with a section of each platform has no pair JSD to score (plan §8.5).
+MOUSE_PAIRED_CONCORDANCE_REASON: Final = (
+    "mouse RESOLVE computes no cross-platform composition in v1 (M6 resolves "
+    "single-platform mouse sections): the pair has no soft broad JSD"
+)
+
+
+def mouse_real_data_qc(
+    signals: RealQcSignals,
+    trust: TrustDecision | None,
+    config: AnnotationConfig,
+) -> RealQcResult:
+    """Run the real-data QC of one mouse sample, warn-only (§8.8; M13b C22).
+
+    ``real_data_qc`` on the mouse signals: the mouse gate's G1-G5 are
+    recorded from its verdict (``gate_outcomes``, and in the summary the
+    G1-G5 records of ``mouse_gate_signal_records`` with G4's window and the
+    AP estimate that chose it), the checks ``real_qc`` adds run as for
+    human, and the checks that do not apply to the section are
+    ``not_applicable`` with their reason (an unpaired section's paired
+    concordance; the prefilter spot check of a bundle without a prefilter;
+    the version-7 checks of a version-6 bundle; the factor re-measure of a
+    family without an R3 member). A mouse pair holding both platforms
+    records paired concordance ``not_evaluable``
+    (``MOUSE_PAIRED_CONCORDANCE_REASON``). Then every lowering outcome
+    becomes a warning (``RealQcResult.with_effects_withheld``): gate M is
+    pending (D20 (b)), so nothing here changes the mouse gate, a label or
+    trust, whatever the family and ``seeded_families_warn_only_until_gate``
+    say.
+
+    Args:
+        signals: The sample's inputs (``signals.gate``: the mouse gate
+            verdict).
+        trust: The primary panel's trust decision.
+        config: A mouse annotation config.
+
+    Returns:
+        The QC result, warn-only.
+
+    Raises:
+        ValueError: If ``config`` is not a mouse config.
+    """
+    if config.species != "mouse":
+        raise ValueError(
+            f"mouse_real_data_qc needs a mouse config, got {config.species!r}"
+        )
+    result = real_data_qc(signals, trust, config)
+    if signals.paired:
+        result = result.replace_check(
+            PAIRED_CONCORDANCE_CHECK,
+            [
+                QcOutcome.not_evaluable(
+                    PAIRED_CONCORDANCE_CHECK,
+                    MOUSE_PAIRED_CONCORDANCE_REASON,
+                    effect="withhold_pair_stats",
+                )
+            ],
+        )
+    return result.with_effects_withheld(MOUSE_RESOLVE_WARN_ONLY_NOTE)
