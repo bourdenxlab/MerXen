@@ -312,6 +312,42 @@ def test_map_refuses_region_settings_it_cannot_apply(
     assert not fake_mmc.calls  # all refused before mapping
 
 
+def test_standalone_lookup_takes_the_current_region_share_revision(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """M6b-R review: a revision-2 region-share bundle next to revision 1.
+
+    REGION_SHARE_REVISION enters only that builder's build_hash, so the
+    revision-2 bundle sits next to the revision-1 bundle in a store with the
+    same builder version (the /srv store holds both). A standalone lookup
+    (``merxen annotate --store``) takes the current revision instead of
+    refusing the store as ambiguous; with only revision 1 it still finds it
+    and warns, and MAP's default rule then refuses it.
+    """
+    from merxen.annotation.pipeline import locate_bundle_path
+    from merxen.annotation.reference import REGION_SHARE_REVISION
+    from merxen.annotation.store import ReferenceStore
+
+    root = tmp_path / "store"
+    store = ReferenceStore(root)
+    old = mouse_region_share_bundle(root, build_hash="a" * 64, structure_homes=False)
+    with caplog.at_level(logging.WARNING, logger="merxen.annotation.pipeline"):
+        assert locate_bundle_path(store, "wmb_region_share", None) == old
+    assert f"revision {REGION_SHARE_REVISION}" in caplog.text
+    assert old.name[:16] in caplog.text
+    new = mouse_region_share_bundle(
+        root, build_hash="b" * 64, revision=REGION_SHARE_REVISION
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="merxen.annotation.pipeline"):
+        assert locate_bundle_path(store, "wmb_region_share", None) == new
+    assert not caplog.text
+    # Two bundles of the current revision stay ambiguous.
+    mouse_region_share_bundle(root, build_hash="c" * 64, revision=REGION_SHARE_REVISION)
+    with pytest.raises(MapError, match="2 bundles of wmb_region_share"):
+        locate_bundle_path(store, "wmb_region_share", None)
+
+
 def test_human_map_refuses_mouse_section_regions(
     tmp_path: Path, fake_mmc: FakeMmc
 ) -> None:

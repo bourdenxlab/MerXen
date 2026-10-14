@@ -1054,6 +1054,7 @@ def mouse_region_share_bundle(
     build_hash: str = MOUSE_REGION_SHARE_HASH,
     composition: pd.DataFrame | None = None,
     structure_homes: bool = True,
+    revision: int | None = None,
 ) -> Path:
     """Write a fake ``wmb_region_share`` bundle of ``MOUSE_MERFISH``.
 
@@ -1064,6 +1065,9 @@ def mouse_region_share_bundle(
         structure_homes: Write ``region_structure_home.parquet``
             (``MOUSE_STRUCTURE_HOME``; revision 2 of the builder, which the
             default rule's coupling needs).
+        revision: The builder revision recorded in the hashed builder params
+            (``build_hash_payload.builder_params.revision``), or ``None`` to
+            record none (as a revision-1 bundle, built before it was hashed).
 
     Returns:
         The bundle directory.
@@ -1119,21 +1123,20 @@ def mouse_region_share_bundle(
         {"path": path.name, "size": path.stat().st_size}
         for path in sorted(bundle_dir.iterdir())
     ]
-    (bundle_dir / "bundle.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 2,
-                "status": "complete",
-                "build_hash": build_hash,
-                "reference_id": "wmb_region_share",
-                "species": "mouse",
-                "role": "region_share",
-                "builder_version": 3,
-                "panel": None,
-                "files": files,
-            }
-        )
-    )
+    manifest: dict[str, Any] = {
+        "schema_version": 2,
+        "status": "complete",
+        "build_hash": build_hash,
+        "reference_id": "wmb_region_share",
+        "species": "mouse",
+        "role": "region_share",
+        "builder_version": 3,
+        "panel": None,
+        "files": files,
+    }
+    if revision is not None:
+        manifest["build_hash_payload"] = {"builder_params": {"revision": revision}}
+    (bundle_dir / "bundle.json").write_text(json.dumps(manifest))
     return bundle_dir
 
 

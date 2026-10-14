@@ -147,6 +147,7 @@ from merxen.annotation.provenance import annotation_manifest_filename
 from merxen.annotation.reference import (
     HO_REFERENCE_ID,
     HO_SELF_MAP_TEST_SET_REVISION,
+    REGION_SHARE_REVISION,
     lookup_sha256,
     read_lookup,
 )
@@ -759,6 +760,58 @@ def _prefer_current_resolvability(candidates: list[StoreEntry]) -> list[StoreEnt
     return candidates
 
 
+def _region_share_revision(entry: StoreEntry) -> int:
+    """The ``wmb_region_share`` revision a bundle was built with.
+
+    Read from the hashed build params
+    (``build_hash_payload.builder_params.revision``); a bundle without one
+    predates the revision (revision 1, no structure-level homes).
+    """
+    manifest = json.loads((entry.path / BUNDLE_MANIFEST_NAME).read_text("utf-8"))
+    payload = manifest.get("build_hash_payload") or {}
+    params = payload.get("builder_params") if isinstance(payload, dict) else None
+    value = params.get("revision") if isinstance(params, dict) else None
+    return value if isinstance(value, int) else 1
+
+
+def _prefer_current_region_share(candidates: list[StoreEntry]) -> list[StoreEntry]:
+    """Among ``wmb_region_share`` bundles, keep those of the current revision.
+
+    ``REGION_SHARE_REVISION`` enters only that builder's ``build_hash`` (its
+    params), so a rebuilt bundle sits next to the older one with the same
+    builder version; a standalone run takes the current revision (M6b-R:
+    revision 2 adds the structure-level homes the default rule's coupling
+    reads). When none has it, the older ones are kept and a warning names
+    their revisions: the default mouse region rule refuses them (MAP's
+    ``check_region_shares``) until the bundle is rebuilt. Other references
+    are returned unchanged.
+    """
+    if not candidates or any(
+        entry.reference_id != REGION_SHARE_REFERENCE_ID for entry in candidates
+    ):
+        return candidates
+    revisions = [_region_share_revision(entry) for entry in candidates]
+    current = [
+        entry
+        for entry, revision in zip(candidates, revisions, strict=True)
+        if revision == REGION_SHARE_REVISION
+    ]
+    if current:
+        return current
+    logger.warning(
+        "no %s bundle has the current revision %d (structure-level subclass "
+        "homes, which the default mouse region rule reads); %s: rebuild it with "
+        "merxen annotation-reference-prep",
+        REGION_SHARE_REFERENCE_ID,
+        REGION_SHARE_REVISION,
+        ", ".join(
+            f"{entry.path.name[:16]} has revision {revision}"
+            for entry, revision in zip(candidates, revisions, strict=True)
+        ),
+    )
+    return candidates
+
+
 def locate_bundle_path(
     store: ReferenceStore,
     reference_id: str,
@@ -770,7 +823,9 @@ def locate_bundle_path(
 
     ``locate_bundle`` for bundles MAP does not map onto (the panel-independent
     ``wmb_region_share``): the same choice among the store's complete
-    current-builder bundles.
+    current-builder bundles, and of several ``wmb_region_share`` bundles the
+    ones of the current ``REGION_SHARE_REVISION``
+    (``_prefer_current_region_share``).
 
     Args:
         store: The reference store.
@@ -784,8 +839,10 @@ def locate_bundle_path(
     Raises:
         MapError: If there is none, or several.
     """
-    candidates = _prefer_current_resolvability(
-        _current_bundles(store, reference_id, panel_hash, config)
+    candidates = _prefer_current_region_share(
+        _prefer_current_resolvability(
+            _current_bundles(store, reference_id, panel_hash, config)
+        )
     )
     if not candidates:
         raise MapError(
