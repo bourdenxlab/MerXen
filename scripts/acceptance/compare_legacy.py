@@ -35,10 +35,14 @@ Three subcommands, all read-only on the results they compare:
     crosswalk and the H10 inputs (cells both labellings place in the E1
     referee's 7 classes, and the disputes among them), plus the id sets.
 
+Pairs are named by their aliases (HD1-HD4; docs/local-configuration.md):
+``manifest`` roots and ``compare --pairs`` take aliases or the pair ids the
+data use, and are read and written under the data's ids (``data_id``).
+
 Usage::
 
     python scripts/acceptance/compare_legacy.py manifest --results-root <R> \\
-        --out before.tsv P7513 P1212 P7113 P5011
+        --out before.tsv HD1 HD2 HD3 HD4
     python scripts/acceptance/compare_legacy.py untouched --before before.tsv \\
         --after after.tsv --out <dir>
     python scripts/acceptance/compare_legacy.py compare --results-root <R> \\
@@ -64,6 +68,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+
+from merxen.privacy import to_alias, to_real
 
 logger = logging.getLogger("compare_legacy")
 
@@ -527,9 +533,21 @@ def compare_dataset(
 # CLI
 
 
+def data_id(value: str) -> str:
+    """Return a pair (or a root under the results root) as the data name it.
+
+    Aliases and the data's ids are both accepted: ``privacy.to_alias``, then
+    ``privacy.to_real`` (the samplesheet pair id).
+    """
+    return to_real(to_alias(value))
+
+
 def _manifest_command(args: argparse.Namespace) -> int:
     counts = write_manifest(
-        args.results_root, args.roots, args.out, workers=args.workers
+        args.results_root,
+        [data_id(root) for root in args.roots],
+        args.out,
+        workers=args.workers,
     )
     print(f"{args.out}: {counts['entries']} entries, {counts['hashed']} hashed")
     return 0
@@ -567,7 +585,7 @@ def _compare_command(args: argparse.Namespace) -> int:
     outputs: dict[str, list[dict[str, Any]]] = defaultdict(list)
     missing: list[str] = []
     for pair, segmentation, platform in _iter_datasets(
-        [p for p in args.pairs.split(",") if p],
+        [data_id(p) for p in args.pairs.split(",") if p],
         [s for s in args.segmentations.split(",") if s],
     ):
         sample = f"{pair}_{platform}"
@@ -634,7 +652,11 @@ def main(argv: list[str] | None = None) -> int:
     manifest.add_argument("--results-root", type=Path, required=True)
     manifest.add_argument("--out", type=Path, required=True)
     manifest.add_argument("--workers", type=int, default=4)
-    manifest.add_argument("roots", nargs="+", help="paths under the results root")
+    manifest.add_argument(
+        "roots",
+        nargs="+",
+        help="paths under the results root (a pair by alias or id)",
+    )
     untouched = commands.add_parser("untouched", help="H13: legacy tables untouched")
     untouched.add_argument("--before", type=Path, required=True)
     untouched.add_argument("--after", type=Path, required=True)
@@ -645,7 +667,9 @@ def main(argv: list[str] | None = None) -> int:
     compare.add_argument("--mapfirst-root", type=Path, required=True)
     compare.add_argument("--out", type=Path, required=True)
     compare.add_argument("--clustering-dir", default="clustering_squidpy_m8")
-    compare.add_argument("--pairs", default="P7513,P1212,P7113,P5011")
+    compare.add_argument(
+        "--pairs", default="HD1,HD2,HD3,HD4", help="pair aliases or ids"
+    )
     compare.add_argument("--segmentations", default=",".join(SEGMENTATIONS))
     args = parser.parse_args(argv)
     logging.basicConfig(

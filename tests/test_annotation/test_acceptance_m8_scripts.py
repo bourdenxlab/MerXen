@@ -16,8 +16,29 @@ import pandas as pd
 import pytest
 from scipy import sparse
 
+from merxen import privacy
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO_ROOT / "scripts" / "acceptance"
+# Invented pair ids of an alias table written for a test (never real ones).
+INVENTED_PAIRS = {"HD1": "Q0101", "HD2": "Q0202", "HD3": "Q0303", "HD4": "Q0404"}
+
+
+def _alias_table(
+    path: Path, monkeypatch: pytest.MonkeyPatch, pairs: dict[str, str]
+) -> None:
+    """Enable an alias table of ``pairs`` (alias -> pair id) for one test."""
+    path.write_text(
+        "".join(
+            f"{alias}\thuman_paired_donor\tpair_id\ttoken\t{real}\n"
+            for alias, real in pairs.items()
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(privacy.ALIAS_FILE_VAR, str(path))
+    privacy.clear_cache()
+
+
 SET_A = "ffc6dd2d96e2a6cce6f37fe95754ba6e057aa412da7df2e0688ad921395739c6"
 SEAAD = "dc3c500f2ed8e5f43ec2900a43ef5214957eea095694b2d9e6d8886868f5c240"
 
@@ -116,9 +137,9 @@ LEGACY_BROAD = np.array(
 
 def _referee_sample(referee: ModuleType) -> Any:
     return referee.RefereeSample(
-        pair="P7513",
+        pair="HD1",
         segmentation="proseg_hybrid",
-        sample_id="P7513_MERSCOPE",
+        sample_id="HD1_MERSCOPE",
         platform="MERSCOPE",
         labels=_referee_labels(),
         counts=_referee_counts(),
@@ -202,12 +223,12 @@ def test_check_against_lists_every_difference(referee: ModuleType) -> None:
     other.loc[0, "first_wins"] = 0.5
     problems = referee.check_against([row], other)
     assert len(problems) == 1 and "first_wins" in problems[0]
-    extra = pd.concat([same, same.assign(sample_id="P7513_XENIUM")])
+    extra = pd.concat([same, same.assign(sample_id="HD1_XENIUM")])
     assert any(
         "only in the criteria" in item for item in referee.check_against([row], extra)
     )
     assert referee.check_against([row], same.assign(first="WHB argmax")) == [
-        "('proseg_hybrid', 'P7513_MERSCOPE'): not in the criteria referee.csv"
+        "('proseg_hybrid', 'HD1_MERSCOPE'): not in the criteria referee.csv"
     ]
 
 
@@ -222,9 +243,9 @@ def test_load_referee_sample_aligns_the_h5ad_to_the_table_cells(
     referee: ModuleType, tmp_path: Path
 ) -> None:
     labels = _referee_labels()
-    resolve_dir = tmp_path / "resolve" / "P7513" / "proseg_hybrid"
+    resolve_dir = tmp_path / "resolve" / "HD1" / "proseg_hybrid"
     _write_labels(
-        resolve_dir / "merscope" / "P7513_MERSCOPE_celltype_labels.parquet",
+        resolve_dir / "merscope" / "HD1_MERSCOPE_celltype_labels.parquet",
         labels,
         [True, True, True, True, True, False],
     )
@@ -240,20 +261,18 @@ def test_load_referee_sample_aligns_the_h5ad_to_the_table_cells(
     adata.layers["counts"] = sparse.csr_matrix(counts)
     h5ad = (
         tmp_path
-        / "results/P7513/proseg_hybrid/clustering_squidpy"
+        / "results/HD1/proseg_hybrid/clustering_squidpy"
         / "clustering_squidpy_out/merscope"
     )
     h5ad.mkdir(parents=True)
-    adata.write_h5ad(h5ad / "P7513_MERSCOPE_clustered.h5ad")
+    adata.write_h5ad(h5ad / "HD1_MERSCOPE_clustered.h5ad")
     summary = {
         "samples": {
-            "P7513_MERSCOPE": {
-                "labels": "merscope/P7513_MERSCOPE_celltype_labels.parquet"
-            }
+            "HD1_MERSCOPE": {"labels": "merscope/HD1_MERSCOPE_celltype_labels.parquet"}
         }
     }
     sample = referee.load_referee_sample(
-        resolve_dir, tmp_path / "results", summary, "P7513", "proseg_hybrid", "MERSCOPE"
+        resolve_dir, tmp_path / "results", summary, "HD1", "proseg_hybrid", "MERSCOPE"
     )
     assert list(sample.labels.index) == ["c0", "c1", "c2", "c3", "c4"]
     np.testing.assert_array_equal(
@@ -274,7 +293,7 @@ def test_marker_referee_help_runs(referee: ModuleType) -> None:
 
 def _tree(root: Path) -> Path:
     results = root / "results"
-    store = results / "P7513" / "merscope" / "latest" / "latest_spatialdata.zarr"
+    store = results / "HD1" / "merscope" / "latest" / "latest_spatialdata.zarr"
     for table in (
         "table_MOSAIK_proseg_hybrid",
         "table_MOSAIK_proseg_hybrid_clustering_squidpy",
@@ -285,13 +304,13 @@ def _tree(root: Path) -> Path:
     (store / "zarr.json").write_text('{"root": 1}')
     (store / "points").mkdir()
     (store / "points" / "p0").write_bytes(b"points")
-    clustered = results / "P7513" / "proseg_hybrid" / "clustering_squidpy" / "out"
+    clustered = results / "HD1" / "proseg_hybrid" / "clustering_squidpy" / "out"
     clustered.mkdir(parents=True)
-    (clustered / "P7513_MERSCOPE_clustered.h5ad").write_bytes(b"h5ad")
-    mender = results / "P7513" / "proseg_hybrid" / "mender" / "mender_out"
+    (clustered / "HD1_MERSCOPE_clustered.h5ad").write_bytes(b"h5ad")
+    mender = results / "HD1" / "proseg_hybrid" / "mender" / "mender_out"
     mender.mkdir(parents=True)
     (mender / "m.h5ad").write_bytes(b"mender")
-    other = results / "P7513" / "proseg_hybrid" / "visualization"
+    other = results / "HD1" / "proseg_hybrid" / "visualization"
     other.mkdir(parents=True)
     (other / "plot.png").write_bytes(b"png")
     os.symlink("plot.png", other / "link.png")
@@ -299,17 +318,17 @@ def _tree(root: Path) -> Path:
 
 
 def test_needs_hash_selects_tables_legacy_outputs_and_depth(legacy: ModuleType) -> None:
-    zarr = "P7513/merscope/latest/latest_spatialdata.zarr"
+    zarr = "HD1/merscope/latest/latest_spatialdata.zarr"
     assert legacy.needs_hash(f"{zarr}/tables/t/obs/c0")
     assert legacy.needs_hash(f"{zarr}/zarr.json")
     assert not legacy.needs_hash(f"{zarr}/points/p0")
-    assert legacy.needs_hash("P7513/reseg/clustering_squidpy/out/x.h5ad")
-    assert legacy.needs_hash("P7513/proseg_hybrid/mender_mapfirst/mender_out/x")
-    assert legacy.needs_hash("P7513/proseg_hybrid/annotation_map/annotation_map_out/m")
-    assert legacy.needs_hash("P7513/xenium/compute_cortical_depth/out/q.json")
+    assert legacy.needs_hash("HD1/reseg/clustering_squidpy/out/x.h5ad")
+    assert legacy.needs_hash("HD1/proseg_hybrid/mender_mapfirst/mender_out/x")
+    assert legacy.needs_hash("HD1/proseg_hybrid/annotation_map/annotation_map_out/m")
+    assert legacy.needs_hash("HD1/xenium/compute_cortical_depth/out/q.json")
     assert legacy.needs_hash("acceptance/2026-10-01/runs/x")
-    assert not legacy.needs_hash("P7513/proseg_hybrid/visualization/plot.png")
-    assert not legacy.needs_hash("P7513/xenium/segmentation/s.parquet")
+    assert not legacy.needs_hash("HD1/proseg_hybrid/visualization/plot.png")
+    assert not legacy.needs_hash("HD1/xenium/segmentation/s.parquet")
 
 
 def test_manifest_records_entries_hashes_and_links(
@@ -317,45 +336,45 @@ def test_manifest_records_entries_hashes_and_links(
 ) -> None:
     results = _tree(tmp_path)
     out = tmp_path / "m.tsv"
-    counts = legacy.write_manifest(results, ["P7513", "acceptance"], out, workers=1)
+    counts = legacy.write_manifest(results, ["HD1", "acceptance"], out, workers=1)
     rows = legacy.load_manifest(out)
     assert counts["entries"] == len(rows)
     table_file = (
-        "P7513/merscope/latest/latest_spatialdata.zarr/tables/"
+        "HD1/merscope/latest/latest_spatialdata.zarr/tables/"
         "table_MOSAIK_proseg_hybrid/obs/c0"
     )
     assert rows[table_file]["sha256"] == legacy.file_sha256(str(results / table_file))
     assert (
-        rows["P7513/merscope/latest/latest_spatialdata.zarr/points/p0"]["sha256"] == "-"
+        rows["HD1/merscope/latest/latest_spatialdata.zarr/points/p0"]["sha256"] == "-"
     )
-    link = rows["P7513/proseg_hybrid/visualization/link.png"]
+    link = rows["HD1/proseg_hybrid/visualization/link.png"]
     assert link["type"] == "l" and link["link_target"] == "plot.png"
-    assert rows["P7513"]["type"] == "d"
+    assert rows["HD1"]["type"] == "d"
     assert "acceptance" not in rows  # an absent root adds nothing
 
 
 def _after_run(results: Path) -> None:
     """What the acceptance run may do: a new _m8 table, the root, new publish dirs."""
-    store = results / "P7513" / "merscope" / "latest" / "latest_spatialdata.zarr"
+    store = results / "HD1" / "merscope" / "latest" / "latest_spatialdata.zarr"
     new = store / "tables" / "table_MOSAIK_proseg_hybrid_clustering_squidpy_m8"
     (new / "obs").mkdir(parents=True)
     (new / "obs" / "c0").write_bytes(b"new")
     (store / "zarr.json").write_text('{"root": 2, "consolidated": true}')
-    runs = results / "acceptance" / "2026-10-01" / "runs" / "P7513"
+    runs = results / "acceptance" / "2026-10-01" / "runs" / "HD1"
     runs.mkdir(parents=True)
     (runs / "summary.json").write_text("{}")
-    (results / "P7513" / "merscope" / "latest" / "lock").write_text("")
+    (results / "HD1" / "merscope" / "latest" / "lock").write_text("")
 
 
 def _manifests(legacy: ModuleType, tmp_path: Path, change: Any = None) -> tuple:
     results = _tree(tmp_path)
     before = tmp_path / "before.tsv"
     after = tmp_path / "after.tsv"
-    legacy.write_manifest(results, ["P7513", "acceptance"], before, workers=1)
+    legacy.write_manifest(results, ["HD1", "acceptance"], before, workers=1)
     _after_run(results)
     if change is not None:
         change(results)
-    legacy.write_manifest(results, ["P7513", "acceptance"], after, workers=1)
+    legacy.write_manifest(results, ["HD1", "acceptance"], after, workers=1)
     return legacy.load_manifest(before), legacy.load_manifest(after)
 
 
@@ -389,21 +408,21 @@ def _same_size_rewrite(path: Path, content: bytes) -> None:
         (
             lambda r: _same_size_rewrite(
                 r
-                / "P7513/merscope/latest/latest_spatialdata.zarr/tables"
+                / "HD1/merscope/latest/latest_spatialdata.zarr/tables"
                 / "table_MOSAIK_proseg_hybrid_clustering_squidpy/obs/c0",
                 b"abce",
             ),
             "tables/table_MOSAIK_proseg_hybrid_clustering_squidpy",
         ),
         (
-            lambda r: (r / "P7513/proseg_hybrid/mender/mender_out/m.h5ad").unlink(),
-            "P7513/proseg_hybrid/mender",
+            lambda r: (r / "HD1/proseg_hybrid/mender/mender_out/m.h5ad").unlink(),
+            "HD1/proseg_hybrid/mender",
         ),
         (
             lambda r: (
-                r / "P7513/proseg_hybrid/clustering_squidpy/out/extra.h5ad"
+                r / "HD1/proseg_hybrid/clustering_squidpy/out/extra.h5ad"
             ).write_bytes(b"x"),
-            "P7513/proseg_hybrid/clustering_squidpy",
+            "HD1/proseg_hybrid/clustering_squidpy",
         ),
     ],
 )
@@ -420,7 +439,7 @@ def test_untouched_needs_the_sha256_of_legacy_files(
     legacy: ModuleType, tmp_path: Path
 ) -> None:
     before, after = _manifests(legacy, tmp_path)
-    key = "P7513/proseg_hybrid/clustering_squidpy/out/P7513_MERSCOPE_clustered.h5ad"
+    key = "HD1/proseg_hybrid/clustering_squidpy/out/HD1_MERSCOPE_clustered.h5ad"
     before[key] = {**before[key], "sha256": "-"}
     after[key] = {**after[key], "sha256": "-"}
     _, summary = legacy.check_untouched(before, after)
@@ -429,9 +448,9 @@ def test_untouched_needs_the_sha256_of_legacy_files(
 
 def test_untouched_fails_without_any_legacy_table(legacy: ModuleType) -> None:
     rows = {
-        "P7513/proseg_hybrid/visualization/plot.png": {
+        "HD1/proseg_hybrid/visualization/plot.png": {
             "type": "f",
-            "path": "P7513/proseg_hybrid/visualization/plot.png",
+            "path": "HD1/proseg_hybrid/visualization/plot.png",
             "size": "3",
             "mtime_ns": "1",
             "sha256": "-",
@@ -493,9 +512,9 @@ def test_compare_dataset_counts_disputes_crosswalk_and_ids(
         tmp_path / "mapfirst.h5ad",
         tmp_path / "labels.parquet",
         {
-            "pair": "P7513",
+            "pair": "HD1",
             "segmentation": "proseg_hybrid",
-            "sample_id": "P7513_MERSCOPE",
+            "sample_id": "HD1_MERSCOPE",
         },
     )
     h10 = out["h10_inputs"][0]
@@ -515,6 +534,39 @@ def test_compare_dataset_counts_disputes_crosswalk_and_ids(
     assert ids["mapfirst_equals_label_table"] and not ids["legacy_equals_mapfirst"]
     shares = {(row["source"], row["class"]): row["share"] for row in out["composition"]}
     assert shares[("new_confident", "not labelled")] == pytest.approx(0.25)
+
+
+def test_compare_legacy_reads_pairs_by_alias_or_data_id(
+    legacy: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _alias_table(tmp_path / "aliases.tsv", monkeypatch, INVENTED_PAIRS)
+    assert legacy.data_id("HD1") == "Q0101"
+    assert legacy.data_id("Q0202") == "Q0202"
+    assert legacy.data_id("HD3/proseg_hybrid") == "Q0303/proseg_hybrid"
+    assert legacy.data_id("acceptance") == "acceptance"
+    out = tmp_path / "out"
+    assert (
+        legacy.main(
+            [
+                "compare",
+                "--results-root",
+                str(tmp_path),
+                "--mapfirst-root",
+                str(tmp_path),
+                "--out",
+                str(out),
+                "--segmentations",
+                "proseg_hybrid",
+            ]
+        )
+        == 0
+    )
+    record = json.loads((out / "compare_legacy_run.json").read_text())
+    missing = record["missing_inputs"]
+    assert len(missing) == 4 * 2 * 3  # legacy, map_first, labels per dataset
+    assert {Path(path).relative_to(tmp_path).parts[0] for path in missing} == set(
+        INVENTED_PAIRS.values()
+    )
 
 
 def test_compare_legacy_help_runs(legacy: ModuleType) -> None:
@@ -583,12 +635,12 @@ def _task(
 def test_load_trace_keeps_a_computed_record_over_a_cached_one(
     acceptance: ModuleType, tmp_path: Path
 ) -> None:
-    first = _trace(tmp_path / "a.tsv", [_task("ANNOTATE_PANEL", "P7513:reseg", "10s")])
+    first = _trace(tmp_path / "a.tsv", [_task("ANNOTATE_PANEL", "HD1:reseg", "10s")])
     second = _trace(
         tmp_path / "b.tsv",
         [
-            _task("ANNOTATE_PANEL", "P7513:reseg", "0ms", status="CACHED"),
-            _task("CLUSTERING_SQUIDPY_ANNOTATE_MAP", "P7513:reseg", "1m"),
+            _task("ANNOTATE_PANEL", "HD1:reseg", "0ms", status="CACHED"),
+            _task("CLUSTERING_SQUIDPY_ANNOTATE_MAP", "HD1:reseg", "1m"),
         ],
     )
     trace = acceptance.load_trace([first, second])
@@ -607,7 +659,7 @@ def _h14_trace(
     segs: tuple = ("proseg_hybrid", "reseg", "proseg_mask", "original_seg"),
 ) -> pd.DataFrame:
     rows = []
-    for pair in ("P7513", "P7113"):
+    for pair in ("HD1", "HD3"):
         for seg in segs:
             tag = f"{pair}:{seg}"
             rows.append(_task("ANNOTATE_PANEL", tag, "1m"))
@@ -624,27 +676,27 @@ def test_h14_sums_the_annotation_wall_over_all_segmentations(
     rows = {
         (row.criterion, row.pair): row
         for row in acceptance.h14_rows(
-            trace, ["P7513", "P7113"], acceptance.SEGMENTATIONS, []
+            trace, ["HD1", "HD3"], acceptance.SEGMENTATIONS, []
         )
     }
-    wall = rows[("H14/annotation_wall", "P7513")]
+    wall = rows[("H14/annotation_wall", "HD1")]
     assert wall.value == pytest.approx(4 * 33 / 60)  # COMPUTE_CPU is not annotation
     assert wall.passes is True and wall.scored is True
-    assert rows[("H14/annotation_wall", "P7113")].scored is False
-    assert rows[("H14/map_peak_rss", "P7513")].value == pytest.approx(10.0)
+    assert rows[("H14/annotation_wall", "HD3")].scored is False
+    assert rows[("H14/map_peak_rss", "HD1")].value == pytest.approx(10.0)
 
 
 def test_h14_fails_above_the_limits_and_needs_every_segmentation(
     acceptance: ModuleType, tmp_path: Path
 ) -> None:
     trace = _h14_trace(acceptance, tmp_path, map_rss="17 GB")
-    rows = acceptance.h14_rows(trace, ["P7513"], acceptance.SEGMENTATIONS, [])
+    rows = acceptance.h14_rows(trace, ["HD1"], acceptance.SEGMENTATIONS, [])
     peak = next(row for row in rows if row.criterion == "H14/map_peak_rss")
     assert peak.passes is False and peak.verdict == "FAIL-OUTSIDE"
     short = _h14_trace(acceptance, tmp_path, segs=("proseg_hybrid", "reseg"))
     wall = next(
         row
-        for row in acceptance.h14_rows(short, ["P7513"], acceptance.SEGMENTATIONS, [])
+        for row in acceptance.h14_rows(short, ["HD1"], acceptance.SEGMENTATIONS, [])
         if row.criterion == "H14/annotation_wall"
     )
     assert wall.passes is None and wall.verdict == "NOT_AVAILABLE"
@@ -654,7 +706,7 @@ def test_h14_fails_above_the_limits_and_needs_every_segmentation(
             _trace(
                 tmp_path / "long.tsv",
                 [
-                    _task("CLUSTERING_SQUIDPY_ANNOTATE_MAP", f"P7513:{seg}", "40m")
+                    _task("CLUSTERING_SQUIDPY_ANNOTATE_MAP", f"HD1:{seg}", "40m")
                     for seg in acceptance.SEGMENTATIONS
                 ],
             )
@@ -662,7 +714,7 @@ def test_h14_fails_above_the_limits_and_needs_every_segmentation(
     )
     wall = next(
         row
-        for row in acceptance.h14_rows(long, ["P7513"], acceptance.SEGMENTATIONS, [])
+        for row in acceptance.h14_rows(long, ["HD1"], acceptance.SEGMENTATIONS, [])
         if row.criterion == "H14/annotation_wall"
     )
     assert wall.value == pytest.approx(160 / 60) and wall.passes is False
@@ -687,7 +739,7 @@ def test_h14_prep_rows_use_each_bundles_build_time_and_check_gpus(
     quoted = tmp_path / "w3"
     quoted.mkdir()
     (quoted / ".command.run").write_text('export CUDA_VISIBLE_DEVICES=""\n')
-    rows.append(_task("ANNOTATION_REPORT", "P7513:reseg", "30s", workdir=str(quoted)))
+    rows.append(_task("ANNOTATION_REPORT", "HD1:reseg", "30s", workdir=str(quoted)))
     trace = acceptance.load_trace([_trace(tmp_path / "t1.tsv", rows)])
     out = acceptance.h14_rows(trace, [], acceptance.SEGMENTATIONS, bundles)
     prep = [row for row in out if row.criterion == "H14/prep_wall"]
@@ -695,7 +747,7 @@ def test_h14_prep_rows_use_each_bundles_build_time_and_check_gpus(
     gpu = next(row for row in out if row.criterion == "H14/no_gpu")
     assert gpu.passes is True and "CUDA hidden in 2 of 2" in gpu.note
     rows.append(
-        _task("CLUSTERING_SQUIDPY_COMPUTE", "P7513:reseg", "1m", workdir=str(exposed))
+        _task("CLUSTERING_SQUIDPY_COMPUTE", "HD1:reseg", "1m", workdir=str(exposed))
     )
     trace = acceptance.load_trace([_trace(tmp_path / "t2.tsv", rows)])
     gpu = next(
@@ -777,7 +829,7 @@ def test_p5_accepts_a_logged_reuse_and_checks_every_map_run(
         json.dumps(
             {
                 "samples": {
-                    "P7513_MERSCOPE": {
+                    "HD1_MERSCOPE": {
                         "runs": {
                             "whb": {"build_hash": SET_A},
                             "seaad": {"build_hash": SEAAD},
@@ -791,7 +843,7 @@ def test_p5_accepts_a_logged_reuse_and_checks_every_map_run(
         refs,
         start,
         reuse_logged={SET_A: True},
-        map_manifests={("P7513", "reseg"): manifest},
+        map_manifests={("HD1", "reseg"): manifest},
     )
     assert not check.ok and "seaad" in check.reasons[0]
     assert acceptance.check_prep_bundles([], start).ok is False
@@ -808,23 +860,23 @@ def test_p5_checks_the_second_policys_map_runs(
     acceptance: ModuleType, tmp_path: Path
 ) -> None:
     runs = tmp_path / "runs"
-    main = runs / acceptance.MAP_MANIFEST_PATH.format(pair="P7513", seg="proseg_hybrid")
-    state = runs / acceptance.STATE_MAP_MANIFEST_PATH.format(pair="P7513")
+    main = runs / acceptance.MAP_MANIFEST_PATH.format(pair="HD1", seg="proseg_hybrid")
+    state = runs / acceptance.STATE_MAP_MANIFEST_PATH.format(pair="HD1")
     for path, build_hash in ((main, SET_A), (state, "b" * 64)):
         path.parent.mkdir(parents=True)
         path.write_text(
             json.dumps(
                 {
                     "samples": {
-                        "P7513_MERSCOPE": {"runs": {"whb": {"build_hash": build_hash}}}
+                        "HD1_MERSCOPE": {"runs": {"whb": {"build_hash": build_hash}}}
                     }
                 }
             )
         )
-    found = acceptance.map_manifests(runs, ["P7513"], ["proseg_hybrid", "reseg"])
+    found = acceptance.map_manifests(runs, ["HD1"], ["proseg_hybrid", "reseg"])
     assert found == {
-        ("P7513", "proseg_hybrid"): main,
-        ("P7513", "proseg_hybrid/mender_state_policy"): state,
+        ("HD1", "proseg_hybrid"): main,
+        ("HD1", "proseg_hybrid/mender_state_policy"): state,
     }
     refs = [_bundle(tmp_path, SET_A, "2026-09-30T10:52:48+00:00")]
     check = acceptance.check_prep_bundles(
@@ -865,35 +917,35 @@ def _criteria_table() -> pd.DataFrame:
 
     return pd.DataFrame(
         [
-            row("H1", "proseg_hybrid", "P7513", 0.129, 0.17, "<=", True, True),
+            row("H1", "proseg_hybrid", "HD1", 0.129, 0.17, "<=", True, True),
             row(
                 "H2",
                 "proseg_hybrid",
-                "P5011_MERSCOPE",
+                "HD4_MERSCOPE",
                 0.01018,
                 0.01,
                 "<=",
                 False,
                 True,
             ),
-            row("H2", "proseg_hybrid", "P7513_MERSCOPE", 0.02, 0.01, "<=", False, True),
-            row("H17/H2", "reseg", "P1212_MERSCOPE", 0.01036, 0.01, "<=", False, True),
+            row("H2", "proseg_hybrid", "HD1_MERSCOPE", 0.02, 0.01, "<=", False, True),
+            row("H17/H2", "reseg", "HD2_MERSCOPE", 0.01036, 0.01, "<=", False, True),
             row(
                 "H8/warning",
                 "proseg_hybrid",
-                "P1212_MERSCOPE",
+                "HD2_MERSCOPE",
                 0.1482,
                 None,
                 "==",
                 False,
                 True,
             ),
-            row("H8", "proseg_hybrid", "P1212_MERSCOPE", None, None, "==", True, True),
-            row("H4", "proseg_hybrid", "P1212_MERSCOPE", 4.0, 6.0, ">=", False, True),
+            row("H8", "proseg_hybrid", "HD2_MERSCOPE", None, None, "==", True, True),
+            row("H4", "proseg_hybrid", "HD2_MERSCOPE", 4.0, 6.0, ">=", False, True),
             row(
                 "H4[m4_resolve_heldout]",
                 "proseg_hybrid",
-                "P1212_MERSCOPE",
+                "HD2_MERSCOPE",
                 5.0,
                 6.0,
                 ">=",
@@ -903,7 +955,7 @@ def _criteria_table() -> pd.DataFrame:
             row(
                 "H5",
                 "proseg_hybrid",
-                "P7513_MERSCOPE",
+                "HD1_MERSCOPE",
                 0.0,
                 0.02,
                 "<=",
@@ -914,7 +966,7 @@ def _criteria_table() -> pd.DataFrame:
             row(
                 "H5",
                 "proseg_hybrid",
-                "P7513_MERSCOPE",
+                "HD1_MERSCOPE",
                 0.0101,
                 0.10,
                 "<=",
@@ -925,7 +977,7 @@ def _criteria_table() -> pd.DataFrame:
             row(
                 "H10",
                 "proseg_hybrid",
-                "P7513_MERSCOPE",
+                "HD1_MERSCOPE",
                 0.991,
                 0.70,
                 ">=",
@@ -933,7 +985,7 @@ def _criteria_table() -> pd.DataFrame:
                 True,
                 "48854 disputes",
             ),
-            row("H7", "proseg_hybrid", "P7113_XENIUM", 0.30, 0.39, ">=", False, False),
+            row("H7", "proseg_hybrid", "HD3_XENIUM", 0.30, 0.39, ">=", False, False),
         ]
     )
 
@@ -943,13 +995,13 @@ def _samples() -> pd.DataFrame:
         [
             {
                 "segmentation": "proseg_hybrid",
-                "sample_id": "P1212_MERSCOPE",
+                "sample_id": "HD2_MERSCOPE",
                 "gate_level": "broad_only",
                 "gate_warning": True,
             },
             {
                 "segmentation": "proseg_hybrid",
-                "sample_id": "P5011_MERSCOPE",
+                "sample_id": "HD4_MERSCOPE",
                 "gate_level": "broad_only",
                 "gate_warning": True,
             },
@@ -962,14 +1014,14 @@ def _h2() -> pd.DataFrame:
         [
             {
                 "segmentation": "proseg_hybrid",
-                "sample_id": "P5011_MERSCOPE",
+                "sample_id": "HD4_MERSCOPE",
                 "node": "all",
                 "n_broad_confident": 0,
                 "n_supercluster_confident": 0,
             },
             {
                 "segmentation": "reseg",
-                "sample_id": "P1212_MERSCOPE",
+                "sample_id": "HD2_MERSCOPE",
                 "node": "all",
                 "n_broad_confident": 2,
                 "n_supercluster_confident": 0,
@@ -992,7 +1044,7 @@ def _enrichment(ceiling_gap: float = 0.001) -> pd.DataFrame:
         rows.append(
             {
                 "label_set": "m4_resolve_heldout_whb_only",
-                "pair": "P1212",
+                "pair": "HD2",
                 "platform": "MERSCOPE",
                 "broad_class": cls,
                 "fold": 8.0,
@@ -1053,22 +1105,22 @@ def test_criteria_rows_apply_the_exceptions_only_inside_their_scope(
     acceptance: ModuleType,
 ) -> None:
     rows = _scored(acceptance)
-    assert _get(rows, "H1", "P7513").verdict == "PASS"
-    assert _get(rows, "H2", "P5011_MERSCOPE").verdict == "EXCEPTION (D5)"
-    assert _get(rows, "H2", "P7513_MERSCOPE").verdict == "FAIL-OUTSIDE"
+    assert _get(rows, "H1", "HD1").verdict == "PASS"
+    assert _get(rows, "H2", "HD4_MERSCOPE").verdict == "EXCEPTION (D5)"
+    assert _get(rows, "H2", "HD1_MERSCOPE").verdict == "FAIL-OUTSIDE"
     # D5 text: no flagged cell with a confident broad label; 2 here
-    reseg = _get(rows, "H17/H2", "P1212_MERSCOPE", "reseg")
+    reseg = _get(rows, "H17/H2", "HD2_MERSCOPE", "reseg")
     assert (
         reseg.verdict == "EXCEPTION-RECHECK (D5)"
         and "confident broad" in reseg.scope_check
     )
-    assert _get(rows, "H8/warning", "P1212_MERSCOPE").verdict == "EXCEPTION (D3)"
-    assert _get(rows, "H4", "P1212_MERSCOPE").verdict == "EXCEPTION (D7)"
-    reported = _get(rows, "H4[m4_resolve_heldout]", "P1212_MERSCOPE")
+    assert _get(rows, "H8/warning", "HD2_MERSCOPE").verdict == "EXCEPTION (D3)"
+    assert _get(rows, "H4", "HD2_MERSCOPE").verdict == "EXCEPTION (D7)"
+    reported = _get(rows, "H4[m4_resolve_heldout]", "HD2_MERSCOPE")
     assert reported.scored is False and reported.verdict == "INFO fail"
-    assert _get(rows, "H7", "P7113_XENIUM").verdict == "INFO fail"
+    assert _get(rows, "H7", "HD3_XENIUM").verdict == "INFO fail"
     moved = _scored(acceptance, enrichment=_enrichment(ceiling_gap=0.05))
-    assert _get(moved, "H4", "P1212_MERSCOPE").verdict == "EXCEPTION-RECHECK (D7)"
+    assert _get(moved, "H4", "HD2_MERSCOPE").verdict == "EXCEPTION-RECHECK (D7)"
     assert all(
         not acceptance.back_to_user(row)
         or row.verdict.startswith(("FAIL-OUTSIDE", "EXCEPTION-RECHECK"))
@@ -1076,9 +1128,65 @@ def test_criteria_rows_apply_the_exceptions_only_inside_their_scope(
     )
 
 
+def _as_data_ids(frame: pd.DataFrame) -> pd.DataFrame:
+    """The fixture with the invented data ids in place of the aliases."""
+
+    def relabel(value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        for alias, real in INVENTED_PAIRS.items():
+            value = value.replace(alias, real)
+        return value
+
+    return frame.map(relabel)
+
+
+def test_criteria_rows_look_up_the_scopes_of_data_ids_by_alias(
+    acceptance: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _alias_table(tmp_path / "aliases.tsv", monkeypatch, INVENTED_PAIRS)
+    rows = acceptance.criteria_rows(
+        _as_data_ids(_criteria_table()),
+        _as_data_ids(_samples()),
+        _as_data_ids(_h2()),
+        _as_data_ids(_enrichment()),
+        {},
+        None,
+    )
+    scored = {
+        (row.criterion, row.segmentation, row.dataset, row.note[:12]): row
+        for row in rows
+    }
+    assert _get(scored, "H2", "Q0404_MERSCOPE").verdict == "EXCEPTION (D5)"
+    assert _get(scored, "H2", "Q0101_MERSCOPE").verdict == "FAIL-OUTSIDE"
+    reseg = _get(scored, "H17/H2", "Q0202_MERSCOPE", "reseg")
+    assert reseg.verdict == "EXCEPTION-RECHECK (D5)"
+    assert _get(scored, "H8/warning", "Q0202_MERSCOPE").verdict == "EXCEPTION (D3)"
+    assert _get(scored, "H4", "Q0202_MERSCOPE").verdict == "EXCEPTION (D7)"
+
+
+def test_for_output_shows_the_tolerances_by_display_name(
+    acceptance: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tolerances = acceptance.sc.TOLERANCES
+    assert acceptance.for_output(tolerances) == tolerances  # table disabled
+    assert acceptance.for_output(("HD1", 1, None)) == ("HD1", 1, None)
+    _alias_table(tmp_path / "aliases.tsv", monkeypatch, INVENTED_PAIRS)
+    written = acceptance.for_output(tolerances)
+    assert written["D4"]["immune"]["dataset"] == "Q0404_MERSCOPE"
+    assert written["D4"]["opc_missing_Q0303_XENIUM"] == [15]
+    assert written["D5"]["text_values"] == {
+        "proseg_hybrid/Q0404_MERSCOPE": 0.0102,
+        "reseg/Q0202_MERSCOPE": 0.0113,
+    }
+    assert written["D12"]["text_values"] == {"Q0101": 0.070, "Q0202": 0.134}
+    assert written["D10"] == tolerances["D10"]
+    assert tolerances["D12"]["text_values"] == {"HD1": 0.070, "HD2": 0.134}
+
+
 def test_criteria_rows_cross_check_the_report(acceptance: ModuleType) -> None:
     good = {
-        ("P7513", "proseg_hybrid"): [
+        ("HD1", "proseg_hybrid"): [
             {
                 "criterion": "H1",
                 "name": "broad_jsd",
@@ -1096,67 +1204,65 @@ def test_criteria_rows_cross_check_the_report(acceptance: ModuleType) -> None:
             {
                 "criterion": "H2",
                 "name": "flag_implausible_share",
-                "sample_id": "P7513_MERSCOPE",
+                "sample_id": "HD1_MERSCOPE",
                 "value": 0.02,
             },
             {
                 "criterion": "H5",
                 "name": "confident_cop_supercluster_share",
-                "sample_id": "P7513_MERSCOPE",
+                "sample_id": "HD1_MERSCOPE",
                 "value": 0.0,
             },
             {
                 "criterion": "H5",
                 "name": "confident_broad_opc_share",
-                "sample_id": "P7513_MERSCOPE",
+                "sample_id": "HD1_MERSCOPE",
                 "value": 0.0101,
             },
         ],
-        ("P1212", "proseg_hybrid"): [
+        ("HD2", "proseg_hybrid"): [
             {
                 "criterion": "H8",
                 "name": "gate_level",
-                "sample_id": "P1212_MERSCOPE",
+                "sample_id": "HD2_MERSCOPE",
                 "value": "broad_only",
             },
             {
                 "criterion": "H8",
                 "name": "gate_warning",
-                "sample_id": "P1212_MERSCOPE",
+                "sample_id": "HD2_MERSCOPE",
                 "value": True,
             },
             {
                 "criterion": "H8",
                 "name": "gate_broad_coverage_segmented",
-                "sample_id": "P1212_MERSCOPE",
+                "sample_id": "HD2_MERSCOPE",
                 "value": 0.148200,
             },
         ],
     }
     rows = _scored(acceptance, reports=good)
-    assert _get(rows, "H1", "P7513").crosscheck == "ok"
-    assert _get(rows, "H2", "P7513_MERSCOPE").crosscheck == "ok"
+    assert _get(rows, "H1", "HD1").crosscheck == "ok"
+    assert _get(rows, "H2", "HD1_MERSCOPE").crosscheck == "ok"
     assert [row.crosscheck for key, row in rows.items() if key[0] == "H5"] == [
         "ok",
         "ok",
     ]
-    assert _get(rows, "H8", "P1212_MERSCOPE").crosscheck == "ok"
-    assert _get(rows, "H8/warning", "P1212_MERSCOPE").crosscheck == "ok"
+    assert _get(rows, "H8", "HD2_MERSCOPE").crosscheck == "ok"
+    assert _get(rows, "H8/warning", "HD2_MERSCOPE").crosscheck == "ok"
     bad = {key: [dict(record) for record in value] for key, value in good.items()}
-    bad[("P7513", "proseg_hybrid")][0]["value"] = 0.1291
-    bad[("P1212", "proseg_hybrid")][1]["value"] = False
+    bad[("HD1", "proseg_hybrid")][0]["value"] = 0.1291
+    bad[("HD2", "proseg_hybrid")][1]["value"] = False
     rows = _scored(acceptance, reports=bad)
-    h1 = _get(rows, "H1", "P7513")
+    h1 = _get(rows, "H1", "HD1")
     assert h1.crosscheck.startswith("CROSSCHECK-MISMATCH") and acceptance.back_to_user(
         h1
     )
     assert h1.verdict == "PASS"
-    assert _get(rows, "H8", "P1212_MERSCOPE").crosscheck.startswith(
-        "CROSSCHECK-MISMATCH"
-    )
-    missing = {("P7513", "proseg_hybrid"): good[("P7513", "proseg_hybrid")][1:]}
+    assert _get(rows, "H8", "HD2_MERSCOPE").crosscheck.startswith("CROSSCHECK-MISMATCH")
+    missing = {("HD1", "proseg_hybrid"): good[("HD1", "proseg_hybrid")][1:]}
     rows = _scored(acceptance, reports=missing)
-    assert "has no H1" in _get(rows, "H1", "P7513").crosscheck
+    assert "has no H1" in _get(rows, "H1", "HD1").crosscheck
 
 
 def test_crosscheck_allows_the_reports_six_digit_rounding(
@@ -1165,7 +1271,7 @@ def test_crosscheck_allows_the_reports_six_digit_rounding(
     # report_model._clean stores float(f"{x:.6g}"): up to 5e-6 relative.
     values = 10 ** np.random.default_rng(0).uniform(-4, 0, 20_000)
     assert all(acceptance._close(v, float(f"{v:.6g}")) for v in values)
-    assert acceptance._close(0.0101767267, 0.0101767)  # stage A3 H2 P5011_MERSCOPE
+    assert acceptance._close(0.0101767267, 0.0101767)  # stage A3 H2 HD4_MERSCOPE
     assert acceptance._close(0.1771234567, 0.177123)
     # a difference in the first five significant digits is a mismatch
     assert not acceptance._close(0.0101767267, 0.0101769)
@@ -1176,15 +1282,15 @@ def test_unrounded_criteria_values_match_the_rounded_report(
     acceptance: ModuleType,
 ) -> None:
     table = _criteria_table()
-    at = (table["criterion"] == "H2") & (table["dataset"] == "P5011_MERSCOPE")
+    at = (table["criterion"] == "H2") & (table["dataset"] == "HD4_MERSCOPE")
     table.loc[at, "value"] = 0.0101767267
     record = {
         "criterion": "H2",
         "name": "flag_implausible_share",
-        "sample_id": "P5011_MERSCOPE",
+        "sample_id": "HD4_MERSCOPE",
         "value": 0.0101767,
     }
-    reports = {("P5011", "proseg_hybrid"): [record]}
+    reports = {("HD4", "proseg_hybrid"): [record]}
 
     def h2() -> Any:
         rows = acceptance.criteria_rows(
@@ -1193,7 +1299,7 @@ def test_unrounded_criteria_values_match_the_rounded_report(
         return next(
             row
             for row in rows
-            if row.criterion == "H2" and row.dataset == "P5011_MERSCOPE"
+            if row.criterion == "H2" and row.dataset == "HD4_MERSCOPE"
         )
 
     row = h2()
@@ -1211,7 +1317,7 @@ def test_first_measured_failures_go_back_even_when_not_scored(
     def row(criterion: str, passes: bool | None, scored: bool = False) -> Any:
         return acceptance.finalize(
             acceptance.Row(
-                criterion, "P7113", "all", "P7113", 1.0, "==", 2.0, passes, scored, "x"
+                criterion, "HD3", "all", "HD3", 1.0, "==", 2.0, passes, scored, "x"
             )
         )
 
@@ -1245,7 +1351,7 @@ def test_criteria_rows_read_only_the_new_vs_legacy_referee_rows(
         [
             {
                 "segmentation": "proseg_hybrid",
-                "sample_id": "P7513_MERSCOPE",
+                "sample_id": "HD1_MERSCOPE",
                 "first": first,
                 "second": second,
                 "first_wins": wins,
@@ -1257,7 +1363,7 @@ def test_criteria_rows_read_only_the_new_vs_legacy_referee_rows(
             )
         ]
     )
-    row = _get(_scored(acceptance, referee=rows), "H10", "P7513_MERSCOPE")
+    row = _get(_scored(acceptance, referee=rows), "H10", "HD1_MERSCOPE")
     assert row.crosscheck.startswith("ok")
 
 
@@ -1266,23 +1372,23 @@ def test_criteria_rows_compare_h10_with_marker_referee(acceptance: ModuleType) -
         [
             {
                 "segmentation": "proseg_hybrid",
-                "sample_id": "P7513_MERSCOPE",
+                "sample_id": "HD1_MERSCOPE",
                 "first_wins": 0.991,
             }
         ]
     )
     assert _get(
-        _scored(acceptance, referee=same), "H10", "P7513_MERSCOPE"
+        _scored(acceptance, referee=same), "H10", "HD1_MERSCOPE"
     ).crosscheck.startswith("ok")
     other = same.assign(first_wins=0.95)
-    row = _get(_scored(acceptance, referee=other), "H10", "P7513_MERSCOPE")
+    row = _get(_scored(acceptance, referee=other), "H10", "HD1_MERSCOPE")
     assert row.crosscheck.startswith("CROSSCHECK-MISMATCH") and acceptance.back_to_user(
         row
     )
-    absent = same.assign(sample_id="P7513_XENIUM")
+    absent = same.assign(sample_id="HD1_XENIUM")
     assert (
         "not in marker_referee"
-        in _get(_scored(acceptance, referee=absent), "H10", "P7513_MERSCOPE").crosscheck
+        in _get(_scored(acceptance, referee=absent), "H10", "HD1_MERSCOPE").crosscheck
     )
 
 
@@ -1296,7 +1402,7 @@ def _h12_records(xenium_tiles: bool = True, xenium_blocks: bool = True) -> list[
         ("MERSCOPE", True, True),
         ("XENIUM", xenium_tiles, xenium_blocks),
     ):
-        sid = f"P7513_{platform}"
+        sid = f"HD1_{platform}"
         records += [
             {
                 "criterion": "H12",
@@ -1349,22 +1455,22 @@ def _h12_records(xenium_tiles: bool = True, xenium_blocks: bool = True) -> list[
 def test_h12_scores_the_tangential_blocks_and_reports_the_tiles_beside(
     acceptance: ModuleType,
 ) -> None:
-    """§20 D11: the P7513 stage B case (tiles fail on Xenium) passes."""
+    """§20 D11: the HD1 stage B case (tiles fail on Xenium) passes."""
     rows, scores = acceptance.h12_rows(
-        {("P7513", "proseg_hybrid"): _h12_records(xenium_tiles=False)},
-        ["P7513", "P1212"],
+        {("HD1", "proseg_hybrid"): _h12_records(xenium_tiles=False)},
+        ["HD1", "HD2"],
     )
     by_pair = {row.pair: row for row in rows}
-    assert by_pair["P7513"].verdict == "PASS"
-    assert by_pair["P1212"].verdict == "NOT_AVAILABLE"
+    assert by_pair["HD1"].verdict == "PASS"
+    assert by_pair["HD2"].verdict == "NOT_AVAILABLE"
     assert scores[0]["ci_scored"] == "tangential_block_500um"
-    assert "beside (square tiles, not scored)" in by_pair["P7513"].note
+    assert "beside (square tiles, not scored)" in by_pair["HD1"].note
     rows, _ = acceptance.h12_rows(
-        {("P7513", "proseg_hybrid"): _h12_records(xenium_blocks=False)}, ["P7513"]
+        {("HD1", "proseg_hybrid"): _h12_records(xenium_blocks=False)}, ["HD1"]
     )
     assert rows[0].verdict == "FAIL-OUTSIDE" and rows[0].passes is False
     rows, _ = acceptance.h12_rows(
-        {("P7513", "reseg"): _h12_records(xenium_blocks=False)}, ["P7513"]
+        {("HD1", "reseg"): _h12_records(xenium_blocks=False)}, ["HD1"]
     )
     reseg = next(row for row in rows if row.segmentation == "reseg")
     assert reseg.scored is False and reseg.verdict == "INFO fail"
@@ -1373,7 +1479,7 @@ def test_h12_scores_the_tangential_blocks_and_reports_the_tiles_beside(
 def _report_with_mender(
     path: Path,
     policy: str,
-    pair: str = "P7513",
+    pair: str = "HD1",
     status: str = "complete",
     ids: bool = True,
 ) -> None:
@@ -1403,19 +1509,19 @@ def _h13_tree(
 ) -> dict:
     reports = {}
     for seg in acceptance.SEGMENTATIONS:
-        path = runs / acceptance.REPORT_PATH.format(pair="P7513", seg=seg)
+        path = runs / acceptance.REPORT_PATH.format(pair="HD1", seg=seg)
         _report_with_mender(path, "exclude_from_features")
-        reports[("P7513", seg)] = json.loads(path.read_text())["metrics"]
+        reports[("HD1", seg)] = json.loads(path.read_text())["metrics"]
         for platform in ("merscope", "xenium"):
             depth = runs / acceptance.DEPTH_DIR.format(
-                pair="P7513", seg=seg, platform=platform
+                pair="HD1", seg=seg, platform=platform
             )
             depth.mkdir(parents=True, exist_ok=True)
             if violins or seg != "reseg":
                 (depth / "violin_broad.png").write_bytes(b"")
     if state:
         _report_with_mender(
-            runs / acceptance.STATE_REPORT_PATH.format(pair="P7513"), "state"
+            runs / acceptance.STATE_REPORT_PATH.format(pair="HD1"), "state"
         )
     return reports
 
@@ -1427,7 +1533,7 @@ def test_h13_parts_pass_on_a_complete_run(
     rows = {
         row.criterion: row
         for row in acceptance.h13_rows(
-            tmp_path, reports, {"passes": True, "failing_groups": []}, ["P7513"]
+            tmp_path, reports, {"passes": True, "failing_groups": []}, ["HD1"]
         )
     }
     assert rows["H13/mender"].verdict == "PASS"
@@ -1444,7 +1550,7 @@ def test_h13_parts_need_both_policies_violins_and_untouched_tables(
     rows = {
         row.criterion: row
         for row in acceptance.h13_rows(
-            tmp_path, reports, {"passes": False, "failing_groups": ["x"]}, ["P7513"]
+            tmp_path, reports, {"passes": False, "failing_groups": ["x"]}, ["HD1"]
         )
     }
     assert rows["H13/mender"].verdict == "NOT_AVAILABLE"
@@ -1454,12 +1560,11 @@ def test_h13_parts_need_both_policies_violins_and_untouched_tables(
     wrong = tmp_path / "wrong"
     reports = _h13_tree(acceptance, wrong)
     _report_with_mender(
-        wrong / acceptance.STATE_REPORT_PATH.format(pair="P7513"),
+        wrong / acceptance.STATE_REPORT_PATH.format(pair="HD1"),
         "exclude_from_features",
     )
     rows = {
-        row.criterion: row
-        for row in acceptance.h13_rows(wrong, reports, None, ["P7513"])
+        row.criterion: row for row in acceptance.h13_rows(wrong, reports, None, ["HD1"])
     }
     assert (
         rows["H13/mender"].verdict == "FAIL-OUTSIDE"
@@ -1580,27 +1685,27 @@ def test_h6_uses_the_v1_raw_thresholds_and_the_confident_broad_chain(
 def test_h6_rows_fail_a_dataset_outside_the_targets(acceptance: ModuleType) -> None:
     cells = _e2_cells(wrong_astro=6)
     masses = {
-        "P7513_MERSCOPE": pd.Series(
+        "HD1_MERSCOPE": pd.Series(
             {"Upper-layer intratelencephalic": 0.5, "Astrocyte": 0.5}
         ),
-        "P1212_XENIUM": pd.Series(
+        "HD2_XENIUM": pd.Series(
             {"Upper-layer intratelencephalic": 0.9, "Astrocyte": 0.1}
         ),
     }
     rows, detail = acceptance.h6_rows(cells, masses)
     by = {row.dataset: row for row in rows if row.criterion == "H6"}
-    assert by["P7513_MERSCOPE"].verdict == "PASS"
+    assert by["HD1_MERSCOPE"].verdict == "PASS"
     info = {row.dataset: row for row in rows if row.criterion == "H6/pooled"}
-    assert info["P1212_XENIUM"].scored is False
-    assert info["P1212_XENIUM"].verdict in ("INFO pass", "INFO fail")
+    assert info["HD2_XENIUM"].scored is False
+    assert info["HD2_XENIUM"].verdict in ("INFO pass", "INFO fail")
     # Broad Astro is not one of D10's rows (§20): back to the user.
     assert (
-        by["P1212_XENIUM"].verdict == "EXCEPTION-RECHECK (D10)"
-        and "broad Astro D15" in by["P1212_XENIUM"].note
-        and "outside D10" in by["P1212_XENIUM"].scope_check
+        by["HD2_XENIUM"].verdict == "EXCEPTION-RECHECK (D10)"
+        and "broad Astro D15" in by["HD2_XENIUM"].note
+        and "outside D10" in by["HD2_XENIUM"].scope_check
     )
-    assert acceptance.back_to_user(by["P1212_XENIUM"])
-    assert set(detail["dataset"]) == {"unweighted", "P7513_MERSCOPE", "P1212_XENIUM"}
+    assert acceptance.back_to_user(by["HD2_XENIUM"])
+    assert set(detail["dataset"]) == {"unweighted", "HD1_MERSCOPE", "HD2_XENIUM"}
 
 
 # ---------------------------------------------------------------------------
@@ -1649,15 +1754,15 @@ def test_h15_compare_finds_identical_and_differing_tables(
             if run == "seed1" and platform == "xenium":
                 frame.loc[0, "ct_broad_name"] = "Microglia"
             frame.to_parquet(
-                directory / f"P7513_{platform.upper()}_celltype_labels.parquet"
+                directory / f"HD1_{platform.upper()}_celltype_labels.parquet"
             )
             mapped = tmp_path / run / "map" / platform
             mapped.mkdir(parents=True)
             frame[["cell_id"]].assign(bp=0.5).to_parquet(
-                mapped / f"P7513_{platform.upper()}_mmc_whb.parquet"
+                mapped / f"HD1_{platform.upper()}_mmc_whb.parquet"
             )
     record = acceptance.h15_compare(
-        "P7513",
+        "HD1",
         tmp_path / "pipeline/map",
         tmp_path / "pipeline/resolve",
         tmp_path / "rerun/map",
@@ -1672,17 +1777,17 @@ def test_h15_compare_finds_identical_and_differing_tables(
     assert record["seed1"]["n_switched"] == 1
     rows = {
         row.criterion: row
-        for row in acceptance.h15_rows({"P7513": record})
-        if row.pair == "P7513"
+        for row in acceptance.h15_rows({"HD1": record})
+        if row.pair == "HD1"
     }
     assert rows["H15/identical_rerun"].verdict == "PASS"
     assert rows["H15/seed1"].verdict == "FAIL-OUTSIDE"  # 1 / 6 > 1%
     changed = table.assign(ct_broad_name=["Neurons", "Neurons", "Microglia"])
     changed.to_parquet(
-        tmp_path / "rerun/resolve/merscope/P7513_MERSCOPE_celltype_labels.parquet"
+        tmp_path / "rerun/resolve/merscope/HD1_MERSCOPE_celltype_labels.parquet"
     )
     record = acceptance.h15_compare(
-        "P7513",
+        "HD1",
         tmp_path / "pipeline/map",
         tmp_path / "pipeline/resolve",
         tmp_path / "rerun/map",
@@ -1690,13 +1795,13 @@ def test_h15_compare_finds_identical_and_differing_tables(
         None,
     )
     assert record["identical"] is False and "seed1" not in record
-    rows = acceptance.h15_rows({"P7513": record})
-    assert [row.verdict for row in rows if row.pair == "P7513"] == [
+    rows = acceptance.h15_rows({"HD1": record})
+    assert [row.verdict for row in rows if row.pair == "HD1"] == [
         "FAIL-OUTSIDE",
         "NOT_AVAILABLE",
         "NOT_AVAILABLE",
     ]
-    assert all(row.verdict == "NOT_AVAILABLE" for row in rows if row.pair == "P1212")
+    assert all(row.verdict == "NOT_AVAILABLE" for row in rows if row.pair == "HD2")
 
 
 def test_h15_seed_threshold_is_one_percent(acceptance: ModuleType) -> None:
@@ -1716,8 +1821,8 @@ def test_h15_seed_threshold_is_one_percent(acceptance: ModuleType) -> None:
     def rows() -> dict:
         return {
             row.criterion: row
-            for row in acceptance.h15_rows({"P7513": record})
-            if row.pair == "P7513"
+            for row in acceptance.h15_rows({"HD1": record})
+            if row.pair == "HD1"
         }
 
     assert rows()["H15/seed1"].verdict == "PASS"
@@ -1747,11 +1852,11 @@ def test_h15_failed_rerun_is_not_measured_not_a_failure(
             directory = tmp_path / "pipeline" / part / platform
             directory.mkdir(parents=True)
             table.to_parquet(
-                directory / f"P7513_{platform.upper()}_celltype_labels.parquet"
+                directory / f"HD1_{platform.upper()}_celltype_labels.parquet"
             )
     (tmp_path / "rerun/map").mkdir(parents=True)  # the task failed: no output
     record = acceptance.h15_compare(
-        "P7513",
+        "HD1",
         tmp_path / "pipeline/map",
         tmp_path / "pipeline/resolve",
         tmp_path / "rerun/map",
@@ -1765,19 +1870,19 @@ def test_h15_failed_rerun_is_not_measured_not_a_failure(
     assert "re-run RESOLVE" in record["rerun_problem"]
     assert record["seed1"] is None and "labels missing" in record["seed1_problem"]
     assert record["notes"] == ["rerun MAP exit 1"]
-    rows = acceptance.h15_rows({"P7513": record})
-    rows = [row for row in rows if row.pair == "P7513"]
+    rows = acceptance.h15_rows({"HD1": record})
+    rows = [row for row in rows if row.pair == "HD1"]
     assert [row.verdict for row in rows] == ["NOT_AVAILABLE"] * 3
     assert all(acceptance.back_to_user(row) for row in rows)
     assert "re-run MAP" in rows[0].note and "labels missing" in rows[1].note
     assert "labels missing" in rows[2].note
-    out = tmp_path / "h15_P7513.json"
+    out = tmp_path / "h15_HD1.json"
     assert (
         acceptance.main(
             [
                 "h15",
                 "--pair",
-                "P7513",
+                "HD1",
                 "--pipeline-map",
                 str(tmp_path / "pipeline/map"),
                 "--pipeline-resolve",
@@ -1838,7 +1943,7 @@ def _draw_spread(
             },
             {
                 **base,
-                "dataset": "P7513_MERSCOPE",
+                "dataset": "HD1_MERSCOPE",
                 "level": "broad",
                 "class": "OPC",
                 "expected": "15,30,60,120",
@@ -1848,7 +1953,7 @@ def _draw_spread(
             },
             {
                 **base,
-                "dataset": "P7513_MERSCOPE",
+                "dataset": "HD1_MERSCOPE",
                 "level": "broad",
                 "class": "Astro",
                 "expected": "15",
@@ -1858,7 +1963,7 @@ def _draw_spread(
             },
             {
                 **base,
-                "dataset": "P7513_MERSCOPE",
+                "dataset": "HD1_MERSCOPE",
                 "level": "broad",
                 "class": "Exc",
                 "expected": "15",
@@ -1879,7 +1984,7 @@ def _draw_spread(
         },
         {
             "draw": "c0e0",
-            "dataset": "P7513_MERSCOPE",
+            "dataset": "HD1_MERSCOPE",
             "level": "broad",
             "class": "OPC",
             "depth": 15,
@@ -1889,7 +1994,7 @@ def _draw_spread(
         raised.append(
             {
                 "draw": "c0e0",
-                "dataset": "P7513_MERSCOPE",
+                "dataset": "HD1_MERSCOPE",
                 "level": "broad",
                 "class": "Exc",
                 "depth": 60,
@@ -1897,12 +2002,12 @@ def _draw_spread(
         )
     pd.DataFrame(raised).to_csv(directory / "draw_spread_would_raise.csv", index=False)
     pd.DataFrame(
-        [{"dataset": "P7513_MERSCOPE", "metric": "H7", "scored_value": 0.6}]
+        [{"dataset": "HD1_MERSCOPE", "metric": "H7", "scored_value": 0.6}]
     ).to_csv(directory / "draw_spread.csv", index=False)
 
 
 REFERENCE = pd.DataFrame(
-    [{"dataset": "P7513_MERSCOPE", "level": "broad", "class": "OPC", "depth": 15}]
+    [{"dataset": "HD1_MERSCOPE", "level": "broad", "class": "OPC", "depth": 15}]
 )
 
 
@@ -1911,18 +2016,18 @@ def test_h18_rows_check_d4s_scope(acceptance: ModuleType, tmp_path: Path) -> Non
     rows, problems = acceptance.h18_rows(tmp_path / "ok", REFERENCE)
     by = {(row.criterion, row.dataset): row for row in rows}
     assert problems == []
-    assert by[("H18/broad", "P7513_MERSCOPE OPC")].verdict == "EXCEPTION (D4)"
-    assert by[("H18/broad", "P7513_MERSCOPE Astro")].verdict == "FAIL-OUTSIDE"
+    assert by[("H18/broad", "HD1_MERSCOPE OPC")].verdict == "EXCEPTION (D4)"
+    assert by[("H18/broad", "HD1_MERSCOPE Astro")].verdict == "FAIL-OUTSIDE"
     assert by[("H18/broad", "PREP[MERSCOPE floors] Exc")].verdict == "PASS"
-    assert ("H18/broad", "P7513_MERSCOPE Exc") not in by  # not required
+    assert ("H18/broad", "HD1_MERSCOPE Exc") not in by  # not required
     assert by[("H18/would_raise", "PREP[MERSCOPE floors]")].verdict == "EXCEPTION (D4)"
-    assert by[("H18/would_raise", "P7513_MERSCOPE")].verdict == "EXCEPTION (D4)"
+    assert by[("H18/would_raise", "HD1_MERSCOPE")].verdict == "EXCEPTION (D4)"
     assert by[("H18/draw_check", "draw_spread_run.json")].verdict == "PASS"
     _draw_spread(tmp_path / "moved", opc_missing="15,30", raised_extra=True, workers=6)
     rows, problems = acceptance.h18_rows(tmp_path / "moved", REFERENCE)
     by = {(row.criterion, row.dataset): row for row in rows}
-    assert by[("H18/broad", "P7513_MERSCOPE OPC")].verdict == "EXCEPTION-RECHECK (D4)"
-    assert by[("H18/would_raise", "P7513_MERSCOPE")].verdict == "EXCEPTION-RECHECK (D4)"
+    assert by[("H18/broad", "HD1_MERSCOPE OPC")].verdict == "EXCEPTION-RECHECK (D4)"
+    assert by[("H18/would_raise", "HD1_MERSCOPE")].verdict == "EXCEPTION-RECHECK (D4)"
     assert by[("H18/draw_check", "draw_spread_run.json")].verdict == "FAIL-OUTSIDE"
     assert problems and "workers 6" in problems[0]
 
@@ -1963,7 +2068,7 @@ def _score_inputs(
     _h2().to_csv(criteria / "h2_breakdown.csv", index=False)
     _enrichment().to_csv(criteria / "heldout_enrichment_m4.csv", index=False)
     _h13_tree(acceptance, runs)
-    report = runs / acceptance.REPORT_PATH.format(pair="P7513", seg="proseg_hybrid")
+    report = runs / acceptance.REPORT_PATH.format(pair="HD1", seg="proseg_hybrid")
     payload = json.loads(report.read_text())
     payload["metrics"] += [
         {
@@ -1976,19 +2081,19 @@ def _score_inputs(
         {
             "criterion": "H2",
             "name": "flag_implausible_share",
-            "sample_id": "P7513_MERSCOPE",
+            "sample_id": "HD1_MERSCOPE",
             "value": 0.02,
         },
         {
             "criterion": "H5",
             "name": "confident_cop_supercluster_share",
-            "sample_id": "P7513_MERSCOPE",
+            "sample_id": "HD1_MERSCOPE",
             "value": 0.0,
         },
         {
             "criterion": "H5",
             "name": "confident_broad_opc_share",
-            "sample_id": "P7513_MERSCOPE",
+            "sample_id": "HD1_MERSCOPE",
             "value": 0.0101,
         },
     ]
@@ -2009,15 +2114,14 @@ def _score_inputs(
     for platform in ("merscope", "xenium"):
         path = (
             runs
-            / "P7513/proseg_hybrid/annotation_resolve/annotation_resolve_out"
+            / "HD1/proseg_hybrid/annotation_resolve/annotation_resolve_out"
             / platform
         )
         path.mkdir(parents=True)
-        labels.to_parquet(path / f"P7513_{platform.upper()}_celltype_labels.parquet")
+        labels.to_parquet(path / f"HD1_{platform.upper()}_celltype_labels.parquet")
     ref = _bundle(root, bundle_hash, "2026-09-30T10:52:48+00:00")
     rows = [
-        _task("ANNOTATE_PANEL", f"P7513:{seg}", "1m")
-        for seg in acceptance.SEGMENTATIONS
+        _task("ANNOTATE_PANEL", f"HD1:{seg}", "1m") for seg in acceptance.SEGMENTATIONS
     ] + [_task("ANNOTATE_REFERENCE_PREP", "whb:1", "12s")]
     trace = _trace(root / "trace.tsv", rows)
     legacy_dir = root / "legacy"
@@ -2051,7 +2155,7 @@ def _score_inputs(
         "--e2-cells",
         str(cells),
         "--datasets",
-        "P7513",
+        "HD1",
         "--date",
         "2026-10-01",
         "--out",
@@ -2075,10 +2179,10 @@ def test_score_writes_the_summary_and_sends_failures_back(
         for row in summary["rows"]
         if row["back_to_user"]
     }
-    assert ("H2", "P7513_MERSCOPE") in back  # a failure no decision names
-    assert ("H15/seed1", "P7513") in back  # not measured: first measurement
+    assert ("H2", "HD1_MERSCOPE") in back  # a failure no decision names
+    assert ("H15/seed1", "HD1") in back  # not measured: first measurement
     assert ("H13/viewer", "viewer") in back
-    assert ("H1", "P7513") not in back
+    assert ("H1", "HD1") not in back
     assert summary["all_scored_rows_pass_or_inside_an_exception"] is False
     assert summary["nothing_back_to_user"] is False
     assert all(
@@ -2093,6 +2197,42 @@ def test_score_writes_the_summary_and_sends_failures_back(
     ):
         assert (tmp_path / "out/tables" / name).is_file(), name
     assert any(path.endswith("criteria_table.csv") for path in summary["inputs"])
+
+
+def test_score_writes_the_data_ids_and_the_tolerances_display_names(
+    acceptance: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # HD1's data keep the fixture's id "HD1"; HD2-HD4 have invented ids.
+    _alias_table(
+        tmp_path / "aliases.tsv", monkeypatch, {**INVENTED_PAIRS, "HD1": "HD1"}
+    )
+    argv = _score_inputs(acceptance, tmp_path)
+    assert acceptance.main(argv) == 0
+    summary = json.loads((tmp_path / "out/summary.json").read_text())
+    tolerances = summary["protocol"]["exception_tolerances"]
+    assert tolerances["D4"]["immune"]["dataset"] == "Q0404_MERSCOPE"
+    assert tolerances["D4"]["opc_missing_Q0303_XENIUM"] == [15]
+    assert tolerances["D12"]["text_values"] == {"HD1": 0.07, "Q0202": 0.134}
+    h15 = {row["pair"] for row in summary["rows"] if row["criterion"].startswith("H15")}
+    assert h15 == {"HD1", "Q0202"}
+    verdicts = summary["verdict_counts"]
+    assert verdicts["EXCEPTION (D5)"] == 1 and verdicts["EXCEPTION (D3)"] == 1
+
+
+def test_h15_records_are_keyed_by_alias_and_rows_carry_data_ids(
+    acceptance: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _alias_table(tmp_path / "aliases.tsv", monkeypatch, INVENTED_PAIRS)
+    record = {"pair": "Q0101", "identical": True, "identical_files": []}
+    rows = acceptance.h15_rows({"HD1": record})
+    assert {row.pair for row in rows} == {"Q0101", "Q0202"}
+    identical = next(
+        row
+        for row in rows
+        if row.pair == "Q0101" and row.criterion == "H15/identical_rerun"
+    )
+    assert identical.passes is True
+    assert all(row.passes is None for row in rows if row.pair == "Q0202")
 
 
 def test_summary_flags_separate_scored_rows_from_the_rest(

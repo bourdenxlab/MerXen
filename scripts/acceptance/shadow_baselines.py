@@ -27,8 +27,12 @@ shared tissue mask), all read-only, and writes to ``--out``:
   confident broad coverage under no vote, the SEA-AD rules and E2's LL rule
   with the same production WHB calls, and the OD-B13 trigger;
 - ``exit_checks.csv``: production vs the pilot configuration (E1 (iii) pilot
-  for P7513 / P1212, E2's runs of it for P7113 / P5011) on shared cells;
+  for HD1 / HD2, E2's runs of it for HD3 / HD4) on shared cells;
 - ``runtime.csv``: MAP wall time, processor-seconds per 1k cells, peak RSS.
+
+Pairs are named in this script by their aliases (HD1-HD4,
+docs/local-configuration.md); ``--pairs`` takes aliases or the pair ids the
+data use, and the outputs carry the data's ids (``data_pair``).
 
 Usage::
 
@@ -43,7 +47,6 @@ import argparse
 import json
 import logging
 import math
-import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -83,6 +86,8 @@ from merxen.annotation.shadow import (
     tile_sums,
 )
 from merxen.annotation.vocab import COP_SUPERCLUSTER, HUMAN_BROAD_CLASSES
+from merxen.local_config import add_location_argument
+from merxen.privacy import to_alias, to_real
 
 logger = logging.getLogger("shadow_baselines")
 
@@ -98,35 +103,69 @@ def add_fallback_arguments(
     """Add ``--gene-id-fallback-csv`` / ``--mouse-gene-id-fallback-csv``.
 
     Their defaults come from ``$MERXEN_GENE_ID_FALLBACK_CSV`` and
-    ``$MERXEN_MOUSE_GENE_ID_FALLBACK_CSV`` (``.env.example``); without either
-    the option is required, so a variant query never silently resolves
-    fewer genes than the MAP run it is compared with.
+    ``$MERXEN_MOUSE_GENE_ID_FALLBACK_CSV`` (environment, then ``.env``;
+    ``merxen.local_config``); without either the option is required, so a
+    variant query never silently resolves fewer genes than the MAP run it is
+    compared with.
     """
     for wanted, option, env, what in (
         (human, "--gene-id-fallback-csv", HUMAN_FALLBACK_ENV, "human"),
         (mouse, "--mouse-gene-id-fallback-csv", MOUSE_FALLBACK_ENV, "mouse"),
     ):
-        if not wanted:
-            continue
-        default = os.environ.get(env) or None
-        parser.add_argument(
-            option,
-            type=Path,
-            default=default,
-            required=default is None,
-            help=f"{what} gene-ID fallback table of the MAP runs (default: ${env})",
-        )
+        if wanted:
+            add_location_argument(
+                parser, option, env, f"{what} gene-ID fallback table of the MAP runs"
+            )
 
 
 PLATFORMS = ("MERSCOPE", "XENIUM")
-PAIRS = ("P7513", "P1212", "P7113", "P5011")
+# Pair aliases (docs/local-configuration.md): HD1 and HD2 are the development
+# pairs, HD3 and HD4 the held-out donors.
+PAIRS = ("HD1", "HD2", "HD3", "HD4")
+DEVELOPMENT_PAIRS = ("HD1", "HD2")
 SEGMENTATIONS = ("proseg_hybrid", "reseg")
-HELD_OUT_PAIRS = ("P7113", "P5011")
+HELD_OUT_PAIRS = ("HD3", "HD4")
 VOTES = ("none", "seaad_from60", "seaad")
 WHB_LEVEL = "CCN202210140_SUPC"
 SEA_LEVEL = "CCN20260630_LEVEL_1"
 OD_B13_TRIGGER = 0.08
 PILOT_BP = 0.8
+
+
+def data_pair(pair: str) -> str:
+    """Return the pair id the data use for a pair given by alias or real id.
+
+    A value from the command line or a recorded file is translated to its
+    alias (``privacy.to_alias``), then to the samplesheet pair id
+    (``privacy.to_real``), which names the result directories and files and
+    is written to the outputs. With the alias table disabled on purpose
+    (``MERXEN_ALIAS_FILE=none``, the tests) both are the identity.
+
+    Args:
+        pair: An alias (``HD1``) or a pair id.
+
+    Returns:
+        The pair id of the data.
+
+    Raises:
+        LocalConfigError: If no alias table is found and it is not disabled.
+    """
+    return to_real(to_alias(pair))
+
+
+def data_pairs(text: str) -> list[str]:
+    """Return the data's pair ids of a comma-separated ``--pairs`` value."""
+    return [data_pair(item) for item in text.split(",") if item]
+
+
+def is_held_out(pair: str) -> bool:
+    """Whether a pair (alias or data id) is a held-out donor."""
+    return to_alias(pair) in HELD_OUT_PAIRS
+
+
+def is_development(pair: str) -> bool:
+    """Whether a pair (alias or data id) is a development pair."""
+    return to_alias(pair) in DEVELOPMENT_PAIRS
 
 
 @dataclass
@@ -317,7 +356,7 @@ def sample_metrics(sample: Sample, pair: str, seg: str) -> dict[str, Any]:
         "segmentation": seg,
         "sample_id": sample.sample_id,
         "platform": sample.platform,
-        "held_out": pair in HELD_OUT_PAIRS or seg != "proseg_hybrid",
+        "held_out": is_held_out(pair) or seg != "proseg_hybrid",
         "n_table_cells": len(labels),
         "median_counts": float(np.median(counts)),
         "gate_A_frac_ge30": v1.gate.frac_ge30,
@@ -439,7 +478,7 @@ def pair_jsd(
                     "segmentation": seg,
                     "kind": kind,
                     "region": region,
-                    "held_out": pair in HELD_OUT_PAIRS or seg != "proseg_hybrid",
+                    "held_out": is_held_out(pair) or seg != "proseg_hybrid",
                     "jsd": result.jsd,
                     "ci_low": result.ci_low,
                     "ci_high": result.ci_high,
@@ -543,7 +582,7 @@ def second_vote_rows(
     row: dict[str, Any] = {
         "pair": pair,
         "sample_id": sample.sample_id,
-        "held_out": pair in HELD_OUT_PAIRS,
+        "held_out": is_held_out(pair),
         "n_e2_native": len(cells),
         "n_shared": len(shared),
         "share_below60_shared": float((labels["total_counts"] < 60).mean()),
@@ -578,7 +617,7 @@ def second_vote_rows(
 
 def _pilot_paths(evidence: Path, sample_id: str) -> dict[str, Path]:
     pair = sample_id.split("_")[0]
-    if pair in ("P7513", "P1212"):
+    if is_development(pair):
         return {
             "whb": evidence / "research/pilot/whb_region" / f"{sample_id}.panel.json",
             "seaad": evidence / "research/pilot/seaad_mr" / f"{sample_id}.json",
@@ -701,7 +740,7 @@ def main(argv: list[str] | None = None) -> int:
     metric_rows, jsd_rows, comp_rows, ref_rows = [], [], [], []
     vote_rows, exit_rows, time_rows = [], [], []
     for seg in [item for item in args.segmentations.split(",") if item]:
-        for pair in [item for item in args.pairs.split(",") if item]:
+        for pair in data_pairs(args.pairs):
             run_dir = args.runs_root / pair / seg
             if not (run_dir / "map_manifest.json").is_file():
                 logger.warning("no MAP outputs for %s %s", pair, seg)

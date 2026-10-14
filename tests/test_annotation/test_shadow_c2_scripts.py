@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from merxen import privacy
 from merxen.annotation.shadow import (
     E1_REFEREE_MARKERS,
     evaluate_human_rules,
@@ -115,7 +116,7 @@ def test_ll_score_sample_and_decision(scripts: dict[str, ModuleType]) -> None:
     row, referee = scripts["shadow_ll"].score_sample(
         sample,
         calls,
-        pair="P7513",
+        pair="HD1",
         seg="proseg_hybrid",
         variant="capped",
         n_segmented=None,
@@ -126,7 +127,7 @@ def test_ll_score_sample_and_decision(scripts: dict[str, ModuleType]) -> None:
     assert row["cost_sea_below60"] == pytest.approx(4 / 40)
     assert row["ll_whb_agree_all"] == 1.0
     assert referee[0]["comparison"].startswith("WHB argmax vs LL")
-    metrics = pd.DataFrame([row, {**row, "pair": "P1212"}])
+    metrics = pd.DataFrame([row, {**row, "pair": "HD2"}])
     decisions = {
         item["decision"]: item for item in scripts["shadow_ll"].decision_rows(metrics)
     }
@@ -140,10 +141,52 @@ def test_ll_score_sample_and_decision(scripts: dict[str, ModuleType]) -> None:
     assert decisions["OD-B13"]["max_cost_sea_below60"] == pytest.approx(0.1)
 
 
+def test_ll_decision_finds_the_development_pairs_by_alias(
+    scripts: dict[str, ModuleType], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An alias table with invented pair ids (never real ones); the metrics
+    # carry the data's ids.
+    table = tmp_path / "aliases.tsv"
+    table.write_text(
+        "HD1\thuman_paired_donor\tpair_id\ttoken\tQ0101\n"
+        "HD3\thuman_paired_donor\tpair_id\ttoken\tQ0303\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(privacy.ALIAS_FILE_VAR, str(table))
+    privacy.clear_cache()
+    sample = _sample(scripts["shadow_baselines"])
+    labels = sample.labels  # type: ignore[attr-defined]
+    calls = pd.DataFrame(
+        {
+            "ll_broad_name": labels["ct_broad_name"].to_numpy(object),
+            "ll_mix_fraction": np.zeros(len(labels)),
+        },
+        index=labels.index,
+    )
+    row, _ = scripts["shadow_ll"].score_sample(
+        sample,
+        calls,
+        pair="Q0303",
+        seg="proseg_hybrid",
+        variant="capped",
+        n_segmented=None,
+    )
+    assert row["held_out"] is True
+    metrics = pd.DataFrame(
+        [
+            {**row, "pair": "Q0101", "od_b8_coverage_gain": 0.01},
+            {**row, "od_b8_coverage_gain": 0.5},
+        ]
+    )
+    vote = scripts["shadow_ll"].decision_rows(metrics)[0]
+    assert vote["max_coverage_gain_dev"] == pytest.approx(0.01)
+    assert vote["max_coverage_gain_all"] == pytest.approx(0.5)
+
+
 def test_heldout_h4_rows_count_passing_classes(scripts: dict[str, ModuleType]) -> None:
     enrichment = pd.DataFrame(
         {
-            "pair": ["P7513"] * 7,
+            "pair": ["HD1"] * 7,
             "platform": ["XENIUM"] * 7,
             "variant": ["set_a"] * 7,
             "label_set": ["heldout_argmax"] * 7,
@@ -184,14 +227,14 @@ def test_ll_fidelity_rows_compare_the_port_with_e1_vii(
             "pred_supercluster": ["MGE interneuron", "Astrocyte", "Microglia"],
         },
         index=pd.Index([1, 2, 3]),
-    ).to_csv(preds / "LLmix_wbctx+platform__P7513_XENIUM.pred.csv")
+    ).to_csv(preds / "LLmix_wbctx+platform__HD1_XENIUM.pred.csv")
     pd.DataFrame(
         {
             "ll_broad_name": ["Neurons", "Astrocytes", "Astrocytes"],
             "ll_supercluster_name": ["CGE interneuron", "Astrocyte", "Astrocyte"],
         },
         index=pd.Index(["1", "2", "3"], name="cell_id"),
-    ).to_parquet(calls / "P7513_proseg_hybrid_P7513_XENIUM_capped.parquet")
+    ).to_parquet(calls / "HD1_proseg_hybrid_HD1_XENIUM_capped.parquet")
 
     [row] = scripts["shadow_ll"].e1_fidelity_rows(calls, preds)
 

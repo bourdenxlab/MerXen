@@ -39,7 +39,7 @@ root, ``<runs>/<pair>/<seg>/``):
   RESOLVE realtime summed over the pair's segmentations <= 2.5 h; MAP peak
   RSS <= 16 GB; PREP <= 2.5 h per validated panel from each bundle's
   recorded build time; no GPU process and CUDA hidden in every task).
-- ``h15`` JSONs (``--h15``): H15 on P7513 and P1212 proseg_hybrid.
+- ``h15`` JSONs (``--h15``): H15 on HD1 and HD2 proseg_hybrid.
 - The archived E2 HO contaminated simulation (``--e2-cells``): H6, first
   measured here (definition below).
 
@@ -77,6 +77,14 @@ mapping. Per level, depth (broad D >= 15, supercluster D >= 30) and class
 with >= 50 simulated test cells of that truth class: the reweighted
 precision of the confident calls of that class must reach 0.90 (broad) /
 0.85 (supercluster); a class without a confident call is not evaluable.
+
+Pairs are named here by their aliases (HD1, HD2 development; HD3, HD4 held
+out; docs/local-configuration.md). ``--datasets`` and ``h15 --pair`` take
+aliases or the pair ids the data use; directories, trace tags, the H15
+records and the outputs use the data's ids, and the per-pair rules
+(``report_scoring``'s checks among them) are looked up by alias
+(``privacy.to_alias``). The exception tolerances are written with their
+display names (``for_output``, ``privacy.display``).
 """
 
 from __future__ import annotations
@@ -103,16 +111,18 @@ import numpy as np
 import pandas as pd
 
 from merxen.annotation import report_scoring as sc
+from merxen.privacy import display, to_alias
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from resolve_criteria import (  # noqa: E402
     DEV_PAIRS,
     H4_HEADLINE_SET,
 )
+from shadow_baselines import data_pair, data_pairs  # noqa: E402
 
 logger = logging.getLogger("run_acceptance")
 
-PAIRS: Final = ("P7513", "P1212", "P7113", "P5011")
+PAIRS: Final = ("HD1", "HD2", "HD3", "HD4")
 PLATFORMS: Final = ("MERSCOPE", "XENIUM")
 SEGMENTATIONS: Final = ("proseg_hybrid", "reseg", "proseg_mask", "original_seg")
 SCORED_SEGMENTATION: Final = "proseg_hybrid"
@@ -180,7 +190,7 @@ H14_PREP_WALL_MAX_H: Final = 2.5
 CUDA_HIDDEN: Final = ("CUDA_VISIBLE_DEVICES=''", 'CUDA_VISIBLE_DEVICES=""')
 
 # H15 (plan §14).
-H15_PAIRS: Final = ("P7513", "P1212")
+H15_PAIRS: Final = ("HD1", "HD2")
 H15_SEED_CHANGE_MAX: Final = 0.01
 
 # Layout of the acceptance run's publish root (STAGE_B_PLAN option (c)).
@@ -279,6 +289,28 @@ def record_safe(row: Row) -> Row:
     ):
         threshold = None
     return dataclasses.replace(row, value=value, threshold=threshold)
+
+
+def for_output(value: Any) -> Any:
+    """Return ``value`` with every alias in its strings shown by its display name.
+
+    For the scoring constants written to ``summary.json`` (the exception
+    tolerances): dict keys and values, list and tuple items go through
+    ``privacy.display``; other values are kept.
+
+    Args:
+        value: A string, number, mapping, list or tuple (nested).
+
+    Returns:
+        The translated copy.
+    """
+    if isinstance(value, str):
+        return display(value)
+    if isinstance(value, Mapping):
+        return {for_output(key): for_output(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return type(value)(for_output(item) for item in value)
+    return value
 
 
 def finalize(row: Row, exception: sc.ExceptionVerdict | None = None) -> Row:
@@ -628,7 +660,7 @@ def h14_rows(
         missing = sorted(set(segmentations) - set(covered))
         incomplete = bool(missing) or not bool(done[tasks.index].all()) or tasks.empty
         wall_h = float(tasks["realtime_s"].sum()) / 3600.0
-        scored = pair in DEV_PAIRS
+        scored = to_alias(pair) in DEV_PAIRS
         rows.append(
             Row(
                 criterion="H14/annotation_wall",
@@ -967,7 +999,7 @@ def _criteria_exception(
         entry = level.get(key) or {}
         return sc.check_d3(
             segmentation=row.segmentation,
-            dataset=row.dataset,
+            dataset=to_alias(row.dataset),
             value=_float(record["value"]),
             level=entry.get("gate_level"),
         )
@@ -978,7 +1010,7 @@ def _criteria_exception(
         return sc.check_d5(
             criterion=row.criterion,
             segmentation=row.segmentation,
-            dataset=row.dataset,
+            dataset=to_alias(row.dataset),
             value=_float(record["value"]),
             n_confident_broad=None if _is_missing(broad) else int(broad),
             n_confident_supercluster=None
@@ -993,7 +1025,9 @@ def _criteria_exception(
             & (enrichment["platform"] == platform)
         ]
         return sc.check_d7(
-            segmentation=row.segmentation, dataset=row.dataset, classes=classes
+            segmentation=row.segmentation,
+            dataset=to_alias(row.dataset),
+            classes=classes,
         )
     return None
 
@@ -1036,7 +1070,7 @@ def h12_rows(
                     )
                 continue
             try:
-                score = sc.score_h12(records, pair_id=pair)
+                score = sc.score_h12(records, pair_id=pair, alias=to_alias(pair))
             except ValueError as error:
                 rows.append(
                     finalize(
@@ -1122,11 +1156,11 @@ def h13_rows(
     - ``H13/legacy_untouched``: ``compare_legacy.py untouched``.
     - ``H13/viewer``: the viewer on reseg is a manual check (not measured).
 
-    The last four are scored on P7513 and P1212 (the flip rule).
+    The last four are scored on HD1 and HD2 (the flip rule).
     """
     rows: list[Row] = []
     for pair in pairs:
-        dev = pair in DEV_PAIRS
+        dev = to_alias(pair) in DEV_PAIRS
         main_path = runs_root / REPORT_PATH.format(pair=pair, seg=SCORED_SEGMENTATION)
         state_path = runs_root / state_report_path.format(pair=pair)
         found = []
@@ -1450,7 +1484,7 @@ def h6_rows(
         ]
         exception = sc.check_d10(
             segmentation=SCORED_SEGMENTATION,
-            dataset=dataset,
+            dataset=to_alias(dataset),
             failing=[
                 (row["level"], row["class"], int(row["depth"]), row["precision"])
                 for row in failing_rows
@@ -1680,10 +1714,18 @@ def h15_compare(
 
 
 def h15_rows(records: Mapping[str, Mapping[str, Any]]) -> list[Row]:
-    """Return H15's rows on P7513 and P1212 (first measured at M8)."""
+    """Return H15's rows on HD1 and HD2 (first measured at M8).
+
+    Args:
+        records: The ``h15`` records keyed by pair alias.
+
+    Returns:
+        The rows, keyed by the data's pair ids.
+    """
     rows: list[Row] = []
-    for pair in H15_PAIRS:
-        record = records.get(pair, {})
+    for alias in H15_PAIRS:
+        pair = data_pair(alias)
+        record = records.get(alias, {})
         identical = record.get("identical")
         files = record.get("identical_files", [])
         rows.append(
@@ -1768,7 +1810,7 @@ def h15_rows(records: Mapping[str, Mapping[str, Any]]) -> list[Row]:
                     "seed only, or a switch)",
                 ),
                 sc.check_d12(
-                    pair=pair,
+                    pair=alias,
                     share_threshold=crossing,
                     n_switched=None if switched is None else int(switched),
                     n_missing=None
@@ -1834,7 +1876,7 @@ def h18_rows(
             None
             if passes
             else sc.check_d4_h18(
-                dataset=str(record["dataset"]),
+                dataset=to_alias(str(record["dataset"])),
                 level=str(record["level"]),
                 cls=str(record["class"]),
                 missing=missing,
@@ -2184,7 +2226,7 @@ def _read_optional(path: Path | None) -> pd.DataFrame | None:
 
 def score(args: argparse.Namespace) -> dict[str, Any]:
     """Run the ``score`` subcommand; return the summary."""
-    pairs = [item for item in args.datasets.split(",") if item]
+    pairs = data_pairs(args.datasets)
     segmentations = (
         list(SEGMENTATIONS)
         if args.segmentations == "all"
@@ -2246,7 +2288,7 @@ def score(args: argparse.Namespace) -> dict[str, Any]:
     if args.h15 is not None:
         for path in sorted(args.h15.glob("h15_*.json")):
             record = _json(track(path))
-            h15_records[str(record["pair"])] = record
+            h15_records[to_alias(str(record["pair"]))] = record
     rows += h15_rows(h15_records)
     masses = {}
     for pair in pairs:
@@ -2340,7 +2382,7 @@ def score(args: argparse.Namespace) -> dict[str, Any]:
             "h4_scored_set": H4_HEADLINE_SET,
             "h12_ci_scored": sc.SCORED_CI,
             "h12_reported_beside": f"{sc.SQUARE_TILE_CI} (§20 D11, not scored)",
-            "exception_tolerances": sc.TOLERANCES,
+            "exception_tolerances": for_output(sc.TOLERANCES),
             "first_measurements": sorted(FIRST_MEASUREMENTS),
         },
         "datasets": pairs,
@@ -2378,7 +2420,7 @@ def score(args: argparse.Namespace) -> dict[str, Any]:
 def h15(args: argparse.Namespace) -> dict[str, Any]:
     """Run the ``h15`` subcommand; return the record."""
     record = h15_compare(
-        args.pair,
+        data_pair(args.pair),
         args.pipeline_map,
         args.pipeline_resolve,
         args.rerun_map,
@@ -2417,12 +2459,14 @@ def main(argv: list[str] | None = None) -> int:
     scoring.add_argument("--run-start", required=True, help="ISO time the run started")
     scoring.add_argument("--e2-cells", type=Path, help="E2 out/cells_insil.csv.gz")
     scoring.add_argument("--h15", type=Path, help="directory of h15_<pair>.json")
-    scoring.add_argument("--datasets", default=",".join(PAIRS))
+    scoring.add_argument(
+        "--datasets", default=",".join(PAIRS), help="pair aliases or ids"
+    )
     scoring.add_argument("--segmentations", default="all")
     scoring.add_argument("--date", default=datetime.now(UTC).date().isoformat())
     scoring.add_argument("--out", type=Path, required=True)
     rerun = commands.add_parser("h15", help="compare an H15 re-run")
-    rerun.add_argument("--pair", required=True)
+    rerun.add_argument("--pair", required=True, help="pair alias or id")
     rerun.add_argument("--pipeline-map", type=Path, required=True)
     rerun.add_argument("--pipeline-resolve", type=Path, required=True)
     rerun.add_argument("--rerun-map", type=Path)

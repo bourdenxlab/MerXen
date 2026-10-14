@@ -3,19 +3,19 @@
 
 H9 scores confident ``ct_broad`` calls against crude canonical-marker
 pseudo-labels, with the methods of the dataset characterisations the plan
-names ("marker pseudo-labels, ``data/P7513`` §C, ``data/P1212`` §4"). Both
+names ("marker pseudo-labels, ``data/HD1`` §C, ``data/HD2`` §4"). Both
 methods are ported verbatim here so that H9 can be scored on segmentations
 the reports never labelled (reseg, H17) and on the held-out donors (for
 information):
 
-- ``p7513_pseudo_labels`` (``data/P7513/characterise_dataset.py``
+- ``hd1_pseudo_labels`` (``data/HD1/characterise_dataset.py``
   ``marker_scores`` / ``pseudo_labels``): top-2 scaled marker scores on the
   log-normalised matrix; seed cells per class; a multinomial class profile
   over all panel genes from the seeds' raw counts; label at posterior >= 0.99,
   else ``Unresolved``; ``Mixed`` when a 50/50 two-class mixture beats the
   best class by >= 10 nats. Broad collapse ``PSEUDO_TO_BROAD``; resolved cells
   are those not ``Unresolved`` / ``Mixed``.
-- ``p1212_pseudo_labels`` (``data/P1212/scripts/common.py``
+- ``hd2_pseudo_labels`` (``data/HD2/scripts/common.py``
   ``pseudo_labels``): each marker's counts over its mean positive count;
   class score = the sum; label when the top class has >= 1.5 units and
   >= 60% of the summed scores, else ``Unassigned``; the 6-class collapse
@@ -25,8 +25,13 @@ information):
 the 6-class scheme both reports used (Neuron, Astro, Oligo, OPC, Micro,
 Vascular; our Vascular cells and Fibroblasts both collapse to Vascular):
 the share of confident cells with a resolved pseudo-label whose collapsed
-class equals the pseudo-label's (P7513's ``Immune_other`` pseudo-label is
+class equals the pseudo-label's (HD1's ``Immune_other`` pseudo-label is
 resolved and never matches, as in the report's MapMyCells comparison).
+
+The methods and the reports are named by the pair aliases (HD1, HD2;
+docs/local-configuration.md). Outputs record a method by ``method_label``
+(``privacy.display``): on a host with the alias table, the name it had
+before the aliasing.
 
 The module is imported by ``resolve_criteria.py``; running it prints the
 marker sets.
@@ -43,8 +48,10 @@ import numpy as np
 import pandas as pd
 from scipy import sparse
 
-# data/P7513/characterise_dataset.py PSEUDO_HUMAN (verbatim).
-P7513_PSEUDO_MARKERS: dict[str, list[str]] = {
+from merxen.privacy import display
+
+# data/HD1/characterise_dataset.py PSEUDO_HUMAN (verbatim).
+HD1_PSEUDO_MARKERS: dict[str, list[str]] = {
     "Exc": ["SLC17A7", "SLC17A6", "SATB2", "CUX2", "RORB", "THEMIS", "FEZF2", "TBR1"],
     "Inh": ["GAD1", "GAD2", "SLC32A1", "LHX6", "PVALB", "SST", "VIP", "ADARB2"],
     "Astro": ["AQP4", "GJA1", "SOX9", "FGFR3", "SLC1A2", "SLC1A3", "GFAP", "ALDH1L1"],
@@ -65,8 +72,8 @@ P7513_PSEUDO_MARKERS: dict[str, list[str]] = {
     "Mural/VLMC": ["DCN", "FBLN1", "ABCC9", "PDGFRB", "RGS5", "COL1A2", "LUM"],
     "Lymph": ["CD3G", "CD2", "TRAC", "NKG7", "GZMA"],
 }
-# data/P7513/characterise_dataset.py PSEUDO_TO_BROAD (verbatim).
-P7513_PSEUDO_TO_BROAD: dict[str, str] = {
+# data/HD1/characterise_dataset.py PSEUDO_TO_BROAD (verbatim).
+HD1_PSEUDO_TO_BROAD: dict[str, str] = {
     "Exc": "Neuron",
     "Inh": "Neuron",
     "Astro": "Astro",
@@ -79,10 +86,10 @@ P7513_PSEUDO_TO_BROAD: dict[str, str] = {
     "Unresolved": "Unresolved",
     "Mixed": "Mixed",
 }
-P7513_UNRESOLVED: tuple[str, ...] = ("Unresolved", "Mixed")
+HD1_UNRESOLVED: tuple[str, ...] = ("Unresolved", "Mixed")
 
-# data/P1212/scripts/common.py PSEUDO_MARKERS and PSEUDO6 (verbatim).
-P1212_PSEUDO_MARKERS: dict[str, list[str]] = {
+# data/HD2/scripts/common.py PSEUDO_MARKERS and PSEUDO6 (verbatim).
+HD2_PSEUDO_MARKERS: dict[str, list[str]] = {
     "Exc": ["SLC17A7", "SLC17A6", "CUX2", "RORB", "THEMIS"],
     "Inh": ["GAD1", "GAD2", "PVALB", "SST", "VIP", "LHX6"],
     "Astro": ["AQP4", "GJA1", "SOX9", "FGFR3"],
@@ -92,7 +99,7 @@ P1212_PSEUDO_MARKERS: dict[str, list[str]] = {
     "Vasc": ["FLT1", "PECAM1", "CALCRL", "ABCC9"],
     "Fibro": ["DCN", "FBLN1"],
 }
-P1212_PSEUDO6: dict[str, str] = {
+HD2_PSEUDO6: dict[str, str] = {
     "Exc": "Neuron",
     "Inh": "Neuron",
     "Astro": "Astro",
@@ -102,7 +109,7 @@ P1212_PSEUDO6: dict[str, str] = {
     "Vasc": "Vascular",
     "Fibro": "Vascular",
 }
-P1212_UNRESOLVED: tuple[str, ...] = ("Unassigned",)
+HD2_UNRESOLVED: tuple[str, ...] = ("Unassigned",)
 
 # Our broad classes collapsed to the reports' 6-class scheme (both reports
 # map the pipeline's "Fibroblasts" to "Vascular").
@@ -115,7 +122,12 @@ BROAD_TO_SIX: dict[str, str] = {
     "Vascular cells": "Vascular",
     "Fibroblasts": "Vascular",
 }
-METHODS: tuple[str, ...] = ("p7513_c", "p1212_4")
+METHODS: tuple[str, ...] = ("hd1_c", "hd2_4")
+
+
+def method_label(method: str) -> str:
+    """Return the name an output records for a method (``privacy.display``)."""
+    return display(method)
 
 
 def _present(genes: Sequence[str], var_names: Sequence[str]) -> list[str]:
@@ -123,13 +135,13 @@ def _present(genes: Sequence[str], var_names: Sequence[str]) -> list[str]:
     return [gene for gene in genes if gene in names]
 
 
-def p7513_marker_scores(
+def hd1_marker_scores(
     lognorm: sparse.spmatrix,
     var_names: Sequence[str],
-    markers: Mapping[str, Sequence[str]] = P7513_PSEUDO_MARKERS,
+    markers: Mapping[str, Sequence[str]] = HD1_PSEUDO_MARKERS,
     top_k: int = 2,
 ) -> pd.DataFrame:
-    """Per-cell class scores: the mean of the top-k scaled markers (P7513 §C step 1).
+    """Per-cell class scores: the mean of the top-k scaled markers (HD1 §C step 1).
 
     Each marker's log-normalised expression is divided by its 90th percentile
     among expressing cells and clipped at 1.
@@ -166,12 +178,12 @@ def p7513_marker_scores(
     return scores
 
 
-def p7513_pseudo_labels(
+def hd1_pseudo_labels(
     counts: sparse.spmatrix,
     lognorm: sparse.spmatrix,
     var_names: Sequence[str],
     *,
-    markers: Mapping[str, Sequence[str]] = P7513_PSEUDO_MARKERS,
+    markers: Mapping[str, Sequence[str]] = HD1_PSEUDO_MARKERS,
     seed_min: float = 0.5,
     seed_other_ratio: float = 0.5,
     min_seeds: int = 30,
@@ -179,7 +191,7 @@ def p7513_pseudo_labels(
     mixed_delta: float = 10.0,
     alpha: float = 0.5,
 ) -> pd.DataFrame:
-    """Marker-seeded multinomial pseudo-labels (``data/P7513`` §C).
+    """Marker-seeded multinomial pseudo-labels (``data/HD1`` §C).
 
     Args:
         counts: Cells x genes raw counts (``layers["counts"]``).
@@ -198,9 +210,9 @@ def p7513_pseudo_labels(
         Per cell: ``pseudo`` (fine class, ``Unresolved`` or ``Mixed``),
         ``pseudo_broad`` (``PSEUDO_TO_BROAD``) and ``nb_posterior``.
     """
-    scores = p7513_marker_scores(lognorm, var_names, markers)
+    scores = hd1_marker_scores(lognorm, var_names, markers)
     classes = list(scores.columns)
-    broad_of = np.array([P7513_PSEUDO_TO_BROAD[c] for c in classes])
+    broad_of = np.array([HD1_PSEUDO_TO_BROAD[c] for c in classes])
     values = scores.to_numpy()
     seeds = {}
     for j, cls in enumerate(classes):
@@ -229,7 +241,7 @@ def p7513_pseudo_labels(
     label = np.array(keep, dtype=object)[best]
     best_posterior = posterior[np.arange(len(posterior)), best]
     label = np.where(best_posterior >= post_min, label, "Unresolved")
-    keep_broad = np.array([P7513_PSEUDO_TO_BROAD[c] for c in keep])
+    keep_broad = np.array([HD1_PSEUDO_TO_BROAD[c] for c in keep])
     best_mix = np.full(len(label), -np.inf)
     for i in range(len(keep)):
         for j in range(i + 1, len(keep)):
@@ -244,21 +256,21 @@ def p7513_pseudo_labels(
     return pd.DataFrame(
         {
             "pseudo": label,
-            "pseudo_broad": [P7513_PSEUDO_TO_BROAD[str(x)] for x in label],
+            "pseudo_broad": [HD1_PSEUDO_TO_BROAD[str(x)] for x in label],
             "nb_posterior": best_posterior,
         }
     )
 
 
-def p1212_pseudo_labels(
+def hd2_pseudo_labels(
     counts: sparse.spmatrix,
     var_names: Sequence[str],
     *,
-    markers: Mapping[str, Sequence[str]] = P1212_PSEUDO_MARKERS,
+    markers: Mapping[str, Sequence[str]] = HD2_PSEUDO_MARKERS,
     min_score: float = 1.5,
     min_frac: float = 0.6,
 ) -> pd.DataFrame:
-    """Marker-count pseudo-labels (``data/P1212`` §4).
+    """Marker-count pseudo-labels (``data/HD2`` §4).
 
     Args:
         counts: Cells x genes raw counts.
@@ -296,7 +308,7 @@ def p1212_pseudo_labels(
     return pd.DataFrame(
         {
             "pseudo8": label,
-            "pseudo6": [P1212_PSEUDO6.get(str(x), "Unassigned") for x in label],
+            "pseudo6": [HD2_PSEUDO6.get(str(x), "Unassigned") for x in label],
         }
     )
 
@@ -306,7 +318,7 @@ class H9Result:
     """H9 agreement of one labelling with one pseudo-labelling.
 
     Attributes:
-        method: ``p7513_c`` or ``p1212_4``.
+        method: ``hd1_c`` or ``hd2_4``.
         n_confident: Confident cells (any pseudo-label).
         n_scored: Confident cells with a resolved pseudo-label.
         agreement: Share of the scored cells whose 6-class label matches.
@@ -337,19 +349,19 @@ def resolved_six(pseudo: pd.DataFrame, method: str) -> np.ndarray:
     """Return each cell's resolved 6-class pseudo-label (``None`` if unresolved).
 
     Args:
-        pseudo: ``p7513_pseudo_labels`` or ``p1212_pseudo_labels`` output (or
+        pseudo: ``hd1_pseudo_labels`` or ``hd2_pseudo_labels`` output (or
             the reports' stored tables with the same columns).
-        method: ``p7513_c`` or ``p1212_4``.
+        method: ``hd1_c`` or ``hd2_4``.
 
     Returns:
         Object array.
     """
-    if method == "p7513_c":
+    if method == "hd1_c":
         values = pseudo["pseudo_broad"].astype(object).to_numpy()
-        unresolved = P7513_UNRESOLVED
-    elif method == "p1212_4":
+        unresolved = HD1_UNRESOLVED
+    elif method == "hd2_4":
         values = pseudo["pseudo6"].astype(object).to_numpy()
-        unresolved = P1212_UNRESOLVED
+        unresolved = HD2_UNRESOLVED
     else:
         raise ValueError(f"unknown pseudo-label method {method!r}")
     return np.array(
@@ -402,10 +414,10 @@ def h9_agreement(
 def main() -> int:
     """Print the marker sets of both methods."""
     for name, markers in (
-        ("p7513_c", P7513_PSEUDO_MARKERS),
-        ("p1212_4", P1212_PSEUDO_MARKERS),
+        ("hd1_c", HD1_PSEUDO_MARKERS),
+        ("hd2_4", HD2_PSEUDO_MARKERS),
     ):
-        print(name)
+        print(method_label(name))
         for cls, genes in markers.items():
             print(f"  {cls}: {', '.join(genes)}")
     return 0

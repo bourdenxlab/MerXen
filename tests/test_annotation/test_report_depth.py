@@ -370,7 +370,7 @@ def test_tangential_blocks_keep_every_depth_slice_in_a_replicate() -> None:
 
 
 def _close_deep_layers(platform: str, seed: int) -> SampleData:
-    """A section whose deep IT and NP/CT/6b medians are close (P7513_XENIUM).
+    """A section whose deep IT and NP/CT/6b medians are close (HD1_XENIUM).
 
     The deep grey-matter cells are labelled by a noisy depth threshold, so
     the two groups' medians are about .08 apart: the tangential-block CIs
@@ -419,15 +419,15 @@ def test_h12_is_scored_on_the_tangential_blocks_where_the_square_tiles_fail(
     (scored_ci,) = _records(item, "depth_ci_scored")
     assert method.value == PRIMARY_CI  # the display primary is unchanged
     assert scored_ci.value == SCORED_CI == PRIMARY_CI
-    score = score_h12(item.metrics, pair_id="P7513")
+    score = score_h12(item.metrics, pair_id="HD1")
     assert score.ci_scored == PRIMARY_CI
     assert score.ci_reported_beside == SQUARE_TILE_CI
     assert score.ordering == {"MERSCOPE": PASS, "XENIUM": PASS}
     assert score.ordering_verdict == PASS
     assert score.reported_beside["ordering"] == {"MERSCOPE": PASS, "XENIUM": FAIL}
     assert score.to_json()["ci_scored"] == PRIMARY_CI
-    # P1212 is scored on WM > GM alone (plan §14 H12).
-    other = score_h12(item.metrics, pair_id="P1212")
+    # HD2 is scored on WM > GM alone (plan §14 H12).
+    other = score_h12(item.metrics, pair_id="HD2")
     assert not other.ordering_required and other.wm_gm_verdict == PASS
     assert other.verdict == PASS
 
@@ -445,7 +445,7 @@ def test_h12_on_a_gated_platform_is_not_available_under_the_scored_ci(
     assert tile.status == "not_available" and tile.value is None
     (scored,) = _records(item, "depth_ordering_replicated", kind=SQUARE_TILE_CI)
     assert scored.status == "not_available"
-    score = score_h12(item.metrics, pair_id="P7513")
+    score = score_h12(item.metrics, pair_id="HD1")
     assert score.ordering == {"MERSCOPE": PASS, "XENIUM": NOT_AVAILABLE}
     assert score.verdict == NOT_AVAILABLE
 
@@ -471,4 +471,4 @@ def test_without_tangential_positions_the_scored_record_is_the_primary(
         assert primary.value == tile.value
     (method,) = _records(item, "depth_ci_method")
     assert method.value == SQUARE_TILE_CI
-    assert score_h12(item.metrics, pair_id="P7513").verdict == FAIL
+    assert score_h12(item.metrics, pair_id="HD1").verdict == FAIL

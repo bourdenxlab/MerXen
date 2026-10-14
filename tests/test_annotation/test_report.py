@@ -519,7 +519,7 @@ def test_discover_sources_prefers_the_map_first_outputs_over_legacy_ones(
 ) -> None:
     """M7 review: legacy outputs beside the map_first ones must not be read.
 
-    On P7513 the legacy clustered H5ADs' MERSCOPE coordinates differ from the
+    On HD1 the legacy clustered H5ADs' MERSCOPE coordinates differ from the
     current pipeline's by about 80-90 µm (H1's shared mask, the tiles).
     """
     setup = _resolved(tmp_path / "run", fake_mmc, make_trust)

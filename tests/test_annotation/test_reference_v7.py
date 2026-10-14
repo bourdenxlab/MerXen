@@ -49,7 +49,7 @@ from .test_reference import (  # noqa: F401
 )
 
 VALIDATED_SET_A_297 = "6e5fd5fb86ef0c3eaccf2efa5b792c9515b087fdf9e9cb6a3978d53268253dc3"
-PINNED_P5011 = "ed7bc6bed98953942f43e6e4ac5af46469faa8195e443ff8f2981ef560808774"
+PINNED_HD4 = "ed7bc6bed98953942f43e6e4ac5af46469faa8195e443ff8f2981ef560808774"
 
 
 def listed_panel(panel_hash: str, n_genes: int = 297) -> Any:
@@ -65,9 +65,9 @@ def test_version_follows_the_family() -> None:
     assert reference.panel_resolvability_version(
         listed_panel(VALIDATED_SET_A_297), config
     ) == (6)
-    assert reference.panel_resolvability_version(
-        listed_panel(PINNED_P5011), config
-    ) == (6)
+    assert reference.panel_resolvability_version(listed_panel(PINNED_HD4), config) == (
+        6
+    )
     inherited = SimpleNamespace(
         panel_hash="0" * 64,
         n_genes=300,

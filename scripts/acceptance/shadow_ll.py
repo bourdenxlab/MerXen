@@ -75,12 +75,14 @@ from merxen.annotation.vocab import HUMAN_BROAD_CLASSES
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from shadow_baselines import (  # noqa: E402
-    HELD_OUT_PAIRS,
     PAIRS,
     PLATFORMS,
     Sample,
     _clustered_path,
     add_fallback_arguments,
+    data_pairs,
+    is_development,
+    is_held_out,
     load_sample,
 )
 
@@ -97,7 +99,6 @@ RULES = (
     "seaad_ll_below60",
     "ll_below60",
 )
-DEVELOPMENT = ("P7513", "P1212")
 OD_B8_COVERAGE = 0.05
 OD_B8_REFEREE = 0.02
 OD_B13_TRIGGER = 0.08
@@ -214,7 +215,7 @@ def score_sample(
         "sample_id": sample.sample_id,
         "platform": sample.platform,
         "variant": variant,
-        "held_out": pair in HELD_OUT_PAIRS or seg != "proseg_hybrid",
+        "held_out": is_held_out(pair) or seg != "proseg_hybrid",
         "n_table_cells": len(labels),
         "share_below60": float(below.mean()),
         "ll_whb_agree_all": float((ll_values == whb).mean()),
@@ -303,7 +304,7 @@ def decision_rows(metrics: pd.DataFrame) -> list[dict[str, Any]]:
     rows = []
     base = metrics[metrics["segmentation"] == "proseg_hybrid"]
     for variant, frame in base.groupby("variant"):
-        dev = frame[frame["pair"].isin(DEVELOPMENT)]
+        dev = frame[frame["pair"].map(is_development).astype(bool)]
         referee_gain = dev[["h10_delta", "plausibility_delta"]].max(axis=None)
         coverage_gain = dev["od_b8_coverage_gain"].max()
         rows.append(
@@ -420,7 +421,7 @@ def main(argv: list[str] | None = None) -> int:
     referee_rows: list[dict[str, Any]] = []
     factor_rows: list[dict[str, Any]] = []
     for seg in [s for s in args.segmentations.split(",") if s]:
-        for pair in [p for p in args.pairs.split(",") if p]:
+        for pair in data_pairs(args.pairs):
             run_dir = args.runs_root / pair / seg
             if not (run_dir / "map_manifest.json").is_file():
                 logger.warning("no MAP outputs for %s %s", pair, seg)
