@@ -22,12 +22,12 @@
       }
     ],
     "deriving_script": "scripts/annotation/build_sim_inputs.py",
-    "deriving_script_sha256": "32b8bc56012d49fb0af156d566088e4d11c32c940d494e5ac7f84f4d51d2f977",
+    "deriving_script_sha256": "6bbba25992d1e65154838d228f491405e7862863cf4859ad3a92c72ca7b3ad2b",
     "evidence": [
       "$A/5k_real/SYNTHESIS.txt",
       "$A/5k_real/sim/REPORT.txt"
     ],
-    "evidence_root": "$A = /srv/storage/MerXen/annotation_dev/evidence_20260926",
+    "evidence_root": "$A = $MERXEN_EVIDENCE_ROOT",
     "licence": "CC BY 4.0 (Creative Commons Attribution 4.0 International)",
     "licence_note": "licence text taken from search-indexed pages; re-confirm in a browser before redistributing",
     "licence_terms_recorded": "CC BY 4.0 (Creative Commons Attribution 4.0 International); attribution to 10x Genomics required. Source: 10x Genomics dataset pages as indexed by web search on 2026-09-28; the pages themselves returned HTTP 429 (Vercel bot checkpoint) to non-browser clients and were not read directly, so re-confirm on the page before redistribution",

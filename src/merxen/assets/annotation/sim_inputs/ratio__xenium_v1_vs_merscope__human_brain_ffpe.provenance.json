@@ -9,10 +9,10 @@
   "description": "Set a's per-gene log2 Xenium / MERSCOPE offsets, gate P's NP6 cross-platform stress (plan \u00a714 NP6; M13 decision D7): each R1 member's efficiency times 2 ** offset, uncovered panel genes a keyed resample; never a PREP member",
   "extra": {
     "pairs": [
-      "P7513",
-      "P7113",
-      "P1212",
-      "P5011"
+      "HD1",
+      "HD3",
+      "HD2",
+      "HD4"
     ],
     "ratio": "log2(Xenium / MERSCOPE)",
     "stress_kind": "cross_platform"
@@ -43,18 +43,18 @@
       }
     ],
     "deriving_script": "scripts/annotation/build_xplatform_stress.py",
-    "deriving_script_sha256": "b3e805acb435326de5b947fc4e4d4e7fd7c918f5c6fe16a3b89e75556ee0c2d9",
+    "deriving_script_sha256": "eba028570371625651a704b602360db92035c5b3db024e4ddcdaba661c6d6039",
     "evidence": [
       "$A/research/xplat/xplat_genes.out",
       "$A/m13/M13_IMPLEMENTATION_PLAN.md",
       "$A/m13/DECISIONS_RESOLVED.md"
     ],
-    "evidence_root": "$A = /srv/storage/MerXen/annotation_dev/evidence_20260926",
+    "evidence_root": "$A = $MERXEN_EVIDENCE_ROOT",
     "licence": "in-house data, no public licence; the asset holds derived per-gene offsets only",
     "licence_note": "in-house data: no public licence text applies",
-    "method": "Per gene, log2 of the Xenium / MERSCOPE mean counts per cell over all cells of each of the four paired sections (P7513, P7113, P1212, P5011; set a's 296 shared genes; research/xplat/xplat_genes.py); each pair centred on its median gene, averaged over the pairs, centred on the median gene and capped at +-2 log2. Gate P's NP6 multiplies an R1 member's LogNormal draw by 2 ** offset; panel genes the table does not cover take a keyed resample of these values (M13 decision D7 (a) + (i)).",
+    "method": "Per gene, log2 of the Xenium / MERSCOPE mean counts per cell over all cells of each of the four paired sections (HD1, HD3, HD2, HD4; set a's 296 shared genes; research/xplat/xplat_genes.py); each pair centred on its median gene, averaged over the pairs, centred on the median gene and capped at +-2 log2. Gate P's NP6 multiplies an R1 member's LogNormal draw by 2 ** offset; panel genes the table does not cover take a keyed resample of these values (M13 decision D7 (a) + (i)).",
     "segmentation": "MerXen proseg_hybrid (Cellpose-SAM prior and ProSeg) on both platforms of each pair",
-    "source_dataset": "MerXen set a paired sections P7513, P7113, P1212 and P5011 (in-house human brain sections, each pair one Xenium and one adjacent MERSCOPE section on the same custom gene panel)",
+    "source_dataset": "MerXen set a paired sections HD1, HD3, HD2 and HD4 (in-house human brain sections, each pair one Xenium and one adjacent MERSCOPE section on the same custom gene panel)",
     "source_files": [
       {
         "file": "log2_xen_over_mer_gene_means.csv",
@@ -69,16 +69,16 @@
       "n_capped": 61,
       "n_genes": 296,
       "pair_median_log2": {
-        "P1212": 0.9119084802626418,
-        "P5011": 1.5216155374297253,
-        "P7113": 0.9802145281433559,
-        "P7513": -0.11540453780881775
+        "HD1": -0.11540453780881775,
+        "HD2": 0.9119084802626418,
+        "HD3": 0.9802145281433559,
+        "HD4": 1.5216155374297253
       },
       "pairs": [
-        "P7513",
-        "P7113",
-        "P1212",
-        "P5011"
+        "HD1",
+        "HD3",
+        "HD2",
+        "HD4"
       ],
       "sd_log2_before_cap": 1.6167263412424933
     },

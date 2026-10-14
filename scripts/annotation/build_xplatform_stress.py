@@ -6,8 +6,8 @@ the measured human cross-platform offsets (capped +-2)" (plan §14 NP6). The
 M13 decision D7 (a) + (i) (pre-registration §23.10) fixes the source and the
 rule: the registered D-A7 basis ``research/xplat/
 log2_xen_over_mer_gene_means.csv`` (the 296 set a genes' log2 Xenium /
-MERSCOPE mean counts per cell on the four paired sections P7513, P7113,
-P1212 and P5011, proseg_hybrid), centred on the median gene, capped at +-2
+MERSCOPE mean counts per cell on the four paired sections HD1, HD3, HD2
+and HD4, proseg_hybrid), centred on the median gene, capped at +-2
 log2 and registered as a ``sim_inputs`` ``stress`` asset with provenance
 (source path, sha256 and this deriving script); panel genes the table does
 not cover take a keyed resample of its values at simulation time
@@ -34,13 +34,19 @@ of genes are capped against 19-24%).
 
 The data are in-house, so the sidecar records ``source_kind: in_house`` and
 each source file by its path under the evidence root and its sha256 (no
-URL). It never records a local path outside the evidence root.
+URL). It never records a local path: the evidence root is written as the
+variable ``$MERXEN_EVIDENCE_ROOT``, and the source's pair columns (real
+pair ids, translated at read time by ``merxen.privacy.to_alias``) as their
+aliases.
 
 Usage::
 
     python scripts/annotation/build_xplatform_stress.py \\
-        --evidence-root /srv/storage/MerXen/annotation_dev/evidence_20260926
+        --evidence-root "$MERXEN_EVIDENCE_ROOT"
 
+``--evidence-root`` defaults to that ``.env`` variable (template
+``.env.example``); reading the source needs the alias table
+(``MERXEN_ALIAS_FILE``) because its columns carry real pair ids.
 ``--check`` writes nothing and exits 1 when a committed file differs from
 what the inputs produce. ``scripts/annotation/build_sim_inputs.py`` writes
 the directory's ``NOTICE``, which lists this asset under "In-house assets";
@@ -63,6 +69,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from merxen import local_config, privacy
 from merxen.annotation import sim_inputs as si
 from merxen.annotation.vocab import ASSET_DIR
 
@@ -73,8 +80,11 @@ SCRIPT_PATH = "scripts/annotation/build_xplatform_stress.py"
 SOURCE_RELATIVE = "research/xplat/log2_xen_over_mer_gene_means.csv"
 SOURCE_SCRIPT_RELATIVE = "research/xplat/xplat_genes.py"
 SOURCE_REPORT_RELATIVE = "research/xplat/xplat_genes.out"
-EVIDENCE_ROOT_TEXT = "$A = /srv/storage/MerXen/annotation_dev/evidence_20260926"
-PAIRS = ("P7513", "P7113", "P1212", "P5011")
+# What the sidecar's evidence_root records: ``$A`` stands for the .env variable.
+EVIDENCE_ROOT_TEXT = "$A = $MERXEN_EVIDENCE_ROOT"
+# The four paired sections, by alias (the evidence table's columns are real
+# pair ids; build_asset translates them with privacy.to_alias).
+PAIRS = ("HD1", "HD3", "HD2", "HD4")
 SET_A_PANEL = "human_set_a_296"
 GENES_FILE = "validated_panel_genes.csv"
 GENES_REPO_PATH = f"src/merxen/assets/annotation/{GENES_FILE}"
@@ -88,7 +98,7 @@ SEGMENTATION = (
 )
 METHOD = (
     "Per gene, log2 of the Xenium / MERSCOPE mean counts per cell over all "
-    "cells of each of the four paired sections (P7513, P7113, P1212, P5011; "
+    "cells of each of the four paired sections (HD1, HD3, HD2, HD4; "
     "set a's 296 shared genes; research/xplat/xplat_genes.py); each pair "
     "centred on its median gene, averaged over the pairs, centred on the "
     "median gene and capped at +-2 log2. Gate P's NP6 multiplies an R1 "
@@ -202,7 +212,8 @@ def build_asset(evidence_root: Path, genes_path: Path, repo_root: Path) -> Built
     source_path = evidence_root / SOURCE_RELATIVE
     if not source_path.is_file():
         raise XplatformBuildError(f"input {source_path} is missing")
-    source = pd.read_csv(source_path, index_col=0)
+    # R2: the evidence table's columns hold real pair ids.
+    source = pd.read_csv(source_path, index_col=0).rename(columns=privacy.to_alias)
     offsets = xplatform_offsets(source, si.XPLATFORM_CAP_LOG2)
     gene_ids = set_a_gene_ids(genes_path)
     unmapped = sorted(set(offsets.index) - set(gene_ids.index))
@@ -228,7 +239,7 @@ def build_asset(evidence_root: Path, genes_path: Path, repo_root: Path) -> Built
     provenance: dict[str, Any] = {
         si.SOURCE_KIND_KEY: si.SOURCE_KIND_IN_HOUSE,
         "source_dataset": (
-            "MerXen set a paired sections P7513, P7113, P1212 and P5011 "
+            "MerXen set a paired sections HD1, HD3, HD2 and HD4 "
             "(in-house human brain sections, each pair one Xenium and one "
             "adjacent MERSCOPE section on the same custom gene panel)"
         ),
@@ -345,7 +356,12 @@ def build_files(
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
-    parser.add_argument("--evidence-root", type=Path, required=True)
+    local_config.add_location_argument(
+        parser,
+        "--evidence-root",
+        "MERXEN_EVIDENCE_ROOT",
+        "The evidence root (`$A`) holding the set a offsets.",
+    )
     parser.add_argument("--genes", type=Path, default=ASSET_DIR / GENES_FILE)
     parser.add_argument("--output-dir", type=Path, default=si.SIM_INPUTS_DIR)
     parser.add_argument(

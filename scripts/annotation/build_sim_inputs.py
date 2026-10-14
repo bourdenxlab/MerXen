@@ -36,12 +36,14 @@ such a script changes a sidecar.
 Usage::
 
     python scripts/annotation/build_sim_inputs.py \\
-        --evidence-root /srv/storage/MerXen/annotation_dev/evidence_20260926 \\
-        --public-root /srv/storage/MerXen/public_validation
+        --evidence-root "$MERXEN_EVIDENCE_ROOT" \\
+        --public-root "$MERXEN_PUBLIC_VALIDATION_ROOT"
 
-``--check`` writes nothing and exits 1 when a committed file differs from
-what the inputs produce. Sidecars record the inputs by their path under the
-evidence root (never the local root) and their sha256.
+Both options default to the ``.env`` variable named above (template
+``.env.example``). ``--check`` writes nothing and exits 1 when a committed
+file differs from what the inputs produce. Sidecars record the inputs by
+their path under the evidence root and their sha256; the root itself is
+written as the variable ``$MERXEN_EVIDENCE_ROOT``, never as a local path.
 """
 
 from __future__ import annotations
@@ -60,6 +62,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from merxen import local_config
 from merxen.annotation import sim_inputs as si
 from merxen.annotation.public_panels import PUBLIC_PANEL_LISTS
 
@@ -67,6 +70,9 @@ logger = logging.getLogger("build_sim_inputs")
 
 DERIVATION_DATE = "2026-09-28"
 SCRIPT_PATH = "scripts/annotation/build_sim_inputs.py"
+# What a sidecar's evidence_root records: ``$A`` stands for the .env variable,
+# never for a local path (docs/local-configuration.md).
+EVIDENCE_ROOT_TEXT = "$A = $MERXEN_EVIDENCE_ROOT"
 MOUSE_DATASET = "xenium_prime_5k_mouse_brain_ff"
 LUNG_5K_DATASET = "xenium_prime_5k_human_lung_ffpe"
 LUNG_V1_DATASET = "xenium_v1_human_lung_ffpe"
@@ -272,7 +278,7 @@ def _common_provenance(
         "deriving_script_sha256": _script_sha256(repo_root),
         "method": method,
         "evidence": [f"$A/{item}" for item in evidence],
-        "evidence_root": "$A = /srv/storage/MerXen/annotation_dev/evidence_20260926",
+        "evidence_root": EVIDENCE_ROOT_TEXT,
         "date": DERIVATION_DATE,
         "use": "simulation input only (OD-E1 amended 2026-09-28); never trust "
         "evidence, never a gate",
@@ -650,7 +656,7 @@ def build_panel_lists(
             "the normalised lists annotation-panel-fetch wrote."
         ),
         "evidence": ["$A/m3b/panels/RETRIEVAL.txt"],
-        "evidence_root": "$A = /srv/storage/MerXen/annotation_dev/evidence_20260926",
+        "evidence_root": EVIDENCE_ROOT_TEXT,
         "date": DERIVATION_DATE,
         "use": "chemistry resolution only (plan §3.7 panel_chemistry)",
     }
@@ -835,8 +841,18 @@ def build_all(
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--evidence-root", type=Path, required=True)
-    parser.add_argument("--public-root", type=Path, required=True)
+    local_config.add_location_argument(
+        parser,
+        "--evidence-root",
+        "MERXEN_EVIDENCE_ROOT",
+        "The evidence root (`$A`) holding the phase-1 tables.",
+    )
+    local_config.add_location_argument(
+        parser,
+        "--public-root",
+        "MERXEN_PUBLIC_VALIDATION_ROOT",
+        "The public-data root holding MANIFEST.tsv.",
+    )
     parser.add_argument("--output-dir", type=Path, default=si.SIM_INPUTS_DIR)
     parser.add_argument(
         "--repo-root", type=Path, default=Path(__file__).resolve().parents[2]
