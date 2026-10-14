@@ -1,10 +1,11 @@
 """Tests of the mouse reference defaults and the SSD1 launch guard.
 
-SSD1 (``/media/mathieubo/SSD1``) is failing, so no mouse default may point
-there and a dev launch must refuse a configuration that reads from it. These
-tests read config text and run ``scripts/annotation_dev/launch_guard.sh``
-against a stub ``nextflow`` (the guard's logic) and, where Nextflow is
-installed, against the real configuration. Nothing here touches SSD1.
+SSD1 (``/media/mathieubo/SSD1``) is failing, so no mouse default and no
+reference-store default may point there, and a dev launch must refuse a
+configuration that reads from it. These tests read config text and run
+``scripts/annotation_dev/launch_guard.sh`` against a stub ``nextflow`` (the
+guard's logic) and, where Nextflow is installed, against the real
+configuration. Nothing here touches SSD1.
 """
 
 from __future__ import annotations
@@ -46,11 +47,18 @@ MOUSE_DEFAULTS = {
     ),
 }
 
-# Annotation params the Dwight file still points at SSD1: the store (waits on
-# the user's decision U6) and the human sources (a mouse launch reads only the
-# human gene table's var index).
+# The Dwight reference stores (U6 (a), 2026-10-14): both on /srv/storage.
+STORE_DEFAULTS = {
+    "annotation_reference_store": "/srv/storage/MerXen/annotation_references",
+    "annotation_reference_store_large": (
+        "/srv/storage/MerXen/annotation_references_large"
+    ),
+}
+
+# Annotation params the Dwight file still points at SSD1: only the human
+# sources, until they are re-downloaded (U6 (b)); a mouse launch reads only the
+# human gene table's var index.
 SSD1_ANNOTATION_PARAMS_LEFT = {
-    "annotation_reference_store",
     "annotation_whb_region_precompute_source",
     "annotation_whb_h5ad_dir",
     "annotation_whb_metadata_dir",
@@ -78,6 +86,32 @@ def test_dwight_mouse_defaults_are_the_verified_srv_paths(
     assert resolved == MOUSE_DEFAULTS
 
 
+def test_dwight_reference_stores_default_to_srv_storage(
+    workflow_config_params: dict[str, dict[str, str]],
+) -> None:
+    """Both stores default under /srv/storage; none under SSD1 (U6 (a))."""
+    params = workflow_config_params[DWIGHT_ANNOTATION]
+
+    resolved = {name: _unquoted(params[name]) for name in STORE_DEFAULTS}
+
+    assert resolved == STORE_DEFAULTS
+    assert len(set(resolved.values())) == len(resolved)
+
+
+def test_no_reference_store_param_default_points_at_ssd1(
+    workflow_config_params: dict[str, dict[str, str]],
+) -> None:
+    """No store param of any workflow config defaults to SSD1."""
+    on_ssd1 = {
+        f"{relative}:{name}"
+        for relative, params in workflow_config_params.items()
+        for name, raw in params.items()
+        if "reference_store" in name and SSD1 in raw
+    }
+
+    assert not on_ssd1
+
+
 def test_no_mouse_param_default_points_at_ssd1(
     workflow_config_params: dict[str, dict[str, str]],
 ) -> None:
@@ -92,7 +126,7 @@ def test_no_mouse_param_default_points_at_ssd1(
     assert not on_ssd1
 
 
-def test_annotation_params_left_on_ssd1_are_the_known_store_and_human_ones(
+def test_annotation_params_left_on_ssd1_are_the_known_human_ones(
     workflow_config_params: dict[str, dict[str, str]],
 ) -> None:
     """A new SSD1 default in the Dwight annotation file needs a decision."""
@@ -112,7 +146,6 @@ def test_run_template_calls_the_guard_before_nextflow_run() -> None:
     assert text.index('"$GUARD" "${args[@]}"') < text.index('nextflow -log "$R/logs')
     assert 'run "${args[@]}"' in text
     for param in (
-        "--annotation_reference_store ",
         "--mecr_reference_cache_dir ",
         "--mapmycells_region_cache_dir ",
         "--clustering_squidpy_broad_reference_cache_dir ",
@@ -121,12 +154,24 @@ def test_run_template_calls_the_guard_before_nextflow_run() -> None:
     assert subprocess.run(["bash", "-n", str(TEMPLATE)], check=False).returncode == 0
 
 
+def test_run_template_leaves_the_reference_stores_to_the_config_defaults() -> None:
+    """The stores default to /srv/storage, so the template overrides neither."""
+    code = [
+        line
+        for line in TEMPLATE.read_text().splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+
+    assert not [line for line in code if "annotation_reference_store" in line]
+    assert not [line for line in code if "STORE" in line]
+
+
 # --- the guard against a stub nextflow ---------------------------------------
 
 BASE_CONFIG = f"""\
 params.species = 'human'
 params.outdir = 'results'
-params.annotation_reference_store = '{SSD1}/MerXen/annotation_references'
+params.annotation_reference_store = '{STORE_DEFAULTS["annotation_reference_store"]}'
 params.annotation_human_gene_table = '{HUMAN_GENE_TABLE}'
 params.annotation_gene_id_fallback_csv = '{HUMAN_GENE_TABLE}'
 params.annotation_whb_h5ad_dir = '{SSD1}/MerXen/mapmycells/abc_whb/expression_matrices'
@@ -151,6 +196,17 @@ def stub_nextflow(tmp_path: Path) -> Path:
     )
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
     return stub
+
+
+@pytest.fixture
+def ssd1_store_config(stub_nextflow: Path) -> Path:
+    """Make the stub's configuration default the store to SSD1, as Dwight once did."""
+    flat = stub_nextflow.parent / "flat.config"
+    text = flat.read_text()
+    srv_store = STORE_DEFAULTS["annotation_reference_store"]
+    assert srv_store in text
+    flat.write_text(text.replace(srv_store, f"{SSD1}/MerXen/annotation_references"))
+    return stub_nextflow
 
 
 @pytest.fixture
@@ -198,14 +254,7 @@ def test_guard_allows_the_human_gene_table_alone(
     result = _run_guard(
         stub_nextflow,
         project_dir,
-        [
-            "--species",
-            "mouse",
-            "--annotation_reference_store",
-            "/srv/storage/MerXen/annotation_references",
-            "--annotation_whb_h5ad_dir",
-            "/srv/storage/whb",
-        ],
+        ["--species", "mouse", "--annotation_whb_h5ad_dir", "/srv/storage/whb"],
     )
 
     assert result.returncode == 0, result.stderr
@@ -213,11 +262,21 @@ def test_guard_allows_the_human_gene_table_alone(
     assert "ok (species 'mouse'" in result.stderr
 
 
-def test_guard_refuses_a_default_still_on_ssd1(
+def test_guard_passes_a_store_default_on_srv_storage(
     stub_nextflow: Path, project_dir: Path
 ) -> None:
-    """The store default is on SSD1 until the launch overrides it."""
+    """With the store default on /srv, a mouse launch passes with no override."""
     result = _run_guard(stub_nextflow, project_dir, ["--species", "mouse"])
+
+    assert result.returncode == 0, result.stderr
+    assert "annotation_reference_store" not in result.stderr
+
+
+def test_guard_refuses_a_default_still_on_ssd1(
+    ssd1_store_config: Path, project_dir: Path
+) -> None:
+    """A store default on SSD1 (an old checkout) is refused until overridden."""
+    result = _run_guard(ssd1_store_config, project_dir, ["--species", "mouse"])
 
     assert result.returncode == 1
     assert "REFUSED" in result.stderr
@@ -235,11 +294,11 @@ def test_guard_refuses_a_default_still_on_ssd1(
     ],
 )
 def test_guard_applies_param_overrides_of_both_spellings(
-    stub_nextflow: Path, project_dir: Path, override: list[str]
+    ssd1_store_config: Path, project_dir: Path, override: list[str]
 ) -> None:
     """A --param on the command line replaces the config default it names."""
     result = _run_guard(
-        stub_nextflow,
+        ssd1_store_config,
         project_dir,
         ["--species", "mouse", "--annotation_whb_h5ad_dir=/srv/x", *override],
     )
@@ -258,7 +317,7 @@ def test_guard_refuses_an_override_that_points_at_ssd1(
             "--species",
             "mouse",
             "--annotation_reference_store",
-            "/srv/storage/store",
+            f"{SSD1}/MerXen/annotation_references",
             "--annotation_mouse_gene_table",
             f"{SSD1}/MerXen/mapmycells/abc_atlas/metadata/WMB-10X/20241115/gene.csv",
             "--annotation_new_param",
@@ -267,20 +326,18 @@ def test_guard_refuses_an_override_that_points_at_ssd1(
     )
 
     assert result.returncode == 1
+    assert "params.annotation_reference_store = " in result.stderr
     assert "params.annotation_mouse_gene_table = " in result.stderr
     assert "params.annotation_new_param = " in result.stderr
-    assert "annotation_reference_store" not in result.stderr.split("REFUSED")[1]
 
 
 def test_guard_skips_human_sources_for_mouse_only(
     stub_nextflow: Path, project_dir: Path
 ) -> None:
     """A mouse launch does not read the WHB sources; a human launch does."""
-    store = ["--annotation_reference_store", "/srv/storage/store"]
-
-    mouse = _run_guard(stub_nextflow, project_dir, ["--species", "mouse", *store])
-    human = _run_guard(stub_nextflow, project_dir, ["--species", "human", *store])
-    config_default = _run_guard(stub_nextflow, project_dir, store)
+    mouse = _run_guard(stub_nextflow, project_dir, ["--species", "mouse"])
+    human = _run_guard(stub_nextflow, project_dir, ["--species", "human"])
+    config_default = _run_guard(stub_nextflow, project_dir, [])
 
     assert mouse.returncode == 0, mouse.stderr
     assert "skipped 1 human WHB / SEA-AD source value(s)" in mouse.stderr
@@ -304,14 +361,7 @@ def test_guard_allows_the_human_gene_table_value_only_under_its_own_params(
     result = _run_guard(
         stub_nextflow,
         project_dir,
-        [
-            "--species",
-            "human",
-            "--annotation_reference_store",
-            "/srv/storage/store",
-            "--annotation_whb_h5ad_dir",
-            "/srv/storage/whb",
-        ],
+        ["--species", "human", "--annotation_whb_h5ad_dir", "/srv/storage/whb"],
     )
 
     assert result.returncode == 1, result.stderr
@@ -331,23 +381,23 @@ def test_guard_allow_keys_name_params_a_launch_does_not_read(
         stub_nextflow,
         project_dir,
         ["--species", "human"],
-        LAUNCH_GUARD_ALLOW_KEYS="annotation_reference_store,annotation_whb_h5ad_dir",
+        LAUNCH_GUARD_ALLOW_KEYS="annotation_whb_h5ad_dir",
     )
 
     assert result.returncode == 0, result.stderr
-    assert "allowed (allow-list): params.annotation_reference_store" in result.stderr
+    assert "allowed (allow-list): params.annotation_whb_h5ad_dir" in result.stderr
 
 
 def test_guard_allow_list_takes_exact_values(
     stub_nextflow: Path, project_dir: Path
 ) -> None:
     """LAUNCH_GUARD_ALLOW lets exact values through and nothing near them."""
-    store = f"{SSD1}/MerXen/annotation_references"
-    args = ["--species", "mouse", "--annotation_whb_h5ad_dir", "/srv/x"]
+    whb_dir = f"{SSD1}/MerXen/mapmycells/abc_whb/expression_matrices"
+    args = ["--species", "human"]
 
-    allowed = _run_guard(stub_nextflow, project_dir, args, LAUNCH_GUARD_ALLOW=store)
+    allowed = _run_guard(stub_nextflow, project_dir, args, LAUNCH_GUARD_ALLOW=whb_dir)
     near_miss = _run_guard(
-        stub_nextflow, project_dir, args, LAUNCH_GUARD_ALLOW=f"{store}/"
+        stub_nextflow, project_dir, args, LAUNCH_GUARD_ALLOW=f"{whb_dir}/"
     )
 
     assert allowed.returncode == 0, allowed.stderr
@@ -394,8 +444,6 @@ def test_guard_resolves_the_configuration_with_the_launch_profile_and_configs(
             "-resume",
             "--species",
             "mouse",
-            "--annotation_reference_store",
-            "/srv/storage/store",
         ],
     )
 
@@ -424,13 +472,12 @@ def test_guard_prefix_can_be_changed(stub_nextflow: Path, project_dir: Path) -> 
 # --- the guard against the real configuration --------------------------------
 
 # The params a mouse launch must still set because their config defaults are on
-# SSD1: the store (U6) and the legacy MapMyCells caches (not read while every
-# row has mecr_enabled false, which the run template points off SSD1).
+# SSD1: the legacy MapMyCells caches (not read while every row has
+# mecr_enabled false, which the run template points off SSD1). The reference
+# stores default to /srv/storage (U6 (a)), so a launch passes none.
 MOUSE_LAUNCH_OVERRIDES = [
     "--species",
     "mouse",
-    "--annotation_reference_store",
-    "/srv/storage/store",
     "--mecr_reference_cache_dir",
     "/srv/storage/cache",
     "--mapmycells_region_cache_dir",
@@ -466,7 +513,7 @@ def test_guard_passes_a_mouse_launch_on_the_dwight_profile() -> None:
 
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
 def test_guard_names_only_the_known_ssd1_defaults_of_dwight() -> None:
-    """With no overrides, exactly the store and the legacy caches are refused."""
+    """With no overrides, exactly the legacy MapMyCells caches are refused."""
     environment = {**os.environ, "NXF_DISABLE_CHECK_LATEST": "true"}
 
     result = subprocess.run(
@@ -482,8 +529,37 @@ def test_guard_names_only_the_known_ssd1_defaults_of_dwight() -> None:
     refused = set(re.findall(r"^launch_guard:   params\.(\w+) = ", result.stderr, re.M))
     assert result.returncode == 1
     assert refused == {
-        "annotation_reference_store",
         "mecr_reference_cache_dir",
         "mapmycells_region_cache_dir",
         "clustering_squidpy_broad_reference_cache_dir",
     }
+
+
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
+def test_guard_still_refuses_the_ssd1_human_sources_of_dwight() -> None:
+    """A human launch is refused for its SSD1 sources, never for the stores.
+
+    The /srv store has no human bundles yet (U6 (b)), so a human run would
+    rebuild from the human sources, which stay on SSD1 and stay refused.
+    """
+    environment = {**os.environ, "NXF_DISABLE_CHECK_LATEST": "true"}
+
+    result = subprocess.run(
+        ["bash", str(GUARD), str(WORKFLOWS / "main.nf"), "-profile", "dwight"]
+        + ["--species", "human"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    refused = set(re.findall(r"^launch_guard:   params\.(\w+) = ", result.stderr, re.M))
+    assert result.returncode == 1
+    assert {
+        "annotation_whb_region_precompute_source",
+        "annotation_whb_h5ad_dir",
+        "annotation_whb_metadata_dir",
+    } <= refused
+    assert not {name for name in refused if "reference_store" in name}
+    assert "allowed (allow-list): params.annotation_human_gene_table" in result.stderr

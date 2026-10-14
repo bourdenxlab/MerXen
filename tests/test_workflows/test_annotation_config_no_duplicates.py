@@ -217,6 +217,6 @@ def test_resolved_params_follow_the_include_order(
     assert conda["clustering_squidpy_mode_human"] == "map_first"
     assert conda["clustering_squidpy_mode_mouse"] == "legacy"
     assert dwight["annotation_reference_store"] == (
-        "/media/mathieubo/SSD1/MerXen/annotation_references"
+        "/srv/storage/MerXen/annotation_references"
     )
     assert dwight["annotation_prep_max_forks"] == 1

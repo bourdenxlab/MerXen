@@ -9,11 +9,16 @@
 # overrides, and exits non-zero if any resolved value points there, before
 # Nextflow starts a single task.
 #
+# The Dwight reference stores default to /srv/storage (U6 (a)), so a launch no
+# longer overrides them. The human sources (WHB, SEA-AD, the legacy MapMyCells
+# caches) still default to SSD1 until U6 (b), so a human launch is refused until
+# it overrides them; the /srv store has no human bundles yet.
+#
 # Usage: give it the arguments of the `nextflow run` call, in the same spelling
 # (a script keeps them in one array and passes it to both):
 #
 #   launch_guard.sh .../workflows/main.nf -profile dwight,conda -c launch.config \
-#       --species mouse --annotation_reference_store /srv/... [more --params]
+#       --species mouse --samplesheet samplesheet.csv --outdir /srv/... [more --params]
 #
 # Understood: the project (a main.nf path or its directory), -profile, -c /
 # -config and every --name value / --name=value / --name (true). Other
@@ -36,7 +41,7 @@
 #     the params that read it as a gene table (annotation_human_gene_table and
 #     annotation_gene_id_fallback_csv): the same file under another param, such
 #     as the legacy mecr_whb_nonneurons_h5ad_path, is a full matrix read and is
-#     refused. Drop it from the list when the human table moves (plan U6).
+#     refused. Drop it from the list when the human table moves (U6 (b)).
 #   * for --species mouse, the params of the human WHB and SEA-AD references
 #     (names with a "whb" or "seaad" part): a mouse launch never reads them.
 #
