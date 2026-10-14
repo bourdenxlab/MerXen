@@ -601,6 +601,53 @@ def test_mo8_sampler_pss_is_reported_beside(tmp_path: Path) -> None:
     assert _by(rows, "map_peak", "ag7")[0].value == 5.0
 
 
+def test_mo8_a_task_without_its_measurement_is_not_evaluable(tmp_path: Path) -> None:
+    # A MAP task without peak_rss, or a task without realtime, must not let
+    # the other tasks' values stand for the section (missing is not a pass).
+    tasks = _section_tasks("ag7", peak="11 GB")
+    map_row = next(t for t in tasks if "ANNOTATE_MAP" in t["process"])
+    map_row["peak_rss"] = "-"
+    rows, _ = M.mo8_section_rows(
+        _outputs(),
+        _trace(tmp_path, tasks),
+        {},
+        memory_reading="trace_rss",
+        processes=4,
+    )
+    assert _verdicts(_by(rows, "map_peak", "ag7")) == ["NOT_AVAILABLE"]
+    assert _verdicts(_by(rows, "section_time", "ag7")) == ["PASS"]
+    tasks = _section_tasks("ag7")
+    next(t for t in tasks if "RESOLVE" in t["process"])["realtime"] = ""
+    rows, _ = M.mo8_section_rows(
+        _outputs(),
+        _trace(tmp_path, tasks),
+        {},
+        memory_reading="trace_rss",
+        processes=4,
+    )
+    assert _verdicts(_by(rows, "section_time", "ag7")) == ["NOT_AVAILABLE"]
+    assert _verdicts(_by(rows, "map_peak", "ag7")) == ["PASS"]
+
+
+def test_mo8_an_unrecorded_process_count_is_unscored(tmp_path: Path) -> None:
+    # §25.1: MO8 holds for 4 processes; a count nobody recorded is not 4.
+    outputs = _outputs()
+    for out in outputs["ag7"].values():
+        out.manifest["n_processors"] = None
+        for sample in out.manifest["samples"].values():
+            for run in sample["runs"].values():
+                run["engine_params"] = {}
+    trace = _trace(tmp_path, _section_tasks("ag7"))
+    trace.loc[trace["process"] == M.MAP_PROCESS, "cpus"] = ""
+    rows, problems = M.mo8_section_rows(
+        outputs, trace, {}, memory_reading="trace_rss", processes=4
+    )
+    assert set(
+        _verdicts(_by(rows, "map_peak", "ag7") + _by(rows, "section_time", "ag7"))
+    ) == {"UNSCORED (process count)"}
+    assert problems and "ag7" in problems[0]
+
+
 def _bundle(
     store: Path,
     reference: str,
@@ -761,10 +808,14 @@ def _mo10(
         "candidate": candidate,
         "t2_reading": "allen-relative",
         "pass": not missed,
-        "gene_sets": {"merfish500": dict(entry), "merfish_ag7": dict(entry)},
+        "gene_sets": {name: dict(entry) for name in M.MO10_GENE_SETS},
         "mo2": [{"section": "ag7", "t2_after": 0.0}],
         "mo3": {"ag7": True},
     }
+
+
+def _rule(label: str) -> dict[str, Any]:
+    return dict(M.candidate_by_label(label).config().model_dump(mode="json"))
 
 
 def test_mo10_pass_fail_and_not_evaluable() -> None:
@@ -800,6 +851,51 @@ def test_mo10_pass_fail_and_not_evaluable() -> None:
     assert set(_verdicts(_by(rows, "t2_clause"))) == {"NOT_AVAILABLE"}
     rows, _ = M.mo10_rows(None, reading="allen_relative", recorded=[], rule_params={})
     assert _verdicts(rows) == ["NOT_AVAILABLE"]
+
+
+def test_mo10_needs_all_three_gene_sets() -> None:
+    # §24: MO10 "passes when all three gene sets pass"; a gene set missing
+    # from mo10.json is not evaluable, not a pass.
+    mo10 = _mo10()
+    del mo10["gene_sets"]["merfish_vzg2"]
+    rows, _ = M.mo10_rows(
+        mo10,
+        reading="allen_relative",
+        recorded=["a+f:tile200,nn2"],
+        rule_params={},
+    )
+    missing = [r for r in rows if r.segmentation == "merfish_vzg2"]
+    assert missing and _verdicts(missing) == ["NOT_AVAILABLE"]
+    rows = [M.finalize(r) for r in rows]
+    assert M.flip_rule(rows, True)["criteria"]["MO10"] == "INCOMPLETE"
+
+
+def test_mo10_is_unscored_when_a_run_used_another_region_rule() -> None:
+    selected = "a+f:tile200,nn2"
+    params = _rule(selected)
+    rows, problems = M.mo10_rows(
+        _mo10(),
+        reading="allen_relative",
+        recorded=[selected],
+        rule_params={"ag7/proseg_hybrid": params, "vzg2/original_seg": params},
+    )
+    assert not problems
+    assert {M.finalize(r).verdict for r in rows if r.scored} == {"PASS"}
+    v1 = _rule("v1")
+    rows, problems = M.mo10_rows(
+        _mo10(),
+        reading="allen_relative",
+        recorded=[selected],
+        rule_params={"ag7/proseg_hybrid": params, "vzg2/original_seg": v1},
+    )
+    assert problems and "vzg2/original_seg" in problems[0]
+    assert {M.finalize(r).verdict for r in rows if r.scored} == {
+        "UNSCORED (region rule)"
+    }
+    # A run that does not record a parameter of the rule cannot be checked.
+    partial = {k: v for k, v in params.items() if k != "coupled_regions"}
+    assert M.rule_mismatches(selected, {"vzg2/original_seg": partial})
+    assert M.rule_mismatches(selected, {"vzg2/original_seg": {}})
 
 
 def test_mo10_scores_t2_per_bin_when_the_bins_are_given() -> None:
@@ -871,17 +967,16 @@ def test_mo10_refuses_a_candidate_the_preregistration_does_not_name_last() -> No
         reading="allen_relative",
         recorded=["a+f:tile200,nn2"],
         rule_params={
-            "ag7/proseg_hybrid": {"rule_variant": "v1", "tile_um": 150.0},
-            "vzg2/original_seg": {"rule_variant": "m6b", "tile_um": 200.0},
+            "ag7/proseg_hybrid": _rule("v1"),
+            "vzg2/original_seg": _rule("a+f:tile200,nn2"),
         },
     )
     assert len(problems) == 1 and "ag7/proseg_hybrid" in problems[0]
     assert "rule_variant" in problems[0] and "tile_um" in problems[0]
     # An (f)-only candidate keeps rule_variant v1 and differs in its tiles.
-    assert not M.rule_mismatches(
-        "f:tile200,nn2",
-        {"vzg2": {"rule_variant": "v1", "tile_um": 200.0, "min_neurons_per_tile": 2}},
-    )
+    f_only = dict(_rule("v1"), tile_um=200.0, min_neurons_per_tile=2)
+    assert f_only["rule_variant"] == "v1"
+    assert not M.rule_mismatches("f:tile200,nn2", {"vzg2": f_only})
     assert M.rule_mismatches("v1", {"vzg2": {"tile_um": 200.0}})
     text = (
         "x\nSelected candidate (M6b): `v1`\n\n### Amendment\n"
@@ -936,8 +1031,10 @@ def test_an_exception_applies_only_inside_its_scope() -> None:
         ("merfish500", "C57BL6J-638850.46"): "FAIL",
         ("merfish_ag7", "C57BL6J-638850.35"): "FAIL (excepted)",
         ("merfish_ag7", "C57BL6J-638850.46"): "FAIL",
+        ("merfish_vzg2", "C57BL6J-638850.35"): "FAIL (excepted)",
+        ("merfish_vzg2", "C57BL6J-638850.46"): "FAIL",
     }
-    assert len(usage[0]["applied_to"]) == 2
+    assert len(usage[0]["applied_to"]) == 3
     excepted = [r for r in rows if r.verdict == "FAIL (excepted)"]
     assert all(not r.back_to_user() and r.exception == "U1-MO10-35" for r in excepted)
     flip = M.flip_rule(rows, True)
@@ -951,14 +1048,18 @@ def test_an_exception_applies_only_inside_its_scope() -> None:
         for r in _by(rows, "missed_region")
         if r.scope["section"] == "C57BL6J-638850.35"
     }
-    assert got == {"merfish500": "FAIL (excepted)", "merfish_ag7": "FAIL"}
+    assert got == {
+        "merfish500": "FAIL (excepted)",
+        "merfish_ag7": "FAIL",
+        "merfish_vzg2": "FAIL",
+    }
 
 
 def test_an_exception_does_not_cover_a_value_beyond_its_bound() -> None:
     rows = _missed_rows(harm_35=0.0020)
     usage = M.apply_exceptions(rows, M.parse_exceptions([EXCEPTION]))
     assert {r.verdict for r in _by(rows, "missed_region")} == {"FAIL"}
-    assert len(usage[0]["named_outside_bounds"]) == 2
+    assert len(usage[0]["named_outside_bounds"]) == 3
     assert (
         "outside the exception's bounds" in _by(rows, "missed_region")[0].exception_note
     )
@@ -979,7 +1080,7 @@ def test_both_approved_rows_excepted_gives_a_passing_flip_criterion() -> None:
     M.apply_exceptions(rows, M.parse_exceptions([EXCEPTION, second]))
     flip = M.flip_rule(rows, True)
     assert flip["criteria"]["MO10"] == "FAIL (excepted)"
-    assert len(flip["excepted"]) == 4
+    assert len(flip["excepted"]) == 6
 
 
 def test_an_exception_never_touches_a_row_that_is_not_measured() -> None:
@@ -1006,6 +1107,8 @@ def test_an_exception_never_touches_a_row_that_is_not_measured() -> None:
         ({"scope": {"part": 3}}, "string or a list"),
         ({"approved": "14/10/2026"}, "ISO date"),
         ({"quote": " "}, "quoted"),
+        # A bound outside "scope" would silently widen the exception.
+        ({"value_max": 0.002}, "unknown keys"),
     ],
 )
 def test_malformed_exceptions_are_refused(change: dict, message: str) -> None:
@@ -1090,6 +1193,13 @@ def test_flip_rule_verdicts() -> None:
     )
     assert M.flip_rule(passing[1:], True)["verdict"] == "INCOMPLETE"
     assert M.flip_rule(passing, False)["verdict"] == "NOT SCORED (provenance)"
+    # A scored row with any other verdict is not a pass.
+    assert M.flip_rule(passing + [row("MO3", "INFO")], True)["verdict"] == (
+        "INCOMPLETE"
+    )
+    # Every problem goes back to the user: the flip cannot read PASS.
+    flip = M.flip_rule(passing, True, ["MO10: vzg2 ran another region rule"])
+    assert flip["verdict"] == "INCOMPLETE" and flip["problems"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1140,11 +1250,7 @@ def _results_root(
                     "mouse_regions": {
                         "inferred_regions": MANUAL,
                         "rule_variant": "m6b",
-                        "params": {
-                            "rule_variant": "m6b",
-                            "tile_um": 200.0,
-                            "min_neurons_per_tile": 2,
-                        },
+                        "params": _rule("a+f:tile200,nn2"),
                         "region_share": {"build_hash": SHARE_BUILD, "path": str(share)},
                     },
                 }
@@ -1360,6 +1466,22 @@ def test_score_fails_the_run_on_a_bundle_outside_the_store(
     assert summary["flip_rule"]["verdict"] == "NOT SCORED (provenance)"
     assert {r["verdict"] for r in summary["rows"]} == {"UNSCORED (provenance)"}
     assert any("SSD1" in problem for problem in summary["problems"])
+
+
+def test_score_negative_control_without_its_map_manifest_is_unscored(
+    e2e: tuple[list[str], Path, Path], tmp_path: Path
+) -> None:
+    # Its MAP bundles cannot be checked (§25.3), so MO7's negative control
+    # is not scored and the flip is not a pass.
+    args, _, _ = e2e
+    negative = Path(args[args.index("--mo7-negative") + 1])
+    (negative / "map" / "map_manifest.json").unlink()
+    out = tmp_path / "out"
+    assert M.main([*args, "--out", str(out)]) == 0
+    summary = json.loads((out / "summary.json").read_text())
+    row = next(r for r in summary["rows"] if r["part"] == "negative_control_failed")
+    assert row["verdict"] == "UNSCORED (provenance)"
+    assert summary["flip_rule"]["verdict"] == "INCOMPLETE"
 
 
 def test_score_refuses_an_output_inside_a_results_root(

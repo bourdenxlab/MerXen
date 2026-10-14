@@ -76,8 +76,8 @@ entry of ``problems``.
 **Flip rule** (§9, §25.2): MO1-MO8 and MO10, with the user's written
 exceptions. MO11 keeps its banner rule and MO9 [L] gates only the use of the
 reseg and proseg outputs, so neither enters it. The flip verdict is ``PASS``
-when every scored row of those criteria is ``PASS`` or ``FAIL (excepted)``,
-``FAIL`` when one is ``FAIL``, else ``INCOMPLETE``.
+when every scored row of those criteria is ``PASS`` or ``FAIL (excepted)``
+and no problem is open, ``FAIL`` when one is ``FAIL``, else ``INCOMPLETE``.
 
 Scored datasets: ag7 proseg_hybrid and VZG2 original_seg (MO1, MO2, MO3,
 MO5, MO6, MO7; MO4's bands). The other segmentations are reported. MO8 is per
@@ -194,6 +194,8 @@ MO10_LIMITS: Final[dict[str, float]] = {
     "t2_bin_mean": 0.001,
     "missed_region": 0.001,
 }
+# §24: MO10 "passes when all three gene sets pass" (M6b-R's mo10.json keys).
+MO10_GENE_SETS: Final = ("merfish500", "merfish_ag7", "merfish_vzg2")
 MO11_ANTERIOR_AP_MM: Final = 6.0
 
 ANNOTATION_PROCESSES: Final = (
@@ -216,6 +218,7 @@ INFO_FAIL: Final = "INFO fail"
 INFO_NOT_MEASURED: Final = "INFO not measured"
 UNSCORED_PROCESSES: Final = "process count"
 UNSCORED_PROVENANCE: Final = "provenance"
+UNSCORED_REGION_RULE: Final = "region rule"
 # A run states its purpose with --label (e.g. "gate M"); the mode only
 # says whether the readings are the registered ones.
 REGISTERED: Final = "registered readings"
@@ -488,6 +491,9 @@ EXCEPTION_KEYS: Final = frozenset(
     }
 )
 EXCEPTION_BOUNDS: Final = frozenset({"value_max", "value_min"})
+EXCEPTION_FIELDS: Final = frozenset(
+    {"id", "criterion", "scope", "approved", "quote", "recorded_in"}
+)
 KNOWN_CRITERIA: Final = frozenset(FLIP_CRITERIA + REPORTED_CRITERIA)
 
 
@@ -534,9 +540,11 @@ def parse_exceptions(payload: Any) -> list[ApprovedException]:
         The exceptions.
 
     Raises:
-        ValueError: For a malformed entry: no id, an unknown criterion, an
-            empty or unknown scope key, a bound that is not a number, an
-            approval date that is not an ISO date, or an empty quote.
+        ValueError: For a malformed entry: an unknown field (a bound beside
+            ``scope`` instead of in it would widen the exception), no id, an
+            unknown criterion, an empty or unknown scope key, a bound that is
+            not a number, an approval date that is not an ISO date, or an
+            empty quote.
     """
     entries = payload.get("exceptions") if isinstance(payload, Mapping) else payload
     if not isinstance(entries, list):
@@ -547,6 +555,11 @@ def parse_exceptions(payload: Any) -> list[ApprovedException]:
         where = f"exception {index}"
         if not isinstance(entry, Mapping):
             raise ValueError(f"{where}: not an object")
+        extra = set(entry) - EXCEPTION_FIELDS
+        if extra:
+            raise ValueError(
+                f"{where}: unknown keys {sorted(extra)} (bounds go in the scope)"
+            )
         ident = str(entry.get("id") or "").strip()
         if not ident or ident in seen:
             raise ValueError(f"{where}: a unique id is required")
@@ -1565,6 +1578,8 @@ def mo7_rows(
     outputs: Mapping[str, Mapping[str, SegOutputs]],
     negative: Mapping[str, Any] | None,
     negative_path: Path | None,
+    *,
+    negative_bundles_checked: bool = True,
 ) -> list[Row]:
     """MO7: the invalid VZG2 proseg_hybrid ``failed``; the scored sets not.
 
@@ -1573,6 +1588,8 @@ def mo7_rows(
         negative: The negative control's resolve summary (§25.2: a standalone
             run on the legacy-snapshot H5AD with M6's G1 JSON).
         negative_path: Its path.
+        negative_bundles_checked: False when its MAP manifest was not found,
+            so its bundles were not checked (§25.3): the row is unscored.
 
     Returns:
         The negative-control row and one not-failed row per segmentation
@@ -1583,6 +1600,12 @@ def mo7_rows(
     sample = next(iter(samples.values())) if len(samples) == 1 else {}
     gate = dict(sample.get("mouse_gate") or {})
     level = gate.get("level")
+    note, unscored = "", ""
+    if not negative:
+        note = "no negative-control run (score --mo7-negative)"
+    elif not negative_bundles_checked:
+        note = "its map_manifest.json was not found: its bundles are not checked"
+        unscored = UNSCORED_PROVENANCE
     rows.append(
         Row(
             "MO7",
@@ -1595,7 +1618,8 @@ def mo7_rows(
             None if level is None else str(level) == MO7_FAILED,
             True,
             f"resolve summary {negative_path}" if negative_path else "resolve summary",
-            note="" if negative else "no negative-control run (score --mo7-negative)",
+            note=note,
+            unscored=unscored,
             beside={
                 "level_reasons": gate.get("level_reasons"),
                 "signal_status": gate.get("signal_status"),
@@ -1716,13 +1740,17 @@ def mo8_section_rows(
             {count for out in segs.values() for count in map_process_counts(trace, out)}
         )
         unscored = ""
-        if counts and counts != [processes]:
+        if counts != [processes] and dataset in outputs:
             unscored = UNSCORED_PROCESSES
             problems.append(
-                f"MO8 {dataset}: MAP ran with {counts} MapMyCells processes, not "
-                f"{processes} (§25.1): the section's MO8 rows are not scored"
+                f"MO8 {dataset}: MAP ran with {counts or 'unrecorded'} MapMyCells "
+                f"processes, not {processes} (§25.1): the section's MO8 rows are "
+                "not scored"
             )
         why = _missing(outputs, dataset)
+        # A task without its realtime would drop out of the sum: not measured.
+        no_time = bool(tasks["realtime_s"].isna().any())
+        incomplete = incomplete or no_time
         wall_h = float(tasks["realtime_s"].sum()) / 3600.0 if not tasks.empty else None
         rows.append(
             Row(
@@ -1745,13 +1773,18 @@ def mo8_section_rows(
                         if tasks.empty or done[tasks.index].all()
                         else "; a task did not complete"
                     )
+                    + ("; a task has no realtime" if no_time else "")
                 ),
                 beside={"map_processes": counts},
                 unscored=unscored,
             )
         )
         maps = tasks[tasks["process"] == MAP_PROCESS]
-        trace_peak = float(maps["peak_rss_gb"].max()) if len(maps) else None
+        # A MAP task without peak_rss: the others' maximum is not the peak.
+        no_peak = bool(maps["peak_rss_gb"].isna().any())
+        trace_peak = (
+            float(maps["peak_rss_gb"].max()) if len(maps) and not no_peak else None
+        )
         sampled = {seg: samplers.get((dataset, seg)) for seg in SEGMENTATIONS}
         pss_values = [values["tree_pss_gb"] for values in sampled.values() if values]
         pss_peak = max(pss_values) if len(pss_values) == len(SEGMENTATIONS) else None
@@ -1782,6 +1815,11 @@ def mo8_section_rows(
                 or (
                     f"MAP tasks missing for {','.join(map_missing)}"
                     if map_missing
+                    else ""
+                )
+                or (
+                    "a MAP task has no peak_rss"
+                    if no_peak and memory_reading == "trace_rss"
                     else ""
                 )
                 or ("" if value is not None else "no sampler for every segmentation"),
@@ -2082,7 +2120,9 @@ def mo10_rows(
 
     Returns:
         The rows and the problems (a candidate the pre-registration does not
-        name last, a run whose rule variant does not fit it).
+        name last, a run whose region rule is not the candidate's: either
+        leaves the scored rows unscored). A gene set of ``MO10_GENE_SETS``
+        missing from ``mo10.json`` gives a not-evaluable row.
     """
     problems: list[str] = []
     rows: list[Row] = []
@@ -2112,8 +2152,30 @@ def mo10_rows(
             f"MO10: mo10.json scores {candidate!r}, but the pre-registration's last "
             f"selection line names {selected!r} (§24 order of record)"
         )
-    problems += rule_mismatches(candidate, rule_params)
+    mismatches = rule_mismatches(candidate, rule_params)
+    if mismatches:
+        # The runs gate M scores must use the rule MO10 scores.
+        unscored = unscored or UNSCORED_REGION_RULE
+        problems += mismatches
     mo10_reading = str(mo10.get("t2_reading") or "registered")
+    for gene_set in sorted(set(MO10_GENE_SETS) - set(mo10.get("gene_sets") or {})):
+        rows.append(
+            Row(
+                "MO10",
+                "gene_set",
+                "MERFISH",
+                gene_set,
+                None,
+                "==",
+                True,
+                None,
+                True,
+                "mo10.json",
+                note="this gene set is missing from mo10.json (§24: all three)",
+                scope={"gene_set": gene_set},
+                unscored=unscored,
+            )
+        )
     allen_reading = reading == "allen_relative"
     for gene_set, entry in sorted((mo10.get("gene_sets") or {}).items()):
 
@@ -2309,9 +2371,10 @@ def rule_mismatches(
     """Return the runs whose region rule is not the selected candidate's.
 
     The candidate's ``MouseRegionConfig`` (``mouse_ap_axis.Candidate.config``)
-    is compared with every key the run's region record carries in
-    ``params``; an (f)-only candidate keeps ``rule_variant`` v1 and differs
-    only in its tile settings.
+    is compared key by key with the run's region record ``params`` (the
+    production MAP records the whole config); a key the run does not record
+    cannot be checked and counts as a difference. An (f)-only candidate
+    keeps ``rule_variant`` v1 and differs only in its tile settings.
 
     Args:
         candidate: The selected candidate's label.
@@ -2327,9 +2390,9 @@ def rule_mismatches(
     problems = []
     for where, params in sorted(rule_params.items()):
         differ = sorted(
-            key
+            key if key in params else f"{key} (not recorded)"
             for key, value in expected.items()
-            if key in params and params[key] != value
+            if key not in params or params[key] != value
         )
         if differ:
             problems.append(
@@ -2467,8 +2530,15 @@ def h18_rows(
 # the flip rule and the summary
 
 
-def flip_rule(rows: Sequence[Row], provenance_ok: bool) -> dict[str, Any]:
-    """The mouse flip rule: MO1-MO8 and MO10 with the approved exceptions."""
+def flip_rule(
+    rows: Sequence[Row], provenance_ok: bool, problems: Sequence[str] = ()
+) -> dict[str, Any]:
+    """The mouse flip rule: MO1-MO8 and MO10 with the approved exceptions.
+
+    A criterion passes only when every scored row is ``PASS`` or ``FAIL
+    (excepted)``. Every problem goes back to the user, so the flip is
+    ``INCOMPLETE`` rather than ``PASS`` while one is open.
+    """
     per_criterion: dict[str, str] = {}
     for criterion in FLIP_CRITERIA + REPORTED_CRITERIA:
         verdicts = [
@@ -2480,7 +2550,7 @@ def flip_rule(rows: Sequence[Row], provenance_ok: bool) -> dict[str, Any]:
             )
         elif FAIL in verdicts:
             per_criterion[criterion] = FAIL
-        elif any(v == NOT_AVAILABLE or v.startswith("UNSCORED") for v in verdicts):
+        elif any(v not in (PASS, EXCEPTED) for v in verdicts):
             per_criterion[criterion] = "INCOMPLETE"
         elif EXCEPTED in verdicts:
             per_criterion[criterion] = EXCEPTED
@@ -2491,7 +2561,7 @@ def flip_rule(rows: Sequence[Row], provenance_ok: bool) -> dict[str, Any]:
         verdict = "NOT SCORED (provenance)"
     elif FAIL in flip:
         verdict = FAIL
-    elif any(value in ("INCOMPLETE", NOT_AVAILABLE) for value in flip):
+    elif any(value in ("INCOMPLETE", NOT_AVAILABLE) for value in flip) or problems:
         verdict = "INCOMPLETE"
     else:
         verdict = PASS
@@ -2500,6 +2570,7 @@ def flip_rule(rows: Sequence[Row], provenance_ok: bool) -> dict[str, Any]:
         "MO11 keeps its banner rule; MO9 [L] is reported",
         "verdict": verdict,
         "criteria": per_criterion,
+        "problems": len(problems),
         "failing": [
             _row_label(row) for row in rows if row.scored and row.verdict == FAIL
         ],
@@ -2853,7 +2924,12 @@ def score(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         rows += mo4_rows(outputs, readings["mo4_window"]["value"])
         rows += mo5_rows(outputs)
         rows += mo6_rows(outputs)
-        rows += mo7_rows(outputs, negative, negative_path)
+        rows += mo7_rows(
+            outputs,
+            negative,
+            negative_path,
+            negative_bundles_checked=negative_manifest is not None,
+        )
         section_rows, section_problems = mo8_section_rows(
             outputs,
             trace,
@@ -2930,7 +3006,7 @@ def score(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         "readings": readings,
         "datasets": {dataset: str(root) for dataset, root in roots.items()},
         "provenance": dataclasses.asdict(provenance),
-        "flip_rule": flip_rule(rows, provenance.ok),
+        "flip_rule": flip_rule(rows, provenance.ok, problems),
         "exceptions": usage,
         "verdict_counts": counts(rows),
         "n_back_to_user": sum(1 for record in records if record["back_to_user"])

@@ -2680,7 +2680,14 @@ value is refused unless `--exploratory` is given, which stamps the summary
 "exploratory, not gate M"; otherwise its mode is "registered readings".
 `--label` states the run's purpose ("gate M" for the gate M score, "smoke
 test, not gate M" for anything else). A section whose MAP ran with another
-process count has its MO8 rows `UNSCORED (process count)`.
+process count, or whose count is recorded nowhere, has its MO8 rows
+`UNSCORED (process count)`. A MAP task without `peak_rss`, or a task
+without `realtime`, leaves the section's peak or time `NOT_AVAILABLE`.
+MO10 needs all three gene sets (`merfish500`, `merfish_ag7`,
+`merfish_vzg2`); one missing from `mo10.json` is `NOT_AVAILABLE`. Every
+run's region rule must be the selected candidate's, key by key (a key the
+run does not record counts as a difference); otherwise the MO10 rows are
+`UNSCORED (region rule)`.
 
 **Provenance.** Before anything is measured, every bundle path the
 reports, MAP manifests, resolve summaries, PREP `bundle_ref.json` files
@@ -2688,7 +2695,9 @@ reports, MAP manifests, resolve summaries, PREP `bundle_ref.json` files
 to a real path inside `/srv/storage/MerXen/annotation_references`. A path
 outside it as written (an SSD1 path) is refused without being read. On any
 failure nothing is scored: the rows are `UNSCORED (provenance)`, the summary
-is still written and the exit status is 3.
+is still written and the exit status is 3. A negative control whose
+`map_manifest.json` is not found has its bundles unchecked, so its MO7 row
+is `UNSCORED (provenance)`.
 
 **Exceptions.** `--exceptions FILE` takes the user's written exceptions:
 
@@ -2708,7 +2717,8 @@ or a list) and its value lies within `value_max` / `value_min`. Anything
 outside stays `FAIL`; a row the exception names but whose value lies beyond
 its bounds is listed under `named_outside_bounds`. A missing measurement is
 never excepted. Write one entry per approved scope: a list in two keys
-matches every combination.
+matches every combination. An entry with any other field (a `value_max`
+beside `scope` instead of in it) is refused.
 
 **Verdicts and the flip rule.** `PASS`, `FAIL`, `FAIL (excepted)`,
 `NOT_AVAILABLE` (a scored row that could not be measured), `UNSCORED
@@ -2716,10 +2726,10 @@ matches every combination.
 reported rows. Every scored row other than `PASS` and `FAIL (excepted)`
 goes back to the user, and so does every entry of `problems` (for example a
 `mo10.json` candidate that is not the pre-registration's last "Selected
-candidate (M6b)" line, or a run whose region rule variant does not fit it).
+candidate (M6b)" line, or a run whose region rule does not fit it).
 The flip rule (MO1–MO8 and MO10) is `PASS` when every scored row of those
-criteria is `PASS` or `FAIL (excepted)`, `FAIL` when one fails, and
-`INCOMPLETE` otherwise.
+criteria is `PASS` or `FAIL (excepted)` and `problems` is empty, `FAIL` when
+one fails, and `INCOMPLETE` otherwise.
 
 **Running it.**
 
