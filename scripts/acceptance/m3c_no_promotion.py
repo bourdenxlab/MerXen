@@ -29,6 +29,11 @@ else its own: no bundle outside the listed hashes is within Jaccard 0.95 of a
 listed panel (the 5K, v1 and custom panels), so inheritance does not arise.
 Read-only on the stores.
 
+Sample names: ``trust`` records a listed family by its display name
+(``privacy.display``, rule R5), as before the aliases on a host with the alias
+table; ``check`` compares family ids through ``privacy.to_alias`` (rule R2),
+so a baseline recorded with the real names matches the current aliased ids.
+
 Usage::
 
     PYTHONPATH=<83e81e3 export>/src python m3c_no_promotion.py trust --out base.json
@@ -50,7 +55,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from merxen import local_config
+from merxen import local_config, privacy
 
 logger = logging.getLogger("m3c_no_promotion")
 
@@ -124,7 +129,7 @@ def bundle_trust(manifest: dict[str, Any]) -> dict[str, Any]:
     )
     resolvability = (manifest.get("builder_output") or {}).get("resolvability") or {}
     return {
-        "family_id": family.family_id,
+        "family_id": privacy.display(family.family_id),
         "family_basis": family.basis,
         "state": decision.state,
         "validation_basis": decision.validation_basis,
@@ -175,6 +180,11 @@ def command_trust(out: Path) -> int:
         + "\n"
     )
     return 0
+
+
+def family_key(family_id: Any) -> Any:
+    """A recorded family id as its alias (R2; ``None`` stays ``None``)."""
+    return None if family_id is None else privacy.to_alias(str(family_id))
 
 
 def _rank(state: str | None) -> int:
@@ -270,7 +280,7 @@ def command_check(baseline: Path, current: Path, out_dir: Path) -> int:
         before = [
             item
             for item in base.values()
-            if item.get("family_id") == family
+            if family_key(item.get("family_id")) == family_key(family)
             and item.get("reference_id") == row["reference_id"]
         ]
         best_before = max((_rank(item.get("state")) for item in before), default=-1)
@@ -291,14 +301,14 @@ def command_check(baseline: Path, current: Path, out_dir: Path) -> int:
                 {
                     str(item.get("state"))
                     for item in base.values()
-                    if item.get("family_id") == family
+                    if family_key(item.get("family_id")) == family_key(family)
                 }
             ),
             "after_new_bundles": sorted(
                 {
                     str(item.get("state"))
                     for item in new_bundles
-                    if item.get("family_id") == family
+                    if family_key(item.get("family_id")) == family_key(family)
                 }
             ),
         }
