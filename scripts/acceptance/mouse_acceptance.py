@@ -19,8 +19,9 @@ Two subcommands. Both read their inputs read-only and write only to ``--out``.
 **Readings.** The defaults are the readings §25 (and §24's amendment of
 2026-10-14) registered. ``summary.json`` records every reading with its
 source. Another reading is accepted only with ``--exploratory``, which stamps
-the summary "exploratory, not gate M". ``--label`` adds a free-text label (for
-example "smoke test, not gate M").
+the summary "exploratory, not gate M"; otherwise the mode is "registered
+readings". ``--label`` states the run's purpose ("gate M" for the gate M
+score, "smoke test, not gate M" ...).
 
 - **MO2** (``--mo2-remap``, registered ``both``, a tightening): the production
   (subset) re-map and the full re-map must both pass T2 after pruning <= 0.1%,
@@ -215,7 +216,9 @@ INFO_FAIL: Final = "INFO fail"
 INFO_NOT_MEASURED: Final = "INFO not measured"
 UNSCORED_PROCESSES: Final = "process count"
 UNSCORED_PROVENANCE: Final = "provenance"
-GATE_M: Final = "gate M"
+# A run states its purpose with --label (e.g. "gate M"); the mode only
+# says whether the readings are the registered ones.
+REGISTERED: Final = "registered readings"
 EXPLORATORY: Final = "exploratory, not gate M"
 
 
@@ -2712,7 +2715,7 @@ def score(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     readings = resolve_readings(
         {name: getattr(args, name) for name in READINGS}, exploratory=args.exploratory
     )
-    mode = EXPLORATORY if args.exploratory else GATE_M
+    mode = EXPLORATORY if args.exploratory else REGISTERED
     roots = {
         key: Path(value) for key, value in _pairs(args.dataset, "--dataset").items()
     }

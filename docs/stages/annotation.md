@@ -2677,9 +2677,10 @@ original_seg; the other segmentations are reported (`INFO`).
 fixed`, `--mo8-map-memory trace_rss`, `--mo8-map-processes 4`,
 `--mo8-prep-memory tree_rss` and `--mo10-t2 allen_relative`. Any other
 value is refused unless `--exploratory` is given, which stamps the summary
-"exploratory, not gate M". `--label` adds a free-text stamp (for example
-"smoke test, not gate M"). A section whose MAP ran with another process
-count has its MO8 rows `UNSCORED (process count)`.
+"exploratory, not gate M"; otherwise its mode is "registered readings".
+`--label` states the run's purpose ("gate M" for the gate M score, "smoke
+test, not gate M" for anything else). A section whose MAP ran with another
+process count has its MO8 rows `UNSCORED (process count)`.
 
 **Provenance.** Before anything is measured, every bundle path the
 reports, MAP manifests, resolve summaries, PREP `bundle_ref.json` files

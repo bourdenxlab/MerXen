@@ -1270,7 +1270,7 @@ def test_score_end_to_end_with_the_registered_readings(
     out = tmp_path / "out"
     assert M.main([*args, "--out", str(out)]) == 0
     summary = json.loads((out / "summary.json").read_text())
-    assert summary["mode"] == "gate M" and summary["label"] == ""
+    assert summary["mode"] == "registered readings" and summary["label"] == ""
     assert all(r["is_registered"] for r in summary["readings"].values())
     assert summary["provenance"]["ok"]
     flip = summary["flip_rule"]
@@ -1279,7 +1279,7 @@ def test_score_end_to_end_with_the_registered_readings(
     assert flip["verdict"] == "PASS", flip
     assert summary["exceptions"][0]["applied_to"]
     assert summary["problems"] == []
-    assert (out / "summary.html").read_text().count("gate M") >= 1
+    assert "registered readings" in (out / "summary.html").read_text()
     assert (out / "tables" / "rows.csv").is_file()
     mo1 = [r for r in summary["rows"] if r["criterion"] == "MO1"]
     assert [r["value"] for r in mo1] == [pytest.approx(0.9), pytest.approx(0.9)]
