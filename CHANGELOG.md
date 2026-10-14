@@ -58,6 +58,11 @@
   - the new-panel human MERSCOPE family's marker referee derives its marker sets with the `class` comparator (`real_qc.marker_referee_comparator_by_family`, keyed by the panel's family id); the 0.75 / 0.70 thresholds are unchanged. Every other family, the seeded set a sections included, keeps the `node` comparator (`real_qc.marker_referee_comparator`), which was `not_evaluable` on every set a sample.
 - **Fixed: trust fail-safe of simulation families.** A panel family validated by simulation whose bundle has no self-map now stays `broad_only`, the provisional fail-safe, with the family verdict as a note. Before, it became `validated`, so promoting such a family would have changed what RESOLVE emits. Families validated on real data keep their state. No simulation family is listed yet, so no output changes.
 
+### Fixed: Dwight mouse reference sources are off SSD1
+
+- The Dwight defaults of the mouse annotation sources (`annotation_wmb_h5ad_dir`, `annotation_wmb_metadata_dir`, `annotation_mouse_gene_table`, `annotation_wmb_selfmap_test_cells_path`, and now `annotation_merfish_ccf_metadata_path`) point at the verified download under `/srv/storage/MerXen/references` instead of the failing SSD1 disk. The paths are those of the VZG2 `map_first` run, so the `wmb_panel` and `wmb_region_share` bundles it built stay reusable.
+- `scripts/annotation_dev/launch_guard.sh` refuses a dev launch whose resolved configuration still reads from SSD1, and `scripts/annotation_dev/run_template.sh` is a launch script that calls it. The reference store and the human sources keep their SSD1 defaults until they move; a launch overrides the store.
+
 ### Acceptance
 
 - The human acceptance (gate H) is scored in `results/acceptance/2026-09-30/` on P7513, P1212, P7113 and P5011, all four segmentations:
