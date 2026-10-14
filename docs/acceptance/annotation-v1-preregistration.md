@@ -1912,7 +1912,10 @@ Each reading the orchestrator adopts here is labelled tightening or neutral. Non
 - **MO9 [L] (neutral, as registered).** Reported. It gates the use of the reseg and proseg outputs, not the flip.
 - **H18 mouse rows (neutral).** Recorded with their values and no exception (§18, "Not covered", CHECK M2). They are not in the mouse flip rule. They set M13b's H18 set under D28 (§26).
 - **MO10 (LOOSENING, POST-HOC, approved in writing on 2026-10-14; §24's amendment, U1; not an orchestrator reading).** Scored as §24's amendment states: the Allen-relative T2 reading, scored by M6b-R on the selected rule, with the one written MO10 exception.
-- **MO1, MO3, MO5, MO6 and MO11** are scored as §9 registers them. No reading is adopted for them here.
+- **The scored VZG2 segmentation (neutral; added 2026-10-14, before any gate M run).** For VZG2, every MO that names no segmentation (MO2, MO3, MO5, MO6) is scored on original_seg. §9's default "on proseg_hybrid unless stated" cannot apply to VZG2: its proseg_hybrid is the invalid section that MO7 scores as the negative control, and MO1, MO4 and MO7 already name VZG2 original_seg. M6's exit scored VZG2 the same way. ag7 is scored on proseg_hybrid, as §9 registers.
+- **MO5's astrocyte FPR on ag7 too (tightening; added 2026-10-14, before any gate M run).** The astrocyte false-positive rate ≤ 0.5% must hold on ag7 proseg_hybrid as well as on VZG2 original_seg, as M6's exit scored it. The ≥ 10× enrichment of held-out microglial genes stays a VZG2 criterion, as registered.
+- These two bullets were added after the scorer was written and its smoke test ran on run3's outputs (pre-merge code, labelled "smoke test, not gate M"; no verdict was read). No gate M run had started.
+- **MO1, MO3, MO6 and MO11** are otherwise scored as §9 registers them.
 - **The mouse flip rule is unchanged:** MO1–MO8 and MO10, with the one written MO10 exception of §24. MO11 keeps its banner rule. Any other failure needs a fix, or a written, user-approved exception in the gate M PR.
 - **Left for GM-REVIEW** (roadmap §3):
   - U8: OD-B7's mouse half;
