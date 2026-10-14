@@ -2175,6 +2175,11 @@ def mo10_rows(
         bins = [
             item for item in entry.get("t2_bins") or [] if isinstance(item, Mapping)
         ]
+        # No Allen-label T2 in any bin: mo10.json was made without the
+        # reading (not evaluable). Otherwise a missing value fails (§24).
+        no_allen = allen_reading and all(
+            _float(item.get("t2_allen_mean")) is None for item in bins
+        )
         bin_verdicts = []
         for item in bins:
             after = _float(item.get("t2_after_mean"))
@@ -2193,8 +2198,8 @@ def mo10_rows(
                 after,
                 "<= T2_allen" if allen_reading else "<=",
                 allen_mean if allen_reading else MO10_LIMITS["t2_bin_mean"],
-                bool(ok) if after is not None else None,
-                note="" if after is not None else "no T2 after pruning in this bin",
+                None if no_allen else bool(ok),
+                note="mo10.json has no Allen-label T2" if no_allen else "",
                 scope={"ap_bin": str(item.get("ap_bin"))},
                 beside={
                     "t2_allen_mean": allen_mean,

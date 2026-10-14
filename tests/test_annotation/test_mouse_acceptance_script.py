@@ -821,6 +821,32 @@ def test_mo10_scores_t2_per_bin_when_the_bins_are_given() -> None:
     assert per_bin[("merfish500", "4.5-6.0")] == "FAIL"
     assert not any(r.scored for r in _by(rows, "t2_clause"))
     assert not problems
+    # One bin without the Allen-label T2 fails (§24: a missing value fails);
+    # no Allen-label T2 at all is not evaluable.
+    gap = [bins[0], {**bins[1], "t2_allen_mean": None}]
+    rows, _ = M.mo10_rows(
+        _mo10(bins=gap, allen_ok=False),
+        reading="allen_relative",
+        recorded=["a+f:tile200,nn2"],
+        rule_params={},
+    )
+    assert _verdicts(_by(rows, "t2_bin_mean"))[:2] == ["PASS", "FAIL"]
+    none = [{**item, "t2_allen_mean": None} for item in bins]
+    rows, _ = M.mo10_rows(
+        _mo10(bins=none, allen_ok=None),
+        reading="allen_relative",
+        recorded=["a+f:tile200,nn2"],
+        rule_params={},
+    )
+    assert set(_verdicts(_by(rows, "t2_bin_mean"))) == {"NOT_AVAILABLE"}
+    # The registered reading scores each bin against 0.1%.
+    rows, _ = M.mo10_rows(
+        _mo10(bins=bins, allen_ok=False),
+        reading="fixed",
+        recorded=["a+f:tile200,nn2"],
+        rule_params={},
+    )
+    assert set(_verdicts(_by(rows, "t2_bin_mean"))) == {"FAIL"}
     # A per-bin verdict that disagrees with mo10.json's is a problem.
     _, problems = M.mo10_rows(
         _mo10(bins=bins, allen_ok=True),
