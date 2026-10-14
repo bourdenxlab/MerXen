@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+from typing import Any
 
 import anndata as ad
 import cv2
@@ -16,6 +17,7 @@ import xarray as xr
 from scipy.ndimage import gaussian_filter, shift
 from spatialdata.models import Image2DModel, TableModel
 
+import merxen.image_registration as registration_module
 from merxen.config import ImageRegistrationConfig, RegisteredImageSpec
 from merxen.image_registration import (
     _read_working_channel,
@@ -355,6 +357,36 @@ def test_registration_with_exact_matrix_places_marker_on_grid(
     assert summary["matrix_scale_check"]["status"] == "ok"
     assert Path(summary["outputs"]["qc_plot"]).exists()
     assert Path(summary["outputs"]["local_shifts"]).exists()
+
+
+@pytest.mark.usefixtures("small_viewer_pyramids")
+def test_registration_serializes_with_another_store_writer(
+    registration_inputs: dict[str, Path],
+    store_lock_contention: Any,
+) -> None:
+    """Registration waits for a writer holding the store lock through another
+    staged symlink, and keeps the lock from its read until the registry is
+    written."""
+    store_lock_contention.run(
+        lambda staged: run_image_registration(
+            _config(
+                registration_inputs,
+                matrix="true_matrix",
+                refine_affine=False,
+                latest_zarr_path=staged,
+            )
+        ),
+        registration_inputs["zarr"],
+        reads=[(sd, "read_zarr")],
+        persists=[
+            (registration_module, "materialize_warped_image"),
+            (registration_module, "build_image_pyramid"),
+            (registration_module, "write_spatialdata_metadata"),
+        ],
+    )
+
+    registry = sd.read_zarr(registration_inputs["zarr"]).attrs[REGISTERED_IMAGES_ATTR]
+    assert registry["post_if"]["status"] == "complete"
 
 
 def test_refinement_recovers_the_true_matrix(

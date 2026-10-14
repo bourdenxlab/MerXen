@@ -353,6 +353,36 @@ def test_hybrid_refinement_roundtrips_spatialdata(
     )
 
 
+def test_hybrid_refinement_serializes_with_another_store_writer(
+    tmp_path: Path,
+    store_lock_contention: Any,
+) -> None:
+    """The refinement waits for a writer holding the store lock through another
+    staged symlink, and keeps the lock from its read until the attrs are written."""
+    import merxen.segmentation.proseg_hybrid as hybrid_module
+
+    zarr_path, mask_path, transforms_path = _write_hybrid_inputs(tmp_path)
+    config = ProsegHybridConfig(min_transcripts=10)
+
+    store_lock_contention.run(
+        lambda staged: run_proseg_hybrid_refinement(
+            staged,
+            mask_path,
+            transforms_path,
+            config,
+            temp_root=tmp_path,
+        ),
+        zarr_path,
+        reads=[(sd, "read_zarr")],
+        persists=[
+            (hybrid_module, "write_or_replace_element"),
+            (hybrid_module, "write_spatialdata_metadata"),
+        ],
+    )
+
+    assert has_proseg_hybrid_refinement(zarr_path, config)
+
+
 def test_hybrid_shapes_take_the_transcripts_transformations(
     tmp_path: Path,
 ) -> None:

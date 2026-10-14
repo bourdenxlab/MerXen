@@ -24,6 +24,7 @@ from spatialdata.transformations import Affine, get_transformation
 
 from merxen.io.image_source import image_to_cyx, registered_image_keys
 from merxen.io.spatialdata_io import (
+    spatialdata_write_lock,
     write_or_replace_element,
     write_spatialdata_metadata,
 )
@@ -108,6 +109,10 @@ def build_viewer_caches(
 ) -> dict[str, Any]:
     """Pre-build viewer caches into the enriched store at ``zarr_path``.
 
+    The store write lock is held from the read until the last cache is written,
+    since label, pyramid, and attrs writes would otherwise interleave with
+    another writer's read-modify-write of the same store.
+
     Returns a summary dict of what was built/skipped per element.
     """
     params = params or ViewerCacheParams()
@@ -120,6 +125,25 @@ def build_viewer_caches(
         transform_path=Path(transform_path) if transform_path is not None else None,
     )
 
+    with spatialdata_write_lock(zarr_path):
+        return _build_viewer_caches_in_store(
+            zarr_path,
+            platform=platform,
+            x_transform=x_transform,
+            y_transform=y_transform,
+            params=params,
+        )
+
+
+def _build_viewer_caches_in_store(
+    zarr_path: Path,
+    *,
+    platform: str,
+    x_transform: tuple[float, float, float],
+    y_transform: tuple[float, float, float],
+    params: ViewerCacheParams,
+) -> dict[str, Any]:
+    """Build every cache into one store; the caller holds its write lock."""
     sdata = read_zarr(zarr_path)
     if register_missing_mask_branches(sdata):
         write_spatialdata_metadata(sdata, write_attrs=True)
@@ -270,7 +294,12 @@ def build_mask_cache_on_grid(
     coordinate_system: str,
     params: ViewerCacheParams,
 ) -> dict[str, Any]:
-    """Rasterize a registered mask and its caches on an explicit image grid."""
+    """Rasterize a registered mask and its caches on an explicit image grid.
+
+    Writes into the store behind ``sdata``; the caller must already hold that
+    store's write lock (this helper does not take it, so a caller that holds
+    it cannot deadlock on a second acquisition).
+    """
     matrix = np.asarray(pixel_to_world_matrix, dtype=np.float64)
     if matrix.shape != (3, 3):
         raise ValueError("pixel_to_world_matrix must be a 3x3 affine")
@@ -566,7 +595,12 @@ def build_image_pyramid(
     params: ViewerCacheParams,
     coordinate_system: str = "global",
 ) -> str:
-    """Build or refresh the viewer-compatible pyramid for one image element."""
+    """Build or refresh the viewer-compatible pyramid for one image element.
+
+    Writes into the store behind ``sdata``; the caller must already hold that
+    store's write lock (this helper does not take it, so a caller that holds
+    it cannot deadlock on a second acquisition).
+    """
     cache_key = derived_image_pyramid_cache_key(image_key, params.downsample)
     if not params.force and _derived_complete(
         zarr_path, "images", cache_key, "image_pyramid", image_key, params

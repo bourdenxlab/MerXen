@@ -36,6 +36,7 @@ from spatialdata.transformations import (
 from merxen.alignment.manifest import invalidate_alignment_materialization
 from merxen.config import ProsegHybridConfig
 from merxen.io.spatialdata_io import (
+    spatialdata_write_lock,
     write_or_replace_element,
     write_spatialdata_metadata,
 )
@@ -1114,7 +1115,26 @@ def run_proseg_hybrid_refinement(
     if not cellpose_polygons:
         raise RuntimeError("No Cellpose polygons were available for hybrid refinement.")
 
-    sdata_obj = sd.read_zarr(zarr_path)
+    # The refinement replaces the points element and writes the store's attrs,
+    # so the store lock is held from the read until the metadata is persisted.
+    with spatialdata_write_lock(zarr_path):
+        sdata_obj = sd.read_zarr(zarr_path)
+        return _refine_and_persist_hybrid_branch(
+            sdata_obj,
+            cellpose_polygons,
+            config,
+            temp_root=temp_root,
+        )
+
+
+def _refine_and_persist_hybrid_branch(
+    sdata_obj: Any,
+    cellpose_polygons: dict[int, BaseGeometry],
+    config: ProsegHybridConfig,
+    *,
+    temp_root: Path | str | None,
+) -> dict[str, int | float | str]:
+    """Build the hybrid branch in one store; the caller holds the store lock."""
     points_key = choose_primary_points_key(sdata_obj)
     if points_key is None:
         raise RuntimeError("No transcript points element is available.")
