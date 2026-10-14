@@ -2,7 +2,8 @@
 """M13 C17: the real-data QC regression on the M8 human pairs (set a).
 
 Plan §12 M13 exit ("real-data QC is run as a regression on P7513, P1212,
-P7113, P5011"; the ag7 and VZG2 rows wait for M6b, chunk C22). The M8 RESOLVE
+P7113, P5011"; the ag7 and VZG2 rows moved to M13b, chunk C22: see the
+``mouse`` step below). The M8 RESOLVE
 outputs (``$A/m8/resolve/<pair>/{proseg_hybrid,reseg}``, read only) name the
 MAP run, the bundles (their ``resolved_build_hash``), the gate denominators
 and the pair's alignment; this script re-runs human RESOLVE on that MAP
@@ -69,19 +70,39 @@ C15), and writes the outcome table under ``$A/m13/regression/``:
      be null on these version-6 bundles);
    * ``regression_summary.json`` and ``REPORT.txt``.
 
+4. ``mouse`` (M13b C22; not part of ``all``): the ag7 and VZG2 rows
+   (``MOUSE_EXPECTED``: ag7 on its four segmentations, VZG2 original_seg)
+   read from mouse RESOLVE outputs that ran the warn-only mouse QC, given as
+   ``--mouse-resolve <dataset>/<segmentation>=<annotation_resolve_out>``.
+   They stay pending until the gate M runs (GM-RUNS) write those outputs;
+   nothing is re-run. Into ``mouse/`` under ``--out``:
+
+   * ``outcomes.csv``: every outcome of every mouse sample;
+   * ``samples.csv``: per sample the outcome per check (G1-G5 among them),
+     the AP estimate and G4's window, and ``no_effect_problems``: the QC is
+     warn-only in mouse RESOLVE, so an applied lowering effect or a
+     ``real_qc_`` reason in the mouse gate is reported;
+   * ``gate_signals.csv``: the G1-G5 records (status, outcome, values,
+     reasons);
+   * ``mouse_summary.json`` and ``REPORT.txt``, with the expected rows still
+     pending.
+
 Reads (never writes) the M8 RESOLVE tree, the MAP runs, the published
-results and the reference store; ``--out`` must lie outside all of them.
-CPU only (RESOLVE runs one at a time with single-threaded BLAS, as M8 did).
-No MapMyCells, no PREP and no Nextflow.
+results, the reference store and the mouse RESOLVE outputs; ``--out`` must
+lie outside all of them. CPU only (RESOLVE runs one at a time with
+single-threaded BLAS, as M8 did). No MapMyCells, no PREP and no Nextflow.
 
 Usage::
 
     PYTHONPATH=src python scripts/acceptance/m13_real_qc_regression.py all --dry-run
     PYTHONPATH=src python scripts/acceptance/m13_real_qc_regression.py all
     PYTHONPATH=src python scripts/acceptance/m13_real_qc_regression.py table
+    PYTHONPATH=src python scripts/acceptance/m13_real_qc_regression.py mouse \
+        --mouse-resolve ag7/proseg_hybrid=<.../annotation_resolve_out> ...
 
-``--dry-run`` lists the registration checks and prints the RESOLVE commands;
-it reads no store, runs nothing and writes nothing.
+``--dry-run`` lists the registration checks and prints the RESOLVE commands
+(``mouse``: the given and the pending rows); it reads no store, runs nothing
+and writes nothing.
 """
 
 from __future__ import annotations
@@ -174,6 +195,27 @@ SINGLE_THREAD_ENV: dict[str, str] = {
     "NUMBA_NUM_THREADS": "1",
     "NUMEXPR_NUM_THREADS": "1",
 }
+
+# The mouse rows of plan §12 M13b (M13b C22): ag7 on its four segmentations
+# and VZG2 original_seg, from the gate M runs' RESOLVE outputs (GM-RUNS).
+MOUSE_EXPECTED: tuple[tuple[str, str], ...] = (
+    ("ag7", "original_seg"),
+    ("ag7", "proseg_hybrid"),
+    ("ag7", "proseg_mask"),
+    ("ag7", "reseg"),
+    ("VZG2", "original_seg"),
+)
+MOUSE_DIR = "mouse"
+# RESOLVE's pair summary (``pipeline.resolve_summary_filename``).
+RESOLVE_SUMMARY_SUFFIX = "_resolve_summary.json"
+RESOLVE_SUMMARY_GLOB = f"*{RESOLVE_SUMMARY_SUFFIX}"
+# What the human table step does not cover.
+NOT_COVERED: tuple[str, ...] = (
+    "ag7 and VZG2 (mouse) rows: pending until the gate M runs (GM-RUNS) write "
+    "mouse RESOLVE outputs with the warn-only mouse QC; the mouse step reads "
+    "them (M13b C22)",
+    "proseg_mask and original_seg: no M8 RESOLVE outputs",
+)
 
 # Outcome detail that is the check's headline number.
 VALUE_KEYS: dict[str, str] = {
@@ -1595,10 +1637,7 @@ def build_tables(
         "d22_flag_rates": d22_summary(tables["flag_rates"]),
         "d23_registration_g1": d23_verdict(tables["registration_g1"]),
         "nr1": nr1_summary(nr1),
-        "not_covered": [
-            "ag7 and VZG2 (mouse) rows: chunk C22, after M6b",
-            "proseg_mask and original_seg: no M8 RESOLVE outputs",
-        ],
+        "not_covered": list(NOT_COVERED),
     }
     (out_dir / "regression_summary.json").write_text(
         json.dumps(result, indent=2, default=str) + "\n", encoding="utf-8"
@@ -1820,6 +1859,394 @@ def render_report(
 
 
 # --------------------------------------------------------------------------
+# Mouse rows (M13b C22)
+
+
+@dataclass(frozen=True)
+class MouseInput:
+    """One mouse RESOLVE output of the regression (a gate M run's).
+
+    Attributes:
+        dataset: ``ag7`` or ``VZG2`` (``MOUSE_EXPECTED``; others are read and
+            listed as not expected).
+        segmentation: The segmentation.
+        resolve_dir: The RESOLVE output (``annotation_resolve_out``, with
+            ``<pair>_resolve_summary.json``).
+    """
+
+    dataset: str
+    segmentation: str
+    resolve_dir: Path
+
+    @property
+    def label(self) -> str:
+        """``<dataset>/<segmentation>``."""
+        return f"{self.dataset}/{self.segmentation}"
+
+
+def parse_mouse_input(text: str) -> MouseInput:
+    """Parse ``--mouse-resolve <dataset>/<segmentation>=<directory>``.
+
+    Args:
+        text: The option value.
+
+    Returns:
+        The input.
+
+    Raises:
+        RegressionError: If the value is not of that form.
+    """
+    key, sep, directory = text.partition("=")
+    dataset, slash, segmentation = key.partition("/")
+    if not (sep and slash and dataset and segmentation and directory):
+        raise RegressionError(
+            f"--mouse-resolve {text!r}: expected DATASET/SEGMENTATION=DIRECTORY"
+        )
+    return MouseInput(dataset, segmentation, Path(directory))
+
+
+def read_mouse_summary(item: MouseInput) -> dict[str, Any]:
+    """Read a mouse RESOLVE output's summary and check it holds the mouse QC.
+
+    Args:
+        item: The input.
+
+    Returns:
+        The ``<pair>_resolve_summary.json`` content.
+
+    Raises:
+        RegressionError: If the directory holds no single summary, the
+            summary is not a mouse one or of another segmentation, or a
+            sample has no enabled mouse real-data QC block (RESOLVE before
+            M13b C22, or ``real_qc.enabled`` false).
+    """
+    found = sorted(item.resolve_dir.glob(f"*{RESOLVE_SUMMARY_SUFFIX}"))
+    if len(found) != 1:
+        raise RegressionError(
+            f"{item.label}: no {RESOLVE_SUMMARY_GLOB} in {item.resolve_dir}"
+            if not found
+            else f"{item.label}: {len(found)} summaries in {item.resolve_dir}"
+        )
+    summary = read_json(found[0])
+    if summary.get("species") != "mouse":
+        raise RegressionError(
+            f"{item.label}: {found[0]} is not a mouse RESOLVE output "
+            f"(species {summary.get('species')!r})"
+        )
+    if summary.get("segmentation") != item.segmentation:
+        raise RegressionError(
+            f"{item.label}: {found[0]} is segmentation "
+            f"{summary.get('segmentation')}, not {item.segmentation}"
+        )
+    samples = summary.get("samples") or {}
+    if not samples:
+        raise RegressionError(f"{item.label}: the summary records no sample")
+    for sample_id, entry in sorted(samples.items()):
+        block = entry.get("real_qc")
+        if block is None:
+            raise RegressionError(
+                f"{item.label} {sample_id}: no real_qc block: the RESOLVE "
+                "output predates M13b C22 (mouse real-data QC)"
+            )
+        if not block.get("enabled"):
+            raise RegressionError(f"{item.label} {sample_id}: QC not enabled")
+        if "gate_signals" not in block:
+            raise RegressionError(
+                f"{item.label} {sample_id}: no gate_signals: the RESOLVE output "
+                "predates M13b C22 (mouse real-data QC)"
+            )
+    return summary
+
+
+def _mouse_gate(entry: Mapping[str, Any]) -> dict[str, Any]:
+    return dict(entry.get("mouse_gate") or _gate(entry))
+
+
+def _no_effect_problems(entry: Mapping[str, Any]) -> list[str]:
+    """Why a mouse sample's QC is not warn-only (empty when it is).
+
+    Mouse RESOLVE applies no QC effect (M13b C22): no downgrade, no gate
+    cap, trust cap, withheld level or withheld pair statistics, and no
+    ``real_qc_`` reason in the mouse gate.
+    """
+    block = entry.get("real_qc") or {}
+    effects = block.get("effects") or {}
+    problems: list[str] = []
+    if block.get("downgrades"):
+        problems.append("downgrades " + ", ".join(map(str, block["downgrades"])))
+    for key in ("gate_cap", "trust_cap"):
+        if effects.get(key) is not None:
+            problems.append(f"{key} {effects[key]}")
+    if effects.get("withheld_levels"):
+        problems.append(
+            "withheld_levels " + ", ".join(map(str, effects["withheld_levels"]))
+        )
+    if effects.get("withhold_pair_stats"):
+        problems.append("withhold_pair_stats")
+    gate = _mouse_gate(entry)
+    for reason in (*gate.get("level_reasons", []), *gate.get("warning_reasons", [])):
+        if str(reason).startswith("real_qc_"):
+            problems.append(f"gate reason {reason}")
+    if not block.get("warn_only"):
+        problems.append("warn_only false")
+    return problems
+
+
+def mouse_outcome_rows(
+    summary: Mapping[str, Any], *, dataset: str, segmentation: str
+) -> list[dict[str, Any]]:
+    """Return one row per real-data QC outcome of a mouse resolve summary.
+
+    Args:
+        summary: A ``read_mouse_summary`` summary.
+        dataset: The dataset (``ag7``, ``VZG2``).
+        segmentation: The segmentation.
+
+    Returns:
+        ``outcome_rows`` with the dataset first.
+    """
+    rows = outcome_rows(
+        summary, pair=str(summary.get("pair_id")), segmentation=segmentation
+    )
+    return [{"dataset": dataset, **row} for row in rows]
+
+
+def mouse_sample_rows(
+    summary: Mapping[str, Any], *, dataset: str, segmentation: str
+) -> list[dict[str, Any]]:
+    """Return one row per mouse sample: the outcome per check, G4 and the AP.
+
+    Args:
+        summary: A ``read_mouse_summary`` summary.
+        dataset: The dataset.
+        segmentation: The segmentation.
+
+    Returns:
+        The rows (``no_effect_problems``: ``none`` when the QC is warn-only
+        as wired, else what it applied).
+    """
+    rows: list[dict[str, Any]] = []
+    for sample_id, entry in sorted((summary.get("samples") or {}).items()):
+        block = entry.get("real_qc") or {}
+        gate = _mouse_gate(entry)
+        g4 = (block.get("gate_signals") or {}).get("g4") or {}
+        window = g4.get("window") or {}
+        estimate = g4.get("ap_estimate") or {}
+        problems = _no_effect_problems(entry)
+        row: dict[str, Any] = {
+            "dataset": dataset,
+            "segmentation": segmentation,
+            "pair": summary.get("pair_id"),
+            "sample_id": sample_id,
+            "platform": str(entry.get("platform")).upper(),
+            "trust_state": (entry.get("trust") or {}).get("state"),
+            "seeded": block.get("seeded"),
+            "warn_only": block.get("warn_only"),
+            "effects_withheld": bool(block.get("effects_withheld")),
+            "gate_level": gate.get("level"),
+            "gate_warning": gate.get("warning"),
+            "qc_warning_reasons": "; ".join(
+                str(reason)
+                for reason in (block.get("effects") or {}).get("warning_reasons", [])
+            ),
+            "no_effect_problems": "; ".join(problems) or "none",
+            "ap_estimate_section": estimate.get("section"),
+            "ap_estimate_mm": estimate.get("ap_mm"),
+            "ap_bin": estimate.get("ap_bin"),
+            "ap_in_scope": estimate.get("in_scope"),
+            "g4_window_source": g4.get("window_source"),
+            "g4_window_sections": ";".join(map(str, window.get("sections") or [])),
+        }
+        for check, token in sorted((block.get("per_check") or {}).items()):
+            row[f"check:{check}"] = token
+        rows.append(row)
+    return rows
+
+
+def mouse_signal_rows(
+    summary: Mapping[str, Any], *, dataset: str, segmentation: str
+) -> list[dict[str, Any]]:
+    """Return one row per mouse sample and gate signal (G1-G5).
+
+    Args:
+        summary: A ``read_mouse_summary`` summary.
+        dataset: The dataset.
+        segmentation: The segmentation.
+
+    Returns:
+        The rows (``values`` as JSON; ``reasons`` joined).
+    """
+    rows: list[dict[str, Any]] = []
+    for sample_id, entry in sorted((summary.get("samples") or {}).items()):
+        signals = (entry.get("real_qc") or {}).get("gate_signals") or {}
+        for signal, record in signals.items():
+            rows.append(
+                {
+                    "dataset": dataset,
+                    "segmentation": segmentation,
+                    "sample_id": sample_id,
+                    "signal": signal,
+                    "check": record.get("check"),
+                    "status": record.get("status"),
+                    "outcome": record.get("outcome"),
+                    "values": json.dumps(record.get("values") or {}, sort_keys=True),
+                    "reasons": "; ".join(map(str, record.get("reasons") or [])),
+                }
+            )
+    return rows
+
+
+def build_mouse_tables(out_dir: Path, inputs: Sequence[MouseInput]) -> dict[str, Any]:
+    """Write the mouse rows (M13b C22) under ``<out_dir>/mouse``.
+
+    Args:
+        out_dir: The regression's output directory.
+        inputs: The mouse RESOLVE outputs (at least one).
+
+    Returns:
+        The mouse summary (also written as JSON): the rows read, the
+        expected rows still ``pending``, the rows read that are
+        ``not_expected``, and ``no_effect_violations`` (samples whose QC
+        applied an effect).
+
+    Raises:
+        RegressionError: Without inputs (the rows stay pending), with a row
+            given twice, or on an output ``read_mouse_summary`` refuses.
+    """
+    if not inputs:
+        raise RegressionError(
+            "no mouse RESOLVE output given: the ag7 and VZG2 rows stay pending "
+            "until the gate M runs (GM-RUNS) write them"
+        )
+    labels = [item.label for item in inputs]
+    twice = sorted({label for label in labels if labels.count(label) > 1})
+    if twice:
+        raise RegressionError(f"mouse rows given twice: {', '.join(twice)}")
+    tables: dict[str, list[dict[str, Any]]] = {
+        "outcomes": [],
+        "samples": [],
+        "gate_signals": [],
+    }
+    records: list[dict[str, Any]] = []
+    for item in inputs:
+        summary = read_mouse_summary(item)
+        keys = {"dataset": item.dataset, "segmentation": item.segmentation}
+        tables["outcomes"] += mouse_outcome_rows(summary, **keys)
+        tables["samples"] += mouse_sample_rows(summary, **keys)
+        tables["gate_signals"] += mouse_signal_rows(summary, **keys)
+        path = next(item.resolve_dir.glob(f"*{RESOLVE_SUMMARY_SUFFIX}"))
+        records.append(
+            {
+                "row": item.label,
+                "resolve_dir": str(item.resolve_dir),
+                "summary_sha256": _sha256(path),
+                "pair_id": summary.get("pair_id"),
+                "samples": sorted((summary.get("samples") or {}).keys()),
+            }
+        )
+    folder = out_dir / MOUSE_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    for name, rows in tables.items():
+        _frame(rows).to_csv(folder / f"{name}.csv", index=False)
+    expected = [f"{dataset}/{segmentation}" for dataset, segmentation in MOUSE_EXPECTED]
+    result: dict[str, Any] = {
+        "code": _code_record(),
+        "inputs": records,
+        "rows": labels,
+        "pending": [label for label in expected if label not in labels],
+        "not_expected": [label for label in labels if label not in expected],
+        "warn_only_samples": sum(bool(row["warn_only"]) for row in tables["samples"]),
+        "n_samples": len(tables["samples"]),
+        "no_effect_violations": [
+            f"{row['sample_id']}/{row['segmentation']}: {row['no_effect_problems']}"
+            for row in tables["samples"]
+            if row["no_effect_problems"] != "none"
+        ],
+    }
+    (folder / "mouse_summary.json").write_text(
+        json.dumps(result, indent=2, default=str) + "\n", encoding="utf-8"
+    )
+    (folder / "REPORT.txt").write_text(
+        render_mouse_report(result, tables), encoding="utf-8"
+    )
+    return result
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def render_mouse_report(
+    result: Mapping[str, Any], tables: Mapping[str, Sequence[Mapping[str, Any]]]
+) -> str:
+    """Return the mouse rows' report text (M13b C22).
+
+    Args:
+        result: The mouse summary.
+        tables: The mouse tables' rows.
+
+    Returns:
+        The report.
+    """
+    code = result["code"]
+    lines = [
+        "M13b C22: real-data QC regression, mouse rows (ag7, VZG2)",
+        "=" * 58,
+        f"code {code.get('commit')} ({code.get('branch')}; dirty "
+        f"{code.get('dirty')}); mouse RESOLVE outputs read only. The mouse QC "
+        "is warn-only (D20 (b): gate M pending): it records, and changes no "
+        "gate, label or trust.",
+        "",
+        "1. Outcome per check (dataset_gate and G1-G5 are the mouse gate's own, "
+        "recorded, never re-applied)",
+    ]
+    checks = sorted(
+        {key for row in tables["samples"] for key in row if key.startswith("check:")}
+    )
+    lines.append(
+        "   "
+        + f"{'row':24s} "
+        + " ".join(name.removeprefix("check:")[:14].ljust(14) for name in checks)
+    )
+    for row in tables["samples"]:
+        label = f"{row['dataset']}/{row['segmentation']}"
+        lines.append(
+            "   "
+            + f"{label:24s} "
+            + " ".join(str(row.get(name) or "-")[:14].ljust(14) for name in checks)
+        )
+    lines += ["", "2. AP estimate and G4 window"]
+    for row in tables["samples"]:
+        lines.append(
+            f"   {row['dataset']}/{row['segmentation']:16s} AP "
+            f"{_fmt(row['ap_estimate_mm'], 2)} mm ({row['ap_estimate_section'] or '-'}"
+            f"; bin {row['ap_bin'] or '-'}; in scope {_fmt(row['ap_in_scope'])}); "
+            f"window {row['g4_window_source'] or 'none'}: "
+            f"{row['g4_window_sections'] or '-'}"
+        )
+    lines += ["", "3. Warn-only check (no QC effect applied)"]
+    violations = result["no_effect_violations"]
+    lines.append(
+        f"   {result['warn_only_samples']} of {result['n_samples']} samples "
+        "warn-only; violations: " + ("; ".join(violations) or "none")
+    )
+    lines += [
+        "",
+        "Rows read: " + (", ".join(result["rows"]) or "none") + ".",
+        "Rows pending (GM-RUNS): " + (", ".join(result["pending"]) or "none") + ".",
+    ]
+    if result["not_expected"]:
+        lines.append(
+            "Rows read but not expected (reported only): "
+            + ", ".join(result["not_expected"])
+            + "."
+        )
+    return "\n".join(lines) + "\n"
+
+
+# --------------------------------------------------------------------------
 # CLI
 
 
@@ -1827,7 +2254,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Entry point."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument(
-        "step", choices=("registration", "resolve", "table", "all"), help="step"
+        "step",
+        choices=("registration", "resolve", "table", "all", "mouse"),
+        help="step ('all' is the human steps; 'mouse' reads the mouse rows)",
     )
     parser.add_argument("--out", type=Path, default=OUT)
     parser.add_argument("--m8-resolve", type=Path, default=M8_RESOLVE)
@@ -1838,6 +2267,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--segmentations", nargs="+", default=list(SEGMENTATIONS))
     parser.add_argument(
         "--variants", nargs="+", choices=VARIANTS, default=list(VARIANTS)
+    )
+    parser.add_argument(
+        "--mouse-resolve",
+        action="append",
+        default=[],
+        metavar="DATASET/SEGMENTATION=DIR",
+        help="mouse: a RESOLVE output of a gate M run (annotation_resolve_out); "
+        "repeat per row",
     )
     parser.add_argument("--force", action="store_true", help="recompute outputs")
     parser.add_argument(
@@ -1855,8 +2292,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         format="%(asctime)s %(levelname)-8s %(message)s",
         datefmt="%H:%M:%S",
     )
-    protected = [args.m8_resolve, args.results, args.store]
+    mouse_inputs = [parse_mouse_input(text) for text in args.mouse_resolve]
+    if args.step == "mouse" and not mouse_inputs:
+        parser.error(
+            "mouse needs --mouse-resolve: the ag7 and VZG2 rows stay pending "
+            "until the gate M runs (GM-RUNS) write their RESOLVE outputs"
+        )
+    # The mouse step reads no reference store, so it never resolves the
+    # store's path (the default is on the damaged SSD1 disk).
+    protected = [
+        args.m8_resolve,
+        args.results,
+        *([] if args.step == "mouse" else [args.store]),
+        *(item.resolve_dir for item in mouse_inputs),
+    ]
     check_out_dir(args.out, protected)
+    if args.step == "mouse":
+        if args.dry_run:
+            labels = [item.label for item in mouse_inputs]
+            print("mouse rows given: " + ", ".join(labels))
+            pending = [
+                f"{dataset}/{segmentation}"
+                for dataset, segmentation in MOUSE_EXPECTED
+                if f"{dataset}/{segmentation}" not in labels
+            ]
+            print("mouse rows pending: " + (", ".join(pending) or "none"))
+            return 0
+        build_mouse_tables(args.out, mouse_inputs)
+        print((args.out / MOUSE_DIR / "REPORT.txt").read_text(encoding="utf-8"))
+        return 0
     if args.step in ("registration", "all"):
         run_registration(
             args.out,
