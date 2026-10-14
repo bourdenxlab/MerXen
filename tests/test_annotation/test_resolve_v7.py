@@ -909,12 +909,32 @@ V6_GOLDEN: dict[str, dict[str, str]] = {
     # changes with the merge; and a fixture that has a section composition
     # gets its estimate and window (see
     # ``test_mouse_g4_window_comes_from_the_ap_estimate``).
+    #
+    # Refreshed 2026-10-14 by M13b C22 (mouse real-data QC in RESOLVE,
+    # warn-only): the ``provenance`` digest of each mouse scenario changed;
+    # its ``labels``, ``summary`` and ``pair/summary`` digests did not. Cause:
+    # mouse RESOLVE now runs ``real_qc.mouse_real_data_qc`` (``real_qc.
+    # enabled`` is on by default) and records it. The difference between the
+    # 515017d code and this code, in these scenarios and only there, is
+    # (1) in the provenance, ``panel.real_data_qc`` going from null to the QC
+    # record (the outcome per check, G1-G5 among them; ``downgrades`` empty;
+    # ``warn_only`` true); (2) in the sample summary, the new ``real_qc``
+    # block, and in the pair summary the new ``real_qc_config``, both left
+    # out of the digests by ``_without_c15`` (the keys human RESOLVE gained in
+    # M13 C15, at the same ``schema_version`` 3). No label, status, flag, gate
+    # record, trust field or other provenance field moves: the QC is
+    # warn-only and applies no effect (D20 (b) leaves gate M pending). The
+    # QC-free run (``real_qc.enabled`` false) still gives the 515017d
+    # provenance digests (``MOUSE_PROVENANCE_BEFORE_C22``), and the QC run's
+    # provenance equals it once ``panel.real_data_qc`` is reset (checked
+    # below). Mouse ``map_first`` stays opt-in (``clustering_squidpy_mode_
+    # mouse`` is "legacy" until M9), so no production mouse output changes.
     "mouse_v6_provisional": {
         "AG_MERSCOPE/labels": (
             "b280d2188f45d21e5d9edda6a2b514d0f4bf18e94b89a5eea38437d78f87e4be"
         ),
         "AG_MERSCOPE/provenance": (
-            "786bbc3a774de00138da087690a1be95f3c64c94a710a41ac498a17d17f90e2f"
+            "af15380f24e40d46d0b86374b550343a763b0f037dcf361e163824eed79524f1"
         ),
         "AG_MERSCOPE/summary": (
             "ad69c95bd0d26c56b9a69a5a82653fee0187cb94c636769cabe4bb3b7416d72a"
@@ -928,13 +948,27 @@ V6_GOLDEN: dict[str, dict[str, str]] = {
             "6c14f98d3e7a3d4c43a4321e9abd97989f612c73084adf1336f42f1b8ef03b9c"
         ),
         "AG_MERSCOPE/provenance": (
-            "da8f9f22b7e3317ebce2f55ef948f46b29eee438e90f3ea24bf8806ec567ad65"
+            "abc77a1fdc974e231a6e8512b74460fc5cabb16dc3cf98fc7cb934ee4f00add1"
         ),
         "AG_MERSCOPE/summary": (
             "22d97886fc9e989da98574c678a81f75dbf8bc898c38b9f72df7187e08e4edc6"
         ),
         "pair/summary": (
             "6c2d04de9c941c9bfe056638a15beb73a18e6270f913bd165679cc2d0356ab11"
+        ),
+    },
+}
+# The mouse provenance digests before M13b C22 (515017d), which the QC-free
+# mouse run (``real_qc.enabled`` false) still gives.
+MOUSE_PROVENANCE_BEFORE_C22: dict[str, dict[str, str]] = {
+    "mouse_v6_provisional": {
+        "AG_MERSCOPE/provenance": (
+            "786bbc3a774de00138da087690a1be95f3c64c94a710a41ac498a17d17f90e2f"
+        ),
+    },
+    "mouse_no_tables": {
+        "AG_MERSCOPE/provenance": (
+            "da8f9f22b7e3317ebce2f55ef948f46b29eee438e90f3ea24bf8806ec567ad65"
         ),
     },
 }
@@ -1135,7 +1169,9 @@ def _v6_scenario(
     Human RESOLVE runs QC-free (``real_qc.enabled`` false): the golden
     digests are of the code before M13 C15, which had no real-data QC. With
     ``with_real_qc`` it also runs with the QC on the same MAP output, stored
-    there under ``"qc"``.
+    there under ``"qc"``. Mouse RESOLVE runs with the default config (the
+    warn-only QC on, M13b C22); with ``with_real_qc`` it also runs QC-free on
+    the same MAP output, stored under ``"qc_free"``.
     """
     make_trust = request.getfixturevalue("make_trust")
     species, tables, *state = scenario.split("_")
@@ -1173,15 +1209,24 @@ def _v6_scenario(
         )
     map_dir = tmp_path / "map"
     map_mouse(mouse_setup, map_dir)
-    return annotate_resolve(
-        map_dir,
-        _mouse_config(),
-        output_dir=tmp_path / "resolve",
-        panel_dir=mouse_setup["panel_dir"],
-        trust_overrides={"wmb_panel": make_trust("provisional", species="mouse")},
-        n_bootstrap=5,
-        registration={MOUSE_SID: PASSING},
-    )
+
+    def run_mouse(enabled: bool, output: str) -> ResolveResult:
+        config = _mouse_config()
+        qc_config = config.real_qc.model_copy(update={"enabled": enabled})
+        return annotate_resolve(
+            map_dir,
+            config.model_copy(update={"real_qc": qc_config}),
+            output_dir=tmp_path / output,
+            panel_dir=mouse_setup["panel_dir"],
+            trust_overrides={"wmb_panel": make_trust("provisional", species="mouse")},
+            n_bootstrap=5,
+            registration={MOUSE_SID: PASSING},
+        )
+
+    result = run_mouse(True, "resolve")
+    if with_real_qc is not None:
+        with_real_qc["qc_free"] = run_mouse(False, "resolve_free")
+    return result
 
 
 @pytest.mark.parametrize("scenario", V6_SCENARIOS)
@@ -1206,6 +1251,23 @@ def test_version_6_resolve_outputs_are_unchanged_but_for_the_null_flag(
         c11 = {name: panel[name] for name in C11_PANEL_FIELDS}
         assert c11 == V6_C11_PANEL[scenario], sample_id
     if not scenario.startswith("human"):
+        # M13b C22: the QC-free mouse run gives the 515017d digests; the QC
+        # run differs from it only by its real-data QC records.
+        free = applied["qc_free"]
+        assert _v6_digests(free, tmp_path) == {
+            **V6_GOLDEN[scenario],
+            **MOUSE_PROVENANCE_BEFORE_C22[scenario],
+        }
+        for sample_id, sample in result.samples.items():
+            other = free.samples[sample_id]
+            block = sample.summary["real_qc"]
+            assert block["enabled"] and block["warn_only"]
+            assert block["downgrades"] == []
+            assert other.summary["real_qc"]["enabled"] is False
+            record = sample.provenance.model_dump(mode="json")
+            assert record["panel"]["real_data_qc"]["warn_only"] is True
+            record["panel"]["real_data_qc"] = None
+            assert record == other.provenance.model_dump(mode="json")
         return
     # With the real-data QC (M13 C15), which lowers nothing in these
     # scenarios, the label tables are the golden ones too.
