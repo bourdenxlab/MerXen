@@ -66,6 +66,18 @@
 - **Rule variants, inert.** `MouseRegionConfig.rule_variant = "m6b"` enables (a) OB–OLF coupling through AON-home tiles, (b) and (c) conditional never-drop nodes, (d) OB at 0.5% of the assigned tiles and (f) other tile settings; the default `v1` refuses the fields. `scripts/acceptance/mouse_ap_axis.py` scores them on MERFISH-638850 under pre-registration §24.
 - **The exit is unmet.** No candidate is admissible: every rule, `v1` included, leaves the bin-mean T2 above 0.1% in some AP bin. `v1` stays the production rule, and MO10 scored on it fails (bin 3.0–4.5 mm harm 0.16–0.21% against 0.10%, largest section harm 0.59–0.76% against 0.30%, T2, and the missed-region clause at three sections). The choice of rule goes to the user.
 
+### Changed: the mouse region rule is M6b's selection (M6b-R)
+
+- **Default rule.** `MouseRegionConfig` now defaults to `a+f:tile200,nn2`: 200 µm tiles, 2 confident neurons per tile, and OB counted as present with OLF when AON-home tiles hold at least 1% of the assigned tiles (`rule_variant = "m6b"`). It is the rule M6b selected under the T2 reading the user approved on 2026-10-14 ("T2 no higher than the Allen labels' own T2, with the same regions"; pre-registration §24; a loosening, approved in writing). The old rule is `MouseRegionConfig.v1()`.
+- **What it changes.** On ag7 and VZG2 the default rule infers the same regions and drop list as v1, so their re-mapped cells do not change. Mouse `map_first` stays opt-in until the mouse flip (M9), so no production output changes.
+- **MO10.** Scored on the selected rule, MO10 fails only its missed-region clause, at two MERFISH sections: .35 (STR) and .46 (CTXsp). Gate M carries a written exception for these.
+- **Region-share bundle, revision 2.** The `wmb_region_share` builder also writes `region_structure_home.parquet`, the structure-level subclass homes that the OB–OLF coupling reads. The revision is in the bundle's `build_hash`, so the bundle is rebuilt once. MAP refuses a bundle without the structure homes before mapping and says how to rebuild it.
+- **Scoring script.** `scripts/acceptance/mouse_ap_axis.py`:
+  - `summarise` reports the Allen labels' T2 beside T2 after pruning;
+  - `summarise --t2-reading` (default `allen-relative`) picks the reading that decides admissibility, and both verdicts are reported;
+  - `summarise --taxonomy-bundle` reads the tree from a given bundle;
+  - `mo10` scores T2 under the selection's reading, reports it under both, and lists the failing parts.
+
 ### Fixed: Dwight mouse reference sources are off SSD1
 
 - The Dwight defaults of the mouse annotation sources (`annotation_wmb_h5ad_dir`, `annotation_wmb_metadata_dir`, `annotation_mouse_gene_table`, `annotation_wmb_selfmap_test_cells_path`, and now `annotation_merfish_ccf_metadata_path`) point at the verified download under `/srv/storage/MerXen/references` instead of the failing SSD1 disk. The paths are those of the VZG2 `map_first` run, so the `wmb_panel` and `wmb_region_share` bundles it built stay reusable.

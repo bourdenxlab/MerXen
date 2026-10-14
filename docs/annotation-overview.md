@@ -875,10 +875,13 @@ Mouse plausibility depends on where the section is, so MAP infers it
    subclass bp both ≥ 0.9. Each votes for its subclass's *home division*,
    the division holding most of that subclass's MERFISH cells (OB split from
    OLF).
-3. **Tiles** of 150 µm with ≥ 3 voters get their majority home. A division
-   is present when it holds ≥ 1% of assigned tiles and its largest
-   8-connected component has ≥ 3 tiles. With < 200 assigned tiles (or no
-   coordinates) pruning is skipped with a warning.
+3. **Tiles** of 200 µm with ≥ 2 voters (the default rule; v1: 150 µm, ≥ 3)
+   get their majority home. A division is present when it holds ≥ 1% of
+   assigned tiles and its largest 8-connected component has ≥ 3 tiles; OB
+   is also present with OLF when tiles whose voters' structure-level home
+   is AON hold ≥ 1% of assigned tiles (the default rule's coupling). With
+   < 200 assigned tiles (or no coordinates) pruning is skipped with a
+   warning.
 4. **Two-tier drop rule.** For each class outside the never-drop classes (25
    Pineal Glut, 30 Astro-Epen, 31 OPC-Oligo, 33 Vascular, 34 Immune): the
    class is *absent* if < 20% of its grey-matter MERFISH cells lie in the
@@ -938,16 +941,20 @@ below 100 counts).
   `map_first` mouse run writes the `_mapfirst` table beside the legacy one.
   The pre-registered mouse criteria (MO1–MO11) have not been scored as an
   acceptance (plan §14, milestone M9).
-- **AP-axis rule choice** (milestone M6b; the exit is unmet). The AP
-  estimate per section (`mouse_ap.estimate_ap`, recorded under
-  `mouse_gate.ap_estimate`) and the G4 windows for all sections are in the
-  code, and G4 uses the estimate by default (warning only). The rule
-  variants (OB–OLF coupling, conditional never-drop classes, OB at 0.5% of
-  tiles, other tile settings) are inert behind `rule_variant = "m6b"`; `v1`
-  is the production rule. The pre-registered selection found no admissible
-  candidate (every rule leaves T2 above 0.1% in some AP bin), and MO10 scored
-  on `v1` fails, so the choice of rule and a written MO10 exception go to
-  the user (pre-registration §24).
+- **AP-axis rule** (milestone M6b). The AP estimate per section
+  (`mouse_ap.estimate_ap`, recorded under `mouse_gate.ap_estimate`) and the
+  G4 windows for all sections are in the code, and G4 uses the estimate by
+  default (warning only).
+  - *The default rule* is `a+f:tile200,nn2`: 200 µm tiles, 2 confident
+    neurons per tile, and OB coupled to OLF through AON-home tiles
+    (`rule_variant = "m6b"`; `MouseRegionConfig.v1()` is the old rule).
+  - *How it was chosen.* M6b selected it under the T2 reading the user
+    approved on 2026-10-14: T2 no higher than the Allen labels' own T2, with
+    the same regions (pre-registration §24).
+  - *What it needs.* Its coupling reads structure-level homes from a
+    `wmb_region_share` bundle of revision 2.
+  - *MO10 on it* fails only the missed-region clause at two MERFISH sections,
+    which gate M carries as a written exception.
 - **Mouse real-data QC and gate P** (milestone M13b): not run; gate P
   refuses mouse families until a second disjoint WMB test draw exists.
 - **Validated mouse families are MERSCOPE only** (ag7, VZG2). A mouse Xenium

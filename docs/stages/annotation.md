@@ -33,7 +33,7 @@ modified or deleted automatically (see [CLI reference](../cli.md#merxen-annotati
 | `whb_frontal_supc_clus` | human primary (also the set-c sensitivity bundle, the same builder on the set-c panel) | Copies and verifies the frontal WHB region precompute (ROIs Human A44-A45, A46, A32, ACC; 653 subclusters, 125,481 cells, 59,357 genes), or rebuilds it from the WHB h5ads; truncates it to supercluster → cluster; finds panel reference and query markers (`n_per_utility` 30). |
 | `seaad_mr_panel` | human secondary | Copies the SEA-AD Multiregion precompute (release 20260711, 207 supertypes × 36,601 genes; md5 `9b1d5f50a412cd69311fa1175d4836a7`, sha256 `abbd4984bc45…3f6a`) and its small taxonomy tables; panel markers. Missing pinned files are fetched into `<store>/.downloads` (or seeded from a verified local copy). |
 | `wmb_panel` | mouse primary | Samples at most `annotation_wmb_max_cells_per_cluster` (50) cells per cluster from the local WMB-10Xv3 h5ads (seed 1; the self-map test cells excluded, see below), restricted to the marker gene universe (see below); builds the marker precompute; finds panel markers with the supertype level dropped; copies the Allen `precomputed_stats_ABC_revision_230821.h5` (md5 `d13b316a1755c459d75b8e45ff92ddfc`) as the mapping precompute. |
-| `wmb_region_share` | mouse, panel-independent | Class and subclass × CCF-division shares of the ABC MERFISH-C57BL6J-638850-CCF cells (OB = MOB, AOB, olfactory nerve layer and OLF-unassigned anterior of AP 2.5 mm, split from OLF), each node's home division, per-section compositions and AP composition windows (each section with its neighbours) for every section. |
+| `wmb_region_share` | mouse, panel-independent | Class and subclass × CCF-division shares of the ABC MERFISH-C57BL6J-638850-CCF cells (OB = MOB, AOB, olfactory nerve layer and OLF-unassigned anterior of AP 2.5 mm, split from OLF), each node's home division, per-section compositions and AP composition windows (each section with its neighbours) for every section; from revision 2 also each subclass's structure-level home (`region_structure_home.parquet`), which the default mouse region rule's OB–OLF coupling reads. |
 | `whb_whole_ctx_panel` | human, optional | Whole-WHB panel markers with the 16 cortex-implausible superclusters dropped and the lookup filtered to the pruned tree; refused above 1,000 genes. |
 | `whb_frontal_supc_clus_ho` | human, resolvability (M3b) | The frontal WHB cells restricted to the panel, without the held-out donor (`annotation_calibration_holdout_donor`, `auto` = the donor with the fewest frontal cells, H19.30.002); clusters with ≥ 5 training cells; a supercluster → cluster → subcluster precompute of the training cells truncated to supercluster → cluster, with panel markers. The held-out donor's cells (≤ 1,000 per supercluster, all cells of rare ones, ≤ `n_test_cells`) are the test set (`test_cells.h5ad`, native panel counts and truth). E2's HO recipe. Every non-neuronal supercluster is topped up to the same cap with WHB non-neuronal nuclei of E2's 14 neocortical dissections outside the frontal ROIs (user decision 2026-09-27, see the self-map below); `test_source` marks each test cell `holdout_donor` or `other_region`. |
 | `wmb_selfmap_testset` | mouse, resolvability (M3b) | The 11,913 self-map test cells plus up to 30 cells per supertype of the non-neuronal classes (Astro-Epen, OPC-Oligo, Vascular, Immune) that the `wmb_panel` marker build did not use (its sample is recomputed with the same rule), restricted to the panel (`test_cells.h5ad`). |
@@ -1972,7 +1972,7 @@ Per sample:
 | `<platform>/<sid>_ct_provisional.parquet` | One row per object: identity, `total_counts`, `n_genes`, `in_table`, **provisional** `ct_<level>_{name,raw,corr,runner_up,margin,status}` and `ct_final_*`, and the raw engine columns `mmc_<reference>_<level>_{label,name,bp,agg,corr}`. |
 | `map_manifest.json` | The run record above, with `panel_status` (`ok`, or `refused` with `panel_reasons` and no runs) and, per run that needs one, `subset_bundle` (trigger, `used`, `requested` or `ambiguous` with the candidates, subset and parent hashes); `annotation-store prune` counts its `build_hash` values as references. |
 | `subset_panels/<sid>_<run_id>.panel_genes.json` | The subset panel of a run whose dataset lacks enough panel genes (`kind` `subset`, `parent_panel_hash`, `excluded_ids`). |
-| `<platform>/<sid>_mouse_regions.parquet` | Mouse: one row per table cell: `tile_i` / `tile_j` (150 µm tile), `tile_region` (the tile's majority home division), `inferred_region` (that division when present), `confident_neuron`, `region_dropped_level` (`class`, `subclass` or null) and `region_pruned_changed`. |
+| `<platform>/<sid>_mouse_regions.parquet` | Mouse: one row per table cell: `tile_i` / `tile_j` (the rule's tile, 200 µm by default), `tile_region` (the tile's majority home division), `inferred_region` (that division when present), `confident_neuron`, `region_dropped_level` (`class`, `subclass` or null) and `region_pruned_changed`. |
 | `<platform>/<sid>_mmc_wmb_panel_pruned.parquet` | Mouse, when nodes were dropped: the tidy table of the re-mapped cells only (`--nodes_to_drop`). The unpruned run keeps `<sid>_mmc_wmb_panel.parquet`. |
 
 The provisional labels apply the raw thresholds only (WHB lineage / broad /
@@ -2003,10 +2003,12 @@ mouse sample's unpruned WMB run:
 2. **Inference** (`auto`; also run for QC with an override): confident
    neurons (a neuronal class, 01–29, with class and subclass bootstrap
    probability ≥ 0.9) vote for their subclass's MERFISH home division
-   (`wmb_region_share`: OB split from OLF); each 150 µm tile with ≥ 3 votes
-   takes its majority home (ties: the first division in sorted order); a
-   division is present with ≥ 1% of the assigned tiles and a connected
-   (8-neighbour) component of ≥ 3 tiles. Fewer than 200 assigned tiles, or
+   (`wmb_region_share`: OB split from OLF); each 200 µm tile with ≥ 2 votes
+   (the default rule; v1: 150 µm, ≥ 3) takes its majority home (ties: the
+   first division in sorted order); a division is present with ≥ 1% of the
+   assigned tiles and a connected (8-neighbour) component of ≥ 3 tiles, and
+   OB also with OLF through AON-home tiles (the default rule's coupling,
+   [Mouse AP axis](#mouse-ap-axis-m6b)). Fewer than 200 assigned tiles, or
    no `obsm["spatial"]`, skip pruning with a warning (status
    `skipped_few_tiles` / `skipped_no_coordinates`).
 3. **Two-tier drop rule.** A class with less than 20% of its MERFISH
@@ -2063,19 +2065,36 @@ coherence (median `region_coherence` of the cells called to each class,
 the class's MERFISH `coh_home_median` from
 `wmb_region_restricted_classes.csv`, and their ratio; MERFISH is denser
 than most query sections, so the ratio is a relative QC reading). The M6b
-rule variants (below) need `mouse_regions.rule_variant = "m6b"`; with the
-default `v1` they are refused, not ignored. Sagittal, OB- and CB-dominated
-sections are out of scope (use an override or `none`).
+rule variants (below) need `mouse_regions.rule_variant = "m6b"`, which the
+default rule sets; with `v1` (`MouseRegionConfig.v1()`) they are refused, not
+ignored. Sagittal, OB- and CB-dominated sections are out of scope (use an
+override or `none`).
 
 ### Mouse AP axis (M6b)
 
-Plan §7.8. **Rule variants** (`MouseRegionConfig`, all off by default; v1
-stays the production rule). The pre-registered selection (§24 of the
-pre-registration; called §17 in the M6b evidence and on the M6b branch until
-it was merged) found no admissible candidate: every rule, v1 included, fails
-the T2 constraint in some AP bin, so none is selected and the choice of rule
-goes to the user. MO10 scored on v1 fails, so the M6b exit is unmet. The
-variants stay inert behind `rule_variant = "m6b"`:
+Plan §7.8. **The default rule is `a+f:tile200,nn2`** (`MouseRegionConfig`'s
+defaults; `rule_variant = "m6b"`): v1 with variant (a) below and 200 µm tiles
+with 2 confident neurons per tile (variant (f)). `MouseRegionConfig.v1()` is
+the v1 rule (150 µm, 3 neurons, no coupling).
+
+How it was selected (§24 of the pre-registration; called §17 in the M6b
+evidence and on the M6b branch until it was merged):
+- The registered selection found no admissible candidate: every rule, v1
+  included, fails "T2 <= 0.1% in every bin". The Allen labels themselves
+  fail that bound in 5 of 6 AP bins.
+- On 2026-10-14 the user approved reading the bound as "T2 no higher than
+  the Allen labels' own T2, with the same regions", for the selection and for
+  MO10's T2 clause.
+- The selection re-run under that reading picked `a+f:tile200,nn2` (largest
+  direct harm 0.210%, against v1's 0.757%).
+- MO10 scored on it fails only the missed-region clause at two MERFISH
+  sections (.35, STR; .46, CTXsp). Gate M carries a written exception for
+  them.
+- On ag7 and VZG2 it infers the same regions and drop list as v1.
+
+Its coupling needs structure-level homes. The `wmb_region_share` builder
+writes them from revision 2 (`region_structure_home.parquet`), and MAP refuses
+an older bundle with the default rule. The variants:
 
 - (a) `coupled_regions` `{"OB": ["OLF"]}`: after the tile rule, OB counts as
   present when OLF is present and the assigned tiles whose majority
@@ -2084,8 +2103,8 @@ variants stay inert behind `rule_variant = "m6b"`:
   `010 IT AON-TT-DP Glut` has that home) hold at least
   `coupling_min_tile_fraction` (1%) of the assigned tiles; one pass, no
   component rule. It needs structure-level homes in the region shares
-  (`region_structure_home.parquet`), which the v1 `wmb_region_share`
-  bundle does not build, so MAP refuses it with that bundle.
+  (`region_structure_home.parquet`), which the `wmb_region_share` bundle
+  has from revision 2; MAP refuses the rule with an older bundle.
 - (b), (c) `conditional_never_drop`: class `05 OB-IMN GABA` (with its
   subclasses) is kept when STR or OLF is present; subclass
   `025 CA2-FC-IG Glut` when Isocortex and STR are present. A kept subclass
@@ -2095,7 +2114,8 @@ variants stay inert behind `rule_variant = "m6b"`:
   reports the T2 without them beside it.
 - (d) `region_min_tile_fraction` `{"OB": 0.005}`: OB is present at 0.5% of
   the assigned tiles; other divisions keep 1% and the component rule.
-- (f) the v1 fields `tile_um` (100 / 200 µm) and `min_neurons_per_tile` (2).
+- (f) the tile fields `tile_um` (100 / 200 µm; v1 150) and
+  `min_neurons_per_tile` (2; v1 3).
 
 **AP estimate and G4 window** (`merxen.annotation.mouse_ap.estimate_ap`;
 E7 §5 step 1): the neuronal subclass composition of the section's confident
