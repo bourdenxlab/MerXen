@@ -25,7 +25,9 @@ score, "smoke test, not gate M" ...).
 
 - **MO2** (``--mo2-remap``, registered ``both``, a tightening): the production
   (subset) re-map and the full re-map must both pass T2 after pruning <= 0.1%,
-  class changes outside dropped nodes <= 0.25% and subclass changes <= 1.5%.
+  class changes outside dropped nodes <= 0.25% and subclass changes <= 1.5%,
+  on every segmentation ``SCORED_UNNAMED`` lists (one full re-map each:
+  ``--mo2-full DATASET/SEGMENTATION=DIR``).
 - **MO4** (``--mo4-window``, registered ``fixed``): MERFISH .31-.33. The
   AP-estimate window (the gate's) is reported beside it.
 - **MO8 MAP memory** (``--mo8-map-memory``, registered ``trace_rss``): H14's
@@ -55,7 +57,11 @@ the exception's criterion is the row's and every scope key matches the row:
 ``region``, ``ap_bin`` and ``bundle`` (a string or a list of strings), and
 ``value_max`` / ``value_min`` (the row's value must lie within them). A
 failure outside every scope stays ``FAIL``. Exceptions never touch a row that
-is not measured (``NOT_AVAILABLE``) or not scored (``UNSCORED``).
+is not measured (``NOT_AVAILABLE``) or not scored (``UNSCORED``). An MO8
+exception names its parts and, for each, what it covers: the ``bundle``
+(full build hashes) of a PREP part, the ``dataset`` of a section part
+(§25.1.1: the written MO8 exception covers the PREP peak of the two gate M
+panels and nothing else).
 
 **Provenance.** Before anything is measured, every bundle path the inputs
 name (the reports' provenance, the MAP manifests, the resolve summaries,
@@ -79,10 +85,14 @@ reseg and proseg outputs, so neither enters it. The flip verdict is ``PASS``
 when every scored row of those criteria is ``PASS`` or ``FAIL (excepted)``
 and no problem is open, ``FAIL`` when one is ``FAIL``, else ``INCOMPLETE``.
 
-Scored datasets: ag7 proseg_hybrid and VZG2 original_seg (MO1, MO2, MO3,
-MO5, MO6, MO7; MO4's bands). The other segmentations are reported. MO8 is per
-4-segmentation section and per PREP bundle; MO9 compares VZG2's segmentations;
-MO10 is the MERFISH series (``mo10.json``).
+Scored segmentations: MO1, MO4 and MO7 name one per dataset
+(``SCORED_SEGMENTATION``). MO2, MO3, MO5 and MO6 name none and are scored on
+``SCORED_UNNAMED`` (§25.2.1, a tightening): §9's default, proseg_hybrid, and,
+for the section whose named criteria use original_seg (MS2), original_seg
+too; every scored segmentation must pass. MO5's enrichment is the second
+section's only (§9). The other segmentations are reported. MO8 is per
+4-segmentation section and per PREP bundle; MO9 compares the second
+section's segmentations; MO10 is the MERFISH series (``mo10.json``).
 """
 
 from __future__ import annotations
@@ -139,6 +149,16 @@ SEGMENTATIONS: Final = ("original_seg", "proseg_hybrid", "reseg", "proseg_mask")
 SCORED_SEGMENTATION: Final[dict[str, str]] = {
     "ag7": "proseg_hybrid",
     "vzg2": "original_seg",
+}
+# §9: "on proseg_hybrid unless stated". §25.2.1 (a tightening, recorded on
+# 2026-10-14 before any gate M run): the criteria that name no segmentation
+# (MO2 with both re-maps, MO3, MO5, MO6) are scored on that default and on
+# the segmentation the dataset's named criteria use (MS2's original_seg,
+# which M6's exit scored); every scored segmentation must pass.
+DEFAULT_SEGMENTATION: Final = "proseg_hybrid"
+SCORED_UNNAMED: Final[dict[str, tuple[str, ...]]] = {
+    dataset: tuple(dict.fromkeys((segmentation, DEFAULT_SEGMENTATION)))
+    for dataset, segmentation in SCORED_SEGMENTATION.items()
 }
 NEGATIVE_CONTROL: Final = "vzg2_invalid"
 FLIP_CRITERIA: Final = ("MO1", "MO2", "MO3", "MO4", "MO5", "MO6", "MO7", "MO8", "MO10")
@@ -491,6 +511,16 @@ EXCEPTION_KEYS: Final = frozenset(
     }
 )
 EXCEPTION_BOUNDS: Final = frozenset({"value_max", "value_min"})
+# MO8's parts and the scope key that names what an exception of each covers
+# (one PREP bundle, one 4-segmentation section): an MO8 exception without it
+# would cover every bundle or section (§25.1.1).
+MO8_PART_UNITS: Final[dict[str, str]] = {
+    "prep_peak": "bundle",
+    "prep_wall": "bundle",
+    "map_peak": "dataset",
+    "section_time": "dataset",
+}
+BUILD_HASH_LENGTH: Final = 64
 EXCEPTION_FIELDS: Final = frozenset(
     {"id", "criterion", "scope", "approved", "quote", "recorded_in"}
 )
@@ -598,6 +628,8 @@ def parse_exceptions(payload: Any) -> list[ApprovedException]:
         quote = str(entry.get("quote") or "").strip()
         if not quote:
             raise ValueError(f"{ident}: the user's approval must be quoted")
+        if criterion == "MO8":
+            _check_mo8_scope(ident, scope)
         out.append(
             ApprovedException(
                 id=ident,
@@ -609,6 +641,39 @@ def parse_exceptions(payload: Any) -> list[ApprovedException]:
             )
         )
     return out
+
+
+def _scope_values(value: Any) -> list[str]:
+    return [value] if isinstance(value, str) else list(value or [])
+
+
+def _check_mo8_scope(ident: str, scope: Mapping[str, Any]) -> None:
+    """Refuse an MO8 exception broader than named parts of named units.
+
+    Raises:
+        ValueError: When the scope names no part, an unknown part, or not
+            the unit of each part (``MO8_PART_UNITS``), or names a bundle by
+            anything but its full build hash.
+    """
+    parts = _scope_values(scope.get("part"))
+    if not parts:
+        raise ValueError(
+            f"{ident}: an MO8 exception must name its part ({sorted(MO8_PART_UNITS)})"
+        )
+    unknown = sorted(set(parts) - set(MO8_PART_UNITS))
+    if unknown:
+        raise ValueError(f"{ident}: unknown MO8 part(s) {unknown}")
+    for part in parts:
+        unit = MO8_PART_UNITS[part]
+        if unit not in scope:
+            raise ValueError(
+                f"{ident}: an MO8 exception for {part} names the {unit} it covers"
+            )
+    for bundle in _scope_values(scope.get("bundle")):
+        if len(bundle) != BUILD_HASH_LENGTH or not all(
+            char in "0123456789abcdef" for char in bundle
+        ):
+            raise ValueError(f"{ident}: MO8 bundle {bundle!r} is not a full build hash")
 
 
 def exception_covers(exception: ApprovedException, row: Row) -> tuple[bool, bool]:
@@ -957,6 +1022,14 @@ def _scored_pairs() -> list[tuple[str, str]]:
     return [(dataset, SCORED_SEGMENTATION[dataset]) for dataset in DATASETS]
 
 
+def _unnamed_pairs() -> list[tuple[str, str]]:
+    return [
+        (dataset, segmentation)
+        for dataset in DATASETS
+        for segmentation in SCORED_UNNAMED[dataset]
+    ]
+
+
 def _all_pairs() -> list[tuple[str, str]]:
     return [(dataset, seg) for dataset in DATASETS for seg in SEGMENTATIONS]
 
@@ -1219,17 +1292,17 @@ def mo2_measure(map_dir: Path, full_dir: Path | None = None) -> dict[str, Any]:
 
 def mo2_rows(
     outputs: Mapping[str, Mapping[str, SegOutputs]],
-    measured: Mapping[str, Mapping[str, Any]],
+    measured: Mapping[tuple[str, str], Mapping[str, Any]],
     reading: str,
-    problems: Mapping[str, str] | None = None,
+    problems: Mapping[tuple[str, str], str] | None = None,
 ) -> list[Row]:
-    """MO2 on ag7 proseg_hybrid and VZG2 original_seg, per re-map and part.
+    """MO2 on every scored segmentation (``SCORED_UNNAMED``), per re-map and part.
 
     Args:
         outputs: The datasets' outputs.
-        measured: Dataset to ``mo2_measure`` output.
+        measured: (dataset, segmentation) to ``mo2_measure`` output.
         reading: ``both`` (registered), ``subset`` or ``full``.
-        problems: Dataset to why it was not measured.
+        problems: (dataset, segmentation) to why it was not measured.
 
     Returns:
         Per dataset, re-map and part one row (the re-map the reading does not
@@ -1242,16 +1315,18 @@ def mo2_rows(
         "subset": ("subset",),
         "full": ("full",),
     }[reading]
-    for dataset, segmentation in _scored_pairs():
-        result = measured.get(dataset) or {}
-        why = (problems or {}).get(dataset) or _missing(outputs, dataset)
+    for dataset, segmentation in _unnamed_pairs():
+        result = measured.get((dataset, segmentation)) or {}
+        why = (problems or {}).get((dataset, segmentation)) or _missing(
+            outputs, dataset
+        )
         for remap in ("subset", "full"):
             values = result.get(remap)
             note = why or (
                 ""
                 if values
                 else (remap == "full" and result.get("full_problem"))
-                or f"no {remap} re-map (score --mo2-full {dataset}=DIR)"
+                or f"no {remap} re-map (score --mo2-full {dataset}/{segmentation}=DIR)"
             )
             unscored = ""
             if remap == "full" and values:
@@ -1324,7 +1399,10 @@ def mo2_rows(
 
 
 def mo3_rows(outputs: Mapping[str, Mapping[str, SegOutputs]]) -> list[Row]:
-    """MO3: the inferred regions equal the manual set, per segmentation."""
+    """MO3: the inferred regions equal the manual set, per segmentation.
+
+    Scored on every segmentation of ``SCORED_UNNAMED`` (§25.2.1).
+    """
     rows = []
     for dataset, segmentation in _all_pairs():
         out = _get(outputs, dataset, segmentation)
@@ -1347,7 +1425,7 @@ def mo3_rows(outputs: Mapping[str, Mapping[str, SegOutputs]]) -> list[Row]:
                 "==",
                 ";".join(manual),
                 None if inferred is None else sorted(inferred) == manual,
-                segmentation == SCORED_SEGMENTATION[dataset],
+                segmentation in SCORED_UNNAMED[dataset],
                 "map_manifest.json (mouse_regions)",
                 note=_missing(outputs, dataset)
                 or (
@@ -1473,14 +1551,15 @@ def mo4_rows(
 def mo5_rows(outputs: Mapping[str, Mapping[str, SegOutputs]]) -> list[Row]:
     """MO5: VZG2 held-out enrichment >= 10x; astrocyte FPR <= 0.5%.
 
-    The enrichment is scored on VZG2 original_seg (§9: "VZG2 held-out
-    microglial-gene enrichment"); the astrocyte FPR on both scored datasets,
-    as the M6 exit measured it. Other segmentations are reported.
+    Both are scored on every segmentation of ``SCORED_UNNAMED`` (§25.2.1):
+    the enrichment on the second section's (§9 names that section), the
+    astrocyte FPR on both sections', as the M6 exit measured it. Other
+    segmentations are reported.
     """
     rows = []
     for dataset, segmentation in _all_pairs():
         out = _get(outputs, dataset, segmentation)
-        primary = segmentation == SCORED_SEGMENTATION[dataset]
+        primary = segmentation in SCORED_UNNAMED[dataset]
         note = _missing(outputs, dataset)
         enrichment = out.value("MO5", "spillover_heldout_enrichment") if out else None
         rows.append(
@@ -1518,7 +1597,10 @@ def mo5_rows(outputs: Mapping[str, Mapping[str, SegOutputs]]) -> list[Row]:
 
 
 def mo6_rows(outputs: Mapping[str, Mapping[str, SegOutputs]]) -> list[Row]:
-    """MO6: the F1 (region-incoherent) rate after pruning lies in 0.2-1.0%."""
+    """MO6: the F1 (region-incoherent) rate after pruning lies in 0.2-1.0%.
+
+    Scored on every segmentation of ``SCORED_UNNAMED`` (§25.2.1).
+    """
     rows = []
     for dataset, segmentation in _all_pairs():
         out = _get(outputs, dataset, segmentation)
@@ -1537,7 +1619,7 @@ def mo6_rows(outputs: Mapping[str, Mapping[str, SegOutputs]]) -> list[Row]:
                 None
                 if number is None
                 else low - TOLERANCE <= number <= high + TOLERANCE,
-                segmentation == SCORED_SEGMENTATION[dataset],
+                segmentation in SCORED_UNNAMED[dataset],
                 "acceptance_metrics.json (resolve summary region_coherence)",
                 note=_missing(outputs, dataset),
             )
@@ -2778,6 +2860,51 @@ def _pairs(values: Sequence[str] | None, option: str) -> dict[str, str]:
     return out
 
 
+def full_remap_dirs(values: Sequence[str] | None) -> dict[tuple[str, str], Path]:
+    """Parse ``--mo2-full``: one full re-map per scored (dataset, segmentation).
+
+    Args:
+        values: ``DATASET/SEGMENTATION=DIR`` items; a bare ``DATASET=DIR``
+            stands for a dataset that ``SCORED_UNNAMED`` scores on one
+            segmentation only.
+
+    Returns:
+        (dataset, segmentation) to the full-remap output directory.
+
+    Raises:
+        ValueError: For an unknown dataset, a segmentation MO2 does not
+            score, an ambiguous bare dataset or a repeated key.
+    """
+    out: dict[tuple[str, str], Path] = {}
+    for value in values or []:
+        key, sep, rest = value.partition("=")
+        if not sep or not key or not rest:
+            raise ValueError(
+                f"--mo2-full: expected DATASET/SEGMENTATION=DIR, got {value!r}"
+            )
+        dataset, _, segmentation = key.partition("/")
+        if dataset not in SCORED_UNNAMED:
+            raise ValueError(f"--mo2-full: unknown dataset {dataset!r}; use {DATASETS}")
+        scored = SCORED_UNNAMED[dataset]
+        if not segmentation:
+            if len(scored) != 1:
+                raise ValueError(
+                    f"--mo2-full {key}: MO2 is scored on {', '.join(scored)} for "
+                    f"{dataset} (§25.2.1); name the segmentation "
+                    f"({dataset}/SEGMENTATION=DIR)"
+                )
+            segmentation = scored[0]
+        if segmentation not in scored:
+            raise ValueError(
+                f"--mo2-full {key}: {segmentation} is not scored for MO2 on "
+                f"{dataset} ({', '.join(scored)}; §25.2.1)"
+            )
+        if (dataset, segmentation) in out:
+            raise ValueError(f"--mo2-full: {dataset}/{segmentation} given twice")
+        out[(dataset, segmentation)] = Path(rest)
+    return out
+
+
 def _check_out(out: Path, protected: Sequence[Path]) -> None:
     target = Path(os.path.abspath(out))
     for root in protected:
@@ -2820,9 +2947,7 @@ def score(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                     f"{out.dataset} {out.segmentation}: no acceptance_metrics.json"
                 )
     trace = load_trace([track(path) for path in args.trace or []])
-    full_dirs = {
-        key: Path(value) for key, value in _pairs(args.mo2_full, "--mo2-full").items()
-    }
+    full_dirs = full_remap_dirs(args.mo2_full)
     samplers: dict[tuple[str, str], dict[str, float]] = {}
     for key, value in _pairs(args.sampler, "--sampler").items():
         dataset, _, segmentation = key.partition("/")
@@ -2882,12 +3007,24 @@ def score(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         found += bundle_paths(negative, f"{NEGATIVE_CONTROL}/resolve_summary")
     if negative_manifest is not None:
         found += bundle_paths(negative_manifest, f"{NEGATIVE_CONTROL}/map_manifest")
-    for dataset, full_dir in full_dirs.items():
+    # A full re-map that records another segmentation is not used (§25.2.1:
+    # one full re-map per scored segmentation).
+    full_mismatch: dict[tuple[str, str], str] = {}
+    for (dataset, segmentation), full_dir in full_dirs.items():
         record_path = full_dir / FULL_REMAP_RECORD
         if record_path.is_file():
-            found += bundle_paths(
-                _read_json(track(record_path)), f"{dataset}/full_remap"
-            )
+            full_record = _read_json(track(record_path))
+            found += bundle_paths(full_record, f"{dataset}/{segmentation}/full_remap")
+            recorded_seg = full_record.get("segmentation")
+            if recorded_seg not in (None, segmentation):
+                full_mismatch[(dataset, segmentation)] = (
+                    f"the full re-map in {full_dir} records segmentation "
+                    f"{recorded_seg}, not {segmentation}"
+                )
+                problems.append(
+                    f"MO2 {dataset} {segmentation}: "
+                    + full_mismatch[(dataset, segmentation)]
+                )
     provenance = check_provenance(found, STORE_ROOT)
 
     rows: list[Row] = []
@@ -2908,17 +3045,28 @@ def score(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             }.items()
         }
         rows += mo1_rows(outputs, pseudo)
-        mo2: dict[str, Any] = {}
-        mo2_problems: dict[str, str] = {}
-        for dataset, segmentation in _scored_pairs():
-            out = _get(outputs, dataset, segmentation)
+        mo2: dict[tuple[str, str], Any] = {}
+        mo2_problems: dict[tuple[str, str], str] = {}
+        for pair in _unnamed_pairs():
+            out = _get(outputs, *pair)
             if out is None or out.manifest is None:
                 continue
+            mismatch = full_mismatch.get(pair)
             try:
-                mo2[dataset] = mo2_measure(out.map_dir, full_dirs.get(dataset))
+                mo2[pair] = mo2_measure(
+                    out.map_dir, None if mismatch else full_dirs.get(pair)
+                )
             except (OSError, ValueError, KeyError) as error:
-                mo2_problems[dataset] = f"MO2 not measured: {error}"
-                problems.append(f"MO2 {dataset}: {error}")
+                mo2_problems[pair] = f"MO2 not measured: {error}"
+                problems.append(f"MO2 {pair[0]} {pair[1]}: {error}")
+                continue
+            if mismatch:
+                mo2[pair] = {
+                    **mo2[pair],
+                    "full": None,
+                    "full_record": None,
+                    "full_problem": mismatch,
+                }
         rows += mo2_rows(outputs, mo2, readings["mo2_remap"]["value"], mo2_problems)
         rows += mo3_rows(outputs)
         rows += mo4_rows(outputs, readings["mo4_window"]["value"])
@@ -3000,6 +3148,10 @@ def score(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             "preregistration": "docs/acceptance/annotation-v1-preregistration.md "
             "§9 (MO1-MO11), §24 (MO10, amendment U1), §25 (gate M)",
             "scored_segmentations": dict(SCORED_SEGMENTATION),
+            "scored_segmentations_unnamed": {
+                dataset: list(segmentations)
+                for dataset, segmentations in SCORED_UNNAMED.items()
+            },
             "selection_lines": recorded,
             "store_root": str(STORE_ROOT),
         },
@@ -3162,6 +3314,8 @@ def full_remap(args: argparse.Namespace) -> dict[str, Any]:
     full_record = {
         "purpose": "MO2 full pruned re-map (pre-registration §25.2)",
         "map_dir": str(map_dir),
+        "pair_id": manifest.pair_id,
+        "segmentation": manifest.segmentation,
         "sample_id": sample_id,
         "parquet": parquet.name,
         "parquet_sha256": file_sha256(parquet),
@@ -3215,7 +3369,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="DATASET/SEG=sampler.csv: a process-tree sampler of that MAP task",
     )
     scoring.add_argument(
-        "--mo2-full", action="append", help="DATASET=DIR: a full-remap output directory"
+        "--mo2-full",
+        action="append",
+        help="DATASET/SEGMENTATION=DIR: the full-remap output of that MAP output, "
+        "one per segmentation MO2 scores (§25.2.1); DATASET=DIR for a dataset "
+        "scored on one segmentation",
     )
     scoring.add_argument(
         "--mo7-negative", help="the negative control's resolve summary (file or dir)"

@@ -39,6 +39,9 @@ def _load() -> ModuleType:
 
 
 M = _load()
+# The dataset keys of the two mouse sections, named by alias here
+# (pre-registration §25.1.1).
+MS1, MS2 = M.DATASETS
 PAIR = {"ag7": "ag7", "vzg2": "MsBrain_VZG2"}
 SID = {"ag7": "ag7_MERSCOPE", "vzg2": "MsBrain_VZG2_MERSCOPE"}
 MANUAL = ["Isocortex", "OLF", "HPF", "CTXsp", "TH", "HY", "MB"]
@@ -280,31 +283,48 @@ def _mo2_values(t2: float = 0.0, klass: float = 0.0, sub: float = 0.0) -> dict:
     }
 
 
+def _mo2_passing() -> dict[str, Any]:
+    return {
+        "subset": _mo2_values(),
+        "full": _mo2_values(),
+        "full_record": {"n_processors": 4},
+        "map_processes": 4,
+    }
+
+
 def test_mo2_scores_both_re_maps_under_the_registered_reading() -> None:
     outputs = _outputs()
     measured = {
-        "ag7": {
-            "subset": _mo2_values(),
+        (MS1, "proseg_hybrid"): {
+            **_mo2_passing(),
             "full": _mo2_values(klass=0.00245, sub=0.0124),
-            "full_record": {"n_processors": 4},
-            "map_processes": 4,
         },
-        "vzg2": {
+        (MS2, "original_seg"): {
             "subset": _mo2_values(t2=0.0012),
             "full": None,
             "map_processes": 4,
         },
+        (MS2, "proseg_hybrid"): _mo2_passing(),
     }
     rows = M.mo2_rows(outputs, measured, "both")
-    ag7 = [M.finalize(row) for row in rows if row.dataset == "ag7" and row.scored]
-    assert [row.verdict for row in ag7] == ["PASS"] * 6
-    vzg2 = {
-        (row.scope["remap"], row.part): M.finalize(row).verdict
+    first = [M.finalize(row) for row in rows if row.dataset == MS1 and row.scored]
+    assert [row.verdict for row in first] == ["PASS"] * 6
+    assert {row.segmentation for row in first} == {"proseg_hybrid"}
+    second = {
+        (row.segmentation, row.scope["remap"], row.part): M.finalize(row).verdict
         for row in rows
-        if row.dataset == "vzg2" and row.scored
+        if row.dataset == MS2 and row.scored
     }
-    assert vzg2[("subset", "t2_after")] == "FAIL"
-    assert vzg2[("full", "t2_after")] == "NOT_AVAILABLE"
+    # §25.2.1: both segmentations, both re-maps, three parts each.
+    assert len(second) == 12
+    assert second[("original_seg", "subset", "t2_after")] == "FAIL"
+    assert second[("original_seg", "full", "t2_after")] == "NOT_AVAILABLE"
+    assert "original_seg=DIR" in next(
+        row.note
+        for row in rows
+        if row.dataset == MS2 and row.scope.get("remap") == "full" and row.scored
+    )
+    assert {v for k, v in second.items() if k[0] == "proseg_hybrid"} == {"PASS"}
     # The subset reading reports the full re-map instead of scoring it.
     rows = M.mo2_rows(outputs, measured, "subset")
     full = [row for row in rows if row.scope.get("remap") == "full"]
@@ -312,32 +332,65 @@ def test_mo2_scores_both_re_maps_under_the_registered_reading() -> None:
 
 
 def test_mo2_full_re_map_with_another_process_count_is_unscored() -> None:
-    measured = {
-        "ag7": {
-            "subset": _mo2_values(),
-            "full": _mo2_values(),
-            "full_record": {"n_processors": 6},
-            "map_processes": 4,
-        }
-    }
+    pair = (MS1, "proseg_hybrid")
+    measured = {pair: {**_mo2_passing(), "full_record": {"n_processors": 6}}}
     rows = M.mo2_rows(_outputs(), measured, "both")
     full = [
         M.finalize(r)
         for r in rows
-        if r.dataset == "ag7" and r.scope.get("remap") == "full"
+        if r.dataset == MS1 and r.scope.get("remap") == "full"
     ]
     assert {row.verdict for row in full} == {"UNSCORED (process count)"}
     assert all(row.back_to_user() for row in full)
     # A full re-map of another MAP output is not used, and says why.
-    measured["ag7"].update(full=None, full_problem="the full re-map ... differ")
+    measured[pair].update(full=None, full_problem="the full re-map ... differ")
     rows = M.mo2_rows(_outputs(), measured, "both")
     full = [
         M.finalize(r)
         for r in rows
-        if r.dataset == "ag7" and r.scope.get("remap") == "full"
+        if r.dataset == MS1 and r.scope.get("remap") == "full"
     ]
     assert {row.verdict for row in full} == {"NOT_AVAILABLE"}
     assert full[0].note == "the full re-map ... differ"
+
+
+def test_mo2_on_the_second_section_needs_both_segmentations_to_pass() -> None:
+    # §25.2.1 (a tightening): a failure on MS2 proseg_hybrid fails MO2 even
+    # when MS2 original_seg passes, and a missing measurement there is not a
+    # pass.
+    measured = {
+        (dataset, segmentation): _mo2_passing()
+        for dataset, segmentations in M.SCORED_UNNAMED.items()
+        for segmentation in segmentations
+    }
+    assert set(measured) == {
+        (MS1, "proseg_hybrid"),
+        (MS2, "original_seg"),
+        (MS2, "proseg_hybrid"),
+    }
+    rows = [M.finalize(r) for r in M.mo2_rows(_outputs(), measured, "both")]
+    assert M.flip_rule(rows, True)["criteria"]["MO2"] == "PASS"
+    measured[(MS2, "proseg_hybrid")]["full"] = _mo2_values(sub=0.02)
+    rows = [M.finalize(r) for r in M.mo2_rows(_outputs(), measured, "both")]
+    failing = [
+        (r.dataset, r.segmentation, r.scope.get("remap"), r.part)
+        for r in rows
+        if r.verdict == "FAIL"
+    ]
+    assert failing == [(MS2, "proseg_hybrid", "full", "subclass_changes_outside")]
+    assert M.flip_rule(rows, True)["criteria"]["MO2"] == "FAIL"
+    del measured[(MS2, "proseg_hybrid")]
+    rows = [M.finalize(r) for r in M.mo2_rows(_outputs(), measured, "both")]
+    missing = [
+        r
+        for r in rows
+        if r.dataset == MS2 and r.segmentation == "proseg_hybrid" and r.scored
+    ]
+    assert len(missing) == 6
+    assert {r.verdict for r in missing} == {"NOT_AVAILABLE"}
+    assert M.flip_rule(rows, True)["criteria"]["MO2"] == "INCOMPLETE"
+    # Not scored (and not reported) on the segmentations no reading names.
+    assert not [r for r in rows if r.segmentation in ("reseg", "proseg_mask")]
 
 
 # ---------------------------------------------------------------------------
@@ -353,11 +406,47 @@ def test_mo3_pass_fail_and_not_evaluable() -> None:
     )
     empty = _seg("ag7", "proseg_hybrid", records=_records(), regions={})
     rows = M.mo3_rows(_outputs(vzg2_original_seg=wrong, ag7_proseg_hybrid=empty))
-    scored = {row.dataset: M.finalize(row).verdict for row in rows if row.scored}
-    assert scored == {"ag7": "NOT_AVAILABLE", "vzg2": "FAIL"}
+    scored = {
+        (row.dataset, row.segmentation): M.finalize(row).verdict
+        for row in rows
+        if row.scored
+    }
+    assert scored == {
+        (MS1, "proseg_hybrid"): "NOT_AVAILABLE",
+        (MS2, "original_seg"): "FAIL",
+        (MS2, "proseg_hybrid"): "PASS",
+    }
     rows = M.mo3_rows(_outputs())
     assert {M.finalize(row).verdict for row in rows if row.scored} == {"PASS"}
     assert {M.finalize(row).verdict for row in rows if not row.scored} == {"INFO pass"}
+
+
+def test_mo3_is_scored_on_both_segmentations_of_the_second_section() -> None:
+    def wrong(segmentation: str) -> Any:
+        regions = {"inferred_regions": [*MANUAL, "OB"], "rule_variant": "v1"}
+        return _seg(MS2, segmentation, records=_records(), regions=regions)
+
+    rows = [
+        M.finalize(row)
+        for row in M.mo3_rows(
+            _outputs(**{f"{MS2}_proseg_hybrid": wrong("proseg_hybrid")})
+        )
+    ]
+    scored = {(r.dataset, r.segmentation): r.verdict for r in rows if r.scored}
+    assert scored == {
+        (MS1, "proseg_hybrid"): "PASS",
+        (MS2, "original_seg"): "PASS",
+        (MS2, "proseg_hybrid"): "FAIL",
+    }
+    assert M.flip_rule(rows, True)["criteria"]["MO3"] == "FAIL"
+    # A segmentation no reading scores is reported only.
+    rows = [
+        M.finalize(row)
+        for row in M.mo3_rows(_outputs(**{f"{MS2}_reseg": wrong("reseg")}))
+    ]
+    reseg = next(r for r in rows if r.dataset == MS2 and r.segmentation == "reseg")
+    assert reseg.verdict == "INFO fail"
+    assert M.flip_rule(rows, True)["criteria"]["MO3"] == "PASS"
 
 
 # ---------------------------------------------------------------------------
@@ -430,12 +519,45 @@ def test_mo5_pass_fail_and_not_evaluable() -> None:
         ag7_proseg_hybrid=_seg("ag7", "proseg_hybrid", records=[]),
     )
     rows = [M.finalize(row) for row in M.mo5_rows(outputs) if row.scored]
-    got = {(row.dataset, row.part): row.verdict for row in rows}
+    got = {(row.dataset, row.segmentation, row.part): row.verdict for row in rows}
     assert got == {
-        ("vzg2", "heldout_enrichment"): "FAIL",
-        ("vzg2", "astrocyte_fpr"): "PASS",
-        ("ag7", "astrocyte_fpr"): "NOT_AVAILABLE",
+        (MS2, "original_seg", "heldout_enrichment"): "FAIL",
+        (MS2, "original_seg", "astrocyte_fpr"): "PASS",
+        (MS2, "proseg_hybrid", "heldout_enrichment"): "PASS",
+        (MS2, "proseg_hybrid", "astrocyte_fpr"): "PASS",
+        (MS1, "proseg_hybrid", "astrocyte_fpr"): "NOT_AVAILABLE",
     }
+
+
+def test_mo5_is_scored_on_both_segmentations_of_the_second_section() -> None:
+    # §25.2.1: MS2's enrichment and astrocyte FPR on both of its scored
+    # segmentations; the astrocyte FPR on MS1 proseg_hybrid too; MS1's
+    # enrichment and the other segmentations are reported.
+    outputs = _outputs(
+        **{
+            f"{MS2}_proseg_hybrid": _seg(
+                MS2, "proseg_hybrid", records=_records(enrichment=8.0, fpr=0.006)
+            ),
+            f"{MS1}_proseg_hybrid": _seg(
+                MS1, "proseg_hybrid", records=_records(enrichment=2.0, fpr=0.0051)
+            ),
+            f"{MS2}_reseg": _seg(MS2, "reseg", records=_records(fpr=0.02)),
+        }
+    )
+    rows = [M.finalize(row) for row in M.mo5_rows(outputs)]
+    got = {(r.dataset, r.segmentation, r.part): r.verdict for r in rows}
+    assert got[(MS2, "proseg_hybrid", "heldout_enrichment")] == "FAIL"
+    assert got[(MS2, "proseg_hybrid", "astrocyte_fpr")] == "FAIL"
+    assert got[(MS2, "original_seg", "heldout_enrichment")] == "PASS"
+    assert got[(MS2, "original_seg", "astrocyte_fpr")] == "PASS"
+    assert got[(MS1, "proseg_hybrid", "astrocyte_fpr")] == "FAIL"
+    assert got[(MS1, "proseg_hybrid", "heldout_enrichment")] == "INFO fail"
+    assert got[(MS2, "reseg", "astrocyte_fpr")] == "INFO fail"
+    assert {key[:2] for key, verdict in got.items() if verdict == "FAIL"} == {
+        (MS2, "proseg_hybrid"),
+        (MS1, "proseg_hybrid"),
+    }
+    assert M.flip_rule(rows, True)["criteria"]["MO5"] == "FAIL"
 
 
 @pytest.mark.parametrize(
@@ -452,8 +574,52 @@ def test_mo6_range(rate: float | None, verdict: str) -> None:
     outputs = _outputs(
         vzg2_original_seg=_seg("vzg2", "original_seg", records=_records(f1=rate))  # type: ignore[arg-type]
     )
-    rows = [r for r in M.mo6_rows(outputs) if r.scored and r.dataset == "vzg2"]
+    rows = [
+        r
+        for r in M.mo6_rows(outputs)
+        if r.scored and r.dataset == MS2 and r.segmentation == "original_seg"
+    ]
     assert _verdicts(rows) == [verdict]
+
+
+def test_mo6_is_scored_on_both_segmentations_of_the_second_section() -> None:
+    outputs = _outputs(
+        **{
+            f"{MS2}_proseg_hybrid": _seg(
+                MS2, "proseg_hybrid", records=_records(f1=0.011)
+            )
+        }
+    )
+    rows = [M.finalize(row) for row in M.mo6_rows(outputs)]
+    scored = {(r.dataset, r.segmentation): r.verdict for r in rows if r.scored}
+    assert scored == {
+        (MS1, "proseg_hybrid"): "PASS",
+        (MS2, "original_seg"): "PASS",
+        (MS2, "proseg_hybrid"): "FAIL",
+    }
+    assert M.flip_rule(rows, True)["criteria"]["MO6"] == "FAIL"
+
+
+def test_the_criteria_that_name_a_segmentation_keep_it() -> None:
+    # §25.2.1: MO1, MO4 and MO7 name MS2 original_seg; MS1 stays on §9's
+    # default. The criteria that name none take both MS2 segmentations.
+    assert M.SCORED_SEGMENTATION == {MS1: "proseg_hybrid", MS2: "original_seg"}
+    assert M.SCORED_UNNAMED == {
+        MS1: ("proseg_hybrid",),
+        MS2: ("original_seg", "proseg_hybrid"),
+    }
+    rows = M.mo7_rows(_outputs(), None, None)
+    scored = {(r.dataset, r.segmentation) for r in rows if r.scored}
+    assert scored == {
+        (M.NEGATIVE_CONTROL, "proseg_hybrid"),
+        (MS1, "proseg_hybrid"),
+        (MS2, "original_seg"),
+    }
+    rows = M.mo1_rows(_outputs(), {}, None)
+    assert [(r.dataset, r.segmentation) for r in rows] == [
+        (MS1, "proseg_hybrid"),
+        (MS2, "original_seg"),
+    ]
 
 
 def test_mo7_negative_control_and_not_failed() -> None:
@@ -1091,7 +1257,11 @@ def test_an_exception_never_touches_a_row_that_is_not_measured() -> None:
             )
         )
     ]
-    exception = dict(EXCEPTION, criterion="MO8", scope={"part": "map_peak"})
+    exception = dict(
+        EXCEPTION,
+        criterion="MO8",
+        scope={"part": "map_peak", "dataset": rows[0].dataset},
+    )
     M.apply_exceptions(rows, M.parse_exceptions([exception]))
     assert rows[0].verdict == "NOT_AVAILABLE"
 
@@ -1114,6 +1284,118 @@ def test_an_exception_never_touches_a_row_that_is_not_measured() -> None:
 def test_malformed_exceptions_are_refused(change: dict, message: str) -> None:
     with pytest.raises(ValueError, match=message):
         M.parse_exceptions([dict(EXCEPTION, **change)])
+
+
+FIRST_PANEL = "1" * 64
+SECOND_PANEL = "2" * 64
+OTHER_PANEL = "3" * 64
+PREP_PEAK_EXCEPTION = {
+    "criterion": "MO8",
+    "approved": "2026-10-14",
+    "quote": "2. You are allowed to use more RAM for those processes.",
+    "recorded_in": "pre-registration §25.1.1",
+}
+
+
+def _prep_peak_exceptions() -> list[Any]:
+    return M.parse_exceptions(
+        [
+            dict(
+                PREP_PEAK_EXCEPTION,
+                id=f"MO8-PREP-PEAK-{panel[:8]}",
+                scope={"part": "prep_peak", "bundle": panel},
+            )
+            for panel in (FIRST_PANEL, SECOND_PANEL)
+        ]
+    )
+
+
+def _mo8_rows(tmp_path: Path, *, failing: bool = True) -> list[Any]:
+    store = tmp_path / "store"
+    bundles = [
+        _bundle(store, "wmb_panel", FIRST_PANEL, tree_rss=47.7),
+        _bundle(
+            store,
+            "wmb_panel",
+            SECOND_PANEL,
+            tree_rss=56.8,
+            wall=7300.0 if failing else 3245.0,
+        ),
+        _bundle(store, "wmb_panel", OTHER_PANEL, tree_rss=45.0 if failing else 30.0),
+        _bundle(store, "wmb_region_share", "4" * 64, panel=None, tree_rss=50.0),
+    ]
+    rows = M.mo8_prep_rows(bundles, _trace(tmp_path, []), memory_reading="tree_rss")
+    peak = 12.5 if failing else 11.0
+    hours = 1.4 if failing else 1.0
+    rows += [
+        M.Row("MO8", "map_peak", MS1, "all", peak, "<=", 12.0, peak <= 12, True, "t"),
+        M.Row(
+            "MO8",
+            "section_time",
+            MS2,
+            "all",
+            hours,
+            "<=",
+            1.25,
+            hours <= 1.25,
+            True,
+            "t",
+        ),
+    ]
+    return [M.finalize(row) for row in rows]
+
+
+def test_the_mo8_prep_peak_exception_covers_its_panels_and_nothing_else(
+    tmp_path: Path,
+) -> None:
+    # §25.1.1: MO8's PREP peak of the two gate M panels only; not their PREP
+    # wall time, not another bundle's peak, not the MAP peak or section time.
+    rows = _mo8_rows(tmp_path)
+    usage = M.apply_exceptions(rows, _prep_peak_exceptions())
+    got = {
+        (row.part, row.scope.get("bundle", row.dataset)): row.verdict
+        for row in rows
+        if row.scored
+    }
+    assert got == {
+        ("prep_wall", FIRST_PANEL): "PASS",
+        ("prep_peak", FIRST_PANEL): "FAIL (excepted)",
+        ("prep_wall", SECOND_PANEL): "FAIL",
+        ("prep_peak", SECOND_PANEL): "FAIL (excepted)",
+        ("prep_wall", OTHER_PANEL): "PASS",
+        ("prep_peak", OTHER_PANEL): "FAIL",
+        ("map_peak", MS1): "FAIL",
+        ("section_time", MS2): "FAIL",
+    }
+    assert [len(item["applied_to"]) for item in usage] == [1, 1]
+    share = [row for row in rows if "wmb_region_share" in row.dataset]
+    assert {row.verdict for row in share} == {"INFO pass", "INFO fail"}
+    assert M.flip_rule(rows, True)["criteria"]["MO8"] == "FAIL"
+    # With every other MO8 row passing, MO8 passes on the exception alone.
+    rows = _mo8_rows(tmp_path / "second", failing=False)
+    M.apply_exceptions(rows, _prep_peak_exceptions())
+    assert M.flip_rule(rows, True)["criteria"]["MO8"] == "FAIL (excepted)"
+
+
+@pytest.mark.parametrize(
+    ("scope", "message"),
+    [
+        ({"bundle": FIRST_PANEL}, "must name its part"),
+        ({"part": "prep_peak"}, "names the bundle"),
+        ({"part": ["prep_peak", "prep_wall"], "dataset": MS1}, "names the bundle"),
+        ({"part": "map_peak"}, "names the dataset"),
+        ({"part": "memory", "bundle": FIRST_PANEL}, "unknown MO8 part"),
+        ({"part": "prep_peak", "bundle": FIRST_PANEL[:8]}, "full build hash"),
+    ],
+)
+def test_an_mo8_exception_names_its_part_and_what_it_covers(
+    scope: dict[str, Any], message: str
+) -> None:
+    # An MO8 exception broader than one part of named panels or sections
+    # would cover rows the approval does not (§25.1.1).
+    entry = dict(PREP_PEAK_EXCEPTION, id="MO8-x", scope=scope)
+    with pytest.raises(ValueError, match=message):
+        M.parse_exceptions([entry])
 
 
 # ---------------------------------------------------------------------------
@@ -1482,6 +1764,122 @@ def test_score_negative_control_without_its_map_manifest_is_unscored(
     row = next(r for r in summary["rows"] if r["part"] == "negative_control_failed")
     assert row["verdict"] == "UNSCORED (provenance)"
     assert summary["flip_rule"]["verdict"] == "INCOMPLETE"
+
+
+def _full_remap_dir(tmp_path: Path, name: str, panel: Path, **record: Any) -> Path:
+    path = tmp_path / "full_remap" / name
+    _write(
+        path / M.FULL_REMAP_RECORD,
+        {"build_hash": panel.name, "bundle_path": str(panel), **record},
+    )
+    return path
+
+
+def test_score_takes_one_full_re_map_per_scored_segmentation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # §25.2.1: MS2's proseg_hybrid gets its own full re-map; --mo2-full names
+    # the segmentation (DATASET/SEGMENTATION=DIR).
+    store, panel, share = _store(tmp_path)
+    monkeypatch.setattr(M, "STORE_ROOT", store)
+    calls: dict[str, Path | None] = {}
+
+    def measured(map_dir: Path, full_dir: Path | None = None) -> dict[str, Any]:
+        calls[map_dir.parents[1].name + "@" + map_dir.parents[2].name] = full_dir
+        result = _mo2_passing()
+        if full_dir is not None and full_dir.name == "second_proseg":
+            result["full"] = _mo2_values(klass=0.003)
+        return result
+
+    monkeypatch.setattr(M, "mo2_measure", measured)
+    args = _e2e_args(tmp_path, store, panel, share)
+    dirs = {
+        "first": _full_remap_dir(tmp_path, "first", panel),
+        "second_original": _full_remap_dir(
+            tmp_path, "second_original", panel, segmentation="original_seg"
+        ),
+        "second_proseg": _full_remap_dir(
+            tmp_path, "second_proseg", panel, segmentation="proseg_hybrid"
+        ),
+    }
+    full_args = [
+        "--mo2-full",
+        f"{MS1}={dirs['first']}",
+        "--mo2-full",
+        f"{MS2}/original_seg={dirs['second_original']}",
+        "--mo2-full",
+        f"{MS2}/proseg_hybrid={dirs['second_proseg']}",
+    ]
+    out = tmp_path / "out"
+    assert M.main([*args, *full_args, "--out", str(out)]) == 0
+    assert calls == {
+        f"proseg_hybrid@{PAIR[MS1]}": dirs["first"],
+        f"original_seg@{PAIR[MS2]}": dirs["second_original"],
+        f"proseg_hybrid@{PAIR[MS2]}": dirs["second_proseg"],
+    }
+    summary = json.loads((out / "summary.json").read_text())
+    failing = summary["flip_rule"]["failing"]
+    assert failing == [f"MO2/class_changes_outside {MS2} proseg_hybrid [remap=full]"], (
+        failing
+    )
+    assert summary["protocol"]["scored_segmentations_unnamed"] == {
+        MS1: ["proseg_hybrid"],
+        MS2: ["original_seg", "proseg_hybrid"],
+    }
+    sources = {
+        source
+        for record in summary["provenance"]["bundles"]
+        for source in record["sources"]
+    }
+    assert f"{MS2}/proseg_hybrid/full_remap:/bundle_path" in sources
+
+
+@pytest.mark.parametrize(
+    ("key", "message"),
+    [
+        ("{MS2}", "name the segmentation"),
+        ("{MS2}/reseg", "not scored for MO2"),
+        ("{MS1}/original_seg", "not scored for MO2"),
+        ("unknown/proseg_hybrid", "unknown dataset"),
+    ],
+)
+def test_score_refuses_a_full_re_map_key_it_cannot_place(
+    e2e: tuple[list[str], Path, Path], tmp_path: Path, key: str, message: str
+) -> None:
+    args, _, panel = e2e
+    full = _full_remap_dir(tmp_path, "full", panel)
+    key = key.format(MS1=MS1, MS2=MS2)
+    with pytest.raises(ValueError, match=message):
+        M.score(
+            M.build_parser().parse_args(
+                [*args, "--mo2-full", f"{key}={full}", "--out", str(tmp_path / "o")]
+            )
+        )
+
+
+def test_score_does_not_use_a_full_re_map_of_another_segmentation(
+    e2e: tuple[list[str], Path, Path], tmp_path: Path
+) -> None:
+    args, _, panel = e2e
+    full = _full_remap_dir(tmp_path, "full", panel, segmentation="original_seg")
+    out = tmp_path / "out"
+    status = M.main(
+        [*args, "--mo2-full", f"{MS2}/proseg_hybrid={full}", "--out", str(out)]
+    )
+    assert status == 0
+    summary = json.loads((out / "summary.json").read_text())
+    rows = [
+        row
+        for row in summary["rows"]
+        if row["criterion"] == "MO2"
+        and row["dataset"] == MS2
+        and row["segmentation"] == "proseg_hybrid"
+        and row["scope"].get("remap") == "full"
+    ]
+    assert {row["verdict"] for row in rows} == {"NOT_AVAILABLE"}
+    assert "original_seg" in rows[0]["note"]
+    assert any("full re-map" in problem for problem in summary["problems"])
+    assert summary["flip_rule"]["criteria"]["MO2"] == "INCOMPLETE"
 
 
 def test_score_refuses_an_output_inside_a_results_root(

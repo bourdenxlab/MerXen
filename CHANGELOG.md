@@ -96,6 +96,13 @@
   - **Missing is never a pass.** A MAP task without `peak_rss`, a task without `realtime`, a MAP process count recorded nowhere, a gene set missing from `mo10.json`, a run whose region rule cannot be shown to be the selected candidate's, and a negative control whose bundles cannot be checked are all not scored.
 - `mouse_acceptance.py full-remap` runs the full pruned re-map of one MAP output, which MO2's full-re-map reading needs. It uses the run's own engine parameters, process count included.
 
+### Changed: gate M scores the readings recorded on 2026-10-14
+
+- **Both segmentations of MS2.** `mouse_acceptance.py score` scores MO2 (the subset and the full re-map), MO3, MO5 and MO6 on MS2 proseg_hybrid as well as on MS2 original_seg, and both must pass. This follows the corrected reading in pre-registration §25.2.1, a tightening. MS1 is scored on proseg_hybrid as before, and the astrocyte FPR is still scored on MS1 too. MO1, MO4 and MO7 keep the segmentation they name.
+- **One full re-map per scored segmentation.** `--mo2-full` takes `DATASET/SEGMENTATION=DIR`. A bare `DATASET=DIR` is refused for a dataset scored on two segmentations. A full re-map that records another segmentation is not used. `full-remap` now records its MAP output's pair and segmentation.
+- **MO8 exceptions are per part and per unit.** An MO8 exception must name its part and, for each part, the bundle (full build hash) or the section it covers. This lets the written MO8 exception of §25.1.1 cover the PREP peak of the two gate M panels and nothing broader.
+- Docs: [mouse acceptance scorer](docs/stages/annotation.md#mouse-acceptance-scorer-gate-m-m9).
+
 ### Added: mouse real-data QC in RESOLVE, warn-only (M13b C22)
 
 - **Mouse RESOLVE runs the real-data QC** of plan §8.8 on every sample (`real_qc.enabled`), after the mouse gate, statuses and flags. See [mouse real-data QC in RESOLVE](docs/stages/annotation.md#mouse-real-data-qc-in-resolve-m13b-warn-only).

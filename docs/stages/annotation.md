@@ -2820,16 +2820,20 @@ of §25 and §24's amendment of 2026-10-14. It reads the published outputs
 read-only and writes `summary.json`, `summary.html` and `tables/rows.csv`
 to `--out`, which must lie outside every results root and the store.
 
-**What it scores.** The scored datasets are ag7 proseg_hybrid and VZG2
-original_seg; the other segmentations are reported (`INFO`).
+**What it scores.** MO1, MO4 and MO7 name a segmentation per dataset and
+are scored on it. MO2, MO3, MO5 and MO6 name none. They are scored on §9's
+default, proseg_hybrid, and, for MS2, also on original_seg, which M6's exit
+scored. Every scored segmentation must pass (pre-registration §25.2.1, a
+tightening; MS1 and MS2 are the mouse sections' aliases, §25.1.1). The
+other segmentations are reported (`INFO`).
 
 | Criterion | Source | Scored as |
 |---|---|---|
 | MO1 | label table + the M6 marker pseudo-labels (`mouse_corr_shadow.py`) | pruned class calls over all marker-pseudo-confident cells; ag7 ≥ 0.89, VZG2 ≥ 0.84 |
-| MO2 | MAP output (`load_resolve_runs`), and a `full-remap` output | T2 after pruning ≤ 0.1%, class ≤ 0.25% and subclass ≤ 1.5% changes outside dropped nodes, on the subset and the full re-map |
+| MO2 | MAP output (`load_resolve_runs`), and a `full-remap` output per scored segmentation | T2 after pruning ≤ 0.1%, class ≤ 0.25% and subclass ≤ 1.5% changes outside dropped nodes, on the subset and the full re-map |
 | MO3 | MAP region record | inferred regions = the manual set |
 | MO4 | report soft shares; the region-share bundle's section composition | Astro-Epen and Immune points against MERFISH .31–.33 (VZG2 ±3 / ±0.5, ag7 ±5 / ±1); the gate's AP-estimate window beside |
-| MO5 | report | VZG2 held-out enrichment ≥ 10×; astrocyte FPR ≤ 0.5% on both datasets (as the M6 exit measured it) |
+| MO5 | report | MS2's held-out enrichment ≥ 10× on both of its scored segmentations; astrocyte FPR ≤ 0.5% on every scored segmentation of both sections (as the M6 exit measured it, and §25.2.1) |
 | MO6 | report | F1 rate in 0.2–1.0% |
 | MO7 | resolve summaries; the negative control's standalone run | the invalid VZG2 proseg_hybrid `failed`; the scored datasets not `failed` |
 | MO8 | Nextflow trace, sampler CSVs, `bundle.json` | per 4-segmentation section PANEL + MAP + RESOLVE ≤ 1.25 h and the largest MAP `peak_rss` ≤ 12 GB (4 processes); per `wmb_panel` bundle wall ≤ 2 h and tree RSS ≤ 40 GB (8 processes) |
@@ -2884,7 +2888,12 @@ outside stays `FAIL`; a row the exception names but whose value lies beyond
 its bounds is listed under `named_outside_bounds`. A missing measurement is
 never excepted. Write one entry per approved scope: a list in two keys
 matches every combination. An entry with any other field (a `value_max`
-beside `scope` instead of in it) is refused.
+beside `scope` instead of in it) is refused. An MO8 entry must name its
+`part` and, for each part, what it covers: the `bundle` (full build hash)
+for `prep_peak` and `prep_wall`, the `dataset` for `map_peak` and
+`section_time`. The written MO8 exception of pre-registration §25.1.1 is
+one entry per gate M panel with `{"part": "prep_peak", "bundle": "<build
+hash>"}`.
 
 **Verdicts and the flip rule.** `PASS`, `FAIL`, `FAIL (excepted)`,
 `NOT_AVAILABLE` (a scored row that could not be measured), `UNSCORED
@@ -2904,12 +2913,18 @@ python scripts/acceptance/mouse_acceptance.py score \
   --dataset ag7=<ag7 outdir>/<ag7 pair> --dataset vzg2=<vzg2 outdir>/<vzg2 pair> \
   --trace <gate M run>/nextflow/trace.tsv --prep-refs <launch dir>/annotation_reference_prep \
   --sampler vzg2/original_seg=<probe>/sampler.csv \
-  --mo2-full ag7=<full-remap out> --mo2-full vzg2=<full-remap out> \
+  --mo2-full DATASET/SEGMENTATION=<full-remap out> \
   --mo7-negative <standalone run dir> --mo10 <M6b-R out>/mo10/mo10.json \
   --exceptions exceptions.json --out <scratch>/gate_m
 ```
 
 Pass only the gate M runs' own traces: tasks are matched by name and tag.
+MO2 needs one full re-map per scored segmentation, three in all: MS1
+proseg_hybrid, MS2 original_seg and MS2 proseg_hybrid. Name each with
+`--mo2-full DATASET/SEGMENTATION=DIR`. A bare `DATASET=DIR` is accepted
+only for a dataset scored on one segmentation. A full re-map whose
+`full_remap.json` records another segmentation is not used: its rows are
+`NOT_AVAILABLE`, and the reason is listed under `problems`.
 MO1's pseudo-labels default to the evidence archive's
 (`--pseudo-labels DATASET=CSV` replaces one).
 
