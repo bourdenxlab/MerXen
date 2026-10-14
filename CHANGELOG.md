@@ -70,6 +70,7 @@
 
 - The Dwight default of `annotation_reference_store` is `/srv/storage/MerXen/annotation_references` instead of the failing SSD1 disk, so no store default points at SSD1 (`annotation_reference_store_large` was already on `/srv`). That store has no human bundles yet: a human run on Dwight finds none and would rebuild from the human sources, which stay on SSD1 and which the launch guard refuses, until the human sources are re-downloaded and the human bundles rebuilt on `/srv`.
 - `scripts/annotation_dev/run_template.sh` no longer overrides the stores.
+- The command examples in `docs/cli.md` and `docs/stages/annotation.md` pass the `/srv` store, and the mouse ones the `/srv` WMB `gene.csv`, instead of SSD1 paths.
 
 ### Fixed: Dwight mouse reference sources are off SSD1
 
