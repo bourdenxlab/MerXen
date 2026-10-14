@@ -1,14 +1,18 @@
-"""Slow: MAP + RESOLVE on E7's 30k-cell ag7 subset with the real WMB store (M6).
+"""Slow: MAP + RESOLVE on E7's 30k-cell MS1 subset with the real WMB store (M6).
 
-The subset is E7's (``exp/E7/queries/ag7_obs_30k.csv``) of the published ag7
-proseg_hybrid clustered H5AD. MAP runs the region step and the pruned re-map
-with the dwight store; RESOLVE applies the mouse rules, gate and flags. The
-test skips when the store, the ctm environment or the inputs are absent.
+The subset is E7's (``$MERXEN_EVIDENCE_ROOT/exp/E7/queries/<MS1>_obs_30k.csv``,
+named by the section's display name) of the published MS1 proseg_hybrid
+clustered H5AD (``$MERXEN_MS1_CLUSTERED_H5AD``). MAP runs the region step and
+the pruned re-map with the legacy store (``$MERXEN_LEGACY_REFERENCE_STORE``,
+gene table ``$MERXEN_LEGACY_WMB_GENE_CSV``); RESOLVE applies the mouse rules,
+gate and flags. The test skips when a location is unset, lies on the refused
+disk (``real_path``) or is absent, or without the ctm environment.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import anndata as ad
@@ -16,38 +20,35 @@ import pandas as pd
 import pytest
 from click.testing import CliRunner
 
+from merxen import privacy
 from merxen.annotation.pipeline import read_label_table
 from merxen.annotation.schema import validate_label_table
 from merxen.cli import main as cli_main
 
-STORE = Path("/media/mathieubo/SSD1/MerXen/annotation_references")
-GENE_TABLE = Path(
-    "/media/mathieubo/SSD1/MerXen/mapmycells/abc_atlas/metadata/WMB-10X/20241115/"
-    "gene.csv"
-)
-AG7 = Path(
-    "/srv/storage/Araceli-ageing/results/ag7/proseg_hybrid/clustering_squidpy/"
-    "clustering_squidpy_out/merscope/ag7_MERSCOPE_clustered.h5ad"
-)
-SUBSET = Path(
-    "/srv/storage/MerXen/annotation_dev/evidence_20260926/exp/E7/queries/"
-    "ag7_obs_30k.csv"
-)
 MANUAL_REGIONS = {"Isocortex", "OLF", "HPF", "CTXsp", "TH", "HY", "MB"}
 E3_MICROGLIA_GENES = {"Csf1r", "Cx3cr1", "Aif1", "Blnk", "C1qa"}
 
 
 @pytest.mark.slow
-def test_ag7_30k_subset_maps_prunes_and_resolves(tmp_path: Path) -> None:
-    if not all(path.exists() for path in (STORE, GENE_TABLE, AG7, SUBSET)):
-        pytest.skip("the dwight store or the ag7 inputs are not available")
+def test_ms1_30k_subset_maps_prunes_and_resolves(
+    tmp_path: Path, real_path: Callable[[str], Path], real_aliases: Path
+) -> None:
+    store = real_path("MERXEN_LEGACY_REFERENCE_STORE")
+    gene_table = real_path("MERXEN_LEGACY_WMB_GENE_CSV")
+    clustered = real_path("MERXEN_MS1_CLUSTERED_H5AD")
+    name = privacy.to_real("MS1", form="name")
+    subset_path = real_path("MERXEN_EVIDENCE_ROOT") / (
+        f"exp/E7/queries/{name}_obs_30k.csv"
+    )
+    if not subset_path.is_file():
+        pytest.skip("E7's 30k subset is not in the evidence archive")
     pytest.importorskip("cell_type_mapper")
-    ids = pd.read_csv(SUBSET, usecols=["obs_id"])["obs_id"].astype(str)
-    full = ad.read_h5ad(AG7, backed="r")
+    ids = pd.read_csv(subset_path, usecols=["obs_id"])["obs_id"].astype(str)
+    full = ad.read_h5ad(clustered, backed="r")
     subset = full[full.obs_names.isin(ids)].to_memory()
     full.file.close()
     assert subset.n_obs == 30_000
-    h5ad = tmp_path / "ag7_30k" / "merscope" / "ag7_MERSCOPE_clustered.h5ad"
+    h5ad = tmp_path / "ms1_30k" / "merscope" / "ms1_MERSCOPE_clustered.h5ad"
     h5ad.parent.mkdir(parents=True)
     subset.write_h5ad(h5ad)
     map_dir = tmp_path / "map"
@@ -62,7 +63,7 @@ def test_ag7_30k_subset_maps_prunes_and_resolves(tmp_path: Path) -> None:
             "--species",
             "mouse",
             "--store",
-            str(STORE),
+            str(store),
             "--out",
             str(map_dir),
             "--work-dir",
@@ -71,7 +72,7 @@ def test_ag7_30k_subset_maps_prunes_and_resolves(tmp_path: Path) -> None:
             "4",
             "--no-reuse",
             "--gene-id-fallback-csv",
-            str(GENE_TABLE),
+            str(gene_table),
         ],
     )
     assert mapped.exit_code == 0, mapped.output
@@ -91,7 +92,7 @@ def test_ag7_30k_subset_maps_prunes_and_resolves(tmp_path: Path) -> None:
             "--out",
             str(tmp_path / "resolve"),
             "--gene-id-fallback-csv",
-            str(GENE_TABLE),
+            str(gene_table),
             "--mouse-g4-sections",
             "C57BL6J-638850.31,C57BL6J-638850.32,C57BL6J-638850.33",
         ],
@@ -102,7 +103,7 @@ def test_ag7_30k_subset_maps_prunes_and_resolves(tmp_path: Path) -> None:
     )
     (sample,) = summary["samples"].values()
     gate = sample["mouse_gate"]
-    assert gate["level"] == "full"  # MO7: ag7 not failed (G1 not given: warns)
+    assert gate["level"] == "full"  # MO7: MS1 not failed (G1 not given: warns)
     assert gate["signal_status"]["g1"] == "not_evaluated"
     assert gate["signal_status"]["g2"] in ("pass", "warn")
     assert gate["signal_status"]["g4"] == "pass"
@@ -131,5 +132,5 @@ def test_ag7_30k_subset_maps_prunes_and_resolves(tmp_path: Path) -> None:
             (tmp_path / "resolve" / "merscope").glob("*_annotation_manifest.json")
         ).read_text()
     )["flags"]["gene_sets"]["microglial_spillover_genes"]
-    symbols = pd.read_csv(GENE_TABLE).set_index("gene_identifier")["gene_symbol"]
+    symbols = pd.read_csv(gene_table).set_index("gene_identifier")["gene_symbol"]
     assert {symbols[gene] for gene in derived} == E3_MICROGLIA_GENES

@@ -471,7 +471,7 @@ def test_human_floors_match_plan_values() -> None:
 def test_mouse_floors_cover_every_class() -> None:
     floors = load_floor_table("mouse")
     wmb = load_vocab("wmb_class")
-    for family in ("mouse_ag7", "mouse_vzg2"):
+    for family in ("mouse_ms1", "mouse_ms2"):
         subset = floors[floors["panel_family"] == family]
         for level, value in (("class", 20), ("subclass", 50)):
             rows = subset[subset["level"] == level]

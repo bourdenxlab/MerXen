@@ -794,7 +794,7 @@ def _legacy_removed(var: pd.DataFrame) -> list[str]:
 
 
 def _current_panel_var(kind: str) -> tuple[pd.DataFrame, str, str]:
-    """``var`` layouts of the current panels (P7513 / P1212, ag7, VZG2)."""
+    """``var`` layouts of the current panels (HD1 / HD2, MS1, MS2)."""
     if kind == "merscope_human":
         names = [*shared_symbols(), "H2AX"] + [f"Blank-{i}" for i in range(50)]
         return pd.DataFrame({"gene": names}, index=names), "MERSCOPE", "human"
@@ -967,16 +967,16 @@ def _codebook_rows(symbols: list[str], ids: list[str], n_bits: int = 25) -> list
 def test_codebook_rows_with_a_trailing_comma_keep_their_columns(
     tmp_path: Path,
 ) -> None:
-    # The ag7 codebook (VA00282): a 28-field header, 29-field rows ending in
+    # The MS1 codebook (VA00282): a 28-field header, 29-field rows ending in
     # ",". Read with the first column as the index, "name" held the
     # transcript IDs and the panel was refused with 0 of 500 genes.
     from merxen.annotation.gene_ids import GeneIdSources, GeneTable
     from merxen.annotation.vocab import asset_path
 
     genes = pd.read_csv(asset_path("validated_panel_genes.csv"))
-    genes = genes[genes["panel_id"] == "mouse_ag7_500"]
+    genes = genes[genes["panel_id"] == "mouse_ms1_500"]
     listed = pd.read_csv(asset_path("validated_panels.csv"))
-    expected_hash = listed.set_index("panel_id").loc["mouse_ag7_500", "panel_hash"]
+    expected_hash = listed.set_index("panel_id").loc["mouse_ms1_500", "panel_hash"]
     symbols = genes["gene_symbol"].astype(str).tolist()
     transcripts = [f"ENSMUST{index:011d}" for index in range(len(symbols))]
     header = "name,id,barcodeType," + ",".join(f"V{i:04d}T8B1" for i in range(1, 26))
@@ -1843,14 +1843,14 @@ def test_single_platform_mouse_sample(tmp_path: Path) -> None:
     root = tmp_path / "prepared"
     ids = [f"ENSMUSG{i:011d}" for i in range(60)]
     write_h5ad(
-        root / "merscope" / "VZG2_prepared.h5ad",
+        root / "merscope" / "MS2_prepared.h5ad",
         counts=np.ones((30, 61)),
         var_names=[f"Gene{i}" for i in range(60)] + ["Blank-1"],
         ensembl_ids=[*ids, ""],
         platform="MERSCOPE",
     )
     (root / "manifest.json").write_text(
-        json.dumps({"samples": {"VZG2": "merscope/VZG2_prepared.h5ad"}})
+        json.dumps({"samples": {"MS2": "merscope/MS2_prepared.h5ad"}})
     )
     result = compute_panel(
         root, "mouse", output_dir=tmp_path / "out", segmentation="original_seg"
@@ -2053,11 +2053,11 @@ def test_intersection_panel_prefers_xenium_symbols() -> None:
 # Gene-ID refusals through the one var parser (ANNOTATE_PANEL and MAP)
 
 
-def _ag7_var() -> pd.DataFrame:
-    from .test_gene_ids import AG7_SYMBOLS
+def _ms1_var() -> pd.DataFrame:
+    from .test_gene_ids import MS1_SYMBOLS
 
     return pd.DataFrame(
-        {"gene": AG7_SYMBOLS, "gene_ids": AG7_SYMBOLS}, index=AG7_SYMBOLS
+        {"gene": MS1_SYMBOLS, "gene_ids": MS1_SYMBOLS}, index=MS1_SYMBOLS
     )
 
 
@@ -2072,26 +2072,26 @@ def _declared_from_var(var: pd.DataFrame, species: str) -> Any:
     )
 
 
-def test_the_ag7_symbols_as_ids_fixture_is_refused() -> None:
-    """ag7: the ID column held symbols, so 0 of 498 root markers matched."""
-    from .test_gene_ids import AG7_SYMBOLS
+def test_the_ms1_symbols_as_ids_fixture_is_refused() -> None:
+    """MS1: the ID column held symbols, so 0 of 498 root markers matched."""
+    from .test_gene_ids import MS1_SYMBOLS
 
-    declared = _declared_from_var(_ag7_var(), "mouse")
+    declared = _declared_from_var(_ms1_var(), "mouse")
 
     assert declared.status == "refused"
     assert "native_id_prefix" in declared.refusal_reasons
     assert declared.resolution is not None
     assert declared.resolution.native_id_column == "gene_ids"
     assert declared.resolution.native_prefix_share == 0.0
-    assert declared.resolution.symbols_as_ids == AG7_SYMBOLS
+    assert declared.resolution.symbols_as_ids == MS1_SYMBOLS
     assert "symbols as IDs" in declared.resolution.refusal_details["native_id_prefix"]
 
 
-def test_the_ag7_fixture_is_refused_from_a_prepared_h5ad(tmp_path: Path) -> None:
+def test_the_ms1_fixture_is_refused_from_a_prepared_h5ad(tmp_path: Path) -> None:
     from .test_gene_ids import _sources
 
-    var = _ag7_var()
-    path = tmp_path / "ag7_prepared.h5ad"
+    var = _ms1_var()
+    path = tmp_path / "ms1_prepared.h5ad"
     ad.AnnData(
         X=sparse.csr_matrix((2, len(var)), dtype=np.float32),
         obs=pd.DataFrame(index=["c0", "c1"]),
@@ -2140,9 +2140,9 @@ def test_an_ensembl_id_index_is_the_native_id_column() -> None:
 def test_annotation_panels_record_each_declared_resolution() -> None:
     from merxen.annotation.panel import declared_resolution
 
-    from .test_gene_ids import AG7_SYMBOLS, _sources
+    from .test_gene_ids import MS1_SYMBOLS, _sources
 
-    var = pd.DataFrame({"gene": AG7_SYMBOLS}, index=AG7_SYMBOLS)
+    var = pd.DataFrame({"gene": MS1_SYMBOLS}, index=MS1_SYMBOLS)
     merscope = declared_panel(
         raw_panel_from_var(var, source=PanelSource(kind="h5ad_var")),
         species="mouse",
@@ -2167,3 +2167,66 @@ def test_annotation_panels_record_each_declared_resolution() -> None:
     ids = single.ensembl_ids
     subset = subset_panel(single, ids[1:], subset_bundle_trigger(ids, ids[1:]))
     assert subset.declared_resolutions == single.declared_resolutions
+
+
+# --------------------------------------------------------------------------
+# Family ids recorded before the sample aliases (privacy rule R2)
+
+
+def _mouse_panel_with_family(tmp_path: Path, family_id: str) -> Path:
+    from merxen.annotation.panel import PanelFamily
+
+    ids = [f"ENSMUSG{index:011d}" for index in range(1, 4)]
+    panel = AnnotationPanel(
+        name="sample",
+        kind="single_sample",
+        species="mouse",
+        platforms=["MERSCOPE"],
+        sample_ids=["S_M"],
+        panel_mode="single_sample",
+        panel_hash=compute_panel_hash(ids),
+        n_genes=3,
+        ensembl_ids=ids,
+        symbols=["A", "B", "C"],
+        panel_family=PanelFamily(
+            family_id=family_id,
+            basis="inherited",
+            reference_panel_hash="0" * 64,
+            jaccard=0.97,
+            matched_platforms=["MERSCOPE"],
+        ),
+    )
+    return panel.write(tmp_path / f"{family_id}.json")
+
+
+def test_a_recorded_real_family_id_is_read_as_its_alias(
+    tmp_path: Path, fake_aliases: Path
+) -> None:
+    from test_privacy.synthetic import MOUSE
+
+    path = _mouse_panel_with_family(tmp_path, f"mouse_{MOUSE}")
+    family = load_annotation_panel(path).panel_family
+    assert family is not None and family.family_id == "mouse_ms1"
+    # Everything else is read as written.
+    assert family.basis == "inherited" and family.jaccard == 0.97
+
+
+def test_current_family_ids_need_no_alias_table(
+    tmp_path: Path, no_alias_table: None
+) -> None:
+    from merxen.local_config import LocalConfigError
+
+    for family_id in ("mouse_ms1", "mouse_merscope_0123456789ab"):
+        loaded = load_annotation_panel(_mouse_panel_with_family(tmp_path, family_id))
+        assert loaded.panel_family is not None
+        assert loaded.panel_family.family_id == family_id
+    # A family id the current code cannot write needs the table.
+    path = _mouse_panel_with_family(tmp_path, "mouse_recorded")
+    with pytest.raises(LocalConfigError, match="no alias table"):
+        load_annotation_panel(path)
+
+
+def test_family_ids_are_kept_with_the_table_disabled(tmp_path: Path) -> None:
+    path = _mouse_panel_with_family(tmp_path, "mouse_recorded")
+    family = load_annotation_panel(path).panel_family
+    assert family is not None and family.family_id == "mouse_recorded"

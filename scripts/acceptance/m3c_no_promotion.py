@@ -50,12 +50,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
+from merxen import local_config
+
 logger = logging.getLogger("m3c_no_promotion")
 
-STORES = (
-    Path("/media/mathieubo/SSD1/MerXen/annotation_references"),
-    Path("/srv/storage/MerXen/annotation_references_large"),
-)
+# The SSD1 store and the large store (.env).
+STORE_VARIABLES = ("MERXEN_LEGACY_REFERENCE_STORE", "MERXEN_REFERENCE_STORE_LARGE")
 SELF_MAP_REFERENCES = ("whb_frontal_supc_clus", "seaad_mr_panel", "wmb_panel")
 BASE_COMMIT = "83e81e3"
 TABLES = ("validated_panels.csv", "validated_panel_levels.csv")
@@ -139,7 +139,10 @@ def command_trust(out: Path) -> int:
     import merxen
 
     rows = []
-    for store in STORES:
+    for store in (
+        local_config.require_path(name, "the self-map bundles")
+        for name in STORE_VARIABLES
+    ):
         for reference_id in SELF_MAP_REFERENCES:
             directory = store / reference_id
             if not directory.is_dir():

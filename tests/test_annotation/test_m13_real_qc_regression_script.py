@@ -14,16 +14,23 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from merxen import local_config, privacy
 from merxen.annotation import real_qc as qc
 from merxen.annotation.config import AnnotationConfig
 from merxen.annotation.mouse_gate import RegistrationSignal
 
-from .test_real_qc_checks import CLASSES, P5011_JSD, clean_strata, stratum
+from .test_real_qc_checks import CLASSES, clean_strata, stratum
 from .test_real_qc_outcomes import human_gate
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "acceptance" / "m13_real_qc_regression.py"
 MakeTrust = Callable[..., Any]
+# HD4's paired concordance records (as test_real_qc_checks' fixture).
+HD4_JSD = [
+    {"kind": "soft", "region": "whole_section", "jsd": 0.226814, "ci_low": 0.21227},
+    {"kind": "soft", "region": "shared_mask", "jsd": 0.234905, "ci_high": 0.25},
+    {"kind": "confident", "region": "shared_mask", "jsd": 0.334206},
+]
 WHB_HASH = "f" * 64
 SETC_HASH = "c" * 64
 SEAAD_HASH = "d" * 64
@@ -89,7 +96,7 @@ def _write_m8_run(
     *,
     samples: Mapping[str, str] | None = None,
     bundles: Mapping[str, Mapping[str, Mapping[str, Any]]] | None = None,
-    jsd: Sequence[Mapping[str, Any]] = P5011_JSD,
+    jsd: Sequence[Mapping[str, Any]] = HD4_JSD,
 ) -> Path:
     """Write an M8 RESOLVE run (run record, summary, label tables)."""
     samples = samples or {f"{pair}_MERSCOPE": "MERSCOPE", f"{pair}_XENIUM": "XENIUM"}
@@ -159,7 +166,7 @@ def _qc_result(
         "paired": True,
         "prefilter_applied": False,
         "has_r3_member": False,
-        "pair_jsd": P5011_JSD,
+        "pair_jsd": HD4_JSD,
         "flag_strata": clean_strata(),
         "registration": RegistrationSignal(1.98, 0.0, status="pass", source="x"),
         "gate": human_gate(),
@@ -175,8 +182,8 @@ def _qc_result(
 def _qc_summary(
     results: Mapping[str, qc.RealQcResult | None],
     *,
-    pair: str = "P5011",
-    jsd: Sequence[Mapping[str, Any]] = P5011_JSD,
+    pair: str = "HD4",
+    jsd: Sequence[Mapping[str, Any]] = HD4_JSD,
 ) -> dict[str, Any]:
     """A resolve summary whose samples carry the QC blocks RESOLVE writes.
 
@@ -258,17 +265,17 @@ def test_layer_keys_follow_the_pipeline(script: ModuleType) -> None:
 def test_read_m8_run_takes_the_resolved_bundles(
     script: ModuleType, tmp_path: Path
 ) -> None:
-    _write_m8_run(tmp_path, "P5011", "proseg_hybrid")
-    run = script.read_m8_run(tmp_path, "P5011", "proseg_hybrid")
-    assert run.map_dir == Path("/runs/P5011/proseg_hybrid")
-    assert run.samples == {"P5011_MERSCOPE": "MERSCOPE", "P5011_XENIUM": "XENIUM"}
-    assert run.n_segmented == {"P5011_MERSCOPE": 1000, "P5011_XENIUM": 1001}
+    _write_m8_run(tmp_path, "HD4", "proseg_hybrid")
+    run = script.read_m8_run(tmp_path, "HD4", "proseg_hybrid")
+    assert run.map_dir == Path("/runs/HD4/proseg_hybrid")
+    assert run.samples == {"HD4_MERSCOPE": "MERSCOPE", "HD4_XENIUM": "XENIUM"}
+    assert run.n_segmented == {"HD4_MERSCOPE": 1000, "HD4_XENIUM": 1001}
     assert run.bundles == {
         "seaad_mr_panel": ("seaad_mr_panel", SEAAD_HASH),
         "whb_frontal_supc_clus": ("whb_frontal_supc_clus", WHB_HASH),
         "whb_frontal_supc_clus_setc": ("whb_frontal_supc_clus", SETC_HASH),
     }
-    assert run.alignment_dir == Path("/results/P5011/alignment/align_out")
+    assert run.alignment_dir == Path("/results/HD4/alignment/align_out")
     assert run.summary_sha256 == "e" * 64
 
 
@@ -282,41 +289,41 @@ def test_read_m8_run_refuses_inconsistent_or_foreign_runs(
     }
     _write_m8_run(
         tmp_path,
-        "P7513",
+        "HD1",
         "reseg",
-        bundles={"P7513_MERSCOPE": _bundles(), "P7513_XENIUM": other},
+        bundles={"HD1_MERSCOPE": _bundles(), "HD1_XENIUM": other},
     )
     with pytest.raises(script.RegressionError, match="different samples"):
-        script.read_m8_run(tmp_path, "P7513", "reseg")
-    directory = _write_m8_run(tmp_path, "P1212", "reseg")
-    summary = json.loads((directory / "P1212_resolve_summary.json").read_text())
-    (directory / "P1212_resolve_summary.json").write_text(
+        script.read_m8_run(tmp_path, "HD1", "reseg")
+    directory = _write_m8_run(tmp_path, "HD2", "reseg")
+    summary = json.loads((directory / "HD2_resolve_summary.json").read_text())
+    (directory / "HD2_resolve_summary.json").write_text(
         json.dumps({**summary, "segmentation": "proseg_hybrid"})
     )
-    with pytest.raises(script.RegressionError, match="not P1212 / reseg"):
-        script.read_m8_run(tmp_path, "P1212", "reseg")
-    (directory / "P1212_resolve_summary.json").write_text(
+    with pytest.raises(script.RegressionError, match="not HD2 / reseg"):
+        script.read_m8_run(tmp_path, "HD2", "reseg")
+    (directory / "HD2_resolve_summary.json").write_text(
         json.dumps({**summary, "species": "mouse"})
     )
     with pytest.raises(script.RegressionError, match="not a human"):
-        script.read_m8_run(tmp_path, "P1212", "reseg")
+        script.read_m8_run(tmp_path, "HD2", "reseg")
     with pytest.raises(script.RegressionError, match="does not exist"):
-        script.read_m8_run(tmp_path, "P7113", "reseg")
+        script.read_m8_run(tmp_path, "HD3", "reseg")
 
 
 def test_the_resolve_command_pins_m8_bundles_and_adds_registration(
     script: ModuleType, tmp_path: Path
 ) -> None:
-    _write_m8_run(tmp_path / "m8", "P5011", "proseg_hybrid")
-    run = script.read_m8_run(tmp_path / "m8", "P5011", "proseg_hybrid")
+    _write_m8_run(tmp_path / "m8", "HD4", "proseg_hybrid")
+    run = script.read_m8_run(tmp_path / "m8", "HD4", "proseg_hybrid")
     store = Path("/store")
     registration = {
-        "P5011_MERSCOPE": Path("/reg/p5011_merscope_registration_qc.json"),
-        "P5011_XENIUM": Path("/reg/p5011_xenium_registration_qc.json"),
+        "HD4_MERSCOPE": Path("/reg/hd4_merscope_registration_qc.json"),
+        "HD4_XENIUM": Path("/reg/hd4_xenium_registration_qc.json"),
     }
     command = script.resolve_command(
         run,
-        out_dir=Path("/out/qc/P5011/proseg_hybrid"),
+        out_dir=Path("/out/qc/HD4/proseg_hybrid"),
         store=store,
         registration=registration,
         config_path=None,
@@ -336,13 +343,12 @@ def test_the_resolve_command_pins_m8_bundles_and_adds_registration(
         in text
     )
     assert f"--bundle seaad_mr_panel=/store/seaad_mr_panel/{SEAAD_HASH}" in text
-    assert "--map-dir /runs/P5011/proseg_hybrid" in text
-    assert "--n-segmented P5011_MERSCOPE=1000" in text
-    assert "--n-segmented P5011_XENIUM=1001" in text
-    assert "--alignment-dir /results/P5011/alignment/align_out" in text
+    assert "--map-dir /runs/HD4/proseg_hybrid" in text
+    assert "--n-segmented HD4_MERSCOPE=1000" in text
+    assert "--n-segmented HD4_XENIUM=1001" in text
+    assert "--alignment-dir /results/HD4/alignment/align_out" in text
     assert (
-        "--registration-qc P5011_MERSCOPE=/reg/p5011_merscope_registration_qc.json"
-        in text
+        "--registration-qc HD4_MERSCOPE=/reg/hd4_merscope_registration_qc.json" in text
     )
     assert "--gene-id-fallback-csv /fallback.h5ad" in text
     assert "--results-root /m8 --results-root /results" in text
@@ -431,7 +437,7 @@ def test_the_output_must_stay_out_of_the_read_only_trees(
     m8.mkdir(parents=True)
     script.check_out_dir(tmp_path / "m13" / "regression", [m8])
     with pytest.raises(script.RegressionError, match="overlaps"):
-        script.check_out_dir(m8 / "P5011", [m8])
+        script.check_out_dir(m8 / "HD4", [m8])
     with pytest.raises(script.RegressionError, match="overlaps"):
         script.check_out_dir(tmp_path / "m8", [m8])
     with pytest.raises(script.RegressionError, match="overlaps"):
@@ -442,7 +448,7 @@ def test_run_resolve_needs_the_registration_checks_and_keeps_finished_runs(
     script: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     m8 = tmp_path / "m8"
-    _write_m8_run(m8, "P5011", "reseg")
+    _write_m8_run(m8, "HD4", "reseg")
     out = tmp_path / "out"
 
     def refuse(*args: Any, **kwargs: Any) -> Any:
@@ -450,7 +456,7 @@ def test_run_resolve_needs_the_registration_checks_and_keeps_finished_runs(
 
     monkeypatch.setattr(script.subprocess, "run", refuse)
     kwargs: dict[str, Any] = {
-        "pairs": ["P5011"],
+        "pairs": ["HD4"],
         "segmentations": ["reseg"],
         "m8_root": m8,
         "store": tmp_path / "store",
@@ -463,14 +469,14 @@ def test_run_resolve_needs_the_registration_checks_and_keeps_finished_runs(
     assert not out.exists()
     with pytest.raises(script.RegressionError, match="registration checks missing"):
         script.run_resolve(out, variants=["qc"], **kwargs)
-    for sample_id in ("P5011_MERSCOPE", "P5011_XENIUM"):
+    for sample_id in ("HD4_MERSCOPE", "HD4_XENIUM"):
         path = script.registration_path(out, "reseg", sample_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{}")
     for variant in script.VARIANTS:
-        done = script.variant_dir(out, variant, "P5011", "reseg")
+        done = script.variant_dir(out, variant, "HD4", "reseg")
         done.mkdir(parents=True)
-        (done / "P5011_resolve_summary.json").write_text("{}")
+        (done / "HD4_resolve_summary.json").write_text("{}")
     # Finished re-runs are kept and left out of the commands to run.
     assert script.run_resolve(out, variants=list(script.VARIANTS), **kwargs) == []
     assert (
@@ -493,9 +499,9 @@ def test_each_rerun_records_its_command_and_code(
     import subprocess
 
     m8 = tmp_path / "m8"
-    _write_m8_run(m8, "P5011", "reseg")
+    _write_m8_run(m8, "HD4", "reseg")
     out = tmp_path / "out"
-    for sample_id in ("P5011_MERSCOPE", "P5011_XENIUM"):
+    for sample_id in ("HD4_MERSCOPE", "HD4_XENIUM"):
         path = script.registration_path(out, "reseg", sample_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{}")
@@ -511,14 +517,14 @@ def test_each_rerun_records_its_command_and_code(
 
     monkeypatch.setattr(script.subprocess, "run", fake_run)
     kwargs: dict[str, Any] = {
-        "pairs": ["P5011"],
+        "pairs": ["HD4"],
         "segmentations": ["reseg"],
         "m8_root": m8,
         "store": tmp_path / "store",
         "protected_roots": [m8],
     }
     (command,) = script.run_resolve(out, variants=["qc"], **kwargs)
-    target = script.variant_dir(out, "qc", "P5011", "reseg")
+    target = script.variant_dir(out, "qc", "HD4", "reseg")
     record = json.loads((target / "regression_rerun.json").read_text())
     assert record["command"] == command
     assert (record["variant"], record["returncode"]) == ("qc", 0)
@@ -542,8 +548,7 @@ def test_each_rerun_records_its_command_and_code(
         script.run_resolve(out, variants=["qc_free"], **kwargs)
     failed = json.loads(
         (
-            script.variant_dir(out, "qc_free", "P5011", "reseg")
-            / "regression_rerun.json"
+            script.variant_dir(out, "qc_free", "HD4", "reseg") / "regression_rerun.json"
         ).read_text()
     )
     assert failed["returncode"] == 3
@@ -558,7 +563,7 @@ def test_dry_run_reads_no_store_runs_nothing_and_writes_nothing(
 ) -> None:
     """``--dry-run`` covers every step: registration too, and the table."""
     m8 = tmp_path / "m8"
-    _write_m8_run(m8, "P5011", "reseg")
+    _write_m8_run(m8, "HD4", "reseg")
     out = tmp_path / "out"
 
     def refuse(*args: Any, **kwargs: Any) -> Any:
@@ -577,7 +582,7 @@ def test_dry_run_reads_no_store_runs_nothing_and_writes_nothing(
         "--store",
         str(tmp_path / "store"),
         "--pairs",
-        "P5011",
+        "HD4",
         "--segmentations",
         "reseg",
         "--dry-run",
@@ -591,15 +596,15 @@ def test_dry_run_reads_no_store_runs_nothing_and_writes_nothing(
     assert all("annotate-resolve" in line for line in printed)
     planned = script.run_registration(
         out,
-        pairs=["P5011"],
+        pairs=["HD4"],
         segmentations=["reseg"],
         m8_root=m8,
         results=tmp_path / "results",
         dry_run=True,
     )
     assert planned == [
-        script.registration_path(out, "reseg", "P5011_MERSCOPE"),
-        script.registration_path(out, "reseg", "P5011_XENIUM"),
+        script.registration_path(out, "reseg", "HD4_MERSCOPE"),
+        script.registration_path(out, "reseg", "HD4_XENIUM"),
     ]
     assert not out.exists()
 
@@ -673,11 +678,11 @@ def _dump(path: Path, record: Mapping[str, Any]) -> Path:
 def test_outcome_rows_record_the_effect_withheld_until_the_gate_merges(
     script: ModuleType, make_trust: MakeTrust
 ) -> None:
-    """D20 (b): P5011's pair statistic warns now, withholds after gate H."""
-    summary = _qc_summary({"P5011_MERSCOPE": _qc_result(make_trust)})
+    """D20 (b): HD4's pair statistic warns now, withholds after gate H."""
+    summary = _qc_summary({"HD4_MERSCOPE": _qc_result(make_trust)})
     rows = {
         row["check"]: row
-        for row in script.outcome_rows(summary, pair="P5011", segmentation="reseg")
+        for row in script.outcome_rows(summary, pair="HD4", segmentation="reseg")
     }
     assert set(rows) >= {"marker_consistency", "registration_g1", "flag_rates"}
     paired = rows["paired_concordance"]
@@ -695,9 +700,9 @@ def test_outcome_rows_record_the_effect_withheld_until_the_gate_merges(
         "pass",
         "none",
     )
-    disabled = _qc_summary({"P5011_MERSCOPE": None})
+    disabled = _qc_summary({"HD4_MERSCOPE": None})
     with pytest.raises(script.RegressionError, match="QC not enabled"):
-        script.outcome_rows(disabled, pair="P5011", segmentation="reseg")
+        script.outcome_rows(disabled, pair="HD4", segmentation="reseg")
 
 
 def test_gate_cap_after_gate_is_set_only_by_a_fired_outcome(
@@ -713,14 +718,14 @@ def test_gate_cap_after_gate_is_set_only_by_a_fired_outcome(
     def marker_row(value: float | None, groups: int, **change: Any) -> Any:
         summary = _qc_summary(
             {
-                "P5011_MERSCOPE": _qc_result(
+                "HD4_MERSCOPE": _qc_result(
                     make_trust,
                     marker_consistency=_referee_signal(value, groups),
                     **change,
                 )
             }
         )
-        rows = script.outcome_rows(summary, pair="P5011", segmentation="reseg")
+        rows = script.outcome_rows(summary, pair="HD4", segmentation="reseg")
         return next(row for row in rows if row["check"] == "marker_consistency")
 
     not_evaluable = marker_row(None, 1)
@@ -746,10 +751,10 @@ def test_gate_cap_after_gate_is_set_only_by_a_fired_outcome(
     assert (applied["outcome"], applied["effect"]) == ("fail", "gate_cap")
     assert applied["gate_cap_after_gate"] == "broad_only"
     # A pair statistic withheld after the gate carries no gate cap.
-    summary = _qc_summary({"P5011_MERSCOPE": _qc_result(make_trust)})
+    summary = _qc_summary({"HD4_MERSCOPE": _qc_result(make_trust)})
     paired = next(
         row
-        for row in script.outcome_rows(summary, pair="P5011", segmentation="reseg")
+        for row in script.outcome_rows(summary, pair="HD4", segmentation="reseg")
         if row["check"] == "paired_concordance"
     )
     assert paired["effect_after_gate"] == "withhold_pair_stats"
@@ -762,25 +767,25 @@ def test_marker_rows_and_the_d18_reading(
     """Only the registered node comparator decides; class is reported."""
     node = _qc_summary(
         {
-            "P5011_MERSCOPE": _qc_result(
+            "HD4_MERSCOPE": _qc_result(
                 make_trust, marker_consistency=_referee_signal(0.74, 2)
             ),
-            "P5011_XENIUM": _qc_result(
+            "HD4_XENIUM": _qc_result(
                 make_trust, marker_consistency=_referee_signal(None, 1)
             ),
         }
     )
     alternative = _qc_summary(
         {
-            "P5011_MERSCOPE": _qc_result(
+            "HD4_MERSCOPE": _qc_result(
                 make_trust, marker_consistency=_referee_signal(0.91, 2)
             ),
-            "P5011_XENIUM": _qc_result(
+            "HD4_XENIUM": _qc_result(
                 make_trust, marker_consistency=_referee_signal(0.88, 2)
             ),
         }
     )
-    rows = script.marker_rows(node, alternative, pair="P5011", segmentation="reseg")
+    rows = script.marker_rows(node, alternative, pair="HD4", segmentation="reseg")
     first, second = rows
     assert first["node_consistency"] == pytest.approx(0.74)
     assert first["node_outcome"] == "warn"
@@ -831,40 +836,40 @@ def test_paired_rows_check_the_d21_expectation(
         (row,) = script.paired_rows(summary, pair=pair, segmentation=segmentation)
         return row
 
-    p5011 = rows("P5011", "proseg_hybrid", P5011_JSD)
-    assert p5011["shared_mask_jsd"] == pytest.approx(0.234905)
-    assert p5011["whole_section_jsd"] == pytest.approx(0.226814)
-    assert (p5011["outcome"], p5011["effect_after_gate"]) == (
+    hd4 = rows("HD4", "proseg_hybrid", HD4_JSD)
+    assert hd4["shared_mask_jsd"] == pytest.approx(0.234905)
+    assert hd4["whole_section_jsd"] == pytest.approx(0.226814)
+    assert (hd4["outcome"], hd4["effect_after_gate"]) == (
         "warn",
         "withhold_pair_stats",
     )
-    assert p5011["expectation_met"] is True
-    # P5011's own values with a pass token (the outcome changed while the
+    assert hd4["expectation_met"] is True
+    # HD4's own values with a pass token (the outcome changed while the
     # values did not, e.g. under another warning threshold): not met.
     lenient = AnnotationConfig(species="human", real_qc={"paired_broad_jsd_warn": 0.3})
-    p5011_pass = rows("P5011", "proseg_hybrid", P5011_JSD, lenient)
-    assert p5011_pass["shared_mask_jsd"] == pytest.approx(0.234905)
-    assert p5011_pass["whole_section_jsd"] == pytest.approx(0.226814)
-    assert p5011_pass["outcome"] == "pass"
-    assert p5011_pass["expectation_met"] is False
+    hd4_pass = rows("HD4", "proseg_hybrid", HD4_JSD, lenient)
+    assert hd4_pass["shared_mask_jsd"] == pytest.approx(0.234905)
+    assert hd4_pass["whole_section_jsd"] == pytest.approx(0.226814)
+    assert hd4_pass["outcome"] == "pass"
+    assert hd4_pass["expectation_met"] is False
     low = [
         {"kind": "soft", "region": "shared_mask", "jsd": 0.1277},
         {"kind": "soft", "region": "whole_section", "jsd": 0.1291},
     ]
-    passing = rows("P7513", "proseg_hybrid", low)
+    passing = rows("HD1", "proseg_hybrid", low)
     assert (passing["outcome"], passing["effect_after_gate"]) == ("pass", "none")
     assert passing["expectation_met"] is True
-    # P5011 passing, or another pair above .154 (still under .20), breaks it.
-    assert rows("P5011", "proseg_hybrid", low)["expectation_met"] is False
+    # HD4 passing, or another pair above .154 (still under .20), breaks it.
+    assert rows("HD4", "proseg_hybrid", low)["expectation_met"] is False
     above = [{"kind": "soft", "region": "shared_mask", "jsd": 0.17}]
-    assert rows("P1212", "proseg_hybrid", above)["outcome"] == "pass"
-    assert rows("P1212", "proseg_hybrid", above)["expectation_met"] is False
+    assert rows("HD2", "proseg_hybrid", above)["outcome"] == "pass"
+    assert rows("HD2", "proseg_hybrid", above)["expectation_met"] is False
     # The whole section is reported, never scored: no shared mask, no verdict.
     whole_only = [{"kind": "soft", "region": "whole_section", "jsd": 0.30}]
-    row = rows("P7113", "proseg_hybrid", whole_only)
+    row = rows("HD3", "proseg_hybrid", whole_only)
     assert row["outcome"] == "not_evaluable"
     assert row["expectation_met"] is False
-    reseg = rows("P5011", "reseg", P5011_JSD)
+    reseg = rows("HD4", "reseg", HD4_JSD)
     assert reseg["expected"] is None
     assert reseg["expectation_met"] is None
 
@@ -889,12 +894,12 @@ def test_flag_rate_rows_report_both_d22_readings(
     ]
     summary = _qc_summary(
         {
-            "P1212_MERSCOPE": _qc_result(make_trust, flag_strata=strata),
-            "P1212_XENIUM": _qc_result(make_trust),
+            "HD2_MERSCOPE": _qc_result(make_trust, flag_strata=strata),
+            "HD2_XENIUM": _qc_result(make_trust),
         },
-        pair="P1212",
+        pair="HD2",
     )
-    rows = script.flag_rate_rows(summary, pair="P1212", segmentation="reseg")
+    rows = script.flag_rate_rows(summary, pair="HD2", segmentation="reseg")
     merscope = rows[0]
     assert merscope["literal_n_strata"] == 7
     assert merscope["literal_n_uninformative"] == 4
@@ -910,8 +915,8 @@ def test_flag_rate_rows_report_both_d22_readings(
     assert totals["literal_max_share"] == pytest.approx(4 / 7)
     outcome = next(
         row
-        for row in script.outcome_rows(summary, pair="P1212", segmentation="reseg")
-        if row["check"] == "flag_rates" and row["sample_id"] == "P1212_MERSCOPE"
+        for row in script.outcome_rows(summary, pair="HD2", segmentation="reseg")
+        if row["check"] == "flag_rates" and row["sample_id"] == "HD2_MERSCOPE"
     )
     assert outcome["outcome"] == "warn"
 
@@ -920,16 +925,16 @@ def test_g1_rows_and_the_d23_reading(script: ModuleType, make_trust: MakeTrust) 
     """A fail rule on set a is a false failure; a missing check decides nothing."""
     summary = _qc_summary(
         {
-            "P7113_MERSCOPE": _qc_result(
+            "HD3_MERSCOPE": _qc_result(
                 make_trust, registration=RegistrationSignal(1.4, 0.0)
             ),
-            "P7113_XENIUM": _qc_result(
+            "HD3_XENIUM": _qc_result(
                 make_trust, registration=RegistrationSignal(2.4, 6.0)
             ),
         },
-        pair="P7113",
+        pair="HD3",
     )
-    rows = script.g1_rows(summary, pair="P7113", segmentation="proseg_hybrid")
+    rows = script.g1_rows(summary, pair="HD3", segmentation="proseg_hybrid")
     assert [row["rule"] for row in rows] == ["fail", "fail"]
     assert rows[0]["density_ratio"] == pytest.approx(1.4)
     assert rows[1]["shift_um"] == pytest.approx(6.0)
@@ -938,28 +943,26 @@ def test_g1_rows_and_the_d23_reading(script: ModuleType, make_trust: MakeTrust) 
     verdict = script.d23_verdict(rows)
     assert verdict["verdict"] == "false_failure"
     assert verdict["fail_rule"] == [
-        "P7113_MERSCOPE/proseg_hybrid",
-        "P7113_XENIUM/proseg_hybrid",
+        "HD3_MERSCOPE/proseg_hybrid",
+        "HD3_XENIUM/proseg_hybrid",
     ]
     good = _qc_summary(
         {
-            "P7113_MERSCOPE": _qc_result(make_trust),
-            "P7113_XENIUM": _qc_result(
+            "HD3_MERSCOPE": _qc_result(make_trust),
+            "HD3_XENIUM": _qc_result(
                 make_trust, registration=RegistrationSignal(2.5, 0.0)
             ),
         },
-        pair="P7113",
+        pair="HD3",
     )
-    good_rows = script.g1_rows(good, pair="P7113", segmentation="proseg_hybrid")
+    good_rows = script.g1_rows(good, pair="HD3", segmentation="proseg_hybrid")
     assert [row["rule"] for row in good_rows] == ["warn", None]
     assert script.d23_verdict(good_rows)["verdict"] == "no_false_failure"
-    assert script.d23_verdict(good_rows)["warn_rule"] == [
-        "P7113_MERSCOPE/proseg_hybrid"
-    ]
+    assert script.d23_verdict(good_rows)["warn_rule"] == ["HD3_MERSCOPE/proseg_hybrid"]
     missing = _qc_summary(
-        {"P7113_MERSCOPE": _qc_result(make_trust, registration=None)}, pair="P7113"
+        {"HD3_MERSCOPE": _qc_result(make_trust, registration=None)}, pair="HD3"
     )
-    missing_rows = script.g1_rows(missing, pair="P7113", segmentation="reseg")
+    missing_rows = script.g1_rows(missing, pair="HD3", segmentation="reseg")
     assert missing_rows[0]["state"] == "not_evaluable"
     assert script.d23_verdict(good_rows + missing_rows)["verdict"] == "incomplete"
     assert script.d23_verdict([])["verdict"] == "incomplete"
@@ -1031,16 +1034,16 @@ def test_build_tables_writes_the_outcome_table_and_the_readings(
 ) -> None:
     m8 = tmp_path / "m8"
     out = tmp_path / "out"
-    _write_m8_run(m8, "P5011", "proseg_hybrid")
+    _write_m8_run(m8, "HD4", "proseg_hybrid")
     statuses = {
-        "P5011_MERSCOPE": ["confident", "low_confidence", "confident"],
-        "P5011_XENIUM": ["confident", "low_confidence", "confident"],
+        "HD4_MERSCOPE": ["confident", "low_confidence", "confident"],
+        "HD4_XENIUM": ["confident", "low_confidence", "confident"],
     }
     results = {
-        "P5011_MERSCOPE": _qc_result(
+        "HD4_MERSCOPE": _qc_result(
             make_trust, marker_consistency=_referee_signal(None, 1)
         ),
-        "P5011_XENIUM": _qc_result(
+        "HD4_XENIUM": _qc_result(
             make_trust,
             marker_consistency=_referee_signal(None, 1),
             registration=RegistrationSignal(2.6, 0.0),
@@ -1048,15 +1051,15 @@ def test_build_tables_writes_the_outcome_table_and_the_readings(
     }
     with pytest.raises(script.RegressionError, match="no qc re-run"):
         script.build_tables(
-            out, pairs=["P5011"], segmentations=["proseg_hybrid"], m8_root=m8
+            out, pairs=["HD4"], segmentations=["proseg_hybrid"], m8_root=m8
         )
     qc_summary = _qc_summary(results)
     _write_rerun(
-        script.variant_dir(out, "qc", "P5011", "proseg_hybrid"), qc_summary, statuses
+        script.variant_dir(out, "qc", "HD4", "proseg_hybrid"), qc_summary, statuses
     )
     free_summary = _qc_summary({sample: None for sample in results})
     _write_rerun(
-        script.variant_dir(out, "qc_free", "P5011", "proseg_hybrid"),
+        script.variant_dir(out, "qc_free", "HD4", "proseg_hybrid"),
         free_summary,
         statuses,
     )
@@ -1067,12 +1070,12 @@ def test_build_tables_writes_the_outcome_table_and_the_readings(
         }
     )
     _write_rerun(
-        script.variant_dir(out, "class_comparator", "P5011", "proseg_hybrid"),
+        script.variant_dir(out, "class_comparator", "HD4", "proseg_hybrid"),
         alternative,
         statuses,
     )
     result = script.build_tables(
-        out, pairs=["P5011"], segmentations=["proseg_hybrid"], m8_root=m8
+        out, pairs=["HD4"], segmentations=["proseg_hybrid"], m8_root=m8
     )
     for name in (
         "outcomes",
@@ -1085,7 +1088,7 @@ def test_build_tables_writes_the_outcome_table_and_the_readings(
     ):
         assert (out / f"{name}.csv").exists(), name
     outcomes = pd.read_csv(out / "outcomes.csv")
-    assert set(outcomes["sample_id"]) == {"P5011_MERSCOPE", "P5011_XENIUM"}
+    assert set(outcomes["sample_id"]) == {"HD4_MERSCOPE", "HD4_XENIUM"}
     assert set(outcomes["check"]) >= {"marker_consistency", "paired_concordance"}
     d18 = result["d18_marker_consistency"]["scored_segmentation"]
     assert d18["verdict"] == "not_evaluable"
@@ -1094,13 +1097,11 @@ def test_build_tables_writes_the_outcome_table_and_the_readings(
     assert result["d21_paired_concordance"]["expectation_met"] is True
     assert result["d22_flag_rates"]["literal_warnings"] == 0
     assert result["d23_registration_g1"]["verdict"] == "no_false_failure"
-    assert result["d23_registration_g1"]["warn_rule"] == [
-        "P5011_MERSCOPE/proseg_hybrid"
-    ]
+    assert result["d23_registration_g1"]["warn_rule"] == ["HD4_MERSCOPE/proseg_hybrid"]
     assert result["d20_warn_only"]["warn_only_samples"] == 2
     assert result["d20_warn_only"]["withheld_effects"] == [
-        "P5011_MERSCOPE/proseg_hybrid:paired_concordance:withhold_pair_stats",
-        "P5011_XENIUM/proseg_hybrid:paired_concordance:withhold_pair_stats",
+        "HD4_MERSCOPE/proseg_hybrid:paired_concordance:withhold_pair_stats",
+        "HD4_XENIUM/proseg_hybrid:paired_concordance:withhold_pair_stats",
     ]
     # Warn-only: the qc variant lowers nothing, so NR1 holds trivially (and
     # the report says so); the applied variant was not run here.
@@ -1143,31 +1144,31 @@ def test_build_tables_reports_an_nr1_violation_and_a_drift_from_m8(
     """A cell confident only with QC breaks NR1; a changed label breaks M8 identity."""
     m8 = tmp_path / "m8"
     out = tmp_path / "out"
-    _write_m8_run(m8, "P7513", "reseg", jsd=[])
+    _write_m8_run(m8, "HD1", "reseg", jsd=[])
     base = ["confident", "low_confidence", "confident"]
     raised = ["confident", "confident", "confident"]
     results = {
         sample: _qc_result(make_trust, pair_jsd=[])
-        for sample in ("P7513_MERSCOPE", "P7513_XENIUM")
+        for sample in ("HD1_MERSCOPE", "HD1_XENIUM")
     }
     _write_rerun(
-        script.variant_dir(out, "qc", "P7513", "reseg"),
-        _qc_summary(results, pair="P7513", jsd=[]),
-        {"P7513_MERSCOPE": raised, "P7513_XENIUM": base},
+        script.variant_dir(out, "qc", "HD1", "reseg"),
+        _qc_summary(results, pair="HD1", jsd=[]),
+        {"HD1_MERSCOPE": raised, "HD1_XENIUM": base},
     )
     _write_rerun(
-        script.variant_dir(out, "qc_free", "P7513", "reseg"),
-        _qc_summary(dict.fromkeys(results), pair="P7513", jsd=[]),
-        {"P7513_MERSCOPE": base, "P7513_XENIUM": base},
+        script.variant_dir(out, "qc_free", "HD1", "reseg"),
+        _qc_summary(dict.fromkeys(results), pair="HD1", jsd=[]),
+        {"HD1_MERSCOPE": base, "HD1_XENIUM": base},
     )
     result = script.build_tables(
-        out, pairs=["P7513"], segmentations=["reseg"], m8_root=m8
+        out, pairs=["HD1"], segmentations=["reseg"], m8_root=m8
     )
     nr1 = pd.read_csv(out / "nr1.csv").set_index("sample_id")
-    assert "confident only with QC" in nr1.loc["P7513_MERSCOPE", "nr1_violations"]
-    assert nr1.loc["P7513_XENIUM", "nr1_violations"] == "none"
-    assert nr1.loc["P7513_MERSCOPE", "qc_vs_m8"].startswith("column ct_broad_status")
-    assert nr1.loc["P7513_MERSCOPE", "qc_free_vs_m8"] == "identical"
+    assert "confident only with QC" in nr1.loc["HD1_MERSCOPE", "nr1_violations"]
+    assert nr1.loc["HD1_XENIUM", "nr1_violations"] == "none"
+    assert nr1.loc["HD1_MERSCOPE", "qc_vs_m8"].startswith("column ct_broad_status")
+    assert nr1.loc["HD1_MERSCOPE", "qc_free_vs_m8"] == "identical"
     assert result["nr1"]["qc_identical_to_m8"] is False
     assert len(result["nr1"]["violations"]) == 1
     # Without the class-comparator re-run the alternative is simply absent.
@@ -1185,15 +1186,15 @@ def test_build_tables_scores_d18_on_the_scored_segmentation_only(
     out = tmp_path / "out"
     statuses = {
         sample: ["confident", "low_confidence", "confident"]
-        for sample in ("P5011_MERSCOPE", "P5011_XENIUM")
+        for sample in ("HD4_MERSCOPE", "HD4_XENIUM")
     }
     for segmentation, value, groups in (
         ("proseg_hybrid", None, 1),
         ("reseg", 0.6, 2),
     ):
-        _write_m8_run(m8, "P5011", segmentation)
+        _write_m8_run(m8, "HD4", segmentation)
         _write_rerun(
-            script.variant_dir(out, "qc", "P5011", segmentation),
+            script.variant_dir(out, "qc", "HD4", segmentation),
             _qc_summary(
                 {
                     sample: _qc_result(
@@ -1207,7 +1208,7 @@ def test_build_tables_scores_d18_on_the_scored_segmentation_only(
         )
     result = script.build_tables(
         out,
-        pairs=["P5011"],
+        pairs=["HD4"],
         segmentations=["proseg_hybrid", "reseg"],
         m8_root=m8,
     )
@@ -1232,40 +1233,40 @@ def test_build_tables_checks_nr1_where_the_applied_variant_lowers(
     """applied_after_gate applies the withheld effects; NR1 is checked there."""
     m8 = tmp_path / "m8"
     out = tmp_path / "out"
-    _write_m8_run(m8, "P5011", "proseg_hybrid")
+    _write_m8_run(m8, "HD4", "proseg_hybrid")
     base = ["confident", "low_confidence", "confident"]
     raised = ["confident", "confident", "confident"]
-    samples = ("P5011_MERSCOPE", "P5011_XENIUM")
+    samples = ("HD4_MERSCOPE", "HD4_XENIUM")
     statuses = dict.fromkeys(samples, base)
     merged = AnnotationConfig.model_validate(
         script.variant_config("applied_after_gate")
     )
     _write_rerun(
-        script.variant_dir(out, "qc", "P5011", "proseg_hybrid"),
+        script.variant_dir(out, "qc", "HD4", "proseg_hybrid"),
         _qc_summary({sample: _qc_result(make_trust) for sample in samples}),
         statuses,
     )
     _write_rerun(
-        script.variant_dir(out, "qc_free", "P5011", "proseg_hybrid"),
+        script.variant_dir(out, "qc_free", "HD4", "proseg_hybrid"),
         _qc_summary(dict.fromkeys(samples)),
         statuses,
     )
     # The MERSCOPE section's marker referee is below 0.70: broad_only applied.
     applied = {
-        "P5011_MERSCOPE": _qc_result(
+        "HD4_MERSCOPE": _qc_result(
             make_trust,
             config=merged,
             marker_consistency=_referee_signal(0.6, 2),
         ),
-        "P5011_XENIUM": _qc_result(make_trust, config=merged),
+        "HD4_XENIUM": _qc_result(make_trust, config=merged),
     }
     _write_rerun(
-        script.variant_dir(out, "applied_after_gate", "P5011", "proseg_hybrid"),
+        script.variant_dir(out, "applied_after_gate", "HD4", "proseg_hybrid"),
         _qc_summary(applied),
-        {"P5011_MERSCOPE": base, "P5011_XENIUM": raised},
+        {"HD4_MERSCOPE": base, "HD4_XENIUM": raised},
     )
     result = script.build_tables(
-        out, pairs=["P5011"], segmentations=["proseg_hybrid"], m8_root=m8
+        out, pairs=["HD4"], segmentations=["proseg_hybrid"], m8_root=m8
     )
     nr1 = result["nr1"]
     assert nr1["trivially_satisfied"] is True
@@ -1274,21 +1275,21 @@ def test_build_tables_checks_nr1_where_the_applied_variant_lowers(
     assert reading["run"] is True
     assert reading["trivially_satisfied"] is False
     assert reading["lowered_samples"] == [
-        "P5011_MERSCOPE/proseg_hybrid: broad_only:marker_consistency; "
+        "HD4_MERSCOPE/proseg_hybrid: broad_only:marker_consistency; "
         "withhold_pair_stats:paired_concordance",
-        "P5011_XENIUM/proseg_hybrid: withhold_pair_stats:paired_concordance",
+        "HD4_XENIUM/proseg_hybrid: withhold_pair_stats:paired_concordance",
     ]
     # The cell confident only with the QC applied breaks NR1 there.
     (violation,) = reading["violations"]
-    assert violation.startswith("P5011_XENIUM/proseg_hybrid: ")
+    assert violation.startswith("HD4_XENIUM/proseg_hybrid: ")
     assert "confident only with QC" in violation
     table = pd.read_csv(out / "nr1.csv").set_index("sample_id")
-    assert table.loc["P5011_MERSCOPE", "nr1_applied_after_gate_violations"] == "none"
-    assert table.loc["P5011_MERSCOPE", "qc_lowerings"] == "none"
+    assert table.loc["HD4_MERSCOPE", "nr1_applied_after_gate_violations"] == "none"
+    assert table.loc["HD4_MERSCOPE", "qc_lowerings"] == "none"
     samples_table = pd.read_csv(out / "samples.csv").set_index("sample_id")
-    assert samples_table.loc["P5011_MERSCOPE", "gate_level_qc"] == "full"
+    assert samples_table.loc["HD4_MERSCOPE", "gate_level_qc"] == "full"
     assert (
-        samples_table.loc["P5011_MERSCOPE", "gate_level_applied_after_gate"]
+        samples_table.loc["HD4_MERSCOPE", "gate_level_applied_after_gate"]
         == "broad_only"
     )
     report = (out / "REPORT.txt").read_text()
@@ -1303,7 +1304,7 @@ def _mouse_summary(
     make_trust: MakeTrust,
     *,
     segmentation: str = "proseg_hybrid",
-    pair: str = "ag7",
+    pair: str = "ms1",
     gate: Any = None,
     enabled: bool = True,
 ) -> dict[str, Any]:
@@ -1347,11 +1348,11 @@ def _write_mouse_run(directory: Path, summary: Mapping[str, Any]) -> Path:
 
 def test_the_mouse_rows_stay_pending_in_the_human_table(script: ModuleType) -> None:
     assert script.MOUSE_EXPECTED == (
-        ("ag7", "original_seg"),
-        ("ag7", "proseg_hybrid"),
-        ("ag7", "proseg_mask"),
-        ("ag7", "reseg"),
-        ("VZG2", "original_seg"),
+        ("MS1", "original_seg"),
+        ("MS1", "proseg_hybrid"),
+        ("MS1", "proseg_mask"),
+        ("MS1", "reseg"),
+        ("MS2", "original_seg"),
     )
     assert any("pending" in item and "mouse" in item for item in script.NOT_COVERED)
 
@@ -1359,28 +1360,69 @@ def test_the_mouse_rows_stay_pending_in_the_human_table(script: ModuleType) -> N
 def test_parse_mouse_input_takes_dataset_segmentation_and_directory(
     script: ModuleType, tmp_path: Path
 ) -> None:
-    item = script.parse_mouse_input(f"ag7/proseg_hybrid={tmp_path}")
+    item = script.parse_mouse_input(f"MS1/proseg_hybrid={tmp_path}")
     assert (item.dataset, item.segmentation, item.resolve_dir) == (
-        "ag7",
+        "MS1",
         "proseg_hybrid",
         tmp_path,
     )
-    for bad in ("ag7=/x", "ag7/proseg_hybrid", "/proseg_hybrid=/x", "ag7/=/x"):
+    for bad in ("MS1=/x", "MS1/proseg_hybrid", "/proseg_hybrid=/x", "MS1/=/x"):
         with pytest.raises(script.RegressionError, match="DATASET/SEGMENTATION"):
             script.parse_mouse_input(bad)
+
+
+def test_pairs_and_mouse_labels_follow_the_alias_table(
+    script: ModuleType, tmp_path: Path, fake_aliases: Path
+) -> None:
+    """Aliases in, the names the data uses out (R2 then R3)."""
+    from test_privacy.synthetic import DONOR, MOUSE, MOUSE2_NAME
+
+    assert script.pair_name("HD1") == DONOR
+    assert script.pair_name(DONOR) == DONOR
+    assert script.mouse_label("MS1") == MOUSE
+    assert script.mouse_label(MOUSE) == MOUSE
+    assert script.mouse_label("ms2") == MOUSE2_NAME
+    assert script.mouse_label("other") == "other"
+    item = script.parse_mouse_input(f"MS2/original_seg={tmp_path}")
+    assert item.label == f"{MOUSE2_NAME}/original_seg"
+    # D21's expected warning is keyed by alias and found by the real pair id.
+    assert privacy.to_alias(DONOR) == "HD1"
+
+
+def test_pairs_need_the_alias_table(script: ModuleType, no_alias_table: None) -> None:
+    from merxen.local_config import LocalConfigError
+
+    with pytest.raises(LocalConfigError, match="no alias table"):
+        script.pair_name("HD1")
+
+
+def test_the_locations_come_from_the_environment(
+    script: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A step resolves the locations it uses; unset ones it needs refuse."""
+    with pytest.raises(SystemExit):
+        script.main(["table", "--dry-run"])
+    evidence = tmp_path / "evidence"
+    monkeypatch.setenv("MERXEN_EVIDENCE_ROOT", str(evidence))
+    monkeypatch.setenv("MERXEN_RESULTS_ROOT", str(tmp_path / "results"))
+    local_config.clear_cache()
+    assert script.main(["table", "--dry-run"]) == 0
+    # resolve needs the store (the legacy one C17 ran with).
+    with pytest.raises(SystemExit):
+        script.main(["resolve", "--dry-run"])
 
 
 def test_mouse_rows_read_a_mouse_resolve_output(
     script: ModuleType, tmp_path: Path, make_trust: MakeTrust
 ) -> None:
-    run = _write_mouse_run(tmp_path / "ag7_ph", _mouse_summary(make_trust))
-    item = script.MouseInput("ag7", "proseg_hybrid", run)
+    run = _write_mouse_run(tmp_path / "ms1_ph", _mouse_summary(make_trust))
+    item = script.MouseInput("MS1", "proseg_hybrid", run)
     summary = script.read_mouse_summary(item)
     samples = script.mouse_sample_rows(
-        summary, dataset="ag7", segmentation="proseg_hybrid"
+        summary, dataset="MS1", segmentation="proseg_hybrid"
     )
     (row,) = samples
-    assert row["dataset"] == "ag7" and row["sample_id"] == "ag7_MERSCOPE"
+    assert row["dataset"] == "MS1" and row["sample_id"] == "ms1_MERSCOPE"
     assert row["warn_only"] is True and row["effects_withheld"] is True
     assert row["no_effect_problems"] == "none"
     assert row["check:g4_composition"] == "warn"
@@ -1392,7 +1434,7 @@ def test_mouse_rows_read_a_mouse_resolve_output(
         "C57BL6J-638850.32;C57BL6J-638850.33;C57BL6J-638850.34"
     )
     signals = script.mouse_signal_rows(
-        summary, dataset="ag7", segmentation="proseg_hybrid"
+        summary, dataset="MS1", segmentation="proseg_hybrid"
     )
     assert [item["signal"] for item in signals] == ["g1", "g2", "g3", "g4", "g5"]
     g4 = signals[3]
@@ -1406,9 +1448,9 @@ def test_mouse_rows_read_a_mouse_resolve_output(
         "g4_immune_points": 0.4,
     }
     outcomes = script.mouse_outcome_rows(
-        summary, dataset="ag7", segmentation="proseg_hybrid"
+        summary, dataset="MS1", segmentation="proseg_hybrid"
     )
-    assert {row["dataset"] for row in outcomes} == {"ag7"}
+    assert {row["dataset"] for row in outcomes} == {"MS1"}
     assert {row["check"] for row in outcomes} >= {"flag_rates", "factor_remeasure"}
 
 
@@ -1427,11 +1469,11 @@ def test_mouse_rows_refuse_outputs_without_the_mouse_qc(
     for index, (match, summary) in enumerate(cases.items()):
         run = _write_mouse_run(tmp_path / f"run{index}", summary)
         with pytest.raises(script.RegressionError, match=match):
-            script.read_mouse_summary(script.MouseInput("ag7", "proseg_hybrid", run))
+            script.read_mouse_summary(script.MouseInput("MS1", "proseg_hybrid", run))
     with pytest.raises(script.RegressionError, match="no .*_resolve_summary.json"):
         empty = tmp_path / "empty"
         empty.mkdir()
-        script.read_mouse_summary(script.MouseInput("ag7", "reseg", empty))
+        script.read_mouse_summary(script.MouseInput("MS1", "reseg", empty))
 
 
 def test_a_mouse_row_with_a_qc_effect_is_reported(
@@ -1439,11 +1481,11 @@ def test_a_mouse_row_with_a_qc_effect_is_reported(
 ) -> None:
     """Warn-only is checked: an applied effect or a real_qc_ gate reason."""
     summary = _mouse_summary(make_trust)
-    item = summary["samples"]["ag7_MERSCOPE"]
+    item = summary["samples"]["ms1_MERSCOPE"]
     item["real_qc"]["downgrades"] = ["not_resolvable_class:prefilter_spotcheck"]
     item["mouse_gate"]["warning_reasons"].append("real_qc_flag_rates: x")
     (row,) = script.mouse_sample_rows(
-        summary, dataset="ag7", segmentation="proseg_hybrid"
+        summary, dataset="MS1", segmentation="proseg_hybrid"
     )
     assert "downgrades" in row["no_effect_problems"]
     assert "real_qc_flag_rates" in row["no_effect_problems"]
@@ -1458,16 +1500,16 @@ def test_build_mouse_tables_lists_the_pending_rows(
     assert not out.exists()
     inputs = [
         script.MouseInput(
-            "ag7",
+            "MS1",
             "proseg_hybrid",
-            _write_mouse_run(tmp_path / "ag7_ph", _mouse_summary(make_trust)),
+            _write_mouse_run(tmp_path / "ms1_ph", _mouse_summary(make_trust)),
         ),
         script.MouseInput(
-            "VZG2",
+            "MS2",
             "proseg_hybrid",
             _write_mouse_run(
-                tmp_path / "vzg2_ph",
-                _mouse_summary(make_trust, pair="vzg2"),
+                tmp_path / "ms2_ph",
+                _mouse_summary(make_trust, pair="ms2"),
             ),
         ),
     ]
@@ -1477,23 +1519,23 @@ def test_build_mouse_tables_lists_the_pending_rows(
     folder = out / script.MOUSE_DIR
     for name in ("outcomes", "samples", "gate_signals"):
         assert (folder / f"{name}.csv").exists(), name
-    assert result["rows"] == ["ag7/proseg_hybrid", "VZG2/proseg_hybrid"]
+    assert result["rows"] == ["MS1/proseg_hybrid", "MS2/proseg_hybrid"]
     assert result["pending"] == [
-        "ag7/original_seg",
-        "ag7/proseg_mask",
-        "ag7/reseg",
-        "VZG2/original_seg",
+        "MS1/original_seg",
+        "MS1/proseg_mask",
+        "MS1/reseg",
+        "MS2/original_seg",
     ]
-    assert result["not_expected"] == ["VZG2/proseg_hybrid"]
+    assert result["not_expected"] == ["MS2/proseg_hybrid"]
     assert result["no_effect_violations"] == []
     assert result["warn_only_samples"] == 2
     saved = json.loads((folder / "mouse_summary.json").read_text())
     assert saved["pending"] == result["pending"]
     report = (folder / "REPORT.txt").read_text()
-    assert "pending" in report and "ag7/original_seg" in report
+    assert "pending" in report and "MS1/original_seg" in report
     assert "AP" in report and "C57BL6J-638850.33" in report
     samples = pd.read_csv(folder / "samples.csv")
-    assert list(samples["dataset"]) == ["ag7", "VZG2"]
+    assert list(samples["dataset"]) == ["MS1", "MS2"]
 
 
 def test_the_mouse_step_reads_its_inputs_and_honours_dry_run(
@@ -1503,9 +1545,9 @@ def test_the_mouse_step_reads_its_inputs_and_honours_dry_run(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    run = _write_mouse_run(tmp_path / "ag7_ph", _mouse_summary(make_trust))
+    run = _write_mouse_run(tmp_path / "ms1_ph", _mouse_summary(make_trust))
     out = tmp_path / "out"
-    # The mouse step reads no store: the default store path (on the damaged
+    # The mouse step reads no store: the legacy store's path (on the damaged
     # SSD1 disk) is never resolved.
     checked: list[Path] = []
     check = script.check_out_dir
@@ -1520,7 +1562,7 @@ def test_the_mouse_step_reads_its_inputs_and_honours_dry_run(
         "--out",
         str(out),
         "--mouse-resolve",
-        f"ag7/proseg_hybrid={run}",
+        f"MS1/proseg_hybrid={run}",
         "--m8-resolve",
         str(tmp_path / "m8"),
         "--results",
@@ -1529,14 +1571,15 @@ def test_the_mouse_step_reads_its_inputs_and_honours_dry_run(
     assert script.main(["mouse", *common, "--dry-run"]) == 0
     assert not out.exists()
     printed = capsys.readouterr().out
-    assert "ag7/proseg_hybrid" in printed and "pending" in printed
+    assert "MS1/proseg_hybrid" in printed and "pending" in printed
     assert script.main(["mouse", *common]) == 0
     assert (out / script.MOUSE_DIR / "mouse_summary.json").exists()
-    assert checked and script.STORE not in checked and run in checked
+    # No store among the kept-out trees (the mouse step resolves none).
+    assert set(checked) == {tmp_path / "m8", tmp_path / "results", run}
     with pytest.raises(SystemExit):
         script.main(["mouse", "--out", str(tmp_path / "other")])
     # The output must stay out of the RESOLVE outputs it reads.
     with pytest.raises(script.RegressionError, match="overlaps"):
         script.main(
-            ["mouse", "--out", str(run / "x"), "--mouse-resolve", f"ag7/reseg={run}"]
+            ["mouse", "--out", str(run / "x"), "--mouse-resolve", f"MS1/reseg={run}"]
         )

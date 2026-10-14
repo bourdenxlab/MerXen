@@ -1,4 +1,4 @@
-ensembl_id,gene_symbol,in_ag7,in_vzg2
+ensembl_id,gene_symbol,in_ms1,in_ms2
 ENSMUSG00000000120,Ngfr,True,True
 ENSMUSG00000000184,Ccnd2,True,True
 ENSMUSG00000000214,Th,True,True

@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from merxen import local_config, privacy
 from merxen.annotation.schema import (
     LEVELS,
     CellStatus,
@@ -580,7 +581,7 @@ def make_trust() -> Callable[..., Any]:
             "role": role,
             "species": species,
             "panel_hash": "a" * 64,
-            "family_id": "human_set_a" if species == "human" else "mouse_ag7",
+            "family_id": "human_set_a" if species == "human" else "mouse_ms1",
             "family_basis": "listed",
         }
         leaf = "supercluster" if species == "human" else "subclass"
@@ -1279,3 +1280,28 @@ def map_mouse(setup: Mapping[str, Any], output: Path, **kwargs: Any) -> Any:
         region_shares=kwargs.pop("region_shares", setup["regions"]),
         **kwargs,
     )
+
+
+@pytest.fixture
+def fake_aliases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Enable the privacy tests' synthetic alias table (invented names).
+
+    ``test_privacy.synthetic`` maps invented "real" names to the aliases
+    (``MOUSE`` -> MS1, ``MOUSE2_NAME`` -> MS2's display name, ``DONOR`` ->
+    HD1 ...), so the code's alias boundary (R2-R5) is tested without a real
+    name in the repository.
+    """
+    from test_privacy.synthetic import write_table
+
+    path = write_table(tmp_path / "fake_aliases.tsv")
+    monkeypatch.setenv(privacy.ALIAS_FILE_VAR, str(path))
+    privacy.clear_cache()
+    return path
+
+
+@pytest.fixture
+def no_alias_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No alias table found and none disabled (translation refuses)."""
+    monkeypatch.delenv(privacy.ALIAS_FILE_VAR)
+    monkeypatch.setattr(local_config, "checkout_root", lambda: None)
+    privacy.clear_cache()

@@ -30,23 +30,23 @@ from merxen.annotation.gene_ids import (
 )
 
 # Symbols of the current panels (the first 40 of each resolved panel):
-# ag7 (MERSCOPE mouse, 500 genes), VZG2 (MERSCOPE mouse, 815 genes) and the
-# P7513 human set a (MERSCOPE / Xenium, 297 genes).
-AG7_SYMBOLS = [
+# MS1 (MERSCOPE mouse, 500 genes), MS2 (MERSCOPE mouse, 815 genes) and the
+# HD1 human set a (MERSCOPE / Xenium, 297 genes).
+MS1_SYMBOLS = [
     "Ngfr", "Ccnd2", "Th", "Lhx2", "Sox9", "Oprm1", "Dbh", "Nfix", "Npas1",
     "Klf4", "Rab3b", "Crhr2", "Ddr1", "Calb2", "Grm3", "Etv1", "Sst", "Chn2",
     "Crabp2", "Bcan", "Ndrg1", "Prlr", "Slc1a6", "Igf1r", "Kit", "Agrp",
     "Pvalb", "Trh", "Tph2", "Sulf2", "Tcap", "Rbfox1", "Bmp7", "Cabp7",
     "Slc47a1", "Prox1", "Ebf3", "Gabra1", "Vipr2", "Pax5",
 ]  # fmt: skip
-VZG2_SYMBOLS = [
+MS2_SYMBOLS = [
     "Ngfr", "Ccnd2", "Th", "Lhx2", "Glra1", "Sox9", "Hoxb6", "Serpinf1",
     "Oprm1", "Car4", "Bcl11a", "Dbh", "Col6a1", "Col18a1", "Nkx2-1", "Irx2",
     "Col1a1", "Nfix", "Grik3", "Gria3", "Npas1", "Ppp1r17", "Cd36", "Rab3b",
     "St8sia6", "Crhr2", "Ddr1", "Fosb", "Calb2", "Man1a", "Grm3", "Etv1",
     "Pax2", "Sst", "Chn2", "Aqp1", "Bcan", "Cd44", "Prlr", "AW551984",
 ]  # fmt: skip
-P7513_MERSCOPE_SYMBOLS = [
+HD1_MERSCOPE_SYMBOLS = [
     "LAMP2", "TAC1", "PAX6", "MGST1", "TENM1", "HHATL", "CD4", "DCN", "CLDN11",
     "RNASET2", "ANK1", "VCAN", "CDH1", "MYO16", "CAPG", "ROS1", "FSTL4",
     "NNAT", "NPFFR2", "ATG5", "ATP2C2", "CALCRL", "ERBB3", "SPI1", "FGFR2",
@@ -66,7 +66,7 @@ def _mouse_case(symbol: str) -> str:
 def _both_tables() -> dict[str, GeneTable]:
     """Local WHB / WMB-like tables holding every fixture symbol in its own case."""
     universe = sorted(
-        {s.upper() for s in AG7_SYMBOLS + VZG2_SYMBOLS + P7513_MERSCOPE_SYMBOLS}
+        {s.upper() for s in MS1_SYMBOLS + MS2_SYMBOLS + HD1_MERSCOPE_SYMBOLS}
     )
     human = [
         ("C1orf162" if symbol == "C1ORF162" else symbol, f"ENSG{index:011d}")
@@ -181,7 +181,7 @@ def test_release_drift_takes_the_reference_id() -> None:
 # The exact-case species test
 
 
-@pytest.mark.parametrize("symbols", [AG7_SYMBOLS, VZG2_SYMBOLS], ids=["ag7", "vzg2"])
+@pytest.mark.parametrize("symbols", [MS1_SYMBOLS, MS2_SYMBOLS], ids=["ms1", "ms2"])
 def test_mouse_panels_under_species_human_are_refused(symbols: list[str]) -> None:
     result = resolve_gene_ids(_symbols_only(symbols), "human", _sources("human"))
 
@@ -198,25 +198,25 @@ def test_mouse_panels_under_species_human_are_refused(symbols: list[str]) -> Non
 
 def test_a_human_merscope_panel_under_species_mouse_is_refused() -> None:
     result = resolve_gene_ids(
-        _symbols_only(P7513_MERSCOPE_SYMBOLS), "mouse", _sources("mouse")
+        _symbols_only(HD1_MERSCOPE_SYMBOLS), "mouse", _sources("mouse")
     )
 
     assert result.status == "refused"
     assert result.refusal_reasons[0] == "species_mismatch"
-    assert result.species_check.exact_matches["human"] == len(P7513_MERSCOPE_SYMBOLS)
+    assert result.species_check.exact_matches["human"] == len(HD1_MERSCOPE_SYMBOLS)
 
 
 def test_the_ratio_rule_alone_refuses_without_the_other_table() -> None:
     human_only = {"human": _both_tables()["human"]}
 
     result = resolve_gene_ids(
-        _symbols_only(AG7_SYMBOLS), "human", _sources("human", gene_tables=human_only)
+        _symbols_only(MS1_SYMBOLS), "human", _sources("human", gene_tables=human_only)
     )
 
     assert result.refusal_reasons == ["species_mismatch"]
     check = result.species_check
     assert check.exact_matches == {"human": 0}
-    assert check.casefold_matches == {"human": len(AG7_SYMBOLS)}
+    assert check.casefold_matches == {"human": len(MS1_SYMBOLS)}
     assert check.exact_case_ratio == 0.0
     assert check.tables["mouse"] is None
 
@@ -225,7 +225,7 @@ def test_the_other_table_rule_alone_refuses_when_the_ratio_passes() -> None:
     # Mouse symbols under species = human: the human table holds only 6 of
     # the 40, all in exact case (ratio 1.0, the ratio rule passes), while
     # the mouse table holds all 40 in exact case.
-    few = AG7_SYMBOLS[:6]
+    few = MS1_SYMBOLS[:6]
     human = GeneTable.from_pairs(
         "human",
         [(symbol, f"ENSG{index:011d}") for index, symbol in enumerate(few)],
@@ -234,7 +234,7 @@ def test_the_other_table_rule_alone_refuses_when_the_ratio_passes() -> None:
     tables = {"human": human, "mouse": _both_tables()["mouse"]}
 
     result = resolve_gene_ids(
-        _symbols_only(AG7_SYMBOLS),
+        _symbols_only(MS1_SYMBOLS),
         "human",
         _sources("human", gene_tables=tables),
         rules=ResolutionRules(min_gene_id_resolution=0.1),
@@ -243,9 +243,9 @@ def test_the_other_table_rule_alone_refuses_when_the_ratio_passes() -> None:
     assert result.refusal_reasons == ["species_mismatch"]
     check = result.species_check
     assert check.exact_case_ratio == 1.0
-    assert check.exact_matches == {"human": 6, "mouse": len(AG7_SYMBOLS)}
+    assert check.exact_matches == {"human": 6, "mouse": len(MS1_SYMBOLS)}
     assert check.reasons == [
-        f"{len(AG7_SYMBOLS)} symbols match the mouse gene table in exact case "
+        f"{len(MS1_SYMBOLS)} symbols match the mouse gene table in exact case "
         "vs 6 for human"
     ]
     assert check.tables["mouse"] == "wmb_gene.csv"
@@ -254,11 +254,11 @@ def test_the_other_table_rule_alone_refuses_when_the_ratio_passes() -> None:
 @pytest.mark.parametrize(
     ("symbols", "species"),
     [
-        (AG7_SYMBOLS, "mouse"),
-        (VZG2_SYMBOLS, "mouse"),
-        (P7513_MERSCOPE_SYMBOLS, "human"),
+        (MS1_SYMBOLS, "mouse"),
+        (MS2_SYMBOLS, "mouse"),
+        (HD1_MERSCOPE_SYMBOLS, "human"),
     ],
-    ids=["ag7", "vzg2", "p7513"],
+    ids=["ms1", "ms2", "hd1"],
 )
 def test_panels_of_the_run_species_pass(symbols: list[str], species: str) -> None:
     result = resolve_gene_ids(_symbols_only(symbols), species, _sources(species))  # type: ignore[arg-type]
@@ -498,7 +498,7 @@ def test_unmapped_features_are_listed_with_their_reason() -> None:
 def test_transcript_ids_of_a_codebook_do_not_count_as_ids() -> None:
     features = [
         FeatureInput(symbol, symbol, native_value=f"ENST{index:011d}")
-        for index, symbol in enumerate(P7513_MERSCOPE_SYMBOLS)
+        for index, symbol in enumerate(HD1_MERSCOPE_SYMBOLS)
     ]
 
     result = resolve_gene_ids(features, "human", _sources("human"))
@@ -559,9 +559,9 @@ def test_gene_tables_from_gene_csv_and_h5ad_var(tmp_path: Path) -> None:
 
 def test_resolution_table_sha256_ignores_feature_order() -> None:
     sources = _sources("human")
-    forward = resolve_gene_ids(_symbols_only(P7513_MERSCOPE_SYMBOLS), "human", sources)
+    forward = resolve_gene_ids(_symbols_only(HD1_MERSCOPE_SYMBOLS), "human", sources)
     backward = resolve_gene_ids(
-        _symbols_only(P7513_MERSCOPE_SYMBOLS[::-1]), "human", sources
+        _symbols_only(HD1_MERSCOPE_SYMBOLS[::-1]), "human", sources
     )
     assert forward.table_sha256() == backward.table_sha256()
     assert forward.summary()["resolution_table_sha256"] == forward.table_sha256()

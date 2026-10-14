@@ -51,7 +51,7 @@ from .test_reference import (
     make_panel,
     write_abc_taxonomy,
 )
-from .test_resolvability_v6_golden import GOLDEN, _fake_source
+from .test_resolvability_v6_golden import _fake_source, golden_for_alias_state
 
 N_GENES = 40
 DONORS = ("D1", "D2", "D3")
@@ -130,7 +130,7 @@ def write_wmb_draw_sources(
 
 
 def draw_config(**resolvability: Any) -> AnnotationConfig:
-    """A version-6 mouse config (as ag7 and VZG2) with small draw constants."""
+    """A version-6 mouse config (as MS1 and MS2) with small draw constants."""
     settings: dict[str, Any] = {
         "version": 6,
         "mouse_nonneuronal_extra_per_supertype": 2,
@@ -344,7 +344,7 @@ def test_no_production_build_hash_changes_and_only_the_test_set_takes_draw_2() -
         / "validated_panels.csv"
     )
     mouse = golden_rows[golden_rows["species"] == "mouse"]
-    assert set(mouse["panel_id"]) == {"mouse_ag7_500", "mouse_vzg2_815"}
+    assert set(mouse["panel_id"]) == {"mouse_ms1_500", "mouse_ms2_815"}
     for row in mouse.itertuples(index=False):
         panel = SimpleNamespace(
             panel_hash=str(row.panel_hash), n_genes=int(row.n_genes), species="mouse"
@@ -367,8 +367,9 @@ def test_no_production_build_hash_changes_and_only_the_test_set_takes_draw_2() -
                     ctm=ctm,
                 )
                 hashes[draw][reference_id] = compute_build_hash(payload)
+        golden = golden_for_alias_state()
         for reference_id, value in hashes[1].items():
-            assert value == GOLDEN[f"build_hash/{row.panel_id}/{reference_id}"]
+            assert value == golden[f"build_hash/{row.panel_id}/{reference_id}"]
         assert (
             hashes[2][reference.WMB_TESTSET_REFERENCE_ID]
             != (hashes[1][reference.WMB_TESTSET_REFERENCE_ID])

@@ -43,12 +43,23 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-A = Path("/srv/storage/MerXen/annotation_dev/evidence_20260926")
-CALLS = A / "5k_real/mouse5k/qc/percell_calls_mouse5k.parquet"
+from merxen import local_config
+
+# Under $MERXEN_EVIDENCE_ROOT ($A) and $MERXEN_REFERENCE_STORE_LARGE (.env).
+CALLS = Path("5k_real/mouse5k/qc/percell_calls_mouse5k.parquet")
 PHASE1_BUNDLE = Path(
-    "/srv/storage/MerXen/annotation_references_large/wmb_panel/"
-    "c30f7eab413cba9e5e142c337d01140750f28967adff2100903f04893eced4f8"
+    "wmb_panel/c30f7eab413cba9e5e142c337d01140750f28967adff2100903f04893eced4f8"
 )
+
+
+def phase1_bundle() -> Path:
+    """The phase-1 5K bundle ``c30f7eab`` in the large store."""
+    store = local_config.require_path(
+        "MERXEN_REFERENCE_STORE_LARGE", "the phase-1 5K bundle c30f7eab"
+    )
+    return store / PHASE1_BUNDLE
+
+
 MAJOR = (
     "01 IT-ET Glut",
     "02 NP-CT-L6b Glut",
@@ -108,17 +119,18 @@ def query_markers_equal(bundle: Path) -> tuple[bool, dict[str, Any]]:
     (the files then differ only in the embedded log and metadata records);
     the mapping precompute must be byte-identical too.
     """
+    phase1 = phase1_bundle()
     files = {
         "m3c": _file_sha(bundle, "query_markers"),
-        "c30f7eab": _file_sha(PHASE1_BUNDLE, "query_markers"),
+        "c30f7eab": _file_sha(phase1, "query_markers"),
     }
     content = {
         "m3c": marker_content_sha256(bundle),
-        "c30f7eab": marker_content_sha256(PHASE1_BUNDLE),
+        "c30f7eab": marker_content_sha256(phase1),
     }
     precompute = {
         "m3c": _file_sha(bundle, "mapping_precompute"),
-        "c30f7eab": _file_sha(PHASE1_BUNDLE, "mapping_precompute"),
+        "c30f7eab": _file_sha(phase1, "mapping_precompute"),
     }
     equal_files = bool(files["m3c"]) and files["m3c"] == files["c30f7eab"]
     equal_content = bool(content["m3c"]) and content["m3c"] == content["c30f7eab"]
@@ -240,10 +252,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--run-dir", type=Path, required=True, help="simulate output")
-    parser.add_argument("--calls", type=Path, default=CALLS)
+    parser.add_argument(
+        "--calls",
+        type=Path,
+        default=None,
+        help=f"default: $MERXEN_EVIDENCE_ROOT/{CALLS.as_posix()}",
+    )
     parser.add_argument("--churn-dir", type=Path, default=None)
     parser.add_argument("--out-dir", type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.calls is None:
+        args.calls = (
+            local_config.require_path("MERXEN_EVIDENCE_ROOT", "the 5K per-cell calls")
+            / CALLS
+        )
     args.out_dir.mkdir(parents=True, exist_ok=True)
     equal, markers = query_markers_equal(args.bundle)
     if not equal:

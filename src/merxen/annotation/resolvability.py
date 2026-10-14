@@ -3283,7 +3283,7 @@ def pooled_composition_weights(
     A ">= D_P" set holds each test cell once, at its deepest bin, so its
     rows come from several depth bins whose weights ``composition_weights``
     normalised separately; mixing them lets a deep bin where the dataset
-    (almost) lacks a type carry a whole set (on ag7, 69 confident calls of
+    (almost) lacks a type carry a whole set (on MS1, 69 confident calls of
     one class had a Kish n of 1). The set is therefore reweighted as one set
     (gate-P evaluation rules, §14: "reweighted sets") to the dataset's cells
     at depths ``>= D_P`` (``DatasetComposition.at_least``), with the same
@@ -5207,7 +5207,7 @@ def v6_family_ids(
 
     The real-data families of ``validated_panels.csv`` (the families whose
     decisions are pre-registered for gates H and M: human_set_a with its set
-    c, mouse_ag7, mouse_vzg2) and the families of ``resolvability_v6_pins
+    c, mouse_ms1, mouse_ms2) and the families of ``resolvability_v6_pins
     .csv``. A family validated later by simulation (gate P, M13) was
     validated on version 7 and stays there.
 

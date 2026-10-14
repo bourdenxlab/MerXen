@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "e425900f3e058bcbd8d46441f07e4d26ec0899c6eea8223a7bc35b50c4a57a5d",
+    3: "c2bea81619d7f49d98bd13eb52f586c53e02a8f2347da2e352656fa072ade1af",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -258,6 +258,12 @@ PIN_HISTORY = (
     "the other's code, so the merged fingerprint differs from both without "
     "any bundle content or build_hash change (test_resolvability_v6_golden, "
     "test_reference_draw2)",
+    "3: sample aliases (privacy rules, 2026-10-14): the WMB marker-universe "
+    "asset is named by the section aliases and its build-hash entry is "
+    "computed on its real-name form (wmb_marker_universe_hash), so every "
+    "build_hash is unchanged with the alias table (every stored bundle "
+    "recomputed); the universe labels in bundle.json pass through "
+    "privacy.display (unchanged with the table). No bundle content changes",
 )
 
 

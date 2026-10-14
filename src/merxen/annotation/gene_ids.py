@@ -39,7 +39,7 @@ tables).
   non-control features resolve.
 * ``native_id_prefix``: fewer than ``min_native_prefix_share`` of the
   values in the native ID column are Ensembl gene IDs of the run species.
-  Symbols stored in the ID column (the ag7 failure that compared symbols
+  Symbols stored in the ID column (the MS1 failure that compared symbols
   with Ensembl IDs and found 0 of 498 root markers) land here and are
   listed as ``symbols_as_ids``. Ensembl transcript or protein IDs (MERSCOPE
   codebooks, isoform probes) are not gene IDs and do not count.

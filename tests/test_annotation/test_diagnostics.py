@@ -72,8 +72,8 @@ SEEDED_HASH_PREFIXES = {
     "human_set_a_297": "6e5fd5fb86ef0c3e",
     "human_set_c_264": "08b83ea5cdd761cb",
     "human_set_c_265": "77bd80ed0fa7603f",
-    "mouse_ag7_500": "f4c291864ba1c911",
-    "mouse_vzg2_815": "2a224a8ef15c904d",
+    "mouse_ms1_500": "f4c291864ba1c911",
+    "mouse_ms2_815": "2a224a8ef15c904d",
 }
 
 
@@ -221,13 +221,13 @@ def test_packaged_tables_list_the_seeded_real_data_families() -> None:
         key: record.panel_hash[:16] for key, record in by_id.items()
     } == SEEDED_HASH_PREFIXES
     assert {record.validation_basis for record in table.records} == {"real_data"}
-    assert table.family_ids() == ["human_set_a", "mouse_ag7", "mouse_vzg2"]
+    assert table.family_ids() == ["human_set_a", "mouse_ms1", "mouse_ms2"]
     assert by_id["human_set_a_297"].platforms == ("MERSCOPE", "XENIUM")
-    assert by_id["mouse_vzg2_815"].platforms == ("MERSCOPE",)
+    assert by_id["mouse_ms2_815"].platforms == ("MERSCOPE",)
     assert {r.validated_max_level for r in table.family_records("human_set_a")} == {
         "supercluster"
     }
-    assert by_id["mouse_ag7_500"].validated_max_level == "subclass"
+    assert by_id["mouse_ms1_500"].validated_max_level == "subclass"
     # No simulation family yet: the levels table is header-only (§4.7).
     assert table.levels == ()
     assert set(table.sha256) == {
@@ -248,8 +248,8 @@ def test_packaged_gene_lists_hash_to_their_rows_and_carry_root_markers() -> None
         "human_set_a_297": (297, 230),
         "human_set_c_264": (264, 212),
         "human_set_c_265": (265, 212),
-        "mouse_ag7_500": (500, 491),
-        "mouse_vzg2_815": (815, 806),
+        "mouse_ms1_500": (500, 491),
+        "mouse_ms2_815": (815, 806),
     }
     genes_297 = set(table.genes["human_set_a_297"].ensembl_ids)
     genes_296 = set(table.genes["human_set_a_296"].ensembl_ids)
@@ -287,7 +287,7 @@ def test_packaged_families_are_what_the_set_a_and_mouse_panels_inherit() -> None
     assert (alone.family_id, alone.basis) == ("human_set_a", "listed")
     assert alone.matched_platforms == ["XENIUM"]
     # The review case: set a plus one gene (NRP1-like) on Xenium alone
-    # inherits set a (P5011 Xenium, per_platform).
+    # inherits set a (HD4 Xenium, per_platform).
     extra = sorted({*genes.ensembl_ids, "ENSG00000099250"})
     plus_one = panel_family(
         extra, species="human", platforms=["XENIUM"], known_families=known
@@ -308,25 +308,25 @@ def test_packaged_families_are_what_the_set_a_and_mouse_panels_inherit() -> None
         ).basis
         == "own"
     )
-    vzg2 = table.genes["mouse_vzg2_815"].ensembl_ids
+    ms2 = table.genes["mouse_ms2_815"].ensembl_ids
     assert (
         panel_family(
-            vzg2,
+            ms2,
             species="mouse",
             platforms=["MERSCOPE"],
             known_families=table.known_families("mouse"),
         ).family_id
-        == "mouse_vzg2"
+        == "mouse_ms2"
     )
-    # A Xenium panel resembling VZG2 (a MERSCOPE-only family) never inherits.
-    xenium_vzg2 = panel_family(
-        vzg2,
+    # A Xenium panel resembling MS2 (a MERSCOPE-only family) never inherits.
+    xenium_ms2 = panel_family(
+        ms2,
         species="mouse",
         platforms=["XENIUM"],
         known_families=table.known_families("mouse"),
     )
-    assert xenium_vzg2.basis == "own"
-    assert xenium_vzg2.matched_platforms == []
+    assert xenium_ms2.basis == "own"
+    assert xenium_ms2.matched_platforms == []
 
 
 def test_load_validated_panels_from_a_path(tmp_path: Path) -> None:

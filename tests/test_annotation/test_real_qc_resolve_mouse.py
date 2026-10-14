@@ -34,7 +34,7 @@ from .test_pipeline_resolve_mouse import (
 
 MakeTrust = Callable[..., Any]
 # The checks a version-6, <= 1,000-gene, single-platform mouse section
-# records (ag7 and VZG2): the gate's G1-G5 and the checks real_qc adds.
+# records (MS1 and MS2): the gate's G1-G5 and the checks real_qc adds.
 MOUSE_CHECKS = {
     "dataset_gate",
     "registration_g1",
@@ -68,7 +68,7 @@ def _with_qc(config: AnnotationConfig, **update: Any) -> AnnotationConfig:
 def _ap_setup(tmp_path: Path, mouse_setup: dict[str, Any]) -> Path:
     """MAP the fake section, with version-6 tables, against a bundle with sections.
 
-    As ag7 and VZG2: a version-6 ``wmb_panel`` bundle of <= 1,000 genes (no
+    As MS1 and MS2: a version-6 ``wmb_panel`` bundle of <= 1,000 genes (no
     prefilter, no R3 member) and a region-share bundle with MERFISH sections,
     so that G4's window comes from the AP estimate.
     """

@@ -508,12 +508,12 @@ def test_candidate_table_and_selection_follow_the_preregistration() -> None:
                 "t2_after": 0.0,
                 "class_changed_outside": 0.0,
                 "subclass_changed_outside": 0.02
-                if label == "f:tile100" and name == "ag7"
+                if label == "f:tile100" and name == "ms1"
                 else 0.0,
                 "inferred": "Isocortex;OLF;HPF;CTXsp;TH;HY;MB",
             }
             for label in ("v1", "a", "b", "a+b", "f:tile100")
-            for name in ("ag7", "vzg2")
+            for name in ("ms1", "ms2")
         ]
     )
     table = module.candidate_table(
@@ -523,7 +523,7 @@ def test_candidate_table_and_selection_follow_the_preregistration() -> None:
     assert table.loc["a", "S_max_harm"] == 0.001
     assert table.loc["a", "S_at"] == "merfish500/S1"
     assert not table.loc["a+b", "t2_ok"] and not table.loc["a+b", "admissible"]
-    assert not table.loc["f:tile100", "mo2_ag7"] and table.loc["f:tile100", "mo2_vzg2"]
+    assert not table.loc["f:tile100", "mo2_ms1"] and table.loc["f:tile100", "mo2_ms2"]
     # T2 exactly at 0.1% is allowed; above it is not.
     assert table.loc["b", "t2_ok"] and table.loc["b", "max_t2_bin_mean"] == 0.001
     # a drops one node fewer than v1 in S1; b drops the same nodes.
@@ -620,7 +620,7 @@ def test_the_allen_relative_reading_replaces_constraint_ii() -> None:
                 "inferred": "Isocortex",
             }
             for label in ("v1", "a", "b", "c")
-            for name in ("ag7", "vzg2")
+            for name in ("ms1", "ms2")
         ]
     )
     registered = module.candidate_table(
@@ -711,7 +711,7 @@ def test_mo10_refuses_before_the_selection_is_recorded(tmp_path: Path) -> None:
         [
             {
                 "candidate": "a+b",
-                "section": "ag7",
+                "section": "ms1",
                 "t2_after": 0.0,
                 "class_changed_outside": 0.0,
                 "subclass_changed_outside": 0.0,
@@ -730,7 +730,7 @@ def test_mo10_refuses_before_the_selection_is_recorded(tmp_path: Path) -> None:
     assert module.mo10_command(args) == 0
     verdict = json.loads((tmp_path / "mo10" / "mo10.json").read_text())
     assert verdict["candidate"] == "a+b" and not verdict["pass"]
-    assert verdict["mo3"] == {"ag7": True}
+    assert verdict["mo3"] == {"ms1": True}
     # A selection without a recorded reading was made under the registered one.
     assert verdict["t2_reading"] == "registered"
     assert verdict["gene_sets"]["merfish500"]["t2_bin_mean_ok_allen"] is None
@@ -770,7 +770,7 @@ def _write_mo10_inputs(out: Path, rows: dict[str, Any], selection: dict) -> None
         [
             {
                 "candidate": "a+b",
-                "section": "vzg2",
+                "section": "ms2",
                 "t2_after": 0.0,
                 "class_changed_outside": 0.0,
                 "subclass_changed_outside": 0.0,
@@ -968,3 +968,16 @@ def test_t2_counts_the_kept_nodes_and_reports_them_apart() -> None:
         0.0,
         0.0,
     )
+
+
+def test_real_sections_are_named_as_the_data_names_them(fake_aliases: Path) -> None:
+    from test_privacy.synthetic import MOUSE, MOUSE2_NAME
+
+    module = _load()
+    second = MOUSE2_NAME.lower()
+    assert module.data_name("ms1") == MOUSE and module.data_name(MOUSE) == MOUSE
+    assert module.data_name("ms2") == second
+    assert module.data_name("merfish_ms1") == f"merfish_{MOUSE}"
+    assert module.data_name("merfish500") == "merfish500"
+    assert module.manual_regions(MOUSE) == module.MANUAL_REGIONS["ms1"]
+    assert module.manual_regions("MS2") == module.MANUAL_REGIONS["ms2"]

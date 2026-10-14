@@ -2,8 +2,8 @@
 """M3c pre-registration §21 (i-b): the stored version-6 bundles stay byte-identical.
 
 For each version-6 production bundle of the SSD1 store (WHB set a 297
-``b6bfe83d``, WHB set c 265 ``5137090d``, SEA-AD ``d70cda25``, WMB ag7
-``5a032858``, WMB VZG2 ``daa8c4a6``; the list is confirmed from each
+``b6bfe83d``, WHB set c 265 ``5137090d``, SEA-AD ``d70cda25``, WMB MS1
+``5a032858``, WMB MS2 ``daa8c4a6``; the list is confirmed from each
 ``bundle.json``: resolvability version 6 and a panel of ``validated_panels.csv``)
 this script checks, with the M3c code and without any mapping:
 
@@ -23,7 +23,10 @@ this script checks, with the M3c code and without any mapping:
 Step 3 runs this script twice: ``hashes`` under each code tree (``PYTHONPATH``
 of the ``83e81e3`` export, then of the M3c tree), and ``check`` compares.
 
-Read-only on the stores; writes only ``--out`` / ``--out-dir``.
+Read-only on the stores; writes only ``--out`` / ``--out-dir``. The store is
+``$MERXEN_LEGACY_REFERENCE_STORE`` (``.env``). Bundle keys are held as aliases
+(``wmb_ms1``); a recorded hashes file's keys are read through
+``privacy.to_alias`` and the outputs show them through ``privacy.display``.
 
 Usage::
 
@@ -52,17 +55,29 @@ from typing import Any, cast
 import numpy as np
 import pandas as pd
 
+from merxen import local_config, privacy
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from sample_labels import display_text, display_tree  # noqa: E402
+
 logger = logging.getLogger("m3c_v6_identity")
 
-STORE = Path("/media/mathieubo/SSD1/MerXen/annotation_references")
+STORE_VARIABLE = "MERXEN_LEGACY_REFERENCE_STORE"
 # The version-6 production bundles of 2026-09-28 (pre-registration §21 (i-b)).
 PREREGISTERED: dict[str, tuple[str, str]] = {
     "whb_set_a_297": ("whb_frontal_supc_clus", "b6bfe83d"),
     "whb_set_c_265": ("whb_frontal_supc_clus", "5137090d"),
     "seaad_set_a": ("seaad_mr_panel", "d70cda25"),
-    "wmb_ag7": ("wmb_panel", "5a032858"),
-    "wmb_vzg2": ("wmb_panel", "daa8c4a6"),
+    "wmb_ms1": ("wmb_panel", "5a032858"),
+    "wmb_ms2": ("wmb_panel", "daa8c4a6"),
 }
+
+
+def store_root() -> Path:
+    """The store of the version-6 bundles (the SSD1 store of M3c)."""
+    return local_config.require_path(STORE_VARIABLE, "the M3c version-6 store")
+
+
 SELF_MAP_REFERENCES = ("whb_frontal_supc_clus", "seaad_mr_panel", "wmb_panel")
 
 
@@ -128,7 +143,7 @@ def query_hashes(query: Any) -> dict[str, str]:
 
 def find_bundle(reference_id: str, prefix: str) -> Path:
     """Return the store directory of a bundle given its hash prefix."""
-    matches = sorted((STORE / reference_id).glob(f"{prefix}*"))
+    matches = sorted((store_root() / reference_id).glob(f"{prefix}*"))
     if len(matches) != 1:
         raise SystemExit(f"{reference_id}/{prefix}: {len(matches)} matches")
     return matches[0]
@@ -142,7 +157,7 @@ def test_set_dir(bundle: Path, manifest: dict[str, Any]) -> Path:
     """Return the test-set bundle of a self-map bundle (same store root)."""
     record = (manifest.get("builder_output") or {}).get("resolvability") or {}
     test = record.get("test_set_bundle") or {}
-    return STORE / str(test["reference_id"]) / str(test["build_hash"])
+    return store_root() / str(test["reference_id"]) / str(test["build_hash"])
 
 
 def list_v6_bundles() -> list[dict[str, Any]]:
@@ -154,7 +169,7 @@ def list_v6_bundles() -> list[dict[str, Any]]:
     }
     rows: list[dict[str, Any]] = []
     for reference_id in SELF_MAP_REFERENCES:
-        for bundle in sorted((STORE / reference_id).iterdir()):
+        for bundle in sorted((store_root() / reference_id).iterdir()):
             if not (bundle / "bundle.json").is_file():
                 continue
             manifest = read_manifest(bundle)
@@ -234,7 +249,7 @@ def command_hashes(out: Path) -> int:
             ),
         }
     result["wall_s"] = round(time.monotonic() - started, 1)
-    out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    out.write_text(json.dumps(display_tree(result), indent=2, sort_keys=True) + "\n")
     return 0
 
 
@@ -361,9 +376,12 @@ def check_decisions(bundle: Path) -> dict[str, Any]:
 def compare_hashes(baseline: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
     """Compare the simulated-query hashes of the two code trees."""
     result: dict[str, Any] = {}
+    # Recorded files key the bundles by the names of their day (R2).
+    base_bundles = {privacy.to_alias(k): v for k, v in baseline["bundles"].items()}
+    now_bundles = {privacy.to_alias(k): v for k, v in current["bundles"].items()}
     for key in PREREGISTERED:
-        base = baseline["bundles"].get(key)
-        now = current["bundles"].get(key)
+        base = base_bundles.get(key)
+        now = now_bundles.get(key)
         if base is None or now is None:
             result[key] = {"equal": False, "reason": "missing"}
             continue
@@ -451,18 +469,21 @@ def command_check(baseline: Path, current: Path, out_dir: Path) -> int:
         "code_commit": _git_head(),
         "baseline_code": base.get("code_root"),
         "current_code": now.get("code_root"),
-        "store": str(STORE),
+        "store": str(store_root()),
         "v6_bundles_in_store": [
             row for row in listing if row["resolvability_version"] == 6
         ],
         "bundles": bundles,
         "passes": passes,
     }
-    (out_dir / "V6_IDENTITY.json").write_text(json.dumps(report, indent=2) + "\n")
+    # Labels as privacy.display shows them (R5); paths verbatim.
+    (out_dir / "V6_IDENTITY.json").write_text(
+        json.dumps(display_tree(report), indent=2) + "\n"
+    )
     lines = [
         "M3c pre-registration §21 (i-b): stored version-6 bundles under the M3c code",
         f"code {report['code_commit']}; baseline {report['baseline_code']}; "
-        f"store {STORE}",
+        f"store {store_root()}",
         f"RESULT: {'PASS' if passes else 'FAIL'}",
         "",
     ]
@@ -502,8 +523,9 @@ def command_check(baseline: Path, current: Path, out_dir: Path) -> int:
             for row in report["v6_bundles_in_store"]
         )
     )
-    (out_dir / "V6_IDENTITY.txt").write_text("\n".join(lines) + "\n")
-    print("\n".join(lines))
+    text = display_text("\n".join(lines) + "\n")
+    (out_dir / "V6_IDENTITY.txt").write_text(text)
+    print(text, end="")
     return 0 if passes else 1
 
 

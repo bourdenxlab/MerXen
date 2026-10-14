@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -457,20 +458,24 @@ def test_packaged_region_restricted_classes_are_e7s_23() -> None:
 
 
 @pytest.mark.slow
-def test_derived_microglia_set_on_ag7_equals_e3s() -> None:
-    """The store's ag7 panel bundle gives E3's five genes (and VZG2's 13)."""
-    store = Path("/media/mathieubo/SSD1/MerXen/annotation_references/wmb_panel")
-    gene_table = Path(
-        "/media/mathieubo/SSD1/MerXen/mapmycells/abc_atlas/metadata/WMB-10X/"
-        "20241115/gene.csv"
-    )
+def test_derived_microglia_set_on_ms1_equals_e3s(
+    real_path: Callable[[str], Path],
+) -> None:
+    """The store's MS1 panel bundle gives E3's five genes (and MS2's 13).
+
+    Reads the legacy store (``$MERXEN_LEGACY_REFERENCE_STORE``) and its gene
+    table (``$MERXEN_LEGACY_WMB_GENE_CSV``); skips without them or when they
+    lie on the refused disk.
+    """
+    store = real_path("MERXEN_LEGACY_REFERENCE_STORE") / "wmb_panel"
+    gene_table = real_path("MERXEN_LEGACY_WMB_GENE_CSV")
     bundles = {
-        "ag7": "5a032858b05d71419f69e52b76ea97aa0ed4ddc88973c6d38d71876bdea38a88",
-        "vzg2": "daa8c4a6611e75c5eaba6cb45180f05b468b3ef2b87cc06c85a897319f246781",
+        "ms1": "5a032858b05d71419f69e52b76ea97aa0ed4ddc88973c6d38d71876bdea38a88",
+        "ms2": "daa8c4a6611e75c5eaba6cb45180f05b468b3ef2b87cc06c85a897319f246781",
     }
     expected = {
-        "ag7": {"Csf1r", "Cx3cr1", "Aif1", "Blnk", "C1qa"},
-        "vzg2": {
+        "ms1": {"Csf1r", "Cx3cr1", "Aif1", "Blnk", "C1qa"},
+        "ms2": {
             "Trem2",
             "Csf1r",
             "C1qa",

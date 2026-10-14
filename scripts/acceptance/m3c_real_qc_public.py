@@ -36,10 +36,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-A = Path("/srv/storage/MerXen/annotation_dev/evidence_20260926")
-CALLS = A / "5k_real/mouse5k/qc/percell_calls_mouse5k.parquet"
+from merxen import local_config
+
+# Under $MERXEN_EVIDENCE_ROOT ($A) and $MERXEN_PUBLIC_VALIDATION_ROOT (.env).
+CALLS = Path("5k_real/mouse5k/qc/percell_calls_mouse5k.parquet")
 MATRIX = Path(
-    "/srv/storage/MerXen/public_validation/xenium_prime_5k_mouse_brain_ff/"
+    "xenium_prime_5k_mouse_brain_ff/"
     "Xenium_Prime_Mouse_Brain_Coronal_FF_cell_feature_matrix.h5"
 )
 SIM_DEPTHS = (250, 350, 500, 700, 1000, 1400, 2000)
@@ -79,8 +81,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--test-set", type=Path, required=True)
-    parser.add_argument("--calls", type=Path, default=CALLS)
-    parser.add_argument("--matrix", type=Path, default=MATRIX)
+    parser.add_argument(
+        "--calls",
+        type=Path,
+        default=None,
+        help=f"default: $MERXEN_EVIDENCE_ROOT/{CALLS.as_posix()}",
+    )
+    parser.add_argument(
+        "--matrix",
+        type=Path,
+        default=None,
+        help=f"default: $MERXEN_PUBLIC_VALIDATION_ROOT/{MATRIX.as_posix()}",
+    )
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument(
         "--profile-predictions",
@@ -89,6 +101,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="profile_predictions.csv of profile mode (reported beside)",
     )
     args = parser.parse_args(argv)
+    if args.calls is None:
+        args.calls = (
+            local_config.require_path("MERXEN_EVIDENCE_ROOT", "the 5K per-cell calls")
+            / CALLS
+        )
+    if args.matrix is None:
+        args.matrix = (
+            local_config.require_path(
+                "MERXEN_PUBLIC_VALIDATION_ROOT", "the public 5K matrix"
+            )
+            / MATRIX
+        )
     args.out_dir.mkdir(parents=True, exist_ok=True)
     calls = pd.read_parquet(args.calls)
     summary = json.loads((args.bundle / res.RESOLVABILITY_SUMMARY_FILE).read_text())

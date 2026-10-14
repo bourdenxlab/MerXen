@@ -42,8 +42,8 @@ M = _load()
 # The dataset keys of the two mouse sections, named by alias here
 # (pre-registration §25.1.1).
 MS1, MS2 = M.DATASETS
-PAIR = {"ag7": "ag7", "vzg2": "MsBrain_VZG2"}
-SID = {"ag7": "ag7_MERSCOPE", "vzg2": "MsBrain_VZG2_MERSCOPE"}
+PAIR = {"ms1": "ms1", "ms2": "MS2_pair"}
+SID = {"ms1": "ms1_MERSCOPE", "ms2": "MS2_pair_MERSCOPE"}
 MANUAL = ["Isocortex", "OLF", "HPF", "CTXsp", "TH", "HY", "MB"]
 PANEL_HASH = "f4c29186" + "0" * 56
 PANEL_BUILD = "97a086d1" + "1" * 56
@@ -203,8 +203,8 @@ def test_a_non_registered_reading_needs_exploratory() -> None:
 def test_mo1_pass_fail_and_not_evaluable() -> None:
     outputs = _outputs()
     measured = {
-        "ag7": {"mo1_pruned": 0.90, "mo1_unpruned": 0.9, "n_pseudo_confident": 100},
-        "vzg2": {"mo1_pruned": 0.83, "mo1_unpruned": 0.83, "n_pseudo_confident": 100},
+        "ms1": {"mo1_pruned": 0.90, "mo1_unpruned": 0.9, "n_pseudo_confident": 100},
+        "ms2": {"mo1_pruned": 0.83, "mo1_unpruned": 0.83, "n_pseudo_confident": 100},
     }
     rows = M.mo1_rows(outputs, {}, measured)
     assert _verdicts(rows) == ["PASS", "FAIL"]
@@ -215,8 +215,8 @@ def test_mo1_pass_fail_and_not_evaluable() -> None:
     rows = M.mo1_rows(outputs, {}, None)
     assert _verdicts(rows) == ["NOT_AVAILABLE", "NOT_AVAILABLE"]
     assert "no label table" in rows[0].note
-    rows = M.mo1_rows({"vzg2": outputs["vzg2"]}, {}, None)
-    assert "no ag7 results root" in rows[0].note
+    rows = M.mo1_rows({"ms2": outputs["ms2"]}, {}, None)
+    assert "no ms1 results root" in rows[0].note
 
 
 def _labels(classes: list[str], subclasses: list[str]) -> pd.DataFrame:
@@ -243,11 +243,11 @@ def test_mo1_measure_uses_the_corr_shadow_pseudo_labels() -> None:
     pseudo = pd.DataFrame(
         {"pseudo_class": ["Glut"] * 10}, index=pd.Index(labels.index, name=None)
     )
-    result = M.mo1_measure("vzg2", labels, pseudo)
+    result = M.mo1_measure("ms2", labels, pseudo)
     assert result["n_pseudo_confident"] == 10
     assert result["mo1_pruned"] == pytest.approx(0.9)
     fine = pd.DataFrame({"pseudo_fine": ["Glut"] * 9 + ["Astro"]}, index=labels.index)
-    result = M.mo1_measure("ag7", labels, fine)
+    result = M.mo1_measure("ms1", labels, fine)
     assert result["mo1_pruned"] == pytest.approx(1.0)
 
 
@@ -399,13 +399,13 @@ def test_mo2_on_the_second_section_needs_both_segmentations_to_pass() -> None:
 
 def test_mo3_pass_fail_and_not_evaluable() -> None:
     wrong = _seg(
-        "vzg2",
+        "ms2",
         "original_seg",
         records=_records(),
         regions={"inferred_regions": [*MANUAL, "OB"], "rule_variant": "v1"},
     )
-    empty = _seg("ag7", "proseg_hybrid", records=_records(), regions={})
-    rows = M.mo3_rows(_outputs(vzg2_original_seg=wrong, ag7_proseg_hybrid=empty))
+    empty = _seg("ms1", "proseg_hybrid", records=_records(), regions={})
+    rows = M.mo3_rows(_outputs(ms2_original_seg=wrong, ms1_proseg_hybrid=empty))
     scored = {
         (row.dataset, row.segmentation): M.finalize(row).verdict
         for row in rows
@@ -459,24 +459,24 @@ WINDOW = {"30 Astro-Epen": 0.1736, "34 Immune": 0.0152}
 def test_mo4_bands_on_the_fixed_window() -> None:
     windows = {(d, M.MO4_FIXED_WINDOW): WINDOW for d in M.DATASETS}
     outputs = _outputs(
-        vzg2_original_seg=_seg(
-            "vzg2", "original_seg", records=_records(astro=0.2100, immune=0.0160)
+        ms2_original_seg=_seg(
+            "ms2", "original_seg", records=_records(astro=0.2100, immune=0.0160)
         ),
-        ag7_proseg_hybrid=_seg(
-            "ag7", "proseg_hybrid", records=_records(astro=0.1910, immune=0.0300)
+        ms1_proseg_hybrid=_seg(
+            "ms1", "proseg_hybrid", records=_records(astro=0.1910, immune=0.0300)
         ),
     )
     rows = {
         (r.dataset, r.part): M.finalize(r)
         for r in M.mo4_rows(outputs, "fixed", windows)
     }
-    # VZG2 Astro-Epen +3.64 points > 3; Immune +0.08 <= 0.5.
-    assert rows[("vzg2", "astro_epen_points")].verdict == "FAIL"
-    assert rows[("vzg2", "astro_epen_points")].value == pytest.approx(3.64)
-    assert rows[("vzg2", "immune_points")].verdict == "PASS"
-    # ag7: Astro-Epen +1.74 <= 5; Immune +1.48 > 1.
-    assert rows[("ag7", "astro_epen_points")].verdict == "PASS"
-    assert rows[("ag7", "immune_points")].verdict == "FAIL"
+    # MS2 Astro-Epen +3.64 points > 3; Immune +0.08 <= 0.5.
+    assert rows[("ms2", "astro_epen_points")].verdict == "FAIL"
+    assert rows[("ms2", "astro_epen_points")].value == pytest.approx(3.64)
+    assert rows[("ms2", "immune_points")].verdict == "PASS"
+    # MS1: Astro-Epen +1.74 <= 5; Immune +1.48 > 1.
+    assert rows[("ms1", "astro_epen_points")].verdict == "PASS"
+    assert rows[("ms1", "immune_points")].verdict == "FAIL"
     # No window composition: not evaluable.
     rows = {
         (r.dataset, r.part): M.finalize(r) for r in M.mo4_rows(_outputs(), "fixed", {})
@@ -487,22 +487,22 @@ def test_mo4_bands_on_the_fixed_window() -> None:
 def test_mo4_ap_estimate_window_is_reported_beside_and_scored_only_when_asked() -> None:
     gate = {"level": "full", "window": {"sections": ["S32", "S33", "S35"]}}
     outputs = _outputs(
-        ag7_proseg_hybrid=_seg(
-            "ag7", "proseg_hybrid", records=_records(astro=0.19), gate=gate
+        ms1_proseg_hybrid=_seg(
+            "ms1", "proseg_hybrid", records=_records(astro=0.19), gate=gate
         )
     )
     windows = {
-        ("ag7", M.MO4_FIXED_WINDOW): WINDOW,
-        ("ag7", ("S32", "S33", "S35")): {"30 Astro-Epen": 0.1840, "34 Immune": 0.0152},
-        ("vzg2", M.MO4_FIXED_WINDOW): WINDOW,
+        ("ms1", M.MO4_FIXED_WINDOW): WINDOW,
+        ("ms1", ("S32", "S33", "S35")): {"30 Astro-Epen": 0.1840, "34 Immune": 0.0152},
+        ("ms2", M.MO4_FIXED_WINDOW): WINDOW,
     }
-    rows = [r for r in M.mo4_rows(outputs, "fixed", windows) if r.dataset == "ag7"]
+    rows = [r for r in M.mo4_rows(outputs, "fixed", windows) if r.dataset == "ms1"]
     astro = _by(rows, "astro_epen_points")[0]
     assert astro.value == pytest.approx(1.64)
     assert astro.beside["ap_estimate_points"] == pytest.approx(0.6)
     assert astro.beside["ap_estimate_window"] == ["S32", "S33", "S35"]
     rows = [
-        r for r in M.mo4_rows(outputs, "ap_estimate", windows) if r.dataset == "ag7"
+        r for r in M.mo4_rows(outputs, "ap_estimate", windows) if r.dataset == "ms1"
     ]
     assert _by(rows, "astro_epen_points")[0].value == pytest.approx(0.6)
 
@@ -513,10 +513,10 @@ def test_mo4_ap_estimate_window_is_reported_beside_and_scored_only_when_asked() 
 
 def test_mo5_pass_fail_and_not_evaluable() -> None:
     outputs = _outputs(
-        vzg2_original_seg=_seg(
-            "vzg2", "original_seg", records=_records(enrichment=9.5, fpr=0.004)
+        ms2_original_seg=_seg(
+            "ms2", "original_seg", records=_records(enrichment=9.5, fpr=0.004)
         ),
-        ag7_proseg_hybrid=_seg("ag7", "proseg_hybrid", records=[]),
+        ms1_proseg_hybrid=_seg("ms1", "proseg_hybrid", records=[]),
     )
     rows = [M.finalize(row) for row in M.mo5_rows(outputs) if row.scored]
     got = {(row.dataset, row.segmentation, row.part): row.verdict for row in rows}
@@ -572,7 +572,7 @@ def test_mo5_is_scored_on_both_segmentations_of_the_second_section() -> None:
 )
 def test_mo6_range(rate: float | None, verdict: str) -> None:
     outputs = _outputs(
-        vzg2_original_seg=_seg("vzg2", "original_seg", records=_records(f1=rate))  # type: ignore[arg-type]
+        ms2_original_seg=_seg("ms2", "original_seg", records=_records(f1=rate))  # type: ignore[arg-type]
     )
     rows = [
         r
@@ -624,16 +624,16 @@ def test_the_criteria_that_name_a_segmentation_keep_it() -> None:
 
 def test_mo7_negative_control_and_not_failed() -> None:
     negative = {"samples": {"x": {"mouse_gate": {"level": "failed"}}}}
-    failed = _seg("ag7", "proseg_hybrid", gate={"level": "failed"})
+    failed = _seg("ms1", "proseg_hybrid", gate={"level": "failed"})
     rows = [
         M.finalize(r)
-        for r in M.mo7_rows(_outputs(ag7_proseg_hybrid=failed), negative, None)
+        for r in M.mo7_rows(_outputs(ms1_proseg_hybrid=failed), negative, None)
     ]
     scored = {(r.dataset, r.part): r.verdict for r in rows if r.scored}
     assert scored == {
-        ("vzg2_invalid", "negative_control_failed"): "PASS",
-        ("ag7", "not_failed"): "FAIL",
-        ("vzg2", "not_failed"): "PASS",
+        ("ms2_invalid", "negative_control_failed"): "PASS",
+        ("ms1", "not_failed"): "FAIL",
+        ("ms2", "not_failed"): "PASS",
     }
     full = {"samples": {"x": {"mouse_gate": {"level": "full"}}}}
     rows = [M.finalize(r) for r in M.mo7_rows(_outputs(), full, None)]
@@ -703,36 +703,36 @@ def test_mo8_section_pass_fail_not_evaluable_and_unscored(tmp_path: Path) -> Non
     outputs = _outputs()
     trace = _trace(
         tmp_path,
-        _section_tasks("ag7", peak="11 GB")
-        + _section_tasks(PAIR["vzg2"], peak="14.7 GB", segs=M.SEGMENTATIONS[:3]),
+        _section_tasks("ms1", peak="11 GB")
+        + _section_tasks(PAIR["ms2"], peak="14.7 GB", segs=M.SEGMENTATIONS[:3]),
     )
     rows, problems = M.mo8_section_rows(
         outputs, trace, {}, memory_reading="trace_rss", processes=4
     )
     got = {(r.dataset, r.part): M.finalize(r) for r in rows}
-    assert got[("ag7", "map_peak")].verdict == "PASS"
-    assert got[("ag7", "map_peak")].value == pytest.approx(11.0)
-    assert got[("ag7", "section_time")].verdict == "PASS"
-    assert got[("ag7", "section_time")].value == pytest.approx(
+    assert got[("ms1", "map_peak")].verdict == "PASS"
+    assert got[("ms1", "map_peak")].value == pytest.approx(11.0)
+    assert got[("ms1", "section_time")].verdict == "PASS"
+    assert got[("ms1", "section_time")].value == pytest.approx(
         4 * (12 + 420 + 55) / 3600
     )
-    # VZG2: one segmentation missing from the trace: time and peak not measured.
-    assert got[("vzg2", "section_time")].verdict == "NOT_AVAILABLE"
-    assert got[("vzg2", "map_peak")].verdict == "NOT_AVAILABLE"
+    # MS2: one segmentation missing from the trace: time and peak not measured.
+    assert got[("ms2", "section_time")].verdict == "NOT_AVAILABLE"
+    assert got[("ms2", "map_peak")].verdict == "NOT_AVAILABLE"
     assert not problems
     # A peak above 12 GB fails; a MAP at 6 processes leaves the rows unscored.
-    trace = _trace(tmp_path, _section_tasks("ag7", peak="12.5 GB"))
+    trace = _trace(tmp_path, _section_tasks("ms1", peak="12.5 GB"))
     rows, _ = M.mo8_section_rows(
         outputs, trace, {}, memory_reading="trace_rss", processes=4
     )
-    assert _by(rows, "map_peak", "ag7")[0].passes is False
-    assert _verdicts(_by(rows, "map_peak", "ag7")) == ["FAIL"]
-    trace = _trace(tmp_path, _section_tasks("ag7", cpus=6))
+    assert _by(rows, "map_peak", "ms1")[0].passes is False
+    assert _verdicts(_by(rows, "map_peak", "ms1")) == ["FAIL"]
+    trace = _trace(tmp_path, _section_tasks("ms1", cpus=6))
     rows, problems = M.mo8_section_rows(
         outputs, trace, {}, memory_reading="trace_rss", processes=4
     )
     assert set(
-        _verdicts(_by(rows, "map_peak", "ag7") + _by(rows, "section_time", "ag7"))
+        _verdicts(_by(rows, "map_peak", "ms1") + _by(rows, "section_time", "ms1"))
     ) == {"UNSCORED (process count)"}
     assert problems and "not 4" in problems[0]
 
@@ -753,24 +753,24 @@ def test_mo8_sampler_pss_is_reported_beside(tmp_path: Path) -> None:
         "summed_vmhwm_gb": 11.0,
         "summed_vmrss_gb": 7.0,
     }
-    trace = _trace(tmp_path, _section_tasks("ag7", peak="13 GB"))
-    samplers = {("ag7", seg): peaks for seg in M.SEGMENTATIONS}
+    trace = _trace(tmp_path, _section_tasks("ms1", peak="13 GB"))
+    samplers = {("ms1", seg): peaks for seg in M.SEGMENTATIONS}
     rows, _ = M.mo8_section_rows(
         _outputs(), trace, samplers, memory_reading="trace_rss", processes=4
     )
-    peak = _by(rows, "map_peak", "ag7")[0]
+    peak = _by(rows, "map_peak", "ms1")[0]
     assert peak.value == pytest.approx(13.0)
     assert peak.beside["sampler_tree_pss_gb"]["reseg"] == 5.0
     rows, _ = M.mo8_section_rows(
         _outputs(), trace, samplers, memory_reading="tree_pss", processes=4
     )
-    assert _by(rows, "map_peak", "ag7")[0].value == 5.0
+    assert _by(rows, "map_peak", "ms1")[0].value == 5.0
 
 
 def test_mo8_a_task_without_its_measurement_is_not_evaluable(tmp_path: Path) -> None:
     # A MAP task without peak_rss, or a task without realtime, must not let
     # the other tasks' values stand for the section (missing is not a pass).
-    tasks = _section_tasks("ag7", peak="11 GB")
+    tasks = _section_tasks("ms1", peak="11 GB")
     map_row = next(t for t in tasks if "ANNOTATE_MAP" in t["process"])
     map_row["peak_rss"] = "-"
     rows, _ = M.mo8_section_rows(
@@ -780,9 +780,9 @@ def test_mo8_a_task_without_its_measurement_is_not_evaluable(tmp_path: Path) -> 
         memory_reading="trace_rss",
         processes=4,
     )
-    assert _verdicts(_by(rows, "map_peak", "ag7")) == ["NOT_AVAILABLE"]
-    assert _verdicts(_by(rows, "section_time", "ag7")) == ["PASS"]
-    tasks = _section_tasks("ag7")
+    assert _verdicts(_by(rows, "map_peak", "ms1")) == ["NOT_AVAILABLE"]
+    assert _verdicts(_by(rows, "section_time", "ms1")) == ["PASS"]
+    tasks = _section_tasks("ms1")
     next(t for t in tasks if "RESOLVE" in t["process"])["realtime"] = ""
     rows, _ = M.mo8_section_rows(
         _outputs(),
@@ -791,27 +791,27 @@ def test_mo8_a_task_without_its_measurement_is_not_evaluable(tmp_path: Path) -> 
         memory_reading="trace_rss",
         processes=4,
     )
-    assert _verdicts(_by(rows, "section_time", "ag7")) == ["NOT_AVAILABLE"]
-    assert _verdicts(_by(rows, "map_peak", "ag7")) == ["PASS"]
+    assert _verdicts(_by(rows, "section_time", "ms1")) == ["NOT_AVAILABLE"]
+    assert _verdicts(_by(rows, "map_peak", "ms1")) == ["PASS"]
 
 
 def test_mo8_an_unrecorded_process_count_is_unscored(tmp_path: Path) -> None:
     # §25.1: MO8 holds for 4 processes; a count nobody recorded is not 4.
     outputs = _outputs()
-    for out in outputs["ag7"].values():
+    for out in outputs["ms1"].values():
         out.manifest["n_processors"] = None
         for sample in out.manifest["samples"].values():
             for run in sample["runs"].values():
                 run["engine_params"] = {}
-    trace = _trace(tmp_path, _section_tasks("ag7"))
+    trace = _trace(tmp_path, _section_tasks("ms1"))
     trace.loc[trace["process"] == M.MAP_PROCESS, "cpus"] = ""
     rows, problems = M.mo8_section_rows(
         outputs, trace, {}, memory_reading="trace_rss", processes=4
     )
     assert set(
-        _verdicts(_by(rows, "map_peak", "ag7") + _by(rows, "section_time", "ag7"))
+        _verdicts(_by(rows, "map_peak", "ms1") + _by(rows, "section_time", "ms1"))
     ) == {"UNSCORED (process count)"}
-    assert problems and "ag7" in problems[0]
+    assert problems and "ms1" in problems[0]
 
 
 def _bundle(
@@ -909,15 +909,15 @@ def test_mo8_prep_pass_fail_not_evaluable_and_unscored(tmp_path: Path) -> None:
 def test_mo9_reports_registration_and_jsd() -> None:
     shifted = dict(SOFT, **{"30 Astro-Epen": 0.10, "01 IT-ET Glut": 0.49})
     outputs = _outputs(
-        vzg2_reseg=_seg(
-            "vzg2",
+        ms2_reseg=_seg(
+            "ms2",
             "reseg",
             records=_records(soft=shifted),
             gate={"level": "full", "signal_status": {"g1": "fail"}},
         )
     )
     for seg in ("original_seg", "proseg_hybrid", "proseg_mask"):
-        outputs["vzg2"][seg].resolve_summary["samples"][SID["vzg2"]]["mouse_gate"] = {
+        outputs["ms2"][seg].resolve_summary["samples"][SID["ms2"]]["mouse_gate"] = {
             "level": "full",
             "signal_status": {"g1": "pass"},
         }
@@ -932,15 +932,13 @@ def test_mo9_reports_registration_and_jsd() -> None:
 
 
 def test_mo11_reports_anterior_sections() -> None:
-    anterior = _seg("ag7", "proseg_hybrid", gate={"ap_estimate": {"ap_mm": 5.2}})
-    posterior = _seg("vzg2", "original_seg", gate={"ap_estimate": {"ap_mm": 8.26}})
-    rows = M.mo11_rows(
-        _outputs(ag7_proseg_hybrid=anterior, vzg2_original_seg=posterior)
-    )
+    anterior = _seg("ms1", "proseg_hybrid", gate={"ap_estimate": {"ap_mm": 5.2}})
+    posterior = _seg("ms2", "original_seg", gate={"ap_estimate": {"ap_mm": 8.26}})
+    rows = M.mo11_rows(_outputs(ms1_proseg_hybrid=anterior, ms2_original_seg=posterior))
     got = {(r.dataset, r.segmentation): r for r in rows}
-    assert got[("ag7", "proseg_hybrid")].beside["anterior"] is True
-    assert "MO11 applies" in got[("ag7", "proseg_hybrid")].note
-    assert got[("vzg2", "original_seg")].beside["anterior"] is False
+    assert got[("ms1", "proseg_hybrid")].beside["anterior"] is True
+    assert "MO11 applies" in got[("ms1", "proseg_hybrid")].note
+    assert got[("ms2", "original_seg")].beside["anterior"] is False
     assert not any(row.scored for row in rows)
 
 
@@ -975,8 +973,8 @@ def _mo10(
         "t2_reading": "allen-relative",
         "pass": not missed,
         "gene_sets": {name: dict(entry) for name in M.MO10_GENE_SETS},
-        "mo2": [{"section": "ag7", "t2_after": 0.0}],
-        "mo3": {"ag7": True},
+        "mo2": [{"section": "ms1", "t2_after": 0.0}],
+        "mo3": {"ms1": True},
     }
 
 
@@ -1023,14 +1021,14 @@ def test_mo10_needs_all_three_gene_sets() -> None:
     # §24: MO10 "passes when all three gene sets pass"; a gene set missing
     # from mo10.json is not evaluable, not a pass.
     mo10 = _mo10()
-    del mo10["gene_sets"]["merfish_vzg2"]
+    del mo10["gene_sets"]["merfish_ms2"]
     rows, _ = M.mo10_rows(
         mo10,
         reading="allen_relative",
         recorded=["a+f:tile200,nn2"],
         rule_params={},
     )
-    missing = [r for r in rows if r.segmentation == "merfish_vzg2"]
+    missing = [r for r in rows if r.segmentation == "merfish_ms2"]
     assert missing and _verdicts(missing) == ["NOT_AVAILABLE"]
     rows = [M.finalize(r) for r in rows]
     assert M.flip_rule(rows, True)["criteria"]["MO10"] == "INCOMPLETE"
@@ -1043,7 +1041,7 @@ def test_mo10_is_unscored_when_a_run_used_another_region_rule() -> None:
         _mo10(),
         reading="allen_relative",
         recorded=[selected],
-        rule_params={"ag7/proseg_hybrid": params, "vzg2/original_seg": params},
+        rule_params={"ms1/proseg_hybrid": params, "ms2/original_seg": params},
     )
     assert not problems
     assert {M.finalize(r).verdict for r in rows if r.scored} == {"PASS"}
@@ -1052,16 +1050,16 @@ def test_mo10_is_unscored_when_a_run_used_another_region_rule() -> None:
         _mo10(),
         reading="allen_relative",
         recorded=[selected],
-        rule_params={"ag7/proseg_hybrid": params, "vzg2/original_seg": v1},
+        rule_params={"ms1/proseg_hybrid": params, "ms2/original_seg": v1},
     )
-    assert problems and "vzg2/original_seg" in problems[0]
+    assert problems and "ms2/original_seg" in problems[0]
     assert {M.finalize(r).verdict for r in rows if r.scored} == {
         "UNSCORED (region rule)"
     }
     # A run that does not record a parameter of the rule cannot be checked.
     partial = {k: v for k, v in params.items() if k != "coupled_regions"}
-    assert M.rule_mismatches(selected, {"vzg2/original_seg": partial})
-    assert M.rule_mismatches(selected, {"vzg2/original_seg": {}})
+    assert M.rule_mismatches(selected, {"ms2/original_seg": partial})
+    assert M.rule_mismatches(selected, {"ms2/original_seg": {}})
 
 
 def test_mo10_scores_t2_per_bin_when_the_bins_are_given() -> None:
@@ -1133,17 +1131,17 @@ def test_mo10_refuses_a_candidate_the_preregistration_does_not_name_last() -> No
         reading="allen_relative",
         recorded=["a+f:tile200,nn2"],
         rule_params={
-            "ag7/proseg_hybrid": _rule("v1"),
-            "vzg2/original_seg": _rule("a+f:tile200,nn2"),
+            "ms1/proseg_hybrid": _rule("v1"),
+            "ms2/original_seg": _rule("a+f:tile200,nn2"),
         },
     )
-    assert len(problems) == 1 and "ag7/proseg_hybrid" in problems[0]
+    assert len(problems) == 1 and "ms1/proseg_hybrid" in problems[0]
     assert "rule_variant" in problems[0] and "tile_um" in problems[0]
     # An (f)-only candidate keeps rule_variant v1 and differs in its tiles.
     f_only = dict(_rule("v1"), tile_um=200.0, min_neurons_per_tile=2)
     assert f_only["rule_variant"] == "v1"
-    assert not M.rule_mismatches("f:tile200,nn2", {"vzg2": f_only})
-    assert M.rule_mismatches("v1", {"vzg2": {"tile_um": 200.0}})
+    assert not M.rule_mismatches("f:tile200,nn2", {"ms2": f_only})
+    assert M.rule_mismatches("v1", {"ms2": {"tile_um": 200.0}})
     text = (
         "x\nSelected candidate (M6b): `v1`\n\n### Amendment\n"
         "Selected candidate (M6b): `a+b`\n"
@@ -1195,10 +1193,10 @@ def test_an_exception_applies_only_inside_its_scope() -> None:
     assert got == {
         ("merfish500", "C57BL6J-638850.35"): "FAIL (excepted)",
         ("merfish500", "C57BL6J-638850.46"): "FAIL",
-        ("merfish_ag7", "C57BL6J-638850.35"): "FAIL (excepted)",
-        ("merfish_ag7", "C57BL6J-638850.46"): "FAIL",
-        ("merfish_vzg2", "C57BL6J-638850.35"): "FAIL (excepted)",
-        ("merfish_vzg2", "C57BL6J-638850.46"): "FAIL",
+        ("merfish_ms1", "C57BL6J-638850.35"): "FAIL (excepted)",
+        ("merfish_ms1", "C57BL6J-638850.46"): "FAIL",
+        ("merfish_ms2", "C57BL6J-638850.35"): "FAIL (excepted)",
+        ("merfish_ms2", "C57BL6J-638850.46"): "FAIL",
     }
     assert len(usage[0]["applied_to"]) == 3
     excepted = [r for r in rows if r.verdict == "FAIL (excepted)"]
@@ -1216,8 +1214,8 @@ def test_an_exception_applies_only_inside_its_scope() -> None:
     }
     assert got == {
         "merfish500": "FAIL (excepted)",
-        "merfish_ag7": "FAIL",
-        "merfish_vzg2": "FAIL",
+        "merfish_ms1": "FAIL",
+        "merfish_ms2": "FAIL",
     }
 
 
@@ -1253,7 +1251,7 @@ def test_an_exception_never_touches_a_row_that_is_not_measured() -> None:
     rows = [
         M.finalize(
             M.Row(
-                "MO8", "map_peak", "ag7", "all", None, "<=", 12.0, None, True, "trace"
+                "MO8", "map_peak", "ms1", "all", None, "<=", 12.0, None, True, "trace"
             )
         )
     ]
@@ -1420,11 +1418,11 @@ def test_provenance_refuses_ssd1_without_touching_it(
 ) -> None:
     store = tmp_path / "store"
     store.mkdir()
-    ssd1 = "/media/mathieubo/SSD1/MerXen/annotation_references/wmb_panel/abc"
+    ssd1 = "/path/to/legacy-disk/MerXen/annotation_references/wmb_panel/abc"
     real = os.path.realpath
 
     def guarded(path: Any, *args: Any, **kwargs: Any) -> str:
-        assert not str(path).startswith("/media/mathieubo/SSD1"), "SSD1 touched"
+        assert not str(path).startswith("/path/to/legacy-disk"), "SSD1 touched"
         return real(path, *args, **kwargs)
 
     monkeypatch.setattr(M.os.path, "realpath", guarded)
@@ -1460,7 +1458,7 @@ def test_provenance_refuses_a_symlink_out_of_the_store_and_a_missing_bundle(
 
 def test_flip_rule_verdicts() -> None:
     def row(criterion: str, verdict: str, scored: bool = True) -> Any:
-        r = M.Row(criterion, "p", "ag7", "s", 1, "<=", 1, True, scored, "x")
+        r = M.Row(criterion, "p", "ms1", "s", 1, "<=", 1, True, scored, "x")
         r.verdict = verdict
         return r
 
@@ -1480,7 +1478,7 @@ def test_flip_rule_verdicts() -> None:
         "INCOMPLETE"
     )
     # Every problem goes back to the user: the flip cannot read PASS.
-    flip = M.flip_rule(passing, True, ["MO10: vzg2 ran another region rule"])
+    flip = M.flip_rule(passing, True, ["MO10: ms2 ran another region rule"])
     assert flip["verdict"] == "INCOMPLETE" and flip["problems"] == 1
 
 
@@ -1590,7 +1588,7 @@ def _e2e_args(tmp_path: Path, store: Path, panel: Path, share: Path) -> list[str
         dataset: _results_root(tmp_path, dataset, panel, share)
         for dataset in M.DATASETS
     }
-    tasks = _section_tasks("ag7") + _section_tasks(PAIR["vzg2"])
+    tasks = _section_tasks("ms1") + _section_tasks(PAIR["ms2"])
     trace = tmp_path / "trace.tsv"
     columns = [
         "name",
@@ -1608,8 +1606,8 @@ def _e2e_args(tmp_path: Path, store: Path, panel: Path, share: Path) -> list[str
     )
     pseudo = {}
     for dataset, column, value in (
-        ("ag7", "pseudo_fine", "Glut"),
-        ("vzg2", "pseudo_class", "Glut"),
+        ("ms1", "pseudo_fine", "Glut"),
+        ("ms2", "pseudo_class", "Glut"),
     ):
         path = tmp_path / f"pseudo_{dataset}.csv"
         pd.DataFrame(
@@ -1636,15 +1634,15 @@ def _e2e_args(tmp_path: Path, store: Path, panel: Path, share: Path) -> list[str
     return [
         "score",
         "--dataset",
-        f"ag7={roots['ag7']}",
+        f"ms1={roots['ms1']}",
         "--dataset",
-        f"vzg2={roots['vzg2']}",
+        f"ms2={roots['ms2']}",
         "--trace",
         str(trace),
         "--pseudo-labels",
-        f"ag7={pseudo['ag7']}",
+        f"ms1={pseudo['ms1']}",
         "--pseudo-labels",
-        f"vzg2={pseudo['vzg2']}",
+        f"ms2={pseudo['ms2']}",
         "--mo7-negative",
         str(negative),
         "--mo10",
@@ -1699,6 +1697,101 @@ def test_score_end_to_end_with_the_registered_readings(
     assert [r["value"] for r in mo1] == [pytest.approx(0.9), pytest.approx(0.9)]
 
 
+def test_score_reads_real_names_and_shows_them_with_the_alias_table(
+    e2e: tuple[list[str], Path, Path], tmp_path: Path, fake_aliases: Path
+) -> None:
+    """R2 on every key read, R5 on the outputs (invented names, see conftest)."""
+    from test_privacy.synthetic import MOUSE, MOUSE2_NAME
+
+    names = {MS1: MOUSE, MS2: MOUSE2_NAME.lower()}
+    args, _, _ = e2e
+    real_args = list(args)
+    for index, value in enumerate(args):
+        key, sep, rest = value.partition("=")
+        if sep and key in names:
+            real_args[index] = f"{names[key]}={rest}"
+    # The recorded files name the sections as M6b-R and the approvals did.
+    mo10_path = Path(args[args.index("--mo10") + 1])
+    mo10 = json.loads(mo10_path.read_text())
+    mo10["gene_sets"] = {
+        key.replace(MS1, names[MS1]).replace(MS2, names[MS2]): value
+        for key, value in mo10["gene_sets"].items()
+    }
+    mo10_path.write_text(json.dumps(mo10))
+    exceptions_path = Path(args[args.index("--exceptions") + 1])
+    gene_sets = ["merfish500", *(f"merfish_{name}" for name in names.values())]
+    exception = {**EXCEPTION, "scope": {**EXCEPTION["scope"], "gene_set": gene_sets}}
+    exceptions_path.write_text(json.dumps({"exceptions": [exception]}))
+    out = tmp_path / "out"
+    assert M.main([*real_args, "--out", str(out)]) == 0
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["flip_rule"]["verdict"] == "PASS", summary["flip_rule"]
+    assert summary["exceptions"][0]["applied_to"]
+    assert summary["exceptions"][0]["scope"]["gene_set"] == gene_sets
+    assert set(summary["datasets"]) == set(names.values())
+    assert summary["protocol"]["scored_segmentations"] == {
+        names[MS1]: "proseg_hybrid",
+        names[MS2]: "original_seg",
+    }
+    rows = summary["rows"]
+    assert {r["dataset"] for r in rows if r["criterion"] == "MO1"} == set(
+        names.values()
+    )
+    assert {r["segmentation"] for r in rows if r["criterion"] == "MO10"} >= {
+        f"merfish_{name}" for name in names.values()
+    }
+    assert f"{names[MS2]}_invalid" in {r["dataset"] for r in rows}
+    table = pd.read_csv(out / "tables" / "rows.csv")
+    assert set(table.loc[table["criterion"] == "MO1", "dataset"]) == set(names.values())
+    html_text = (out / "summary.html").read_text()
+    assert f"<td>{names[MS1]}</td>" in html_text
+
+
+def test_display_keeps_paths_and_shows_labels(fake_aliases: Path) -> None:
+    from sample_labels import alias_key, display_text, display_tree
+    from test_privacy.synthetic import MOUSE
+
+    path = "/path/to/ms1/results/ms1_MERSCOPE.json"
+    assert display_text(f"no ms1 results root at {path}") == (
+        f"no {MOUSE} results root at {path}"
+    )
+    assert display_tree({"ms1": ["ms1/reseg", path]}) == {
+        MOUSE: [f"{MOUSE}/reseg", path]
+    }
+    assert alias_key(MOUSE, M.DATASETS) == "ms1"
+    assert alias_key("MS1", M.DATASETS) == "ms1"
+    assert M.dataset_key(MOUSE) == "ms1"
+
+
+def test_keys_refuse_without_an_alias_table(
+    no_alias_table: None,
+) -> None:
+    from merxen.local_config import LocalConfigError
+
+    with pytest.raises(LocalConfigError, match="no alias table"):
+        M.dataset_key("ms1")
+
+
+def test_full_remap_refuses_the_refused_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from merxen.local_config import LocalConfigError
+
+    with pytest.raises(LocalConfigError, match="MERXEN_REFUSED_PATH_PREFIX"):
+        M.refused_prefix()
+    monkeypatch.setenv("MERXEN_REFUSED_PATH_PREFIX", "/path/to/legacy-disk/")
+    prefix = M.refused_prefix()
+    assert prefix == "/path/to/legacy-disk"
+    payload = {
+        "panel": {"gene_tables": {"mouse": "/path/to/legacy-disk/gene.csv"}},
+        "other": ["/path/to/legacy-disk-2/x.csv", "/path/to/legacy-disk"],
+    }
+    assert M._refused_strings(payload, prefix) == [
+        "/path/to/legacy-disk/gene.csv",
+        "/path/to/legacy-disk",
+    ]
+
+
 def test_score_exploratory_reading_is_stamped(
     e2e: tuple[list[str], Path, Path], tmp_path: Path
 ) -> None:
@@ -1738,7 +1831,7 @@ def test_score_fails_the_run_on_a_bundle_outside_the_store(
     ) / M.REPORT_PATH.format(seg="reseg")
     payload = json.loads(report.read_text())
     payload["provenance"]["references"]["wmb_panel"]["bundle_path"] = (
-        "/media/mathieubo/SSD1/MerXen/annotation_references/wmb_panel/5a032858"
+        "/path/to/legacy-disk/MerXen/annotation_references/wmb_panel/5a032858"
     )
     report.write_text(json.dumps(payload))
     out = tmp_path / "out"
@@ -1747,7 +1840,7 @@ def test_score_fails_the_run_on_a_bundle_outside_the_store(
     assert not summary["provenance"]["ok"]
     assert summary["flip_rule"]["verdict"] == "NOT SCORED (provenance)"
     assert {r["verdict"] for r in summary["rows"]} == {"UNSCORED (provenance)"}
-    assert any("SSD1" in problem for problem in summary["problems"])
+    assert any("legacy-disk" in problem for problem in summary["problems"])
 
 
 def test_score_negative_control_without_its_map_manifest_is_unscored(
@@ -1892,5 +1985,5 @@ def test_score_refuses_an_output_inside_a_results_root(
 
 
 def test_manual_regions_are_mouse_ap_axis_s() -> None:
-    assert set(M.MANUAL_REGIONS["ag7"]) == set(MANUAL)
-    assert set(M.MANUAL_REGIONS["vzg2"]) == set(MANUAL)
+    assert set(M.MANUAL_REGIONS["ms1"]) == set(MANUAL)
+    assert set(M.MANUAL_REGIONS["ms2"]) == set(MANUAL)

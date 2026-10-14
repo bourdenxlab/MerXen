@@ -49,16 +49,16 @@ Curated by hand (reviewed in PRs, each row with a rationale):
   family (E5 296-gene and post-M0e 297-gene panel hashes) and its set-c
   exclusions, the 32 cross-platform-deviant genes of E5
   (exp/E5/04_make_genesets.py; plan §3.2, D-A7).
-- wmb_marker_universe_ag7_vzg2.csv: the validated WMB marker-precompute
-  gene universe, the ag7 | VZG2 union (899 genes) of
-  research/selfmap/query_{ag7,vzg2}_full.h5ad; symbols from the WMB-10X
+- wmb_marker_universe_ms1_ms2.csv: the validated WMB marker-precompute
+  gene universe, the MS1 | MS2 union (899 genes) of
+  research/selfmap/query_{ms1,ms2}_full.h5ad; symbols from the WMB-10X
   gene.csv 20241115 (plan §7.1).
 - heldout_markers_human.csv, heldout_markers_mouse.csv: independent
   held-out markers for the non-circular enrichment check (plan §5.8).
   Human: two canonical markers per class (rank 1) and canonical
   alternates (rank 2, added in M3 because set a lacks SATB2, PLP1, CSF1R,
   CLDN5 and LUM); SST deliberately absent; GAD2 and P2RY12 avoided on
-  MERSCOPE. Mouse: the E3 VZG2 held-out microglial
+  MERSCOPE. Mouse: the E3 MS2 held-out microglial
   genes; class-level markers are still to be added (plan §5.8 step 4).
 - gene_id_overrides_human.csv, gene_id_overrides_mouse.csv: curated
   symbol -> Ensembl gene ID rows of the gene-ID resolver (plan §8.4),
@@ -68,7 +68,7 @@ Curated by hand (reviewed in PRs, each row with a rationale):
   validated_panel_levels.csv: the validated panel families (plan §4.7,
   §8.2). Seeded real-data families (plan rev3, approved in PR #22):
   human_set_a (E5 set a, 296 genes, its post-M0e 297-gene form and their
-  curated set c, 264 / 265 genes), mouse_ag7 (500 genes) and mouse_vzg2
+  curated set c, 264 / 265 genes), mouse_ms1 (500 genes) and mouse_ms2
   (815 genes). Gene lists from exp/E5/genes_{a,c}.csv and the M3 / M3b
   panel_genes.json files, each re-hashed to its panel_hash; root markers
   from the root key of the production primary bundles' query markers

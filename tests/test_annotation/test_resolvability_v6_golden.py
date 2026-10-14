@@ -98,16 +98,16 @@ GOLDEN: dict[str, str] = {
     "build_hash/human_set_c_265/whb_frontal_supc_clus_ho": (
         "6d323487ff0c49cc7cbd78dcaf118c11564b0735107b7b3a307e2662f5aba711"
     ),
-    "build_hash/mouse_ag7_500/wmb_panel": (
+    "build_hash/mouse_ms1_500/wmb_panel": (
         "47edbff9e8494a8b51a536bbd1c53cafff3a9e395b0a62caa9423d699f18dee8"
     ),
-    "build_hash/mouse_ag7_500/wmb_selfmap_testset": (
+    "build_hash/mouse_ms1_500/wmb_selfmap_testset": (
         "fc46d2f11d7741b736882627b158f52222b07592029464e412f15c650c2a1895"
     ),
-    "build_hash/mouse_vzg2_815/wmb_panel": (
+    "build_hash/mouse_ms2_815/wmb_panel": (
         "88c769cf7b8cf243d148398c279fd62ed292392e1d4f3870112650cc3660bf05"
     ),
-    "build_hash/mouse_vzg2_815/wmb_selfmap_testset": (
+    "build_hash/mouse_ms2_815/wmb_selfmap_testset": (
         "f4cbe68e77bd2c0ea659603e53f91a50b8ee8c8eedc04b1e92607e57158ea701"
     ),
     "human_like/bundle_output_recipe": (
@@ -189,6 +189,31 @@ GOLDEN: dict[str, str] = {
         "2477a4363fea6cf8597c179efe62f6f49d8b58c89bd6af78d32d65500efca1f2"
     ),
 }
+
+# The marker universe of every wmb_panel payload (reference._wmb_params) is
+# hashed in its real-name form (reference.wmb_marker_universe_hash, privacy
+# rule R4, 2026-10-14): GOLDEN holds that form, checked with the alias table
+# (test_golden_build_hashes_with_the_alias_table, on a host that has it).
+# With the table disabled (these hermetic tests, CI) the two mouse wmb_panel
+# payloads hash the asset's alias form instead; only these two values differ.
+GOLDEN_ALIASES_DISABLED: dict[str, str] = {
+    "build_hash/mouse_ms1_500/wmb_panel": (
+        "3d5641fddb0d0ad2a2cc625f338320424751f38d15dd6d2353a0baf3c75e5c29"
+    ),
+    "build_hash/mouse_ms2_815/wmb_panel": (
+        "94edc0af406f9d6dd50d62a11df41e55dbcd1e5d1f5ab4ecf99806c25a001f83"
+    ),
+}
+
+
+def golden_for_alias_state() -> dict[str, str]:
+    """Return the golden values the current alias-table state must give."""
+    from merxen import privacy
+
+    if privacy.has_aliases():
+        return dict(GOLDEN)
+    return {**GOLDEN, **GOLDEN_ALIASES_DISABLED}
+
 
 # Synthetic panels: (species, depth grid, cells per cluster, cell seed).
 PANELS: dict[str, tuple[str, tuple[int, ...], int, int]] = {
@@ -407,13 +432,29 @@ def test_golden_hashes_are_complete() -> None:
 
 
 def test_version_6_path_is_byte_identical(current_hashes: dict[str, str]) -> None:
+    golden = golden_for_alias_state()
     differ = {
-        name: (GOLDEN.get(name), value)
+        name: (golden.get(name), value)
         for name, value in current_hashes.items()
-        if GOLDEN.get(name) != value
+        if golden.get(name) != value
     }
-    missing = sorted(set(GOLDEN) - set(current_hashes))
+    missing = sorted(set(golden) - set(current_hashes))
     assert not differ and not missing, (
         f"version-6 outputs changed (pre-registration §21 (i) fails): {differ}; "
         f"missing {missing}"
     )
+
+
+def test_golden_build_hashes_with_the_alias_table(real_aliases: Path) -> None:
+    """With the alias table every build hash is the golden one (F1, R4)."""
+    hashes = build_hashes()
+    assert hashes == {name: GOLDEN[name] for name in hashes}
+    assert len(hashes) == 16
+
+
+def test_without_the_table_only_the_two_universe_hashes_differ() -> None:
+    """Without a table the two mouse wmb_panel values are the alias-form pins."""
+    hashes = build_hashes()
+    assert {
+        name: value for name, value in hashes.items() if GOLDEN[name] != value
+    } == GOLDEN_ALIASES_DISABLED
