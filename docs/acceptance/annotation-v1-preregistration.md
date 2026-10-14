@@ -1830,6 +1830,15 @@ This is why the amendment is POST-HOC.
 
 Selected candidate (M6b): `a+f:tile200,nn2`
 
+**MO10 on `a+f:tile200,nn2` (result, recorded 2026-10-14 after scoring; nothing here changes a reading, threshold or rule).** Scored at 11:59 with `mo10 --out $A/m6b/scoring_u1`, after the selection commit `35455e8` (11:18). The outputs are in `$A/m6b/scoring_u1/mo10/` (`mo10.json`, `MO10.txt`).
+- *Adopted reading (Allen-relative T2): FAIL.* Only the missed-region clause fails, at two sections:
+  - .35 (AP 7.6 mm), STR missed: harm 0.140% in MERFISH 500 and 0.133% in MERFISH ∩ VZG2;
+  - .46 (AP 5.7 mm), CTXsp missed: harm 0.103% in MERFISH 500.
+  MERFISH ∩ ag7 passes. In all three gene sets the bin-mean harm (at most 0.080%), the section maximum (at most 0.210%) and the T2 clause pass.
+- These are the parts the approval covers ("What the approval covers" above), so the written MO10 exception of gate M has this scope and nothing goes back to the user under U1.
+- *Registered T2 reading (0.1%), reported:* the T2 clause also fails, in 6 of the 18 (gene set × bin) cells.
+- *MO2 and MO3 with the selected rule* pass on ag7 proseg_hybrid and VZG2 original_seg (`scoring_u1/summary/real.csv`; STAGE_C_REPORT §4). The production region step was also run with the default rule and the revision-2 `wmb_region_share` bundle `2bf9c01c…`, with no re-map, on the M6 MAP output of ag7 and run3's MAP output of VZG2. It infers the scoring's regions and drop list on both, which is v1's recorded drop list (`$A/m6b/region_share_r2/mo2_mo3/CHECK_REGIONS.txt`).
+
 ## 25. Gate M scoring protocol (GM-PREREG; recorded 2026-10-14, before any gate M score is read)
 
 Gate M (plan §12 M9) scores the mouse criteria of §9 on ag7 and VZG2. This section fixes how, before any gate M run has produced a score. No gate M run has started: GM-RUNS starts after M6b-R, C22, A1 and the scorer (GM-SCORER). No §9 threshold, target or decision rule changes here, except through §24's amendment (U1).
