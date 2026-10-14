@@ -2425,6 +2425,102 @@ def _table_xy(loaded: LoadedSample, cell_ids: pd.Index) -> np.ndarray | None:
     return np.asarray(xy[positions], dtype=np.float64)
 
 
+@dataclass(frozen=True)
+class MouseRegionPlanInputs:
+    """A mouse section's region plan with the inputs the rest of the step needs.
+
+    Attributes:
+        plan: The region step's plan (``mouse_regions.plan_region_step``).
+        taxonomy: The bundle's class / subclass taxonomy.
+        cell_ids: The table cells (the unpruned tidy table's order).
+        class_level: The bundle's class level.
+        subclass_level: Its subclass level.
+    """
+
+    plan: RegionPlan
+    taxonomy: WmbTaxonomy
+    cell_ids: pd.Index
+    class_level: str
+    subclass_level: str
+
+
+def plan_mouse_regions(
+    loaded: LoadedSample,
+    bundle: MmcBundle,
+    unpruned: pd.DataFrame,
+    request: SectionRegionsRequest,
+    config: AnnotationConfig,
+    *,
+    region_shares: RegionShareBundle | None,
+) -> MouseRegionPlanInputs:
+    """Infer a mouse section's divisions and plan the pruning (plan §7.2).
+
+    The first half of MAP's region step (``_mouse_region_step``): the region
+    inference and the drop list, before any re-map.
+
+    Args:
+        loaded: The sample (its coordinates).
+        bundle: The primary WMB run's bundle (levels and tree).
+        unpruned: That run's tidy table.
+        request: The sample's ``mouse_section_regions`` request.
+        config: The annotation config (``mouse_regions``).
+        region_shares: The ``wmb_region_share`` bundle.
+
+    Returns:
+        The plan, the taxonomy, the table cells and the two levels.
+
+    Raises:
+        MapError: If the bundle has no class and subclass levels or the
+            region step cannot run.
+    """
+    sample_id = loaded.sample.sample_id
+    if len(bundle.levels) < 2:
+        raise MapError(
+            f"{sample_id}: the region step needs the class and subclass levels; "
+            f"{bundle.reference_id} maps {bundle.levels}"
+        )
+    class_level, subclass_level = bundle.levels[0], bundle.levels[1]
+    tree = bundle.tree()
+    try:
+        taxonomy = WmbTaxonomy.from_tree(
+            tree, class_level=class_level, subclass_level=subclass_level
+        )
+    except MouseRegionError as error:
+        raise MapError(f"{sample_id}: {error}") from error
+    cell_ids = pd.Index(unpruned["cell_id"].astype(str).unique())
+    classes = level_frame(unpruned, class_level).reindex(cell_ids)
+    subclasses = level_frame(unpruned, subclass_level).reindex(cell_ids)
+    xy = (
+        _table_xy(loaded, cell_ids)
+        if region_shares is not None and request.needs_region_shares
+        else None
+    )
+    try:
+        plan = plan_region_step(
+            request,
+            cell_ids=cell_ids,
+            class_names=classes["name"].astype(object).to_numpy(),
+            class_labels=classes["assignment"].astype(object).to_numpy(),
+            class_bp=classes["bp"].to_numpy(np.float64),
+            subclass_names=subclasses["name"].astype(object).to_numpy(),
+            subclass_labels=subclasses["assignment"].astype(object).to_numpy(),
+            subclass_bp=subclasses["bp"].to_numpy(np.float64),
+            xy=xy,
+            shares=region_shares.shares if region_shares is not None else None,
+            taxonomy=taxonomy,
+            config=config.mouse_regions,
+        )
+    except MouseRegionError as error:
+        raise MapError(f"{sample_id}: {error}") from error
+    return MouseRegionPlanInputs(
+        plan=plan,
+        taxonomy=taxonomy,
+        cell_ids=cell_ids,
+        class_level=class_level,
+        subclass_level=subclass_level,
+    )
+
+
 def _mouse_region_step(
     loaded: LoadedSample,
     run: MapBundle,
@@ -2466,45 +2562,11 @@ def _mouse_region_step(
             region step cannot run.
     """
     sample_id = loaded.sample.sample_id
-    bundle = run.bundle
-    if len(bundle.levels) < 2:
-        raise MapError(
-            f"{sample_id}: the region step needs the class and subclass levels; "
-            f"{bundle.reference_id} maps {bundle.levels}"
-        )
-    class_level, subclass_level = bundle.levels[0], bundle.levels[1]
-    tree = bundle.tree()
-    try:
-        taxonomy = WmbTaxonomy.from_tree(
-            tree, class_level=class_level, subclass_level=subclass_level
-        )
-    except MouseRegionError as error:
-        raise MapError(f"{sample_id}: {error}") from error
-    cell_ids = pd.Index(unpruned["cell_id"].astype(str).unique())
-    classes = level_frame(unpruned, class_level).reindex(cell_ids)
-    subclasses = level_frame(unpruned, subclass_level).reindex(cell_ids)
-    xy = (
-        _table_xy(loaded, cell_ids)
-        if region_shares is not None and request.needs_region_shares
-        else None
+    planned = plan_mouse_regions(
+        loaded, run.bundle, unpruned, request, config, region_shares=region_shares
     )
-    try:
-        plan = plan_region_step(
-            request,
-            cell_ids=cell_ids,
-            class_names=classes["name"].astype(object).to_numpy(),
-            class_labels=classes["assignment"].astype(object).to_numpy(),
-            class_bp=classes["bp"].to_numpy(np.float64),
-            subclass_names=subclasses["name"].astype(object).to_numpy(),
-            subclass_labels=subclasses["assignment"].astype(object).to_numpy(),
-            subclass_bp=subclasses["bp"].to_numpy(np.float64),
-            xy=xy,
-            shares=region_shares.shares if region_shares is not None else None,
-            taxonomy=taxonomy,
-            config=config.mouse_regions,
-        )
-    except MouseRegionError as error:
-        raise MapError(f"{sample_id}: {error}") from error
+    plan, taxonomy, cell_ids = planned.plan, planned.taxonomy, planned.cell_ids
+    class_level, subclass_level = planned.class_level, planned.subclass_level
     for reason in plan.reasons:
         logger.warning("%s: %s", sample_id, reason)
     remap_record: RegionRemapRecord | None = None
