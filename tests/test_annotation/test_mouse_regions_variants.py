@@ -18,6 +18,7 @@ from pydantic import ValidationError
 
 from merxen.annotation.config import (
     MOUSE_CCF_REGIONS,
+    MOUSE_REGION_RULE_LABEL,
     ConditionalNeverDrop,
     MouseRegionConfig,
 )
@@ -191,7 +192,8 @@ def _section(
 
 
 def _config(**settings: Any) -> MouseRegionConfig:
-    return MouseRegionConfig.model_validate({"rule_variant": M6B, **settings})
+    """The v1 rule with M6b settings (variant ``m6b``)."""
+    return MouseRegionConfig.v1(**{"rule_variant": M6B, **settings})
 
 
 def _names(nodes: list[Any]) -> set[str]:
@@ -202,8 +204,18 @@ def _names(nodes: list[Any]) -> set[str]:
 # Config and variant checks
 
 
-def test_v1_is_the_default_and_refuses_m6b_fields() -> None:
-    v1 = MouseRegionConfig()
+def test_the_default_is_the_selected_rule_and_v1_refuses_m6b_fields() -> None:
+    # The default rule is the one M6b selected (pre-registration §24): v1
+    # with (a) OB coupled to OLF and (f) 200 µm tiles, 2 neurons per tile.
+    default = MouseRegionConfig()
+    assert default == _config(
+        coupled_regions={"OB": ["OLF"]}, tile_um=200.0, min_neurons_per_tile=2
+    )
+    assert default.uses_m6b_fields() == ["coupled_regions"]
+    assert MOUSE_REGION_RULE_LABEL == "a+f:tile200,nn2"
+    check_rule_variant(default)
+    v1 = MouseRegionConfig.v1()
+    assert (v1.tile_um, v1.min_neurons_per_tile, v1.coupled_regions) == (150.0, 3, {})
     assert v1.rule_variant == "v1"
     assert v1.uses_m6b_fields() == []
     assert v1.coupling_home_structures == {"OB": ["AON"]}
@@ -214,15 +226,15 @@ def test_v1_is_the_default_and_refuses_m6b_fields() -> None:
         {"conditional_never_drop": [KEEP_B]},
         {"region_min_tile_fraction": {"OB": 0.005}},
     ):
-        config = MouseRegionConfig.model_validate(settings)
+        config = MouseRegionConfig.v1(**settings)
         (field,) = config.uses_m6b_fields()
         with pytest.raises(MouseRegionError, match=field):
             check_rule_variant(config)
         check_rule_variant(_config(**settings))  # m6b accepts it
     # The tile parameters (f) are v1 fields.
-    check_rule_variant(MouseRegionConfig(tile_um=100.0, min_neurons_per_tile=2))
+    check_rule_variant(MouseRegionConfig.v1(tile_um=100.0, min_neurons_per_tile=2))
     with pytest.raises(MouseRegionError, match="not implemented"):
-        check_rule_variant(MouseRegionConfig(rule_variant="v2"))
+        check_rule_variant(MouseRegionConfig.v1(rule_variant="v2"))
 
 
 def test_variant_settings_are_validated() -> None:
@@ -233,13 +245,15 @@ def test_variant_settings_are_validated() -> None:
     with pytest.raises(ValidationError, match="unknown regions"):
         ConditionalNeverDrop.model_validate({**KEEP_B, "when_any_present": ["CP"]})
     with pytest.raises(ValidationError, match="unknown regions"):
-        MouseRegionConfig(region_min_tile_fraction={"AON": 0.005})
+        MouseRegionConfig.v1(region_min_tile_fraction={"AON": 0.005})
     with pytest.raises(ValidationError, match="must lie in"):
-        MouseRegionConfig(region_min_tile_fraction={"OB": 1.5})
+        MouseRegionConfig.v1(region_min_tile_fraction={"OB": 1.5})
     with pytest.raises(ValidationError, match="coupling_home_structures"):
-        MouseRegionConfig(coupled_regions={"OB": ["OLF"]}, coupling_home_structures={})
+        MouseRegionConfig.v1(
+            coupled_regions={"OB": ["OLF"]}, coupling_home_structures={}
+        )
     with pytest.raises(ValidationError, match="other divisions"):
-        MouseRegionConfig(coupled_regions={"OB": ["OB"]})
+        MouseRegionConfig.v1(coupled_regions={"OB": ["OB"]})
     config = _config(region_min_tile_fraction={"OB": 0.005})
     assert config.tile_fraction_for("OB") == 0.005
     assert config.tile_fraction_for("HY") == 0.01
@@ -274,7 +288,7 @@ AON_BLOCKS = {
 
 def test_coupling_adds_ob_with_olf_and_aon_home_tiles() -> None:
     xy, names, confident = _section(AON_BLOCKS)
-    v1 = infer_regions(xy, names, confident, _shares(), MouseRegionConfig())
+    v1 = infer_regions(xy, names, confident, _shares(), MouseRegionConfig.v1())
     assert v1.inferred_regions == ("Isocortex", "OLF")
     assert v1.coupled_regions == () and v1.coupling_tile_counts == {}
 
@@ -358,7 +372,7 @@ def test_coupling_refuses_shares_without_structure_homes() -> None:
         infer_regions(xy, names, confident, _shares(structures=False), config)
     with pytest.raises(MouseRegionError, match="structure-level"):
         check_region_shares(config, _shares(structures=False))
-    check_region_shares(MouseRegionConfig(), _shares(structures=False))
+    check_region_shares(MouseRegionConfig.v1(), _shares(structures=False))
 
 
 def test_coupled_plan_keeps_the_ob_types_of_an_aon_section() -> None:
@@ -376,7 +390,7 @@ def test_coupled_plan_keeps_the_ob_types_of_an_aon_section() -> None:
     }
     common = {"shares": _shares(), "taxonomy": _taxonomy(), **inputs}
     request = SectionRegionsRequest.parse("auto")
-    v1 = plan_region_step(request, config=MouseRegionConfig(), **common)
+    v1 = plan_region_step(request, config=MouseRegionConfig.v1(), **common)
     assert v1.present_regions == ("Isocortex", "OLF")
     assert "05 OB-IMN GABA" in _names(list(v1.nodes))
     ob_cells = names == "051 OB-IMN B"
@@ -396,7 +410,7 @@ def test_coupled_plan_keeps_the_ob_types_of_an_aon_section() -> None:
 def test_ob_imn_is_kept_when_str_or_olf_is_present() -> None:
     taxonomy = _taxonomy()
     v1 = two_tier_drop_list(
-        ("Isocortex", "STR"), _shares(), taxonomy, MouseRegionConfig()
+        ("Isocortex", "STR"), _shares(), taxonomy, MouseRegionConfig.v1()
     )
     assert "05 OB-IMN GABA" in _names(v1)  # absent class, both subclasses < .3
     keep = _config(conditional_never_drop=[KEEP_B])
@@ -415,7 +429,7 @@ def test_ob_imn_is_kept_when_str_or_olf_is_present() -> None:
 def test_ig_subclass_is_kept_when_isocortex_and_str_are_present() -> None:
     taxonomy = _taxonomy()
     present = ("Isocortex", "STR")
-    v1 = two_tier_drop_list(present, _shares(), taxonomy, MouseRegionConfig())
+    v1 = two_tier_drop_list(present, _shares(), taxonomy, MouseRegionConfig.v1())
     assert "025 CA2-FC-IG Glut" in _names(v1)
     keep = _config(conditional_never_drop=[KEEP_C])
     kept = two_tier_drop_list(present, _shares(), taxonomy, keep)
@@ -476,7 +490,7 @@ def test_ob_only_tile_fraction() -> None:
         "013 PIR Glut": [(17, 19), (18, 19), (19, 19)],
     }
     xy, names, confident = _section(blocks)
-    v1 = infer_regions(xy, names, confident, _shares(), MouseRegionConfig())
+    v1 = infer_regions(xy, names, confident, _shares(), MouseRegionConfig.v1())
     assert v1.n_assigned_tiles == 400
     assert v1.inferred_regions == ("Isocortex",)
     ob = infer_regions(
@@ -516,7 +530,7 @@ def test_tile_parameters_change_the_assigned_tiles(
     counted = int((per_tile >= min_neurons).sum())
     if expected is not None:
         assert counted == expected
-    config = MouseRegionConfig(tile_um=tile_um, min_neurons_per_tile=min_neurons)
+    config = MouseRegionConfig.v1(tile_um=tile_um, min_neurons_per_tile=min_neurons)
     inference = infer_regions(xy, names, confident, _shares(), config)
     assert inference.n_assigned_tiles == counted
     assert inference.inferred_regions == (("Isocortex",) if counted else ())

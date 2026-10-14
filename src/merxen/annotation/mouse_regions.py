@@ -8,10 +8,10 @@ works on the unpruned WMB mapping of one section:
    subclass bootstrap probability >= 0.9 (``confident_neuron_min_bp``).
 2. **Tiles**: each confident neuron votes for its subclass's MERFISH home
    division (``wmb_region_share`` bundle, ``region_home``; OB split from OLF);
-   the section is cut into 150 µm tiles (``tile_um``) and every tile with
-   >= 3 such neurons (``min_neurons_per_tile``) is *assigned* its majority
-   home (ties: the first division in sorted order, as E7's
-   ``DataFrame.idxmax``).
+   the section is cut into 200 µm tiles (``tile_um``; v1 150 µm) and every
+   tile with >= 2 such neurons (``min_neurons_per_tile``; v1 3) is
+   *assigned* its majority home (ties: the first division in sorted order,
+   as E7's ``DataFrame.idxmax``).
 3. **Presence**: a division is present when it holds >= 1% of the assigned
    tiles (``min_tile_fraction``) and its largest 8-connected component has
    >= 3 tiles (``min_component_tiles``) (``exp/E7/09_autoregion_v2.py``).
@@ -43,7 +43,10 @@ in the label table), the re-mapped cells' tidy table in
 ``<sid>_mouse_regions.parquet``; ``MouseRegionRecord`` in
 ``map_manifest.json`` records the decision.
 
-**M6b rule variants** (§7.8; ``MouseRegionConfig``, all off in v1): per
+**M6b rule variants** (§7.8; ``MouseRegionConfig``, all off in v1). The
+default rule is the one M6b selected, ``a+f:tile200,nn2`` (pre-registration
+§24): the v1 rule with the coupling (a) of OB to OLF and the tile settings
+(f) above; ``MouseRegionConfig.v1()`` is the v1 rule. The variants: per
 division ``min_tile_fraction`` overrides (d, ``region_min_tile_fraction``)
 in step 3; then region coupling (a, ``coupled_regions``): a coupled division
 that is not present counts as present when one of its partners is present
@@ -84,6 +87,7 @@ from merxen.annotation.mapmycells_engine import coerce_tidy_dtypes, level_frame
 from merxen.annotation.reference import (
     REGION_HOME_FILE,
     REGION_SHARE_FILE,
+    REGION_STRUCTURE_HOME_FILE,
     LookupValidation,
     TaxonomyTreeView,
     validate_lookup,
@@ -96,9 +100,9 @@ logger = logging.getLogger(__name__)
 
 REGION_SHARE_REFERENCE_ID: Final = "wmb_region_share"
 RULE_VARIANTS: Final[tuple[str, ...]] = MOUSE_RULE_VARIANTS
-# Structure-level subclass homes (M6b variant (a)); not written by the v1
-# ``wmb_region_share`` builder, read when a bundle lists it.
-REGION_STRUCTURE_HOME_FILE: Final = "region_structure_home.parquet"
+# Structure-level subclass homes (M6b variant (a), ``REGION_STRUCTURE_HOME_FILE``)
+# are read when a bundle lists them: the wmb_region_share builder writes them
+# from revision 2 (``reference.REGION_SHARE_REVISION``).
 REGION_CELLS_SUFFIX: Final = "_mouse_regions.parquet"
 REGION_CELLS_METADATA_KEY: Final = b"merxen_mouse_regions"
 REGION_CELLS_SCHEMA_VERSION: Final = 1
@@ -243,9 +247,11 @@ def check_region_shares(config: MouseRegionConfig, shares: RegionShares) -> None
     """
     if config.coupled_regions and shares.subclass_structure_home is None:
         raise MouseRegionError(
-            "coupled_regions needs structure-level subclass homes "
-            f"({REGION_STRUCTURE_HOME_FILE}), which the region-share tables lack "
-            "(plan §7.8 (a))"
+            "coupled_regions (the default mouse region rule couples OB to OLF) "
+            f"needs structure-level subclass homes ({REGION_STRUCTURE_HOME_FILE}), "
+            "which the region-share tables lack; a wmb_region_share bundle of "
+            "revision 2 or later has them (rebuild it with merxen "
+            "annotation-reference-prep; plan §7.8 (a))"
         )
 
 

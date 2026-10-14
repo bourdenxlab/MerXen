@@ -1179,11 +1179,36 @@ class AnnotationFlagsConfig(_AnnotationModel):
 
 
 MOUSE_RULE_VARIANTS: Final[tuple[str, ...]] = ("v1", "m6b")
+# The production mouse region rule (the ``MouseRegionConfig`` defaults) is the
+# rule M6b selected, ``a+f:tile200,nn2`` (pre-registration §24, selection of
+# 2026-10-14 under the Allen-relative T2 reading the user approved): (a) OB
+# coupled to OLF through AON-home tiles, (f) 200 µm tiles with 2 confident
+# neurons. Its label in the M6b scoring:
+MOUSE_REGION_RULE_LABEL: Final = "a+f:tile200,nn2"
+# The v1 (E7 / M6) rule, the default until then (``MouseRegionConfig.v1``):
+# the fields the selected rule changes, at their v1 values.
+MOUSE_V1_REGION_RULE: Final[dict[str, Any]] = {
+    "tile_um": 150.0,
+    "min_neurons_per_tile": 3,
+    "coupled_regions": {},
+    "conditional_never_drop": [],
+    "region_min_tile_fraction": {},
+    "rule_variant": "v1",
+}
 # The structure-level home that evidences a coupled region (plan §7.8 (a):
 # OB is present with OLF when AON-home tiles hold >= 1% of assigned tiles).
 DEFAULT_COUPLING_HOME_STRUCTURES: Final[dict[str, tuple[str, ...]]] = {
     "OB": ("AON",),
 }
+
+
+def _copy_value(value: Any) -> Any:
+    """Return a copy of a JSON-like value (dicts and lists copied)."""
+    if isinstance(value, dict):
+        return {key: _copy_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_copy_value(item) for item in value]
+    return value
 
 
 class ConditionalNeverDrop(_AnnotationModel):
@@ -1241,15 +1266,20 @@ class ConditionalNeverDrop(_AnnotationModel):
 class MouseRegionConfig(_AnnotationModel):
     """Mouse region inference and two-tier pruning (plan §3.7, §7.2; E7).
 
-    The defaults are the v1 (E7 / M6) rule. M6b's candidate changes (§7.8)
-    are the tile parameters (variant (f)), ``coupled_regions`` with
+    The defaults are the rule M6b selected, ``a+f:tile200,nn2``
+    (``MOUSE_REGION_RULE_LABEL``; pre-registration §24): the v1 (E7 / M6)
+    rule with 200 µm tiles, 2 confident neurons per tile and OB coupled to
+    OLF through AON-home tiles (``rule_variant = "m6b"``). It needs the
+    structure-level homes of a ``wmb_region_share`` bundle of revision 2 or
+    later. ``MouseRegionConfig.v1()`` is the v1 rule. M6b's candidate changes
+    (§7.8) are the tile parameters (variant (f)), ``coupled_regions`` with
     ``coupling_home_structures`` (a), ``conditional_never_drop`` (b, c) and
     ``region_min_tile_fraction`` (d); the last three need
     ``rule_variant = "m6b"`` (``mouse_regions.check_rule_variant``).
 
     Attributes:
-        tile_um: Tile size.
-        min_neurons_per_tile: Confident neurons a tile needs.
+        tile_um: Tile size (200 µm; v1 150 µm).
+        min_neurons_per_tile: Confident neurons a tile needs (2; v1 3).
         confident_neuron_min_bp: Class and subclass bootstrap probability of a
             confident neuron.
         min_tile_fraction: Share of assigned tiles a present region needs.
@@ -1271,8 +1301,8 @@ class MouseRegionConfig(_AnnotationModel):
             counts as present when one of its coupled divisions is present
             and the tiles whose majority structure-level home is one of its
             ``coupling_home_structures`` hold at least
-            ``coupling_min_tile_fraction`` of the assigned tiles. Empty in
-            v1.
+            ``coupling_min_tile_fraction`` of the assigned tiles. The
+            default is ``{"OB": ["OLF"]}``; empty in v1.
         coupling_home_structures: CCF structures (``parcellation_structure``)
             evidencing each coupled division (``OB``: ``AON``).
         coupling_min_tile_fraction: Share of assigned tiles the evidencing
@@ -1286,12 +1316,13 @@ class MouseRegionConfig(_AnnotationModel):
         coherence_max_conf: Only cells below this confidence are flagged.
         ap_scope_min_mm: The report warns in front of this AP estimate.
         ap_scope_max_mm: The report warns behind this AP estimate.
-        rule_variant: Region-rule variant: ``v1`` (default; the M6b fields
-            must stay empty) or ``m6b`` (any M6b candidate).
+        rule_variant: Region-rule variant: ``m6b`` (default; any M6b
+            candidate, the selected rule among them) or ``v1`` (the M6b
+            fields must stay empty).
     """
 
-    tile_um: float = Field(default=150.0, gt=0.0)
-    min_neurons_per_tile: int = Field(default=3, ge=1)
+    tile_um: float = Field(default=200.0, gt=0.0)
+    min_neurons_per_tile: int = Field(default=2, ge=1)
     confident_neuron_min_bp: float = 0.9
     min_tile_fraction: float = 0.01
     min_component_tiles: int = Field(default=3, ge=1)
@@ -1310,7 +1341,9 @@ class MouseRegionConfig(_AnnotationModel):
             "34 Immune",
         ]
     )
-    coupled_regions: dict[str, list[str]] = Field(default_factory=dict)
+    coupled_regions: dict[str, list[str]] = Field(
+        default_factory=lambda: {"OB": ["OLF"]}
+    )
     coupling_home_structures: dict[str, list[str]] = Field(
         default_factory=lambda: {
             region: list(structures)
@@ -1325,7 +1358,22 @@ class MouseRegionConfig(_AnnotationModel):
     coherence_max_conf: float = 0.8
     ap_scope_min_mm: float = 2.4
     ap_scope_max_mm: float = 10.4
-    rule_variant: str = "v1"
+    rule_variant: str = "m6b"
+
+    @classmethod
+    def v1(cls: type[MouseRegionConfig], **updates: Any) -> MouseRegionConfig:
+        """Return the v1 (E7 / M6) region rule.
+
+        Args:
+            **updates: Other fields to set (validated as usual).
+
+        Returns:
+            The defaults with ``MOUSE_V1_REGION_RULE`` and the updates.
+        """
+        settings = {
+            key: _copy_value(value) for key, value in MOUSE_V1_REGION_RULE.items()
+        }
+        return cls.model_validate({**settings, **updates})
 
     @field_validator(
         "confident_neuron_min_bp",

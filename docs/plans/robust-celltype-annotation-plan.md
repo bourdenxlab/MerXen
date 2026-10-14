@@ -1198,6 +1198,12 @@ Step 1 (archive to `$A`, sha256 manifest) **done 2026-09-26**. **Exit (remaining
   - *The rule (U1):* you approved reading the T2 bound as "T2 no higher than the Allen labels' own T2, with the same regions" ("1. go with recommendation"). It applies to the selection and to MO10's T2 clause. It is a LOOSENING and POST-HOC (pre-registration §24, amendment of 2026-10-14).
   - *M6b-R* re-runs the selection under that reading, with no new re-map; `a+f:tile200,nn2` is expected. It then records the selection in §24 and scores MO10 on it.
   - *Gate M* carries one written MO10 exception.
+- **Status (2026-10-14, M6b-R; branch `feature/rca-m6b-r-region-rule`).** The rule is selected and is the mouse default.
+  - *Selection.* Re-run under the approved reading, with no re-map (`$A/m6b/scoring_u1`). It reproduces the 2026-09-29 outputs and the stage C T2 diagnostic exactly. 43 of the 96 rules meet the Allen-relative bound, v1 among them, and none meets 0.1%. The selection is `a+f:tile200,nn2` (S 0.210%, against v1's 0.757%), recorded in §24 (`35455e8`) before MO10 was scored.
+  - *MO10 on `a+f:tile200,nn2`* (`$A/m6b/scoring_u1/mo10/`) fails only the missed-region clause: at .35 (STR missed; harm 0.140% in MERFISH 500 and 0.133% in MERFISH ∩ VZG2) and .46 (CTXsp missed; 0.103%, MERFISH 500). Those are the parts the approval covers; MERFISH ∩ ag7 passes. The bin-mean harm (at most 0.080%), the section maximum (at most 0.210%) and T2 under the approved reading pass. Under the registered 0.1% T2 reading, T2 fails in 6 (gene set × bin) cells as well.
+  - *MO2 / MO3.* The selected rule passes both on ag7 proseg_hybrid and VZG2 original_seg (STAGE_C_REPORT §4). On the production path with the new bundle, the region step infers the scoring's regions and drop list on both datasets. Its drop list is the one v1 recorded, so the re-mapped cells are unchanged (`$A/m6b/region_share_r2/mo2_mo3/CHECK_REGIONS.txt`).
+  - *Production.* `MouseRegionConfig`'s defaults are the selected rule: 200 µm tiles, 2 neurons per tile, OB coupled to OLF through AON-home tiles, `rule_variant` `m6b`. `MouseRegionConfig.v1()` is the old rule. The coupling reads structure-level homes, which the `wmb_region_share` builder writes from revision 2 (`region_structure_home.parquet`). The `/srv` store holds the revision-2 bundle `2bf9c01c…`.
+  - *Exit.* MO10 passes except for the written exception that gate M carries (U1); the chosen variant is in the pre-registration; MO2 and MO3 pass on ag7 and VZG2.
 
 ### M7 `[feature]`: `ANNOTATION_REPORT` (4–6 days)
 

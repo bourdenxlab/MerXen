@@ -448,11 +448,21 @@ def test_mouse_region_config() -> None:
     assert set(regions.never_drop_classes) == {
         name for name in wmb.names if wmb.is_never_drop(name)
     }
-    assert regions.coupled_regions == {}
-    assert regions.tile_um == 150.0
-    assert MouseRegionConfig(coupled_regions={"OB": ["OLF"]}).coupled_regions == {
-        "OB": ["OLF"]
-    }
+    # The default rule is M6b's selection, a+f:tile200,nn2 (pre-registration
+    # §24); MouseRegionConfig.v1() is the E7 / M6 rule.
+    assert regions.coupled_regions == {"OB": ["OLF"]}
+    assert (regions.tile_um, regions.min_neurons_per_tile) == (200.0, 2)
+    assert regions.rule_variant == "m6b"
+    v1 = MouseRegionConfig.v1()
+    assert (v1.tile_um, v1.min_neurons_per_tile, v1.rule_variant) == (150.0, 3, "v1")
+    assert (
+        v1.coupled_regions == {} and v1.never_drop_classes == regions.never_drop_classes
+    )
+    # v1() copies its settings: changing one rule leaves the next one intact.
+    v1.coupled_regions["OB"] = ["OLF"]
+    assert MouseRegionConfig.v1().coupled_regions == {}
+    assert MouseRegionConfig.v1(tile_um=100.0).tile_um == 100.0
+    assert MouseRegionConfig(coupled_regions={}).coupled_regions == {}
     with pytest.raises(ValidationError, match="unknown regions"):
         MouseRegionConfig(coupled_regions={"OB": ["AON"]})
     with pytest.raises(ValidationError, match="ap_scope_min_mm"):

@@ -30,14 +30,22 @@ ag7 proseg_hybrid and VZG2 original_seg. Subcommands, each writing under
    lookup and ``--nodes_to_drop``; as ``pipeline._remap_cells``).
 4. ``summarise``: T2 after pruning (``mouse_gate.t2_share`` on the pruned
    subclass calls with the candidate's present regions and never-drop
-   nodes), relabelled cells, MO2 on ag7 and VZG2, the per-AP-bin tables, the
-   candidate table and the pre-registered selection (lowest maximum direct
-   harm over the 38 sections and 3 gene sets, subject to MO2 on ag7 and VZG2
-   and the bin-mean T2 <= 0.1% in every bin; ties: fewer changes from v1,
-   then fewer drop decisions differing from v1, then the label).
-5. ``mo10``: MO10 on the selected candidate, per gene set; refuses to run
-   unless the pre-registration names the selected candidate (§24 "order of
-   record").
+   nodes), the Allen labels' T2 with the same regions and T2 subclasses
+   (``t2_allen``), relabelled cells, MO2 on ag7 and VZG2, the per-AP-bin
+   tables, the candidate table and the pre-registered selection (lowest
+   maximum direct harm over the 38 sections and 3 gene sets, subject to MO2
+   on ag7 and VZG2 and constraint (ii) on T2; ties: fewer changes from v1,
+   then fewer drop decisions differing from v1, then the label). Constraint
+   (ii) has two readings, both reported (``--t2-reading``):
+   ``allen-relative`` (the default; §24 amendment of 2026-10-14, U1:
+   for every gene set and AP bin, the bin-mean T2 after pruning is at most
+   the bin-mean Allen-label T2, 1e-12 for rounding, a missing value fails)
+   and ``registered`` (the bin-mean T2 after pruning <= 0.1% in every bin).
+5. ``mo10``: MO10 on the selected candidate, per gene set, with the T2 clause
+   scored under the selection's reading and reported under both; refuses to
+   run unless the pre-registration names the selected candidate (§24 "order
+   of record"), after the amendment that approved the reading if it is
+   ``allen-relative``.
 6. ``ap-estimate``: ``mouse_ap.estimate_ap`` on held-out MERFISH sections
    (each section left out of the reference): with the Allen labels of every
    section and with our mappings of the in-scope sections; the error
@@ -51,7 +59,10 @@ Usage::
         --real ag7=MAP_DIR --real vzg2=MAP_DIR --region-share-bundle DIR
     mouse_ap_axis.py remap --out OUT --gene-id-fallback-csv gene.csv \
         [--worker I --n-workers N --n-processors P]
-    mouse_ap_axis.py summarise --out OUT
+    mouse_ap_axis.py summarise --out OUT --mapping-done DONE_DIR \
+        --subsamples DIR --real ag7=MAP_DIR --real vzg2=MAP_DIR \
+        --region-share-bundle DIR [--taxonomy-bundle WMB_PANEL_DIR] \
+        [--t2-reading allen-relative|registered]
     mouse_ap_axis.py mo10 --out OUT --preregistration PREREG.md
     mouse_ap_axis.py ap-estimate --out OUT --region-share-bundle DIR \
         --mapping-done DONE_DIR --subsamples DIR
@@ -90,7 +101,7 @@ from merxen.annotation.mouse_ap import (
     is_neuronal_subclass,
     section_steps,
 )
-from merxen.annotation.mouse_gate import t2_share
+from merxen.annotation.mouse_gate import t2_share, t2_subclasses
 from merxen.annotation.mouse_regions import (
     DroppedNode,
     RegionShares,
@@ -134,6 +145,18 @@ MO10_SECTION_MAX_HARM = 0.003
 MO10_T2_BIN_MEAN_MAX = 0.001
 MO10_MISSED_HARM_MAX = 0.001
 SECTION_ABOVE = 0.001
+# The two readings of selection constraint (ii) and MO10's T2 clause (§24).
+# ``allen-relative`` is the reading the user approved on 2026-10-14 (§24,
+# "Amendment of 2026-10-14 (U1)"): the bin-mean T2 after pruning is at most
+# the bin-mean T2 of the Allen labels of the same cells with the rule's own
+# regions and T2 subclasses; ``registered`` is "<= 0.1% in every bin".
+T2_READING_ALLEN = "allen-relative"
+T2_READING_REGISTERED = "registered"
+T2_READINGS: tuple[str, ...] = (T2_READING_ALLEN, T2_READING_REGISTERED)
+# Absolute tolerance of the Allen-relative comparison, for float rounding only.
+T2_ALLEN_TOLERANCE = 1e-12
+# A selection under the Allen-relative reading is recorded after this heading.
+T2_ALLEN_AMENDMENT_HEADING = "### Amendment of 2026-10-14 (U1)"
 # E7 PRESENT_MANUAL: the manual anatomy of ag7 and VZG2 (MO3).
 MANUAL_REGIONS: dict[str, tuple[str, ...]] = {
     "ag7": ("Isocortex", "OLF", "HPF", "CTXsp", "TH", "HY", "MB"),
@@ -231,7 +254,11 @@ class Candidate:
         )
 
     def config(self) -> MouseRegionConfig:
-        """Return the rule's ``MouseRegionConfig`` (M6 values elsewhere)."""
+        """Return the rule's ``MouseRegionConfig`` (M6 values elsewhere).
+
+        Built on the v1 rule (``MouseRegionConfig.v1``), not on the defaults:
+        since M6b-R the defaults are the selected candidate.
+        """
         settings: dict[str, Any] = {
             "tile_um": self.tile_um,
             "min_neurons_per_tile": self.min_neurons,
@@ -247,7 +274,7 @@ class Candidate:
             settings["conditional_never_drop"] = keep
         if self.components:
             settings["rule_variant"] = "m6b"
-        return MouseRegionConfig.model_validate(settings)
+        return MouseRegionConfig.v1(**settings)
 
 
 def all_candidates() -> list[Candidate]:
@@ -660,6 +687,56 @@ def taxonomy_for(bundle_path: str) -> WmbTaxonomy:
     return _TAXONOMY_CACHE[bundle_path]
 
 
+def check_taxonomy_fits(data: Dataset, taxonomy: WmbTaxonomy) -> None:
+    """Refuse a taxonomy that does not fit a dataset's calls and Allen labels.
+
+    Used with ``--taxonomy-bundle``: every (class, subclass) pair of the
+    unpruned calls, and of the Allen labels of a MERFISH section, must be a
+    parent and child of the taxonomy's tree.
+
+    Args:
+        data: The dataset.
+        taxonomy: The taxonomy read in place of its MAP run's bundle.
+
+    Raises:
+        ValueError: If a pair does not fit.
+    """
+    parent = {sub: cls for cls, subs in taxonomy.subclasses.items() for sub in subs}
+    sources = [(data.class_names, data.subclass_names)]
+    if data.allen_class is not None and data.allen_subclass is not None:
+        sources.append((data.allen_class, data.allen_subclass))
+    pairs: set[tuple[str, str]] = set()
+    for classes, subclasses in sources:
+        for klass, sub in zip(classes, subclasses, strict=True):
+            if isinstance(klass, str) and isinstance(sub, str):
+                pairs.add((str(klass), str(sub)))
+    wrong = sorted((klass, sub) for klass, sub in pairs if parent.get(sub) != klass)
+    if wrong:
+        raise ValueError(
+            f"{data.key}: {len(wrong)} (class, subclass) pairs do not fit the "
+            f"taxonomy, e.g. {wrong[:3]}"
+        )
+
+
+def dataset_taxonomy(data: Dataset, override: str | None) -> WmbTaxonomy:
+    """Return a dataset's taxonomy: its MAP run's bundle's, or an override's.
+
+    Args:
+        data: The dataset.
+        override: A ``wmb_panel`` bundle to read the taxonomy from instead
+            (``--taxonomy-bundle``; checked against the dataset), or
+            ``None``.
+
+    Returns:
+        The class / subclass taxonomy.
+    """
+    if override is None:
+        return taxonomy_for(data.bundle_path)
+    taxonomy = taxonomy_for(override)
+    check_taxonomy_fits(data, taxonomy)
+    return taxonomy
+
+
 def full_shares(bundle_dir: Path, structure_home: pd.DataFrame) -> RegionShares:
     """The store bundle's shares with the full structure homes (ag7 / VZG2)."""
     return RegionShares.from_tables(
@@ -848,6 +925,88 @@ def t2_values(
         never_drop_subclasses=sorted(kept),
     )
     return static, kept_excluded
+
+
+def t2_allen_labels(
+    allen_subclass: Sequence[object] | np.ndarray,
+    regions: Sequence[str],
+    shares: RegionShares,
+    taxonomy: WmbTaxonomy,
+    config: MouseRegionConfig,
+) -> float:
+    """Return the Allen labels' T2 with a rule's regions (§24 amendment, U1).
+
+    The T2 subclass set of the rule's T2 after pruning (``t2_subclasses``:
+    the same regions and shares, the static never-drop classes,
+    ``min_merfish_cells_subclass``), applied to the Allen subclass labels of
+    the same table cells. Every table cell counts: no correlation or
+    bootstrap filter. This is ``t2_allen_labels`` of the stage C diagnostic
+    (``$A/m6b/stageC/t2_diagnostic.py``).
+
+    Args:
+        allen_subclass: The Allen subclass label per table cell.
+        regions: The rule's T2 regions of the section (``t2_regions``).
+        shares: The section's region shares.
+        taxonomy: The taxonomy (subclass to class).
+        config: The rule.
+
+    Returns:
+        The share of table cells whose Allen subclass is T2.
+    """
+    subclass_class = {
+        sub: cls for cls, subs in taxonomy.subclasses.items() for sub in subs
+    }
+    t2 = t2_subclasses(
+        regions,
+        shares,
+        subclass_class=subclass_class,
+        never_drop_classes=list(config.never_drop_classes),
+        min_merfish_cells=config.min_merfish_cells_subclass,
+    )
+    labels = np.asarray([str(name) for name in allen_subclass], dtype=object)
+    if not len(labels):
+        return 0.0
+    return float(np.isin(labels, sorted(t2)).mean())
+
+
+def t2_columns(
+    subclasses: Sequence[object] | np.ndarray,
+    allen_subclass: Sequence[object] | np.ndarray | None,
+    regions: Sequence[str],
+    shares: RegionShares,
+    taxonomy: WmbTaxonomy,
+    config: MouseRegionConfig,
+    *,
+    remap_missing: bool = False,
+) -> dict[str, float]:
+    """Return a section's T2 columns for one rule (§24).
+
+    Args:
+        subclasses: The pruned subclass call per table cell.
+        allen_subclass: The Allen subclass labels (MERFISH), or ``None``.
+        regions: The rule's T2 regions of the section.
+        shares: The section's region shares.
+        taxonomy: The taxonomy.
+        config: The rule.
+        remap_missing: The rule's re-map has not run (T2 after pruning is
+            then missing).
+
+    Returns:
+        ``t2_after`` (the registered T2 after pruning),
+        ``t2_after_kept_excluded`` (diagnostic) and ``t2_allen`` (the Allen
+        labels' T2; NaN without Allen labels).
+    """
+    after, kept = (
+        (np.nan, np.nan)
+        if remap_missing
+        else t2_values(subclasses, regions, shares, taxonomy, config)
+    )
+    allen = (
+        np.nan
+        if allen_subclass is None
+        else t2_allen_labels(allen_subclass, regions, shares, taxonomy, config)
+    )
+    return {"t2_after": after, "t2_after_kept_excluded": kept, "t2_allen": allen}
 
 
 def _plan_one(task: tuple[str, dict[str, Any]]) -> dict[str, Any]:
@@ -1157,7 +1316,7 @@ def _summarise_one(task: dict[str, Any]) -> list[dict[str, Any]]:
         structure = pd.read_parquet(out / "tables" / "structure_home_full.parquet")
         shares = full_shares(Path(task["region_share_bundle"]), structure)
         data = load_real_dataset(str(first["section"]), Path(task["map_dir"]))
-    taxonomy = taxonomy_for(data.bundle_path)
+    taxonomy = dataset_taxonomy(data, task.get("taxonomy_bundle"))
     cache: dict[str, tuple[np.ndarray, np.ndarray, bool, np.ndarray]] = {}
     class_labels = data.class_labels.astype(str)
     subclass_labels = data.subclass_labels.astype(str)
@@ -1187,13 +1346,17 @@ def _summarise_one(task: dict[str, Any]) -> list[dict[str, Any]]:
         config = candidate.config()
         regions = _split(record["t2_regions"])
         record["remap_missing"] = missing
-        t2, t2_kept = (
-            (np.nan, np.nan)
-            if missing
-            else t2_values(subclasses, regions, shares, taxonomy, config)
+        record.update(
+            t2_columns(
+                subclasses,
+                data.allen_subclass,
+                regions,
+                shares,
+                taxonomy,
+                config,
+                remap_missing=missing,
+            )
         )
-        record["t2_after"] = t2
-        record["t2_after_kept_excluded"] = t2_kept
         class_changed = classes.astype(object) != data.class_names.astype(object)
         subclass_changed = subclasses.astype(object) != data.subclass_names.astype(
             object
@@ -1267,10 +1430,80 @@ def per_bin_summary(
     return table.sort_values(["gene_set", "candidate", "_order"]).drop(columns="_order")
 
 
+def t2_ok_registered(bins: pd.DataFrame) -> bool:
+    """Constraint (ii) as registered: the bin-mean T2 <= 0.1% in every bin.
+
+    Args:
+        bins: A rule's per-bin rows (``t2_after_mean``).
+
+    Returns:
+        Whether every bin mean is at most 0.1% (a missing value fails).
+    """
+    values = bins["t2_after_mean"]
+    return bool((values <= MO10_T2_BIN_MEAN_MAX).all()) and not values.isna().any()
+
+
+def t2_ok_allen(bins: pd.DataFrame) -> bool:
+    """Constraint (ii) as approved on 2026-10-14 (§24 amendment, U1).
+
+    For every bin: the bin-mean T2 after pruning is at most the bin-mean
+    Allen-label T2 with the same regions, in float64 with an absolute
+    tolerance of ``T2_ALLEN_TOLERANCE`` for rounding only.
+
+    Args:
+        bins: A rule's per-bin rows (``t2_after_mean``, ``t2_allen_mean``).
+
+    Returns:
+        Whether every bin meets the bound; a missing value on either side
+        (or no ``t2_allen_mean`` column) fails.
+    """
+    if "t2_allen_mean" not in bins:
+        return False
+    after = pd.to_numeric(bins["t2_after_mean"], errors="coerce")
+    allen = pd.to_numeric(bins["t2_allen_mean"], errors="coerce")
+    if after.isna().any() or allen.isna().any():
+        return False
+    return bool((after <= allen + T2_ALLEN_TOLERANCE).all())
+
+
+def _t2_excess(bins: pd.DataFrame) -> pd.Series:
+    """Return the per-bin T2 after pruning minus the Allen-label T2."""
+    if "t2_allen_mean" not in bins:
+        return pd.Series(np.nan, index=bins.index, dtype=np.float64)
+    return pd.to_numeric(bins["t2_after_mean"], errors="coerce") - pd.to_numeric(
+        bins["t2_allen_mean"], errors="coerce"
+    )
+
+
+def _check_t2_reading(t2_reading: str) -> None:
+    if t2_reading not in T2_READINGS:
+        raise ValueError(f"unknown T2 reading {t2_reading!r}; known: {T2_READINGS}")
+
+
 def candidate_table(
-    merfish: pd.DataFrame, real: pd.DataFrame, bins: pd.DataFrame
+    merfish: pd.DataFrame,
+    real: pd.DataFrame,
+    bins: pd.DataFrame,
+    *,
+    t2_reading: str = T2_READING_ALLEN,
 ) -> pd.DataFrame:
-    """Return one row per candidate: S, the constraints and the tie keys."""
+    """Return one row per candidate: S, the constraints and the tie keys.
+
+    Args:
+        merfish: The in-scope MERFISH section rows.
+        real: The ag7 / VZG2 rows.
+        bins: The per-bin rows.
+        t2_reading: The reading of constraint (ii) that decides
+            ``t2_ok`` and ``admissible`` (``T2_READINGS``); both readings'
+            verdicts are reported (``t2_ok_registered``, ``t2_ok_allen``).
+
+    Returns:
+        One row per rule (v1 is the reference, never admissible).
+
+    Raises:
+        ValueError: For an unknown T2 reading.
+    """
+    _check_t2_reading(t2_reading)
     v1 = merfish[merfish["candidate"] == "v1"].set_index(["dataset"])["nodes"]
     v1_pairs = {
         dataset: {
@@ -1289,10 +1522,10 @@ def candidate_table(
             }
             differing += len(pairs ^ v1_pairs.get(record["dataset"], set()))
         cand_bins = bins[bins["candidate"] == label]
-        t2_ok = (
-            bool((cand_bins["t2_after_mean"] <= MO10_T2_BIN_MEAN_MAX).all())
-            and not cand_bins["t2_after_mean"].isna().any()
-        )
+        registered_ok = t2_ok_registered(cand_bins)
+        allen_ok = t2_ok_allen(cand_bins)
+        t2_ok = allen_ok if t2_reading == T2_READING_ALLEN else registered_ok
+        excess = _t2_excess(cand_bins)
         real_part = real[real["candidate"] == label]
         mo2: dict[str, bool | None] = {}
         for name in REAL_DATASETS:
@@ -1317,6 +1550,13 @@ def candidate_table(
                 "max_oracle_harm": float(part["oracle_harm"].max()),
                 "max_t2_bin_mean": float(cand_bins["t2_after_mean"].max()),
                 "t2_ok": t2_ok,
+                "t2_reading": t2_reading,
+                "t2_ok_registered": registered_ok,
+                "t2_ok_allen": allen_ok,
+                "max_t2_excess_over_allen": float(excess.max()),
+                "n_t2_bins_above_allen": int(
+                    (excess.isna() | (excess > T2_ALLEN_TOLERANCE)).sum()
+                ),
                 "mo2_ag7": mo2.get("ag7"),
                 "mo2_vzg2": mo2.get("vzg2"),
                 "mo2_ok": all(value is True for value in mo2.values()),
@@ -1400,6 +1640,8 @@ def summarise_command(args: argparse.Namespace) -> int:
             )
         else:
             task.update({"done": done_by_key[key], "subsamples": args.subsamples})
+        if args.taxonomy_bundle:
+            task["taxonomy_bundle"] = args.taxonomy_bundle
         tasks.append(task)
     records: list[dict[str, Any]] = []
     with ProcessPoolExecutor(max_workers=args.processes) as pool:
@@ -1418,12 +1660,23 @@ def summarise_command(args: argparse.Namespace) -> int:
     real.to_csv(summary / "real.csv", index=False)
     bins = per_bin_summary(
         merfish,
-        ["harm", "harm_confident", "oracle_harm", "t2_after", "relabelled", "n_nodes"],
+        [
+            "harm",
+            "harm_confident",
+            "oracle_harm",
+            "t2_after",
+            "relabelled",
+            "n_nodes",
+            "t2_allen",
+        ],
     )
     bins.to_csv(summary / "bins.csv", index=False)
-    table = candidate_table(merfish, real, bins)
+    table = candidate_table(merfish, real, bins, t2_reading=args.t2_reading)
     table.to_csv(summary / "candidates.csv", index=False)
     selection = select_candidate(table)
+    selection["t2_reading"] = args.t2_reading
+    if args.taxonomy_bundle:
+        selection["taxonomy_bundle"] = args.taxonomy_bundle
     selection["n_sections"] = int(merfish["section"].nunique())
     selection["gene_sets"] = sorted(merfish["gene_set"].unique())
     selection["n_rows"] = len(merfish)
@@ -1448,6 +1701,10 @@ def candidates_report(
         "38 sections x 3 gene sets)",
         f"selection: {selection.get('selected')} ({selection.get('reason')}); "
         f"complete={selection.get('complete')}",
+        f"T2 reading of constraint (ii): {selection.get('t2_reading')} (t2_ok and "
+        "admissible; t2_ok_registered: bin-mean T2 <= 0.1% in every bin; "
+        "t2_ok_allen: bin-mean T2 <= the Allen labels' bin-mean T2 with the "
+        "same regions in every bin, §24 amendment of 2026-10-14)",
         "",
     ]
     view = table.sort_values(
@@ -1460,6 +1717,9 @@ def candidates_report(
         "mean_harm",
         "max_t2_bin_mean",
         "t2_ok",
+        "t2_ok_registered",
+        "t2_ok_allen",
+        "max_t2_excess_over_allen",
         "mo2_ag7",
         "mo2_vzg2",
         "admissible",
@@ -1486,69 +1746,251 @@ def candidates_report(
 # 5. mo10
 
 
-def mo10_verdict(sections: pd.DataFrame, bins: pd.DataFrame) -> dict[str, Any]:
+def _failing_parts(
+    gene_set: str,
+    part: pd.DataFrame,
+    gene_bins: pd.DataFrame,
+    bad_missed: pd.DataFrame,
+    t2_reading: str,
+) -> list[dict[str, Any]]:
+    """Return the MO10 parts that fail for one gene set under a T2 reading."""
+    failing: list[dict[str, Any]] = []
+    for row in gene_bins.to_dict("records"):
+        if not row["harm_mean"] <= MO10_BIN_MEAN_HARM_MAX:
+            failing.append(
+                {
+                    "gene_set": gene_set,
+                    "part": "bin_mean_harm",
+                    "where": row["ap_bin"],
+                    "value": float(row["harm_mean"]),
+                    "limit": MO10_BIN_MEAN_HARM_MAX,
+                }
+            )
+    for row in part.sort_values("harm", ascending=False).to_dict("records"):
+        if not row["harm"] <= MO10_SECTION_MAX_HARM:
+            failing.append(
+                {
+                    "gene_set": gene_set,
+                    "part": "section_max_harm",
+                    "where": row["section"],
+                    "value": float(row["harm"]),
+                    "limit": MO10_SECTION_MAX_HARM,
+                }
+            )
+    for row in gene_bins.to_dict("records"):
+        after = float(row["t2_after_mean"])
+        if t2_reading == T2_READING_ALLEN:
+            allen = float(row.get("t2_allen_mean", np.nan))
+            ok = not (np.isnan(after) or np.isnan(allen)) and (
+                after <= allen + T2_ALLEN_TOLERANCE
+            )
+            limit = allen
+        else:
+            ok = after <= MO10_T2_BIN_MEAN_MAX
+            limit = MO10_T2_BIN_MEAN_MAX
+        if not ok:
+            failing.append(
+                {
+                    "gene_set": gene_set,
+                    "part": "t2_bin_mean",
+                    "where": row["ap_bin"],
+                    "value": after,
+                    "limit": limit,
+                    "t2_reading": t2_reading,
+                }
+            )
+    for row in bad_missed.to_dict("records"):
+        failing.append(
+            {
+                "gene_set": gene_set,
+                "part": "missed_region",
+                "where": row["section"],
+                "value": float(row["harm"]),
+                "limit": MO10_MISSED_HARM_MAX,
+                "missed": row["missed"],
+            }
+        )
+    return failing
+
+
+def mo10_verdict(
+    sections: pd.DataFrame,
+    bins: pd.DataFrame,
+    *,
+    t2_reading: str = T2_READING_REGISTERED,
+) -> dict[str, Any]:
     """Return MO10 (§9) for one candidate, per gene set and overall.
+
+    The T2 clause is scored under ``t2_reading`` and reported under both
+    readings (§24 amendment of 2026-10-14: the scored reading is the
+    selection's).
 
     Args:
         sections: The candidate's section rows (all gene sets).
         bins: Its per-bin rows.
+        t2_reading: The reading of the T2 clause that is scored.
 
     Returns:
-        Per gene set: bin means, section maximum, T2 bin means, missed
-        regions with harm above 0.1%; ``pass`` overall when every gene set
-        passes.
+        Per gene set: the checks (``t2_bin_mean_ok`` under the scored
+        reading, ``t2_bin_mean_ok_registered`` and ``t2_bin_mean_ok_allen``,
+        the latter ``None`` without Allen-label bins), bin means, section
+        maximum, T2 bin means against both bounds, missed regions with harm
+        above 0.1%; ``pass`` overall when every gene set passes,
+        ``pass_registered_t2`` with the registered T2 clause, and the failing
+        parts under each (``failing_parts``, ``failing_parts_registered_t2``).
+
+    Raises:
+        ValueError: For an unknown T2 reading.
     """
-    result: dict[str, Any] = {"gene_sets": {}}
+    _check_t2_reading(t2_reading)
+    result: dict[str, Any] = {"t2_reading": t2_reading, "gene_sets": {}}
+    failing: list[dict[str, Any]] = []
+    failing_registered: list[dict[str, Any]] = []
     for gene_set, part in sections.groupby("gene_set"):
         gene_bins = bins[bins["gene_set"] == gene_set]
         bad_missed = part[
             (part["missed"].fillna("") != "") & (part["harm"] > MO10_MISSED_HARM_MAX)
         ]
-        checks = {
+        registered_ok = bool((gene_bins["t2_after_mean"] <= MO10_T2_BIN_MEAN_MAX).all())
+        has_allen = "t2_allen_mean" in gene_bins
+        allen_ok = t2_ok_allen(gene_bins) if has_allen else None
+        others = {
             "bin_mean_harm_ok": bool(
                 (gene_bins["harm_mean"] <= MO10_BIN_MEAN_HARM_MAX).all()
             ),
             "section_max_harm_ok": bool(part["harm"].max() <= MO10_SECTION_MAX_HARM),
-            "t2_bin_mean_ok": bool(
-                (gene_bins["t2_after_mean"] <= MO10_T2_BIN_MEAN_MAX).all()
-            ),
             "missed_only_where_harm_small": bad_missed.empty,
         }
+        scored = (
+            registered_ok if t2_reading == T2_READING_REGISTERED else bool(allen_ok)
+        )
+        checks = {**others, "t2_bin_mean_ok": scored}
+        t2_bins = [
+            {
+                "ap_bin": row["ap_bin"],
+                "n_sections": int(row["n_sections"]),
+                "t2_after_mean": float(row["t2_after_mean"]),
+                "t2_allen_mean": (float(row["t2_allen_mean"]) if has_allen else None),
+            }
+            for row in gene_bins.to_dict("records")
+        ]
         result["gene_sets"][gene_set] = {
             **checks,
+            "t2_bin_mean_ok_registered": registered_ok,
+            "t2_bin_mean_ok_allen": allen_ok,
             "pass": all(checks.values()),
+            "pass_registered_t2": all(others.values()) and registered_ok,
             "max_section_harm": float(part["harm"].max()),
             "max_bin_mean_harm": float(gene_bins["harm_mean"].max()),
             "max_t2_bin_mean": float(gene_bins["t2_after_mean"].max()),
+            "t2_bins": t2_bins,
             "missed_with_harm_above": bad_missed[["section", "missed", "harm"]].to_dict(
                 "records"
             ),
             "max_oracle_harm": float(part["oracle_harm"].max()),
         }
+        failing += _failing_parts(
+            str(gene_set), part, gene_bins, bad_missed, t2_reading
+        )
+        failing_registered += _failing_parts(
+            str(gene_set), part, gene_bins, bad_missed, T2_READING_REGISTERED
+        )
     result["pass"] = bool(result["gene_sets"]) and all(
         value["pass"] for value in result["gene_sets"].values()
     )
+    result["pass_registered_t2"] = bool(result["gene_sets"]) and all(
+        value["pass_registered_t2"] for value in result["gene_sets"].values()
+    )
+    result["failing_parts"] = failing
+    result["failing_parts_registered_t2"] = failing_registered
     return result
+
+
+def mo10_report(verdict: Mapping[str, Any]) -> str:
+    """Plain-text MO10 verdict: the checks per gene set and the failing parts."""
+
+    def percent(value: Any) -> str:
+        return "-" if value is None else f"{100 * float(value):.3f}%"
+
+    lines = [
+        f"MO10 on {verdict['candidate']} (pre-registration §24; T2 clause scored "
+        f"under the {verdict['t2_reading']} reading, reported under both)",
+        f"MO10: {'PASS' if verdict['pass'] else 'FAIL'}; with the registered T2 "
+        f"clause (<= 0.1%): {'PASS' if verdict['pass_registered_t2'] else 'FAIL'}",
+        "",
+    ]
+    checks = (
+        "bin_mean_harm_ok",
+        "section_max_harm_ok",
+        "t2_bin_mean_ok",
+        "t2_bin_mean_ok_registered",
+        "t2_bin_mean_ok_allen",
+        "missed_only_where_harm_small",
+        "pass",
+    )
+    for gene_set, entry in verdict["gene_sets"].items():
+        lines.append(
+            f"{gene_set}: " + ", ".join(f"{check}={entry[check]}" for check in checks)
+        )
+        for row in entry["t2_bins"]:
+            lines.append(
+                f"  T2 {row['ap_bin']:>9}: after {percent(row['t2_after_mean'])}, "
+                f"Allen labels {percent(row['t2_allen_mean'])}"
+            )
+    for key, title in (
+        ("failing_parts", f"Failing parts ({verdict['t2_reading']} T2 reading)"),
+        ("failing_parts_registered_t2", "Failing parts (registered T2 reading)"),
+    ):
+        lines += ["", f"{title}: {len(verdict[key])}"]
+        for item in verdict[key]:
+            extra = f" missed {item['missed']}" if item.get("missed") else ""
+            lines.append(
+                f"  {item['gene_set']:<13} {item['part']:<17} {item['where']:<20} "
+                f"{percent(item['value'])} (limit {percent(item['limit'])}){extra}"
+            )
+    return "\n".join(lines) + "\n"
 
 
 def mo10_command(args: argparse.Namespace) -> int:
     """Score MO10 on the selected candidate, once the pre-registration names it."""
     out = Path(args.out)
-    selection = json.loads((out / "summary" / "selection.json").read_text())
+    selection_path = out / "summary" / "selection.json"
+    selection = json.loads(selection_path.read_text())
     chosen = selection.get("selected") or "v1"
-    text = Path(args.preregistration).read_text()
+    # A selection.json without a reading predates the amendment (registered).
+    t2_reading = str(selection.get("t2_reading") or T2_READING_REGISTERED)
+    _check_t2_reading(t2_reading)
+    prereg = Path(args.preregistration)
+    text = prereg.read_text()
     marker = f"Selected candidate (M6b): `{chosen}`"
     if marker not in text:
         raise SystemExit(
             f"the pre-registration does not record {marker!r}; commit the "
             "selection first (§24)"
         )
+    if t2_reading == T2_READING_ALLEN:
+        heading = text.find(T2_ALLEN_AMENDMENT_HEADING)
+        if heading < 0 or text.find(marker, heading) < 0:
+            raise SystemExit(
+                f"the pre-registration must record {marker!r} after "
+                f"{T2_ALLEN_AMENDMENT_HEADING!r}, the amendment that approved the "
+                f"{t2_reading} T2 reading of this selection; commit the "
+                "selection there first (§24)"
+            )
     sections = pd.read_parquet(out / "summary" / "sections.parquet")
     bins = pd.read_csv(out / "summary" / "bins.csv")
     verdict = mo10_verdict(
-        sections[sections["candidate"] == chosen], bins[bins["candidate"] == chosen]
+        sections[sections["candidate"] == chosen],
+        bins[bins["candidate"] == chosen],
+        t2_reading=t2_reading,
     )
     verdict["candidate"] = chosen
+    verdict["inputs"] = {
+        "selection_json": str(selection_path),
+        "selection_sha256": _sha256(selection_path),
+        "preregistration": str(prereg),
+        "preregistration_sha256": _sha256(prereg),
+    }
     real = pd.read_csv(out / "summary" / "real.csv")
     rows = real[real["candidate"] == chosen]
     verdict["mo2"] = rows[
@@ -1560,6 +2002,7 @@ def mo10_command(args: argparse.Namespace) -> int:
         for row in rows.to_dict("records")
     }
     _write_json(out / "mo10" / "mo10.json", verdict)
+    _write_text(out / "mo10" / "MO10.txt", mo10_report(verdict))
     logger.info("MO10: %s", verdict["pass"])
     return 0
 
@@ -1709,6 +2152,22 @@ def build_parser() -> argparse.ArgumentParser:
     summarise.add_argument("--real", action="append")
     summarise.add_argument("--region-share-bundle", required=True)
     summarise.add_argument("--processes", type=int, default=6)
+    summarise.add_argument(
+        "--taxonomy-bundle",
+        default=None,
+        help=(
+            "read the class / subclass taxonomy from this wmb_panel bundle instead "
+            "of each MAP run's bundle (every wmb_panel bundle has the validated "
+            "Allen tree without the supertype level); each dataset's calls and "
+            "Allen labels are checked against it"
+        ),
+    )
+    summarise.add_argument(
+        "--t2-reading",
+        choices=T2_READINGS,
+        default=T2_READING_ALLEN,
+        help="the reading of constraint (ii) that decides admissibility (§24)",
+    )
 
     mo10 = commands.add_parser("mo10", help="MO10 on the recorded selection")
     mo10.add_argument("--out", required=True)

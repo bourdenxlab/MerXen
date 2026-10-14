@@ -974,7 +974,22 @@ MOUSE_MERFISH: dict[str, dict[str, int]] = {
     "24 MY Glut": {"MY": 1000},
     "30 Astro-Epen": {"MY": 500, "Isocortex": 500},
 }
+# Structure-level home of each class's subclass (the bundle's
+# region_structure_home.parquet; none is AON, so the default rule's OB-OLF
+# coupling never adds OB).
+MOUSE_STRUCTURE_HOME: dict[str, str] = {
+    "01 IT-ET Glut": "MOp",
+    "19 MB Glut": "SCm",
+    "24 MY Glut": "MDRN",
+    "30 Astro-Epen": "MOp",
+}
 MOUSE_SID = "AG_MERSCOPE"
+# The fake section is laid out in v1's 150 µm tiles with 3 neurons each (200
+# tiles), so ``mouse_setup`` maps it with the v1 region rule
+# (``MouseRegionConfig.v1()``): under the default rule's 200 µm tiles it has
+# fewer than 200 assigned tiles and would skip pruning.
+# ``test_the_default_rule_prunes_the_scaled_fake_section`` maps the section
+# scaled to 200 µm tiles with the default rule.
 MOUSE_TILE = 150.0
 MOUSE_REGION_SHARE_HASH = "e" * 64
 
@@ -1038,6 +1053,8 @@ def mouse_region_share_bundle(
     *,
     build_hash: str = MOUSE_REGION_SHARE_HASH,
     composition: pd.DataFrame | None = None,
+    structure_homes: bool = True,
+    revision: int | None = None,
 ) -> Path:
     """Write a fake ``wmb_region_share`` bundle of ``MOUSE_MERFISH``.
 
@@ -1045,6 +1062,12 @@ def mouse_region_share_bundle(
         root: The store root.
         build_hash: The bundle's build hash (its directory name).
         composition: An optional ``section_composition.parquet`` table (G4).
+        structure_homes: Write ``region_structure_home.parquet``
+            (``MOUSE_STRUCTURE_HOME``; revision 2 of the builder, which the
+            default rule's coupling needs).
+        revision: The builder revision recorded in the hashed builder params
+            (``build_hash_payload.builder_params.revision``), or ``None`` to
+            record none (as a revision-1 bundle, built before it was hashed).
 
     Returns:
         The bundle directory.
@@ -1083,29 +1106,43 @@ def mouse_region_share_bundle(
     pd.DataFrame(home_rows).to_parquet(bundle_dir / "region_home.parquet")
     if composition is not None:
         composition.to_parquet(bundle_dir / "section_composition.parquet")
+    if structure_homes:
+        pd.DataFrame(
+            [
+                {
+                    "level": "subclass",
+                    "node_name": f"{class_name} 1",
+                    "home": MOUSE_STRUCTURE_HOME[class_name],
+                    "home_share": 1.0,
+                    "n_grey": sum(MOUSE_MERFISH[class_name].values()),
+                }
+                for class_name in MOUSE_MERFISH
+            ]
+        ).to_parquet(bundle_dir / "region_structure_home.parquet")
     files = [
         {"path": path.name, "size": path.stat().st_size}
         for path in sorted(bundle_dir.iterdir())
     ]
-    (bundle_dir / "bundle.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 2,
-                "status": "complete",
-                "build_hash": build_hash,
-                "reference_id": "wmb_region_share",
-                "species": "mouse",
-                "role": "region_share",
-                "builder_version": 3,
-                "panel": None,
-                "files": files,
-            }
-        )
-    )
+    manifest: dict[str, Any] = {
+        "schema_version": 2,
+        "status": "complete",
+        "build_hash": build_hash,
+        "reference_id": "wmb_region_share",
+        "species": "mouse",
+        "role": "region_share",
+        "builder_version": 3,
+        "panel": None,
+        "files": files,
+    }
+    if revision is not None:
+        manifest["build_hash_payload"] = {"builder_params": {"revision": revision}}
+    (bundle_dir / "bundle.json").write_text(json.dumps(manifest))
     return bundle_dir
 
 
-def mouse_section() -> tuple[np.ndarray, np.ndarray, list[str]]:
+def mouse_section(
+    tile: float = MOUSE_TILE,
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """Return counts, µm coordinates and kinds of the fake mouse section.
 
     200 tiles: Isocortex (01) left, MB (19) right, 5 MY sink calls in MB.
@@ -1117,9 +1154,12 @@ def mouse_section() -> tuple[np.ndarray, np.ndarray, list[str]]:
     neurons) never vote. The below-min_counts object comes first, so a
     selection of table rows by position rather than by cell id shifts every
     table cell's coordinates.
+
+    Args:
+        tile: The tile edge (µm) the section is laid out in.
     """
     counts: list[list[int]] = [[1, 0, 0, 0, 0, 0]]  # below min_counts
-    xy: list[tuple[float, float]] = [(0.5 * MOUSE_TILE, 0.5 * MOUSE_TILE)]
+    xy: list[tuple[float, float]] = [(0.5 * tile, 0.5 * tile)]
     kinds = ["low"]
     for i in range(20):
         for j in range(10):
@@ -1128,28 +1168,31 @@ def mouse_section() -> tuple[np.ndarray, np.ndarray, list[str]]:
                 row = [0] * 6
                 row[marker] = 30
                 counts.append(row)
-                xy.append(((i + 0.2 + 0.3 * k) * MOUSE_TILE, (j + 0.5) * MOUSE_TILE))
+                xy.append(((i + 0.2 + 0.3 * k) * tile, (j + 0.5) * tile))
                 kinds.append("ctx" if marker == 0 else "mb")
     for index in range(5):
         counts.append([0, 8, 20, 0, 0, 0])
-        xy.append(((12 + index + 0.5) * MOUSE_TILE, 3.5 * MOUSE_TILE))
+        xy.append(((12 + index + 0.5) * tile, 3.5 * tile))
         kinds.append("my")
     counts.append([3, 3, 20, 0, 0, 0])
-    xy.append((15.5 * MOUSE_TILE, 6.5 * MOUSE_TILE))
+    xy.append((15.5 * tile, 6.5 * tile))
     kinds.append("my_lost")
     for index in range(2):
         counts.append([0, 0, 0, 60, 0, 0])  # above the subclass floor (50)
-        xy.append(((2 + index + 0.5) * MOUSE_TILE, 2.5 * MOUSE_TILE))
+        xy.append(((2 + index + 0.5) * tile, 2.5 * tile))
         kinds.append("astro")
     return np.array(counts), np.array(xy, dtype=np.float64), kinds
 
 
-def write_mouse_h5ad(path: Path, *, spatial: bool = True) -> tuple[Path, list[str]]:
+def write_mouse_h5ad(
+    path: Path, *, spatial: bool = True, tile: float = MOUSE_TILE
+) -> tuple[Path, list[str]]:
     """Write the fake mouse section as a prepared h5ad.
 
     Args:
         path: The h5ad path.
         spatial: Write ``obsm['spatial']``.
+        tile: The tile edge (µm) the section is laid out in.
 
     Returns:
         The path and the object kinds (``mouse_section``).
@@ -1157,7 +1200,7 @@ def write_mouse_h5ad(path: Path, *, spatial: bool = True) -> tuple[Path, list[st
     import anndata as ad
     from scipy import sparse
 
-    counts, xy, kinds = mouse_section()
+    counts, xy, kinds = mouse_section(tile)
     var_names = [*MOUSE_SYMBOLS, "Blank-0001"]
     var = pd.DataFrame(index=pd.Index(var_names, dtype=str))
     var["gene"] = var_names
@@ -1174,7 +1217,7 @@ def write_mouse_h5ad(path: Path, *, spatial: bool = True) -> tuple[Path, list[st
 @pytest.fixture
 def mouse_setup(tmp_path: Path, fake_mmc: FakeMmc) -> dict[str, Any]:
     """The fake mouse section, its panel, WMB bundle and region-share bundle."""
-    from merxen.annotation.config import AnnotationConfig
+    from merxen.annotation.config import AnnotationConfig, MouseRegionConfig
     from merxen.annotation.mapmycells_engine import MmcBundle
     from merxen.annotation.mouse_regions import RegionShareBundle
     from merxen.annotation.panel import PANEL_GENES_FILE, REQUIRED_BUNDLES_FILE
@@ -1198,7 +1241,10 @@ def mouse_setup(tmp_path: Path, fake_mmc: FakeMmc) -> dict[str, Any]:
         drop_level="CCN20230722_SUPT",
     )
     bundle = MmcBundle.from_dir(bundle_dir)
-    config = AnnotationConfig(species="mouse").coupled_to_clustering(10)
+    # The v1 region rule: the section is laid out in its tiles (MOUSE_TILE).
+    config = AnnotationConfig(
+        species="mouse", mouse_regions=MouseRegionConfig.v1()
+    ).coupled_to_clustering(10)
     runs = map_bundles(
         required, panel_dir, {("wmb_panel", panel.panel_hash): bundle}, config
     )

@@ -1822,6 +1822,26 @@ This is why the amendment is POST-HOC.
 - *Anything further goes back to the user* before the gate M PR. That means any other MO10 part that fails: a bin-mean harm, a section-maximum harm, the T2 clause under the adopted reading, or a missed region at another section.
 - MO11 and its banner are unchanged.
 
+**Selection under the approved reading (recorded 2026-10-14, before MO10 is scored on the selected rule).**
+- *Run.* `scripts/acceptance/mouse_ap_axis.py summarise --t2-reading allen-relative` at `297f084`, into the new directory `$A/m6b/scoring_u1`. Its inputs are the 2026-09-29 scoring's tables, plan rows and re-maps, linked read-only from `$A/m6b/scoring`; no re-map ran. The `$A/m6b/scoring` files have the same sha256 before and after the run (2,312 files). The taxonomy came from the verified `/srv` bundle `af3fab09…` (`--taxonomy-bundle`, checked against every call and Allen label), and the region tables of ag7 and VZG2 from the `/srv` bundle `1867f978…`, whose files are byte-identical to those of the scoring's bundle. No SSD1 path was opened (`scoring_u1/runner.py`, `run_u1.sh`, `PROGRESS.txt`).
+- *Reproduction* (`scoring_u1/REPRODUCTION.txt`). Every column of the 2026-09-29 `sections.parquet`, `real.csv`, `bins.csv` and `candidates.csv` is reproduced exactly; `t2_ok_registered` equals the old `t2_ok` in 96/96 rows. The Allen-label T2 equals the stage C diagnostic's `t2_allen_labels` exactly in 342/342 section rows, and the 54 bin-mean rows of `T2_DIAGNOSTIC.txt` are reproduced as printed.
+- *Outcome* (`scoring_u1/summary/selection.json`, `candidates.csv`, `CANDIDATES.txt`).
+  - 43 of the 96 rules meet the approved bound, v1 among them; none meets the 0.1% bound; all 96 meet MO2. So 42 candidates are admissible.
+  - The lowest S among them is 0.210%, shared by 7 candidates. The 7 other rules at that S, all with component (c), exceed the Allen labels' T2 in one bin (merfish_ag7, 3.0–4.5 mm: 0.4067% against 0.4061%).
+  - The tie order selects `a+f:tile200,nn2`: 3 changes, tying `b+f:tile200,nn2` and `d+f:tile200,nn2`, and 662 differing drop decisions against their 990 and 694. This is the expected selection above.
+- MO10 has not been scored on this rule. It is scored next, with `mo10 --out $A/m6b/scoring_u1`, whose guard reads the line below.
+
+Selected candidate (M6b): `a+f:tile200,nn2`
+
+**MO10 on `a+f:tile200,nn2` (result, recorded 2026-10-14 after scoring; nothing here changes a reading, threshold or rule).** Scored at 11:59 with `mo10 --out $A/m6b/scoring_u1`, after the selection commit `35455e8` (11:18). The outputs are in `$A/m6b/scoring_u1/mo10/` (`mo10.json`, `MO10.txt`).
+- *Adopted reading (Allen-relative T2): FAIL.* Only the missed-region clause fails, at two sections:
+  - .35 (AP 7.6 mm), STR missed: harm 0.140% in MERFISH 500 and 0.133% in MERFISH ∩ VZG2;
+  - .46 (AP 5.7 mm), CTXsp missed: harm 0.103% in MERFISH 500.
+  MERFISH ∩ ag7 passes. In all three gene sets the bin-mean harm (at most 0.080%), the section maximum (at most 0.210%) and the T2 clause pass.
+- These are the parts the approval covers ("What the approval covers" above), so the written MO10 exception of gate M has this scope and nothing goes back to the user under U1.
+- *Registered T2 reading (0.1%), reported:* the T2 clause also fails, in 6 of the 18 (gene set × bin) cells.
+- *MO2 and MO3 with the selected rule* pass on ag7 proseg_hybrid and VZG2 original_seg (`scoring_u1/summary/real.csv`; STAGE_C_REPORT §4). The production region step was also run with the default rule and the revision-2 `wmb_region_share` bundle `2bf9c01c…`, with no re-map, on the M6 MAP output of ag7 and run3's MAP output of VZG2. It infers the scoring's regions and drop list on both, which is v1's recorded drop list (`$A/m6b/region_share_r2/mo2_mo3/CHECK_REGIONS.txt`).
+
 ## 25. Gate M scoring protocol (GM-PREREG; recorded 2026-10-14, before any gate M score is read)
 
 Gate M (plan §12 M9) scores the mouse criteria of §9 on ag7 and VZG2. This section fixes how, before any gate M run has produced a score. No gate M run has started: GM-RUNS starts after M6b-R, C22, A1 and the scorer (GM-SCORER). No §9 threshold, target or decision rule changes here, except through §24's amendment (U1).
