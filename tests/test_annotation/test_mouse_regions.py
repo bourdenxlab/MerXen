@@ -187,11 +187,11 @@ def test_section_regions_request_parses_auto_none_and_overrides() -> None:
 
 
 def test_unimplemented_rule_variants_are_refused() -> None:
-    check_rule_variant(MouseRegionConfig())
+    check_rule_variant(MouseRegionConfig.v1())
     with pytest.raises(MouseRegionError, match="coupled_regions"):
-        check_rule_variant(MouseRegionConfig(coupled_regions={"OB": ["OLF"]}))
+        check_rule_variant(MouseRegionConfig.v1(coupled_regions={"OB": ["OLF"]}))
     with pytest.raises(MouseRegionError, match="rule variant"):
-        check_rule_variant(MouseRegionConfig(rule_variant="a"))
+        check_rule_variant(MouseRegionConfig.v1(rule_variant="a"))
 
 
 def test_region_shares_sum_the_present_grey_divisions() -> None:
@@ -220,7 +220,7 @@ def test_wmb_taxonomy_reads_class_and_subclass_levels() -> None:
 
 
 def test_two_tier_rule_drops_by_the_class_share() -> None:
-    nodes = two_tier_drop_list(PRESENT, _shares(), _taxonomy(), MouseRegionConfig())
+    nodes = two_tier_drop_list(PRESENT, _shares(), _taxonomy(), MouseRegionConfig.v1())
 
     by_name = {node.name: node for node in nodes}
     assert _names(nodes) == [
@@ -248,7 +248,7 @@ def test_two_tier_rule_drops_by_the_class_share() -> None:
 
 
 def test_never_drop_and_unmapped_classes_are_kept() -> None:
-    nodes = two_tier_drop_list(PRESENT, _shares(), _taxonomy(), MouseRegionConfig())
+    nodes = two_tier_drop_list(PRESENT, _shares(), _taxonomy(), MouseRegionConfig.v1())
 
     classes = {node.class_name for node in nodes}
     assert "30 Astro-Epen" not in classes  # never dropped, though all in MY
@@ -260,10 +260,10 @@ def test_never_drop_and_unmapped_classes_are_kept() -> None:
         PRESENT,
         _shares(),
         _taxonomy(),
-        MouseRegionConfig(min_merfish_cells_class=50),
+        MouseRegionConfig.v1(min_merfish_cells_class=50),
     )
     assert "15 HY Gnrh1 Glut" in _names(smaller)  # absent: both subclasses go
-    more = MouseRegionConfig(never_drop_classes=["27 MY GABA"])
+    more = MouseRegionConfig.v1(never_drop_classes=["27 MY GABA"])
     assert "27 MY GABA" not in _names(
         two_tier_drop_list(PRESENT, _shares(), _taxonomy(), more)
     )
@@ -273,7 +273,7 @@ def test_never_drop_and_unmapped_classes_are_kept() -> None:
 
 
 def test_small_subclasses_follow_their_class() -> None:
-    config = MouseRegionConfig()
+    config = MouseRegionConfig.v1()
     nodes = _names(two_tier_drop_list(PRESENT, _shares(), _taxonomy(), config))
     assert "243 MY Glut tiny" in nodes  # absent class: follows it (dropped)
     assert "010 IT tiny Glut" not in nodes  # present class: kept
@@ -281,7 +281,7 @@ def test_small_subclasses_follow_their_class() -> None:
     everything = two_tier_drop_list(MOUSE_CCF_REGIONS, _shares(), _taxonomy(), config)
     assert everything == []
     # Raising the small-subclass limit makes 242 (100 cells) follow class 24.
-    bigger = MouseRegionConfig(min_merfish_cells_subclass=101)
+    bigger = MouseRegionConfig.v1(min_merfish_cells_subclass=101)
     assert "24 MY Glut" in _names(
         two_tier_drop_list(PRESENT, _shares(), _taxonomy(), bigger)
     )
@@ -289,7 +289,7 @@ def test_small_subclasses_follow_their_class() -> None:
 
 def test_drop_list_nodes_never_overlap_and_count_subclasses() -> None:
     taxonomy = _taxonomy()
-    nodes = two_tier_drop_list(PRESENT, _shares(), taxonomy, MouseRegionConfig())
+    nodes = two_tier_drop_list(PRESENT, _shares(), taxonomy, MouseRegionConfig.v1())
     class_nodes = {node.name for node in nodes if node.kind == "class"}
     assert not [
         node
@@ -346,7 +346,7 @@ def test_one_percent_rule_and_connected_components() -> None:
         "HY": [(14, 20), (15, 20), (16, 20)],
     }
     xy, names, confident = _section(blocks)
-    inference = infer_regions(xy, names, confident, _shares(), MouseRegionConfig())
+    inference = infer_regions(xy, names, confident, _shares(), MouseRegionConfig.v1())
 
     assert inference.n_assigned_tiles == 399
     assert inference.tile_counts["HPF"] == 4
@@ -355,11 +355,11 @@ def test_one_percent_rule_and_connected_components() -> None:
     assert inference.inferred_regions == ("Isocortex", "HPF", "MB")
     # 1% of 399 tiles is 3.99: HY's 3 connected tiles are below it; lowering
     # the fraction admits HY, and a 5-tile component rule removes HPF.
-    lower = MouseRegionConfig(min_tile_fraction=0.005)
+    lower = MouseRegionConfig.v1(min_tile_fraction=0.005)
     assert (
         "HY" in infer_regions(xy, names, confident, _shares(), lower).inferred_regions
     )
-    strict = MouseRegionConfig(min_component_tiles=5)
+    strict = MouseRegionConfig.v1(min_component_tiles=5)
     assert (
         "HPF"
         not in infer_regions(xy, names, confident, _shares(), strict).inferred_regions
@@ -372,10 +372,10 @@ def test_one_percent_rule_and_connected_components() -> None:
 def test_exactly_one_percent_of_tiles_is_present() -> None:
     blocks = {"Isocortex": _rect(0, 20, 0, 15), "HPF": [(0, 15), (1, 15), (2, 15)]}
     xy, names, confident = _section(blocks)
-    inference = infer_regions(xy, names, confident, _shares(), MouseRegionConfig())
+    inference = infer_regions(xy, names, confident, _shares(), MouseRegionConfig.v1())
     assert inference.n_assigned_tiles == 303
     assert inference.inferred_regions == ("Isocortex",)  # 3 / 303 < 1%
-    config = MouseRegionConfig(min_tile_fraction=3 / 303)
+    config = MouseRegionConfig.v1(min_tile_fraction=3 / 303)
     assert infer_regions(xy, names, confident, _shares(), config).inferred_regions == (
         "Isocortex",
         "HPF",
@@ -385,17 +385,17 @@ def test_exactly_one_percent_of_tiles_is_present() -> None:
 def test_tiles_need_enough_confident_neurons_and_voters() -> None:
     blocks = {"Isocortex": _rect(0, 10, 0, 10)}
     xy, names, confident = _section(blocks, per_tile=2)
-    inference = infer_regions(xy, names, confident, _shares(), MouseRegionConfig())
+    inference = infer_regions(xy, names, confident, _shares(), MouseRegionConfig.v1())
     assert inference.n_assigned_tiles == 0 and inference.inferred_regions == ()
     assert inference.n_voting_neurons == 200
-    two = MouseRegionConfig(min_neurons_per_tile=2)
+    two = MouseRegionConfig.v1(min_neurons_per_tile=2)
     assert infer_regions(xy, names, confident, _shares(), two).n_assigned_tiles == 100
     # Non-confident cells and subclasses without a MERFISH home do not vote.
     xy3, names3, confident3 = _section(blocks, per_tile=3)
     confident3[::3] = False
     assert (
         infer_regions(
-            xy3, names3, confident3, _shares(), MouseRegionConfig()
+            xy3, names3, confident3, _shares(), MouseRegionConfig.v1()
         ).n_assigned_tiles
         == 0
     )
@@ -411,7 +411,11 @@ def test_majority_ties_go_to_the_first_division_in_sorted_order() -> None:
         dtype=object,
     )
     inference = infer_regions(
-        xy, names, np.ones(4, bool), _shares(), MouseRegionConfig(min_component_tiles=1)
+        xy,
+        names,
+        np.ones(4, bool),
+        _shares(),
+        MouseRegionConfig.v1(min_component_tiles=1),
     )
     assert inference.tiles["region"].tolist() == ["HPF"]  # "HPF" < "MB"
 
@@ -469,7 +473,7 @@ def test_auto_plan_prunes_and_marks_the_dropped_cells() -> None:
         SectionRegionsRequest.parse("auto"),
         shares=_shares(),
         taxonomy=_taxonomy(),
-        config=MouseRegionConfig(),
+        config=MouseRegionConfig.v1(),
         **inputs,
     )
     assert plan.status == "pruned"
@@ -501,7 +505,7 @@ def test_fewer_than_200_assigned_tiles_skip_pruning() -> None:
         SectionRegionsRequest.parse("auto"),
         shares=_shares(),
         taxonomy=_taxonomy(),
-        config=MouseRegionConfig(),
+        config=MouseRegionConfig.v1(),
         **_plan_inputs(blocks),
     )
     assert plan.status == "skipped_few_tiles"
@@ -517,7 +521,7 @@ def test_auto_without_coordinates_skips_pruning() -> None:
         SectionRegionsRequest.parse("auto"),
         shares=_shares(),
         taxonomy=_taxonomy(),
-        config=MouseRegionConfig(),
+        config=MouseRegionConfig.v1(),
         **inputs,
     )
     assert plan.status == "skipped_no_coordinates"
@@ -530,7 +534,7 @@ def test_override_uses_the_listed_divisions_without_coordinates() -> None:
         SectionRegionsRequest.parse("Isocortex;HPF;MB;MY"),
         shares=_shares(),
         taxonomy=_taxonomy(),
-        config=MouseRegionConfig(),
+        config=MouseRegionConfig.v1(),
         **inputs,
     )
     assert plan.status == "pruned"
@@ -542,7 +546,7 @@ def test_override_uses_the_listed_divisions_without_coordinates() -> None:
         SectionRegionsRequest.parse("Isocortex;HPF;MB;MY"),
         shares=_shares(),
         taxonomy=_taxonomy(),
-        config=MouseRegionConfig(),
+        config=MouseRegionConfig.v1(),
         **_plan_inputs(BLOCKS_200),
     )
     assert with_xy.inference is not None
@@ -552,7 +556,7 @@ def test_override_uses_the_listed_divisions_without_coordinates() -> None:
         SectionRegionsRequest.parse(";".join(MOUSE_CCF_REGIONS)),
         shares=_shares(),
         taxonomy=_taxonomy(),
-        config=MouseRegionConfig(),
+        config=MouseRegionConfig.v1(),
         **inputs,
     )
     assert full.status == "no_nodes_dropped" and full.nodes == ()
@@ -563,7 +567,7 @@ def test_none_disables_pruning_and_needs_no_shares() -> None:
         SectionRegionsRequest.parse("none"),
         shares=None,
         taxonomy=_taxonomy(),
-        config=MouseRegionConfig(),
+        config=MouseRegionConfig.v1(),
         **_plan_inputs(BLOCKS_200),
     )
     assert plan.status == "disabled" and plan.nodes == ()
@@ -573,7 +577,7 @@ def test_none_disables_pruning_and_needs_no_shares() -> None:
             SectionRegionsRequest.parse("Isocortex"),
             shares=None,
             taxonomy=_taxonomy(),
-            config=MouseRegionConfig(),
+            config=MouseRegionConfig.v1(),
             **_plan_inputs(BLOCKS_200),
         )
     with pytest.raises(MouseRegionError, match="coupled_regions"):
@@ -581,13 +585,13 @@ def test_none_disables_pruning_and_needs_no_shares() -> None:
             SectionRegionsRequest.parse("none"),
             shares=None,
             taxonomy=_taxonomy(),
-            config=MouseRegionConfig(coupled_regions={"OB": ["OLF"]}),
+            config=MouseRegionConfig.v1(coupled_regions={"OB": ["OLF"]}),
             **_plan_inputs(BLOCKS_200),
         )
 
 
 def test_dropped_levels_prefer_the_class() -> None:
-    nodes = two_tier_drop_list(PRESENT, _shares(), _taxonomy(), MouseRegionConfig())
+    nodes = two_tier_drop_list(PRESENT, _shares(), _taxonomy(), MouseRegionConfig.v1())
     levels = dropped_levels(
         ["CCN20230722_CLAS_27", "CCN20230722_CLAS_24", "CCN20230722_CLAS_24", None],
         ["CCN20230722_SUBC_270", "CCN20230722_SUBC_241", "CCN20230722_SUBC_242", None],
@@ -615,7 +619,7 @@ def _lookup() -> dict[str, Any]:
 
 
 def test_pruned_lookup_removes_the_dropped_keys() -> None:
-    nodes = two_tier_drop_list(PRESENT, _shares(), _taxonomy(), MouseRegionConfig())
+    nodes = two_tier_drop_list(PRESENT, _shares(), _taxonomy(), MouseRegionConfig.v1())
     lookup = _lookup()
     genes = sorted(
         {
@@ -662,7 +666,7 @@ def test_ctm_accepts_the_pruned_lookup_but_not_the_unfiltered_one(
         create_marker_cache_from_specified_markers,
     )
 
-    nodes = two_tier_drop_list(PRESENT, _shares(), _taxonomy(), MouseRegionConfig())
+    nodes = two_tier_drop_list(PRESENT, _shares(), _taxonomy(), MouseRegionConfig.v1())
     lookup = _lookup()
     genes = sorted(
         {
@@ -772,7 +776,7 @@ def _plan(n: int = 3) -> RegionPlan:
         np.array(["007 L2/3 IT CTX Glut"] * n, dtype=object),
         np.ones(n, bool),
         _shares(),
-        MouseRegionConfig(min_component_tiles=1),
+        MouseRegionConfig.v1(min_component_tiles=1),
     )
     return RegionPlan(
         request=SectionRegionsRequest.parse("auto"),

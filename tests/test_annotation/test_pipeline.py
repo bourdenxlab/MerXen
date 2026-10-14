@@ -1127,7 +1127,8 @@ def test_mouse_maps_with_the_drop_level_and_no_pruning_when_none(
     command = fake_mmc.calls[-1]["command"]
     assert command[command.index("--drop_level") + 1] == "CCN20230722_SUPT"
     assert "--nodes_to_drop" not in command
-    assert manifest.mouse_region_step == MOUSE_REGION_STEP.format(variant="v1")
+    # The default rule is M6b's selection (variant m6b; pre-registration §24).
+    assert manifest.mouse_region_step == MOUSE_REGION_STEP.format(variant="m6b")
     record = manifest.samples["AG_MERSCOPE"]
     assert set(record.runs) == {"wmb_panel"}
     assert record.mouse_regions is not None

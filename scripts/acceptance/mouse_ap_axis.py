@@ -254,7 +254,11 @@ class Candidate:
         )
 
     def config(self) -> MouseRegionConfig:
-        """Return the rule's ``MouseRegionConfig`` (M6 values elsewhere)."""
+        """Return the rule's ``MouseRegionConfig`` (M6 values elsewhere).
+
+        Built on the v1 rule (``MouseRegionConfig.v1``), not on the defaults:
+        since M6b-R the defaults are the selected candidate.
+        """
         settings: dict[str, Any] = {
             "tile_um": self.tile_um,
             "min_neurons_per_tile": self.min_neurons,
@@ -270,7 +274,7 @@ class Candidate:
             settings["conditional_never_drop"] = keep
         if self.components:
             settings["rule_variant"] = "m6b"
-        return MouseRegionConfig.model_validate(settings)
+        return MouseRegionConfig.v1(**settings)
 
 
 def all_candidates() -> list[Candidate]:

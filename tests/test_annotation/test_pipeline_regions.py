@@ -12,10 +12,12 @@ import pandas as pd
 import pytest
 from click.testing import CliRunner
 
-from merxen.annotation.config import AnnotationConfig
+from merxen.annotation.config import AnnotationConfig, MouseRegionConfig
 from merxen.annotation.mapmycells_engine import MmcEngineError, level_frame
+from merxen.annotation.mouse_regions import RegionShareBundle
 from merxen.annotation.pipeline import (
     MAP_MANIFEST_NAME,
+    MOUSE_REGION_STEP,
     MapError,
     MapSample,
     ResolveError,
@@ -28,7 +30,12 @@ from merxen.cli import main as cli_main
 
 from .conftest import MOUSE_CLAS as CLAS
 from .conftest import MOUSE_SID as SID
-from .conftest import FakeMmc, map_mouse, write_mouse_h5ad
+from .conftest import (
+    FakeMmc,
+    map_mouse,
+    mouse_region_share_bundle,
+    write_mouse_h5ad,
+)
 
 
 def test_region_step_prunes_and_remaps_only_the_dropped_cells(
@@ -223,32 +230,83 @@ def test_auto_without_coordinates_skips_pruning(
     assert "no cell coordinates" in caplog.text
 
 
+def test_the_default_rule_prunes_the_scaled_fake_section(
+    tmp_path: Path, fake_mmc: FakeMmc, mouse_setup: dict[str, Any]
+) -> None:
+    """The default rule (M6b's a+f:tile200,nn2) on the section in 200 µm tiles.
+
+    The fake section is laid out in v1's 150 µm tiles, 3 neurons each. Laid
+    out in the default rule's 200 µm tiles, the default rule (2 neurons per
+    tile, OB coupled to OLF through AON-home tiles; no AON home here) must
+    find the same regions, drop the same node and re-map the same cells as
+    v1 on the original section, and record its own settings.
+    """
+    v1_manifest = map_mouse(mouse_setup, tmp_path / "v1")
+    default = AnnotationConfig(species="mouse").coupled_to_clustering(10)
+    h5ad, _ = write_mouse_h5ad(
+        tmp_path / "scaled" / f"{SID}.h5ad", tile=default.mouse_regions.tile_um
+    )
+    sample = mouse_setup["sample"]
+    manifest = map_mouse(
+        mouse_setup,
+        tmp_path / "default",
+        config=default,
+        sample=MapSample(sample.sample_id, sample.platform, h5ad, sample.source),
+    )
+    v1 = v1_manifest.samples[SID].mouse_regions
+    regions = manifest.samples[SID].mouse_regions
+    assert v1 is not None and regions is not None
+    assert (v1.rule_variant, regions.rule_variant) == ("v1", "m6b")
+    assert (regions.params["tile_um"], regions.params["min_neurons_per_tile"]) == (
+        200.0,
+        2,
+    )
+    assert regions.params["coupled_regions"] == {"OB": ["OLF"]}
+    assert regions.status == v1.status == "pruned"
+    assert regions.n_assigned_tiles == v1.n_assigned_tiles == 200
+    assert regions.tile_counts == v1.tile_counts
+    assert regions.inferred_regions == v1.inferred_regions == ["Isocortex", "MB"]
+    assert regions.coupled_regions == []
+    assert regions.present_regions == v1.present_regions
+    assert regions.drop_list_sha256 == v1.drop_list_sha256
+    assert regions.n_cells_region_dropped == v1.n_cells_region_dropped == 6
+    assert manifest.mouse_region_step == MOUSE_REGION_STEP.format(variant="m6b")
+    labels = {
+        name: pd.read_parquet(
+            tmp_path / name / str(found.samples[SID].provisional_labels)
+        ).set_index("cell_id")
+        for name, found in (("v1", v1_manifest), ("default", manifest))
+    }
+    for column in ("ct_class_name", "mmc_wmb_class_name", "region_pruned_changed"):
+        assert labels["default"][column].equals(labels["v1"][column]), column
+
+
 def test_map_refuses_region_settings_it_cannot_apply(
     tmp_path: Path, fake_mmc: FakeMmc, mouse_setup: dict[str, Any]
 ) -> None:
     with pytest.raises(MapError, match="needs the wmb_region_share bundle"):
         map_mouse(mouse_setup, tmp_path / "a", region_shares=None)
-    coupled = AnnotationConfig.model_validate(
-        {
-            "species": "mouse",
-            "mouse_regions": {"coupled_regions": {"OB": ["OLF"]}},
-        }
+    coupled = AnnotationConfig(
+        species="mouse",
+        mouse_regions=MouseRegionConfig.v1(coupled_regions={"OB": ["OLF"]}),
     ).coupled_to_clustering(10)
     with pytest.raises(MapError, match="coupled_regions"):
         map_mouse(mouse_setup, tmp_path / "b", config=coupled)
-    # With rule variant m6b the coupling needs structure-level homes, which
-    # the region-share bundle lacks.
-    m6b = AnnotationConfig.model_validate(
-        {
-            "species": "mouse",
-            "mouse_regions": {
-                "coupled_regions": {"OB": ["OLF"]},
-                "rule_variant": "m6b",
-            },
-        }
-    ).coupled_to_clustering(10)
-    with pytest.raises(MapError, match="structure-level"):
-        map_mouse(mouse_setup, tmp_path / "b2", config=m6b)
+    # The default rule (variant m6b) couples OB to OLF, which needs
+    # structure-level homes: a region-share bundle without them (revision 1)
+    # is refused before anything is mapped.
+    default = AnnotationConfig(species="mouse").coupled_to_clustering(10)
+    assert default.mouse_regions.coupled_regions == {"OB": ["OLF"]}
+    old_bundle = mouse_region_share_bundle(
+        tmp_path / "old_store", structure_homes=False
+    )
+    with pytest.raises(MapError, match="structure-level.*revision 2"):
+        map_mouse(
+            mouse_setup,
+            tmp_path / "b2",
+            config=default,
+            region_shares=RegionShareBundle.from_dir(old_bundle),
+        )
     with pytest.raises(MapError, match="unknown mouse section region"):
         map_mouse(mouse_setup, tmp_path / "c", section_regions={SID: "Striatum"})
     assert not fake_mmc.calls  # all refused before mapping
@@ -280,7 +338,9 @@ def _pipeline_inputs(
     prepared = root / "clustering_prepare_out"
     (prepared / "merscope").mkdir(parents=True)
     target = prepared / "merscope" / f"{SID}_prepared.h5ad"
-    target.write_bytes(setup["sample"].h5ad_path.read_bytes())
+    # The CLI maps with the default region rule: the section laid out in its
+    # tiles (200 µm), so that its 200 tiles are assigned as v1's are in 150 µm.
+    write_mouse_h5ad(target, tile=MouseRegionConfig().tile_um)
     (prepared / "manifest.json").write_text(
         json.dumps({"samples": {SID: f"merscope/{SID}_prepared.h5ad"}})
     )

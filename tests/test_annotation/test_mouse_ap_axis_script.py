@@ -70,9 +70,16 @@ def test_candidates_are_v1_and_the_95_combinations() -> None:
 
 
 def test_candidate_configs_set_the_m6b_fields() -> None:
+    from merxen.annotation.config import MouseRegionConfig
+
     module = _load()
     v1 = module.candidate_by_label("v1").config()
     assert v1.rule_variant == "v1" and v1.uses_m6b_fields() == []
+    # The candidates are built on the v1 rule, not on the defaults, which
+    # are the selected candidate since M6b-R.
+    assert v1 == MouseRegionConfig.v1()
+    assert (v1.tile_um, v1.min_neurons_per_tile) == (150.0, 3)
+    assert module.candidate_by_label("a+f:tile200,nn2").config() == MouseRegionConfig()
     tiles = module.candidate_by_label("f:tile200,nn2").config()
     assert (tiles.tile_um, tiles.min_neurons_per_tile, tiles.rule_variant) == (
         200.0,
