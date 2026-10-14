@@ -901,7 +901,14 @@ def test_a_missing_gate_verdict_is_recorded_not_evaluable(
         make_trust("validated_real", species="mouse"),
         AnnotationConfig(species="mouse"),
     ).provenance()
-    for check in ("dataset_gate", "registration_g1", "marker_consistency"):
+    for check in (
+        "dataset_gate",
+        "registration_g1",
+        "marker_consistency",
+        "g3_implausibility",
+        "g4_composition",
+        "g5_spillover",
+    ):
         assert mouse.outcomes[check] == "not_evaluable", check
 
 

@@ -1293,3 +1293,250 @@ def test_build_tables_checks_nr1_where_the_applied_variant_lowers(
     )
     report = (out / "REPORT.txt").read_text()
     assert "NR1 violations 1 over 2 lowered samples" in report
+
+
+# --------------------------------------------------------------------------
+# Mouse rows (M13b C22): pending until GM-RUNS, read from its RESOLVE outputs
+
+
+def _mouse_summary(
+    make_trust: MakeTrust,
+    *,
+    segmentation: str = "proseg_hybrid",
+    pair: str = "ag7",
+    gate: Any = None,
+    enabled: bool = True,
+) -> dict[str, Any]:
+    """A mouse resolve summary with the QC block mouse RESOLVE writes."""
+    from merxen.annotation.pipeline import real_qc_record
+
+    from .test_real_qc_checks import mouse_signals
+    from .test_real_qc_mouse import g4_gate
+
+    verdict = g4_gate() if gate is None else gate
+    result = qc.mouse_real_data_qc(
+        mouse_signals(gate=verdict),
+        make_trust("validated_real", species="mouse"),
+        AnnotationConfig(species="mouse"),
+    )
+    sample_id = f"{pair}_MERSCOPE"
+    return {
+        "pair_id": pair,
+        "species": "mouse",
+        "segmentation": segmentation,
+        "samples": {
+            sample_id: {
+                "sample_id": sample_id,
+                "platform": "MERSCOPE",
+                "trust": {"state": "validated"},
+                "resolution": {"gate": verdict.to_json()},
+                "mouse_gate": verdict.to_json(),
+                "real_qc": real_qc_record(result if enabled else None, enabled=enabled),
+            }
+        },
+        "pair": {"jsd": [], "mask_note": None},
+    }
+
+
+def _write_mouse_run(directory: Path, summary: Mapping[str, Any]) -> Path:
+    directory.mkdir(parents=True)
+    path = directory / f"{summary['pair_id']}_resolve_summary.json"
+    path.write_text(json.dumps(summary, default=str))
+    return directory
+
+
+def test_the_mouse_rows_stay_pending_in_the_human_table(script: ModuleType) -> None:
+    assert script.MOUSE_EXPECTED == (
+        ("ag7", "original_seg"),
+        ("ag7", "proseg_hybrid"),
+        ("ag7", "proseg_mask"),
+        ("ag7", "reseg"),
+        ("VZG2", "original_seg"),
+    )
+    assert any("pending" in item and "mouse" in item for item in script.NOT_COVERED)
+
+
+def test_parse_mouse_input_takes_dataset_segmentation_and_directory(
+    script: ModuleType, tmp_path: Path
+) -> None:
+    item = script.parse_mouse_input(f"ag7/proseg_hybrid={tmp_path}")
+    assert (item.dataset, item.segmentation, item.resolve_dir) == (
+        "ag7",
+        "proseg_hybrid",
+        tmp_path,
+    )
+    for bad in ("ag7=/x", "ag7/proseg_hybrid", "/proseg_hybrid=/x", "ag7/=/x"):
+        with pytest.raises(script.RegressionError, match="DATASET/SEGMENTATION"):
+            script.parse_mouse_input(bad)
+
+
+def test_mouse_rows_read_a_mouse_resolve_output(
+    script: ModuleType, tmp_path: Path, make_trust: MakeTrust
+) -> None:
+    run = _write_mouse_run(tmp_path / "ag7_ph", _mouse_summary(make_trust))
+    item = script.MouseInput("ag7", "proseg_hybrid", run)
+    summary = script.read_mouse_summary(item)
+    samples = script.mouse_sample_rows(
+        summary, dataset="ag7", segmentation="proseg_hybrid"
+    )
+    (row,) = samples
+    assert row["dataset"] == "ag7" and row["sample_id"] == "ag7_MERSCOPE"
+    assert row["warn_only"] is True and row["effects_withheld"] is True
+    assert row["no_effect_problems"] == "none"
+    assert row["check:g4_composition"] == "warn"
+    assert row["check:paired_concordance"] == "not_applicable"
+    assert row["ap_estimate_section"] == "C57BL6J-638850.33"
+    assert row["ap_estimate_mm"] == 8.0
+    assert row["g4_window_source"] == "ap_estimate"
+    assert row["g4_window_sections"] == (
+        "C57BL6J-638850.32;C57BL6J-638850.33;C57BL6J-638850.34"
+    )
+    signals = script.mouse_signal_rows(
+        summary, dataset="ag7", segmentation="proseg_hybrid"
+    )
+    assert [item["signal"] for item in signals] == ["g1", "g2", "g3", "g4", "g5"]
+    g4 = signals[3]
+    assert (g4["check"], g4["status"], g4["outcome"]) == (
+        "g4_composition",
+        "warn",
+        "warn",
+    )
+    assert json.loads(g4["values"]) == {
+        "g4_astro_epen_points": -6.5,
+        "g4_immune_points": 0.4,
+    }
+    outcomes = script.mouse_outcome_rows(
+        summary, dataset="ag7", segmentation="proseg_hybrid"
+    )
+    assert {row["dataset"] for row in outcomes} == {"ag7"}
+    assert {row["check"] for row in outcomes} >= {"flag_rates", "factor_remeasure"}
+
+
+def test_mouse_rows_refuse_outputs_without_the_mouse_qc(
+    script: ModuleType, tmp_path: Path, make_trust: MakeTrust
+) -> None:
+    old = _mouse_summary(make_trust)
+    for item in old["samples"].values():
+        item.pop("real_qc")
+    cases = {
+        "predates M13b C22": old,
+        "QC not enabled": _mouse_summary(make_trust, enabled=False),
+        "not a mouse": {**_mouse_summary(make_trust), "species": "human"},
+        "segmentation reseg": _mouse_summary(make_trust, segmentation="reseg"),
+    }
+    for index, (match, summary) in enumerate(cases.items()):
+        run = _write_mouse_run(tmp_path / f"run{index}", summary)
+        with pytest.raises(script.RegressionError, match=match):
+            script.read_mouse_summary(script.MouseInput("ag7", "proseg_hybrid", run))
+    with pytest.raises(script.RegressionError, match="no .*_resolve_summary.json"):
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        script.read_mouse_summary(script.MouseInput("ag7", "reseg", empty))
+
+
+def test_a_mouse_row_with_a_qc_effect_is_reported(
+    script: ModuleType, tmp_path: Path, make_trust: MakeTrust
+) -> None:
+    """Warn-only is checked: an applied effect or a real_qc_ gate reason."""
+    summary = _mouse_summary(make_trust)
+    item = summary["samples"]["ag7_MERSCOPE"]
+    item["real_qc"]["downgrades"] = ["not_resolvable_class:prefilter_spotcheck"]
+    item["mouse_gate"]["warning_reasons"].append("real_qc_flag_rates: x")
+    (row,) = script.mouse_sample_rows(
+        summary, dataset="ag7", segmentation="proseg_hybrid"
+    )
+    assert "downgrades" in row["no_effect_problems"]
+    assert "real_qc_flag_rates" in row["no_effect_problems"]
+
+
+def test_build_mouse_tables_lists_the_pending_rows(
+    script: ModuleType, tmp_path: Path, make_trust: MakeTrust
+) -> None:
+    out = tmp_path / "out"
+    with pytest.raises(script.RegressionError, match="pending"):
+        script.build_mouse_tables(out, [])
+    assert not out.exists()
+    inputs = [
+        script.MouseInput(
+            "ag7",
+            "proseg_hybrid",
+            _write_mouse_run(tmp_path / "ag7_ph", _mouse_summary(make_trust)),
+        ),
+        script.MouseInput(
+            "VZG2",
+            "proseg_hybrid",
+            _write_mouse_run(
+                tmp_path / "vzg2_ph",
+                _mouse_summary(make_trust, pair="vzg2"),
+            ),
+        ),
+    ]
+    with pytest.raises(script.RegressionError, match="twice"):
+        script.build_mouse_tables(out, [inputs[0], inputs[0]])
+    result = script.build_mouse_tables(out, inputs)
+    folder = out / script.MOUSE_DIR
+    for name in ("outcomes", "samples", "gate_signals"):
+        assert (folder / f"{name}.csv").exists(), name
+    assert result["rows"] == ["ag7/proseg_hybrid", "VZG2/proseg_hybrid"]
+    assert result["pending"] == [
+        "ag7/original_seg",
+        "ag7/proseg_mask",
+        "ag7/reseg",
+        "VZG2/original_seg",
+    ]
+    assert result["not_expected"] == ["VZG2/proseg_hybrid"]
+    assert result["no_effect_violations"] == []
+    assert result["warn_only_samples"] == 2
+    saved = json.loads((folder / "mouse_summary.json").read_text())
+    assert saved["pending"] == result["pending"]
+    report = (folder / "REPORT.txt").read_text()
+    assert "pending" in report and "ag7/original_seg" in report
+    assert "AP" in report and "C57BL6J-638850.33" in report
+    samples = pd.read_csv(folder / "samples.csv")
+    assert list(samples["dataset"]) == ["ag7", "VZG2"]
+
+
+def test_the_mouse_step_reads_its_inputs_and_honours_dry_run(
+    script: ModuleType,
+    tmp_path: Path,
+    make_trust: MakeTrust,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _write_mouse_run(tmp_path / "ag7_ph", _mouse_summary(make_trust))
+    out = tmp_path / "out"
+    # The mouse step reads no store: the default store path (on the damaged
+    # SSD1 disk) is never resolved.
+    checked: list[Path] = []
+    check = script.check_out_dir
+
+    def recorded(out_dir: Path, protected: Any) -> None:
+        roots = [Path(root) for root in protected]
+        checked.extend(roots)
+        check(out_dir, roots)
+
+    monkeypatch.setattr(script, "check_out_dir", recorded)
+    common = [
+        "--out",
+        str(out),
+        "--mouse-resolve",
+        f"ag7/proseg_hybrid={run}",
+        "--m8-resolve",
+        str(tmp_path / "m8"),
+        "--results",
+        str(tmp_path / "results"),
+    ]
+    assert script.main(["mouse", *common, "--dry-run"]) == 0
+    assert not out.exists()
+    printed = capsys.readouterr().out
+    assert "ag7/proseg_hybrid" in printed and "pending" in printed
+    assert script.main(["mouse", *common]) == 0
+    assert (out / script.MOUSE_DIR / "mouse_summary.json").exists()
+    assert checked and script.STORE not in checked and run in checked
+    with pytest.raises(SystemExit):
+        script.main(["mouse", "--out", str(tmp_path / "other")])
+    # The output must stay out of the RESOLVE outputs it reads.
+    with pytest.raises(script.RegressionError, match="overlaps"):
+        script.main(
+            ["mouse", "--out", str(run / "x"), "--mouse-resolve", f"ag7/reseg={run}"]
+        )

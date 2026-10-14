@@ -752,7 +752,8 @@ def test_qc_to_provenance_records_each_check_and_the_downgrades() -> None:
         qc.qc_to_provenance([qc.QcOutcome("bad name", False, "warning")])
 
 
-def test_the_mouse_gate_records_g1_and_g2_as_its_own_checks() -> None:
+def test_the_mouse_gate_records_g1_to_g5_as_its_own_checks() -> None:
+    """G1 and G2 are §8.8's checks; G3-G5 keep the gate's names (M13b C22)."""
     verdict = mouse_gate(
         referee=MarkerReferee(
             consistency=0.75, n_pseudo_confident=500, n_cells=600, markers={}
@@ -762,13 +763,21 @@ def test_the_mouse_gate_records_g1_and_g2_as_its_own_checks() -> None:
         "dataset_gate": "warn",
         "registration_g1": "pass",
         "marker_consistency": "warn",
+        "g3_implausibility": "pass",
+        "g4_composition": "not_evaluable",
+        "g5_spillover": "pass",
     }
     failed = mouse_gate(
         registration=RegistrationSignal(density_ratio=1.2, shift_um=0.0),
         referee=None,
+        t2_share=0.05,
+        spillover_rate=None,
     )
     assert qc.gate_outcomes(failed) == {
         "dataset_gate": "fail",
         "registration_g1": "fail",
         "marker_consistency": "not_evaluable",
+        "g3_implausibility": "warn",
+        "g4_composition": "not_evaluable",
+        "g5_spillover": "not_evaluable",
     }

@@ -207,9 +207,10 @@ def test_mouse_resolve_writes_valid_labels_gate_and_region_columns(
     )
     summary = json.loads(result.summary_path.read_text())
     assert summary["species"] == "mouse"
-    # Mouse RESOLVE runs no real-data QC (M13 C15): no QC block, no QC config.
-    assert "real_qc_config" not in summary
-    assert "real_qc" not in summary["samples"][SID]
+    # Mouse RESOLVE runs the real-data QC warn-only (M13b C22; see
+    # test_real_qc_resolve_mouse.py): its block and the pair's QC config.
+    assert summary["real_qc_config"]["enabled"] is True
+    assert summary["samples"][SID]["real_qc"]["warn_only"] is True
     step = summary["samples"][SID]["region_step"]
     assert step["status"] == "pruned"
     assert step["drop_list_sha256"] == provenance.mouse_gate.drop_list_sha256
@@ -1129,7 +1130,11 @@ def test_mouse_panel_provenance_comes_from_the_panel_diagnostics(
             validated_share=shares,
             n_missing_panel_genes=0,
         )
-        assert record == expected
+        # The warn-only real-data QC adds its record (M13b C22).
+        assert sample.real_qc is not None
+        assert record.real_data_qc == sample.real_qc.provenance()
+        assert record.real_data_qc.warn_only is True
+        assert record.model_copy(update={"real_data_qc": None}) == expected
         assert record.panel_hash == panel.panel_hash
         assert record.panel_mode == "single_sample"
         assert record.n_declared_genes == len(IDS)
