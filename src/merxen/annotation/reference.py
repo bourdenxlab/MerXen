@@ -366,6 +366,26 @@ TEST_SOURCE_COLUMN: Final = "test_source"
 TEST_SOURCE_DONOR: Final = "holdout_donor"
 TEST_SOURCE_OTHER_REGION: Final = "other_region"
 WMB_TESTSET_EXTRA_SEED: Final = 2
+# Gate P's second disjoint WMB test draw (M13b C20a; plan §14 C_P and NP4,
+# "mouse, the two disjoint test draws"). Draw 1 is the production self-map's
+# test set; draw 2 repeats its design on cells no earlier set holds (<= 10
+# cells per supertype as the self-map list, ``research/selfmap/truth.csv``,
+# plus the non-neuronal extra per supertype) and tops each class up so that
+# the pooled test cells (draw 1's check half and draw 2) reach C_P's 700
+# where the 10Xv3 cells allow, taking <= 5% of any cluster's cells (the
+# reading of the roadmap's U7 (ii), recorded before any draw-2 output).
+WMB_DRAW_1: Final = 1
+WMB_DRAW_2: Final = 2
+WMB_DRAW2_VERSION: Final = 1
+WMB_DRAW2_SEED: Final = 1
+WMB_DRAW2_STREAM: Final = "wmb_draw2"
+WMB_SELFMAP_PER_SUPERTYPE: Final = 10
+DRAW2_SOURCE_SUPERTYPE: Final = "draw2_per_supertype"
+DRAW2_SOURCE_NONNEURONAL: Final = "draw2_nonneuronal_extra"
+DRAW2_SOURCE_TOP_UP: Final = "draw2_class_top_up"
+DRAW2_TARGET_READING: Final = (
+    "up to the class target pooled with draw 1's check half (crc32 split half 1)"
+)
 # The non-neuronal WMB classes whose supertypes get extra test cells (§3.2:
 # Astro-Epen, OPC-Oligo, Vascular, Immune).
 WMB_NONNEURONAL_TEST_CLASSES: Final[tuple[str, ...]] = (
@@ -6021,6 +6041,421 @@ def wmb_class_top_up(
     return pd.concat([cells, added[list(cells.columns)]], ignore_index=True), record
 
 
+def wmb_second_draw_rule(config: AnnotationConfig) -> dict[str, Any]:
+    """Return gate P's second WMB test draw rule (hashed; M13b C20a).
+
+    Args:
+        config: The annotation config.
+
+    Returns:
+        The rule ``wmb_second_draw`` applies, as the draw-2 test set's
+        ``build_hash`` records it (``_wmb_testset_params``).
+    """
+    resolvability = config.resolvability
+    return {
+        "draw": WMB_DRAW_2,
+        "version": WMB_DRAW2_VERSION,
+        "seed": WMB_DRAW2_SEED,
+        "per_supertype": WMB_SELFMAP_PER_SUPERTYPE,
+        "nonneuronal_extra_per_supertype": int(
+            resolvability.mouse_nonneuronal_extra_per_supertype
+        ),
+        "class_target": int(resolvability.gate_p_class_min_test_cells),
+        "target_reading": DRAW2_TARGET_READING,
+        "max_cluster_frac": float(resolvability.gate_p_topup_max_cluster_frac),
+        "min_training_cells_per_cluster": HO_MIN_TRAINING_CELLS_PER_CLUSTER,
+        "excluded": ["marker_training_sample", "selfmap_list", "draw_1"],
+        "order": (
+            f"lowest draw_key(seed, {WMB_DRAW2_STREAM}, cell id) first per cluster "
+            "cap and supertype; the class top-up by its own keyed draw"
+        ),
+    }
+
+
+def test_cell_digest(cell_ids: Iterable[str]) -> str:
+    """Return the sha256 of a set of test-cell ids (sorted, one per line).
+
+    Gate P compares the draw-1 digest a draw-2 bundle records with the cells
+    of the draw-1 test set its own PREP built (M13b C20b).
+
+    Args:
+        cell_ids: The test cells.
+
+    Returns:
+        The hex digest.
+    """
+    text = "\n".join(sorted({str(cell) for cell in cell_ids}))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _keyed_order(seed: int, stream: str, cell_ids: Sequence[str]) -> np.ndarray:
+    """Positions of ``cell_ids`` ranked by their keyed draw (lowest first)."""
+    from merxen.annotation import resolvability as res
+
+    keys = [res.draw_key(int(seed), stream, str(cell)) for cell in cell_ids]
+    return np.array(sorted(range(len(keys)), key=keys.__getitem__), dtype=int)
+
+
+def _first_rows(frame: pd.DataFrame, column: str, limit: int) -> np.ndarray:
+    """Which rows are among the first ``limit`` of their ``column`` value."""
+    if limit <= 0 or frame.empty:
+        return np.zeros(len(frame), dtype=bool)
+    values = frame[column].astype(str)
+    return np.asarray(values.groupby(values, sort=False).cumcount() < limit)
+
+
+def wmb_second_draw(
+    meta: pd.DataFrame,
+    sampled: pd.DataFrame,
+    *,
+    exclude: Iterable[str],
+    first_draw: pd.DataFrame,
+    rule: Mapping[str, Any],
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Draw gate P's second disjoint WMB test set (M13b C20a; plan §14).
+
+    §14 NP4 compares "the two disjoint test draws" of a mouse family, and
+    §14 C_P: "The second mouse draw tops every class up to 700 where the
+    10Xv3 cells unused by the marker build allow; it takes <= 5% of any
+    cluster's cells, which bounds leakage into the Allen means". Draw 2
+    repeats draw 1's design on cells no earlier set holds, then tops up:
+
+    1. Candidates: 10Xv3 cells of the available matrices with full WMB truth
+       that are neither marker-training cells (``sampled``) nor in
+       ``exclude`` (the self-map list) nor draw-1 test cells, of clusters
+       with at least ``min_training_cells_per_cluster`` training cells (the
+       training-cluster rule of the class top-up). Each cluster gives at
+       most ``floor(max_cluster_frac x its 10Xv3 cells)`` cells to draw 2 as
+       a whole (the 5% bound).
+    2. ``per_supertype`` cells per supertype (the self-map list's <= 10),
+       lowest ``draw_key(seed, "wmb_draw2", cell)`` first within the caps.
+    3. ``nonneuronal_extra_per_supertype`` more per supertype of the
+       non-neuronal classes (draw 1's extra), in the same order.
+    4. The class top-up (``resolvability.class_top_up``, stratified by
+       subclass): each class whose pooled test cells, draw 1's check half
+       (``cell_split_half`` 1, the half gate P scores) plus draw 2 so far,
+       fall short of ``class_target`` gains candidates up to it where the
+       remaining caps allow (the reading "up to 700 pooled with draw 1's
+       check half").
+
+    No mapping result enters: the draw is fixed from the reference metadata
+    before anything is mapped.
+
+    Args:
+        meta: Every 10Xv3 candidate cell of the available matrices with its
+            WMB levels and ``cluster_alias`` (the test-set builder's table).
+        sampled: The marker-training sample (``cell_label``,
+            ``cluster_alias``).
+        exclude: Further cells draw 2 may not hold (the self-map list).
+        first_draw: Draw 1's test cells (``cell_label`` and WMB levels).
+        rule: ``wmb_second_draw_rule``.
+
+    Returns:
+        ``(draw-2 cells with meta's columns and test_source, record)``: the
+        record holds the rule, both draws' cell digests, the disjointness
+        checks, the largest share of a cluster taken and, per class, the
+        cells of each part, the pooled count, what the caps left available
+        and whether the class reaches the target.
+
+    Raises:
+        ReferenceBuildError: If a drawn cell is a training, self-map-list or
+            draw-1 cell, repeats, lies outside the training-cluster rule or
+            exceeds its cluster's cap.
+    """
+    from merxen.annotation import resolvability as res
+
+    training = set(sampled["cell_label"].astype(str))
+    first_ids = set(first_draw["cell_label"].astype(str))
+    listed = {str(cell) for cell in exclude}
+    excluded = listed | training | first_ids
+    per_cluster = sampled["cluster_alias"].astype(int).value_counts()
+    minimum = int(rule["min_training_cells_per_cluster"])
+    kept = {int(alias) for alias, count in per_cluster.items() if count >= minimum}
+    labels = meta["cell_label"].astype(str)
+    is_candidate = ~labels.isin(excluded).to_numpy(bool)
+    in_kept = meta["cluster_alias"].astype(int).isin(kept).to_numpy(bool)
+    candidates = meta[is_candidate & in_kept]
+    candidates = candidates.set_index(candidates["cell_label"].astype(str), drop=False)
+    candidates = candidates[~candidates.index.duplicated(keep="first")]
+    sizes = meta["cluster_alias"].astype(int).value_counts()
+    fraction = float(rule["max_cluster_frac"])
+    caps = {
+        int(alias): int(math.floor(fraction * size)) for alias, size in sizes.items()
+    }
+    seed = int(rule["seed"])
+    ranked = candidates.iloc[
+        _keyed_order(seed, WMB_DRAW2_STREAM, list(candidates.index))
+    ]
+    clusters = ranked["cluster_alias"].astype(int)
+    rank_in_cluster = clusters.groupby(clusters, sort=False).cumcount().to_numpy()
+    cap_of = clusters.map(caps).fillna(0).astype(int).to_numpy()
+    capped = ranked[rank_in_cluster < cap_of]
+    in_base = _first_rows(capped, WMB_SUPT, int(rule["per_supertype"]))
+    base = capped[in_base]
+    rest = capped[~in_base]
+    nonneuronal = rest[
+        rest[WMB_CLAS].astype(str).isin(list(WMB_NONNEURONAL_TEST_CLASSES)).to_numpy()
+    ]
+    extra = nonneuronal[
+        _first_rows(nonneuronal, WMB_SUPT, int(rule["nonneuronal_extra_per_supertype"]))
+    ]
+    taken = pd.concat([base, extra])
+    first_half = res.cell_split_half(first_draw["cell_label"].astype(str).tolist())
+    check = first_draw[first_half == 1]
+    check_per_class = check[WMB_CLAS].astype(str).value_counts()
+    first_per_class = first_draw[WMB_CLAS].astype(str).value_counts()
+    taken_per_class = taken[WMB_CLAS].astype(str).value_counts()
+    classes = sorted(
+        set(meta[WMB_CLAS].astype(str)) | set(first_per_class.index.astype(str))
+    )
+    have = {
+        cls: int(check_per_class.get(cls, 0)) + int(taken_per_class.get(cls, 0))
+        for cls in classes
+    }
+    taken_per_cluster = taken["cluster_alias"].astype(int).value_counts()
+    remaining = {
+        str(alias): int(cap - int(taken_per_cluster.get(alias, 0)))
+        for alias, cap in caps.items()
+    }
+    pool = candidates.drop(index=taken.index)
+    target = int(rule["class_target"])
+    chosen, top_up_record = res.class_top_up(
+        pool.assign(_cluster=pool["cluster_alias"].astype(int).astype(str)),
+        class_column=WMB_CLAS,
+        leaf_column=WMB_SUBC,
+        have=have,
+        target=target,
+        seed=seed,
+        cluster_column="_cluster",
+        cluster_cap=remaining,
+    )
+    top_up = pool.loc[list(chosen)]
+    columns = [*meta.columns, TEST_SOURCE_COLUMN]
+    cells = pd.concat(
+        [
+            base.assign(**{TEST_SOURCE_COLUMN: DRAW2_SOURCE_SUPERTYPE}),
+            extra.assign(**{TEST_SOURCE_COLUMN: DRAW2_SOURCE_NONNEURONAL}),
+            top_up.assign(**{TEST_SOURCE_COLUMN: DRAW2_SOURCE_TOP_UP}),
+        ]
+    )[columns].reset_index(drop=True)
+    ids = cells["cell_label"].astype(str)
+    drawn_per_cluster = cells["cluster_alias"].astype(int).value_counts()
+    problems = {
+        "training": sorted(set(ids) & training)[:5],
+        "selfmap_list": sorted(set(ids) & listed)[:5],
+        "draw_1": sorted(set(ids) & first_ids)[:5],
+        "repeated": sorted(set(ids[ids.duplicated()]))[:5],
+        "outside_training_clusters": sorted(set(drawn_per_cluster.index) - kept)[:5],
+        "over_cap": sorted(
+            int(alias)
+            for alias, count in drawn_per_cluster.items()
+            if count > caps.get(int(alias), 0)
+        )[:5],
+    }
+    broken = {key: value for key, value in problems.items() if value}
+    if broken:  # pragma: no cover - guarded by the filters above
+        raise ReferenceBuildError(f"the second WMB test draw breaks its rule: {broken}")
+    capped_per_class = capped[WMB_CLAS].astype(str).value_counts()
+    reference_per_class = meta[WMB_CLAS].astype(str).value_counts()
+    parts = {
+        name: frame[WMB_CLAS].astype(str).value_counts()
+        for name, frame in (
+            (DRAW2_SOURCE_SUPERTYPE, base),
+            (DRAW2_SOURCE_NONNEURONAL, extra),
+            (DRAW2_SOURCE_TOP_UP, top_up),
+        )
+    }
+    drawn_per_class = cells[WMB_CLAS].astype(str).value_counts()
+    top_up_classes = top_up_record.get("per_class") or {}
+    per_class: dict[str, dict[str, Any]] = {}
+    for cls in classes:
+        n_draw2 = int(drawn_per_class.get(cls, 0))
+        pooled = int(check_per_class.get(cls, 0)) + n_draw2
+        per_class[cls] = {
+            "n_reference_10xv3": int(reference_per_class.get(cls, 0)),
+            "n_draw1": int(first_per_class.get(cls, 0)),
+            "n_draw1_check_half": int(check_per_class.get(cls, 0)),
+            **{f"n_{name}": int(counts.get(cls, 0)) for name, counts in parts.items()},
+            "n_draw2": n_draw2,
+            "n_pooled": pooled,
+            "n_available_under_cap": int(capped_per_class.get(cls, 0)),
+            "reaches_target": pooled >= target,
+            "ran_out": bool((top_up_classes.get(cls) or {}).get("ran_out", False))
+            or pooled < target,
+        }
+    pooled_total = sum(item["n_pooled"] for item in per_class.values())
+    pooled_reaching = sum(
+        item["n_pooled"] for item in per_class.values() if item["reaches_target"]
+    )
+    taken_share = [
+        int(count) / int(sizes[alias]) for alias, count in drawn_per_cluster.items()
+    ]
+    record = {
+        "rule": dict(rule),
+        "n_cells": int(len(cells)),
+        "per_source": {
+            name: int(len(frame))
+            for name, frame in (
+                (DRAW2_SOURCE_SUPERTYPE, base),
+                (DRAW2_SOURCE_NONNEURONAL, extra),
+                (DRAW2_SOURCE_TOP_UP, top_up),
+            )
+        },
+        "first_draw": {
+            "n_cells": len(first_ids),
+            "n_check_half": int(len(check)),
+            "cell_digest": test_cell_digest(first_ids),
+        },
+        "cell_digest": test_cell_digest(ids),
+        "n_candidates": int(len(candidates)),
+        "n_candidates_under_cap": int(len(capped)),
+        "n_excluded_cluster_not_in_training": int((is_candidate & ~in_kept).sum()),
+        "max_cluster_share_taken": float(max(taken_share, default=0.0)),
+        "disjoint_from_training": not problems["training"],
+        "disjoint_from_selfmap_list": not problems["selfmap_list"],
+        "disjoint_from_first_draw": not problems["draw_1"],
+        "class_top_up": top_up_record,
+        "per_class": per_class,
+        "n_classes": len(per_class),
+        "classes_reaching_target": sorted(
+            cls for cls, item in per_class.items() if item["reaches_target"]
+        ),
+        "classes_short_of_target": sorted(
+            cls for cls, item in per_class.items() if not item["reaches_target"]
+        ),
+        "n_pooled": int(pooled_total),
+        "pooled_share_in_classes_reaching_target": (
+            pooled_reaching / pooled_total if pooled_total else None
+        ),
+    }
+    return cells, record
+
+
+def wmb_test_set_spec(
+    primary: AnnotationReferenceSpec, config: AnnotationConfig
+) -> AnnotationReferenceSpec:
+    """Return the WMB test set's spec of a prepared ``wmb_panel`` spec.
+
+    The spec ``wmb_panel``'s self-map builds its test set (draw 1) from
+    (``_test_set_spec``). Gate P's second draw (M13b C20) is the same spec
+    built with ``resolvability.gate_p_wmb_draw`` 2, so the two differ only
+    by the draw.
+
+    Args:
+        primary: The prepared ``wmb_panel`` spec (sources are files,
+            ``prepare_reference_spec``).
+        config: The annotation config.
+
+    Returns:
+        The ``wmb_selfmap_testset`` spec.
+
+    Raises:
+        ReferenceBuildError: If a test-set source is missing.
+    """
+    sources = _test_set_source_paths(
+        {name: Path(path) for name, path in primary.sources.items()},
+        owner=primary.reference_id,
+        reference_id=WMB_TESTSET_REFERENCE_ID,
+        names=WMB_TESTSET_SOURCES,
+    )
+    return _spec_of_test_set(primary, config, sources, WMB_TESTSET_REFERENCE_ID)
+
+
+@dataclass(frozen=True)
+class WmbReferenceFacts:
+    """What gate P reads from the WMB reference metadata (M13b C20b).
+
+    Attributes:
+        composition: Each subclass label's share of the 10Xv3 cells of the
+            available matrices with full WMB truth (NP3's natural
+            composition, §14; the cells the test draws are drawn from).
+        donor_of: The ABC ``donor_label`` of each asked test cell (§14 NP4
+            [L]: "the per-donor spread is reported from the ABC
+            ``donor_label``"); empty when the metadata has no such column.
+        n_cells: The cells the composition counts.
+    """
+
+    composition: dict[str, float]
+    donor_of: dict[str, str]
+    n_cells: int
+
+
+def wmb_reference_facts(
+    sources: Mapping[str, Path], cell_ids: Iterable[str] = ()
+) -> WmbReferenceFacts:
+    """Return the WMB reference composition and the donors of some test cells.
+
+    Reads the WMB cell metadata, membership and matrix directory of a WMB
+    test set's sources (``wmb_test_set_spec``): the 10Xv3 cells of the
+    available matrices with a cluster and full WMB truth, as the test-set
+    builder takes its candidates.
+
+    Args:
+        sources: The test set's sources.
+        cell_ids: Test cells whose ``donor_label`` is wanted.
+
+    Returns:
+        The facts.
+
+    Raises:
+        ReferenceBuildError: If a source is missing or no cell has a label.
+    """
+    missing = [
+        name
+        for name in (
+            SOURCE_WMB_CELL_METADATA,
+            SOURCE_WMB_CLUSTER_MEMBERSHIP,
+            SOURCE_WMB_H5AD_DIR,
+        )
+        if name not in sources
+    ]
+    if missing:
+        raise ReferenceBuildError(f"the WMB reference facts need the sources {missing}")
+    h5ad = Path(sources[SOURCE_WMB_H5AD_DIR])
+    paths = [h5ad] if h5ad.is_file() else sorted(h5ad.glob(f"*{WMB_H5AD_SUFFIX}"))
+    matrices = {
+        path.name[: -len(WMB_H5AD_SUFFIX)]
+        for path in paths
+        if path.name.endswith(WMB_H5AD_SUFFIX)
+    }
+    metadata_path = Path(sources[SOURCE_WMB_CELL_METADATA])
+    header = pd.read_csv(metadata_path, nrows=0).columns
+    columns = ["cell_label", "feature_matrix_label", "library_method", "cluster_alias"]
+    with_donor = "donor_label" in header
+    meta = pd.read_csv(
+        metadata_path,
+        usecols=[*columns, *(["donor_label"] if with_donor else [])],
+        dtype={"cluster_alias": "Int64"},
+    )
+    meta = meta[meta["library_method"] == WMB_LIBRARY_METHOD].dropna(
+        subset=["cluster_alias"]
+    )
+    meta = meta[meta["feature_matrix_label"].isin(matrices)]
+    meta["cluster_alias"] = meta["cluster_alias"].astype(int)
+    labels = membership_labels(sources[SOURCE_WMB_CLUSTER_MEMBERSHIP], WMB_HIERARCHY)
+    meta = meta.join(labels, on="cluster_alias").dropna(subset=list(WMB_HIERARCHY))
+    counts = meta[WMB_SUBC].astype(str).value_counts()
+    total = int(counts.sum())
+    if total == 0:
+        raise ReferenceBuildError("no WMB 10Xv3 cell has a subclass label")
+    wanted = {str(cell) for cell in cell_ids}
+    donor_of: dict[str, str] = {}
+    if with_donor and wanted:
+        rows = meta[meta["cell_label"].astype(str).isin(wanted)]
+        donor_of = dict(
+            zip(
+                rows["cell_label"].astype(str),
+                rows["donor_label"].astype(str),
+                strict=True,
+            )
+        )
+    return WmbReferenceFacts(
+        composition={str(label): int(count) / total for label, count in counts.items()},
+        donor_of=donor_of,
+        n_cells=total,
+    )
+
+
 def build_wmb_selfmap_testset(context: BuildContext) -> dict[str, Any]:
     """Build the ``wmb_selfmap_testset`` bundle (mouse, resolvability).
 
@@ -6033,6 +6468,14 @@ def build_wmb_selfmap_testset(context: BuildContext) -> dict[str, Any]:
     same rule, so that build is unchanged), restricted to the panel with
     native counts and truth at class, subclass, supertype and cluster.
 
+    With ``resolvability.gate_p_wmb_draw`` 2 the bundle holds gate P's
+    second disjoint draw instead (M13b C20a; ``wmb_second_draw``): draw 1's
+    cells are selected as above (they are not read from a store, so the
+    draw-2 ``build_hash`` does not depend on where draw 1 lives), excluded
+    with the training sample and the self-map list, and draw 2 is drawn
+    and panel-restricted in their place. Draw 1's selection, output and
+    ``build_hash`` are unchanged.
+
     Args:
         context: The build context.
 
@@ -6044,6 +6487,7 @@ def build_wmb_selfmap_testset(context: BuildContext) -> dict[str, Any]:
     spec = context.spec
     panel = _panel_of(context)
     config = _config_of(context)
+    draw = int(config.resolvability.gate_p_wmb_draw)
     timer = _StepTimer(context.work_dir / CTM_LOG_DIR)
     matrices = _wmb_matrices(context)
     if not matrices:
@@ -6133,6 +6577,25 @@ def build_wmb_selfmap_testset(context: BuildContext) -> dict[str, Any]:
                 for cls, item in top_up_record["per_class"].items()
             ),
         )
+    draw_record: dict[str, Any] | None = None
+    if draw == WMB_DRAW_2:
+        with timer.step("second_draw"):
+            cells, draw_record = wmb_second_draw(
+                meta,
+                sampled,
+                exclude=base,
+                first_draw=cells,
+                rule=wmb_second_draw_rule(config),
+            )
+        logger.info(
+            "%s: second draw of %d test cells (%d of %d classes reach %d pooled "
+            "with draw 1's check half)",
+            WMB_TESTSET_REFERENCE_ID,
+            draw_record["n_cells"],
+            len(draw_record["classes_reaching_target"]),
+            draw_record["n_classes"],
+            draw_record["rule"]["class_target"],
+        )
     reference_genes = set(_matrix_genes(next(iter(matrices.values()))))
     genes = sorted(gene for gene in panel.ensembl_ids if gene in reference_genes)
     if not genes:
@@ -6182,6 +6645,41 @@ def build_wmb_selfmap_testset(context: BuildContext) -> dict[str, Any]:
             "resolvability_version": plan.version,
             "class_top_up": top_up_record,
             "n_class_top_up": int((obs["test_source"] == TOP_UP_SOURCE).sum()),
+        }
+    if draw_record is not None:
+        return {
+            "reference": (
+                "WMB second disjoint test draw (10Xv3; gate P), panel-restricted"
+            ),
+            "test_set": {
+                **written,
+                "draw": WMB_DRAW_2,
+                "gate_p_draw": draw_record,
+                "n_selfmap_list": len(base),
+                "selfmap_list_sha256": base_digest,
+                "matches_validated_test_set": base_digest
+                == WMB_SELFMAP_TEST_CELLS_PIN.sha256,
+                "marker_training_sample": {
+                    "n_cells": int(sampling["n_sampled_cells"]),
+                    "disjoint": bool(
+                        not set(obs.index) & set(sampled["cell_label"].astype(str))
+                    ),
+                },
+                "per_class": {str(key): int(value) for key, value in per_class.items()},
+                "native_counts_median": float(np.median(native))
+                if len(native)
+                else None,
+                **(
+                    {}
+                    if not version_7
+                    else {
+                        "resolvability_version": version_7["resolvability_version"],
+                        "first_draw_class_top_up": top_up_record,
+                    }
+                ),
+            },
+            "depth_grid": grid,
+            **timer.to_json(),
         }
     return {
         "reference": "WMB self-map test cells (10Xv3), panel-restricted",
@@ -7287,6 +7785,13 @@ def _wmb_testset_params(
         "seed": TEST_SET_SEED,
         "matrix_pattern": f"*{WMB_H5AD_SUFFIX}",
         "vocab_assets": vocab_asset_sha256(WMB_TAXONOMY_ID),
+        # Gate P's second draw only (M13b C20a): absent from every production
+        # payload, so no production build_hash changes.
+        **(
+            {}
+            if int(config.resolvability.gate_p_wmb_draw) == WMB_DRAW_1
+            else {"gate_p_draw": wmb_second_draw_rule(config)}
+        ),
     }
 
 
@@ -7397,7 +7902,20 @@ def prep_memory_reserve_gb() -> float:
 def _wmb_large_panel_refusal(
     panel: AnnotationPanel, config: AnnotationConfig
 ) -> str | None:
-    """Refuse a large WMB panel without the prefilter above the memory reserve."""
+    """Refuse a large WMB panel without the prefilter above the memory reserve.
+
+    Also refuse gate P's second WMB test draw (``gate_p_wmb_draw`` 2) for the
+    primary: the production self-map maps draw 1 only, and draw 2 is built
+    as its own ``wmb_selfmap_testset`` bundle (M13b C20a).
+    """
+    if int(config.resolvability.gate_p_wmb_draw) != WMB_DRAW_1:
+        return (
+            f"wmb_panel's self-map maps the production test draw {WMB_DRAW_1} only "
+            f"(resolvability.gate_p_wmb_draw is "
+            f"{config.resolvability.gate_p_wmb_draw}); build gate P's second "
+            f"draw as its own {WMB_TESTSET_REFERENCE_ID} bundle "
+            "(scripts/annotation/build_wmb_draw2.py)"
+        )
     if (
         panel.n_genes <= config.panel.large_panel_genes
         or config.panel.large_panel_marker_prefilter != "none"

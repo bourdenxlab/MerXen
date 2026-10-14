@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "2d960816289f217e14d24f40510e95c12e97959cc38bf09df974b62236cfba06",
+    3: "92b2b98480440f83dd024612cd1eea9d695b5de831ee1b1869314ef14e44503c",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -238,6 +238,14 @@ PIN_HISTORY = (
     "gate P reads); resolvability_plan selects profile assets only, so no "
     "PREP reads the role, no such asset is registered yet, and no bundle "
     "content or build_hash changes (test_resolvability_v6_golden)",
+    "3: gate P's second disjoint WMB test draw (M13b C20a): "
+    "build_wmb_selfmap_testset draws it (wmb_second_draw) only when "
+    "resolvability.gate_p_wmb_draw is 2, whose rule enters the test set's "
+    "params only then; wmb_panel refuses draw 2; wmb_test_set_spec and "
+    "wmb_reference_facts (gate P's reads, no builder calls them) are added. "
+    "Draw 1's selection, output and every production payload are unchanged "
+    "(test_resolvability_v6_golden, test_reference_draw2), so no bundle "
+    "content or build_hash changes",
 )
 
 
