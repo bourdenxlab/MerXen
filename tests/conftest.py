@@ -10,6 +10,7 @@ unset or its path is absent (docs/local-configuration.md).
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -29,8 +30,29 @@ _ISOLATED = {
 }
 
 
-def _capture() -> tuple[dict[str, str], Path | None, str | None, str]:
+# The environment as it was before the isolation, handed to pytest-xdist
+# workers (they start from the controller's isolated environment). No code
+# under test reads this variable.
+_STASH_VAR = "_MERXEN_TEST_PRIVATE_STASH"
+
+
+def _original_environment() -> dict[str, str]:
+    stash = os.environ.get(_STASH_VAR)
+    if stash is not None:
+        return dict(json.loads(stash))
+    names = [*local_config.KNOWN, *_ISOLATED]
+    return {name: os.environ[name] for name in names if name in os.environ}
+
+
+def _capture(
+    original: dict[str, str],
+) -> tuple[dict[str, str], Path | None, str | None, str]:
     """Real locations, alias table and .env, taken before the isolation."""
+    for name in [*local_config.KNOWN, *_ISOLATED]:
+        os.environ.pop(name, None)
+    os.environ.update(original)
+    local_config.clear_cache()
+    privacy.clear_cache()
     try:
         locations = local_config.snapshot()
         alias_file = privacy.alias_file()
@@ -40,13 +62,15 @@ def _capture() -> tuple[dict[str, str], Path | None, str | None, str]:
     return locations, alias_file, str(env_file) if env_file else None, ""
 
 
-_REAL_LOCATIONS, _REAL_ALIAS_FILE, _REAL_ENV_FILE, _CAPTURE_ERROR = _capture()
+_ORIGINAL = _original_environment()
+_REAL_LOCATIONS, _REAL_ALIAS_FILE, _REAL_ENV_FILE, _CAPTURE_ERROR = _capture(_ORIGINAL)
 
 # Session-wide isolation (also covers module- and session-scoped fixtures and
 # the subprocesses they start); the autouse fixture repeats it per test.
 for _name in local_config.KNOWN:
     os.environ.pop(_name, None)
 os.environ.update(_ISOLATED)
+os.environ[_STASH_VAR] = json.dumps(_ORIGINAL)
 local_config.clear_cache()
 privacy.clear_cache()
 
