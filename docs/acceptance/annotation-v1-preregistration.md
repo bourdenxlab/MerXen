@@ -7,8 +7,8 @@
 - **Evidence root** (`$A`): `/srv/storage/MerXen/annotation_dev/evidence_20260926`. The item-1 baselines are in `$A/shadow/baselines/metrics/*.csv` (§10 lists the files); items 2–7 are in `$A/shadow/{e8,x1,heldout,flags,ll,glial_jsd}/` (§11), summarised in `$A/shadow/SHADOW_SUMMARY.txt`.
 - **M3c addendum (2026-09-28):** §14 pre-registers the acceptance tests of milestone M3c (Xenium Prime 5K measured efficiency, per-class depth and emission stability; plan §12 "M3c", as of `ce15cde`) before any M3c code, with your decisions of 2026-09-28 and the M3c scope decision. §9 stays the plan's §14 as of `06a04a1`; the plan's later "Version-7 families" paragraph is quoted in §14.1.
 - **M3c amendment (2026-09-29):** §15 records the orchestrator decisions D1–D7 of 2026-09-29, **pending your confirmation at PR review**, made after §14 (iii) failed in stage D: eight ensemble members, a one-standard-error margin on E2's spread route, the re-test of (iii) on two new keyed ensembles (stop if it fails), and the per-class warning, lung-scenario headline and panel-card changes. It is committed before any code of the amendment and before any new run; the stage-D failure stays on record (§15.1).
-- **Mouse decisions (2026-10-14):** the user's decisions of 2026-10-14 are recorded before any gate M score is read: §24's amendment (U1, the T2 reading of the M6b selection and of MO10), §25 (gate M's scoring protocol, U3 and U4) and §26 (the M13b readings, U7).
 - **M13 (2026-10-06):** §23 pre-registers the real-data acceptance of the new-panel human MERSCOPE family (P5822, P4815, P3518, P7417) and the gate-P definitions that apply to every family, before any measurement on the family. It records the user's decisions of 2026-10-02 (D1 (a), D2 (d), D3 (a), the same-species dry-run rule D4, D25, D26) and marks every item that depends on an unanswered decision as proposed.
+- **Mouse decisions (2026-10-14):** the user's decisions of 2026-10-14 are recorded before any gate M score is read: §24's amendment (U1, the T2 reading of the M6b selection and of MO10), §25 (gate M's scoring protocol, U3 and U4, with the orchestrator's readings and ag7's G1 recipe) and §26 (the M13b readings, U7, under the gate-P criteria as revised by §23.21 and §23.22).
 
 ## 1. Rules
 
@@ -1790,7 +1790,10 @@ These are exactly the columns `t2_after` and `t2_allen_labels` of `$A/m6b/stageC
   - the statistic S, the tie rule and the "no admissible candidate" path;
   - the order of record;
   - the inputs: the scoring outputs of 2026-09-29 in `$A/m6b/scoring`, with no new re-map.
-- **MO10's T2 clause. Reading adopted: "both".**
+- **MO10's T2 clause. Reading adopted: "both". Label: LOOSENING, POST-HOC** (against the alternative below).
+  - *Loosening:* MO10's T2 clause registers 0.1% in every bin. The Allen-relative bound admits higher values wherever the Allen labels' own T2 is above 0.1%, which the question put at 5 of 6 bins (see *Loosening* above).
+  - *Post-hoc:* when it was adopted, C1 had shown the three diagnosed rules meeting the Allen-relative bound, and `candidates.csv` showed every rule failing the 0.1% bound.
+  - *Approval:* the orchestrator reads it as within the written approval of 2026-10-14, for the reasons in the next two bullets. Also, the exception that approval covers is the missed-region clause only (below); under the alternative, the exception would have to cover the T2 clause as well, which the approval did not. The gate M PR states this reading beside the quoted answer.
   - The quoted bound, "T2 ≤ 0.1% in every bin", is selection constraint (ii) (the selection rule of this section). It is also MO10's T2 clause (§9: "T2 after pruning ≤ 0.1% in every bin").
   - The question asked to read "the bound" as the Allen-relative one, and did not restrict that to the selection. MO10's T2 clause is therefore scored with the bound above too, per gene set as this section states.
   - *Alternative, not adopted:* the reading replaces constraint (ii) only, and MO10's T2 clause keeps 0.1%. STAGE_C_REPORT §6 recommended this alternative. Under it the T2 clause fails for every rule, and the written MO10 exception would have to cover it as well.
@@ -1896,7 +1899,7 @@ Under the reading above, PREP time passes and **PREP peak is expected to fail on
 
 ### 25.2 Readings adopted before scoring (orchestrator; labels as in roadmap §3 U4)
 
-None of these readings is a loosening, so none needs written approval (§1 rule 2). The gate M PR lists them.
+Each reading the orchestrator adopts here is labelled tightening or neutral. None of them is a loosening, so none needs written approval (§1 rule 2). The MO10 bullet is not one of them: it applies §24's amendment (U1), a LOOSENING, POST-HOC, approved in writing on 2026-10-14. The written MO10 exception that the flip-rule bullet names comes from the same approval. The gate M PR lists them all.
 - **MO2 (tightening).** Both the production (subset) re-map and the full re-map must pass: T2 after pruning ≤ 0.1%, class changes outside dropped nodes ≤ 0.25% and subclass changes ≤ 1.5%.
   - Each re-map runs with the MAP run's own engine parameters, its 4 processes included, as §24's stage-B rule requires for re-maps.
   - At M6, ag7's full re-map was .245%, against the .25% limit.
@@ -1908,7 +1911,7 @@ None of these readings is a loosening, so none needs written approval (§1 rule 
   - The full pipeline results of this run were deleted on 2026-09-30.
 - **MO9 [L] (neutral, as registered).** Reported. It gates the use of the reseg and proseg outputs, not the flip.
 - **H18 mouse rows (neutral).** Recorded with their values and no exception (§18, "Not covered", CHECK M2). They are not in the mouse flip rule. They set M13b's H18 set under D28 (§26).
-- **MO10.** Scored as §24's amendment states: the Allen-relative T2 reading, scored by M6b-R on the selected rule, with the one written MO10 exception.
+- **MO10 (LOOSENING, POST-HOC, approved in writing on 2026-10-14; §24's amendment, U1; not an orchestrator reading).** Scored as §24's amendment states: the Allen-relative T2 reading, scored by M6b-R on the selected rule, with the one written MO10 exception.
 - **MO1, MO3, MO5, MO6 and MO11** are scored as §9 registers them. No reading is adopted for them here.
 - **The mouse flip rule is unchanged:** MO1–MO8 and MO10, with the one written MO10 exception of §24. MO11 keeps its banner rule. Any other failure needs a fix, or a written, user-approved exception in the gate M PR.
 - **Left for GM-REVIEW** (roadmap §3):
@@ -1940,6 +1943,35 @@ None of these readings is a loosening, so none needs written approval (§1 rule 
   - the store's write-lock file.
 
   Backups and a sha256 manifest are taken first. Pre-run and post-run manifests (run3's pattern) show that no other file of the store changed.
+- **Label: neutral** for scoring. The route decides where the run reads and writes; it changes no criterion, threshold or reading.
+  - It is user-approved. The user chose it, option (B) of roadmap §3 U3, over the roadmap's recommendation, a read-only copy (option (A), labelled neutral).
+  - The roadmap gave (B) no label and noted that it needs the owner's agreement. The user confirmed that agreement (above).
+
+**ag7's G1 input: the QC-stage recipe** (adopted by the orchestrator on 2026-10-14, after both recipes below had been computed and before any gate M score is read).
+- *Why a recipe is chosen.* ag7's own QC-stage outputs are symlinks into a home directory that cannot be read, so A1 recomputed G1 with code `515017d`.
+  - Report: `annotation_dev/ag7_inplace_20261014/A1_REPORT.md` §3.
+  - Files: `g1/g1_recompute.py` and `g1/g1_summary.json` in that directory, with checksums in `g1/SHA256SUMS`.
+- *Adopted: the pipeline's QC-stage recipe.* `merxen.qc.registration.compute_segmentation_registration_qc` on the segmentation's shapes in the store, with the reference shapes `merscope_cell_boundaries`.
+  - This is what the QC stage computes, and what the mouse gate reads in production: `mouse_gate.find_registration_check` takes the QC stage's `<sample>_registration_qc.json` (`src/merxen/annotation/mouse_gate.py` lines 187–195).
+  - On VZG2 it reproduces the published QC-stage JSONs exactly for all four segmentations (`g1/qc_recipe_vzg2_check.json`).
+  - The staged files are `g1/qc_recipe/ag7_<segmentation>_registration_qc.json`.
+- *Not adopted: M6's standalone recipe* (`$A/m6/stageC/scripts/g1_registration_stageC.py`: centroids from the clustered H5AD's `obsm['spatial']`, with the original_seg H5AD as the reference). At `515017d` it reproduces M6's stage-C JSONs exactly.
+
+| Segmentation | Density ratio, M6 recipe | Density ratio, QC-stage recipe | G1, M6 recipe | G1, QC-stage recipe |
+|---|---|---|---|---|
+| original_seg | 1.625 | 1.882 | warning | warning |
+| proseg_hybrid | 2.197 | 1.984 | pass | warning |
+| proseg_mask | 1.984 | 1.909 | warning | warning |
+| reseg | 2.167 | 1.879 | pass | warning |
+
+- *G1's lines, from the code.* G1 fails when the density ratio is below 1.5 or the shift against the platform's own segmentation exceeds 5 µm. It warns when the ratio is below 2.0.
+  - Source: the `MouseGateConfig` defaults (`src/merxen/annotation/config.py` lines 852–854), applied in `mouse_gate.py` lines 845–866; plan §7.6.
+  - Every shift is 0 µm under both recipes, except original_seg's, which is not measured.
+- *Result.* Neither recipe fails G1 on any segmentation. The QC-stage recipe puts a G1 warning on all four segmentations; the M6 recipe puts one on two (original_seg and proseg_mask).
+- **Label: neutral; POST-HOC as to the warnings.**
+  - *Post-hoc:* the recipe was chosen after both sets of values had been seen.
+  - *Neutral, not a tightening:* it is G1's production input. It changes no G1 fail, so it changes no gate level. No gate M criterion reads a G1 warning on ag7: MO7 asks only that ag7 is not `failed`, "with or without the warning flag" (plan §7.6). So no criterion becomes harder to pass.
+  - *Not a loosening:* on every segmentation its G1 status is at least as strict as the M6 recipe's. It adds the warnings on proseg_hybrid and reseg and removes none. Its ratio is the higher one only on original_seg (1.882 against 1.625), where both recipes warn.
 
 ## 26. M13b readings (U7; recorded 2026-10-14, before any mouse gate-P mapping)
 
@@ -1949,7 +1981,17 @@ M13b (plan §12 M13b; the M13 chunks C20–C22) brings gate P to mouse:
 - C21: the ag7 and VZG2 dry run;
 - C22: the mouse real-data QC in RESOLVE.
 
-The gate-P definitions and rulings of §23.9–§23.19 apply to it as they do to every family. These include CK1 (a), CK2 and A27 (a) (§23.19). No mouse gate-P cell has been mapped, and no mouse gate-P output exists. No threshold, target or criterion changes here.
+**The gate-P text that applies (corrected 2026-10-14, in the same PR, before any mouse gate-P mapping).** The gate-P definitions and rulings of §23.9–§23.19 apply to M13b as they do to every family, **as revised by §23.21 (R1–R7) and §23.22**. That revised text is the registered gate-P text now, and the mouse dry run runs under it. **Label: neutral.**
+- *Why it applies to mouse.* The user approved R1–R7 on 2026-10-07 ("Approve all six (Recommended)", §23.21) as a revision of the gate-P criteria, and §23.22 records how the code reads R3 (c).
+- *The code.* The scoring code at this branch's base (`515017d`) implements the revision for every family and species. In `src/merxen/annotation/gate_p.py`, the module docstring (lines 17–55) names the function of each item: `np3_test_cell_weights` (R1), `gate_p_depth_walk` (R2), `np5_tstar_consequence` (R3 (c)), `dry_run_verdict` (R5, lines 8265–8366), `np5_decision_agreement` (R6) and `np5_rederive_ensemble` (R7). The mouse driver path does not exist yet (C20b; `GatePOptions.check_supported` refuses mouse, `gate_p_run.py` lines 316–329). It is to call the same functions.
+- *Rulings of §23.19 that stand:*
+  - CK2;
+  - A27 (a): a mouse family's NP6 takes the human cross-platform offsets, with every gene resampled (§23.15 item 6). The label A27 is the M13 decision memo's (`$A/m13/M13_DECISION_MEMO.answered_20261007.md`, answered on 2026-10-07; §23.19).
+- *CK1 (a) does not stand.* §23.21 R5: "in the dry run, a class H18 expects whose record is `not_evaluable` is reported, not failed. This replaces CK1 (a)."
+- *Stricter alternative, not taken:* CK1 (a) for mouse, under which an H18 class that is not evaluable fails the mouse dry run. It is not taken because R5 replaced CK1 (a) for every family. Applying CK1 (a) to mouse alone would re-instate a ruling the user replaced.
+- *The first version of this section* (commit `e54cce1`) cited CK1 (a) here and in reading (iv) and named only §23.9–§23.19. This paragraph and reading (iv) replace that text.
+
+No mouse gate-P cell has been mapped, and no mouse gate-P output exists. No threshold, target or criterion changes here.
 
 **The question** (put on 2026-10-13 at 16:46 UTC, verbatim): "U7, M13b (mouse gate P): start the mouse dry-run work (second WMB draw, ag7/VZG2 dry run) now in parallel with gate M, version 6 first, run as registered and revise under the CK2 path if it fails as predicted?"
 
@@ -1960,9 +2002,27 @@ The gate-P definitions and rulings of §23.9–§23.19 apply to it as they do to
 - **(ii) Draw 2's top-up (neutral; adopted by the orchestrator).** The top-up "up to 700" (§9, "Class set C_P") is read pooled with draw 1's check half.
   - Feasibility was estimated read-only before this record (roadmap §1): draw 2 can top up 26 of the 34 classes to 700, and C_P then holds about 95% of the pooled test cells.
 - **(iii) Version 6 first (tightening).** A forced version 7 runs only when a mouse version-7 family is scored, on a separate version-7 test set with the v7.6 top-up. The answer approves this ("version 6 first").
-- **(iv) The predicted failure, disclosed now.**
-  - Roadmap §1 M13b, verbatim: "**the version-6 mouse dry run is predicted to fail by construction**: VZG2's frozen PREP emits nothing at class for `04 DG-IMN Glut` and `29 CB Glut`, and ag7's also nothing for `34 Immune`."
-  - The dry run runs as registered (§9, "Dry run"; §23.9 item 8, with D28 and CK1 (a)).
+- **(iv) The predicted failure, disclosed now; re-examined under R5 on 2026-10-14.**
+  - Roadmap §1 M13b, verbatim (made under CK1 (a)): "**the version-6 mouse dry run is predicted to fail by construction**: VZG2's frozen PREP emits nothing at class for `04 DG-IMN Glut` and `29 CB Glut`, and ag7's also nothing for `34 Immune`."
+  - *The record such a class gets* (code at `515017d`):
+    1. Version 6 freezes the PREP bundle's own decisions, in the provisional regime (`gate_p_run.py` lines 185 and 948–965).
+    2. A call is confident only where the bin of its called class at that level and depth is emitted with a threshold (`resolvability.frozen_confident_mask`, `resolvability.py` lines 4922–4967). A class that emits nothing at class level therefore has no confident class-level call.
+    3. `resolvability.gate_p_tested_sets` then gives it no tested set: even every bin pooled holds fewer than n_min = 200 confident calls (lines 4903–4913).
+    4. `gate_p_depth_walk` marks every criterion not evaluable for a key without a tested set (`gate_p.py` lines 6056–6059). Its class-level parts are not read, so no criterion fails.
+    5. `gate_p_class_records` gives every C_P class a record (line 7512). This one is **`not_evaluable`, not failed** (lines 7518–7545).
+  - *What R5 changes.* `dry_run_verdict` reports a `not_evaluable` row, instead of failing it, only when the row is one H18 expects and is not a C_P class at the minimum level (`gate_p.py` lines 8302–8341).
+    - For mouse the minimum level is class (`diagnostics.MIN_SIMULATION_LEVEL`, `diagnostics.py` line 182). H18's rows are at the leaf level, subclass (`h18_expected_classes`, lines 8231–8262).
+    - A C_P class at class level that is not validated has `passed` False (line 8339). The class level is then incomplete in the level walk (lines 7629–7633), which fails `passes` as well (lines 8343–8350).
+    - Under CK1 (a), too, a C_P class at class level had to be validated, so the roadmap's prediction did not rest on CK1 (a) at class level. R5 changes the outcome only for subclass-level H18 rows that are not evaluable: CK1 (a) failed them, and R5 reports them.
+  - **The corrected prediction.** The version-6 dry run of a family is predicted to fail by construction when its C_P at class level holds one of these classes:
+    - VZG2: `04 DG-IMN Glut` or `29 CB Glut`;
+    - ag7: either of those, or `34 Immune`.
+    - For a class that C_P leaves out (fewer than 700 pooled test cells), the prediction is withdrawn. The class-level rule does not reach it, and its subclass-level H18 row, if not evaluable, is reported (R5), not failed.
+    - C_P is fixed by C20 from the pooled test-cell table (draw 1's check half and draw 2) before any cell is mapped. This record does not fix it.
+  - *Read while this correction was written.* These are reference metadata only: no cell was mapped and no gate-P code was run.
+    - The class-level provisional decisions in `resolvability.parquet` of the two bundles (VZG2 `af3fab09…`, ag7 `97a086d1…`) confirm the roadmap's premise. Neither emits any class-level bin for `04 DG-IMN Glut` or `29 CB Glut`, and ag7's emits none for `34 Immune`.
+    - The test cells of these three classes: 70, 30 and 230 in draw 1 (`wmb_selfmap_testset` `c499a7ea…`, both halves); 666, 687 and 590 in each of the two draw-2 test-set bundles already in the store (`947410bd…` and `d03f52b9…`, built 2026-10-14, not yet recorded). With draw 1's check half, each class lies near C_P's 700. Whether each reaches 700 is settled when C20 fixes C_P.
+  - The dry run runs as registered (§9, "Dry run"; §23.9 item 8, with D28, as revised by §23.21 R5).
   - If it fails, the criteria are revised only under CK2, with the user's approval: a revision memo, then a revision PR the user approves, then a re-run under the revised criteria that must pass. "A failed dry run is never re-scored under another reading" (§23.19).
   - Any such revision is a LOOSENING, POST-HOC at that point.
   - The answer approves this ("run as registered and revise under the CK2 path if it fails as predicted").
