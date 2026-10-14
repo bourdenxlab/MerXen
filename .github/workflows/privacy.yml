@@ -22,7 +22,12 @@ jobs:
         with:
           python-version: "3.12"
       # The text reaches the script through the environment, never through
-      # shell interpolation.
+      # shell interpolation. The branch name is checked here as well: locally,
+      # pre-commit skips the push hook for a branch with no new commits.
+      - name: PR branch name
+        env:
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: printf '%s\n' "$PR_BRANCH" | python3 scripts/privacy/check_private_text.py --stdin
       - name: PR title and description
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}

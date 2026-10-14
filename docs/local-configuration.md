@@ -173,8 +173,9 @@ are kept in the private records."
    `/path/to/`, `/usr/`, `/proc/` and `/dev/`.
 3. Generic donor ids: `P` followed by four digits, except the synthetic
    fixture ids `P0001`, `P0002`, `P9999`. Always applied.
-4. Real names: every row of the alias table (when found). Without a table the
-   hook prints `privacy: no alias table (.aliases.tsv); real-name check
+4. Real names: every row of the alias table (when found; literal rows in any
+   case, although `to_alias` translates data only on an exact match). Without
+   a table the hook prints `privacy: no alias table (.aliases.tsv); real-name check
    skipped` and still applies rules 1-3.
 
 Base64 payload lines and notebook image output lines are skipped. Binary files
@@ -215,8 +216,11 @@ Before `gh pr create` or `gh pr edit`, check the title and body:
 printf '%s\n\n%s\n' "$TITLE" "$BODY" | python3 scripts/privacy/check_private_text.py --stdin
 ```
 
-The Privacy workflow on GitHub checks the PR title, description and commit
-messages on every change, edits included (rules 1 and 3: CI has no table).
+The Privacy workflow on GitHub checks the PR branch name, title, description
+and commit messages on every change, edits included (rules 1 and 3: CI has no
+table). The branch name is checked there too because pre-commit runs the push
+hook only for the first pushed ref that brings new commits: a new branch on
+commits already pushed, or a second ref of one push, is not checked locally.
 
 ### What may stay
 

@@ -12,7 +12,15 @@ import pytest
 from merxen import privacy
 from merxen.local_config import LocalConfigError
 
-from .synthetic import DONOR, DONOR_NUMBER, LEGACY_VALUE, MOUSE, STORE_VALUE, USER
+from .synthetic import (
+    DONOR,
+    DONOR_NUMBER,
+    LEGACY_VALUE,
+    MOUSE,
+    MOUSE2_PAIR,
+    STORE_VALUE,
+    USER,
+)
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts/privacy/rewrite_text.py"
 
@@ -42,6 +50,14 @@ def test_names_become_aliases_with_numbers_and_deny_rows(fake_table: Path) -> No
     )
     assert text == "xen_hd1_adata of HD1 by <user>"
     assert [item.original for item in report] == [DONOR_NUMBER, DONOR, USER]
+
+
+def test_names_of_any_case_become_aliases(fake_table: Path) -> None:
+    # What the scanner refuses, the rewrite replaces (literal rows of any case).
+    text, _ = privacy.rewrite(
+        f"under {MOUSE2_PAIR.lower()}/", paths=False, names=True, quote_brackets=True
+    )
+    assert text == "under MS2/"
 
 
 def test_blockquotes_bracket_substitutions(fake_table: Path, fake_env: Path) -> None:

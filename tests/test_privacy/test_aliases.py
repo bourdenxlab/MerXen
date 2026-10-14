@@ -232,6 +232,16 @@ def test_find_names_prefers_the_longest_literal(fake_table: Path) -> None:
     ]
 
 
+def test_find_names_ignores_the_case_of_literal_rows(fake_table: Path) -> None:
+    # The scanner refuses every spelling of a literal real form (a lower-cased
+    # pair id in a directory name); translating data stays exact.
+    text = f"data/{MOUSE2_PAIR.lower()}/x and {MOUSE2_PAIR.upper()}"
+    labels = [row.label for _, row in privacy.name_matches(text)]
+    assert labels == ["MS2", "MS2"]
+    assert privacy.to_alias(MOUSE2_PAIR.lower()) == MOUSE2_PAIR.lower()
+    assert privacy.to_alias(MOUSE2_PAIR) == "MS2"
+
+
 def test_find_names_includes_numbers_and_deny_rows(fake_table: Path) -> None:
     labels = [
         row.label
