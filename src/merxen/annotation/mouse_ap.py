@@ -37,7 +37,7 @@ import numpy as np
 import pandas as pd
 
 from merxen.annotation.mouse_regions import RegionShares
-from merxen.annotation.reference import GREY_REGIONS
+from merxen.annotation.reference import GREY_REGIONS, structure_home_table
 
 logger = logging.getLogger(__name__)
 
@@ -509,20 +509,7 @@ class MerfishRegionCounts:
             .sum()
             .unstack(fill_value=0)
         )
-        structure = structure[structure.sum(axis=1) > 0].sort_index()
-        structure = structure.reindex(columns=sorted(structure.columns))
-        totals = structure.sum(axis=1)
-        values = structure.to_numpy()
-        best = values.argmax(axis=1)
-        structure_home = pd.DataFrame(
-            {
-                "level": "subclass",
-                "node_name": structure.index.astype(str),
-                "home": np.asarray(structure.columns, dtype=object)[best],
-                "home_share": values[np.arange(len(values)), best] / totals.to_numpy(),
-                "n_grey": totals.to_numpy(np.int64),
-            }
-        )
+        structure_home = structure_home_table(structure)
         return {
             "region_share": pd.concat(share_frames, ignore_index=True),
             "region_home": pd.concat(home_frames, ignore_index=True),

@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "2d960816289f217e14d24f40510e95c12e97959cc38bf09df974b62236cfba06",
+    3: "be9a3794068ea33ca14a9ff36be95aea27bb3e8fff830c6c17e3e300a059a8b4",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -238,6 +238,13 @@ PIN_HISTORY = (
     "gate P reads); resolvability_plan selects profile assets only, so no "
     "PREP reads the role, no such asset is registered yet, and no bundle "
     "content or build_hash changes (test_resolvability_v6_golden)",
+    "3: the wmb_region_share builder writes region_structure_home.parquet, the "
+    "structure-level subclass homes the default mouse region rule's OB-OLF "
+    "coupling reads (M6b-R, plan §7.8 (a); structure_home_table is shared "
+    "with the M6b scoring's tables); REGION_SHARE_REVISION 2 enters that "
+    "builder's build_hash through its params, so the region-share bundle gets "
+    "a new hash without a builder bump and a revision-1 bundle is never "
+    "reused; every other bundle's payload and build_hash are unchanged",
 )
 
 

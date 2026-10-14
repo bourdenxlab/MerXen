@@ -144,6 +144,9 @@ TAXONOMY_DIR: Final = "taxonomy"
 REGION_SHARE_FILE: Final = "region_share.parquet"
 REGION_HOME_FILE: Final = "region_home.parquet"
 SECTION_COMPOSITION_FILE: Final = "section_composition.parquet"
+# Structure-level subclass homes (M6b variant (a); revision 2 of the
+# wmb_region_share bundle, ``REGION_SHARE_REVISION``).
+REGION_STRUCTURE_HOME_FILE: Final = "region_structure_home.parquet"
 SECTION_REGIONS_FILE: Final = "section_regions.parquet"
 AP_WINDOWS_FILE: Final = "ap_windows.parquet"
 
@@ -273,6 +276,11 @@ OB_NERVE_STRUCTURE: Final = "In"
 OLF_UNASSIGNED_STRUCTURE: Final = "OLF-unassigned"
 OB_ANTERIOR_AP_MM: Final = 2.5
 AP_WINDOW_HALF_WIDTH: Final = 1
+# Content revision of the wmb_region_share bundle, hashed in its builder
+# params (only that builder's build_hash moves): 2 adds the structure-level
+# subclass homes (region_structure_home.parquet) that the default mouse
+# region rule's OB-OLF coupling reads (M6b-R, plan §7.8 (a)).
+REGION_SHARE_REVISION: Final = 2
 MERFISH_COLUMNS: Final[tuple[str, ...]] = (
     "brain_section_label",
     "class",
@@ -4474,6 +4482,58 @@ def region_share_tables(
     }
 
 
+def structure_home_table(counts: pd.DataFrame) -> pd.DataFrame:
+    """Return each subclass's structure-level home from grey-cell counts.
+
+    Args:
+        counts: Grey-matter MERFISH cells, subclass (index) x CCF
+            ``parcellation_structure`` (columns).
+
+    Returns:
+        ``level`` (``subclass``), ``node_name``, ``home`` (the structure
+        with the most cells; ties to the first in sorted order),
+        ``home_share`` and ``n_grey``, one row per subclass with cells, in
+        name order.
+    """
+    counts = counts[counts.sum(axis=1) > 0].sort_index()
+    counts = counts.reindex(columns=sorted(counts.columns))
+    totals = counts.sum(axis=1)
+    values = counts.to_numpy()
+    best = values.argmax(axis=1)
+    return pd.DataFrame(
+        {
+            "level": "subclass",
+            "node_name": counts.index.astype(str),
+            "home": np.asarray(counts.columns, dtype=object)[best],
+            "home_share": values[np.arange(len(values)), best] / totals.to_numpy(),
+            "n_grey": totals.to_numpy(np.int64),
+        }
+    )
+
+
+def region_structure_home(cells: pd.DataFrame) -> pd.DataFrame:
+    """Return the structure-level subclass homes of MERFISH cells.
+
+    The ``parcellation_structure`` holding the largest share of each
+    subclass's grey-matter cells (M6b variant (a): AON-home tiles evidence
+    OB with OLF; ``mouse_ap.MerfishRegionCounts.tables`` computes the same
+    without some sections).
+
+    Args:
+        cells: One row per cell with ``subclass``, ``parcellation_structure``
+            and ``region`` (``merfish_region``).
+
+    Returns:
+        The ``structure_home_table`` of the grey-matter cells.
+    """
+    grey = cells[cells["region"].isin(GREY_REGIONS)]
+    counts = pd.crosstab(
+        grey["subclass"].astype(str).to_numpy(),
+        grey["parcellation_structure"].astype(str).to_numpy(),
+    )
+    return structure_home_table(counts)
+
+
 def build_wmb_region_share(context: BuildContext) -> dict[str, Any]:
     """Build the ``wmb_region_share`` bundle (mouse, panel-independent).
 
@@ -4482,7 +4542,8 @@ def build_wmb_region_share(context: BuildContext) -> dict[str, Any]:
     class x CCF-division shares of grey-matter cells with OB split from OLF,
     each node's home division, per-section compositions and region shares,
     and AP-indexed composition windows (each section with its neighbours)
-    for every MERFISH-C57BL6J-638850 section.
+    for every MERFISH-C57BL6J-638850 section; from revision 2 also each
+    subclass's structure-level home (``region_structure_home``).
 
     Args:
         context: The build context.
@@ -4501,12 +4562,14 @@ def build_wmb_region_share(context: BuildContext) -> dict[str, Any]:
         )
     with timer.step("region_tables"):
         tables = region_share_tables(cells)
+        tables["structure_home"] = region_structure_home(cells)
     files = {
         "region_share": REGION_SHARE_FILE,
         "region_home": REGION_HOME_FILE,
         "section_composition": SECTION_COMPOSITION_FILE,
         "section_regions": SECTION_REGIONS_FILE,
         "ap_windows": AP_WINDOWS_FILE,
+        "structure_home": REGION_STRUCTURE_HOME_FILE,
     }
     for key, name in files.items():
         _write_parquet(tables[key], context.work_dir / name)
@@ -4518,6 +4581,8 @@ def build_wmb_region_share(context: BuildContext) -> dict[str, Any]:
     return {
         "reference": "ABC MERFISH-C57BL6J-638850-CCF cell metadata",
         "region_scheme": REGION_SCHEME,
+        "revision": REGION_SHARE_REVISION,
+        "n_structure_homes": int(len(tables["structure_home"])),
         "grey_regions": list(GREY_REGIONS),
         "files": files,
         "n_cells": int(len(cells)),
@@ -7360,6 +7425,7 @@ def _region_share_params(
         "grey_regions": list(GREY_REGIONS),
         "ob_anterior_ap_mm": OB_ANTERIOR_AP_MM,
         "ap_window_half_width": AP_WINDOW_HALF_WIDTH,
+        "revision": REGION_SHARE_REVISION,
     }
 
 

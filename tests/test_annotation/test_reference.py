@@ -16,7 +16,12 @@ from click.testing import CliRunner
 
 from merxen.annotation import reference
 from merxen.annotation import resolvability as res
-from merxen.annotation.config import AnnotationConfig, AnnotationReferenceSpec
+from merxen.annotation.config import (
+    AnnotationConfig,
+    AnnotationReferenceSpec,
+    MouseRegionConfig,
+)
+from merxen.annotation.mouse_regions import RegionShareBundle, check_region_shares
 from merxen.annotation.panel import AnnotationPanel, compute_panel_hash
 from merxen.annotation.reference import (
     CollapsedParent,
@@ -1774,6 +1779,41 @@ def test_region_share_tables_cover_every_section_with_windows() -> None:
     assert set(tables["section_regions"]["region"]) <= set(reference.GREY_REGIONS)
 
 
+def test_region_structure_home_matches_the_scoring_tables() -> None:
+    from merxen.annotation.mouse_ap import MerfishRegionCounts
+
+    cells = merfish_cells()
+    cells["region"] = merfish_region(
+        cells["parcellation_division"], cells["parcellation_structure"], cells["x_ccf"]
+    )
+    homes = reference.region_structure_home(cells).set_index("node_name")
+    # Grey-matter cells only: 045's MOB (6) wins over OLF-unassigned (2) and
+    # the olfactory nerve layer (1), which are OB grey matter too.
+    assert homes.loc["045 OB-STR-CTX Inh IMN", "home"] == "MOB"
+    assert homes.loc["045 OB-STR-CTX Inh IMN", "n_grey"] == 9
+    assert homes.loc["007 L2/3 IT CTX Glut", "home"] == "MOp"
+    assert homes.loc["007 L2/3 IT CTX Glut", "home_share"] == pytest.approx(4 / 7)
+    # Fibre-tract and ventricle cells are not grey matter.
+    assert "327 Oligo NN" not in homes.index and "325 CHOR NN" not in homes.index
+    # The M6b scoring's leave-neighbours-out tables with nothing left out.
+    scoring = MerfishRegionCounts.from_cells(cells).tables(())["structure_home"]
+    pd.testing.assert_frame_equal(
+        reference.region_structure_home(cells).reset_index(drop=True),
+        scoring.reset_index(drop=True),
+    )
+
+
+def test_structure_home_ties_go_to_the_first_structure() -> None:
+    counts = pd.DataFrame(
+        {"MOp": [2, 0, 1], "AON": [2, 0, 3]}, index=["b sub", "empty", "a sub"]
+    )
+    table = reference.structure_home_table(counts)
+    assert table["node_name"].tolist() == ["a sub", "b sub"]
+    assert table["home"].tolist() == ["AON", "AON"]
+    assert table["home_share"].tolist() == [0.75, 0.5]
+    assert table["n_grey"].tolist() == [4, 4]
+
+
 def test_cli_builds_the_region_share_bundle_then_reuses_it(tmp_path: Path) -> None:
     csv = tmp_path / "cell_metadata_with_parcellation_annotation.csv"
     merfish_cells().to_csv(csv, index=False)
@@ -1808,8 +1848,17 @@ def test_cli_builds_the_region_share_bundle_then_reuses_it(tmp_path: Path) -> No
         reference.SECTION_COMPOSITION_FILE,
         reference.SECTION_REGIONS_FILE,
         reference.AP_WINDOWS_FILE,
+        reference.REGION_STRUCTURE_HOME_FILE,
     ):
         assert (bundle_dir / name).is_file()
+    # Revision 2: the structure-level homes the default rule's coupling reads
+    # (hashed in the builder params, so a revision-1 bundle is never reused).
+    assert manifest["build_hash_payload"]["builder_params"]["revision"] == 2
+    assert output["revision"] == 2 and output["n_structure_homes"] == 4
+    shares = RegionShareBundle.from_dir(bundle_dir).shares
+    assert shares.subclass_structure_home is not None
+    assert shares.subclass_structure_home["045 OB-STR-CTX Inh IMN"] == "MOB"
+    check_region_shares(MouseRegionConfig(), shares)
     second = runner.invoke(cli_main, args)
     assert second.exit_code == 0, second.output
     assert "annotation-reference-prep: reused" in second.output
