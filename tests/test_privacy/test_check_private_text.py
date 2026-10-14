@@ -140,6 +140,35 @@ def test_staged_refuses_a_name_in_a_new_file_name(repo: Repo) -> None:
     assert DONOR not in result.stdout
 
 
+def test_staged_refuses_a_name_in_a_renamed_file(repo: Repo) -> None:
+    repo.write("notebooks/qc.ipynb", "{}\n")
+    repo.commit("[chore]: qc notebook")
+    repo.git("mv", "notebooks/qc.ipynb", f"notebooks/{DONOR}_qc.ipynb")
+    result = repo.check("--staged")
+    assert result.returncode == 1
+    assert "notebooks/[HD1]_qc.ipynb (path name): name: HD1" in result.stdout
+    assert DONOR not in result.stdout
+
+
+def test_a_file_replaced_by_a_symlink_is_checked(repo: Repo) -> None:
+    # A type change (git status T): the link target becomes the content.
+    repo.write("data/table.csv", "a,b\n")
+    repo.commit("[chore]: table")
+    repo.git("update-ref", "refs/remotes/origin/main", "HEAD")
+    repo.git("checkout", "-q", "-b", "feature/work")
+    target = repo.path / "data/table.csv"
+    target.unlink()
+    target.symlink_to(f"{HOST_ROOT}/x/table.csv")
+    repo.git("add", "data/table.csv")
+    result = repo.check("--staged")
+    assert result.returncode == 1
+    assert "data/table.csv:1:1: host-path: root=srv" in result.stdout
+    repo.commit("[chore]: link the table")
+    result = repo.check("--pre-push", **_pushed(repo))
+    assert result.returncode == 1
+    assert "data/table.csv:1:1: host-path: root=srv" in result.stdout
+
+
 def test_staged_refuses_private_files_by_name(repo: Repo) -> None:
     repo.write(".env", "MERXEN_X=1\n")
     result = repo.check("--staged")

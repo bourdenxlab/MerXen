@@ -18,7 +18,8 @@
 #                except variant and deny.
 #   match        token   case-insensitive, alphanumeric boundaries
 #                ident   bare number touching '_' or '-' (scanner, docs only)
-#                literal case-sensitive substring
+#                literal case-sensitive substring when translating data (the
+#                hooks and the docs rewrite match it in any case)
 #                regex   Python regex in the real column
 #                none    never matched (a form only to_real/display return)
 #   real         the real string (or regex for match=regex)

@@ -189,7 +189,8 @@ class Scanner:
 
 def scan_diff(scanner: Scanner, where: str, diff_args: Sequence[str]) -> None:
     """Scan added lines, binaries and new names of one diff."""
-    common = ["--no-color", "--no-ext-diff", "--no-textconv", "--diff-filter=ACMR"]
+    # T: a type change (a file replaced by a symlink) carries new content.
+    common = ["--no-color", "--no-ext-diff", "--no-textconv", "--diff-filter=ACMRT"]
     status = git("diff", *diff_args, "--name-status", "-z", *common)
     for letter, path in name_status(status):
         if letter in "ACR" or privacy.is_private_file(path):

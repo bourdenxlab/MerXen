@@ -189,9 +189,16 @@ class AliasRow:
     skip_paths: tuple[str, ...] = ()
     placeholder: str = ""
     pattern: re.Pattern[str] = field(init=False, repr=False, compare=False)
+    scan_pattern: re.Pattern[str] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "pattern", _row_pattern(self.match, self.real))
+        pattern = _row_pattern(self.match, self.real)
+        object.__setattr__(self, "pattern", pattern)
+        # The scanner and the docs rewrite refuse every spelling of a literal
+        # real form (a lower-cased run or pair id); translating data with
+        # to_alias stays exact.
+        scan = re.compile(pattern.pattern, re.I) if self.match == "literal" else pattern
+        object.__setattr__(self, "scan_pattern", scan)
 
     @property
     def is_deny(self) -> bool:
@@ -488,9 +495,12 @@ def _replacement(row: AliasRow, text: str, match: re.Match[str]) -> str:
 
 
 def _spans(
-    text: str, rows: Iterable[AliasRow], path: str | None
+    text: str, rows: Iterable[AliasRow], path: str | None, *, scan: bool = False
 ) -> list[tuple[re.Match[str], AliasRow]]:
-    """Non-overlapping row matches, chosen greedily in priority order."""
+    """Non-overlapping row matches, chosen greedily in priority order.
+
+    ``scan`` uses the case-insensitive literal patterns (scanner, rewrite).
+    """
     starts: list[int] = []
     chosen: list[tuple[int, int, re.Match[str], AliasRow]] = []
     lower = text.lower()
@@ -500,7 +510,8 @@ def _spans(
             continue
         if row.skipped(path):
             continue
-        for match in row.pattern.finditer(text):
+        pattern = row.scan_pattern if scan else row.pattern
+        for match in pattern.finditer(text):
             start, end = match.span()
             if start == end:
                 continue
@@ -680,7 +691,7 @@ def name_matches(
     table_ = table()
     if table_ is None:
         return []
-    return _spans(text, table_.rows, path)
+    return _spans(text, table_.rows, path, scan=True)
 
 
 def find_names(text: str, path: str | None = None) -> list[re.Match[str]]:
@@ -986,7 +997,7 @@ def rewrite(
                 spans.append((start, end, label, "path"))
         if table_ is not None:
             taken = [(s, e) for s, e, _, _ in spans]
-            for match, row in _spans(line, table_.rows, path):
+            for match, row in _spans(line, table_.rows, path, scan=True):
                 start, end = match.span()
                 if any(s < end and start < e for s, e in taken):
                     continue
