@@ -509,7 +509,9 @@ def test_candidate_table_and_selection_follow_the_preregistration() -> None:
             for name in ("ag7", "vzg2")
         ]
     )
-    table = module.candidate_table(merfish, real, bins).set_index("candidate")
+    table = module.candidate_table(
+        merfish, real, bins, t2_reading="registered"
+    ).set_index("candidate")
     assert table.loc["v1", "is_reference"]
     assert table.loc["a", "S_max_harm"] == 0.001
     assert table.loc["a", "S_at"] == "merfish500/S1"
@@ -529,6 +531,163 @@ def test_candidate_table_and_selection_follow_the_preregistration() -> None:
     assert module.select_candidate(table.reset_index())["selected"] == "b"
     none = table.reset_index().assign(admissible=False)
     assert module.select_candidate(none)["selected"] is None
+
+
+def _t2_bins(values: dict[str, tuple[float, float]]) -> pd.DataFrame:
+    """Bin rows of one gene set: candidate -> (T2 after, Allen-label T2)."""
+    return pd.DataFrame(
+        [
+            {
+                "candidate": label,
+                "gene_set": "merfish500",
+                "ap_bin": "3.0-4.5",
+                "t2_after_mean": after,
+                "t2_allen_mean": allen,
+            }
+            for label, (after, allen) in values.items()
+        ]
+    )
+
+
+def test_the_two_t2_readings_of_constraint_ii() -> None:
+    module = _load()
+    bins = _t2_bins(
+        {
+            "at_limit": (0.001, 0.0005),
+            "above_limit_below_allen": (0.004, 0.005),
+            "equal_to_allen": (0.004, 0.004),
+            "allen_plus_rounding": (0.004 + 5e-13, 0.004),
+            "above_allen": (0.004 + 2e-12, 0.004),
+            "allen_missing": (0.0, float("nan")),
+            "after_missing": (float("nan"), 0.01),
+        }
+    ).set_index("candidate")
+
+    def check(label: str) -> tuple[bool, bool]:
+        part = bins.loc[[label]]
+        return module.t2_ok_registered(part), module.t2_ok_allen(part)
+
+    # Registered: the bin mean <= 0.1% (inclusive); a missing value fails.
+    # Allen-relative (§24 amendment of 2026-10-14): the bin mean <= the Allen
+    # labels' bin mean with the same regions, 1e-12 for rounding only; a
+    # missing value on either side fails.
+    assert check("at_limit") == (True, False)
+    assert check("above_limit_below_allen") == (False, True)
+    assert check("equal_to_allen") == (False, True)
+    assert check("allen_plus_rounding") == (False, True)
+    assert check("above_allen") == (False, False)
+    assert check("allen_missing") == (True, False)
+    assert check("after_missing") == (False, False)
+    # Bins without the Allen-label column cannot meet the Allen bound.
+    assert not module.t2_ok_allen(bins.loc[["equal_to_allen"]][["t2_after_mean"]])
+    assert module.T2_READINGS == ("allen-relative", "registered")
+
+
+def test_the_allen_relative_reading_replaces_constraint_ii() -> None:
+    module = _load()
+    nodes = {"S1": _nodes((CLAS, "A")), "S2": _nodes((CLAS, "A"))}
+    merfish = pd.DataFrame(
+        _merfish("v1", {"S1": 0.007, "S2": 0.001}, nodes)
+        + _merfish("a", {"S1": 0.001, "S2": 0.0}, nodes)
+        + _merfish("b", {"S1": 0.002, "S2": 0.0}, nodes)
+        + _merfish("c", {"S1": 0.0005, "S2": 0.0}, nodes)
+    )
+    # Every rule is above 0.1%; a and b stay at or below the Allen labels'
+    # own T2, c does not.
+    bins = _t2_bins(
+        {
+            "v1": (0.004, 0.006),
+            "a": (0.003, 0.003),
+            "b": (0.002, 0.003),
+            "c": (0.0031, 0.003),
+        }
+    )
+    real = pd.DataFrame(
+        [
+            {
+                "candidate": label,
+                "section": name,
+                "t2_after": 0.0,
+                "class_changed_outside": 0.0,
+                "subclass_changed_outside": 0.0,
+                "inferred": "Isocortex",
+            }
+            for label in ("v1", "a", "b", "c")
+            for name in ("ag7", "vzg2")
+        ]
+    )
+    registered = module.candidate_table(
+        merfish, real, bins, t2_reading="registered"
+    ).set_index("candidate")
+    assert not registered["admissible"].any()
+    assert module.select_candidate(registered.reset_index())["selected"] is None
+    table = module.candidate_table(merfish, real, bins).set_index("candidate")
+    # The approved reading is the default; both verdicts are reported.
+    assert set(table["t2_reading"]) == {"allen-relative"}
+    assert not table["t2_ok_registered"].any()
+    assert table["t2_ok_allen"].to_dict() == {
+        "v1": True,
+        "a": True,
+        "b": True,
+        "c": False,
+    }
+    assert table["t2_ok"].equals(table["t2_ok_allen"])
+    assert table.loc["c", "max_t2_excess_over_allen"] == pytest.approx(0.0001)
+    assert table.loc["c", "n_t2_bins_above_allen"] == 1
+    assert table.loc["a", "n_t2_bins_above_allen"] == 0
+    # c has the lowest S but fails the Allen bound; a is selected (S 0.001).
+    selection = module.select_candidate(table.reset_index())
+    assert selection["selected"] == "a" and selection["ties"] == ["a"]
+    with pytest.raises(ValueError, match="T2 reading"):
+        module.candidate_table(merfish, real, bins, t2_reading="excess")
+
+
+def test_t2_columns_score_the_allen_labels_with_the_rules_regions() -> None:
+    module = _load()
+    taxonomy = _taxonomy()
+    regions = ["Isocortex", "OLF"]
+    # 050 / 051 OB-IMN and 240 MY are T2 with Isocortex + OLF present;
+    # 300 Astro NN is in a never-drop class.
+    calls = np.array(["007 L2/3 IT CTX Glut"] * 9 + ["051 OB-IMN B"], dtype=object)
+    allen = np.array(
+        ["050 OB-IMN A"] * 2 + ["300 Astro NN"] * 3 + ["007 L2/3 IT CTX Glut"] * 5,
+        dtype=object,
+    )
+    v1 = module.candidate_by_label("v1").config()
+    row = module.t2_columns(calls, allen, regions, _shares(), taxonomy, v1)
+    assert row["t2_after"] == pytest.approx(0.1)
+    assert row["t2_allen"] == pytest.approx(0.2)
+    # The Allen side keeps the static never-drop classes only: (b)'s
+    # conditional keep of 05 OB-IMN GABA (OLF present) does not change it.
+    keep = module.candidate_by_label("b").config()
+    kept = module.t2_columns(calls, allen, regions, _shares(), taxonomy, keep)
+    assert kept["t2_allen"] == pytest.approx(0.2)
+    assert kept["t2_after"] == pytest.approx(0.1)
+    assert kept["t2_after_kept_excluded"] == 0.0
+    # A missing re-map leaves T2 after pruning missing, not the Allen side.
+    missing = module.t2_columns(
+        calls, allen, regions, _shares(), taxonomy, v1, remap_missing=True
+    )
+    assert np.isnan(missing["t2_after"]) and np.isnan(missing["t2_after_kept_excluded"])
+    assert missing["t2_allen"] == pytest.approx(0.2)
+    # Real data has no Allen labels.
+    real = module.t2_columns(calls, None, regions, _shares(), taxonomy, v1)
+    assert np.isnan(real["t2_allen"]) and real["t2_after"] == pytest.approx(0.1)
+
+
+def test_a_taxonomy_override_must_fit_every_call_and_allen_label() -> None:
+    module = _load()
+    data = _sliver_dataset(module)
+    module.check_taxonomy_fits(data, _taxonomy())
+    data.allen_class = data.allen_class.copy()
+    data.allen_class[0] = "24 MY Glut"
+    with pytest.raises(ValueError, match="do not fit"):
+        module.check_taxonomy_fits(data, _taxonomy())
+    data = _sliver_dataset(module)
+    data.class_names = data.class_names.copy()
+    data.class_names[-1] = "01 IT-ET Glut"  # a 240 MY Glut A call
+    with pytest.raises(ValueError, match="do not fit"):
+        module.check_taxonomy_fits(data, _taxonomy())
 
 
 def test_mo10_refuses_before_the_selection_is_recorded(tmp_path: Path) -> None:
@@ -565,6 +724,103 @@ def test_mo10_refuses_before_the_selection_is_recorded(tmp_path: Path) -> None:
     verdict = json.loads((tmp_path / "mo10" / "mo10.json").read_text())
     assert verdict["candidate"] == "a+b" and not verdict["pass"]
     assert verdict["mo3"] == {"ag7": True}
+    # A selection without a recorded reading was made under the registered one.
+    assert verdict["t2_reading"] == "registered"
+    assert verdict["gene_sets"]["merfish500"]["t2_bin_mean_ok_allen"] is None
+
+
+# section: (AP bin, harm, T2 after, missed regions), and the Allen-label T2.
+ALLEN_T2 = {
+    "S61": ("2.4-3.0", 0.0, 0.0002, ""),
+    "S60": ("2.4-3.0", 0.0002, 0.0, ""),
+    "S58": ("3.0-4.5", 0.0001, 0.004, ""),
+    "S57": ("3.0-4.5", 0.0003, 0.002, ""),
+    "S56": ("3.0-4.5", 0.0002, 0.003, "CTXsp"),
+    "S40": ("6.0-7.5", 0.0009, 0.0, ""),
+}
+ALLEN_LABEL_T2 = {
+    "S61": 0.0003,
+    "S60": 0.0,
+    "S58": 0.006,
+    "S57": 0.002,
+    "S56": 0.001,
+    "S40": 0.0,
+}
+
+
+def _write_mo10_inputs(out: Path, rows: dict[str, Any], selection: dict) -> None:
+    summary = out / "summary"
+    summary.mkdir(parents=True, exist_ok=True)
+    (summary / "selection.json").write_text(json.dumps(selection))
+    frame = pd.DataFrame(_section_rows("a+b", rows)).assign(oracle_harm=0.0)
+    frame["t2_allen"] = frame["section"].map(ALLEN_LABEL_T2)
+    frame.to_parquet(summary / "sections.parquet")
+    module = _load()
+    module.per_bin_summary(frame, ["harm", "t2_after", "t2_allen"]).to_csv(
+        summary / "bins.csv", index=False
+    )
+    pd.DataFrame(
+        [
+            {
+                "candidate": "a+b",
+                "section": "vzg2",
+                "t2_after": 0.0,
+                "class_changed_outside": 0.0,
+                "subclass_changed_outside": 0.0,
+                "inferred": "Isocortex;OLF;HPF;CTXsp;TH;HY;MB",
+            }
+        ]
+    ).to_csv(summary / "real.csv", index=False)
+
+
+def test_mo10_scores_t2_under_the_allen_relative_reading(tmp_path: Path) -> None:
+    module = _load()
+    _write_mo10_inputs(
+        tmp_path, ALLEN_T2, {"selected": "a+b", "t2_reading": "allen-relative"}
+    )
+    prereg = tmp_path / "prereg.md"
+    heading = "### Amendment of 2026-10-14 (U1): the T2 reading approved by the user"
+    # The selection under the approved reading must be recorded after the
+    # amendment that approved it.
+    prereg.write_text(f"## 24\nSelected candidate (M6b): `a+b`\n\n{heading}\n")
+    args = module.build_parser().parse_args(
+        ["mo10", "--out", str(tmp_path), "--preregistration", str(prereg)]
+    )
+    with pytest.raises(SystemExit, match="after"):
+        module.mo10_command(args)
+    prereg.write_text(
+        "## 24\nSelected candidate (M6b): `v1`\n\n"
+        f"{heading}\n\nSelected candidate (M6b): `a+b`\n"
+    )
+    assert module.mo10_command(args) == 0
+    verdict = json.loads((tmp_path / "mo10" / "mo10.json").read_text())
+    assert verdict["t2_reading"] == "allen-relative"
+    entry = verdict["gene_sets"]["merfish500"]
+    # The 3.0-4.5 bin: T2 0.30% against the Allen labels' 0.30%.
+    assert entry["t2_bin_mean_ok_allen"] and not entry["t2_bin_mean_ok_registered"]
+    assert entry["t2_bin_mean_ok"] and entry["pass"]
+    assert verdict["pass"] and not verdict["pass_registered_t2"]
+    assert verdict["failing_parts"] == []
+    assert [
+        (part["part"], part["where"]) for part in verdict["failing_parts_registered_t2"]
+    ] == [("t2_bin_mean", "3.0-4.5")]
+    bins = {row["ap_bin"]: row for row in entry["t2_bins"]}
+    assert bins["3.0-4.5"]["t2_allen_mean"] == pytest.approx(0.003)
+    assert (tmp_path / "mo10" / "MO10.txt").is_file()
+    # A missed region where the section's harm is above 0.1% fails MO10
+    # under either reading and is listed.
+    rows = dict(ALLEN_T2, S57=("3.0-4.5", 0.0014, 0.002, "STR"))
+    _write_mo10_inputs(
+        tmp_path, rows, {"selected": "a+b", "t2_reading": "allen-relative"}
+    )
+    assert module.mo10_command(args) == 0
+    verdict = json.loads((tmp_path / "mo10" / "mo10.json").read_text())
+    assert not verdict["pass"]
+    assert [
+        (part["part"], part["where"], part["value"])
+        for part in verdict["failing_parts"]
+    ] == [("missed_region", "S57", pytest.approx(0.0014))]
+    assert verdict["failing_parts"][0]["missed"] == "STR"
 
 
 # --------------------------------------------------------------------------
