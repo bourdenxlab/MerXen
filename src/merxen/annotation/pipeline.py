@@ -195,7 +195,10 @@ if TYPE_CHECKING:
         ResolvabilityProvenance,
     )
     from merxen.annotation.real_qc import (
+        CoverageSignal,
+        GeneComplexitySignal,
         MarkerConsistencySignal,
+        NonneuronalTrendSignal,
         QcEffects,
         RealQcResult,
         RealQcSignals,
@@ -3538,7 +3541,10 @@ RESOLVE_SUMMARY_SUFFIX: Final = "_resolve_summary.json"
 # deep-cached COMPUTE_CPU (review of M4).
 RESOLVE_RUN_SUFFIX: Final = "_resolve_run.json"
 # 3 (M13 C15): each human sample's ``real_qc`` block and the pair's
-# ``real_qc_config``.
+# ``real_qc_config``. M13b C22 adds the same two keys to mouse summaries
+# (with the mouse-only ``gate_signals`` and ``effects_withheld`` inside the
+# block) without a new version: the keys are version 3's, and a new number
+# would change every human summary, which C22 must leave byte-identical.
 RESOLVE_SUMMARY_SCHEMA_VERSION: Final = 3
 RESOLVE_STEP: Final = "annotate_resolve"
 MISSING_INSTANCE_ID: Final = -1
@@ -4464,10 +4470,13 @@ class SampleResolution:
             which level (``cross_platform_record``).
         labels_path: Where the table was written.
         manifest_path: Where the provenance was written.
-        real_qc: The sample's real-data QC (human RESOLVE with
-            ``real_qc.enabled``; M13 C15), ``None`` otherwise.
+        real_qc: The sample's real-data QC (with ``real_qc.enabled``: human
+            RESOLVE, M13 C15; mouse RESOLVE, warn-only, M13b C22), ``None``
+            otherwise.
         gate: The dataset gate verdict after real-data QC (human), which the
-            pair step updates once paired concordance is scored.
+            pair step updates once paired concordance is scored. Mouse
+            leaves it ``None``: its QC changes no gate, so the summary and
+            provenance keep the mouse gate's own records.
         paired: Whether the sample has a section of the other platform in
             the pair (paired concordance applies).
     """
@@ -5238,6 +5247,120 @@ def real_qc_prefilter_applied(primary: ResolveRun | None) -> bool | None:
     return payload.get("large_panel_prefilter") is not None
 
 
+def real_qc_emitted_levels(
+    resolution: HumanResolution | MouseResolution,
+) -> list[str]:
+    """Return the levels a sample emits for at least one table cell.
+
+    The input of the prefilter spot check (``real_qc.prefilter_spotcheck``),
+    in the resolution's level order.
+
+    Args:
+        resolution: The QC-free resolution.
+
+    Returns:
+        The emitted levels.
+    """
+    table = np.asarray(resolution.in_table, dtype=bool)
+    return [
+        level
+        for level, item in resolution.emissions.items()
+        if bool(np.asarray(item.emitted, dtype=bool)[table].any())
+    ]
+
+
+def real_qc_gene_complexity(
+    loaded: LoadedSample,
+    resolution: HumanResolution | MouseResolution,
+    *,
+    primary: ResolveRun | None,
+    tables: ResolvabilityTables | None,
+) -> GeneComplexitySignal | None:
+    """Return the gene-complexity inputs of a sample (D19 (a); M13 C16).
+
+    The simulated ``n_genes`` a version-7 primary bundle stores
+    (``resolvability.load_simulated_genes``), with the table cells counted on
+    the bundle's query genes (``real_qc.gene_complexity_signal``).
+
+    Args:
+        loaded: The sample's counts.
+        resolution: The QC-free resolution (its table cells).
+        primary: The primary run.
+        tables: The primary bundle's resolvability tables.
+
+    Returns:
+        The signal, or ``None`` when the bundle stores none (the check is
+        then ``not_evaluable``).
+    """
+    from merxen.annotation import real_qc as rq
+    from merxen.annotation.resolvability import load_simulated_genes
+
+    if tables is None or primary is None:
+        return None
+    simulated = load_simulated_genes(primary.bundle.path, summary=tables.summary)
+    if simulated is None:
+        return None
+    table = np.asarray(resolution.in_table, dtype=bool)
+    return rq.gene_complexity_signal(
+        simulated, loaded.counts[table], loaded.feature_ids
+    )
+
+
+def real_qc_version_7_signals(
+    loaded: LoadedSample,
+    resolution: HumanResolution | MouseResolution,
+    *,
+    version: int | None,
+    version_7: Version7Outputs,
+) -> tuple[CoverageSignal | None, NonneuronalTrendSignal | None]:
+    """Return the per-class coverage and depth-trend inputs of a sample.
+
+    For a version-7 bundle with a class-depth prediction: per primary level
+    the real confident share per class key against the prediction at the
+    sample's own per-class depth, and the non-neuronal depth trend on the
+    same keys (``real_qc.coverage_vs_simulation``,
+    ``real_qc.nonneuronal_depth_trend``).
+
+    Args:
+        loaded: The sample's counts (total counts per object).
+        resolution: The QC-free resolution.
+        version: The primary bundle's resolvability version.
+        version_7: The sample's version-7 outputs.
+
+    Returns:
+        ``(coverage, trend)``; both ``None`` outside version 7 or without
+        a prediction.
+    """
+    from merxen.annotation import real_qc as rq
+    from merxen.annotation.resolvability import RESOLVABILITY_VERSION_V7
+
+    if version != RESOLVABILITY_VERSION_V7 or version_7.prediction is None:
+        return None, None
+    table = np.asarray(resolution.in_table, dtype=bool)
+    totals = np.asarray(loaded.total_counts, dtype=np.float64)[table]
+    confident = {
+        level: np.asarray(resolution.levels[level].confident, dtype=bool)[table]
+        for level in version_7.class_keys
+    }
+    frames = [
+        rq.real_class_coverage(keys, {level: confident[level]})
+        for level, keys in version_7.class_keys.items()
+    ]
+    real = (
+        pd.concat(frames, ignore_index=True)
+        if frames
+        else rq.real_class_coverage([], {})
+    )
+    coverage = rq.CoverageSignal(real=real, predicted=version_7.prediction)
+    trend = rq.NonneuronalTrendSignal(
+        totals=totals,
+        called_class=dict(version_7.class_keys),
+        confident=confident,
+        nonneuronal_classes=version_7.nonneuronal_classes,
+    )
+    return coverage, trend
+
+
 def human_real_qc_signals(
     loaded: LoadedSample,
     resolution: HumanResolution,
@@ -5296,55 +5419,12 @@ def human_real_qc_signals(
         The signals.
     """
     from merxen.annotation import real_qc as rq
-    from merxen.annotation.resolvability import (
-        RESOLVABILITY_VERSION_V7,
-        load_simulated_genes,
-    )
 
-    table = np.asarray(resolution.in_table, dtype=bool)
     version, has_r3 = real_qc_bundle_facts(primary, tables)
     prefiltered = real_qc_prefilter_applied(primary)
-    simulated = (
-        None
-        if tables is None or primary is None
-        else load_simulated_genes(primary.bundle.path, summary=tables.summary)
+    coverage, trend = real_qc_version_7_signals(
+        loaded, resolution, version=version, version_7=version_7
     )
-    complexity = (
-        None
-        if simulated is None
-        else rq.gene_complexity_signal(
-            simulated, loaded.counts[table], loaded.feature_ids
-        )
-    )
-    emitted = [
-        level
-        for level, item in resolution.emissions.items()
-        if bool(np.asarray(item.emitted, dtype=bool)[table].any())
-    ]
-    coverage = None
-    trend = None
-    if version == RESOLVABILITY_VERSION_V7 and version_7.prediction is not None:
-        totals = np.asarray(loaded.total_counts, dtype=np.float64)[table]
-        confident = {
-            level: np.asarray(resolution.levels[level].confident, dtype=bool)[table]
-            for level in version_7.class_keys
-        }
-        frames = [
-            rq.real_class_coverage(keys, {level: confident[level]})
-            for level, keys in version_7.class_keys.items()
-        ]
-        real = (
-            pd.concat(frames, ignore_index=True)
-            if frames
-            else rq.real_class_coverage([], {})
-        )
-        coverage = rq.CoverageSignal(real=real, predicted=version_7.prediction)
-        trend = rq.NonneuronalTrendSignal(
-            totals=totals,
-            called_class=dict(version_7.class_keys),
-            confident=confident,
-            nonneuronal_classes=version_7.nonneuronal_classes,
-        )
     return rq.RealQcSignals(
         resolvability_version=version,
         paired=paired,
@@ -5354,8 +5434,10 @@ def human_real_qc_signals(
             resolution, primary=primary, panel=panel, query=query, config=config
         ),
         flag_strata=flag_strata,
-        gene_complexity=complexity,
-        emitted_levels=emitted,
+        gene_complexity=real_qc_gene_complexity(
+            loaded, resolution, primary=primary, tables=tables
+        ),
+        emitted_levels=real_qc_emitted_levels(resolution),
         coverage=coverage,
         nonneuronal_trend=trend,
         registration=registration,
@@ -6278,7 +6360,9 @@ def annotate_resolve(
     ``PanelProvenance.real_data_qc``, its lowering effects to its labels and
     gate, and paired concordance, scored on the pair's JSD before any table
     is written, may withhold the pair's supercluster-level cross-platform
-    statistics. Everything under
+    statistics. Mouse samples run it warn-only (M13b C22): the outcomes and
+    the mouse gate's G1-G5 go to the same records, and nothing else changes.
+    Everything under
     ``output_dir`` is deterministic for given inputs; the clock, the wall
     time and absolute paths go to the run record ``<pair>_resolve_run.json``
     (``run_record_path``; default: in ``output_dir``).
@@ -6485,6 +6569,7 @@ def annotate_resolve(
                 panel_mode=panel_mode,
                 validate=validate,
                 seed=seed,
+                paired=paired,
             )
         else:
             result = resolve_human_sample(
@@ -6612,6 +6697,7 @@ def annotate_resolve(
         )
     # Paired concordance on the pair's JSD (plan §8.8; M13 C15), then the
     # label tables and manifests, whose provenance records the QC outcomes.
+    # A mouse pair has no JSD in v1: its samples recorded the check already.
     if not mouse and config.real_qc.enabled:
         score_paired_concordance(results, pair, config)
     for sample_id, result in results.items():
@@ -6651,12 +6737,8 @@ def annotate_resolve(
             "panel_mode": panel_mode,
             "thresholds": config.thresholds.model_dump(mode="json"),
             "flags_config": config.flags.model_dump(mode="json"),
-            # Human only: mouse RESOLVE runs no real-data QC (M13 C15).
-            **(
-                {}
-                if mouse
-                else {"real_qc_config": config.real_qc.model_dump(mode="json")}
-            ),
+            # Human (M13 C15) and, since M13b C22, mouse.
+            "real_qc_config": config.real_qc.model_dump(mode="json"),
             "samples": {key: value.summary for key, value in results.items()},
             "pair": pair,
         }
