@@ -42,7 +42,11 @@ Builders (registered with the store on import):
 * ``wmb_selfmap_testset`` (mouse, resolvability; M3b): the 11,913 self-map
   test cells (``research/selfmap/truth.csv``) plus up to 30 cells per
   non-neuronal supertype that the ``wmb_panel`` marker build did not use,
-  panel-restricted.
+  panel-restricted. With ``resolvability.gate_p_wmb_draw`` 2 the same builder
+  makes gate P's second disjoint draw instead (M13b C20a;
+  ``wmb_second_draw``): the same design on cells no earlier set holds, each
+  class topped up to 700 pooled with draw 1's check half, <= 5% of any
+  cluster's 10Xv3 cells.
 
 With resolvability enabled, the primary and secondary builders then run the
 self-map (``merxen.annotation.resolvability``) on their test set, which they

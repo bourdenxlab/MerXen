@@ -569,6 +569,61 @@ def test_np4_range_uses_means_of_group_values_d12() -> None:
     assert row["p_bar"] != pytest.approx(1743 / 1820, abs=1e-3)
 
 
+def test_np4_donor_spread_reports_a_planted_donor_without_scoring_it() -> None:
+    """§14 NP4 [L] (mouse): the per-donor spread of the pooled seed-0 calls."""
+    replicates = {("draw1", seed): _replicate("draw1", seed, 400) for seed in SEEDS} | {
+        ("draw2", seed): _replicate("draw2", seed, 300) for seed in SEEDS
+    }
+    donor_of: dict[str, str] = {}
+    for group in ("draw1", "draw2"):
+        for index, cell in enumerate(replicates[(group, 0)]["cell_id"].astype(str)):
+            # draw 2's 100 wrong calls (its last cells) are all donor D3's.
+            wrong = group == "draw2" and index >= 300
+            donor_of[cell] = "D3" if wrong else ("D1", "D2")[index % 2]
+    decisions = _decisions_at_10()
+    tested = _tested_from_seed0(replicates, decisions)
+    stats, spread = gp.np4_donor_spread(
+        replicates,
+        decisions,
+        tested,
+        default_group=None,
+        donor_of=donor_of,
+        targets=_targets(),
+        settings=_np4(),
+    )
+    assert set(stats["donor"]) == {"D1", "D2", "D3"}
+    by_donor = stats.set_index("donor")
+    assert by_donor.loc["D3", "n_confident"] == 100
+    assert by_donor.loc["D3", "precision"] == 0.0
+    assert by_donor.loc["D1", "n_confident"] == 350
+    (row,) = spread.to_dict(orient="records")
+    assert list(spread.columns) == list(gp.NP4_DONOR_SPREAD_COLUMNS)
+    assert row["n_donors"] == row["n_donors_evaluated"] == 3
+    assert row["floor_failures"] == "D3" and not row["floor_ok"]
+    assert row["donor_range"] == pytest.approx(1.0) and not row["range_ok"]
+    assert not row["passed"]
+    # Reported only: the scored NP4 of the two draws is the draws' own.
+    verdicts = gp.np4_set_verdicts(
+        gp.replicate_set_stats(replicates, decisions, tested, default_group=None),
+        _targets(),
+        _np4(),
+    )
+    assert set(verdicts["n_groups"]) == {2}
+    assert "np4_donor_spread" in gp.GATE_P_REPORTED_ONLY_TABLES
+    # A pooled test cell without a donor is refused.
+    donor_of.pop(next(iter(donor_of)))
+    with pytest.raises(ValueError, match="no donor"):
+        gp.np4_donor_spread(
+            replicates,
+            decisions,
+            tested,
+            default_group=None,
+            donor_of=donor_of,
+            targets=_targets(),
+            settings=_np4(),
+        )
+
+
 def test_np4_settings_follow_the_config() -> None:
     np4 = gp.Np4Settings.from_config(AnnotationResolvabilityConfig())
     assert np4.replicate_min_confident_n == 100

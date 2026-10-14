@@ -1102,12 +1102,14 @@ def test_gate_p_refuses_requests_before_any_compute(
         config = gate_config(**resolvability)
         return GatePRequest(**{**request.__dict__, "config": config})
 
-    # M13 D4: the species is chosen when the check starts; mouse waits for C20.
+    # M13 D4: the species is chosen when the check starts; the mouse path
+    # needs the family's second disjoint WMB test draw (M13b C20).
     refused(
         family.request(),
         "second disjoint WMB",
         error=GatePUnavailableError,
         species="mouse",
+        accept_small_pools=False,
     )
     with pytest.raises(GatePUnavailableError, match="C20"):
         run.gate_p_hook(run.GatePOptions(species="mouse"))

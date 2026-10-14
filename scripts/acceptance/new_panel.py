@@ -10,7 +10,10 @@ under ``<out-dir>/gate_p``.
 
 ``--species`` is required (M13 D4, the user's rule of 2026-10-02: "The species
 must be selected when starting a new panel check"); a human family is dry-run
-on set a only. Every other argument goes to ``annotation-panel-simulate``
+on set a only, a mouse family on ag7 and VZG2. A mouse family also needs its
+second disjoint WMB test draw, ``--gate-p-wmb-draw2 <bundle>`` (M13b C20: built
+by ``scripts/annotation/build_wmb_draw2.py`` from the family's ``wmb_panel``
+PREP inputs). Every other argument goes to ``annotation-panel-simulate``
 unchanged (``merxen annotation-panel-simulate --help`` lists them, the
 ``--gate-p-*`` options included). Point ``--store`` at the separate gate-P
 store (M13 D11 (b)); the production store is never written by gate P.
@@ -40,6 +43,17 @@ Usage (set a dry run, version 6)::
         --scratch-dir <scratch> --out-dir $A/m13/dryrun/v6 \\
         --param annotation_whb_h5ad_dir=<...> --n-processors 8 \\
         --expected-depth <median> --gate-p-dry-run
+
+Usage (a mouse seeded family's dry run, version 6)::
+
+    python scripts/acceptance/new_panel.py --species mouse \\
+        --gene-list <panel gene list> --name ag7_dry_run \\
+        --references wmb_panel --store $A/m13b/gate_p_store \\
+        --download-dir <the production store's .downloads> \\
+        --scratch-dir <scratch> --out-dir $A/m13b/dryrun/ag7 \\
+        --param annotation_wmb_h5ad_dir=<...> --n-processors 8 \\
+        --expected-depth <median> --gate-p-dry-run \\
+        --gate-p-wmb-draw2 <wmb_selfmap_testset/<draw-2 hash>>
 """
 
 from __future__ import annotations

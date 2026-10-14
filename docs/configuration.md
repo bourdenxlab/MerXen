@@ -745,6 +745,7 @@ the code that ran.
 | `--gate-p-time-reference-seconds S`, `--gate-p-time-reference-basis TEXT` | none | NP9's time reference of a version-6 family and its source; not used for version 7. |
 | `--gate-p-skip-prep-identity` | off | Do not rebuild PREP for NP9's identity part (NP9 is then not evaluable). |
 | `--gate-p-x1-factors PATH` | none | The X1 factor table, reported beside NP6's offsets (D7 (b)). |
+| `--gate-p-wmb-draw2 PATH` | none | A mouse family's second disjoint WMB test draw (M13b C20a; `scripts/annotation/build_wmb_draw2.py`). Required for mouse. |
 
 **The NP5 depth-profile asset.** A family with real sections takes its own
 profile, built by `scripts/annotation/build_np5_depth_profile.py` from its

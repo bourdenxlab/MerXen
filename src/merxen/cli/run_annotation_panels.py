@@ -293,9 +293,10 @@ def code_commit(source_root: Path | None = None) -> tuple[str | None, str | None
     is_flag=True,
     default=False,
     help="Run the gate-P programme (NP1-NP9; merxen.annotation.gate_p_run) after "
-    "the simulation, writing <out-dir>/gate_p. Needs --species (M13 D4); gate P "
-    "builds its leave-one-donor-out bundles in --store. The human path only: a "
-    "mouse family waits for the second WMB test draw (M13 C20).",
+    "the simulation, writing <out-dir>/gate_p. Needs --species (M13 D4); a human "
+    "family's gate P builds its leave-one-donor-out bundles in --store, a mouse "
+    "family's needs its second disjoint WMB test draw (--gate-p-wmb-draw2; M13b "
+    "C20).",
 )
 @click.option(
     "--gate-p-other-region",
@@ -384,6 +385,14 @@ def code_commit(source_root: Path | None = None) -> tuple[str | None, str | None
     default=None,
     help="The X1 factor table, reported beside NP6's offsets (M13 D7 (b)).",
 )
+@click.option(
+    "--gate-p-wmb-draw2",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    help="A mouse family's second disjoint WMB test draw: the "
+    "wmb_selfmap_testset bundle scripts/annotation/build_wmb_draw2.py built from "
+    "the family's PREP inputs (M13b C20a). Required for --species mouse.",
+)
 def annotation_panel_simulate_command(**options: Any) -> None:
     """Simulate a candidate panel: predicted levels, trust, prefilter, resources."""
     from merxen.annotation.simulate import SimulationError
@@ -439,6 +448,7 @@ def _annotation_panel_simulate(
     gate_p_run_with_unaccepted_parents: bool = False,
     gate_p_skip_prep_identity: bool = False,
     gate_p_x1_factors: Path | None = None,
+    gate_p_wmb_draw2: Path | None = None,
 ) -> None:
     from merxen.annotation.reference import SourceOptions, set_prep_resources
     from merxen.annotation.simulate import (
@@ -490,6 +500,7 @@ def _annotation_panel_simulate(
             run_with_unaccepted_parents=gate_p_run_with_unaccepted_parents,
             prep_identity=not gate_p_skip_prep_identity,
             x1_factors=gate_p_x1_factors,
+            wmb_draw2_bundle=gate_p_wmb_draw2,
         )
         gate_p_programme = gate_p_hook(gate_p_options)
         # run_panel_simulation runs the precheck before any compute (the

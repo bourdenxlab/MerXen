@@ -951,9 +951,11 @@ PREP bundles, writes the simulation report and then runs gate P, writing
 `<out-dir>/gate_p/` ([outputs](../outputs.md#gate-p-outputs-m13)).
 
 - `--species` is required: the species is chosen when a new panel check
-  starts (M13 D4). The human path is implemented. A mouse family is refused
-  before any compute until the second disjoint WMB test draw and the ag7 /
-  VZG2 dry run exist (M13 chunks C20–C21, moved to M13b, after M6b).
+  starts (M13 D4). Both paths are implemented. A mouse family needs its
+  second disjoint WMB test draw (`--gate-p-wmb-draw2`; M13b C20,
+  [below](#the-mouse-path-m13b-c20)) and is refused before any compute
+  without it. No mouse family is scored before the ag7 / VZG2 dry run passes
+  (M13b C21, started by the user).
 - `--store` and `--store-large` must name a separate gate-P store (M13 D11
   (b)). A store that is, or lies in, the config's `reference_store` or
   `reference_store_large` is refused before any compute, so gate P never
@@ -1038,7 +1040,83 @@ PREP bundles, writes the simulation report and then runs gate P, writing
 
 `--gate-p-version 7` scores a version-6 family's version-7 ensemble (M13 D5
 (c)): the emission members are simulated on the bundle's own test set, and
-nothing is written to a store.
+nothing is written to a store. It is refused for mouse, where a forced
+version 7 needs a separate version-7 test set with the v7.6 top-up (the
+mouse roadmap's U7 (iii)).
+
+#### The mouse path (M13b C20)
+
+The Allen means hold every WMB donor, so a mouse donor cannot be held out;
+plan §14 scores a mouse family on "the two disjoint test draws" instead.
+
+- **Draw 1** is the test set of the production self-map: PREP's
+  `wmb_panel` maps it onto itself, and the frozen thresholds were fitted on
+  its fit half, so gate P scores it on its check half only.
+- **Draw 2** is its own `wmb_selfmap_testset` bundle, built before gate P
+  with `resolvability.gate_p_wmb_draw` 2 by
+  `scripts/annotation/build_wmb_draw2.py` from the same inputs as the
+  family's `wmb_panel` PREP (config, panel file, sources, download cache), in
+  the reference store next to draw 1 (`reference.wmb_second_draw`). It
+  repeats draw 1's design on cells that are neither marker-training,
+  self-map-list nor draw-1 cells: ≤ 10 cells per supertype (the self-map
+  list's design) and the non-neuronal extra per supertype. Each class is then
+  topped up to `gate_p_class_min_test_cells` (700), pooled with draw 1's
+  check half, where the 10Xv3 cells allow (the roadmap's reading U7 (ii)),
+  taking at most `gate_p_topup_max_cluster_frac` (5%) of any cluster's
+  10Xv3 cells, so the leakage into the Allen means stays bounded. Draw 1's
+  cells are recomputed by the builder, not read from a store, so the
+  draw-2 `build_hash` does not depend on where draw 1 lives. The bundle
+  records draw 1's cell digest, the disjointness checks and, per class, the
+  cells of each part, the pooled count, what the caps left available and
+  whether the class reaches 700. The draw-2 rule enters only that bundle's
+  `build_hash`; draw 1 and every production `build_hash` are unchanged, and
+  `wmb_panel` refuses draw 2.
+- `--gate-p-wmb-draw2 <bundle>` passes draw 2. `GatePOptions.check_supported`
+  lifts the mouse path only when it is a complete draw-2 bundle. After PREP
+  and before any mapping, gate P checks it against the PREP it is scored
+  with: its files verify against `bundle.json`, it is of the family's panel,
+  its `build_hash` is the one PREP's test-set spec
+  (`reference.wmb_test_set_spec`) gives with draw 2, the draw-1 digest it
+  recorded is that of PREP's draw-1 cells, and it holds no draw-1 and no
+  marker-training cell of PREP's bundle. The precheck also requires
+  `gate_p_mouse_test_draws` 2 and a production config (draw 1).
+- Both draws are mapped onto PREP's own `wmb_panel` at seeds 0 and 1; the
+  replicates are `replicates/draw1/…` and `replicates/draw2/…`, and NP4
+  compares the two draws.
+- NP3's natural composition is each subclass's share of the WMB 10Xv3 cells
+  of the available matrices with full truth, the cells the draws come from
+  (`reference.wmb_reference_facts`).
+- NP4's per-donor spread is reported, never scored (§14 NP4 [L], M13 CHECK
+  K8): the pooled seed-0 held-out calls are split by the ABC `donor_label`
+  of their test cells and each donor is counted at the tested sets
+  (`gate_p.np4_donor_spread`; `np4_donor_stats__<member>` and
+  `np4_donor_spread__<member>`).
+- NP6 takes the measured human cross-platform offsets, with every mouse gene
+  resampled (M13 A27 (a)); a version-7 mouse family's R3 members read its
+  measured factor table.
+- NP7 scores the single-wrong-node part only, without the vocab: the 1% part
+  on sink or region-implausible nodes is human (§14).
+- NP9's measured time adds draw 2's build (its `bundle.json` timings) to PREP
+  and the replicates, as the human leave-one-donor-out builds count.
+- `gate_p_draw2_availability.csv` replaces the human pool sizes: draw 2's
+  availability per class, as its bundle recorded it. Nothing stops on it.
+- The dry run has no mouse exemption: narrowing H18's classes would be a
+  loosening. The human D2 options (`--gate-p-other-region`,
+  `--gate-p-accept-small-pools`) are refused for mouse.
+- The run record names the groups `default_draw` and `extra_draws`, records
+  draw 2 (`draw2`) and lists the mouse readings
+  (`gate_p_run.GATE_P_RUN_READINGS_MOUSE`).
+
+Built for the seeded families on 2026-10-14 (code `d8dd1b7`), in
+`/srv/storage/MerXen/annotation_references`: ag7 (500 genes, draw 1
+`6c31f20b`) draw 2 `947410bd`, and VZG2 (815 genes, draw 1 `c499a7ea`) draw 2
+`d03f52b9`. Each holds 16,903 cells: 10,006 per supertype, 798 non-neuronal
+extra and 6,099 top-up. 26 of the 34 classes reach 700 pooled test cells,
+and those classes hold 94.5% of the pooled cells. The 8 that do not are 03
+OB-CR Glut, 15 HY Gnrh1 Glut, 16 HY MM Glut, 17 MH-LH Glut, 21 MB Dopa, 22
+MB-HB Sero, 25 Pineal Glut and 32 OEC. The draw is panel independent, so
+both panels hold the same cells. Each build took about 1.5 min, with a peak
+RSS of 3.1 GB.
 
 **Criteria** (plan §14; every threshold is pre-registered and unchanged; the
 readings as revised by pre-registration §23.21 on 2026-10-07):
@@ -1048,7 +1126,7 @@ readings as revised by pre-registration §23.21 on 2026-10-07):
 | NP1 gene IDs | `np1_gene_ids` | ≥ 95% of the declared panel resolved (≥ 98% when the vendor supplies IDs); no control reaches the query; the unresolved list reviewed in the gate-P PR |
 | NP2 panel coverage | `np2_panel_coverage` | ≥ 10 root markers, and ≥ 10 markers for each root child with ≥ 50 cells; weak or collapsed parents accepted by the user (`--gate-p-accepted-parents`, given before the run; an unaccepted one stops a family's run before any build). The detail lists the accepted parents by lookup key, whatever the entry named them by, and the entries that name no listed parent (`accepted_not_listed`) |
 | NP3 frozen-threshold precision | `np3_set_stats`, `np3_verdicts`, `np3_test_cell_weights` | on pooled tested sets of ≥ 200 confident held-out calls (deep bins pooled; each test cell once), under the reference's natural composition and the class-balanced composition, both read on the test cells of the set's scope (R1: each called cell of truth type t weighs π_t / N_t, trimmed at 10 × the median; both must pass; Kish effective n): point precision ≥ the provisional target, Wilson lower bound ≥ target_L, coverage ≥ 0.30. The per-call-set weightings (scored before §23.21) are reported only |
-| NP4 stability | `np4_set_verdicts`, `np4_seed_stability` | per replicate (donor × seed) with ≥ 100 confident calls, point precision ≥ target_L; replicate range ≤ max(0.03, 3.5 SE); seed 0 vs 1 changes ≤ 2% of a level's confident labels (D6) |
+| NP4 stability | `np4_set_verdicts`, `np4_seed_stability` | per replicate (donor or draw × seed) with ≥ 100 confident calls, point precision ≥ target_L; replicate range ≤ max(0.03, 3.5 SE); seed 0 vs 1 changes ≤ 2% of a level's confident labels (D6). Mouse: the per-donor spread is reported only (`np4_donor_spread`) |
 | NP5 resolvability consistency | `np5_decision_agreement`, `np5_tstar_consequence`, `np5_extrapolated_share` | the re-derived decisions agree except one flip next to a boundary, comparing a bin only where the base and the replicate each hold ≥ 50 test cells (R6; version 7: the ensemble re-derived per replicate against the frozen ensemble decisions, R7); each replicate's t*, applied to the base's pooled calls of the set, gives point precision ≥ target_L − 0.02 (R3 (c); version 7 the ensemble's re-fitted t*, each call at its own bin's threshold, §23.22; the t* spread is reported only); ≤ 50% of the class's cells at the expected depth extrapolated (median and profile readings both scored) |
 | NP6 stress sensitivity | `np6_set_stats`, `np6_verdicts` | under spill 0.35, LogNormal(0, 1) efficiency and the cross-platform offsets (`ratio__xenium_v1_vs_merscope__human_brain_ffpe`, capped ±2 log2; the lung stress for human Prime): point ≥ target_L, Wilson ≥ target_L − 0.02, and the one-sided 95% lower bound of the precision drop ≤ 0.05, unweighted and under NP3's two test-cell weightings (R1) |
 | NP7 error structure | `np7_error_structure` | per level ≤ 1% of confident calls on sink or region-implausible nodes (human); ≤ 5% of a truth class's confident calls on one wrong node |
@@ -1078,8 +1156,8 @@ and NP1, NP2 and NP9 pass, NP8 passing or not applying.
 species' seeded families with `--gate-p-dry-run` (`gate_p.dry_run_verdict`;
 M13 D4, D28): set a for a human family, ag7 and VZG2 for a mouse family. The
 dry run must pass at broad (class) for every class of C_P and at supercluster
-(subclass) for the classes H18 expects, less supercluster COP (pre-registration
-§18 C1). A class H18 expects whose record is `not_evaluable` (fewer than
+(subclass) for the classes H18 expects, less supercluster COP for human
+(pre-registration §18 C1; a mouse family has no exemption). A class H18 expects whose record is `not_evaluable` (fewer than
 n_min confident calls) is reported, not failed (R5; `reported_not_evaluable`
 in the verdict). For human it runs on version 6 and on the version-7 ensemble
 (`--gate-p-version 7`, D5 (c)). A failure makes the criteria unattainable,
@@ -3073,8 +3151,8 @@ held-out-gene CSV is not produced in the pipeline, so item 8 is
   calls to the WHB sink Miscellaneous counted confident through their
   supercluster bp) and stays `provisional`
   ([details](#gate-p-on-the-new-panel-human-merscope-family-m13)). The
-  mouse path waits for the second WMB test draw and the ag7 / VZG2 dry run
-  (M13 chunks C20–C22, moved to M13b, after M6b).
+  mouse path exists since M13b C20 (2026-10-14), but no mouse family is
+  scored before the ag7 / VZG2 dry run (C21) passes.
 - **Simulation over-predicts real coverage on the new-panel family** (M13
   NR8). In 21–24 (level, class) rows per section the real confident share
   falls more than 0.10 below the class-depth prediction, by up to 0.54 at
