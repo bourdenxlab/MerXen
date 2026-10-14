@@ -532,18 +532,20 @@ def test_each_rerun_records_its_command_and_code(
     position = command.index("--annotation-config")
     assert command[position + 1] == str(out / "configs" / "qc.json")
     code = record["code"]
-    assert (
-        code["commit"]
-        == real_run(
-            ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
+    head = real_run(
+        ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
     )
+    if head.returncode == 0:
+        assert code["commit"] == head.stdout.strip()
+        assert isinstance(code["dirty"], bool)
+    else:
+        # A code export (git archive) has no checkout to read the commit from.
+        assert code["commit"] is None and code["dirty"] is None
     assert code["script"] == "scripts/acceptance/m13_real_qc_regression.py"
     assert isinstance(code["script_matches_head"], bool)
-    assert isinstance(code["dirty"], bool)
     with pytest.raises(script.RegressionError, match="exit 3"):
         script.run_resolve(out, variants=["qc_free"], **kwargs)
     failed = json.loads(
