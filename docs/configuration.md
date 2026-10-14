@@ -580,7 +580,7 @@ the dwight values in `workflows/conf/dwight.annotation.config`.
 | `annotation_prepare_only` | `false` | Build the reference bundles of `annotation_panel_genes_path` for every row and segmentation, and run no pipeline stage. |
 | `annotation_panel_genes_path` | `null` | Declared panel of a prepare-only run (any gene list `merxen annotation-panel --panel-genes-path` reads). A human gene list of the seeded set-a family also gets its curated set c. |
 | `annotation_human_references`, `annotation_mouse_references` | `whb_frontal_supc_clus,seaad_mr_panel`; `wmb_panel,wmb_region_share` | Reference ids per species. |
-| `annotation_reference_store` | `null` (`<outdir>/annotation_references`); Dwight: `/media/mathieubo/SSD1/MerXen/annotation_references` | Store root. Bundles are added, never modified or deleted; finished bundles are read-only. |
+| `annotation_reference_store` | `null` (`<outdir>/annotation_references`); Dwight: `/srv/storage/MerXen/annotation_references` | Store root. Bundles are added, never modified or deleted; finished bundles are read-only. |
 | `annotation_reference_store_large` | `null` (the main store); Dwight: `/srv/storage/MerXen/annotation_references_large` | Store of bundles on panels above 1,000 genes, which keep their reference markers ([Annotation](stages/annotation.md#large-panels-m3b)). |
 | `annotation_prep_large_memory` | `64 GB` | `ANNOTATE_REFERENCE_PREP` memory for panels above 1,000 genes (24 h instead of 8 h). Set from the M3b 5K measurement (OD-E8): the WMB marker steps of the Xenium Prime 5K Mouse panel peaked at 37.7 GB with the prefilter and 27.2 GB without it (the default) at 8 processes and `--max-gb 40`; + 30% = 49 GB ([Annotation](stages/annotation.md#large-panels-m3b)). A large WMB panel whose predicted query-marker peak + 30% exceeds the reserve is refused: raise this value. The per-parent marker prefilter has no pipeline parameter; it is set only through `--annotation-config` (`panel.large_panel_marker_prefilter`, `panel.large_panel_prefilter_cap`) of the standalone `annotation-reference-prep` and `annotation-panel-simulate`. |
 | `annotation_auto_download` | `true` | Fetch missing pinned files (SEA-AD Multiregion, the MERFISH CCF metadata) into `<annotation_reference_store>/.downloads`, verified by size and sha256. |
@@ -624,11 +624,14 @@ sources therefore default to the verified ABC Atlas download under
 `annotation_wmb_metadata_dir`, `annotation_merfish_ccf_metadata_path`,
 `annotation_mouse_gene_table`, `annotation_wmb_selfmap_test_cells_path`; the
 strings of the VZG2 `map_first` run, because `build_hash` covers the resolved
-source paths). Still on SSD1 by default, until the human sources move: the
-reference store (`annotation_reference_store`; a launch passes its own),
-`annotation_whb_*`, the legacy `mecr_*`, `mapmycells_*` and
-`clustering_squidpy_*` sources, and the human gene table (only its `var` index
-is read).
+source paths). Both reference stores (`annotation_reference_store` and
+`annotation_reference_store_large`) default to `/srv/storage/MerXen`, so a
+launch does not pass them. The `/srv` store has no human bundles yet: a human
+run finds none and rebuilds from the human sources, which the guard refuses
+until they move. Still on SSD1 by default, until the human
+sources are re-downloaded: `annotation_whb_*`, the legacy `mecr_*`,
+`mapmycells_*` and `clustering_squidpy_*` sources, and the human gene table
+(only its `var` index is read).
 
 `scripts/annotation_dev/launch_guard.sh` refuses a launch whose resolved
 configuration reads from SSD1. Give it the arguments of the `nextflow run`
