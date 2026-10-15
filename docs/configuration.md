@@ -2,14 +2,19 @@
 
 MerXen configuration lives in four places:
 
-1. **Shell environment** — a `.env` file for Python-side defaults.
+1. **Shell environment** — a `.env` file for Python-side defaults and for
+   every location that scripts, tests and notebooks read
+   ([Local configuration](local-configuration.md)).
 2. **Portable Nextflow parameters** — scientific and algorithmic defaults in
    [workflows/nextflow.config](../workflows/nextflow.config), overridable per
    run with `--<name>`.
-3. **Execution profiles** — host capacity, local software/reference paths,
-   hardware choices, concurrency, and GPU locking. The default Dwight settings
-   live in
-   [workflows/conf/dwight.config](../workflows/conf/dwight.config).
+3. **Execution profiles** — host capacity, local software paths, hardware
+   choices, concurrency, and GPU locking. The default Dwight settings live in
+   [workflows/conf/dwight.config](../workflows/conf/dwight.config). The data
+   locations of a host (reference sources and stores, the task temporary
+   directory, container images and bind mounts) are in no tracked file: two
+   private, gitignored site configs hold them
+   ([Site configs](#site-configs-private-host-locations)).
 4. **Pydantic models** — [src/merxen/config.py](../src/merxen/config.py) — the
    authoritative schema every CLI command validates its JSON config against.
 
@@ -32,12 +37,58 @@ Variables, from [.env.example](../.env.example):
 The `MERXEN_` prefix is wired up via `model_config = {"env_prefix": "MERXEN_"}`
 in [config.py:202](../src/merxen/config.py#L202).
 
+`.env.example` also lists the location variables of this host (storage roots,
+reference stores, the evidence archive, ...), all commented out. Code reads
+them through `merxen.local_config`; a variable that is not set is an error that
+names it, never a built-in default. Docs write them as `$MERXEN_...`.
+
 ## Nextflow parameters
 
 Portable defaults live in
 [workflows/nextflow.config](../workflows/nextflow.config). Dwight-specific
 defaults are included automatically through Nextflow's reserved `standard`
 profile. Override either kind with `--<name>` on the command line.
+
+### Site configs (private host locations)
+
+No tracked file holds a host path. The locations of a host live in two
+gitignored Nextflow files that the tracked configs include; each has a tracked
+template with placeholders (copy it without the `.example` suffix and fill in
+the values):
+
+| File | Template | Included by | Sets |
+|------|----------|-------------|------|
+| `workflows/conf/site.config` | `site.config.example` | `nextflow.config`, so every profile | `apptainer_container`, `apptainer_bind_paths`, `clustering_squidpy_gpu_container`, `mender_container` |
+| `workflows/conf/dwight.site.config` | `dwight.site.config.example` | `conf/dwight.config`, so the `standard`, `dwight` and `local` profiles | the legacy MapMyCells / WHB sources, the annotation reference stores and sources, `task_tmp_dir`, and the task environment (`TMPDIR`, `MERXEN_ALIAS_FILE`) |
+
+Each file is found at the path in `MERXEN_SITE_CONFIG` /
+`MERXEN_DWIGHT_SITE_CONFIG`, else beside its template in `workflows/conf/`. An
+unset or empty variable means "look beside the template"; `none` (or
+`/dev/null`) means "no file, on purpose"; a variable naming a file that does not
+exist makes Nextflow stop with "Unable to parse config file" (the cause is in
+`.nextflow.log`; `scripts/annotation_dev/launch_guard.sh` and `run_template.sh`
+name the variable). A git worktree and a code export contain neither file, so
+set the variables there; the private `.env` names both
+([Local configuration](local-configuration.md)). A site config may only set
+params that a tracked config declares, and the two files share no param (a test
+checks both). In the tables below, a Dwight value written `$MERXEN_...` is the
+value of that `.env` variable, which `dwight.site.config` also holds.
+
+Without a site config several params stay `null`, and a `null` here does not
+fail by itself: `annotation_reference_store` falls back to
+`<outdir>/annotation_references` (every reference bundle is rebuilt, about 40
+minutes and 48-57 GB each, instead of reusing the store), the reference
+downloads default to on, task temporary files land on the small root disk, and
+the `apptainer` profile runs its tasks without a container. `main.nf` therefore
+stops a launch with an error in two cases, unless the variable is set to `none`
+or `/dev/null` on purpose:
+
+- a `standard`, `dwight` or `local` launch with no `task_tmp_dir` (no Dwight
+  site config): "no Dwight site config ... set `MERXEN_DWIGHT_SITE_CONFIG`,
+  install `workflows/conf/dwight.site.config`, or
+  `MERXEN_DWIGHT_SITE_CONFIG=none` to run without host locations";
+- an `apptainer` launch with no `apptainer_container` (no site config): the same
+  message for `MERXEN_SITE_CONFIG` and `workflows/conf/site.config`.
 
 ### Required
 
@@ -77,7 +128,7 @@ profile. Override either kind with `--<name>` on the command line.
 | `mender_enabled` | `false` | Enable independent per-platform/per-segmentation MENDER spatial-domain analysis. A non-empty samplesheet value may override this per row. |
 | `mender_segmentations` | `proseg_hybrid` | MENDER branches: any comma-separated subset of `reseg`, `original_seg`, `proseg_mask`, and `proseg_hybrid`, or `all`. A non-empty samplesheet value may override this per row. |
 | `force_spatialdata_build` | `false` | Rebuild SpatialData zarrs even if cached. |
-| `merscope_allow_transform_override_mismatch` | `false` | VZG2 builds fail when `merscope_transform_path` places the mosaic more than 1 µm away from the archive manifest. `true` keeps the override with a warning, for archives whose `bbox_microns` is known to be wrong. See [stages/spatialdata-build.md](stages/spatialdata-build.md). |
+| `merscope_allow_transform_override_mismatch` | `false` | `.vzg2` builds fail when `merscope_transform_path` places the mosaic more than 1 µm away from the archive manifest. `true` keeps the override with a warning, for archives whose `bbox_microns` is known to be wrong. See [stages/spatialdata-build.md](stages/spatialdata-build.md). |
 | `force_proseg_rerun` | `false` | Rebuild ProSeg bases from the current Cellpose/transcript inputs instead of reusing a persistent `latest_spatialdata.zarr`. Useful with `-resume` after upstream inputs were rebuilt. |
 | `qc_registration_strict` | `false` | Fail the QC task (instead of only warning in its outputs) when the segmentation registration check flags cells that do not sit on their transcripts. See [stages/qc.md](stages/qc.md#registration-check). |
 | `start_stage` | `build_spatialdata` | Fallback first stage. Skipped upstream stages are read from published outputs. A samplesheet `start_stage` value overrides this per row. |
@@ -85,7 +136,9 @@ profile. Override either kind with `--<name>` on the command line.
 | `only_stage` | `null` | Fallback single-stage selector. A row-level `only_stage` overrides row start/stop values; row start/stop values suppress the global `only_stage` fallback for that row. |
 | `gpu_process_lock_enabled` | Dwight: `true` | Serialize local GPU-heavy processes so `CELLPOSE_SEGMENT`, GPU `ALIGN`, and GPU `CLUSTERING_SQUIDPY` do not compete for one workstation GPU. ProSeg does not take this lock. |
 | `gpu_process_lock_file` | Dwight: `/tmp/merxen-dwight-gpu.lock` | One host-wide lock shared by tasks and concurrent launches on Dwight. |
-| `task_tmp_dir` | Dwight: `/srv/storage/MerXen/tmp` | Exported to every task as `TMPDIR`, so library temporary files land on the `/srv/storage` RAID rather than `/tmp` on the small root disk. The directory must exist (`mkdir -p` it once per host). ProSeg and the proseg_hybrid refinement write their large intermediates to `$MERXEN_TMPDIR` if set, otherwise to the task's work directory, never to the system temporary directory. |
+| `task_tmp_dir` | `null`; Dwight: `$MERXEN_TASK_TMP_DIR` | Exported to every task as `TMPDIR` (the Dwight site config sets the `env` entry), so library temporary files land on the storage RAID rather than `/tmp` on the small root disk. The directory must exist (`mkdir -p` it once per host). `null` stops a `standard`, `dwight` or `local` launch (see [Site configs](#site-configs-private-host-locations)). ProSeg and the proseg_hybrid refinement write their large intermediates to `$MERXEN_TMPDIR` if set, otherwise to the task's work directory, never to the system temporary directory. |
+| `apptainer_container` | `null`; HPC: `site.config` | Image of the `apptainer` profile (`process.container`). `null` leaves the tasks without a container, so an `apptainer` launch with no site config stops (see [Site configs](#site-configs-private-host-locations)). |
+| `apptainer_bind_paths` | `null`; HPC: `site.config` | Comma-separated host directories the `apptainer` and `gpu` profiles mount into every container (`-B <paths>`). `null` mounts none beyond Apptainer's own. |
 
 Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
 `build_spatialdata`, `segment_nuclei`, `segment`, `enrich`, `register_images`,
@@ -154,7 +207,7 @@ Cellpose process types.
 | `register_images_refine_affine` | `true` | Apply the DAPI affine refinement on top of each Xenium Explorer matrix. |
 | `register_images_max_forks` | Dwight: `2` | Maximum concurrent registration processes. |
 
-`REGISTER_IMAGES` requests 8 CPUs and 32 GB (P7513 peaked at 8.5 GB with about five cores busy). The viewer pyramid of each
+`REGISTER_IMAGES` requests 8 CPUs and 32 GB (HD1 peaked at 8.5 GB with about five cores busy). The viewer pyramid of each
 registered image follows `viewer_cache_build_image_pyramid`.
 
 ### Viewer caches
@@ -429,7 +482,7 @@ The following settings are read only when
 | `clustering_squidpy_figure_dpi` | `180` | DPI for PNG plots. |
 | `clustering_squidpy_use_gpu` | Dwight: `true` | Use RAPIDS single-cell acceleration when available. |
 | `clustering_squidpy_gpu_conda` | `envs/environment.clustering-gpu.yml` | Dedicated RAPIDS environment used only by `CLUSTERING_SQUIDPY_COMPUTE`. |
-| `clustering_squidpy_gpu_container` | Site GPU image path | Dedicated RAPIDS image used only by `CLUSTERING_SQUIDPY_COMPUTE` with Apptainer. Build it from `containers/Dockerfile.clustering-gpu` or override this path. |
+| `clustering_squidpy_gpu_container` | `null`; HPC: `site.config` | Dedicated RAPIDS image used only by `CLUSTERING_SQUIDPY_COMPUTE` with Apptainer. Build it from `containers/Dockerfile.clustering-gpu` or override this path. |
 | `clustering_squidpy_max_forks` | Dwight: `4` | Maximum concurrent Squidpy clustering tasks. GPU-backed tasks still share the local GPU lock when enabled. |
 | `clustering_squidpy_gpu_vram_monitor` | Dwight: `true` | Run a lightweight `nvidia-smi` sampler around each `CLUSTERING_SQUIDPY_COMPUTE` task. |
 | `clustering_squidpy_gpu_vram_monitor_interval_seconds` | `2` | Sampling interval for the clustering GPU VRAM monitor. |
@@ -474,7 +527,7 @@ The following settings are read only when
 | `mender_run_umap` | `true` | Generate the context embedding. |
 | `mender_write_spatialdata_table` | `true` | Import `mender_domain` into the derived clustered SpatialData table. |
 | `mender_conda` | `envs/environment.mender.yml` | Old compatible CPU environment used only by compute. |
-| `mender_container` | Site MENDER SIF path | CPU-only image built from `containers/Dockerfile.mender`; override for portable Apptainer runs. |
+| `mender_container` | `null`; HPC: `site.config` | CPU-only image built from `containers/Dockerfile.mender`; override for portable Apptainer runs. |
 | `mender_compute_max_forks` | Dwight: `2` | At 192 GB per compute task, at most 384 GB is reserved concurrently. |
 
 See [MENDER spatial domains](stages/mender.md) for the data contract, restart
@@ -507,7 +560,7 @@ mode, output layout, and CPU container instructions.
 | `mecr_cell_metadata_path` | Atlas-dependent | Maps raw H5AD cell labels to cluster aliases. |
 | `mecr_taxonomy_metadata_path` | Atlas-dependent | Resolves taxonomy node labels. |
 | `mecr_cluster_membership_path` | Atlas-dependent | Maps cluster aliases to taxonomy nodes. |
-| `mecr_reference_cache_dir` | `<outdir>/mapmycells_cache` | Durable Allen reference cache. The Dwight profile uses `/media/mathieubo/SSD1/MerXen/mapmycells`. |
+| `mecr_reference_cache_dir` | `<outdir>/mapmycells_cache` | Durable Allen reference cache. The Dwight profile uses `$MERXEN_MAPMYCELLS_CACHE_DIR`. |
 | `mecr_auto_download_reference` | `true` | For mouse, download or reuse the complete WMB raw reference and metadata. Downloads are resumable and use four concurrent transfers. |
 | `mecr_taxonomy_level` | atlas-dependent | `CCN202210140_SUPC` for WHB or `CCN20230722_CLAS` for WMB. |
 | `mecr_gene_symbol_column` | `gene_symbol` | Reference `var` column containing gene symbols. |
@@ -541,7 +594,7 @@ runs once, and is shared across all samples and segmentation branches. See
 | `mapmycells_gene_mapping_db_path` | `null` | Optional `mmc_gene_mapper` SQLite DB. Human-to-WMB runs download it when automatic downloads are enabled. |
 | `mapmycells_region_name` | species-dependent | Human: `frontal_a44_a45_a46_a32_acc`; mouse: `region`. Short safe name used in region output directories and annotation prefixes. |
 | `mapmycells_region_labels` | species-dependent | Human defaults to the four frontal WHB labels. Mouse defaults empty and requires explicit WMB `region_of_interest_acronym` values for region mode. |
-| `mapmycells_region_cache_dir` | `<outdir>/mapmycells_cache` | Durable cache for Allen WHB/WMB downloads, the gene mapper, and generated region reference files. The Dwight profile overrides this with `/media/mathieubo/SSD1/MerXen/mapmycells`. |
+| `mapmycells_region_cache_dir` | `<outdir>/mapmycells_cache` | Durable cache for Allen WHB/WMB downloads, the gene mapper, and generated region reference files. The Dwight profile overrides this with `$MERXEN_MAPMYCELLS_CACHE_DIR`. |
 | `mapmycells_region_min_cells_per_leaf` | `10` | Drop region taxonomy leaf aliases with fewer cells than this before precomputing stats. |
 | `mapmycells_region_force_rebuild` | `false` | Build a new region reference directory even if a matching cached build exists. Earlier builds are never deleted; see [MapMyCells region reference cache](stages/mapmycells.md#region-reference-cache). |
 | `mapmycells_region_query_markers_n_per_utility` | `10` | Marker count target passed to Allen's `QueryMarkerRunner` for the region reference. |
@@ -580,26 +633,26 @@ the dwight values in `workflows/conf/dwight.annotation.config`.
 | `annotation_prepare_only` | `false` | Build the reference bundles of `annotation_panel_genes_path` for every row and segmentation, and run no pipeline stage. |
 | `annotation_panel_genes_path` | `null` | Declared panel of a prepare-only run (any gene list `merxen annotation-panel --panel-genes-path` reads). A human gene list of the seeded set-a family also gets its curated set c. |
 | `annotation_human_references`, `annotation_mouse_references` | `whb_frontal_supc_clus,seaad_mr_panel`; `wmb_panel,wmb_region_share` | Reference ids per species. |
-| `annotation_reference_store` | `null` (`<outdir>/annotation_references`); Dwight: `/srv/storage/MerXen/annotation_references` | Store root. Bundles are added, never modified or deleted; finished bundles are read-only. |
-| `annotation_reference_store_large` | `null` (the main store); Dwight: `/srv/storage/MerXen/annotation_references_large` | Store of bundles on panels above 1,000 genes, which keep their reference markers ([Annotation](stages/annotation.md#large-panels-m3b)). |
+| `annotation_reference_store` | `null` (`<outdir>/annotation_references`); Dwight: `$MERXEN_REFERENCE_STORE` | Store root. Bundles are added, never modified or deleted; finished bundles are read-only. |
+| `annotation_reference_store_large` | `null` (the main store); Dwight: `$MERXEN_REFERENCE_STORE_LARGE` | Store of bundles on panels above 1,000 genes, which keep their reference markers ([Annotation](stages/annotation.md#large-panels-m3b)). |
 | `annotation_prep_large_memory` | `64 GB` | `ANNOTATE_REFERENCE_PREP` memory for panels above 1,000 genes (24 h instead of 8 h). Set from the M3b 5K measurement (OD-E8): the WMB marker steps of the Xenium Prime 5K Mouse panel peaked at 37.7 GB with the prefilter and 27.2 GB without it (the default) at 8 processes and `--max-gb 40`; + 30% = 49 GB ([Annotation](stages/annotation.md#large-panels-m3b)). A large WMB panel whose predicted query-marker peak + 30% exceeds the reserve is refused: raise this value. The per-parent marker prefilter has no pipeline parameter; it is set only through `--annotation-config` (`panel.large_panel_marker_prefilter`, `panel.large_panel_prefilter_cap`) of the standalone `annotation-reference-prep` and `annotation-panel-simulate`. |
 | `annotation_auto_download` | `true` | Fetch missing pinned files (SEA-AD Multiregion, the MERFISH CCF metadata) into `<annotation_reference_store>/.downloads`, verified by size and sha256. |
 | `annotation_ctm_version` | `1.7.2` | `cell_type_mapper` version PREP and MAP require (each task checks it before running). |
 | `annotation_resolvability` | `true` | Resolvability self-map (M3b): PREP simulates held-out reference cells on the panel and writes the resolvability tables into the WHB, SEA-AD and WMB bundles ([Annotation](stages/annotation.md#resolvability-self-map-m3b)). While true, `wmb_panel` needs `annotation_wmb_selfmap_test_cells_path`, and the WHB and SEA-AD bundles need `annotation_whb_region_precompute_source`, `annotation_whb_h5ad_dir` and `annotation_whb_metadata_dir` (the held-out test set; the preflight checks all three). The self-map recipe enters `build_hash`; the RESOLVE-time decision settings do not. |
 | `annotation_xplat_sensitivity`, `annotation_xplat_sensitivity_segmentations` | `geneset_c`; `proseg_hybrid` | Whether same-panel human pairs get a set-c bundle, and on which segmentations. |
 | `annotation_panel_mode` | `auto` | `auto` (intersection when the two platform panels have Jaccard ≥ 0.9, else `per_platform`; always `per_platform` when exactly one declared panel is refused, so the valid platform keeps its panel), `intersection` or `per_platform`. |
-| `annotation_human_gene_table`, `annotation_mouse_gene_table` | `null`; Dwight: the WHB-10Xv3 `var` (`WHB-10Xv3-Nonneurons-raw.h5ad`, still on SSD1) and the WMB-10X `gene.csv` (20241115; the md5-checked copy under `/srv/storage/MerXen/references/abc_atlas/metadata/WMB-10X/20241115/`) | Local gene tables (Allen `gene.csv` layout or a reference `.h5ad` whose `var` index holds the IDs; nothing is downloaded). The run species' table is the symbol fallback and the release-drift reference of the gene-ID resolver (else `annotation_gene_id_fallback_csv`); both feed the exact-case species test, which refuses a mouse panel run as human and vice versa ([Annotation](stages/annotation.md#declared-panels-gene-ids-and-controls-m3b)). Preflight checks that set files exist. |
+| `annotation_human_gene_table`, `annotation_mouse_gene_table` | `null`; Dwight: the WHB-10Xv3 `var` (`WHB-10Xv3-Nonneurons-raw.h5ad`, still on SSD1) and the WMB-10X `gene.csv` (20241115; the md5-checked copy under `$MERXEN_ABC_ATLAS_DIR/metadata/WMB-10X/20241115/`) | Local gene tables (Allen `gene.csv` layout or a reference `.h5ad` whose `var` index holds the IDs; nothing is downloaded). The run species' table is the symbol fallback and the release-drift reference of the gene-ID resolver (else `annotation_gene_id_fallback_csv`); both feed the exact-case species test, which refuses a mouse panel run as human and vice versa ([Annotation](stages/annotation.md#declared-panels-gene-ids-and-controls-m3b)). Preflight checks that set files exist. |
 | `annotation_gene_alias_table`, `annotation_gene_id_overrides_csv` | `null` | Optional local HGNC / MGI alias table (previous and alias symbols; only single-target aliases resolve) and extra curated overrides (`symbol`, `ensembl_id`, `reason`, optional `species`) on top of the packaged `gene_id_overrides_<species>.csv`. |
 | `annotation_whb_region_precompute_source` | `null`; Dwight: the SSD1 frontal region reference | WHB frontal region precompute (directory or `precomputed_stats.h5`), copied into each WHB bundle. |
 | `annotation_whb_h5ad_dir`, `annotation_whb_metadata_dir` | `null`; Dwight: the SSD1 ABC WHB cache | Inputs to rebuild the region precompute when no source precompute is given, and the held-out resolvability test set's raw h5ads, taxonomy tables and WHB cell metadata (the other-region non-neuronal test cells; WHB and SEA-AD bundles) while `annotation_resolvability` is true. |
 | `annotation_seaad_precomputed_stats_path`, `annotation_seaad_metadata_dir` | `null` | Local SEA-AD Multiregion files; unset, they come from the pinned download cache. |
-| `annotation_wmb_h5ad_dir` | `null`; Dwight: `/srv/storage/MerXen/references/abc_atlas/expression_matrices/WMB-10Xv3/20230630` | Directory of `WMB-10Xv3-*-raw.h5ad`; only those files enter `build_hash`. |
-| `annotation_wmb_metadata_dir` | `null`; Dwight: `/srv/storage/MerXen/references/abc_atlas/metadata` | WMB-10X cell metadata and the WMB taxonomy tables. |
+| `annotation_wmb_h5ad_dir` | `null`; Dwight: `$MERXEN_ABC_ATLAS_DIR/expression_matrices/WMB-10Xv3/20230630` | Directory of `WMB-10Xv3-*-raw.h5ad`; only those files enter `build_hash`. |
+| `annotation_wmb_metadata_dir` | `null`; Dwight: `$MERXEN_ABC_ATLAS_DIR/metadata` | WMB-10X cell metadata and the WMB taxonomy tables. |
 | `annotation_wmb_mapping_stats_path` | `null`; Dwight: the Allen `precomputed_stats_ABC_revision_230821.h5` | Allen WMB means, copied as the mapping precompute. |
-| `annotation_wmb_selfmap_test_cells_path` | `null`; Dwight: `/srv/storage/MerXen/references/wmb_selfmap/truth_20260925.csv`, a byte-identical copy of `research/selfmap/truth.csv` of the evidence archive | The 11,913 self-map test cells kept out of the marker training cells. A copy matching the pinned sha256 is seeded into `<store>/.downloads/local/wmb_selfmap/`, and bundles hash that copy. Required while `annotation_resolvability` is true. |
-| `annotation_wmb_marker_gene_universe_path` | `null` | Override of the `wmb_panel` marker gene universe. Unset, a panel inside the validated ag7 ∪ VZG2 union (899 genes) uses that union and any other panel its own genes. |
+| `annotation_wmb_selfmap_test_cells_path` | `null`; Dwight: `$MERXEN_WMB_SELFMAP_TEST_CELLS`, a byte-identical copy of `research/selfmap/truth.csv` of the evidence archive | The 11,913 self-map test cells kept out of the marker training cells. A copy matching the pinned sha256 is seeded into `<store>/.downloads/local/wmb_selfmap/`, and bundles hash that copy. Required while `annotation_resolvability` is true. |
+| `annotation_wmb_marker_gene_universe_path` | `null` | Override of the `wmb_panel` marker gene universe. Unset, a panel inside the validated MS1 ∪ MS2 union (899 genes) uses that union and any other panel its own genes. |
 | `annotation_wmb_max_cells_per_cluster` | `50` | Marker training cells per WMB cluster. |
-| `annotation_merfish_ccf_metadata_path` | `null`; Dwight: the verified `cell_metadata_with_parcellation_annotation.csv` under `/srv/storage/MerXen/references/abc_atlas/metadata/MERFISH-C57BL6J-638850-CCF/20231215/views/` | Local MERFISH-C57BL6J-638850-CCF cell metadata; unset, it comes from the pinned download cache. |
+| `annotation_merfish_ccf_metadata_path` | `null`; Dwight: the verified `cell_metadata_with_parcellation_annotation.csv` under `$MERXEN_ABC_ATLAS_DIR/metadata/MERFISH-C57BL6J-638850-CCF/20231215/views/` | Local MERFISH-C57BL6J-638850-CCF cell metadata; unset, it comes from the pinned download cache. |
 | `annotation_prep_max_forks` | Dwight: `1` | Concurrent `ANNOTATE_REFERENCE_PREP` tasks. |
 | `annotation_max_forks` | `2` (applied on Dwight) | Concurrent `CLUSTERING_SQUIDPY_ANNOTATE_MAP` tasks (6 CPUs and 24 GB each, 48 GB above 1,000 panel genes). |
 | `annotation_resolve_max_forks` | Dwight: `4` | Concurrent `CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE` tasks (2 CPUs and 16 GB each, 32 GB above 1,000 panel genes; about a minute per pair × segmentation). |
@@ -616,31 +669,39 @@ the dwight values in `workflows/conf/dwight.annotation.config`.
 
 #### Dwight reference sources and the SSD1 launch guard
 
-SSD1 (`/media/mathieubo/SSD1`) is failing: most of the reference bundles and
+SSD1 (`$MERXEN_SSD1_ROOT`) is failing: most of the reference bundles and
 sources stored there no longer match their recorded hashes, and the store's
 reuse check compares only the size of files above 64 MB. The Dwight mouse
-sources therefore default to the verified ABC Atlas download under
-`/srv/storage/MerXen/references` (`annotation_wmb_h5ad_dir`,
-`annotation_wmb_metadata_dir`, `annotation_merfish_ccf_metadata_path`,
-`annotation_mouse_gene_table`, `annotation_wmb_selfmap_test_cells_path`; the
-strings of the VZG2 `map_first` run, because `build_hash` covers the resolved
-source paths). Both reference stores (`annotation_reference_store` and
-`annotation_reference_store_large`) default to `/srv/storage/MerXen`, so a
-launch does not pass them. The `/srv` store has no human bundles yet: a human
-run finds none and rebuilds from the human sources, which the guard refuses
-until they move. Still on SSD1 by default, until the human
-sources are re-downloaded: `annotation_whb_*`, the legacy `mecr_*`,
-`mapmycells_*` and `clustering_squidpy_*` sources, and the human gene table
-(only its `var` index is read).
+sources therefore default (as set in the private `dwight.site.config`) to the
+verified ABC Atlas download under `$MERXEN_REFERENCES_DIR`
+(`annotation_wmb_h5ad_dir`, `annotation_wmb_metadata_dir`,
+`annotation_merfish_ccf_metadata_path`, `annotation_mouse_gene_table`,
+`annotation_wmb_selfmap_test_cells_path`; the strings of the MS2 `map_first`
+run, because `build_hash` covers the resolved source paths). Both reference
+stores (`annotation_reference_store` and `annotation_reference_store_large`)
+default to `$MERXEN_STORAGE_ROOT`, so a launch does not pass them. The store
+has no human bundles yet: a human run finds none and rebuilds from the human
+sources, which the guard refuses until they move. Still on SSD1 by default,
+until the human sources are re-downloaded: `annotation_whb_*`, the legacy
+`mecr_*`, `mapmycells_*` and `clustering_squidpy_*` sources, and the human gene
+table (only its `var` index is read).
 
 `scripts/annotation_dev/launch_guard.sh` refuses a launch whose resolved
 configuration reads from SSD1. Give it the arguments of the `nextflow run`
-call; it runs `nextflow config`, applies the launch's `--param` overrides and
-exits 1 if any value still contains `/media/mathieubo/SSD1`, before any task
-starts. Exceptions are the human gene table, the values or params named in
-`LAUNCH_GUARD_ALLOW` and `LAUNCH_GUARD_ALLOW_KEYS`, and, for `--species mouse`,
-the human WHB and SEA-AD source params. `scripts/annotation_dev/run_template.sh`
-is a launch script that calls it.
+call; it runs `nextflow config` (with the caller's environment, so the site
+configs the launch will include are included, and it reports which), applies
+the launch's `--param` overrides and exits 1 if any value still contains the
+refused prefix, before any task starts. The prefix is `MERXEN_REFUSED_PATH_PREFIX`
+and the one allow-listed human gene table is `MERXEN_HUMAN_GENE_TABLE`, both read
+from the `.env` that `MERXEN_ENV_FILE` names (else the checkout's own; the
+environment wins over the file), or `LAUNCH_GUARD_PREFIX` / `LAUNCH_GUARD_HUMAN_GENE_TABLE`;
+`LAUNCH_GUARD_PREFIX=none` switches the guard off. Other exceptions are the
+values or params named in `LAUNCH_GUARD_ALLOW` and `LAUNCH_GUARD_ALLOW_KEYS`,
+and, for `--species mouse`, the human WHB and SEA-AD source params. A site
+variable that names a missing file is an error (exit 2). `scripts/annotation_dev/run_template.sh`
+is a launch script that calls it: it reads `MERXEN_ENV_FILE`, exports the
+alias and site-config variables to the launch, and lets a variable the operator
+exported (for example `MERXEN_DWIGHT_SITE_CONFIG=none`) win over the file.
 
 #### Annotation config fields of milestone M3c (`--annotation-config`)
 

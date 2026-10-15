@@ -60,8 +60,15 @@ EXPECTED_SHA256: dict[str, str] = {
     "main.nf wiring": (
         "65ea609bc42e7f079a6a805ddb61d6b9140ef4ad39842dc88593178af6696d4a"
     ),
+    # 2026-10-15 (privacy clean-up): four host-location params the legacy
+    # clustering reads (the broad reference cache directory and three WHB
+    # source files) moved from conf/dwight.config to the private Dwight site
+    # config, so their lines read "unset" in the pinned files. The resolved
+    # value of every param of every profile is unchanged (nextflow config
+    # compared before and after, with the site config), so the task texts,
+    # legacy task hashes and -resume are too.
     "param defaults": (
-        "fe4ca1ed06ba1c74dba06b3a50219cfac58a719376ead6792ae7ae0568c5f3c2"
+        "4e7c16d4e65037667139301de8c2da639eb6a1b9a1d17876a1454beeedccec4d"
     ),
 }
 

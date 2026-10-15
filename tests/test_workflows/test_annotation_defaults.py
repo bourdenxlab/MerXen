@@ -879,7 +879,7 @@ def _add_m5_cases(
             }
         )
     )
-    # P5 as P1212: same panel (RESOLVE records full), MERSCOPE gate broad_only.
+    # P5 as HD2: same panel (RESOLVE records full), MERSCOPE gate broad_only.
     (resolve / "P5_resolve_summary.json").write_text(
         json.dumps(
             {
@@ -1463,7 +1463,7 @@ def test_groovy_run_record_lists_stopped_branches_and_panels(
     assert info["refused_panels"] == ["P1:proseg_hybrid (too few genes)"]
     assert info["provisional_panels"] == ["P2:proseg_hybrid P2_MERSCOPE"]
     assert info["broad_only_panels"] == []
-    # P5 (as P1212): RESOLVE records full from the panel; the broad-only
+    # P5 (as HD2): RESOLVE records full from the panel; the broad-only
     # MERSCOPE gate restricts it (plan §5.4), as CrossPlatformScope does.
     assert info["restricted_dataset_gates"] == [
         "P5:proseg_hybrid P5_MERSCOPE: broad_only"

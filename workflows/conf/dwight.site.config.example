@@ -1,0 +1,102 @@
+/*
+ * Template of the private Dwight site config. Copy it to
+ * workflows/conf/dwight.site.config (gitignored: never commit the real one)
+ * and replace the placeholders with this host's locations.
+ *
+ * conf/dwight.config includes it (so the standard, dwight and local profiles
+ * read it), after conf/dwight.annotation.config. It is found at
+ * $MERXEN_DWIGHT_SITE_CONFIG, else at conf/dwight.site.config beside this
+ * template; an unset or empty variable means "look beside it", and 'none' (or
+ * /dev/null) means "no Dwight site config on purpose" (docs/local-configuration.md).
+ * A variable naming a file that does not exist makes Nextflow fail to parse
+ * the config. Without the file and without 'none', main.nf stops a standard,
+ * dwight or local launch: several of these params fall back silently when
+ * they are null (the reference store becomes <outdir>/annotation_references and
+ * every bundle is rebuilt; the reference downloads switch on; task temporary
+ * files go to the root disk).
+ *
+ * It may only set params that nextflow.config or conf/annotation.config
+ * declares (a test checks), and the container and bind-mount params belong in
+ * conf/site.config instead (the two files share no param). Values that also
+ * live in .env (MERXEN_REFERENCE_STORE, MERXEN_TASK_TMP_DIR, ...) must equal
+ * them (a test checks, on a host that has both files).
+ *
+ * The strings below that feed a reference bundle (the sources and the stores)
+ * must stay byte-identical from one run to the next: build_hash covers the
+ * resolved source paths, so a changed string rebuilds the bundle.
+ */
+
+params {
+    // Legacy MapMyCells / WHB assets, on the failing legacy disk (SSD1; the
+    // launch guard refuses launches that read it, scripts/annotation_dev).
+    mecr_whb_neurons_h5ad_path = "/path/to/legacy-disk/MerXen/mapmycells/abc_whb/expression_matrices/WHB-10Xv3/20240330/WHB-10Xv3-Neurons-raw.h5ad"
+    mecr_whb_nonneurons_h5ad_path = "/path/to/legacy-disk/MerXen/mapmycells/abc_whb/expression_matrices/WHB-10Xv3/20240330/WHB-10Xv3-Nonneurons-raw.h5ad"
+    mecr_whb_cell_metadata_path = "/path/to/legacy-disk/MerXen/mapmycells/abc_whb/metadata/WHB-10Xv3/20241115/cell_metadata.csv"
+    mecr_whb_taxonomy_metadata_path = "/path/to/legacy-disk/MerXen/mapmycells/abc_whb/metadata/WHB-taxonomy/20240330/cluster_annotation_term.csv"
+    mecr_whb_cluster_membership_path = "/path/to/legacy-disk/MerXen/mapmycells/abc_whb/metadata/WHB-taxonomy/20240330/cluster_to_cluster_annotation_membership.csv"
+    mecr_reference_cache_dir = "/path/to/legacy-disk/MerXen/mapmycells"
+    clustering_squidpy_whb_marker_lookup_path = "/path/to/legacy-disk/MerXen/mapmycells/query_markers.n10.20240221800.json"
+    clustering_squidpy_whb_taxonomy_metadata_path = "/path/to/legacy-disk/MerXen/mapmycells/abc_whb/metadata/WHB-taxonomy/20240330/cluster_annotation_term.csv"
+    clustering_squidpy_whb_cluster_membership_path = "/path/to/legacy-disk/MerXen/mapmycells/abc_whb/metadata/WHB-taxonomy/20240330/cluster_to_cluster_annotation_membership.csv"
+    clustering_squidpy_broad_reference_cache_dir = "/path/to/legacy-disk/MerXen/mapmycells"
+    mapmycells_whb_marker_lookup_path = "/path/to/legacy-disk/MerXen/mapmycells/query_markers.n10.20240221800.json"
+    mapmycells_whb_precomputed_stats_path = "/path/to/legacy-disk/MerXen/mapmycells/precomputed_stats.siletti.training.h5"
+    mapmycells_region_cache_dir = "/path/to/legacy-disk/MerXen/mapmycells"
+    // No WHB gene.csv is cached there; the WHB raw matrix var holds the same
+    // gene_identifier / gene_symbol table (59,357 human genes).
+    annotation_gene_id_fallback_csv = "/path/to/legacy-disk/MerXen/mapmycells/abc_whb/expression_matrices/WHB-10Xv3/20240330/WHB-10Xv3-Nonneurons-raw.h5ad"
+
+    // Temporary files of every task go to the storage RAID, not to /tmp on the
+    // small root disk (it filled up and failed two ProSeg tasks on 2026-09-30).
+    // The directory must exist: mkdir -p it once per host. Exported to the
+    // tasks as TMPDIR (env block below).
+    task_tmp_dir = "/path/to/storage/MerXen/tmp"
+
+    // Reference stores (OD-D10, OD-E6), both on the storage RAID: panels <= 1,000
+    // genes in annotation_references, larger ones (e.g. Xenium 5K, with their
+    // reference markers kept) in their own store directory. The main store was
+    // on the legacy disk until decision U6 (a) of 2026-10-14: that disk is
+    // failing (annotation_dev/SSD1_DAMAGE_20261013.md), so no store may point
+    // there. The store holds mouse bundles only (wmb_panel, wmb_region_share,
+    // wmb_selfmap_testset); a human run finds no human bundle in it and would
+    // rebuild from the human sources below, which are still on the legacy disk
+    // (the launch guard refuses them) until U6 (b).
+    annotation_reference_store = "/path/to/storage/MerXen/annotation_references"
+    annotation_reference_store_large = "/path/to/storage/MerXen/annotation_references_large"
+
+    // Local reference sources (copied with a checksum into a bundle, never
+    // symlinked). SEA-AD and the MERFISH CCF metadata are fetched once into
+    // <annotation_reference_store>/.downloads from their pinned URLs and
+    // verified by size and sha256 (annotation_auto_download).
+    annotation_whb_region_precompute_source = "/path/to/legacy-disk/MerXen/mapmycells/references/region_frontal_a44_a45_a46_a32_acc"
+    annotation_whb_h5ad_dir = "/path/to/legacy-disk/MerXen/mapmycells/abc_whb/expression_matrices/WHB-10Xv3/20240330"
+    annotation_whb_metadata_dir = "/path/to/legacy-disk/MerXen/mapmycells/abc_whb/metadata"
+    // The mouse sources are the verified ABC Atlas download on the storage RAID
+    // (references/abc_atlas/MANIFEST.tsv, sha256 and size per file). The legacy
+    // disk is failing: no mouse source may point there.
+    annotation_wmb_h5ad_dir = "/path/to/storage/MerXen/references/abc_atlas/expression_matrices/WMB-10Xv3/20230630"
+    annotation_wmb_metadata_dir = "/path/to/storage/MerXen/references/abc_atlas/metadata"
+    annotation_wmb_mapping_stats_path = "/path/to/ms1-owner/abc_atlas/mapmycells/WMB-10X/20240831/precomputed_stats_ABC_revision_230821.h5"
+    annotation_merfish_ccf_metadata_path = "/path/to/storage/MerXen/references/abc_atlas/metadata/MERFISH-C57BL6J-638850-CCF/20231215/views/cell_metadata_with_parcellation_annotation.csv"
+    // Gene tables of the exact-case species test and the symbol fallback
+    // (plan §8.4): the WHB-10Xv3 var (59,357 genes; the M0e fallback table above)
+    // and the WMB-10X gene.csv (32,285 genes). The human table is still on the
+    // legacy disk (only its var index is read; the file is the one exception the
+    // launch guard allows until the human sources move); the mouse table is the
+    // md5-checked copy on the storage RAID.
+    annotation_human_gene_table = "/path/to/legacy-disk/MerXen/mapmycells/abc_whb/expression_matrices/WHB-10Xv3/20240330/WHB-10Xv3-Nonneurons-raw.h5ad"
+    annotation_mouse_gene_table = "/path/to/storage/MerXen/references/abc_atlas/metadata/WMB-10X/20241115/gene.csv"
+    // The 11,913 WMB self-map test cells (<= 10 per supertype), excluded from
+    // the wmb_panel marker build so the resolvability test set stays disjoint.
+    // A byte-identical copy of research/selfmap/truth.csv (sha256 1b921d93...).
+    annotation_wmb_selfmap_test_cells_path = "/path/to/storage/MerXen/references/wmb_selfmap/truth_20260925.csv"
+}
+
+env {
+    TMPDIR = params.task_tmp_dir
+    // Lets pipeline tasks translate aliases: the alias table is needed by the
+    // wmb_panel build hash (docs/local-configuration.md). Point it at the
+    // canonical table; a table that cannot be read stops the task. 'none'
+    // disables the table on purpose, which gives new bundles alias-form hashes.
+    MERXEN_ALIAS_FILE = "/path/to/private_config/aliases.tsv"
+}

@@ -118,9 +118,9 @@ A paired row with `pair_id=EXAMPLE01` fans out to **two**
   from the manifest's mosaic dimensions and micron bounding box; an explicit
   `merscope_transform_path` still takes precedence.
 - **VZG2 transform origin.** Mosaic pixel 0 is the manifest's `bbox_microns`
-  minimum, which can be negative (the Vizgen MsBrain VZG2 region starts at
+  minimum, which can be negative (the MS2 region starts at
   (-21.86, -111.78) µm). A transform without that translation shifts every
-  Cellpose / ProSeg cell by minus the minimum; the 2026-09-08 VZG2 run was
+  Cellpose / ProSeg cell by minus the minimum; the 2026-09-08 MS2 run was
   built from such a stale override and its `reseg`, `proseg_mask` and
   `proseg_hybrid` outputs are offset by (+21.9, +111.8) µm (`original_seg` is
   unaffected). The build now fails when `merscope_transform_path` disagrees
@@ -147,7 +147,7 @@ the existing `merscope_dir` column:
 
 ```csv
 pair_id,analysis_mode,only_stage,merscope_dir,merscope_z_range
-MOUSE_VZG2,merscope,build,/srv/storage/mouse_vizgen_reference/sample.vzg2,0-6
+EXAMPLE_MOUSE,merscope,build,/path/to/sample.vzg2,0-6
 ```
 
 If a folder also contains a canonical raw `images/` directory, MerXen prefers

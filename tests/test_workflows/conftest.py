@@ -1,11 +1,42 @@
-"""Fixtures for workflow configuration smoke tests."""
+"""Fixtures for workflow configuration smoke tests.
+
+Tests are hermetic (``tests/conftest.py``): no private site config is
+visible, so ``nextflow config`` here resolves the null site params. A test that
+needs site values uses :func:`example_site_env`, which points both site-config
+variables at the tracked templates (``workflows/conf/*.config.example``,
+placeholder values that mirror the real layout).
+"""
 
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+
+WORKFLOWS_DIR = Path(__file__).resolve().parents[2] / "workflows"
+SITE_CONFIG_EXAMPLE = WORKFLOWS_DIR / "conf" / "site.config.example"
+DWIGHT_SITE_CONFIG_EXAMPLE = WORKFLOWS_DIR / "conf" / "dwight.site.config.example"
+
+
+@pytest.fixture
+def example_site_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """Point both site-config variables at the tracked templates.
+
+    The variables are set in ``os.environ`` for the test, so the subprocesses it
+    starts (``nextflow config``, the launch guard) inherit them.
+
+    Returns:
+        Variable name to template path.
+    """
+    env = {
+        "MERXEN_SITE_CONFIG": str(SITE_CONFIG_EXAMPLE),
+        "MERXEN_DWIGHT_SITE_CONFIG": str(DWIGHT_SITE_CONFIG_EXAMPLE),
+    }
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    return env
 
 
 @pytest.fixture
@@ -29,6 +60,8 @@ PARAM_CONFIG_FILES: tuple[str, ...] = (
     "conf/dwight.config",
     "conf/annotation.config",
     "conf/dwight.annotation.config",
+    "conf/site.config.example",
+    "conf/dwight.site.config.example",
 )
 
 
@@ -70,6 +103,12 @@ def parse_config_params(text: str) -> dict[str, str]:
         assert name not in params, f"param {name} defined twice"
         params[name] = value.strip()
     return params
+
+
+@pytest.fixture
+def parse_params() -> Callable[[str], dict[str, str]]:
+    """Return :func:`parse_config_params` (a conftest cannot be imported)."""
+    return parse_config_params
 
 
 @pytest.fixture(scope="session")
