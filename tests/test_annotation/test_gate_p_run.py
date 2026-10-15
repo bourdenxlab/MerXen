@@ -1769,7 +1769,7 @@ def test_bundle_differences_lists_every_edited_item(
     path = record / reference.QUERY_MARKERS_FILTERED_FILE
     markers = json.loads(path.read_text())
     markers["metadata"] = {
-        "config": {"query_path": "/scratch/merxen-bundle-other/query.h5ad"},
+        "config": {"query_path": "/path/to/other/query.h5ad"},
         "n_processors": 3,
         "timestamp": "another time",
     }

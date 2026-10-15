@@ -28,11 +28,11 @@
       }
     ],
     "deriving_script": "scripts/annotation/build_sim_inputs.py",
-    "deriving_script_sha256": "32b8bc56012d49fb0af156d566088e4d11c32c940d494e5ac7f84f4d51d2f977",
+    "deriving_script_sha256": "6bbba25992d1e65154838d228f491405e7862863cf4859ad3a92c72ca7b3ad2b",
     "evidence": [
       "$A/m3b/panels/RETRIEVAL.txt"
     ],
-    "evidence_root": "$A = /srv/storage/MerXen/annotation_dev/evidence_20260926",
+    "evidence_root": "$A = $MERXEN_EVIDENCE_ROOT",
     "licence": "vendor panel definition files (public); gene identifiers only",
     "licence_note": "licence text taken from search-indexed pages; re-confirm in a browser before redistributing",
     "method": "Ensembl gene ids of the pinned vendor panel files (merxen.annotation.public_panels, URL + sha256 pinned in M3b), from the normalised lists annotation-panel-fetch wrote.",

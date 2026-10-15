@@ -9,6 +9,7 @@ import json
 import math
 import shutil
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from merxen import local_config, privacy
 from merxen.annotation import sim_inputs as si
 from merxen.annotation.resolvability import gene_efficiency
 
@@ -129,13 +131,43 @@ def test_the_notice_lists_every_asset_with_its_sources(
     assert "https://" not in in_house
 
 
-def test_the_committed_public_assets_match_their_sources() -> None:
-    """Re-derive the public assets and the NOTICE when the inputs are here."""
+def test_every_sidecar_names_the_evidence_root_by_its_variable() -> None:
+    """``$A`` stands for ``$MERXEN_EVIDENCE_ROOT``, never for a local path."""
+    sidecars = sorted(si.SIM_INPUTS_DIR.glob(f"*{si.SIDECAR_SUFFIX}"))
+    assert len(sidecars) == len(si.load_registry())
+    for sidecar in sidecars:
+        provenance = json.loads(sidecar.read_text(encoding="utf-8"))["provenance"]
+        assert provenance["evidence_root"] == "$A = $MERXEN_EVIDENCE_ROOT", sidecar.name
+
+
+def test_the_asset_directory_holds_no_host_path() -> None:
+    for path in sorted(si.SIM_INPUTS_DIR.iterdir()):
+        if path.suffix == ".csv":
+            continue
+        text = path.read_text(encoding="utf-8")
+        assert not privacy.find_host_paths(text), path.name
+        assert not privacy.find_generic_donor_ids(text), path.name
+
+
+def test_the_asset_directory_holds_no_sample_name(real_aliases: Path) -> None:
+    """With the real alias table: the sidecars and the NOTICE name aliases only."""
+    assert privacy.has_aliases()
+    for path in sorted(si.SIM_INPUTS_DIR.iterdir()):
+        if path.suffix == ".csv":
+            continue
+        text = path.read_text(encoding="utf-8")
+        assert not privacy.find_names(text, path.relative_to(REPO_ROOT).as_posix())
+
+
+def test_the_committed_public_assets_match_their_sources(
+    real_path: Callable[[str], Path],
+) -> None:
+    """Re-derive the public assets and the NOTICE from the real inputs."""
     builder = _build_script("build_sim_inputs.py")
-    evidence = Path("/srv/storage/MerXen/annotation_dev/evidence_20260926")
-    public = Path("/srv/storage/MerXen/public_validation")
-    if not (evidence.is_dir() and (public / "MANIFEST.tsv").is_file()):
-        pytest.skip("the phase-1 evidence or the public data are not on this machine")
+    evidence = real_path("MERXEN_EVIDENCE_ROOT")
+    public = real_path("MERXEN_PUBLIC_VALIDATION_ROOT")
+    if not (public / "MANIFEST.tsv").is_file():
+        pytest.skip("MANIFEST.tsv is not in MERXEN_PUBLIC_VALIDATION_ROOT")
     argv = ["--evidence-root", str(evidence), "--public-root", str(public)]
     assert builder.main([*argv, "--check"]) == 0
 
@@ -188,7 +220,7 @@ def test_the_cross_platform_asset_holds_set_a_offsets_centred_and_capped(
     assert float(factors.abs().max()) == pytest.approx(si.XPLATFORM_CAP_LOG2)
     summary = asset.provenance["summary"]
     assert int((factors.abs() >= 2.0 - 1e-12).sum()) == summary["n_capped"] > 0
-    assert summary["pairs"] == ["P7513", "P7113", "P1212", "P5011"]
+    assert summary["pairs"] == ["HD1", "HD3", "HD2", "HD4"]
     genes = pd.read_csv(si.SIM_INPUTS_DIR.parent / "validated_panel_genes.csv")
     set_a = set(genes.loc[genes["panel_id"] == "human_set_a_296", "ensembl_id"])
     assert set(factors.index) == set_a
@@ -458,10 +490,10 @@ def test_the_cross_platform_builder_centres_averages_and_caps(tmp_path: Path) ->
     builder = _build_script()
     source = pd.DataFrame(
         {
-            "P7513": [0.0, 1.0, 2.0, 6.0, -6.0],
-            "P7113": [1.0, 2.0, 3.0, 7.0, -5.0],
-            "P1212": [1.0, 1.0, 1.0, 1.0, 1.0],
-            "P5011": [2.0, 3.0, 4.0, 8.0, -4.0],
+            "HD1": [0.0, 1.0, 2.0, 6.0, -6.0],
+            "HD3": [1.0, 2.0, 3.0, 7.0, -5.0],
+            "HD2": [1.0, 1.0, 1.0, 1.0, 1.0],
+            "HD4": [2.0, 3.0, 4.0, 8.0, -4.0],
         },
         index=["LAMP2", "TAC1", "PAX6", "MGST1", "SOX10"],
     )
@@ -486,25 +518,116 @@ def test_the_cross_platform_builder_centres_averages_and_caps(tmp_path: Path) ->
     assert asset.provenance["source_files"][0]["sha256"] == si._sha256_file(
         root / builder.SOURCE_RELATIVE
     )
-    assert "/home/" not in si.sidecar_json(asset)
+    assert not privacy.find_host_paths(si.sidecar_json(asset))
+    assert asset.provenance["evidence_root"] == builder.EVIDENCE_ROOT_TEXT
     renamed = source.rename(index={"SOX10": "NOT_IN_SET_A"})
     renamed.to_csv(root / builder.SOURCE_RELATIVE)
     with pytest.raises(builder.XplatformBuildError, match="NOT_IN_SET_A"):
         builder.build_asset(root, genes, REPO_ROOT)
-    source.drop(columns="P1212").to_csv(root / builder.SOURCE_RELATIVE)
-    with pytest.raises(builder.XplatformBuildError, match="P1212"):
+    source.drop(columns="HD2").to_csv(root / builder.SOURCE_RELATIVE)
+    with pytest.raises(builder.XplatformBuildError, match="HD2"):
         builder.build_asset(root, genes, REPO_ROOT)
-    source.assign(P1212=np.inf).to_csv(root / builder.SOURCE_RELATIVE)
+    source.assign(HD2=np.inf).to_csv(root / builder.SOURCE_RELATIVE)
     with pytest.raises(builder.XplatformBuildError, match="finite"):
         builder.build_asset(root, genes, REPO_ROOT)
 
 
-def test_the_committed_cross_platform_asset_matches_its_source() -> None:
-    """Re-derive the asset from the evidence when it is on this machine."""
+def _acceptance_script(name: str) -> Any:
+    path = REPO_ROOT / "scripts" / "acceptance" / name
+    spec = importlib.util.spec_from_file_location(Path(name).stem, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_d3_fixture_builder_writes_store_paths_as_variables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    builder = _acceptance_script("m3c_d3_fixtures.py")
+    store = tmp_path / "large"
+    monkeypatch.setenv("MERXEN_REFERENCE_STORE_LARGE", str(store))
+    local_config.clear_cache()
+    bundle = store / "wmb_panel" / "c30f7eab"
+    assert builder.locate(str(bundle), "bundle") == (
+        "$MERXEN_REFERENCE_STORE_LARGE/wmb_panel/c30f7eab"
+    )
+    # Values that are not absolute paths stay as they are.
+    assert builder.locate("measured 5K vs WMB", "efficiency") == "measured 5K vs WMB"
+    assert builder.locate(5006, "n_genes") == 5006
+    # A path under no location variable is refused, without printing it.
+    with pytest.raises(RuntimeError, match=r"d3_manifest\['test_set'\]") as caught:
+        builder.locate(str(tmp_path / "elsewhere" / "set"), "test_set")
+    assert str(tmp_path) not in str(caught.value)
+
+
+def test_the_committed_d3_fixture_record_holds_variables_only() -> None:
+    record = json.loads((DATA / "m3c_d3_fixtures.json").read_text(encoding="utf-8"))
+    assert record["evidence_root"] == "$A = $MERXEN_EVIDENCE_ROOT"
+    manifest = record["d3_manifest"]
+    store = "$MERXEN_REFERENCE_STORE_LARGE/"
+    assert manifest["bundle"].startswith(store + "wmb_panel/")
+    assert manifest["test_set"].startswith(store + "wmb_selfmap_testset/")
+    assert not privacy.find_host_paths(json.dumps(record))
+
+
+def test_the_committed_d3_fixtures_match_their_sources(
+    real_path: Callable[[str], Path],
+) -> None:
+    """Re-derive the D3 fixtures (and their record) from the real evidence."""
+    builder = _acceptance_script("m3c_d3_fixtures.py")
+    evidence = real_path("MERXEN_EVIDENCE_ROOT")
+    real_path("MERXEN_REFERENCE_STORE_LARGE")
+    if not (evidence / builder.EFFICIENCY).is_file():
+        pytest.skip(f"the evidence {builder.EFFICIENCY} is not under the root")
+    assert builder.main(["--evidence-root", str(evidence), "--check"]) == 0
+
+
+def test_the_cross_platform_builder_translates_the_sources_pair_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2: the evidence table's columns hold real ids, the sidecar aliases only."""
     builder = _build_script()
-    root = Path(builder.EVIDENCE_ROOT_TEXT.split("= ")[1])
+    real = {"HD1": "Q1001", "HD3": "Q3003", "HD2": "Q2002", "HD4": "Q4004"}
+    table = tmp_path / "aliases.tsv"
+    table.write_text(
+        "".join(
+            f"{alias}\thuman_paired_donor\tpair_id\ttoken\t{name}\n"
+            for alias, name in real.items()
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(privacy.ALIAS_FILE_VAR, str(table))
+    privacy.clear_cache()
+    values = {"HD1": [0.0, 1.0, 2.0], "HD3": [1.0, 2.0, 3.0]}
+    values |= {"HD2": [1.0, 1.0, 1.0], "HD4": [2.0, 3.0, 4.0]}
+    source = pd.DataFrame(values, index=["LAMP2", "TAC1", "PAX6"])
+    root = tmp_path / "evidence"
+    (root / "research" / "xplat").mkdir(parents=True)
+    (root / builder.SOURCE_SCRIPT_RELATIVE).write_text("# derives the source\n")
+    genes = si.SIM_INPUTS_DIR.parent / "validated_panel_genes.csv"
+    source.to_csv(root / builder.SOURCE_RELATIVE)
+    from_aliases = builder.build_asset(root, genes, REPO_ROOT)
+    source.rename(columns=real).to_csv(root / builder.SOURCE_RELATIVE)
+    from_real = builder.build_asset(root, genes, REPO_ROOT)
+    assert from_real.csv_text == from_aliases.csv_text
+    assert (
+        from_real.asset.provenance["summary"]
+        == from_aliases.asset.provenance["summary"]
+    )
+    assert from_real.asset.extra["pairs"] == ["HD1", "HD3", "HD2", "HD4"]
+    assert not any(name in si.sidecar_json(from_real.asset) for name in real.values())
+
+
+def test_the_committed_cross_platform_asset_matches_its_source(
+    real_path: Callable[[str], Path], real_aliases: Path
+) -> None:
+    """Re-derive the asset from the evidence (its columns hold real pair ids)."""
+    builder = _build_script()
+    root = real_path("MERXEN_EVIDENCE_ROOT")
     if not (root / builder.SOURCE_RELATIVE).is_file():
-        pytest.skip(f"the evidence {builder.SOURCE_RELATIVE} is not on this machine")
+        pytest.skip(f"the evidence {builder.SOURCE_RELATIVE} is not under the root")
     assert builder.main(["--evidence-root", str(root), "--check"]) == 0
 
 
