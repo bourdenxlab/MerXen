@@ -56,6 +56,7 @@ from merxen.annotation.config import (
     LARGE_PANEL_GENES,
     AnnotationConfig,
 )
+from merxen.annotation.pipeline import DEFAULT_N_PROCESSORS_BY_SPECIES
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = REPO_ROOT / "workflows"
@@ -242,9 +243,21 @@ def test_resolve_caches_on_content_and_publishes_under_the_segmentation() -> Non
 
 
 def test_map_resources_follow_the_plan() -> None:
-    """MAP: 6 cpus, 24 GB, 48 GB above 1,000 panel genes (plan §3.3)."""
+    """MAP: 6 cpus (mouse 4), 24 GB, 48 GB above 1,000 panel genes (plan §3.3).
+
+    Mouse maps with 4 MapMyCells processes, the count gate M measured
+    (pre-registration §25.1); human keeps 6. The Python default of a
+    standalone ``merxen annotate`` holds the same counts.
+    """
     block = _with_name_block(ANNOTATION_CONFIG.read_text(), MAP)
-    assert re.search(r"cpus = 6\n", block)
+    match = re.search(
+        r'cpus = \{ map_spec\.species == "mouse" \? (\d+) : (\d+) \}\n', block
+    )
+    assert match is not None, block
+    assert {"mouse": int(match.group(1)), "human": int(match.group(2))} == (
+        DEFAULT_N_PROCESSORS_BY_SPECIES
+    )
+    assert DEFAULT_N_PROCESSORS_BY_SPECIES == {"human": 6, "mouse": 4}
     assert (
         f"memory = {{ (map_spec.n_panel_genes ?: 0) > {LARGE_PANEL_GENES} "
         '? "48 GB" : "24 GB" }'
@@ -1502,7 +1515,7 @@ def _compute_cases(root: Path, human: dict[str, Any]) -> dict[str, dict[str, Any
             "source_root": str(SRC),
         },
         # §20 D15: a map_first row of a legacy-mode run gets a map_first
-        # row's suffix (as forRow gives it), not the run's legacy "".
+        # row's suffix (as forRow gives it): "" since the mouse flip (§25).
         "compute_spec_mouse_row_opt_in": {
             "fn": "computeSpec",
             "params": {
@@ -1530,9 +1543,11 @@ def _compute_cases(root: Path, human: dict[str, Any]) -> dict[str, dict[str, Any
             },
             "source_root": str(SRC),
         },
-        "compute_spec_empty_suffix": {
+        "compute_spec_mouse_empty_suffix": {
             "fn": "computeSpec",
-            # Mouse has not flipped (human has, §20): "" is refused.
+            # Mouse has flipped (§25): an explicit "" is accepted. The refusal
+            # before a flip is covered with injected flips in
+            # test_annotation_defaults.py.
             "params": {
                 **map_first,
                 "species": "mouse",
@@ -2153,15 +2168,15 @@ def test_compute_spec_carries_suffix_policy_and_hierarchy_fingerprint(
         "mender_unassigned_state_policy": "exclude_from_features",
         "hierarchy_fingerprint": fingerprint,
     }
+    # Mouse has flipped (§25): its map_first rows are unsuffixed too.
     mouse_row = _value(harness, "compute_spec_mouse_row_opt_in")
-    assert mouse_row["table_key_suffix"] == "mapfirst"
+    assert mouse_row["table_key_suffix"] == ""
     human_row = _value(harness, "compute_spec_human_legacy_run_suffix")
     assert human_row["table_key_suffix"] == "mapfirst"
     policy = _value(harness, "compute_spec_policy")
     assert policy["table_key_suffix"] == "trial"
     assert policy["mender_unassigned_state_policy"] == "state"
-    # Before the flip an empty suffix would overwrite the legacy table.
-    assert "overwrite the legacy one" in _error(harness, "compute_spec_empty_suffix")
+    assert _value(harness, "compute_spec_mouse_empty_suffix")["table_key_suffix"] == ""
 
 
 @needs_nextflow

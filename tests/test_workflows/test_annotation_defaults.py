@@ -320,14 +320,21 @@ class AnnotationTestHarness {
                 }
             case "preflight":
                 def errors = []
-                AnnotationPreflight.append(errors, c.settings, c.params)
+                AnnotationPreflight.append(errors, c.settings, c.params, flipped)
                 return errors
+            case "rowModeSummary":
+                return AnnotationSettings.rowModeSummary(c.params, c.rows, flipped)
             case "nearMissModeColumns":
                 return AnnotationSettings.nearMissModeColumns(c.headers)
-            case "usesDeprecatedHumanLegacy":
-                return AnnotationSettings.usesDeprecatedHumanLegacy(
-                    c.params, c.row_modes
-                )
+            case "deprecatedLegacy":
+                return [
+                    uses: AnnotationSettings.usesDeprecatedLegacy(
+                        c.params, c.row_modes, flipped
+                    ),
+                    warning: AnnotationSettings.deprecatedLegacyWarning(
+                        c.params, c.row_modes, flipped
+                    ),
+                ]
             case "isMapFirstRun":
                 return c.containsKey("row_modes")
                     ? AnnotationSettings.isMapFirstRun(c.params, c.row_modes)
@@ -443,6 +450,17 @@ MODE_PARSING_CASES: dict[str, tuple[dict[str, Any], str, str]] = {
 }
 
 
+# A samplesheet whose rows set every kind of clustering_squidpy_mode value.
+MIXED_SAMPLESHEET_ROW_MODES: tuple[str | None, ...] = (
+    None,
+    "",
+    "legacy",
+    " Legacy ",
+    "map_first",
+    "MAP_FIRST",
+)
+
+
 def _case_name(species: str, flipped: bool, source: str, mode: str | None) -> str:
     return f"{species}|{'flipped' if flipped else 'unflipped'}|{source}|{mode}"
 
@@ -546,6 +564,54 @@ def _build_cases(tmp_path: Path, defaults: dict[str, Any]) -> dict[str, dict[str
         "params": map_first,
         "species": "mouse",
     }
+    # One samplesheet's per-row modes under a human and a mouse run (a run
+    # has one species, so the mixed-species case is the same rows twice).
+    mixed_rows = [
+        {"pair_id": f"R{index}", "clustering_squidpy_mode": row_mode}
+        for index, row_mode in enumerate(MIXED_SAMPLESHEET_ROW_MODES)
+    ]
+    for species in SPECIES:
+        cases[f"rowModeSummary|{species}"] = {
+            "fn": "rowModeSummary",
+            "params": {**defaults, "species": species},
+            "rows": mixed_rows,
+        }
+        # Before the mouse flip: only human flipped, and the species params
+        # left unset (the mouse param said legacy then).
+        cases[f"rowModeSummary|{species}|before-mouse-flip"] = {
+            "fn": "rowModeSummary",
+            "params": {
+                **defaults,
+                "species": species,
+                "clustering_squidpy_mode_human": None,
+                "clustering_squidpy_mode_mouse": None,
+            },
+            "rows": mixed_rows,
+            "flipped": ["human"],
+        }
+    cases["rowModeSummary|bad-row"] = {
+        "fn": "rowModeSummary",
+        "params": {**defaults, "species": "mouse"},
+        "rows": [{"pair_id": "R0", "clustering_squidpy_mode": "map-first"}],
+    }
+    cases["rowModeSummary|bad-species"] = {
+        "fn": "rowModeSummary",
+        "params": {**defaults, "species": "zebrafish"},
+        "rows": mixed_rows,
+    }
+    cases["rowModeSummary|no-rows"] = {
+        "fn": "rowModeSummary",
+        "params": {**defaults, "species": "mouse"},
+        "rows": [],
+    }
+    for species in SPECIES:
+        for index, row_mode in enumerate(MIXED_SAMPLESHEET_ROW_MODES):
+            cases[f"forRow|samplesheet|{species}|{index}"] = {
+                "fn": "forRow",
+                "row": {"pair_id": f"R{index}", "clustering_squidpy_mode": row_mode},
+                "params": defaults,
+                "species": species,
+            }
 
     map_first_settings = {
         "clustering_squidpy_mode": "map_first",
@@ -684,7 +750,18 @@ def _build_cases(tmp_path: Path, defaults: dict[str, Any]) -> dict[str, dict[str
             "annotation_gene_id_overrides_csv": str(tmp_path / "missing.csv"),
         },
     }
+    # An empty suffix before the species' flip would overwrite the legacy
+    # table (OD-A3): mouse before M9 (only human flipped), and since M9.
     cases["preflight|map_first|empty-suffix"] = {
+        "fn": "preflight",
+        "settings": {
+            **mouse_settings,
+            "clustering_squidpy_table_key_suffix": "",
+        },
+        "params": defaults,
+        "flipped": ["human"],
+    }
+    cases["preflight|map_first|empty-suffix-mouse-flipped"] = {
         "fn": "preflight",
         "settings": {
             **mouse_settings,
@@ -737,6 +814,14 @@ def _add_m5_cases(
         ("human-default", {**defaults, "species": "human"}),
         ("mouse-default", {**defaults, "species": "mouse"}),
         (
+            "mouse-legacy-param",
+            {
+                **defaults,
+                "species": "mouse",
+                "clustering_squidpy_mode_mouse": "legacy",
+            },
+        ),
+        (
             "mouse-param",
             {
                 **defaults,
@@ -751,30 +836,79 @@ def _add_m5_cases(
         ),
     ):
         cases[f"isMapFirstRun|{label}"] = {"fn": "isMapFirstRun", "params": params}
-    for label, params, row_modes in (
-        ("human-default", {**defaults, "species": "human"}, None),
-        ("human-legacy-row", {**defaults, "species": "human"}, ["", "legacy"]),
+    for label, params, row_modes, flipped in (
+        ("human-default", {**defaults, "species": "human"}, None, None),
+        ("human-legacy-row", {**defaults, "species": "human"}, ["", "legacy"], None),
         (
             "human-legacy-param",
             {**defaults, "species": "human", "clustering_squidpy_mode_human": "legacy"},
             None,
+            None,
         ),
-        ("mouse-legacy", {**defaults, "species": "mouse"}, None),
+        ("mouse-default", {**defaults, "species": "mouse"}, None, None),
+        (
+            "mouse-map_first-rows",
+            {**defaults, "species": "mouse"},
+            ["", "map_first"],
+            None,
+        ),
+        (
+            "mouse-legacy-row",
+            {**defaults, "species": "mouse"},
+            ["map_first", " Legacy "],
+            None,
+        ),
+        (
+            "mouse-legacy-param",
+            {**defaults, "species": "mouse", "clustering_squidpy_mode_mouse": "legacy"},
+            None,
+            None,
+        ),
+        (
+            "mouse-legacy-override",
+            {
+                **defaults,
+                "species": "Mus musculus",
+                "clustering_squidpy_mode": "legacy",
+            },
+            [None],
+            None,
+        ),
+        # Before the mouse flip (only human flipped) mouse legacy did not warn.
+        (
+            "mouse-legacy-before-flip",
+            {**defaults, "species": "mouse", "clustering_squidpy_mode_mouse": "legacy"},
+            None,
+            ["human"],
+        ),
+        ("bad-species", {**defaults, "species": "zebrafish"}, ["legacy"], None),
     ):
-        cases[f"usesDeprecatedHumanLegacy|{label}"] = {
-            "fn": "usesDeprecatedHumanLegacy",
+        cases[f"deprecatedLegacy|{label}"] = {
+            "fn": "deprecatedLegacy",
             "params": params,
             "row_modes": row_modes,
+            "flipped": flipped,
         }
     # §20 D15: one map_first row takes the run's map_first wiring; rows that
     # are all legacy keep the legacy wiring; a blank row follows the run.
     for label, params, row_modes in (
         (
             "rows|mouse-one-map_first",
-            {**defaults, "species": "mouse"},
+            {**defaults, "species": "mouse", "clustering_squidpy_mode_mouse": "legacy"},
             ["", "map_first"],
         ),
-        ("rows|mouse-blank", {**defaults, "species": "mouse"}, [None, " "]),
+        (
+            "rows|mouse-blank",
+            {**defaults, "species": "mouse", "clustering_squidpy_mode_mouse": "legacy"},
+            [None, " "],
+        ),
+        # Since the mouse flip (§25) a blank mouse row follows map_first.
+        ("rows|mouse-default-blank", {**defaults, "species": "mouse"}, [None, " "]),
+        (
+            "rows|mouse-all-legacy",
+            {**defaults, "species": "mouse"},
+            ["legacy", "LEGACY"],
+        ),
         (
             "rows|human-all-legacy",
             {**defaults, "species": "human"},
@@ -815,8 +949,16 @@ def _add_m5_cases(
             "legacy",
             {**defaults, "species": "human", "clustering_squidpy_mode_human": "legacy"},
         ),
-        ("map_first", {**map_first, "species": "mouse"}),
+        (
+            "map_first",
+            {
+                **map_first,
+                "species": "mouse",
+                "clustering_squidpy_table_key_suffix": "mapfirst",
+            },
+        ),
         ("human-flipped", {**map_first, "species": "human"}),
+        ("mouse-flipped", {**map_first, "species": "mouse"}),
         (
             "trial",
             {
@@ -1150,7 +1292,7 @@ def _python_parsed_mode(label: str) -> dict[str, str]:
         ("case-and-space", "map_first"),
         ("blank-override", "map_first"),
         ("mixed-case-override", "legacy"),
-        ("blank-species-param", "legacy"),
+        ("blank-species-param", "map_first"),
     ],
 )
 def test_python_mode_parsing(label: str, expected: str | None) -> None:
@@ -1186,12 +1328,14 @@ def test_groovy_mode_parsing(groovy_results: dict[str, dict[str, Any]]) -> None:
 def test_groovy_config_defaults_follow_the_species_defaults(
     groovy_results: dict[str, dict[str, Any]], species: str
 ) -> None:
-    """annotation.config gives each species its default mode (human flipped, §20).
+    """annotation.config gives each species its default mode (both flipped).
 
-    A legacy (mouse) row gets no keys: VALIDATE_ANALYSIS_LAYER takes the row
-    settings as a ``val`` input, so an extra key in a legacy row would change
-    its task hash (legacy ``-resume``).
+    Human flipped at M8 (§20) and mouse at M9 (§25). A legacy row would get
+    no keys: VALIDATE_ANALYSIS_LAYER takes the row settings as a ``val``
+    input, so an extra key in a legacy row would change its task hash
+    (legacy ``-resume``).
     """
+    assert DEFAULT_CLUSTERING_MODE[species] == "map_first"
     mode = DEFAULT_CLUSTERING_MODE[species]
     assert _value(groovy_results, f"resolveMode|config-defaults|{species}") == mode
     row = _value(groovy_results, f"forRow|config-defaults|{species}")
@@ -1237,13 +1381,20 @@ def test_groovy_for_row_in_map_first(groovy_results: dict[str, dict[str, Any]]) 
     assert mouse_row["annotation_anatomical_region"] is None
     assert mouse_row["annotation_mouse_section_regions"] == "Isocortex;HPF"
     assert mouse_row["clustering_squidpy_table_key_suffix"] == "trial"
-    assert mouse_row["annotation_mode_mapmycells_stage"] == "legacy"
-    # §20 D15: a row's own mode wins; a mouse row stays suffixed before M9.
+    # Mouse has flipped (§25): no legacy MAPMYCELLS stage beside map_first.
+    assert mouse_row["annotation_mode_mapmycells_stage"] == "skip"
+    # §20 D15: a row's own mode wins; since M9 a mouse row is unsuffixed.
     assert _value(groovy_results, "forRow|human|default") == human_row
     assert _value(groovy_results, "forRow|human|row-legacy") == {}
     mouse_opt_in = _value(groovy_results, "forRow|mouse|row-map_first")
-    assert mouse_opt_in["clustering_squidpy_mode"] == "map_first"
-    assert mouse_opt_in["clustering_squidpy_table_key_suffix"] == "mapfirst"
+    assert mouse_opt_in == {
+        "clustering_squidpy_mode": "map_first",
+        "clustering_squidpy_table_key_suffix": "",
+        "annotation_anatomical_region": None,
+        "annotation_mouse_section_regions": "auto",
+        "annotation_mode_mapmycells_stage": "skip",
+        "mender_unassigned_state_policy": "exclude_from_features",
+    }
     assert (
         "samplesheet column clustering_squidpy_mode"
         in (groovy_results["forRow|human|row-bad"]["error"])
@@ -1254,6 +1405,82 @@ def test_groovy_for_row_in_map_first(groovy_results: dict[str, dict[str, Any]]) 
         ]
         == "auto"
     )
+
+
+@needs_nextflow
+@pytest.mark.parametrize("species", SPECIES)
+def test_groovy_mixed_samplesheet_rows_resolve_alike_for_both_species(
+    groovy_results: dict[str, dict[str, Any]], species: str
+) -> None:
+    """Per-row modes of one samplesheet are the same under either species.
+
+    Blank rows follow the species default, map_first for both since the
+    flips (human M8, mouse M9); an explicit row value wins; legacy rows get
+    no settings keys. Every map_first row is unsuffixed and skips the legacy
+    MAPMYCELLS stage. Python's ``resolve_clustering_mode`` agrees.
+    """
+    modes = []
+    for index, row_mode in enumerate(MIXED_SAMPLESHEET_ROW_MODES):
+        row = _value(groovy_results, f"forRow|samplesheet|{species}|{index}")
+        python = resolve_clustering_mode(species, row_mode=row_mode)  # type: ignore[arg-type]
+        if row == {}:
+            modes.append("legacy")
+        else:
+            modes.append(row["clustering_squidpy_mode"])
+            assert row["clustering_squidpy_table_key_suffix"] == ""
+            assert row["annotation_mode_mapmycells_stage"] == "skip"
+        assert modes[-1] == python, (species, row_mode)
+    assert modes == [
+        "map_first",
+        "map_first",
+        "legacy",
+        "legacy",
+        "map_first",
+        "map_first",
+    ]
+
+
+@needs_nextflow
+def test_groovy_row_mode_summary_lists_each_rows_mode(
+    groovy_results: dict[str, dict[str, Any]],
+) -> None:
+    """main.nf logs every row's mode when the DAG is built (also in -preview)."""
+    rows = (
+        "R0=map_first, R1=map_first, R2=legacy (row), R3=legacy (row), "
+        "R4=map_first (row), R5=map_first (row)"
+    )
+    for species in SPECIES:
+        assert _value(groovy_results, f"rowModeSummary|{species}") == (
+            f"Clustering mode per samplesheet row ({species}; run mode map_first): "
+            + rows
+        )
+    # Before the mouse flip, the blank mouse rows followed legacy.
+    assert _value(groovy_results, "rowModeSummary|mouse|before-mouse-flip") == (
+        "Clustering mode per samplesheet row (mouse; run mode legacy): "
+        "R0=legacy, R1=legacy, R2=legacy (row), R3=legacy (row), "
+        "R4=map_first (row), R5=map_first (row)"
+    )
+    assert _value(groovy_results, "rowModeSummary|human|before-mouse-flip") == (
+        _value(groovy_results, "rowModeSummary|human")
+    )
+    assert _value(groovy_results, "rowModeSummary|bad-row") == (
+        "Clustering mode per samplesheet row (mouse; run mode map_first): "
+        "R0=invalid 'map-first' (row)"
+    )
+    assert _value(groovy_results, "rowModeSummary|bad-species") == ""
+    assert _value(groovy_results, "rowModeSummary|no-rows") == ""
+
+
+def test_main_nf_logs_the_row_modes_and_the_legacy_deprecation() -> None:
+    """Both lines are logged once, before any channel runs (hook H5 site)."""
+    main_text = (REPO_ROOT / "workflows" / "main.nf").read_text()
+    summary = main_text.index(
+        "AnnotationSettings.rowModeSummary(params, samplesheetRows)"
+    )
+    warning = main_text.index("AnnotationSettings.deprecatedLegacyWarning(params)")
+    assert main_text.index("AnnotationSettings.useRowModes(") < summary < warning
+    assert warning < main_text.index("sample_rows_raw_ch = samplesheet_ch.map")
+    assert "usesDeprecatedHumanLegacy" not in main_text
 
 
 @needs_nextflow
@@ -1355,6 +1582,10 @@ def test_groovy_preflight(groovy_results: dict[str, dict[str, Any]]) -> None:
     assert len(empty_suffix) == 1
     assert "overwrite the legacy one" in empty_suffix[0]
     assert "OD-A3" in empty_suffix[0]
+    # Mouse has flipped (§25): its map_first tables are the unsuffixed ones.
+    assert (
+        _value(groovy_results, "preflight|map_first|empty-suffix-mouse-flipped") == []
+    )
     regions = _value(groovy_results, "preflight|map_first|mouse-regions")
     assert len(regions) == 1
     assert "Unknown mouse_section_regions 'Isocortex;Cortex'" in regions[0]
@@ -1368,10 +1599,14 @@ def test_groovy_map_first_run_follows_the_resolved_mode(
     assert _value(groovy_results, "isMapFirstRun|legacy") is False
     assert _value(groovy_results, "isMapFirstRun|human") is True
     assert _value(groovy_results, "isMapFirstRun|human-default") is True
-    assert _value(groovy_results, "isMapFirstRun|mouse-default") is False
+    # Mouse has flipped (§25): its default run takes the map_first wiring.
+    assert _value(groovy_results, "isMapFirstRun|mouse-default") is True
+    assert _value(groovy_results, "isMapFirstRun|mouse-legacy-param") is False
     # §20 D15: any map_first row selects the map_first wiring.
     assert _value(groovy_results, "isMapFirstRun|rows|mouse-one-map_first") is True
     assert _value(groovy_results, "isMapFirstRun|rows|mouse-blank") is False
+    assert _value(groovy_results, "isMapFirstRun|rows|mouse-default-blank") is True
+    assert _value(groovy_results, "isMapFirstRun|rows|mouse-all-legacy") is False
     assert _value(groovy_results, "isMapFirstRun|rows|human-all-legacy") is False
     assert _value(groovy_results, "isMapFirstRun|rows|human-one-blank") is True
     assert _value(groovy_results, "isMapFirstRun|rows|legacy-run-row-map_first") is True
@@ -1379,16 +1614,39 @@ def test_groovy_map_first_run_follows_the_resolved_mode(
 
 
 @needs_nextflow
-def test_groovy_warns_only_for_human_legacy_rows(
+def test_groovy_warns_for_legacy_rows_of_a_flipped_species(
     groovy_results: dict[str, dict[str, Any]],
 ) -> None:
-    """Human legacy clustering is deprecated after the flip (§20); mouse is not."""
-    assert _value(groovy_results, "usesDeprecatedHumanLegacy|human-default") is False
-    assert _value(groovy_results, "usesDeprecatedHumanLegacy|human-legacy-row") is True
-    assert (
-        _value(groovy_results, "usesDeprecatedHumanLegacy|human-legacy-param") is True
-    )
-    assert _value(groovy_results, "usesDeprecatedHumanLegacy|mouse-legacy") is False
+    """Legacy clustering is deprecated after each species' flip (§20, §25)."""
+
+    def deprecated(label: str) -> dict[str, Any]:
+        return _value(groovy_results, f"deprecatedLegacy|{label}")
+
+    quiet = {"uses": False, "warning": ""}
+    assert deprecated("human-default") == quiet
+    assert deprecated("mouse-default") == quiet
+    assert deprecated("mouse-map_first-rows") == quiet
+    assert deprecated("bad-species") == quiet
+    for label in ("human-legacy-row", "human-legacy-param"):
+        record = deprecated(label)
+        assert record["uses"] is True, label
+        assert record["warning"] == (
+            "Human legacy clustering (clustering_squidpy_mode legacy) is "
+            "deprecated: human runs map_first by default since M8 "
+            "(pre-registration §20). The legacy mode stays available until it "
+            "is removed in a later release."
+        )
+    for label in ("mouse-legacy-row", "mouse-legacy-param", "mouse-legacy-override"):
+        record = deprecated(label)
+        assert record["uses"] is True, label
+        assert record["warning"] == (
+            "Mouse legacy clustering (clustering_squidpy_mode legacy) is "
+            "deprecated: mouse runs map_first by default since M9 (gate M, "
+            "pre-registration §25). The legacy mode stays available until it "
+            "is removed in a later release."
+        ), label
+    # Before the mouse flip a mouse legacy run did not warn.
+    assert deprecated("mouse-legacy-before-flip") == quiet
     # A near-miss header is reported, so a row cannot silently lose its mode.
     assert _value(groovy_results, "nearMissModeColumns") == [
         "Clustering_Squidpy_Mode",
@@ -1444,8 +1702,10 @@ def test_groovy_cortical_depth_tables_name_the_runs_suffix(
     assert _value(groovy_results, "clusteredTableFields|map_first") == {
         "clustered_table_key_suffix": "mapfirst"
     }
-    # Human has flipped: its map_first tables are unsuffixed.
+    # Both species have flipped (§20, §25): their map_first tables are
+    # unsuffixed.
     assert _value(groovy_results, "clusteredTableFields|human-flipped") == {}
+    assert _value(groovy_results, "clusteredTableFields|mouse-flipped") == {}
     assert _value(groovy_results, "clusteredTableFields|trial") == {
         "clustered_table_key_suffix": "trial"
     }

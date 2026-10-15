@@ -235,7 +235,13 @@ ENGINE_PREFIXES: Final[dict[str, str]] = {
     "whb_whole_ctx_panel": "whb_wholectx",
 }
 N_PROCESSORS_ENV: Final = "MERXEN_ANNOTATION_MAP_N_PROCESSORS"
-DEFAULT_N_PROCESSORS: Final = 6
+# MAP's MapMyCells worker processes per species when the caller gives none
+# (plan §3.3). The pipeline passes the MAP task's cpus, which
+# workflows/conf/annotation.config sets to the same values. Mouse maps with 4,
+# the count gate M measured and passed MO8's MAP memory limit with
+# (pre-registration §25.1); MapMyCells' bootstrap depends on the count.
+DEFAULT_N_PROCESSORS_BY_SPECIES: Final[dict[str, int]] = {"human": 6, "mouse": 4}
+DEFAULT_N_PROCESSORS: Final = DEFAULT_N_PROCESSORS_BY_SPECIES["human"]
 # ``map_manifest.json``'s ``mouse_region_step`` (per-sample outcomes are in
 # each sample's ``mouse_regions`` record).
 MOUSE_REGION_STEP: Final = (
@@ -327,15 +333,26 @@ class MapBundle:
         return not self.panel.platforms or platform in self.panel.platforms
 
 
-def default_n_processors() -> int:
-    """Return MAP's worker processes: the env override or 6 (plan §3.3)."""
+def default_n_processors(species: str | None = None) -> int:
+    """Return MAP's worker processes (plan §3.3).
+
+    Args:
+        species: The run species; ``None`` gives the human default.
+
+    Returns:
+        The ``MERXEN_ANNOTATION_MAP_N_PROCESSORS`` override, else the
+        species default (``DEFAULT_N_PROCESSORS_BY_SPECIES``: human 6,
+        mouse 4).
+    """
     value = os.environ.get(N_PROCESSORS_ENV)
     if value:
         try:
             return max(1, int(value))
         except ValueError:
             logger.warning("Ignoring non-integer %s=%r", N_PROCESSORS_ENV, value)
-    return DEFAULT_N_PROCESSORS
+    if species is None:
+        return DEFAULT_N_PROCESSORS
+    return DEFAULT_N_PROCESSORS_BY_SPECIES[species]
 
 
 def reference_spec_for(
@@ -2094,7 +2111,8 @@ def annotate_map(
             ``map_manifest.json``).
         pair_id: Pair id.
         segmentation: Segmentation.
-        n_processors: MMC worker processes (default: ``default_n_processors``).
+        n_processors: MMC worker processes (default: ``default_n_processors``
+            of the config's species).
         work_dir: Task-local scratch for queries and extended JSONs (default:
             ``<output_dir>/.work``, removed at the end).
         reuse_from: Directory of a published ``map_manifest.json`` whose
@@ -2127,7 +2145,7 @@ def annotate_map(
     start = time.monotonic()
     min_counts = config.require_min_counts()
     installed = check_ctm_version(config.ctm_version)
-    processes = n_processors or default_n_processors()
+    processes = n_processors or default_n_processors(config.species)
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     owns_work_dir = work_dir is None
@@ -3498,7 +3516,7 @@ def write_refused_manifest(
         created_at=datetime.now(UTC).isoformat(timespec="seconds"),
         ctm_version=installed_ctm_version(),
         ctm_commit=ctm_commit(),
-        n_processors=n_processors or default_n_processors(),
+        n_processors=n_processors or default_n_processors(config.species),
         min_counts=config.require_min_counts(),
         mouse_region_step=_mouse_region_step_label(config),
         panel_status="refused",

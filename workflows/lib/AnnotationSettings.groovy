@@ -177,28 +177,114 @@ class AnnotationSettings {
     }
 
     /**
-     * Whether a human row still clusters in the deprecated legacy mode.
+     * Return the launch log line that lists each samplesheet row's mode.
      *
-     * Human flipped to map_first at M8 (pre-registration §20); a human run
-     * whose params or row column ask for legacy gets a deprecation warning.
+     * main.nf logs it when the DAG is built, so -preview shows it too: each
+     * row's pair_id with its resolved clustering mode, marked "(row)" when
+     * the row's clustering_squidpy_mode column set it.
+     *
+     * @param params Pipeline params.
+     * @param rows Samplesheet rows (maps with pair_id and the optional
+     *     clustering_squidpy_mode column).
+     * @param flippedSpecies Species whose default is map_first.
+     * @return The line, or "" without rows or with an invalid species or run
+     *     mode (rowSampleSettings reports it). An invalid row mode is listed
+     *     as invalid.
+     */
+    static String rowModeSummary(
+        Map params,
+        Collection rows,
+        Collection flippedSpecies = AnnotationDefaults.FLIPPED_SPECIES
+    ) {
+        if (!rows) {
+            return ""
+        }
+        def species
+        def runMode
+        try {
+            species = AnnotationDefaults.normalizeSpecies(params?.get("species"))
+            runMode = AnnotationDefaults.resolveMode(params, species, flippedSpecies)
+        } catch (IllegalArgumentException ignored) {
+            return ""
+        }
+        def items = rows.collect { Map row ->
+            def rowMode = rowValue(row, AnnotationDefaults.ROW_MODE_COLUMN)
+            def mode
+            try {
+                mode = AnnotationDefaults.resolveRowMode(rowMode, params, species, flippedSpecies)
+            } catch (IllegalArgumentException ignored) {
+                mode = "invalid '${rowMode}'"
+            }
+            "${rowValue(row, 'pair_id')}=${mode}${rowMode == null ? '' : ' (row)'}".toString()
+        }
+        return (
+            "Clustering mode per samplesheet row (${species}; run mode ${runMode}): " +
+            items.join(", ")
+        ).toString()
+    }
+
+    // The flip of each species, named in its legacy deprecation warning.
+    static final Map<String, String> FLIP_RECORDS = [
+        human: "M8 (pre-registration §20)",
+        mouse: "M9 (gate M, pre-registration §25)",
+    ].asImmutable()
+
+    /**
+     * Whether a row of a flipped species still clusters in legacy mode.
+     *
+     * Human flipped to map_first at M8 (pre-registration §20) and mouse at
+     * M9 (§25); a run of a flipped species whose params or row column ask
+     * for legacy gets a deprecation warning (deprecatedLegacyWarning).
      *
      * @param params Pipeline params.
      * @param rowModes As isMapFirstRun (default: the recorded row modes).
-     * @return Whether the run is human and a row resolves to legacy.
+     * @param flippedSpecies Species whose default is map_first.
+     * @return Whether the run's species has flipped and a row resolves to
+     *     legacy.
      */
-    static boolean usesDeprecatedHumanLegacy(Map params, Collection rowModes = ROW_MODES) {
+    static boolean usesDeprecatedLegacy(
+        Map params,
+        Collection rowModes = ROW_MODES,
+        Collection flippedSpecies = AnnotationDefaults.FLIPPED_SPECIES
+    ) {
         try {
             def species = AnnotationDefaults.normalizeSpecies(params?.get("species"))
-            if (species != "human") {
+            if (!(species in flippedSpecies)) {
                 return false
             }
             def modes = rowModes == null ? [null] : rowModes
             return modes.any { rowMode ->
-                AnnotationDefaults.resolveRowMode(rowMode, params, species) == AnnotationDefaults.LEGACY
+                AnnotationDefaults.resolveRowMode(rowMode, params, species, flippedSpecies) ==
+                    AnnotationDefaults.LEGACY
             }
         } catch (IllegalArgumentException ignored) {
             return false
         }
+    }
+
+    /**
+     * Return the legacy deprecation warning of a run, or "" without one.
+     *
+     * @param params Pipeline params.
+     * @param rowModes As isMapFirstRun (default: the recorded row modes).
+     * @param flippedSpecies Species whose default is map_first.
+     * @return The warning text when usesDeprecatedLegacy, else "".
+     */
+    static String deprecatedLegacyWarning(
+        Map params,
+        Collection rowModes = ROW_MODES,
+        Collection flippedSpecies = AnnotationDefaults.FLIPPED_SPECIES
+    ) {
+        if (!usesDeprecatedLegacy(params, rowModes, flippedSpecies)) {
+            return ""
+        }
+        def species = AnnotationDefaults.normalizeSpecies(params?.get("species"))
+        def name = species.capitalize()
+        return (
+            "${name} legacy clustering (clustering_squidpy_mode legacy) is deprecated: " +
+            "${species} runs map_first by default since ${FLIP_RECORDS[species]}. " +
+            "The legacy mode stays available until it is removed in a later release."
+        ).toString()
     }
 
     /**

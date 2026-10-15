@@ -21,7 +21,8 @@ class AnnotationDefaults {
     // Species whose default clustering mode is map_first. Only the flip PRs
     // change it (human at M8 / gate H, mouse at M9 / gate M), together with
     // DEFAULT_CLUSTERING_MODE and FLIPPED_SPECIES in merxen.annotation.config.
-    static final List<String> FLIPPED_SPECIES = ["human"].asImmutable()
+    // Human flipped at M8 (pre-registration §20), mouse at M9 (§25).
+    static final List<String> FLIPPED_SPECIES = ["human", "mouse"].asImmutable()
 
     // The optional samplesheet column that sets one row's clustering mode
     // (pre-registration §20 D15): legacy or map_first, blank = the run's mode.

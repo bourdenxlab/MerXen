@@ -6,11 +6,12 @@
  * ANNOTATION_PREPARE_ONLY (hook H10) calls prepareOnlyErrors once per
  * --annotation_prepare_only run instead: such a run preflights no row.
  *
- * map_first runs only when a run selects it (clustering_squidpy_mode or
- * clustering_squidpy_mode_<species>); legacy stays the default until the
- * species' flip. A map_first row that clusters builds reference bundles, so
- * it is checked like a prepare-only run: the references' source params, the
- * writable reference stores and the settings annotation_config.json takes.
+ * map_first is the default of both species since their flips (human M8,
+ * mouse M9); a run or row can still select legacy (clustering_squidpy_mode,
+ * clustering_squidpy_mode_<species> or the row's column). A map_first row
+ * that clusters builds reference bundles, so it is checked like a
+ * prepare-only run: the references' source params, the writable reference
+ * stores and the settings annotation_config.json takes.
  */
 class AnnotationPreflight {
 
@@ -53,15 +54,22 @@ class AnnotationPreflight {
      * @param errors Error list of runPreflightChecks (appended in place).
      * @param settings Row settings from rowSampleSettings.
      * @param params Pipeline params.
+     * @param flippedSpecies Species whose default is map_first (an empty
+     *     suffix is refused for any other species, OD-A3).
      */
-    static void append(List errors, Map settings, Map params) {
+    static void append(
+        List errors,
+        Map settings,
+        Map params,
+        Collection flippedSpecies = AnnotationDefaults.FLIPPED_SPECIES
+    ) {
         if (!AnnotationSettings.isMapFirst(settings)) {
             return
         }
         def species = AnnotationDefaults.normalizeSpecies(settings.get("species"))
         def label = "${settings.get('pair_id')} (${species}, clustering_squidpy_mode map_first)"
         def suffix = AnnotationSettings.tableKeySuffix(settings)
-        if (!suffix && !(species in AnnotationDefaults.FLIPPED_SPECIES)) {
+        if (!suffix && !(species in flippedSpecies)) {
             errors << "${label}: ${AnnotationDefaults.emptySuffixMessage(species)}".toString()
         }
         appendChoiceChecks(errors, params, label)

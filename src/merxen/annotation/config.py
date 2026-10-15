@@ -7,9 +7,9 @@ Validators never touch the filesystem: the GPU clustering environment loads
 the configuration too, and the paths it names may not exist there. Paths are
 only typed; the pipeline checks them in preflight and at use.
 
-Defaults are inert: annotation is disabled and the clustering mode of both
-species stays ``legacy`` until that species' flip (M8 human, M9 mouse), so
-the legacy pipeline is unchanged. ``resolve_clustering_mode`` and
+Annotation is disabled by default. The default clustering mode of both
+species is ``map_first`` since their flips (M8 human, M9 mouse); ``legacy``
+stays available and is deprecated. ``resolve_clustering_mode`` and
 ``resolve_table_key_suffix`` mirror ``workflows/lib/AnnotationDefaults.groovy``.
 The clustering-mode types and ``AdaptiveSplitConfig`` are the fields that
 ``ClusteringSquidpyConfig`` and ``MenderConfig`` gain at hook H8.
@@ -61,12 +61,12 @@ MarkerRefereeComparator = Literal["node", "class"]
 TableKeySuffix = Annotated[str, AfterValidator(validate_table_key_suffix)]
 # Default clustering mode per species. Only the flip PRs (M8 human, M9 mouse)
 # change these, together with ``FLIPPED_SPECIES``. Human flipped at M8
-# (pre-registration §20).
+# (pre-registration §20), mouse at M9 (gate M, pre-registration §25).
 DEFAULT_CLUSTERING_MODE: Final[dict[str, str]] = {
     "human": "map_first",
-    "mouse": "legacy",
+    "mouse": "map_first",
 }
-FLIPPED_SPECIES: Final[frozenset[str]] = frozenset({"human"})
+FLIPPED_SPECIES: Final[frozenset[str]] = frozenset({"human", "mouse"})
 # The optional samplesheet column that sets one row's clustering mode
 # (pre-registration §20 D15; ``AnnotationDefaults.ROW_MODE_COLUMN``).
 ROW_MODE_COLUMN: Final = "clustering_squidpy_mode"

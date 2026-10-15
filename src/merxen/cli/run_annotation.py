@@ -714,7 +714,8 @@ def _bundle_overrides(values: tuple[str, ...]) -> dict[str, Path]:
     "--n-processors",
     type=click.IntRange(min=1),
     default=None,
-    help="MapMyCells processes (default: $MERXEN_ANNOTATION_MAP_N_PROCESSORS or 6).",
+    help="MapMyCells processes (default: $MERXEN_ANNOTATION_MAP_N_PROCESSORS, else "
+    "6 for human and 4 for mouse).",
 )
 @click.option(
     "--work-dir",
