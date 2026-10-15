@@ -340,7 +340,7 @@ def _samples_json(pair_id: str, platforms: list[str]) -> str:
             {
                 "sample_id": f"{pair_id}_{platform}",
                 "platform": platform,
-                "zarr_path": f"/data/{pair_id}_{platform}.zarr",
+                "zarr_path": f"/path/to/data/{pair_id}_{platform}.zarr",
             }
             for platform in platforms
         ]

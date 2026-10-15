@@ -1734,7 +1734,7 @@ def test_map_first_registration_falls_back_to_the_published_checks(
     The usual re-annotation of published results starts after qc
     (``start_stage clustering_squidpy``): the row's QC stage does not run,
     and RESOLVE stages each active platform's check from the QC stage's
-    publish location under ``params.outdir`` (VZG2 mouse, 2026-10-13: all
+    publish location under ``params.outdir`` (MS2 mouse, 2026-10-13: all
     four segmentations refused for want of G1), for every segmentation of
     the row. A branch whose QC runs in the launch takes its own QC tasks'
     checks, never the published ones. A segmentation that is not an

@@ -11,6 +11,13 @@ from typing import Any
 
 import pytest
 
+DWIGHT_SITE_CONFIG_EXAMPLE = (
+    Path(__file__).resolve().parents[2]
+    / "workflows"
+    / "conf"
+    / "dwight.site.config.example"
+)
+
 
 def _resolved_config(
     workflow_dir: Path,
@@ -166,18 +173,29 @@ def test_default_standard_and_dwight_profiles_resolve_equivalently() -> None:
         assert "conda" not in compute_cpu
 
 
-def test_dwight_sends_task_temporary_files_to_srv_storage() -> None:
-    """Task TMPDIR must point at /srv/storage, never the small root disk's /tmp."""
+def test_dwight_sends_task_temporary_files_to_the_site_config_directory() -> None:
+    """Task TMPDIR comes from the Dwight site config, never the root disk's /tmp.
+
+    dwight.config holds no location: the site config (here its template, with
+    placeholders) defines ``task_tmp_dir`` and the ``env`` entry that exports it
+    to every task, and dwight.config includes that file.
+    """
     repo_root = Path(__file__).resolve().parents[2]
     text = (repo_root / "workflows" / "conf" / "dwight.config").read_text()
-    assert re.search(r'task_tmp_dir\s*=\s*"/srv/storage/MerXen/tmp"', text)
-    assert re.search(r"\benv\s*\{\s*TMPDIR\s*=\s*params\.task_tmp_dir\s*\}", text)
+    assert not re.search(r"\btask_tmp_dir\s*=", text)
+    assert not re.search(r"(?m)^\s*env\s*\{", text)
+    assert "includeConfig (System.getenv('MERXEN_DWIGHT_SITE_CONFIG')" in text
+    template = DWIGHT_SITE_CONFIG_EXAMPLE.read_text()
+    assert re.search(r'task_tmp_dir\s*=\s*"/path/to/storage/MerXen/tmp"', template)
+    assert re.search(r"\benv\s*\{[^}]*\bTMPDIR\s*=\s*params\.task_tmp_dir\b", template)
 
 
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
-def test_dwight_resolves_task_tmpdir_to_srv_storage() -> None:
-    """The resolved dwight profile should export TMPDIR on /srv/storage to tasks."""
+def test_dwight_resolves_task_tmpdir_from_the_site_config(
+    example_site_env: dict[str, str],
+) -> None:
+    """The resolved dwight profile should export the site config's TMPDIR to tasks."""
     repo_root = Path(__file__).resolve().parents[2]
     resolved = _resolved_config(repo_root / "workflows", profile="dwight")
-    assert resolved["env"]["TMPDIR"] == "/srv/storage/MerXen/tmp"
-    assert resolved["params"]["task_tmp_dir"] == "/srv/storage/MerXen/tmp"
+    assert resolved["env"]["TMPDIR"] == "/path/to/storage/MerXen/tmp"
+    assert resolved["params"]["task_tmp_dir"] == "/path/to/storage/MerXen/tmp"

@@ -1,24 +1,42 @@
 #!/usr/bin/env bash
-# Refuse a Nextflow launch whose resolved configuration reads from SSD1.
+# Refuse a Nextflow launch whose resolved configuration reads from the refused
+# disk (SSD1).
 #
-# /media/mathieubo/SSD1 is failing (annotation_dev/SSD1_DAMAGE_20261013.md and
-# its addendum): most of its reference bundles and sources no longer match
-# their recorded hashes, and the store reuse check compares only the size of
-# files over 64 MB. No dev launch may read from it. This guard resolves the
-# configuration the way the launch will, applies the launch's own --param
-# overrides, and exits non-zero if any resolved value points there, before
-# Nextflow starts a single task.
+# SSD1 is failing (annotation_dev/SSD1_DAMAGE_20261013.md and its addendum):
+# most of its reference bundles and sources no longer match their recorded
+# hashes, and the store reuse check compares only the size of files over
+# 64 MB. No dev launch may read from it. This guard resolves the configuration
+# the way the launch will, applies the launch's own --param overrides, and
+# exits non-zero if any resolved value points there, before Nextflow starts a
+# single task.
 #
-# The Dwight reference stores default to /srv/storage (U6 (a)), so a launch no
-# longer overrides them. The human sources (WHB, SEA-AD, the legacy MapMyCells
-# caches) still default to SSD1 until U6 (b), so a human launch is refused until
-# it overrides them; the /srv store has no human bundles yet.
+# The refused disk is a path prefix kept in the gitignored .env
+# (MERXEN_REFUSED_PATH_PREFIX), not in this script; so is the one allow-listed
+# file (MERXEN_HUMAN_GENE_TABLE). The guard reads the .env that
+# MERXEN_ENV_FILE names, else the one two directories above this script (the
+# checkout's own; a copy of the guard outside the repository must set
+# MERXEN_ENV_FILE). The process environment wins over the file, and
+# LAUNCH_GUARD_PREFIX / LAUNCH_GUARD_HUMAN_GENE_TABLE win over both.
+#
+# The Dwight reference stores default (site config) to the storage RAID
+# (U6 (a)), so a launch no longer overrides them. The human sources (WHB,
+# SEA-AD, the legacy MapMyCells caches) still default to the refused disk until
+# U6 (b), so a human launch is refused until it overrides them; the store has
+# no human bundles yet.
+#
+# The guard resolves the configuration with the caller's environment (it does
+# not export the site-config variables itself), so it checks exactly what the
+# launch will resolve, including the private site configs
+# (workflows/conf/site.config and dwight.site.config, or the files named by
+# MERXEN_SITE_CONFIG / MERXEN_DWIGHT_SITE_CONFIG); it reports which ones were
+# included. A variable naming a file that does not exist is an error here
+# (Nextflow itself would only say that it cannot parse the config).
 #
 # Usage: give it the arguments of the `nextflow run` call, in the same spelling
 # (a script keeps them in one array and passes it to both):
 #
-#   launch_guard.sh .../workflows/main.nf -profile dwight,conda -c launch.config \
-#       --species mouse --samplesheet samplesheet.csv --outdir /srv/... [more --params]
+#   launch_guard.sh <code>/workflows/main.nf -profile dwight,conda -c launch.config \
+#       --species mouse --samplesheet samplesheet.csv --outdir <results root> [more --params]
 #
 # Understood: the project (a main.nf path or its directory), -profile, -c /
 # -config and every --name value / --name=value / --name (true). Other
@@ -29,7 +47,7 @@
 # --param overrides replace the params they name. Not checked: values a config
 # derives from a param inside its own expressions (the printed value is the
 # default, so an override of the source param does not clear a derived value);
-# a path that resolves to SSD1 through a symlink; anything a process reads
+# a path that resolves to the refused disk through a symlink; anything a process reads
 # that is not in the configuration (a samplesheet column, a bundle_ref.json).
 #
 # What is let through, each reported in the output:
@@ -37,7 +55,8 @@
 #     the params named in LAUNCH_GUARD_ALLOW_KEYS (comma-separated). The
 #     default allow-list is the human gene table alone (the WHB Nonneurons
 #     h5ad: only its var index is read, to test gene symbols against the human
-#     gene set; its sha256 is recorded in the SSD1 addendum), and only under
+#     gene set; its sha256 is recorded in the SSD1 addendum; MERXEN_HUMAN_GENE_TABLE
+#     in .env, empty or unset: no allow-listed file), and only under
 #     the params that read it as a gene table (annotation_human_gene_table and
 #     annotation_gene_id_fallback_csv): the same file under another param, such
 #     as the legacy mecr_whb_nonneurons_h5ad_path, is a full matrix read and is
@@ -46,7 +65,9 @@
 #     (names with a "whb" or "seaad" part): a mouse launch never reads them.
 #
 # Environment: NEXTFLOW (the executable; default nextflow), LAUNCH_GUARD_VERBOSE
-# (list the skipped human-source values), LAUNCH_GUARD_PREFIX (default /media/mathieubo/SSD1), LAUNCH_GUARD_PROJECT
+# (list the skipped human-source values), LAUNCH_GUARD_PREFIX (the refused prefix;
+# default MERXEN_REFUSED_PATH_PREFIX; "none" switches the guard off),
+# LAUNCH_GUARD_HUMAN_GENE_TABLE (default MERXEN_HUMAN_GENE_TABLE), LAUNCH_GUARD_PROJECT
 # (project directory when no main.nf is given; default: the repository's
 # workflows/ directory next to this script).
 #
@@ -55,8 +76,6 @@
 
 set -euo pipefail
 
-PREFIX="${LAUNCH_GUARD_PREFIX:-/media/mathieubo/SSD1}"
-HUMAN_GENE_TABLE="/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/expression_matrices/WHB-10Xv3/20240330/WHB-10Xv3-Nonneurons-raw.h5ad"
 NEXTFLOW_BIN="${NEXTFLOW:-nextflow}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project="${LAUNCH_GUARD_PROJECT:-${HERE}/../../workflows}"
@@ -65,6 +84,37 @@ die() {
     echo "launch_guard: $*" >&2
     exit 2
 }
+
+# One value of the private .env: the process environment first (as in Python),
+# then the file; nothing is exported or kept. The file is MERXEN_ENV_FILE
+# ("none" or /dev/null: absent on purpose; empty: unset), else the checkout's
+# own. A named file that does not exist is an error.
+env_file="${MERXEN_ENV_FILE:-${HERE}/../../.env}"
+read_env() {
+    local name="$1"
+    if [[ -n "${!name:-}" ]]; then
+        printf '%s' "${!name}"
+    elif [[ "${env_file}" == none || "${env_file}" == /dev/null ]]; then
+        :
+    elif [[ -r "${env_file}" ]]; then
+        (
+            . "${env_file}"
+            printf '%s' "${!name:-}"
+        )
+    elif [[ -n "${MERXEN_ENV_FILE:-}" ]]; then
+        die "MERXEN_ENV_FILE names a file that does not exist or is not readable: ${MERXEN_ENV_FILE}"
+    fi
+}
+
+PREFIX="${LAUNCH_GUARD_PREFIX:-$(read_env MERXEN_REFUSED_PATH_PREFIX)}"
+[[ -n "${PREFIX}" ]] ||
+    die "no refused prefix: set MERXEN_REFUSED_PATH_PREFIX in .env (template .env.example; MERXEN_ENV_FILE names the .env), or LAUNCH_GUARD_PREFIX=none"
+if [[ "${PREFIX}" == none ]]; then
+    echo "launch_guard: disabled (LAUNCH_GUARD_PREFIX=none)" >&2
+    exit 0
+fi
+# The one allow-listed file (empty: none).
+HUMAN_GENE_TABLE="${LAUNCH_GUARD_HUMAN_GENE_TABLE:-$(read_env MERXEN_HUMAN_GENE_TABLE)}"
 
 declare -A override=()
 declare -a override_order=()
@@ -120,6 +170,26 @@ done
 
 [[ -f "${project}/main.nf" ]] || die "no main.nf in the project directory ${project}"
 
+# The private Nextflow site configs, found as the configs find them (an
+# explicit variable, else the project's conf/ directory; "none" or /dev/null =
+# absent on purpose; empty = unset). Reported below; a named missing file stops
+# the guard with the variable's name.
+site_config_report() { # site_config_report VARIABLE FILE_NAME
+    local variable="$1" file_name="$2" value="${!1:-}"
+    if [[ "${value}" == none || "${value}" == /dev/null ]]; then
+        echo "${variable}=${value} (none on purpose)"
+    elif [[ -n "${value}" ]]; then
+        [[ -f "${value}" ]] || die "${variable} names a file that does not exist: ${value}"
+        echo "${value}"
+    elif [[ -f "${project}/conf/${file_name}" ]]; then
+        echo "${project}/conf/${file_name}"
+    else
+        echo "none found (its params stay null)"
+    fi
+}
+site_report_base="$(site_config_report MERXEN_SITE_CONFIG site.config)"
+site_report_dwight="$(site_config_report MERXEN_DWIGHT_SITE_CONFIG dwight.site.config)"
+
 nextflow_args=()
 for config_file in ${config_files[@]+"${config_files[@]}"}; do
     nextflow_args+=(-c "${config_file}")
@@ -128,6 +198,8 @@ nextflow_args+=(config)
 [[ -n "${profile}" ]] && nextflow_args+=(-profile "${profile}")
 nextflow_args+=(-o flat "${project}")
 
+echo "launch_guard: site config included: ${site_report_base}" >&2
+echo "launch_guard: Dwight site config included (standard, dwight and local profiles): ${site_report_dwight}" >&2
 flat_config="$(NXF_ANSI_LOG=false "${NEXTFLOW_BIN}" "${nextflow_args[@]}")" ||
     die "'nextflow config' failed; the launch is not allowed (${NEXTFLOW_BIN} ${nextflow_args[*]})"
 [[ -n "${flat_config}" ]] || die "'nextflow config' printed nothing; the launch is not allowed"
@@ -186,7 +258,7 @@ for index in "${!resolved_keys[@]}"; do
     value="${resolved_values[index]}"
     [[ "${value}" == *"${PREFIX}"* ]] || continue
     name="${key#params.}"
-    if { [[ "${value}" == "${HUMAN_GENE_TABLE}" && "${key}" == params.* ]] &&
+    if { [[ -n "${HUMAN_GENE_TABLE}" && "${value}" == "${HUMAN_GENE_TABLE}" && "${key}" == params.* ]] &&
         is_listed "${name}" "${GENE_TABLE_KEYS[@]}"; } ||
         is_listed "${value}" ${allowed_values[@]+"${allowed_values[@]}"} ||
         { [[ "${key}" == params.* ]] && is_listed "${name}" ${allowed_keys[@]+"${allowed_keys[@]}"}; }; then
@@ -215,7 +287,7 @@ if ((${#refused[@]})); then
     for entry in "${refused[@]}"; do
         echo "launch_guard:   ${entry}" >&2
     done
-    echo "launch_guard: override each with --<param> <path on /srv/storage> in the launch, or, if it is not read by this launch, name it in LAUNCH_GUARD_ALLOW_KEYS." >&2
+    echo "launch_guard: override each with --<param> <a path on a healthy disk> in the launch, or, if it is not read by this launch, name it in LAUNCH_GUARD_ALLOW_KEYS." >&2
     exit 1
 fi
 
