@@ -59,7 +59,7 @@ classes belong to none).
   marker absent from a dataset's query genes (a dataset of the family
   missing panel genes, §8.7) is dropped and listed (``missing_genes``), and
   ``frozen_fingerprint`` keeps the frozen table's identity.
-* **Pseudo-labels.** ``data/P1212``'s rule, as mouse G2: each marker's
+* **Pseudo-labels.** ``data/HD2``'s rule, as mouse G2: each marker's
   counts over its mean positive count among the dataset's table cells;
   class score = the sum; a label when the top class has
   ``marker_referee_min_marker_units`` (1.5) units and

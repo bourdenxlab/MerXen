@@ -15,8 +15,12 @@ import pandas as pd
 import pytest
 from scipy import sparse
 
+from merxen import privacy
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO_ROOT / "scripts" / "acceptance"
+# Invented pair ids of an alias table written for a test (never real ones).
+INVENTED_PAIRS = {"HD1": "Q0101", "HD2": "Q0202", "HD3": "Q0303", "HD4": "Q0404"}
 
 
 def _load(name: str) -> ModuleType:
@@ -42,11 +46,27 @@ def criteria() -> ModuleType:
     return _load("resolve_criteria")
 
 
+@pytest.fixture
+def invented_aliases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """An alias table mapping HD1-HD4 to invented pair ids, for one test."""
+    path = tmp_path / "aliases.tsv"
+    path.write_text(
+        "".join(
+            f"{alias}\thuman_paired_donor\tpair_id\ttoken\t{real}\n"
+            for alias, real in INVENTED_PAIRS.items()
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(privacy.ALIAS_FILE_VAR, str(path))
+    privacy.clear_cache()
+    return INVENTED_PAIRS
+
+
 # ---------------------------------------------------------------------------
 # marker_pseudo_labels
 
 
-def test_p1212_pseudo_labels_scale_by_positive_mean_and_need_60_percent(
+def test_hd2_pseudo_labels_scale_by_positive_mean_and_need_60_percent(
     pseudo: ModuleType,
 ) -> None:
     genes = ["AQP4", "GJA1", "SLC17A7", "GAD1", "DCN", "FLT1", "OTHER"]
@@ -60,7 +80,7 @@ def test_p1212_pseudo_labels_scale_by_positive_mean_and_need_60_percent(
             [2, 2, 1, 0, 0, 0, 0],  # Astro 1.67 units, 71% of the scores
         ]
     )
-    result = pseudo.p1212_pseudo_labels(sparse.csr_matrix(counts), genes)
+    result = pseudo.hd2_pseudo_labels(sparse.csr_matrix(counts), genes)
     assert list(result["pseudo8"]) == [
         "Astro",
         "Unassigned",
@@ -79,7 +99,7 @@ def test_p1212_pseudo_labels_scale_by_positive_mean_and_need_60_percent(
     ]
 
 
-def _p7513_fixture() -> tuple[sparse.csr_matrix, sparse.csr_matrix, list[str]]:
+def _hd1_fixture() -> tuple[sparse.csr_matrix, sparse.csr_matrix, list[str]]:
     rng = np.random.default_rng(0)
     genes = ["AQP4", "GJA1", "MOBP", "MOG", "SLC17A7", "CUX2", "BG1", "BG2"]
     marker_columns = {"Astro": (0, 1), "Oligo": (2, 3), "Exc": (4, 5)}
@@ -102,11 +122,11 @@ def _p7513_fixture() -> tuple[sparse.csr_matrix, sparse.csr_matrix, list[str]]:
     return counts, lognorm, genes
 
 
-def test_p7513_pseudo_labels_seed_profiles_unresolved_and_mixed(
+def test_hd1_pseudo_labels_seed_profiles_unresolved_and_mixed(
     pseudo: ModuleType,
 ) -> None:
-    counts, lognorm, genes = _p7513_fixture()
-    result = pseudo.p7513_pseudo_labels(counts, lognorm, genes)
+    counts, lognorm, genes = _hd1_fixture()
+    result = pseudo.hd1_pseudo_labels(counts, lognorm, genes)
     labels = result["pseudo"].to_numpy()
     assert (labels[:60] == "Astro").mean() > 0.95
     assert (labels[60:120] == "Oligo").mean() > 0.95
@@ -114,7 +134,7 @@ def test_p7513_pseudo_labels_seed_profiles_unresolved_and_mixed(
     assert labels[180] == "Unresolved"
     assert labels[181] == "Mixed"
     assert result["pseudo_broad"].iloc[130] == "Neuron"
-    six = pseudo.resolved_six(result, "p7513_c")
+    six = pseudo.resolved_six(result, "hd1_c")
     assert six[180] is None and six[181] is None
 
 
@@ -141,7 +161,7 @@ def test_h9_agreement_scores_confident_resolved_cells_on_six_classes(
     six = np.array(
         ["Vascular", "Vascular", "Immune_other", "Neuron", None, "OPC"], dtype=object
     )
-    result = pseudo.h9_agreement(names, confident, six, "p7513_c")
+    result = pseudo.h9_agreement(names, confident, six, "hd1_c")
     assert result.n_confident == 5
     assert result.n_scored == 4
     assert result.agreement == pytest.approx(0.5)
@@ -149,7 +169,7 @@ def test_h9_agreement_scores_confident_resolved_cells_on_six_classes(
     assert result.by_class["Micro"]["agreement"] == 0.0
     row = result.to_row()
     assert row["agree_Vascular"] == 1.0 and row["n_Oligo"] == 1.0
-    empty = pseudo.h9_agreement(names, np.zeros(6, bool), six, "p1212_4")
+    empty = pseudo.h9_agreement(names, np.zeros(6, bool), six, "hd2_4")
     assert empty.n_scored == 0 and math.isnan(empty.agreement)
 
 
@@ -160,16 +180,16 @@ def test_h9_agreement_scores_confident_resolved_cells_on_six_classes(
 @pytest.mark.parametrize(
     ("criterion", "pair", "segmentation", "expected"),
     [
-        ("H9", "P7513", "proseg_hybrid", True),
-        ("H9", "P7113", "proseg_hybrid", False),
-        ("H7", "P5011", "proseg_hybrid", True),
-        ("H10", "P5011", "proseg_hybrid", False),
-        ("H4", "P7113", "proseg_hybrid", True),
-        ("H4", "P5011", "proseg_hybrid", False),
-        ("H17/H1", "P1212", "reseg", True),
-        ("H17/H9", "P7113", "reseg", False),
-        ("H7", "P7513", "reseg", False),
-        ("H17/H2", "P7513", "proseg_hybrid", False),
+        ("H9", "HD1", "proseg_hybrid", True),
+        ("H9", "HD3", "proseg_hybrid", False),
+        ("H7", "HD4", "proseg_hybrid", True),
+        ("H10", "HD4", "proseg_hybrid", False),
+        ("H4", "HD3", "proseg_hybrid", True),
+        ("H4", "HD4", "proseg_hybrid", False),
+        ("H17/H1", "HD2", "reseg", True),
+        ("H17/H9", "HD3", "reseg", False),
+        ("H7", "HD1", "reseg", False),
+        ("H17/H2", "HD1", "proseg_hybrid", False),
     ],
 )
 def test_scored_follows_the_human_flip_rule(
@@ -179,18 +199,16 @@ def test_scored_follows_the_human_flip_rule(
 
 
 def test_criterion_row_compares_with_the_threshold(criteria: ModuleType) -> None:
-    low = criteria.criterion_row(
-        "H2", "P7513", "proseg_hybrid", "S", 0.0102, 0.01, "<="
-    )
+    low = criteria.criterion_row("H2", "HD1", "proseg_hybrid", "S", 0.0102, 0.01, "<=")
     assert low["passes"] is False and low["scored"] is True
-    edge = criteria.criterion_row("H7", "P7513", "proseg_hybrid", "S", 0.62, 0.62, ">=")
+    edge = criteria.criterion_row("H7", "HD1", "proseg_hybrid", "S", 0.62, 0.62, ">=")
     assert edge["passes"] is True
     missing = criteria.criterion_row(
-        "H9", "P7513", "proseg_hybrid", "S", math.nan, 0.9, ">="
+        "H9", "HD1", "proseg_hybrid", "S", math.nan, 0.9, ">="
     )
     assert missing["passes"] is None
     label_set = criteria.criterion_row(
-        "H4[m4_resolve_heldout]", "P1212", "proseg_hybrid", "S", 5.0, 6.0, ">="
+        "H4[m4_resolve_heldout]", "HD2", "proseg_hybrid", "S", 5.0, 6.0, ">="
     )
     assert label_set["passes"] is False and label_set["scored"] is True
 
@@ -352,19 +370,19 @@ def _resolved_sample(criteria: ModuleType, sample_id: str, **summary: object) ->
 
 
 def test_sample_criteria_and_table_rows(criteria: ModuleType) -> None:
-    sample = _resolved_sample(criteria, "P7513_MERSCOPE")
+    sample = _resolved_sample(criteria, "HD1_MERSCOPE")
     six = np.array(
         ["Astro", "OPC", "OPC", "Astro", None, "Astro", "Neuron", "Micro"], dtype=object
     )
-    row, detail = criteria.sample_criteria(sample, {"p7513_c": six, "p1212_4": six})
+    row, detail = criteria.sample_criteria(sample, {"hd1_c": six, "hd2_4": six})
     assert row["H2_implausible_share"] == pytest.approx(1 / 8)
     assert row["H7_broad_coverage_table"] == pytest.approx(5 / 8)
     # >= 20 counts: cells 1-7; WHB argmax broad vs SEA-AD broad.
     assert row["H3_n_ge20"] == 7
     # Confident broad cells 1, 2, 3, 6, 7 all agree with the pseudo-labels
     # except cell 7 (Astrocytes vs Micro).
-    assert row["H9_p7513_c"] == pytest.approx(4 / 5)
-    assert {item["method"] for item in detail} == {"p7513_c", "p1212_4"}
+    assert row["H9_hd1_c"] == pytest.approx(4 / 5)
+    assert {item["method"] for item in detail} == {"hd1_c", "hd2_4"}
     table = criteria.table_rows_for_sample(row)
     by_criterion = {item["criterion"]: item for item in table}
     assert by_criterion["H2"]["passes"] is False
@@ -379,10 +397,10 @@ def test_h8_rows_expect_broad_only_and_note_an_extra_warning(
     criteria: ModuleType,
 ) -> None:
     for sample_id, level, warning, passes in (
-        ("P5011_MERSCOPE", "broad_only", True, True),
-        ("P1212_MERSCOPE", "broad_only", True, True),
-        ("P1212_MERSCOPE", "full", False, False),
-        ("P7113_XENIUM", "broad_only", False, False),
+        ("HD4_MERSCOPE", "broad_only", True, True),
+        ("HD2_MERSCOPE", "broad_only", True, True),
+        ("HD2_MERSCOPE", "full", False, False),
+        ("HD3_XENIUM", "broad_only", False, False),
     ):
         sample = _resolved_sample(criteria, sample_id, level=level, warning=warning)
         row, _ = criteria.sample_criteria(sample, None)
@@ -392,7 +410,7 @@ def test_h8_rows_expect_broad_only_and_note_an_extra_warning(
             if item["criterion"] == "H8"
         )
         assert h8["passes"] is passes
-        if sample_id == "P1212_MERSCOPE" and warning:
+        if sample_id == "HD2_MERSCOPE" and warning:
             assert "expectation is False" in h8["note"]
 
 
@@ -400,11 +418,11 @@ def test_h8_warning_rows_compare_the_flag_with_its_expectation(
     criteria: ModuleType,
 ) -> None:
     for sample_id, warning, segmentation, passes in (
-        ("P5011_MERSCOPE", True, "proseg_hybrid", True),
-        ("P1212_MERSCOPE", True, "proseg_hybrid", False),
-        ("P1212_MERSCOPE", False, "proseg_hybrid", True),
-        ("P7513_XENIUM", True, "proseg_hybrid", False),
-        ("P1212_MERSCOPE", True, "reseg", True),
+        ("HD4_MERSCOPE", True, "proseg_hybrid", True),
+        ("HD2_MERSCOPE", True, "proseg_hybrid", False),
+        ("HD2_MERSCOPE", False, "proseg_hybrid", True),
+        ("HD1_XENIUM", True, "proseg_hybrid", False),
+        ("HD2_MERSCOPE", True, "reseg", True),
     ):
         sample = _resolved_sample(
             criteria, sample_id, level="broad_only", warning=warning
@@ -418,14 +436,14 @@ def test_h8_warning_rows_compare_the_flag_with_its_expectation(
         assert warning_row["scored"] is (
             segmentation == "proseg_hybrid" and rows["H8"]["scored"]
         )
-    assert criteria.scored("H8/warning", "P1212", "proseg_hybrid") is True
-    assert criteria.scored("H8/warning", "P1212", "reseg") is False
+    assert criteria.scored("H8/warning", "HD2", "proseg_hybrid") is True
+    assert criteria.scored("H8/warning", "HD2", "reseg") is False
 
 
 def test_h2_breakdown_splits_the_implausible_calls_by_node(
     criteria: ModuleType,
 ) -> None:
-    sample = _resolved_sample(criteria, "P7513_MERSCOPE")
+    sample = _resolved_sample(criteria, "HD1_MERSCOPE")
     labels = sample.labels.copy()
     labels.loc["c6", "flag_implausible"] = True
     labels.loc["c6", "mmc_whb_supercluster_name"] = "Amygdala excitatory"
@@ -497,15 +515,13 @@ def test_jsd_rows_add_the_h17_margin_on_reseg(criteria: ModuleType) -> None:
             "mask_note": "applied",
         }
     }
-    rows = criteria.jsd_rows(summary, "P7513", "reseg")
+    rows = criteria.jsd_rows(summary, "HD1", "reseg")
     assert rows[0]["threshold"] == pytest.approx(0.19)
     assert rows[1]["threshold"] is None
     table = criteria.jsd_table_rows(rows)
     assert len(table) == 1
     assert table[0]["criterion"] == "H17/H1" and table[0]["passes"] is True
-    proseg = criteria.jsd_table_rows(
-        criteria.jsd_rows(summary, "P7513", "proseg_hybrid")
-    )
+    proseg = criteria.jsd_table_rows(criteria.jsd_rows(summary, "HD1", "proseg_hybrid"))
     assert proseg[0]["criterion"] == "H1" and proseg[0]["passes"] is False
 
 
@@ -518,14 +534,14 @@ def test_h16_rows_check_that_strata_above_15_percent_are_marked(
         {"flag": "contaminated", "class": "C", "rate": None, "informative_h16": False},
     ]
     summary = {"samples": {"S": {"flags": {"strata": strata}}}}
-    rows = criteria.h16_rows(summary, "P7513", "proseg_hybrid")
+    rows = criteria.h16_rows(summary, "HD1", "proseg_hybrid")
     assert [row["h16_marked_ok"] for row in rows] == [True, True, True]
     assert [row["above_h16"] for row in rows] == [True, False, False]
     table = criteria.h16_table_rows(pd.DataFrame(rows))
     assert table[0]["passes"] is True
     strata.append({"flag": "ood", "class": "D", "rate": 0.5, "informative_h16": True})
     bad = criteria.h16_table_rows(
-        pd.DataFrame(criteria.h16_rows(summary, "P7513", "proseg_hybrid"))
+        pd.DataFrame(criteria.h16_rows(summary, "HD1", "proseg_hybrid"))
     )
     assert bad[0]["passes"] is False and "1 of them not marked" in bad[0]["note"]
 
@@ -535,18 +551,18 @@ def test_referee_table_rows_take_the_new_vs_legacy_comparison(
 ) -> None:
     rows = [
         {
-            "pair": "P7513",
+            "pair": "HD1",
             "segmentation": "proseg_hybrid",
-            "sample_id": "P7513_MERSCOPE",
+            "sample_id": "HD1_MERSCOPE",
             "first": "new confident (RESOLVE)",
             "second": "legacy broad_class",
             "first_wins": 0.98,
             "n_disputes": 10,
         },
         {
-            "pair": "P7513",
+            "pair": "HD1",
             "segmentation": "proseg_hybrid",
-            "sample_id": "P7513_MERSCOPE",
+            "sample_id": "HD1_MERSCOPE",
             "first": "WHB argmax",
             "second": "SEA-AD argmax",
             "first_wins": 0.4,
@@ -602,7 +618,7 @@ def test_patched_runs_swap_the_primary_tidy_and_drop_sea_when_whb_only(
 def test_h4_summary_counts_classes_passing(criteria: ModuleType) -> None:
     enrichment = pd.DataFrame(
         {
-            "pair": ["P7513"] * 7 + ["P5011"] * 7 + ["P7513"] * 7,
+            "pair": ["HD1"] * 7 + ["HD4"] * 7 + ["HD1"] * 7,
             "platform": ["MERSCOPE"] * 21,
             "label_set": ["m4_resolve_heldout"] * 14
             + ["diag_m4_resolve_heldout_ge30"] * 7,
@@ -610,7 +626,7 @@ def test_h4_summary_counts_classes_passing(criteria: ModuleType) -> None:
             "fold": [5.0] * 21,
             "auroc": [0.8] * 6 + [0.6] + [0.6] * 7 + [0.8] * 7,
             "passes": [True] * 6 + [False] + [False] * 7 + [True] * 7,
-            # c6 of P7513 fails at its ceiling (0.2 + 0.5 * 0.8 * 1.0 = 0.6).
+            # c6 of HD1 fails at its ceiling (0.2 + 0.5 * 0.8 * 1.0 = 0.6).
             "detection_assigned": [0.9] * 6 + [0.2] + [0.9] * 7 + [0.9] * 7,
             "detection_other": [0.1] * 6 + [0.0] + [0.1] * 7 + [0.1] * 7,
         }
@@ -618,13 +634,13 @@ def test_h4_summary_counts_classes_passing(criteria: ModuleType) -> None:
     summary = {
         (row["pair"], row["label_set"]): row for row in criteria.h4_summary(enrichment)
     }
-    main = summary[("P7513", "m4_resolve_heldout")]
+    main = summary[("HD1", "m4_resolve_heldout")]
     assert main["n_pass"] == 6 and main["h4_pass"] is True
     assert main["diagnostic"] is False
     assert main["failing_at_auroc_ceiling"] == "c6"
-    assert summary[("P5011", "m4_resolve_heldout")]["h4_scored_pair"] is False
-    assert summary[("P5011", "m4_resolve_heldout")]["failing_at_auroc_ceiling"] == ""
-    assert summary[("P7513", "diag_m4_resolve_heldout_ge30")]["diagnostic"] is True
+    assert summary[("HD4", "m4_resolve_heldout")]["h4_scored_pair"] is False
+    assert summary[("HD4", "m4_resolve_heldout")]["failing_at_auroc_ceiling"] == ""
+    assert summary[("HD1", "diag_m4_resolve_heldout_ge30")]["diagnostic"] is True
     rows = criteria.h4_table_rows(summary.values())
     assert {row["criterion"] for row in rows} == {"H4[m4_resolve_heldout]"}
     assert len(rows) == 2
@@ -651,11 +667,11 @@ def test_h4_summary_counts_classes_passing(criteria: ModuleType) -> None:
         0
     ]["h4_assigned_class"]
     # A pair H4 does not score stays unscored on the headline row too.
-    p5011 = {
-        **summary[("P5011", "m4_resolve_heldout")],
+    hd4 = {
+        **summary[("HD4", "m4_resolve_heldout")],
         "label_set": whb_only["label_set"],
     }
-    assert [row["scored"] for row in criteria.h4_table_rows([p5011])] == [False, False]
+    assert [row["scored"] for row in criteria.h4_table_rows([hd4])] == [False, False]
 
 
 def test_scripts_help_runs(criteria: ModuleType, pseudo: ModuleType) -> None:
@@ -681,3 +697,84 @@ def test_main_requires_the_h4_inputs(criteria: ModuleType, tmp_path: Path) -> No
                 str(tmp_path / "fb.h5ad"),
             ]
         )
+
+
+# ---------------------------------------------------------------------------
+# Aliases (docs/local-configuration.md): data ids in, data ids and the
+# methods' display names out, rules looked up by alias
+
+
+def test_rows_of_data_ids_use_the_alias_rules_and_method_names(
+    criteria: ModuleType, invented_aliases: dict[str, str]
+) -> None:
+    real = invented_aliases
+    sample = _resolved_sample(criteria, f"{real['HD1']}_MERSCOPE")
+    six = np.array(
+        ["Astro", "OPC", "OPC", "Astro", None, "Astro", "Neuron", "Micro"], dtype=object
+    )
+    row, detail = criteria.sample_criteria(sample, {"hd1_c": six, "hd2_4": six})
+    assert row["pair"] == real["HD1"]
+    assert row["H9_q0101_c"] == pytest.approx(4 / 5)
+    assert {item["method"] for item in detail} == {"q0101_c", "q0202_4"}
+    by_criterion = {
+        item["criterion"]: item for item in criteria.table_rows_for_sample(row)
+    }
+    assert by_criterion["H3"]["threshold"] == 0.90
+    assert by_criterion["H7"]["threshold"] == 0.62
+    assert by_criterion["H9"]["threshold"] == 0.90
+    assert by_criterion["H9"]["note"].startswith("pseudo-labels q0101_c ")
+    assert by_criterion["H9"]["pair"] == real["HD1"]
+    assert by_criterion["H9"]["scored"] is True
+    held_out = _resolved_sample(
+        criteria, f"{real['HD4']}_MERSCOPE", level="broad_only", warning=True
+    )
+    rows = {
+        item["criterion"]: item
+        for item in criteria.table_rows_for_sample(
+            criteria.sample_criteria(held_out, None)[0]
+        )
+    }
+    assert rows["H8"]["passes"] is True and rows["H8/warning"]["passes"] is True
+    assert criteria.scored("H8", real["HD4"], "proseg_hybrid") is True
+    assert criteria.scored("H9", real["HD4"], "proseg_hybrid") is False
+    assert criteria.scored("H17/H1", real["HD2"], "reseg") is True
+    jsd = criteria.jsd_rows(
+        {"pair": {"jsd": [{"kind": "soft", "region": "whole_section", "jsd": 0.3}]}},
+        real["HD4"],
+        "proseg_hybrid",
+    )
+    assert jsd[0]["threshold"] == pytest.approx(0.31)
+
+
+def test_pairs_and_method_names_translate_at_the_boundary(
+    criteria: ModuleType, pseudo: ModuleType, invented_aliases: dict[str, str]
+) -> None:
+    shadow = _load("shadow_baselines")
+    heldout = _load("heldout_genes")
+    assert shadow.data_pairs("HD1,Q0202,") == ["Q0101", "Q0202"]
+    assert shadow.data_pair("hd3") == "q0303"
+    assert shadow.is_held_out("Q0303") and not shadow.is_held_out("Q0101")
+    assert shadow.is_development("HD2") and shadow.is_development("Q0202")
+    assert pseudo.method_label("hd1_c") == "q0101_c"
+    assert privacy.to_alias(pseudo.method_label("hd2_4")) == "hd2_4"
+    enrichment = pd.DataFrame(
+        {
+            "pair": ["Q0303", "Q0404"],
+            "platform": ["MERSCOPE"] * 2,
+            "variant": ["set_a"] * 2,
+            "label_set": ["heldout_argmax"] * 2,
+            "broad_class": ["Neurons"] * 2,
+            "passes": [True, True],
+        }
+    )
+    scored = {row["pair"]: row["h4_scored_pair"] for row in heldout.h4_rows(enrichment)}
+    assert scored == {"Q0303": True, "Q0404": False}
+
+
+def test_the_methods_have_display_names_on_this_host(
+    pseudo: ModuleType, real_aliases: Path
+) -> None:
+    for method in pseudo.METHODS:
+        label = pseudo.method_label(method)
+        assert label != method
+        assert privacy.to_alias(label) == method

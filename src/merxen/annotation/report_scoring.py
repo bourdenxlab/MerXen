@@ -31,6 +31,14 @@ It is a ``report*`` module on purpose: like the report, it reads what
 RESOLVE wrote and RESOLVE never imports it, so it stays out of the RESOLVE
 rules fingerprint (``AnnotationReferences.RESOLVE_RULE_EXCLUDES``) and an
 edit to the scoring does not re-run RESOLVE in the pipeline.
+
+Pairs and datasets are named here by their aliases (HD1-HD4,
+docs/local-configuration.md), and the checks compare the ids they are given
+with them: a caller that holds the ids the data use translates them with
+``privacy.to_alias`` first, and writes these constants to an output through
+``privacy.display`` (``scripts/acceptance/run_acceptance.py``). The module
+itself does not import ``merxen.privacy``: as an annotation report source its
+imports are pinned by the report fingerprint (``REPORT_SOURCES``).
 """
 
 from __future__ import annotations
@@ -53,10 +61,10 @@ FAIL_OUTSIDE: Final = "FAIL-OUTSIDE"
 # --------------------------------------------------------------------------
 # H12 (plan §14; pre-registration §9, §17, §18 item 3)
 
-# "P7513, P7113: Upper-layer IT < Deep-layer IT < Deep-layer NP/CT/6b medians
-# with non-overlapping 95% CIs on both platforms. All 4 pairs incl. P1212,
-# P5011, at broad level: oligodendrocytes WM > GM on both platforms."
-H12_ORDERING_PAIRS: Final[frozenset[str]] = frozenset({"P7513", "P7113"})
+# "HD1, HD3: Upper-layer IT < Deep-layer IT < Deep-layer NP/CT/6b medians
+# with non-overlapping 95% CIs on both platforms. All 4 pairs incl. HD2,
+# HD4, at broad level: oligodendrocytes WM > GM on both platforms."
+H12_ORDERING_PAIRS: Final[frozenset[str]] = frozenset({"HD1", "HD3"})
 H12_ORDERING: Final = "depth_ordering_passes"
 H12_REPLICATED: Final = "depth_ordering_replicated"
 H12_WM_GM: Final = "oligodendrocyte_wm_minus_gm_share"
@@ -147,7 +155,9 @@ class H12Score:
         }
 
 
-def score_h12(records: Iterable[Any], *, pair_id: str) -> H12Score:
+def score_h12(
+    records: Iterable[Any], *, pair_id: str, alias: str | None = None
+) -> H12Score:
     """Score H12 of one pair from its ``acceptance_metrics.json`` records.
 
     The ordering of each platform is its kind-less ``depth_ordering_passes``
@@ -161,7 +171,10 @@ def score_h12(records: Iterable[Any], *, pair_id: str) -> H12Score:
 
     Args:
         records: The pair's metric records (dicts or ``MetricRecord``).
-        pair_id: The pair.
+        pair_id: The pair (recorded in the score).
+        alias: The pair's alias, when ``pair_id`` is the id the data use
+            (``privacy.to_alias``); it decides whether the ordering is
+            required (``H12_ORDERING_PAIRS``). Default: ``pair_id``.
 
     Returns:
         The score.
@@ -244,7 +257,7 @@ def score_h12(records: Iterable[Any], *, pair_id: str) -> H12Score:
     wm_gm_verdict = _pair_verdict(
         [value["verdict"] for value in wm_gm.values()], len(wm_gm)
     )
-    required = pair_id in H12_ORDERING_PAIRS
+    required = (pair_id if alias is None else alias) in H12_ORDERING_PAIRS
     parts = [wm_gm_verdict] + ([ordering_verdict] if required else [])
     verdict = (
         FAIL if FAIL in parts else NOT_AVAILABLE if NOT_AVAILABLE in parts else PASS
@@ -278,33 +291,33 @@ def score_h12(records: Iterable[Any], *, pair_id: str) -> H12Score:
 # --------------------------------------------------------------------------
 # The approved exceptions (pre-registration §18 D3, D4, D5, D7; item 6)
 
-# D3: "P1212_MERSCOPE carries the segmented-object coverage warning (.148 of
+# D3: "HD2_MERSCOPE carries the segmented-object coverage warning (.148 of
 # 296,487 segmented objects ...) in addition to its expected broad_only level."
-D3_DATASET: Final = ("proseg_hybrid", "P1212_MERSCOPE")
+D3_DATASET: Final = ("proseg_hybrid", "HD2_MERSCOPE")
 D3_TEXT_VALUE: Final = 0.148
 D3_TOLERANCE: Final = 0.005
 D3_LEVEL: Final = "broad_only"
-# D5: "H2 exceeds 1% on P5011_MERSCOPE proseg_hybrid (1.02%) and
-# P1212_MERSCOPE reseg (1.13%) ... none receives a broad or supercluster
+# D5: "H2 exceeds 1% on HD4_MERSCOPE proseg_hybrid (1.02%) and
+# HD2_MERSCOPE reseg (1.13%) ... none receives a broad or supercluster
 # label". Scope: the value may exceed the text's by at most the tolerance.
 # The reseg value was 1.04% (M4) until the user extended D5 to the
 # pipeline's stage B value on 2026-10-01 (§20 D13).
 D5_TEXT_VALUES: Final[dict[tuple[str, str], float]] = {
-    ("proseg_hybrid", "P5011_MERSCOPE"): 0.0102,
-    ("reseg", "P1212_MERSCOPE"): 0.0113,
+    ("proseg_hybrid", "HD4_MERSCOPE"): 0.0102,
+    ("reseg", "HD2_MERSCOPE"): 0.0113,
 }
 D5_TOLERANCE: Final = 0.0005
 D5_CRITERIA: Final[dict[tuple[str, str], str]] = {
-    ("proseg_hybrid", "P5011_MERSCOPE"): "H2",
-    ("reseg", "P1212_MERSCOPE"): "H17/H2",
+    ("proseg_hybrid", "HD4_MERSCOPE"): "H2",
+    ("reseg", "HD2_MERSCOPE"): "H17/H2",
 }
-# D7: "On P1212_MERSCOPE ... H4 passes 4 of 7 classes on the WHB-only
+# D7: "On HD2_MERSCOPE ... H4 passes 4 of 7 classes on the WHB-only
 # held-out label set ... the three failing classes (Oligodendrocytes,
 # Microglia, Vascular cells) reach the maximum AUROC their held-out-marker
 # detection permits". Scope: the failing classes are among the three, each
 # fails on AUROC alone (fold >= H4's 3) within the tolerance of its ceiling,
 # and at least 4 classes pass.
-D7_DATASET: Final = ("proseg_hybrid", "P1212_MERSCOPE")
+D7_DATASET: Final = ("proseg_hybrid", "HD2_MERSCOPE")
 D7_CLASSES: Final[frozenset[str]] = frozenset(
     {"Oligodendrocytes", "Microglia", "Vascular cells"}
 )
@@ -312,18 +325,18 @@ D7_CEILING_TOLERANCE: Final = 0.01
 D7_MIN_PASS: Final = 4
 H4_MIN_FOLD: Final = 3.0
 # D4: "Broad OPC is not emitted at 15 counts on the eight human datasets ...,
-# nor at 120 counts on seven of them (... P7113_XENIUM emits it ...). Broad
-# and supercluster Immune are not emitted at 60 counts on P5011_MERSCOPE."
+# nor at 120 counts on seven of them (... HD3_XENIUM emits it ...). Broad
+# and supercluster Immune are not emitted at 60 counts on HD4_MERSCOPE."
 D4_DATASETS: Final[frozenset[str]] = frozenset(
     f"{pair}_{platform}"
-    for pair in ("P7513", "P1212", "P7113", "P5011")
+    for pair in ("HD1", "HD2", "HD3", "HD4")
     for platform in ("MERSCOPE", "XENIUM")
 )
 D4_OPC_MISSING: Final[frozenset[int]] = frozenset({15, 120})
 D4_OPC_MISSING_BY_DATASET: Final[dict[str, frozenset[int]]] = {
-    "P7113_XENIUM": frozenset({15}),
+    "HD3_XENIUM": frozenset({15}),
 }
-D4_IMMUNE_DATASET: Final = "P5011_MERSCOPE"
+D4_IMMUNE_DATASET: Final = "HD4_MERSCOPE"
 D4_IMMUNE_MISSING: Final[frozenset[int]] = frozenset({60})
 # D4's would-raise list at PREP (the rebuilt set a WHB self-map, C11: "set a
 # PREP 15"; broad from 15 and supercluster from 30 counts).
@@ -337,166 +350,166 @@ D4_PREP_WOULD_RAISE: Final[frozenset[tuple[str, str, int]]] = frozenset(
 # D10 (§20): H6's per-class precision may miss its target in exactly the
 # (level, class, depth) rows stage B failed, on the datasets that failed
 # them (``tables/h6_precision.csv``): OPC, COP and deep-layer CT / 6b, and
-# supercluster Fibroblast 120 on P5011_XENIUM (extended by the user,
+# supercluster Fibroblast 120 on HD4_XENIUM (extended by the user,
 # 2026-10-01). Each row keeps stage B's precision as its floor, less
 # ``D10_TOLERANCE``; a row outside the list or below its floor goes back to
 # the user. Scored on proseg_hybrid only (H6's scored segmentation).
 D10_SEGMENTATION: Final = "proseg_hybrid"
 D10_TOLERANCE: Final = 0.01
 D10_FAILING: Final[dict[tuple[str, str, int, str], float]] = {
-    ("broad", "OPC", 15, "P1212_MERSCOPE"): 0.8396,
-    ("broad", "OPC", 15, "P1212_XENIUM"): 0.7670,
-    ("broad", "OPC", 15, "P5011_MERSCOPE"): 0.8875,
-    ("broad", "OPC", 15, "P5011_XENIUM"): 0.8932,
-    ("broad", "OPC", 15, "P7113_MERSCOPE"): 0.6888,
-    ("broad", "OPC", 15, "P7113_XENIUM"): 0.7512,
-    ("broad", "OPC", 15, "P7513_MERSCOPE"): 0.7680,
-    ("broad", "OPC", 15, "P7513_XENIUM"): 0.8068,
-    ("broad", "OPC", 30, "P1212_XENIUM"): 0.8644,
-    ("broad", "OPC", 30, "P7113_MERSCOPE"): 0.8112,
-    ("broad", "OPC", 30, "P7113_XENIUM"): 0.8539,
-    ("broad", "OPC", 30, "P7513_MERSCOPE"): 0.8651,
-    ("broad", "OPC", 30, "P7513_XENIUM"): 0.8895,
-    ("broad", "OPC", 60, "P7113_MERSCOPE"): 0.8831,
-    ("broad", "OPC", 120, "P1212_XENIUM"): 0.8564,
-    ("broad", "OPC", 120, "P7113_MERSCOPE"): 0.7989,
-    ("broad", "OPC", 120, "P7113_XENIUM"): 0.8454,
-    ("broad", "OPC", 120, "P7513_MERSCOPE"): 0.8567,
-    ("broad", "OPC", 120, "P7513_XENIUM"): 0.8848,
+    ("broad", "OPC", 15, "HD2_MERSCOPE"): 0.8396,
+    ("broad", "OPC", 15, "HD2_XENIUM"): 0.7670,
+    ("broad", "OPC", 15, "HD4_MERSCOPE"): 0.8875,
+    ("broad", "OPC", 15, "HD4_XENIUM"): 0.8932,
+    ("broad", "OPC", 15, "HD3_MERSCOPE"): 0.6888,
+    ("broad", "OPC", 15, "HD3_XENIUM"): 0.7512,
+    ("broad", "OPC", 15, "HD1_MERSCOPE"): 0.7680,
+    ("broad", "OPC", 15, "HD1_XENIUM"): 0.8068,
+    ("broad", "OPC", 30, "HD2_XENIUM"): 0.8644,
+    ("broad", "OPC", 30, "HD3_MERSCOPE"): 0.8112,
+    ("broad", "OPC", 30, "HD3_XENIUM"): 0.8539,
+    ("broad", "OPC", 30, "HD1_MERSCOPE"): 0.8651,
+    ("broad", "OPC", 30, "HD1_XENIUM"): 0.8895,
+    ("broad", "OPC", 60, "HD3_MERSCOPE"): 0.8831,
+    ("broad", "OPC", 120, "HD2_XENIUM"): 0.8564,
+    ("broad", "OPC", 120, "HD3_MERSCOPE"): 0.7989,
+    ("broad", "OPC", 120, "HD3_XENIUM"): 0.8454,
+    ("broad", "OPC", 120, "HD1_MERSCOPE"): 0.8567,
+    ("broad", "OPC", 120, "HD1_XENIUM"): 0.8848,
     (
         "supercluster",
         "Committed oligodendrocyte precursor",
         30,
-        "P1212_MERSCOPE",
+        "HD2_MERSCOPE",
     ): 0.8017,
-    ("supercluster", "Committed oligodendrocyte precursor", 30, "P1212_XENIUM"): 0.6926,
+    ("supercluster", "Committed oligodendrocyte precursor", 30, "HD2_XENIUM"): 0.6926,
     (
         "supercluster",
         "Committed oligodendrocyte precursor",
         30,
-        "P5011_MERSCOPE",
+        "HD4_MERSCOPE",
     ): 0.8499,
-    ("supercluster", "Committed oligodendrocyte precursor", 30, "P5011_XENIUM"): 0.8279,
+    ("supercluster", "Committed oligodendrocyte precursor", 30, "HD4_XENIUM"): 0.8279,
     (
         "supercluster",
         "Committed oligodendrocyte precursor",
         30,
-        "P7113_MERSCOPE",
+        "HD3_MERSCOPE",
     ): 0.6106,
-    ("supercluster", "Committed oligodendrocyte precursor", 30, "P7113_XENIUM"): 0.6591,
+    ("supercluster", "Committed oligodendrocyte precursor", 30, "HD3_XENIUM"): 0.6591,
     (
         "supercluster",
         "Committed oligodendrocyte precursor",
         30,
-        "P7513_MERSCOPE",
+        "HD1_MERSCOPE",
     ): 0.6914,
-    ("supercluster", "Committed oligodendrocyte precursor", 30, "P7513_XENIUM"): 0.7171,
-    ("supercluster", "Committed oligodendrocyte precursor", 60, "P1212_XENIUM"): 0.7786,
+    ("supercluster", "Committed oligodendrocyte precursor", 30, "HD1_XENIUM"): 0.7171,
+    ("supercluster", "Committed oligodendrocyte precursor", 60, "HD2_XENIUM"): 0.7786,
     (
         "supercluster",
         "Committed oligodendrocyte precursor",
         60,
-        "P7113_MERSCOPE",
+        "HD3_MERSCOPE",
     ): 0.7050,
-    ("supercluster", "Committed oligodendrocyte precursor", 60, "P7113_XENIUM"): 0.7503,
+    ("supercluster", "Committed oligodendrocyte precursor", 60, "HD3_XENIUM"): 0.7503,
     (
         "supercluster",
         "Committed oligodendrocyte precursor",
         60,
-        "P7513_MERSCOPE",
+        "HD1_MERSCOPE",
     ): 0.7756,
-    ("supercluster", "Committed oligodendrocyte precursor", 60, "P7513_XENIUM"): 0.8030,
+    ("supercluster", "Committed oligodendrocyte precursor", 60, "HD1_XENIUM"): 0.8030,
     (
         "supercluster",
         "Committed oligodendrocyte precursor",
         120,
-        "P1212_MERSCOPE",
+        "HD2_MERSCOPE",
     ): 0.7885,
     (
         "supercluster",
         "Committed oligodendrocyte precursor",
         120,
-        "P1212_XENIUM",
+        "HD2_XENIUM",
     ): 0.6785,
     (
         "supercluster",
         "Committed oligodendrocyte precursor",
         120,
-        "P5011_MERSCOPE",
+        "HD4_MERSCOPE",
     ): 0.8413,
     (
         "supercluster",
         "Committed oligodendrocyte precursor",
         120,
-        "P5011_XENIUM",
+        "HD4_XENIUM",
     ): 0.8335,
     (
         "supercluster",
         "Committed oligodendrocyte precursor",
         120,
-        "P7113_MERSCOPE",
+        "HD3_MERSCOPE",
     ): 0.5891,
     (
         "supercluster",
         "Committed oligodendrocyte precursor",
         120,
-        "P7113_XENIUM",
+        "HD3_XENIUM",
     ): 0.6432,
     (
         "supercluster",
         "Committed oligodendrocyte precursor",
         120,
-        "P7513_MERSCOPE",
+        "HD1_MERSCOPE",
     ): 0.6746,
     (
         "supercluster",
         "Committed oligodendrocyte precursor",
         120,
-        "P7513_XENIUM",
+        "HD1_XENIUM",
     ): 0.7098,
-    ("supercluster", "Deep-layer corticothalamic and 6b", 30, "P1212_MERSCOPE"): 0.7685,
-    ("supercluster", "Deep-layer corticothalamic and 6b", 30, "P1212_XENIUM"): 0.7796,
-    ("supercluster", "Deep-layer corticothalamic and 6b", 30, "P7113_MERSCOPE"): 0.8202,
-    ("supercluster", "Deep-layer corticothalamic and 6b", 30, "P7513_MERSCOPE"): 0.7807,
-    ("supercluster", "Deep-layer corticothalamic and 6b", 30, "P7513_XENIUM"): 0.8446,
-    ("supercluster", "Fibroblast", 120, "P5011_XENIUM"): 0.7829,
-    ("supercluster", "Oligodendrocyte precursor", 30, "P1212_MERSCOPE"): 0.2360,
-    ("supercluster", "Oligodendrocyte precursor", 30, "P1212_XENIUM"): 0.4950,
-    ("supercluster", "Oligodendrocyte precursor", 30, "P5011_MERSCOPE"): 0.4117,
-    ("supercluster", "Oligodendrocyte precursor", 30, "P5011_XENIUM"): 0.6395,
-    ("supercluster", "Oligodendrocyte precursor", 30, "P7113_MERSCOPE"): 0.4610,
-    ("supercluster", "Oligodendrocyte precursor", 30, "P7113_XENIUM"): 0.5910,
-    ("supercluster", "Oligodendrocyte precursor", 30, "P7513_MERSCOPE"): 0.5261,
-    ("supercluster", "Oligodendrocyte precursor", 30, "P7513_XENIUM"): 0.6270,
-    ("supercluster", "Oligodendrocyte precursor", 60, "P1212_MERSCOPE"): 0.2635,
-    ("supercluster", "Oligodendrocyte precursor", 60, "P1212_XENIUM"): 0.5317,
-    ("supercluster", "Oligodendrocyte precursor", 60, "P5011_MERSCOPE"): 0.4477,
-    ("supercluster", "Oligodendrocyte precursor", 60, "P5011_XENIUM"): 0.6726,
-    ("supercluster", "Oligodendrocyte precursor", 60, "P7113_MERSCOPE"): 0.4976,
-    ("supercluster", "Oligodendrocyte precursor", 60, "P7113_XENIUM"): 0.6260,
-    ("supercluster", "Oligodendrocyte precursor", 60, "P7513_MERSCOPE"): 0.5626,
-    ("supercluster", "Oligodendrocyte precursor", 60, "P7513_XENIUM"): 0.6607,
-    ("supercluster", "Oligodendrocyte precursor", 120, "P1212_MERSCOPE"): 0.3665,
-    ("supercluster", "Oligodendrocyte precursor", 120, "P1212_XENIUM"): 0.6474,
-    ("supercluster", "Oligodendrocyte precursor", 120, "P5011_MERSCOPE"): 0.5673,
-    ("supercluster", "Oligodendrocyte precursor", 120, "P5011_XENIUM"): 0.7687,
-    ("supercluster", "Oligodendrocyte precursor", 120, "P7113_MERSCOPE"): 0.6157,
-    ("supercluster", "Oligodendrocyte precursor", 120, "P7113_XENIUM"): 0.7303,
-    ("supercluster", "Oligodendrocyte precursor", 120, "P7513_MERSCOPE"): 0.6753,
-    ("supercluster", "Oligodendrocyte precursor", 120, "P7513_XENIUM"): 0.7590,
+    ("supercluster", "Deep-layer corticothalamic and 6b", 30, "HD2_MERSCOPE"): 0.7685,
+    ("supercluster", "Deep-layer corticothalamic and 6b", 30, "HD2_XENIUM"): 0.7796,
+    ("supercluster", "Deep-layer corticothalamic and 6b", 30, "HD3_MERSCOPE"): 0.8202,
+    ("supercluster", "Deep-layer corticothalamic and 6b", 30, "HD1_MERSCOPE"): 0.7807,
+    ("supercluster", "Deep-layer corticothalamic and 6b", 30, "HD1_XENIUM"): 0.8446,
+    ("supercluster", "Fibroblast", 120, "HD4_XENIUM"): 0.7829,
+    ("supercluster", "Oligodendrocyte precursor", 30, "HD2_MERSCOPE"): 0.2360,
+    ("supercluster", "Oligodendrocyte precursor", 30, "HD2_XENIUM"): 0.4950,
+    ("supercluster", "Oligodendrocyte precursor", 30, "HD4_MERSCOPE"): 0.4117,
+    ("supercluster", "Oligodendrocyte precursor", 30, "HD4_XENIUM"): 0.6395,
+    ("supercluster", "Oligodendrocyte precursor", 30, "HD3_MERSCOPE"): 0.4610,
+    ("supercluster", "Oligodendrocyte precursor", 30, "HD3_XENIUM"): 0.5910,
+    ("supercluster", "Oligodendrocyte precursor", 30, "HD1_MERSCOPE"): 0.5261,
+    ("supercluster", "Oligodendrocyte precursor", 30, "HD1_XENIUM"): 0.6270,
+    ("supercluster", "Oligodendrocyte precursor", 60, "HD2_MERSCOPE"): 0.2635,
+    ("supercluster", "Oligodendrocyte precursor", 60, "HD2_XENIUM"): 0.5317,
+    ("supercluster", "Oligodendrocyte precursor", 60, "HD4_MERSCOPE"): 0.4477,
+    ("supercluster", "Oligodendrocyte precursor", 60, "HD4_XENIUM"): 0.6726,
+    ("supercluster", "Oligodendrocyte precursor", 60, "HD3_MERSCOPE"): 0.4976,
+    ("supercluster", "Oligodendrocyte precursor", 60, "HD3_XENIUM"): 0.6260,
+    ("supercluster", "Oligodendrocyte precursor", 60, "HD1_MERSCOPE"): 0.5626,
+    ("supercluster", "Oligodendrocyte precursor", 60, "HD1_XENIUM"): 0.6607,
+    ("supercluster", "Oligodendrocyte precursor", 120, "HD2_MERSCOPE"): 0.3665,
+    ("supercluster", "Oligodendrocyte precursor", 120, "HD2_XENIUM"): 0.6474,
+    ("supercluster", "Oligodendrocyte precursor", 120, "HD4_MERSCOPE"): 0.5673,
+    ("supercluster", "Oligodendrocyte precursor", 120, "HD4_XENIUM"): 0.7687,
+    ("supercluster", "Oligodendrocyte precursor", 120, "HD3_MERSCOPE"): 0.6157,
+    ("supercluster", "Oligodendrocyte precursor", 120, "HD3_XENIUM"): 0.7303,
+    ("supercluster", "Oligodendrocyte precursor", 120, "HD1_MERSCOPE"): 0.6753,
+    ("supercluster", "Oligodendrocyte precursor", 120, "HD1_XENIUM"): 0.7590,
 }
 # D12 (b) (§20): "Re-running MAP with MapMyCells rng_seed 1 changes 7.0%
-# (P7513) and 13.4% (P1212) of the seed-0 confident broad labels. None is a
+# (HD1) and 13.4% (HD2) of the seed-0 confident broad labels. None is a
 # switch between two confident labels". Scope: no switch (the scored
 # reading, D12 (a)), and the threshold-crossing share at most the text's
 # value plus D5's tolerance.
-D12_TEXT_VALUES: Final[dict[str, float]] = {"P7513": 0.070, "P1212": 0.134}
+D12_TEXT_VALUES: Final[dict[str, float]] = {"HD1": 0.070, "HD2": 0.134}
 D12_TOLERANCE: Final = 0.0005
 TOLERANCES: Final[dict[str, Any]] = {
     "D3": {"text_value": D3_TEXT_VALUE, "band": D3_TOLERANCE, "level": D3_LEVEL},
     "D4": {
         "opc_missing": sorted(D4_OPC_MISSING),
-        "opc_missing_P7113_XENIUM": sorted(D4_OPC_MISSING_BY_DATASET["P7113_XENIUM"]),
+        "opc_missing_HD3_XENIUM": sorted(D4_OPC_MISSING_BY_DATASET["HD3_XENIUM"]),
         "immune": {"dataset": D4_IMMUNE_DATASET, "missing": sorted(D4_IMMUNE_MISSING)},
         "would_raise": "PREP within the text's 15 bins; per dataset within the "
         "stage A2 list (each added bin itemised and rechecked)",
@@ -557,7 +570,7 @@ def _result(decision: str, failed: list[str], checked: str) -> ExceptionVerdict:
 def check_d3(
     *, segmentation: str, dataset: str, value: float | None, level: str | None
 ) -> ExceptionVerdict | None:
-    """D3: the P1212_MERSCOPE H8 warning (``None``: D3 names no such row)."""
+    """D3: the HD2_MERSCOPE H8 warning (``None``: D3 names no such row)."""
     if (segmentation, dataset) != D3_DATASET:
         return None
     failed: list[str] = []
@@ -584,7 +597,7 @@ def check_d5(
     n_confident_broad: int | None,
     n_confident_supercluster: int | None,
 ) -> ExceptionVerdict | None:
-    """D5: H2 on P5011_MERSCOPE proseg_hybrid and P1212_MERSCOPE reseg."""
+    """D5: H2 on HD4_MERSCOPE proseg_hybrid and HD2_MERSCOPE reseg."""
     key = (segmentation, dataset)
     if D5_CRITERIA.get(key) != criterion:
         return None
@@ -614,7 +627,7 @@ def check_d5(
 def check_d7(
     *, segmentation: str, dataset: str, classes: pd.DataFrame
 ) -> ExceptionVerdict | None:
-    """D7: H4 on P1212_MERSCOPE (the WHB-only held-out label set).
+    """D7: H4 on HD2_MERSCOPE (the WHB-only held-out label set).
 
     Args:
         segmentation: The segmentation.
@@ -661,8 +674,8 @@ def check_d4_h18(
 
     PREP rows are not covered (D4 names no PREP bin): ``None``, a failure
     outside the texts. So is a class, or an Immune row on a dataset, D4 does
-    not name. Broad OPC may miss 15 and 120 counts (P7113_XENIUM: 15 only);
-    broad and supercluster Immune on P5011_MERSCOPE 60 counts; another
+    not name. Broad OPC may miss 15 and 120 counts (HD3_XENIUM: 15 only);
+    broad and supercluster Immune on HD4_MERSCOPE 60 counts; another
     missing depth of a named row is sent back to the user.
     """
     gone = {int(depth) for depth in missing}
@@ -680,7 +693,7 @@ def check_d4_h18(
         )
     if cls == "Immune" and level in ("broad", "supercluster"):
         if dataset != D4_IMMUNE_DATASET:
-            return None  # the text names P5011_MERSCOPE only
+            return None  # the text names HD4_MERSCOPE only
         extra = sorted(gone - D4_IMMUNE_MISSING)
         return _result(
             "D4",
@@ -770,7 +783,7 @@ def check_d12(
     n_switched: int | None,
     n_missing: int | None = 0,
 ) -> ExceptionVerdict | None:
-    """D12 (b): H15/seed1's threshold crossings on P7513 and P1212.
+    """D12 (b): H15/seed1's threshold crossings on HD1 and HD2.
 
     ``None`` on another pair. In scope when no seed-0 confident label
     switches to another confident name, no cell is missing from either

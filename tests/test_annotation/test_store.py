@@ -923,7 +923,7 @@ def test_prune_dry_run_only_lists(
     store = ReferenceStore(tmp_path / "store")
     kept = store.get_or_build(spec, make_panel(), builder=copying_builder())
     unused = store.get_or_build(spec, make_panel(offset=3), builder=copying_builder())
-    results = tmp_path / "results" / "P7513" / "proseg_hybrid" / "annotation"
+    results = tmp_path / "results" / "HD1" / "proseg_hybrid" / "annotation"
     results.mkdir(parents=True)
     kept.write(results / "bundle_ref.json")
     # Records inside zarr stores are never read.

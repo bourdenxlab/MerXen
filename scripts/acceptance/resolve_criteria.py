@@ -37,6 +37,13 @@ Writes to ``--out``:
 - ``criteria_table.csv``: one row per criterion x dataset (value,
   threshold, pass, scored by the flip rule).
 
+Pairs are named here by their aliases (HD1, HD2 development; HD3, HD4
+held out; docs/local-configuration.md). ``--pairs`` takes aliases or the
+pair ids the data use; directories, files and the outputs use the data's ids,
+and every per-pair threshold or rule is looked up by alias
+(``privacy.to_alias``). The H9 method names are written with
+``marker_pseudo_labels.method_label``.
+
 Usage::
 
     python scripts/acceptance/resolve_criteria.py \\
@@ -99,6 +106,7 @@ from merxen.annotation.vocab import (
     load_heldout_markers,
     primary_vocab,
 )
+from merxen.privacy import to_alias
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from heldout_genes import (  # noqa: E402
@@ -110,8 +118,9 @@ from heldout_genes import (  # noqa: E402
 from marker_pseudo_labels import (  # noqa: E402
     METHODS,
     h9_agreement,
-    p1212_pseudo_labels,
-    p7513_pseudo_labels,
+    hd1_pseudo_labels,
+    hd2_pseudo_labels,
+    method_label,
     resolved_six,
 )
 from shadow_baselines import (  # noqa: E402
@@ -120,61 +129,62 @@ from shadow_baselines import (  # noqa: E402
     SEGMENTATIONS,
     _clustered_path,
     add_fallback_arguments,
+    data_pairs,
 )
 
 logger = logging.getLogger("resolve_criteria")
 
 # Pre-registered thresholds (plan §14 = pre-registration §9; never changed here).
 H1_THRESHOLDS: dict[str, float] = {
-    "P7513": 0.17,
-    "P1212": 0.17,
-    "P7113": 0.17,
-    "P5011": 0.31,
+    "HD1": 0.17,
+    "HD2": 0.17,
+    "HD3": 0.17,
+    "HD4": 0.31,
 }
 H17_MARGIN = 0.02
 H2_MAX = 0.01
 H3_THRESHOLDS: dict[str, float] = {
-    "P7513": 0.90,
-    "P1212": 0.80,
-    "P7113": 0.80,
-    "P5011": 0.80,
+    "HD1": 0.90,
+    "HD2": 0.80,
+    "HD3": 0.80,
+    "HD4": 0.80,
 }
 H5_COP_MAX = 0.02
 H5_OPC_MAX = 0.10
 H7_THRESHOLDS: dict[tuple[str, str], float] = {
-    ("P7513", "MERSCOPE"): 0.62,
-    ("P7513", "XENIUM"): 0.44,
-    ("P7113", "MERSCOPE"): 0.67,
-    ("P7113", "XENIUM"): 0.39,
-    ("P1212", "MERSCOPE"): 0.34,
-    ("P1212", "XENIUM"): 0.29,
-    ("P5011", "MERSCOPE"): 0.30,
-    ("P5011", "XENIUM"): 0.40,
+    ("HD1", "MERSCOPE"): 0.62,
+    ("HD1", "XENIUM"): 0.44,
+    ("HD3", "MERSCOPE"): 0.67,
+    ("HD3", "XENIUM"): 0.39,
+    ("HD2", "MERSCOPE"): 0.34,
+    ("HD2", "XENIUM"): 0.29,
+    ("HD4", "MERSCOPE"): 0.30,
+    ("HD4", "XENIUM"): 0.40,
 }
-H8_BROAD_ONLY: frozenset[str] = frozenset({"P1212_MERSCOPE", "P5011_MERSCOPE"})
+H8_BROAD_ONLY: frozenset[str] = frozenset({"HD2_MERSCOPE", "HD4_MERSCOPE"})
 # Expected warning flags: §5.4 / H8 on proseg_hybrid; on reseg (not scored by
 # H8) the M3 baselines of the pre-registration §5, for information.
 H8_WARNING: dict[str, frozenset[str]] = {
-    "proseg_hybrid": frozenset({"P5011_MERSCOPE"}),
-    "reseg": frozenset({"P1212_MERSCOPE", "P5011_MERSCOPE"}),
+    "proseg_hybrid": frozenset({"HD4_MERSCOPE"}),
+    "reseg": frozenset({"HD2_MERSCOPE", "HD4_MERSCOPE"}),
 }
 H9_THRESHOLDS: dict[tuple[str, str], float] = {
-    ("P7513", "MERSCOPE"): 0.90,
-    ("P7513", "XENIUM"): 0.83,
-    ("P1212", "MERSCOPE"): 0.75,
-    ("P1212", "XENIUM"): 0.75,
+    ("HD1", "MERSCOPE"): 0.90,
+    ("HD1", "XENIUM"): 0.83,
+    ("HD2", "MERSCOPE"): 0.75,
+    ("HD2", "XENIUM"): 0.75,
 }
 # The report whose pseudo-label method H9 names for each pair.
-H9_METHOD: dict[str, str] = {"P7513": "p7513_c", "P1212": "p1212_4"}
+H9_METHOD: dict[str, str] = {"HD1": "hd1_c", "HD2": "hd2_4"}
 H10_MIN = 0.70
 # A failing class within this of its AUROC ceiling fails on detection alone.
 H4_CEILING_SLACK = 0.02
 H16_RATE = 0.15
 
-DEV_PAIRS = ("P7513", "P1212")
-DONOR_PAIRS = ("P7113", "P5011")
-H4_PAIRS = ("P7513", "P1212", "P7113")
-H17_PAIRS = ("P7513", "P1212")
+DEV_PAIRS = ("HD1", "HD2")
+DONOR_PAIRS = ("HD3", "HD4")
+H4_PAIRS = ("HD1", "HD2", "HD3")
+H17_PAIRS = ("HD1", "HD2")
 DEV_CRITERIA = frozenset({"H1", "H2", "H3", "H5", "H7", "H8", "H9", "H10", "H16"})
 DONOR_CRITERIA = frozenset({"H1", "H2", "H3", "H7", "H8"})
 SEA_RUN = "seaad_mr_panel"
@@ -197,19 +207,20 @@ H4_LABEL_SETS: tuple[str, ...] = (
 def scored(criterion: str, pair: str, segmentation: str) -> bool:
     """Whether the §14 human flip rule scores a criterion on a dataset.
 
-    H1-H3, H5, H7-H10, H12-H16 on P7513 and P1212; H1-H3, H7, H8, H12 on
-    P7113 and P5011; H4 on P7513, P1212 and P7113; H17 (H1 + 0.02, H2, H9)
-    on P7513 and P1212 reseg; everything on proseg_hybrid otherwise.
+    H1-H3, H5, H7-H10, H12-H16 on HD1 and HD2; H1-H3, H7, H8, H12 on
+    HD3 and HD4; H4 on HD1, HD2 and HD3; H17 (H1 + 0.02, H2, H9)
+    on HD1 and HD2 reseg; everything on proseg_hybrid otherwise.
 
     Args:
         criterion: ``H1`` ... ``H18``, ``H17/<component>`` or ``<id>/<part>``
             (scored as ``<id>``, e.g. ``H8/warning``).
-        pair: Pair id.
+        pair: Pair id (alias or the data's id).
         segmentation: Segmentation.
 
     Returns:
         Whether the flip rule scores it.
     """
+    pair = to_alias(pair)
     if criterion.startswith("H17"):
         return segmentation == "reseg" and pair in H17_PAIRS
     criterion = criterion.split("/")[0]
@@ -386,8 +397,8 @@ def cop_control(labels: pd.DataFrame) -> dict[str, float]:
 def pseudo_labellings(sample: ResolvedSample) -> dict[str, np.ndarray]:
     """Return both reports' resolved 6-class pseudo-labels of the cells (H9)."""
     frames = {
-        "p7513_c": p7513_pseudo_labels(sample.counts, sample.lognorm, sample.symbols),
-        "p1212_4": p1212_pseudo_labels(sample.counts, sample.symbols),
+        "hd1_c": hd1_pseudo_labels(sample.counts, sample.lognorm, sample.symbols),
+        "hd2_4": hd2_pseudo_labels(sample.counts, sample.symbols),
     }
     return {method: resolved_six(frames[method], method) for method in METHODS}
 
@@ -446,9 +457,10 @@ def sample_criteria(
     if pseudo is not None:
         names = labels["ct_broad_name"].astype(object).to_numpy()
         for method, six in pseudo.items():
-            result = h9_agreement(names, broad_confident, six, method)
-            row[f"H9_{method}"] = result.agreement
-            row[f"H9_{method}_n_scored"] = result.n_scored
+            label = method_label(method)
+            result = h9_agreement(names, broad_confident, six, label)
+            row[f"H9_{label}"] = result.agreement
+            row[f"H9_{label}_n_scored"] = result.n_scored
             detail.append(
                 {
                     "pair": sample.pair,
@@ -579,7 +591,7 @@ def referee_rows(sample: ResolvedSample) -> list[dict[str, Any]]:
 
 def jsd_rows(summary: Mapping[str, Any], pair: str, segmentation: str) -> list[dict]:
     """Return the pair JSD rows RESOLVE wrote, with the H1 / H17 threshold."""
-    threshold = H1_THRESHOLDS.get(pair)
+    threshold = H1_THRESHOLDS.get(to_alias(pair))
     if threshold is not None and segmentation != "proseg_hybrid":
         threshold += H17_MARGIN
     rows = []
@@ -632,6 +644,8 @@ def table_rows_for_sample(row: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Return the criteria-table rows of one sample."""
     pair, seg = str(row["pair"]), str(row["segmentation"])
     sid, platform = str(row["sample_id"]), str(row["platform"])
+    # Thresholds and expectations are keyed by alias (the rows hold data ids).
+    key, sid_key = to_alias(pair), to_alias(sid)
     out = [
         criterion_row("H2", pair, seg, sid, row["H2_implausible_share"], H2_MAX, "<="),
         criterion_row(
@@ -640,7 +654,7 @@ def table_rows_for_sample(row: Mapping[str, Any]) -> list[dict[str, Any]]:
             seg,
             sid,
             row["H3_whb_sea_agree_ge20"],
-            H3_THRESHOLDS.get(pair),
+            H3_THRESHOLDS.get(key),
             ">=",
         ),
         criterion_row(
@@ -672,12 +686,12 @@ def table_rows_for_sample(row: Mapping[str, Any]) -> list[dict[str, Any]]:
             seg,
             sid,
             row["H7_broad_coverage_table"],
-            H7_THRESHOLDS.get((pair, platform)),
+            H7_THRESHOLDS.get((key, platform)),
             ">=",
         ),
     ]
-    expected = "broad_only" if sid in H8_BROAD_ONLY else "full"
-    warning_expected = sid in H8_WARNING.get(seg, frozenset())
+    expected = "broad_only" if sid_key in H8_BROAD_ONLY else "full"
+    warning_expected = sid_key in H8_WARNING.get(seg, frozenset())
     basis = "§5.4" if seg == "proseg_hybrid" else "M3 baseline"
     level_ok = row["gate_level"] == expected
     note = (
@@ -700,7 +714,7 @@ def table_rows_for_sample(row: Mapping[str, Any]) -> list[dict[str, Any]]:
         )
     )
     # The warning flag against its expectation (H8 names the levels; §5.4
-    # expects the warning on P5011_MERSCOPE only): reported as its own row
+    # expects the warning on HD4_MERSCOPE only): reported as its own row
     # so an unexpected warning is never hidden behind a passing level.
     out.append(
         criterion_row(
@@ -719,8 +733,9 @@ def table_rows_for_sample(row: Mapping[str, Any]) -> list[dict[str, Any]]:
             passes=bool(row["gate_warning"]) == warning_expected,
         )
     )
-    method = H9_METHOD.get(pair)
-    if method is not None and f"H9_{method}" in row:
+    method = H9_METHOD.get(key)
+    label = method_label(method) if method is not None else ""
+    if method is not None and f"H9_{label}" in row:
         criterion = "H9" if seg == "proseg_hybrid" else "H17/H9"
         out.append(
             criterion_row(
@@ -728,12 +743,11 @@ def table_rows_for_sample(row: Mapping[str, Any]) -> list[dict[str, Any]]:
                 pair,
                 seg,
                 sid,
-                row[f"H9_{method}"],
-                H9_THRESHOLDS.get((pair, platform)),
+                row[f"H9_{label}"],
+                H9_THRESHOLDS.get((key, platform)),
                 ">=",
                 note=(
-                    f"pseudo-labels {method} "
-                    f"({int(row[f'H9_{method}_n_scored'])} scored)"
+                    f"pseudo-labels {label} ({int(row[f'H9_{label}_n_scored'])} scored)"
                 ),
             )
         )
@@ -1107,7 +1121,7 @@ def h4_summary(enrichment: pd.DataFrame) -> list[dict[str, Any]]:
                         ["broad_class", "fold", "auroc"],
                     ].itertuples(index=False)
                 ),
-                "h4_scored_pair": pair in H4_PAIRS,
+                "h4_scored_pair": to_alias(str(pair)) in H4_PAIRS,
                 "h4_pass": n_pass >= H4_MIN_CLASSES,
                 "h4_assigned_class": str(label_set) == H4_HEADLINE_SET,
                 "diagnostic": str(label_set).startswith(H4_DIAGNOSTIC_PREFIX),
@@ -1215,7 +1229,7 @@ def main(argv: list[str] | None = None) -> int:
         args.heldout_root is None or args.store is None or args.qc_summary is None
     ):
         parser.error("H4 needs --heldout-root, --store and --qc-summary (or --skip-h4)")
-    pairs = [item for item in args.pairs.split(",") if item]
+    pairs = data_pairs(args.pairs)
     sample_rows: list[dict[str, Any]] = []
     h9_rows: list[dict[str, Any]] = []
     h2_rows: list[dict[str, Any]] = []

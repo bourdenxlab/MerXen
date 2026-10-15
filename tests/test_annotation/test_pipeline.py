@@ -1151,17 +1151,17 @@ def test_mouse_maps_with_the_drop_level_and_no_pruning_when_none(
 def test_published_layout_reads_the_results_path(tmp_path: Path) -> None:
     path = (
         tmp_path
-        / "results/P7513/reseg/clustering_squidpy/clustering_squidpy_out/xenium"
-        / "P7513_XENIUM_clustered.h5ad"
+        / "results/HD1/reseg/clustering_squidpy/clustering_squidpy_out/xenium"
+        / "HD1_XENIUM_clustered.h5ad"
     )
 
     layout = published_layout(path)
 
     assert layout.results_root == (tmp_path / "results").resolve()
-    assert layout.pair_id == "P7513"
+    assert layout.pair_id == "HD1"
     assert layout.segmentation == "reseg"
     assert layout.platform == "XENIUM"
-    assert layout.sample_id == "P7513_XENIUM"
+    assert layout.sample_id == "HD1_XENIUM"
     other = published_layout(tmp_path / "loose" / "S1_MERSCOPE_clustered.h5ad")
     assert other.results_root is None
     assert other.platform == "MERSCOPE"

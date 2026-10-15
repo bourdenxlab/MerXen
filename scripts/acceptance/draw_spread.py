@@ -70,6 +70,7 @@ from merxen.annotation.pipeline import (
 from merxen.annotation.shadow import SEED_PANEL_FAMILY
 from merxen.annotation.store import ReferenceStore
 from merxen.annotation.vocab import load_floor_table
+from merxen.privacy import to_alias
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from resolve_criteria import (  # noqa: E402
@@ -78,7 +79,12 @@ from resolve_criteria import (  # noqa: E402
     H8_WARNING,
     n_segmented_table,
 )
-from shadow_baselines import PAIRS, PLATFORMS, add_fallback_arguments  # noqa: E402
+from shadow_baselines import (  # noqa: E402
+    PAIRS,
+    PLATFORMS,
+    add_fallback_arguments,
+    data_pairs,
+)
 
 logger = logging.getLogger("draw_spread")
 
@@ -215,13 +221,15 @@ def resolve_rows(
     Args:
         draw: The draw.
         result: ``annotate_resolve`` output.
-        pair: The pair id.
+        pair: The pair id (the thresholds and expectations are looked up by
+            its alias, ``privacy.to_alias``).
         config: The config (the gate's warning threshold).
 
     Returns:
         ``draw_spread.metric_row`` rows.
     """
     warn_below = float(config.gate.warn_segmented_broad_coverage)
+    key = to_alias(pair)
     rows: list[dict[str, Any]] = []
     for sample_id, resolution in sorted(result.samples.items()):
         platform = str(resolution.platform).upper()
@@ -229,15 +237,16 @@ def resolve_rows(
         table = labels[labels["in_table"].to_numpy(bool)]
         confident = table["ct_broad_status"].astype(str).to_numpy() == "confident"
         gate = (resolution.summary.get("resolution") or {}).get("gate") or {}
-        expected_level = "broad_only" if sample_id in H8_BROAD_ONLY else "full"
-        warning_expected = sample_id in H8_WARNING[SEGMENTATION]
+        sample_key = to_alias(sample_id)
+        expected_level = "broad_only" if sample_key in H8_BROAD_ONLY else "full"
+        warning_expected = sample_key in H8_WARNING[SEGMENTATION]
         rows += [
             ds.metric_row(
                 draw,
                 sample_id,
                 "H7",
                 float(confident.mean()) if len(table) else None,
-                threshold=H7_THRESHOLDS.get((pair, platform)),
+                threshold=H7_THRESHOLDS.get((key, platform)),
                 comparator=">=",
             ),
             ds.metric_row(
@@ -584,7 +593,7 @@ def dataset_compositions(
     out: dict[str, tuple[str, res.DatasetComposition, str | None]] = {}
     if args.resolve_root is None or args.runs_root is None:
         return out
-    for pair in args.pairs.split(","):
+    for pair in data_pairs(args.pairs):
         for platform in PLATFORMS:
             sample_id = f"{pair}_{platform}"
             labels_path = (
@@ -630,7 +639,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seeds", default=",".join(map(str, ds.GRID_SEEDS)))
     parser.add_argument("--resolve-root", type=Path, help="seed-0 RESOLVE outputs")
     parser.add_argument("--runs-root", type=Path, help="MAP outputs")
-    parser.add_argument("--pairs", default=",".join(PAIRS))
+    parser.add_argument("--pairs", default=",".join(PAIRS), help="pair aliases or ids")
     parser.add_argument("--resolve", action="store_true", help="RESOLVE per draw")
     parser.add_argument("--store", type=Path, help="reference store (RESOLVE)")
     parser.add_argument("--qc-summary", type=Path, help="segmented objects (RESOLVE)")
@@ -792,7 +801,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.resolve:
             with draw_tables_installed(bundle_dir, drawn) as served:
-                for pair in args.pairs.split(","):
+                for pair in data_pairs(args.pairs):
                     n_segmented = {
                         f"{pair}_{platform}": segmented[(pair, SEGMENTATION, platform)]
                         for platform in PLATFORMS

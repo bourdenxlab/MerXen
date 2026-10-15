@@ -45,12 +45,25 @@ HUMAN_CHECKS = {
     "nonneuronal_depth_trend",
     "factor_remeasure",
 }
-# The pair statistic of P5011 proseg_hybrid at M8 (soft broad JSD).
-P5011_JSD = [
+# The pair statistic of HD4 proseg_hybrid at M8 (soft broad JSD).
+HD4_JSD = [
     {"kind": "soft", "region": "whole_section", "jsd": 0.226814, "ci_low": 0.21227},
     {"kind": "soft", "region": "shared_mask", "jsd": 0.234905, "ci_high": 0.25},
     {"kind": "confident", "region": "shared_mask", "jsd": 0.334206},
 ]
+
+
+def __getattr__(name: str) -> Any:
+    """Transitional, for the privacy cleanup (docs/local-configuration.md).
+
+    The M13 regression test (another cleanup package's file) imports
+    ``HD4_JSD`` under its name from before the aliasing, which held the
+    pair's real id. Until that package's change merges, a missing ``*_JSD``
+    name resolves to it; remove this with the last such import.
+    """
+    if name.endswith("_JSD"):
+        return HD4_JSD
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def stratum(
@@ -227,13 +240,13 @@ def test_registration_g1_boundaries(
 
 
 def test_paired_concordance_is_not_applicable_to_an_unpaired_section() -> None:
-    result = qc.paired_concordance(P5011_JSD, paired=False, warn_above=0.20)
+    result = qc.paired_concordance(HD4_JSD, paired=False, warn_above=0.20)
     assert result.outcome == "not_applicable"
     assert result.effect == "withhold_pair_stats" and not result.lowers
 
 
 def test_paired_concordance_scores_the_shared_mask_point_estimate() -> None:
-    result = qc.paired_concordance(P5011_JSD, paired=True, warn_above=0.20)
+    result = qc.paired_concordance(HD4_JSD, paired=True, warn_above=0.20)
     assert result.outcome == "fail" and result.effect == "withhold_pair_stats"
     assert result.details["scored_region"] == "shared_mask"
     assert result.details["jsd"] == pytest.approx(0.234905)
@@ -635,7 +648,7 @@ def test_a_seeded_family_only_warns_while_its_species_gate_is_pending(
     signals = new_panel_signals(
         resolvability_version=6,
         paired=True,
-        pair_jsd=P5011_JSD,
+        pair_jsd=HD4_JSD,
         marker_consistency=qc.MarkerConsistencySignal(0.66, 4, 900),
         coverage=None,
         nonneuronal_trend=None,
@@ -917,7 +930,7 @@ def test_a_simulation_validated_family_is_not_seeded(make_trust: MakeTrust) -> N
     signals = new_panel_signals(
         marker_consistency=qc.MarkerConsistencySignal(0.66, 4, 900),
         paired=True,
-        pair_jsd=P5011_JSD,
+        pair_jsd=HD4_JSD,
     )
     config = AnnotationConfig(species="human")
     simulation = qc.real_data_qc(signals, make_trust("validated_simulation"), config)
@@ -985,7 +998,7 @@ def test_warn_only_demotes_only_the_checks_section_88_names(
     signals = new_panel_signals(
         resolvability_version=6,
         paired=True,
-        pair_jsd=P5011_JSD,
+        pair_jsd=HD4_JSD,
         marker_consistency=qc.MarkerConsistencySignal(0.66, 4, 900),
         registration=RegistrationSignal(1.1, 0.0),
         coverage=None,

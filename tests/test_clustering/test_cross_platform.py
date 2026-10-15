@@ -91,7 +91,7 @@ def test_same_panel_pair_allows_every_level() -> None:
 
 
 def test_a_broad_only_dataset_restricts_a_same_panel_pair_to_broad() -> None:
-    """P1212: same panel, RESOLVE records full, but MERSCOPE is broad_only (§5.4)."""
+    """HD2: same panel, RESOLVE records full, but MERSCOPE is broad_only (§5.4)."""
     scope = scope_from_resolve_summary(
         _summary(SAME_PANEL, {"P1_MERSCOPE": "broad_only", "P1_XENIUM": "full"})
     )

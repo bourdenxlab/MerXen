@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
 import math
@@ -17,6 +18,7 @@ import pytest
 import shapely
 from scipy import sparse
 
+from merxen import privacy
 from merxen.annotation import composition as co
 from merxen.annotation import segmentation_compare as sc
 from merxen.annotation.vocab import HUMAN_BROAD_CLASSES
@@ -286,20 +288,20 @@ def test_task_replacements(m8b: ModuleType, tmp_path: Path) -> None:
     locations = m8b.Locations(
         tmp_path / "runs", tmp_path / "results", tmp_path / "b", tmp_path / "out"
     )
-    assert set(m8b.task_replacements(locations, "P7513", "MAP")) == {
+    assert set(m8b.task_replacements(locations, "HD1", "MAP")) == {
         "map_inputs/clustering_prepare_out"
     }
-    resolve = m8b.task_replacements(locations, "P7513", "RESOLVE")
+    resolve = m8b.task_replacements(locations, "HD1", "RESOLVE")
     assert resolve["resolve_inputs/annotation_map_out"] == locations.map_dir(
-        "hybrid_matched", "P7513"
+        "hybrid_matched", "HD1"
     )
-    report = m8b.task_replacements(locations, "P7513", "REPORT")
+    report = m8b.task_replacements(locations, "HD1", "REPORT")
     assert set(report) == {
         "report_inputs/annotation_resolve_out",
         "report_inputs/annotation_map_out",
     }
     with pytest.raises(SystemExit):
-        m8b.task_replacements(locations, "P7513", "PANEL")
+        m8b.task_replacements(locations, "HD1", "PANEL")
 
 
 def test_locations_point_hybrid_matched_at_its_own_outputs(
@@ -308,18 +310,18 @@ def test_locations_point_hybrid_matched_at_its_own_outputs(
     locations = m8b.Locations(
         tmp_path / "runs", tmp_path / "results", tmp_path / "b", tmp_path / "out"
     )
-    assert "arms/hybrid_matched/P1212" in str(
-        locations.resolve_dir("hybrid_matched", "P1212")
+    assert "arms/hybrid_matched/HD2" in str(
+        locations.resolve_dir("hybrid_matched", "HD2")
     )
-    assert locations.resolve_dir("hybrid", "P1212") == (
-        tmp_path / "runs/P1212/proseg_hybrid/annotation_resolve/annotation_resolve_out"
+    assert locations.resolve_dir("hybrid", "HD2") == (
+        tmp_path / "runs/HD2/proseg_hybrid/annotation_resolve/annotation_resolve_out"
     )
-    assert locations.panel_dir("hybrid_matched", "P1212") == locations.panel_dir(
-        "hybrid", "P1212"
+    assert locations.panel_dir("hybrid_matched", "HD2") == locations.panel_dir(
+        "hybrid", "HD2"
     )
     assert (
-        locations.clustered_path("reseg", "P1212", "XENIUM").name
-        == "P1212_XENIUM_clustered.h5ad"
+        locations.clustered_path("reseg", "HD2", "XENIUM").name
+        == "HD2_XENIUM_clustered.h5ad"
     )
 
 
@@ -407,7 +409,7 @@ def test_records_wide_lays_arms_side_by_side(m8b: ModuleType) -> None:
             "hybrid_matched": _records(0.65),
             "proseg_mask": [],
         },
-        "P7513",
+        "HD1",
     )
     assert len(wide) == 4
     coverage = wide[wide["name"] == "confident_coverage_table"].iloc[0]
@@ -428,8 +430,8 @@ def test_criteria_wide(m8b: ModuleType) -> None:
             [
                 {
                     "criterion": "H7",
-                    "pair": "P5011",
-                    "dataset": "P5011_MERSCOPE",
+                    "pair": "HD4",
+                    "dataset": "HD4_MERSCOPE",
                     "value": value,
                     "comparator": ">=",
                     "threshold": 0.5,
@@ -438,8 +440,8 @@ def test_criteria_wide(m8b: ModuleType) -> None:
                 },
                 {
                     "criterion": "H8",
-                    "pair": "P5011",
-                    "dataset": "P5011_MERSCOPE",
+                    "pair": "HD4",
+                    "dataset": "HD4_MERSCOPE",
                     "value": "full",
                     "comparator": "==",
                     "threshold": "full",
@@ -470,7 +472,7 @@ def test_depth_bin_coverage(m8b: ModuleType) -> None:
             "ct_lineage_status": ["confident"] * 4,
         }
     )
-    frame = m8b.depth_bin_coverage(labels, pair="P1212", platform="XENIUM", arm="reseg")
+    frame = m8b.depth_bin_coverage(labels, pair="HD2", platform="XENIUM", arm="reseg")
     broad = frame[frame["level"] == "broad"].set_index("depth_bin")
     assert broad.loc[10, "coverage"] == pytest.approx(0.5)
     assert broad.loc[10, "share_low_confidence"] == pytest.approx(0.5)
@@ -505,7 +507,7 @@ def test_paired_jsd_rows_identical_arms_have_zero_difference(m8b: ModuleType) ->
         "XENIUM": _section(rng, 250, "XENIUM"),
     }
     rows = m8b.paired_jsd_rows(
-        first, first, mask=None, names=("reseg", "hybrid"), pair="P7513"
+        first, first, mask=None, names=("reseg", "hybrid"), pair="HD1"
     )
     assert {row["kind"] for row in rows} == set(m8b.JSD_KINDS)
     for row in rows:
@@ -528,7 +530,7 @@ def test_paired_jsd_rows_ci_covers_a_real_difference(m8b: ModuleType) -> None:
     }
     second = {"MERSCOPE": _section(rng, 400, "MERSCOPE"), "XENIUM": first["XENIUM"]}
     rows = m8b.paired_jsd_rows(
-        first, second, mask=None, names=("a", "b"), pair="P1212", kinds=("soft",)
+        first, second, mask=None, names=("a", "b"), pair="HD2", kinds=("soft",)
     )
     row = rows[0]
     assert row["difference_ci_low"] <= row["difference"] <= row["difference_ci_high"]
@@ -746,7 +748,7 @@ def test_gene_tests_rows(m8b: ModuleType) -> None:
     )
     rows = m8b.gene_tests(
         genes,
-        pair="P7513",
+        pair="HD1",
         platform="MERSCOPE",
         glia_neurons=glia,
         probe_note="not_available: x",
@@ -824,7 +826,7 @@ def test_expression_frames_uses_cells_confident_in_both(m8b: ModuleType) -> None
         np.array([[8, 1, 1], [1, 8, 1], [3, 3, 3]]),
     )
     frames = m8b.expression_frames(
-        reseg, hybrid, reference=_reference(), pair="P7513", platform="MERSCOPE"
+        reseg, hybrid, reference=_reference(), pair="HD1", platform="MERSCOPE"
     )
     expression = frames["expression"].set_index(["class", "gene"])
     # Neurons: cell 1 only (cell 3 differs between arms)
@@ -865,7 +867,7 @@ def test_expression_frames_combined_arms(m8b: ModuleType) -> None:
         reseg,
         hybrid,
         reference=_reference(),
-        pair="P5011",
+        pair="HD4",
         platform="XENIUM",
         arms=arms,
     )
@@ -892,7 +894,7 @@ def test_combined_coverage(m8b: ModuleType) -> None:
         }
     )
     combined, rows = m8b.combined_coverage(
-        hybrid, reseg, pair="P1212", platform="MERSCOPE"
+        hybrid, reseg, pair="HD2", platform="MERSCOPE"
     )
     assert combined["ct_broad_name"].tolist() == ["Neurons", "Microglia", None]
     row = rows[0]
@@ -930,7 +932,7 @@ def test_analysis3_sample_bins_and_differences(m8b: ModuleType) -> None:
         xy_reseg=xy,
         xy_hybrid=xy,
         negatives=negatives,
-        pair="P7513",
+        pair="HD1",
         platform="XENIUM",
     )
     summary = out["summary"][0]
@@ -966,7 +968,7 @@ def test_write_analysis_and_render(m8b: ModuleType, tmp_path: Path) -> None:
     directory = tmp_path / "segmentation_comparison"
     depth = pd.DataFrame(
         {
-            "pair": ["P7513"] * 6,
+            "pair": ["HD1"] * 6,
             "role": ["development"] * 6,
             "platform": ["MERSCOPE"] * 6,
             "arm": ["reseg", "hybrid", "hybrid_matched"] * 2,
@@ -985,7 +987,7 @@ def test_write_analysis_and_render(m8b: ModuleType, tmp_path: Path) -> None:
             "h12": pd.DataFrame(
                 [
                     {
-                        "pair": "P7513",
+                        "pair": "HD1",
                         "role": "development",
                         "arm": "reseg",
                         "verdict": "PASS",
@@ -1014,13 +1016,13 @@ def test_write_analysis_and_render(m8b: ModuleType, tmp_path: Path) -> None:
 
 def test_series_colours_are_fixed_per_arm(m8b: ModuleType) -> None:
     colours = m8b.series_colours(
-        ["reseg", "hybrid", "P7513 MERSCOPE", "P7513 XENIUM", "P1212 XENIUM", "L"]
+        ["reseg", "hybrid", "HD1 MERSCOPE", "HD1 XENIUM", "HD2 XENIUM", "L"]
     )
     assert colours["hybrid"] == m8b.ARM_COLOURS["hybrid"]
     assert colours["reseg"] == m8b.ARM_COLOURS["reseg"]
     # a dataset takes its pair's colour, never an arm's
-    assert colours["P7513 MERSCOPE"] == colours["P7513 XENIUM"] == m8b.OTHER_PALETTE[0]
-    assert colours["P1212 XENIUM"] == m8b.OTHER_PALETTE[1]
+    assert colours["HD1 MERSCOPE"] == colours["HD1 XENIUM"] == m8b.OTHER_PALETTE[0]
+    assert colours["HD2 XENIUM"] == m8b.OTHER_PALETTE[1]
     assert colours["L"] == m8b.OTHER_PALETTE[2]
     assert not set(m8b.OTHER_PALETTE) & set(m8b.ARM_PALETTE)
     assert (
@@ -1079,7 +1081,7 @@ def test_acceptance_commands_per_arm(m8b: ModuleType, tmp_path: Path) -> None:
             "--gene-id-fallback-csv",
             "/fb.h5ad",
             "--pairs",
-            "P7513,P5011",
+            "HD1,HD4",
         ]
     )
     names = [name for name, _ in m8b.acceptance_commands(locations, "reseg", args)]
@@ -1088,7 +1090,7 @@ def test_acceptance_commands_per_arm(m8b: ModuleType, tmp_path: Path) -> None:
         "resolve_criteria"
     ]
     assert "--skip-h4" not in criteria
-    assert criteria[criteria.index("--pairs") + 1] == "P7513,P5011"
+    assert criteria[criteria.index("--pairs") + 1] == "HD1,HD4"
     assert criteria[criteria.index("--segmentations") + 1] == "proseg_hybrid"
     matched = dict(m8b.acceptance_commands(locations, "hybrid_matched", args))
     assert set(matched) == {"resolve_criteria", "marker_referee"}
@@ -1097,14 +1099,50 @@ def test_acceptance_commands_per_arm(m8b: ModuleType, tmp_path: Path) -> None:
         m8b._pairs(type("A", (), {"pairs": "P9999"})())
 
 
+def test_pairs_are_taken_by_alias_or_data_id(
+    m8b: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An alias table with invented pair ids (never real ones).
+    invented = {"HD1": "Q0101", "HD2": "Q0202", "HD3": "Q0303", "HD4": "Q0404"}
+    table = tmp_path / "aliases.tsv"
+    table.write_text(
+        "".join(
+            f"{alias}\thuman_paired_donor\tpair_id\ttoken\t{real}\n"
+            for alias, real in invented.items()
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(privacy.ALIAS_FILE_VAR, str(table))
+    privacy.clear_cache()
+    assert m8b.pair_argument("HD3") == "Q0303"
+    assert m8b.pair_argument("Q0303") == "Q0303"
+    with pytest.raises(argparse.ArgumentTypeError):
+        m8b.pair_argument("HM1")
+    args = m8b.build_parser().parse_args(
+        ["controls", "--runs-root", "r", "--results-root", "R", "--stage-b", "b"]
+        + ["--out", "o", "--pair", "HD2", "--platform", "MERSCOPE"]
+    )
+    assert args.pair == "Q0202"
+    assert m8b._pairs(type("A", (), {"pairs": ""})()) == list(invented.values())
+    assert m8b._pairs(type("A", (), {"pairs": "HD1,Q0404"})()) == ["Q0101", "Q0404"]
+    assert m8b.role("Q0202") == "development"
+    assert m8b.role("Q0303") == "held_out"
+    colours = m8b.series_colours(["Q0101 MERSCOPE", "Q0101 XENIUM", "L"])
+    assert colours["Q0101 MERSCOPE"] == colours["Q0101 XENIUM"]
+    frame = pd.DataFrame({"role": ["development", "held_out"], "value": [1, 2]})
+    page = m8b._by_role(frame)
+    assert "Development pairs (Q0101, Q0202)" in page
+    assert "Held-out donors (Q0303, Q0404; reported separately)" in page
+
+
 def test_render_draws_every_figure_from_its_tables(
     m8b: ModuleType, tmp_path: Path
 ) -> None:
     directory = tmp_path / "segmentation_comparison"
-    datasets = [("P7513", "MERSCOPE"), ("P7513", "XENIUM"), ("P5011", "XENIUM")]
+    datasets = [("HD1", "MERSCOPE"), ("HD1", "XENIUM"), ("HD4", "XENIUM")]
 
     def role(pair: str) -> str:
-        return "development" if pair == "P7513" else "held_out"
+        return "development" if pair == "HD1" else "held_out"
 
     genes = pd.DataFrame(
         [
@@ -1164,7 +1202,7 @@ def test_render_draws_every_figure_from_its_tables(
     jsd = pd.DataFrame(
         [
             {
-                "pair": "P7513",
+                "pair": "HD1",
                 "role": "development",
                 "kind": k,
                 "region": "whole_section",
@@ -1260,7 +1298,7 @@ def test_selection_depth_rows_split_the_headline(m8b: ModuleType) -> None:
     )
     matched = _labels(["1", "2", "3"], [confident, low, low], [False] * 3)
     rows = m8b.selection_depth_rows(
-        reseg, hybrid, matched, pair="P7513", platform="MERSCOPE"
+        reseg, hybrid, matched, pair="HD1", platform="MERSCOPE"
     )
     row = next(r for r in rows if r["metric"] == "coverage_broad")
     assert row["n_shared"] == 3 and row["n_hybrid_only"] == 2
@@ -1295,7 +1333,7 @@ def test_ci_side_and_jsd_reading(m8b: ModuleType) -> None:
     jsd = pd.DataFrame(
         [
             {
-                "pair": "P7113",
+                "pair": "HD3",
                 "kind": "soft",
                 "region": "whole_section",
                 "first": "reseg",
@@ -1323,7 +1361,7 @@ def test_ci_side_and_jsd_reading(m8b: ModuleType) -> None:
 
 
 def _bin_rows(pair: str, cls: str, near: float, far: float) -> list[dict[str, Any]]:
-    role = "development" if pair == "P7513" else "held_out"
+    role = "development" if pair == "HD1" else "held_out"
     rows = []
     for label, value in (("0-10", near), ("20-30", 0.0), (">50", far), ("all", 0.5)):
         rows.append(
@@ -1347,9 +1385,9 @@ def _bin_rows(pair: str, cls: str, near: float, far: float) -> list[dict[str, An
 
 def test_spillover_summary_counts_bins_apart_from_classes(m8b: ModuleType) -> None:
     bins = pd.DataFrame(
-        _bin_rows("P7513", "Neurons", 0.3, 0.1)
-        + _bin_rows("P7513", "Astrocytes", -0.2, 0.0)
-        + _bin_rows("P5011", "Neurons", 0.2, 0.2)
+        _bin_rows("HD1", "Neurons", 0.3, 0.1)
+        + _bin_rows("HD1", "Astrocytes", -0.2, 0.0)
+        + _bin_rows("HD4", "Neurons", 0.2, 0.2)
     )
     frame = m8b.spillover_summary(bins, analysis="a", neighbours="n")
     every = frame[frame["scope"] == "all datasets"].iloc[0]
@@ -1382,12 +1420,12 @@ def test_leaking_genes_ranks_by_median(m8b: ModuleType) -> None:
                 "ci_high": value + 0.01,
             }
             for pair, cells, cls, gene, value in (
-                ("P7513", "both_confident", "Neurons", "CD68", 0.30),
-                ("P1212", "both_confident", "Neurons", "CD68", 0.00),
-                ("P7113", "both_confident", "Neurons", "CD68", 0.01),
-                ("P7513", "both_confident", "Neurons", "ERMN", 0.05),
-                ("P1212", "both_confident", "Astrocytes", "ERMN", 0.04),
-                ("P7513", "same_label", "Neurons", "ERMN", 0.90),
+                ("HD1", "both_confident", "Neurons", "CD68", 0.30),
+                ("HD2", "both_confident", "Neurons", "CD68", 0.00),
+                ("HD3", "both_confident", "Neurons", "CD68", 0.01),
+                ("HD1", "both_confident", "Neurons", "ERMN", 0.05),
+                ("HD2", "both_confident", "Astrocytes", "ERMN", 0.04),
+                ("HD1", "same_label", "Neurons", "ERMN", 0.90),
             )
         ]
     )
@@ -1396,7 +1434,7 @@ def test_leaking_genes_ranks_by_median(m8b: ModuleType) -> None:
     assert frame["rank_by_median"].tolist() == [1, 2]
     cd68 = frame.set_index("gene").loc["CD68"]
     assert cd68["max_difference"] == pytest.approx(0.30)
-    assert cd68["max_row"] == "P7513 XENIUM Neurons" and cd68["n_rows"] == 3
+    assert cd68["max_row"] == "HD1 XENIUM Neurons" and cd68["n_rows"] == 3
     assert frame.set_index("gene").loc["ERMN", "classes_where_negative"] == (
         "Astrocytes; Neurons"
     )
@@ -1417,7 +1455,7 @@ def _noise_gene_rows(
     reseg = np.round(hybrid * (1 - np.array(loss))).astype(int)
     return pd.DataFrame(
         {
-            "pair": "P1212",
+            "pair": "HD2",
             "role": "development",
             "platform": platform,
             "gene": [f"G{i}" for i in range(n)],
@@ -1457,8 +1495,8 @@ def test_noise_floor_tables(m8b: ModuleType) -> None:
     tables = m8b.noise_floor_tables(
         genes,
         {
-            ("P1212", "MERSCOPE"): (controls, {"note": ""}),
-            ("P1212", "XENIUM"): (pd.DataFrame(), {"note": "none here"}),
+            ("HD2", "MERSCOPE"): (controls, {"note": ""}),
+            ("HD2", "XENIUM"): (pd.DataFrame(), {"note": "none here"}),
         },
     )
     floor = tables["noise_floor"].set_index("platform")
@@ -1511,7 +1549,7 @@ def test_common_bins_sample_uses_one_distance_for_both_arms(m8b: ModuleType) -> 
         xy_reseg=xy_reseg,
         xy_hybrid=xy_hybrid,
         negatives=negatives,
-        pair="P7513",
+        pair="HD1",
         platform="XENIUM",
     )
     bins = pd.DataFrame(out["bins"])
@@ -1561,11 +1599,11 @@ def test_control_tallies_marks_stores_without_controls(
     locations = m8b.Locations(
         tmp_path / "runs", tmp_path / "results", tmp_path / "b", tmp_path / "out"
     )
-    xenium = locations.transcripts_cache("P7513", "XENIUM")
+    xenium = locations.transcripts_cache("HD1", "XENIUM")
     m8b.write_json({"filter": {"n_control_removed": 0}}, xenium / "tally_record.json")
-    merscope = locations.transcripts_cache("P7513", "MERSCOPE")
+    merscope = locations.transcripts_cache("HD1", "MERSCOPE")
     m8b.write_json({"filter": {"n_control_removed": 5}}, merscope / "tally_record.json")
-    cache = locations.controls_cache("P7113", "MERSCOPE")
+    cache = locations.controls_cache("HD3", "MERSCOPE")
     cache.mkdir(parents=True)
     tally = pd.DataFrame(
         {"level": ["all"], "group": ["all"], "gene": ["Blank-1"]}
@@ -1573,10 +1611,10 @@ def test_control_tallies_marks_stores_without_controls(
     )
     tally.to_parquet(cache / "tally.parquet", index=False)
     m8b.write_json({"note": ""}, cache / "tally_record.json")
-    out = m8b.control_tallies(locations, ["P7513", "P7113"])
-    assert set(out) == {("P7513", "XENIUM"), ("P7113", "MERSCOPE")}
-    assert out[("P7513", "XENIUM")][1]["note"] == m8b.NO_CONTROLS
-    assert out[("P7113", "MERSCOPE")][0]["A_hybrid"].tolist() == [1.0]
+    out = m8b.control_tallies(locations, ["HD1", "HD3"])
+    assert set(out) == {("HD1", "XENIUM"), ("HD3", "MERSCOPE")}
+    assert out[("HD1", "XENIUM")][1]["note"] == m8b.NO_CONTROLS
+    assert out[("HD3", "MERSCOPE")][0]["A_hybrid"].tolist() == [1.0]
 
 
 def test_matched_count_sources_and_run_args(m8b: ModuleType) -> None:
@@ -1614,7 +1652,7 @@ def test_render_page_adds_the_posthoc_section(m8b: ModuleType, tmp_path: Path) -
     selection = pd.DataFrame(
         [
             {
-                "pair": "P7513",
+                "pair": "HD1",
                 "role": "development",
                 "platform": "MERSCOPE",
                 "metric": "coverage_broad",

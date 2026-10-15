@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import pytest
 
+from merxen import privacy
 from merxen.annotation import report_scoring as sc
 from merxen.annotation.report_depth import PRIMARY_CI, SQUARE_TILE_CI
 
@@ -53,7 +55,7 @@ def _h12_records(
 
 
 def test_score_h12_scores_the_tangential_blocks_not_the_tiles() -> None:
-    """The P7513_XENIUM case of §17: tiles fail, blocks pass (§20 D11)."""
+    """The HD1_XENIUM case of §17: tiles fail, blocks pass (§20 D11)."""
     records = _h12_records(
         {"MERSCOPE": True, "XENIUM": False},
         {"MERSCOPE": True, "XENIUM": True},
@@ -62,7 +64,7 @@ def test_score_h12_scores_the_tangential_blocks_not_the_tiles() -> None:
     records.append(
         _record("depth_ordering_replicated", False, scope="pair", kind=SQUARE_TILE_CI)
     )
-    score = sc.score_h12(records, pair_id="P7513")
+    score = sc.score_h12(records, pair_id="HD1")
     assert score.verdict == sc.PASS and score.ci_scored == PRIMARY_CI
     assert score.ordering == {"MERSCOPE": sc.PASS, "XENIUM": sc.PASS}
     assert score.reported_beside["ordering"] == {
@@ -79,11 +81,11 @@ def test_score_h12_scores_the_tangential_blocks_not_the_tiles() -> None:
         {"MERSCOPE": True, "XENIUM": False},
         {"MERSCOPE": (0.5, 0.45), "XENIUM": (0.5, 0.46)},
     )
-    assert sc.score_h12(failing, pair_id="P7513").verdict == sc.FAIL
+    assert sc.score_h12(failing, pair_id="HD1").verdict == sc.FAIL
     # A scored replication record that contradicts its platforms is an error.
     records.append(_record("depth_ordering_replicated", False, scope="pair"))
     with pytest.raises(ValueError, match="depth_ordering_replicated"):
-        sc.score_h12(records, pair_id="P7513")
+        sc.score_h12(records, pair_id="HD1")
 
 
 def test_score_h12_wm_gm_needs_the_tile_ci_above_zero_on_both_platforms() -> None:
@@ -92,21 +94,21 @@ def test_score_h12_wm_gm_needs_the_tile_ci_above_zero_on_both_platforms() -> Non
         {},
         {"MERSCOPE": (0.5, 0.45), "XENIUM": (0.02, -0.01)},
     )
-    score = sc.score_h12(records, pair_id="P5011")
+    score = sc.score_h12(records, pair_id="HD4")
     assert not score.ordering_required
     assert score.wm_gm["XENIUM"]["verdict"] == sc.FAIL
     assert score.verdict == sc.FAIL
     # An invalid depth input (not_available) is not a failure.
     records[-1]["status"] = "not_available"
     records[-1]["value"] = None
-    assert sc.score_h12(records, pair_id="P5011").verdict == sc.NOT_AVAILABLE
+    assert sc.score_h12(records, pair_id="HD4").verdict == sc.NOT_AVAILABLE
 
 
 def test_score_h12_never_scores_the_tiles_beside_the_blocks() -> None:
     records = _h12_records(
         {"MERSCOPE": True, "XENIUM": True}, {}, {"MERSCOPE": (0.5, 0.4)}
     )
-    score = sc.score_h12(records, pair_id="P7513")
+    score = sc.score_h12(records, pair_id="HD1")
     assert score.ordering_verdict == sc.NOT_AVAILABLE
     assert score.verdict == sc.NOT_AVAILABLE
     # A report whose only CI was the tiles is scored on its primary records.
@@ -114,7 +116,7 @@ def test_score_h12_never_scores_the_tiles_beside_the_blocks() -> None:
         {}, {"MERSCOPE": True, "XENIUM": True}, {"MERSCOPE": (0.5, 0.4)}
     )
     records[0]["value"] = SQUARE_TILE_CI
-    tiles_only = sc.score_h12(records, pair_id="P7513")
+    tiles_only = sc.score_h12(records, pair_id="HD1")
     assert tiles_only.ordering_verdict == sc.PASS
     assert tiles_only.ci_scored == SQUARE_TILE_CI
     assert tiles_only.ci_reported_beside is None
@@ -133,14 +135,14 @@ def test_score_h12_names_a_mixed_ci_per_platform() -> None:
         if record["name"] == "depth_ordering_passes" and record["kind"] is None:
             method = PRIMARY_CI if record["platform"] == "MERSCOPE" else SQUARE_TILE_CI
             record["note"] = f"ordered=True; ci={method}"
-    score = sc.score_h12(records, pair_id="P7513")
+    score = sc.score_h12(records, pair_id="HD1")
     assert score.ci_scored == "mixed"
     assert score.ordering == {"MERSCOPE": sc.PASS, "XENIUM": sc.FAIL}
     assert any("mixed CIs" in note for note in score.notes)
 
 
 def test_d3_holds_only_at_the_text_value_and_level() -> None:
-    kwargs = {"segmentation": "proseg_hybrid", "dataset": "P1212_MERSCOPE"}
+    kwargs = {"segmentation": "proseg_hybrid", "dataset": "HD2_MERSCOPE"}
     held = sc.check_d3(value=0.1482, level="broad_only", **kwargs)
     assert held is not None and held.in_scope
     assert held.verdict == "EXCEPTION (D3)"
@@ -151,7 +153,7 @@ def test_d3_holds_only_at_the_text_value_and_level() -> None:
     assert (
         sc.check_d3(
             segmentation="proseg_hybrid",
-            dataset="P5011_MERSCOPE",
+            dataset="HD4_MERSCOPE",
             value=0.148,
             level="broad_only",
         )
@@ -163,7 +165,7 @@ def test_d5_checks_the_value_and_the_confident_labels_of_the_flagged_cells() -> 
     base = {
         "criterion": "H2",
         "segmentation": "proseg_hybrid",
-        "dataset": "P5011_MERSCOPE",
+        "dataset": "HD4_MERSCOPE",
         "n_confident_broad": 0,
         "n_confident_supercluster": 0,
     }
@@ -180,7 +182,7 @@ def test_d5_checks_the_value_and_the_confident_labels_of_the_flagged_cells() -> 
             **base,
             "criterion": "H17/H2",
             "segmentation": "reseg",
-            "dataset": "P1212_MERSCOPE",
+            "dataset": "HD2_MERSCOPE",
         },
         value=0.011311,
     )
@@ -191,13 +193,13 @@ def test_d5_checks_the_value_and_the_confident_labels_of_the_flagged_cells() -> 
             **base,
             "criterion": "H17/H2",
             "segmentation": "reseg",
-            "dataset": "P1212_MERSCOPE",
+            "dataset": "HD2_MERSCOPE",
         },
         value=0.0119,
     )
     assert above is not None and not above.in_scope
-    # D5 names H17/H2 for P1212_MERSCOPE reseg, not proseg_hybrid H2.
-    assert sc.check_d5(**{**base, "dataset": "P1212_MERSCOPE"}, value=0.0103) is None
+    # D5 names H17/H2 for HD2_MERSCOPE reseg, not proseg_hybrid H2.
+    assert sc.check_d5(**{**base, "dataset": "HD2_MERSCOPE"}, value=0.0103) is None
 
 
 def _h4_classes(**changes: tuple[float, float, float, bool]) -> pd.DataFrame:
@@ -226,7 +228,7 @@ def _h4_classes(**changes: tuple[float, float, float, bool]) -> pd.DataFrame:
 
 
 def test_d7_needs_the_texts_classes_at_their_auroc_ceilings() -> None:
-    kwargs = {"segmentation": "proseg_hybrid", "dataset": "P1212_MERSCOPE"}
+    kwargs = {"segmentation": "proseg_hybrid", "dataset": "HD2_MERSCOPE"}
     held = sc.check_d7(classes=_h4_classes(), **kwargs)
     assert held is not None and held.in_scope
     other = sc.check_d7(
@@ -246,7 +248,7 @@ def test_d7_needs_the_texts_classes_at_their_auroc_ceilings() -> None:
         sc.check_d7(
             classes=_h4_classes(),
             segmentation="proseg_hybrid",
-            dataset="P7113_MERSCOPE",
+            dataset="HD3_MERSCOPE",
         )
         is None
     )
@@ -257,21 +259,17 @@ def test_d4_h18_scope_is_the_named_bins_of_the_named_datasets() -> None:
         result = sc.check_d4_h18(dataset=dataset, level=level, cls=cls, missing=missing)
         return None if result is None else result.verdict
 
-    assert check("P7513_MERSCOPE", "broad", "OPC", {15, 120}) == "EXCEPTION (D4)"
-    assert check("P7513_MERSCOPE", "broad", "OPC", {15, 30}) == (
+    assert check("HD1_MERSCOPE", "broad", "OPC", {15, 120}) == "EXCEPTION (D4)"
+    assert check("HD1_MERSCOPE", "broad", "OPC", {15, 30}) == ("EXCEPTION-RECHECK (D4)")
+    # HD3_XENIUM emits broad OPC at 120 counts: only 15 is covered there.
+    assert check("HD3_XENIUM", "broad", "OPC", {15}) == "EXCEPTION (D4)"
+    assert check("HD3_XENIUM", "broad", "OPC", {15, 120}) == ("EXCEPTION-RECHECK (D4)")
+    assert check("HD4_MERSCOPE", "supercluster", "Immune", {60}) == ("EXCEPTION (D4)")
+    assert check("HD4_MERSCOPE", "broad", "Immune", {30, 60}) == (
         "EXCEPTION-RECHECK (D4)"
     )
-    # P7113_XENIUM emits broad OPC at 120 counts: only 15 is covered there.
-    assert check("P7113_XENIUM", "broad", "OPC", {15}) == "EXCEPTION (D4)"
-    assert check("P7113_XENIUM", "broad", "OPC", {15, 120}) == (
-        "EXCEPTION-RECHECK (D4)"
-    )
-    assert check("P5011_MERSCOPE", "supercluster", "Immune", {60}) == ("EXCEPTION (D4)")
-    assert check("P5011_MERSCOPE", "broad", "Immune", {30, 60}) == (
-        "EXCEPTION-RECHECK (D4)"
-    )
-    assert check("P5011_XENIUM", "broad", "Immune", {60}) is None
-    assert check("P7513_MERSCOPE", "broad", "Astro", {15}) is None
+    assert check("HD4_XENIUM", "broad", "Immune", {60}) is None
+    assert check("HD1_MERSCOPE", "broad", "Astro", {15}) is None
     assert check("PREP[MERSCOPE floors]", "broad", "OPC", {15}) is None
 
 
@@ -290,16 +288,15 @@ def test_d4_would_raise_lists_are_the_stage_a2_lists() -> None:
     assert "broad Oligo 30" in added.reasons[0]
     reference = [("broad", "OPC", 15), ("broad", "Astro", 30)]
     fewer = sc.check_d4_would_raise(
-        dataset="P7513_MERSCOPE", bins=reference[:1], reference=reference
+        dataset="HD1_MERSCOPE", bins=reference[:1], reference=reference
     )
     assert fewer is not None and fewer.in_scope
     unlisted = sc.check_d4_would_raise(
-        dataset="P7513_MERSCOPE", bins=reference, reference=None
+        dataset="HD1_MERSCOPE", bins=reference, reference=None
     )
     assert unlisted is not None and not unlisted.in_scope
     assert (
-        sc.check_d4_would_raise(dataset="P7513_MERSCOPE", bins=[], reference=None)
-        is None
+        sc.check_d4_would_raise(dataset="HD1_MERSCOPE", bins=[], reference=None) is None
     )
 
 
@@ -317,10 +314,10 @@ def test_verdict_labels_the_row() -> None:
 
 def test_d10_covers_only_the_stage_b_rows_of_each_dataset() -> None:
     hybrid = {"segmentation": "proseg_hybrid"}
-    assert sc.check_d10(dataset="P7513_MERSCOPE", failing=[], **hybrid) is None
+    assert sc.check_d10(dataset="HD1_MERSCOPE", failing=[], **hybrid) is None
     fibro = ("supercluster", "Fibroblast", 120)
     held = sc.check_d10(
-        dataset="P5011_XENIUM",
+        dataset="HD4_XENIUM",
         failing=[
             ("broad", "OPC", 15, 0.8932),
             (*fibro, 0.78),
@@ -330,46 +327,73 @@ def test_d10_covers_only_the_stage_b_rows_of_each_dataset() -> None:
     )
     assert held is not None and held.in_scope
     assert held.verdict == "EXCEPTION (D10)"
-    # Broad OPC 60 failed on P7113_MERSCOPE only; Fibroblast 120 on
-    # P5011_XENIUM only; Astro is not named.
+    # Broad OPC 60 failed on HD3_MERSCOPE only; Fibroblast 120 on
+    # HD4_XENIUM only; Astro is not named.
     for dataset, row in (
-        ("P7513_MERSCOPE", ("broad", "OPC", 60, 0.8)),
-        ("P7513_XENIUM", (*fibro, 0.78)),
-        ("P7513_XENIUM", ("broad", "Astro", 15, 0.8)),
+        ("HD1_MERSCOPE", ("broad", "OPC", 60, 0.8)),
+        ("HD1_XENIUM", (*fibro, 0.78)),
+        ("HD1_XENIUM", ("broad", "Astro", 15, 0.8)),
     ):
         moved = sc.check_d10(dataset=dataset, failing=[row], **hybrid)
         assert moved is not None and not moved.in_scope
         assert moved.verdict == "EXCEPTION-RECHECK (D10)"
     # A named row whose precision falls more than the tolerance below stage
     # B's value goes back to the user.
-    floor = sc.D10_FAILING[(*fibro, "P5011_XENIUM")]
-    low = sc.check_d10(
-        dataset="P5011_XENIUM", failing=[(*fibro, floor - 0.02)], **hybrid
-    )
+    floor = sc.D10_FAILING[(*fibro, "HD4_XENIUM")]
+    low = sc.check_d10(dataset="HD4_XENIUM", failing=[(*fibro, floor - 0.02)], **hybrid)
     assert low is not None and not low.in_scope
     assert "below stage B" in low.reasons[0]
     # H6 is scored on proseg_hybrid only.
     assert (
         sc.check_d10(
-            dataset="P5011_XENIUM", failing=[(*fibro, 0.78)], segmentation="reseg"
+            dataset="HD4_XENIUM", failing=[(*fibro, 0.78)], segmentation="reseg"
         )
         is None
     )
 
 
 def test_d12_needs_no_switch_and_the_texts_threshold_share() -> None:
-    held = sc.check_d12(pair="P1212", share_threshold=0.13403, n_switched=0)
+    held = sc.check_d12(pair="HD2", share_threshold=0.13403, n_switched=0)
     assert held is not None and held.in_scope
     assert held.verdict == "EXCEPTION (D12)"
-    assert not sc.check_d12(
-        pair="P1212", share_threshold=0.13403, n_switched=2
-    ).in_scope
-    assert not sc.check_d12(pair="P7513", share_threshold=0.0712, n_switched=0).in_scope
-    assert not sc.check_d12(
-        pair="P7513", share_threshold=0.07, n_switched=None
-    ).in_scope
-    assert sc.check_d12(pair="P7113", share_threshold=0.07, n_switched=0) is None
+    assert not sc.check_d12(pair="HD2", share_threshold=0.13403, n_switched=2).in_scope
+    assert not sc.check_d12(pair="HD1", share_threshold=0.0712, n_switched=0).in_scope
+    assert not sc.check_d12(pair="HD1", share_threshold=0.07, n_switched=None).in_scope
+    assert sc.check_d12(pair="HD3", share_threshold=0.07, n_switched=0) is None
     # A cell missing from one seed's table would count as a crossing.
     assert not sc.check_d12(
-        pair="P7513", share_threshold=0.07, n_switched=0, n_missing=3
+        pair="HD1", share_threshold=0.07, n_switched=0, n_missing=3
     ).in_scope
+
+
+# ---------------------------------------------------------------------------
+# Aliases (docs/local-configuration.md)
+
+
+def test_h12_takes_the_alias_beside_the_data_id() -> None:
+    tiles = _h12_records({}, {"MERSCOPE": True, "XENIUM": True}, {})
+    score = sc.score_h12(tiles, pair_id="Q0101", alias="HD1")
+    assert score.ordering_required and score.pair_id == "Q0101"
+    assert not sc.score_h12(tiles, pair_id="Q0101").ordering_required
+    assert not sc.score_h12(tiles, pair_id="Q0202", alias="HD2").ordering_required
+
+
+def test_the_scopes_are_keyed_by_alias() -> None:
+    pairs = {"HD1", "HD2", "HD3", "HD4"}
+    datasets = {
+        f"{pair}_{platform}" for pair in pairs for platform in ("MERSCOPE", "XENIUM")
+    }
+    assert pairs >= sc.H12_ORDERING_PAIRS
+    assert {sc.D3_DATASET[1], sc.D7_DATASET[1], sc.D4_IMMUNE_DATASET} <= datasets
+    assert {dataset for _, dataset in sc.D5_TEXT_VALUES} <= datasets
+    assert datasets == sc.D4_DATASETS
+    assert {key[3] for key in sc.D10_FAILING} <= datasets
+    assert set(sc.D12_TEXT_VALUES) <= pairs
+
+
+def test_the_real_alias_table_names_every_human_pair(real_aliases: Path) -> None:
+    for alias in ("HD1", "HD2", "HD3", "HD4"):
+        pair = privacy.to_real(alias)
+        assert pair != alias
+        assert privacy.to_alias(pair) == alias
+        assert privacy.display(alias) == pair

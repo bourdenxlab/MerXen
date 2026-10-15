@@ -79,14 +79,16 @@ from merxen.annotation.shadow import (
     whb_labels_from_tidy,
 )
 from merxen.annotation.vocab import HUMAN_BROAD_CLASSES, load_heldout_markers
+from merxen.privacy import to_alias
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from shadow_baselines import (  # noqa: E402
-    HELD_OUT_PAIRS,
     PAIRS,
     PLATFORMS,
     _clustered_path,
     add_fallback_arguments,
+    data_pairs,
+    is_held_out,
 )
 
 logger = logging.getLogger("heldout_genes")
@@ -104,7 +106,7 @@ PANEL_FILES = {
 }
 PREFIXES = {"set_a": "mmc_whb", "set_c": "mmc_whb_setc", "x1": "mmc_whb"}
 WHB_SUPC = "CCN202210140_SUPC"
-H4_PAIRS = ("P7513", "P1212", "P7113")
+H4_PAIRS = ("HD1", "HD2", "HD3")
 H4_MIN_CLASSES = 6
 
 
@@ -271,7 +273,7 @@ def run_pair(
                 "pair": pair,
                 "platform": platform,
                 "variant": variant,
-                "held_out_pair": pair in HELD_OUT_PAIRS,
+                "held_out_pair": is_held_out(pair),
                 "n_cells": len(cells),
                 "n_query_genes": len(query.gene_ids) - len(ids),
                 "n_heldout_genes": len(ids),
@@ -340,7 +342,7 @@ def h4_rows(enrichment: pd.DataFrame) -> list[dict[str, Any]]:
                 "failing": ";".join(
                     frame.loc[~frame["passes"].astype(bool), "broad_class"]
                 ),
-                "h4_scored_pair": pair in H4_PAIRS,
+                "h4_scored_pair": to_alias(str(pair)) in H4_PAIRS,
                 "h4_pass": n_pass >= H4_MIN_CLASSES,
                 # M8 D6: H4 is scored on resolve_criteria.py's WHB-only set.
                 "h4_assigned_class": False,
@@ -370,7 +372,7 @@ def main(argv: list[str] | None = None) -> int:
     marker_table = load_heldout_markers("human")
     selection_rows: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
-    for pair in [p for p in args.pairs.split(",") if p]:
+    for pair in data_pairs(args.pairs):
         selection, enrichment = run_pair(pair, args, marker_table)
         selection_rows += selection
         rows += enrichment

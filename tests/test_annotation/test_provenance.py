@@ -318,8 +318,8 @@ def test_minimal_provenance_defaults() -> None:
 
 
 def test_manifest_filename() -> None:
-    assert annotation_manifest_filename("P1212_XENIUM") == (
-        "P1212_XENIUM_annotation_manifest.json"
+    assert annotation_manifest_filename("HD2_XENIUM") == (
+        "HD2_XENIUM_annotation_manifest.json"
     )
 
 

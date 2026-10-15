@@ -15,6 +15,7 @@ import pytest
 from merxen.annotation import draw_spread as ds
 from merxen.annotation import resolvability as res
 
+from .test_acceptance_m8_scripts import INVENTED_PAIRS, _alias_table
 from .test_resolvability import (
     GRID,
     bootstrap_mapper,
@@ -376,12 +377,12 @@ def test_spread_table_reports_the_scored_value_and_the_draws_failing() -> None:
         draw = ds.Draw(int(tag[1]), int(tag[3]))
         rows.append(
             ds.metric_row(
-                draw, "P5011_MERSCOPE", "H7", value, threshold=0.30, comparator=">="
+                draw, "HD4_MERSCOPE", "H7", value, threshold=0.30, comparator=">="
             )
         )
         rows.append(ds.metric_row(draw, "PREP", "note_only", 3.0))
     table = ds.spread_table(rows).set_index(["dataset", "metric"])
-    h7 = table.loc[("P5011_MERSCOPE", "H7")]
+    h7 = table.loc[("HD4_MERSCOPE", "H7")]
     assert h7["scored_value"] == pytest.approx(0.436) and h7["scored_passes"]
     assert h7["min"] == pytest.approx(0.29) and h7["max"] == pytest.approx(0.45)
     assert h7["n_draws"] == 3 and h7["n_draws_failing"] == 1
@@ -485,9 +486,9 @@ def test_script_serves_the_draw_tables_for_the_one_bundle(
         # RESOLVE resolved with another bundle: the draw's tables were not
         # used, so its rows would be the stored seed-0 tables (M8 review).
         with pytest.raises(RuntimeError, match="never loaded"):
-            served.check_served(0, "draw c0e1, pair P7513")
+            served.check_served(0, "draw c0e1, pair HD1")
         assert res.load_resolvability(bundle) is marker
-        served.check_served(0, "draw c0e1, pair P7513")
+        served.check_served(0, "draw c0e1, pair HD1")
         assert served.patched == 1 and served.other == [str(tmp_path / "other")]
     assert res.load_resolvability(bundle) is None
 
@@ -636,11 +637,16 @@ def test_script_prep_family_is_the_datasets_trust_family(script: ModuleType) -> 
         script.prep_panel_family(None, {"a": "human_set_a", "b": "human_5k"})
 
 
+@pytest.mark.parametrize("pair", ["HD2", INVENTED_PAIRS["HD2"]])
 def test_script_resolve_rows_score_h7_and_the_expected_warning(
-    script: ModuleType,
+    script: ModuleType, pair: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from merxen.annotation.config import AnnotationConfig
 
+    # The pair by alias (no alias table) or by the id its data use (a table
+    # of invented ids): the thresholds and expectations are the alias's.
+    if pair != "HD2":
+        _alias_table(tmp_path / "aliases.tsv", monkeypatch, INVENTED_PAIRS)
     labels = pd.DataFrame(
         {
             "in_table": [True, True, True, False],
@@ -655,7 +661,7 @@ def test_script_resolve_rows_score_h7_and_the_expected_warning(
     gate = {"level": "broad_only", "warning": True, "broad_coverage_segmented": 0.148}
     result = SimpleNamespace(
         samples={
-            "P1212_MERSCOPE": SimpleNamespace(
+            f"{pair}_MERSCOPE": SimpleNamespace(
                 platform="MERSCOPE",
                 labels=labels,
                 summary={"resolution": {"gate": gate}},
@@ -663,16 +669,36 @@ def test_script_resolve_rows_score_h7_and_the_expected_warning(
         }
     )
     rows = script.resolve_rows(
-        ds.Draw(0, 0), result, "P1212", AnnotationConfig(species="human")
+        ds.Draw(0, 0), result, pair, AnnotationConfig(species="human")
     )
     by_metric = {row["metric"]: row for row in rows}
     h7 = by_metric["H7"]
     assert h7["value"] == pytest.approx(2 / 3) and h7["threshold"] == 0.34
     assert h7["passes"] is True
     warning = by_metric["H8/warning_value"]
-    # §5.4 expects no warning on P1212_MERSCOPE: the D3 exception case.
+    # §5.4 expects no warning on HD2_MERSCOPE: the D3 exception case.
     assert warning["value"] == 0.148 and warning["passes"] is False
     assert by_metric["H8/level"]["passes"] is True
+
+
+def test_script_reads_the_default_pairs_under_their_data_ids(
+    script: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _alias_table(tmp_path / "aliases.tsv", monkeypatch, INVENTED_PAIRS)
+    args = SimpleNamespace(
+        resolve_root=tmp_path, runs_root=tmp_path, pairs=",".join(script.PAIRS)
+    )
+    with caplog.at_level("WARNING", logger="draw_spread"):
+        assert script.dataset_compositions(args, [15], 1.0) == {}
+    skipped = {record.getMessage().split(":")[0] for record in caplog.records}
+    assert skipped == {
+        f"{real}_{platform}"
+        for real in INVENTED_PAIRS.values()
+        for platform in script.PLATFORMS
+    }
 
 
 def test_script_help_runs(script: ModuleType) -> None:

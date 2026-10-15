@@ -21,7 +21,7 @@ section (MERSCOPE), each mapped by ``merxen annotate``:
   composition JSD vs proseg_hybrid (no second platform);
 - the gate (A, level), WHB-SEA agreement and the implausible share.
 
-OD-B6 rule (plan): switch P1212's default segmentation if a segmentation
+OD-B6 rule (plan): switch HD2's default segmentation if a segmentation
 has >= 25% more confident broad cells per mm² on MERSCOPE than
 proseg_hybrid. Writes ``e8_human.csv``, ``e8_human_jsd.csv`` and
 ``e8_mouse.csv`` to ``--out``.
@@ -57,6 +57,7 @@ from merxen.annotation.shadow import (
     soft_matrix_from_provisional,
 )
 from merxen.annotation.vocab import HUMAN_BROAD_CLASSES, MOUSE_BROAD_CLASSES
+from merxen.privacy import to_alias
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from shadow_baselines import (  # noqa: E402
@@ -64,6 +65,7 @@ from shadow_baselines import (  # noqa: E402
     SectionTiles,
     _clustered_path,
     add_fallback_arguments,
+    data_pair,
     load_sample,
 )
 
@@ -111,7 +113,7 @@ def human_rows(
     n_segmented: dict[Any, int],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """E8 rows of the human pair."""
-    pair = args.pair
+    pair = data_pair(args.pair)
     rows: list[dict[str, Any]] = []
     jsd_rows: list[dict[str, Any]] = []
     for seg, run_dir in runs.items():
@@ -263,10 +265,12 @@ def human_rows(
 def mouse_rows(args: argparse.Namespace, runs: dict[str, Path]) -> list[dict[str, Any]]:
     """E8 rows of the mouse section."""
     qc = pd.read_csv(args.evidence_root / "research/lowcount/qc_summary.csv")
+    # ``--mouse-sample`` and the recorded sample names compared by alias.
+    mouse = to_alias(args.mouse_sample)
     segmented = {
         str(r.seg): int(r.n_cells)
         for r in qc.itertuples(index=False)
-        if str(r.sample) == args.mouse_sample
+        if to_alias(str(r.sample)) == mouse
     }
     rows: list[dict[str, Any]] = []
     class_shares: dict[str, pd.Series] = {}
@@ -381,10 +385,12 @@ def mouse_rows(args: argparse.Namespace, runs: dict[str, Path]) -> list[dict[str
 def main(argv: list[str] | None = None) -> int:
     """Compute the E8 comparison."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--pair", default="P1212")
+    parser.add_argument("--pair", default="HD2", help="alias or pair id")
     parser.add_argument("--human-run", action="append", default=[], metavar="SEG=DIR")
     parser.add_argument("--mouse-run", action="append", default=[], metavar="SEG=DIR")
-    parser.add_argument("--mouse-sample", default="ag7")
+    parser.add_argument(
+        "--mouse-sample", default="MS1", help="alias or the qc_summary sample name"
+    )
     parser.add_argument("--results-root", type=Path, required=True)
     parser.add_argument("--mouse-results-root", type=Path, required=True)
     parser.add_argument("--evidence-root", type=Path, required=True)

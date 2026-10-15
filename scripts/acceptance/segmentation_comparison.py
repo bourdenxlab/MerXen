@@ -2,8 +2,8 @@
 """M8b segmentation comparison, reseg vs proseg_hybrid (pre-registration §19).
 
 Implements the arms and analyses 1-4 of pre-registration §19 (plan §12 M8b)
-on the M8 stage B outputs of P7513, P1212, P7113 and P5011 (MERSCOPE and
-Xenium; P7113 and P5011 are held-out donors, reported separately: every
+on the M8 stage B outputs of HD1, HD2, HD3 and HD4 (MERSCOPE and
+Xenium; HD3 and HD4 are held-out donors, reported separately: every
 table carries ``role``). M8b scores nothing for gate H and fits no
 threshold: every number here is evidence for the user's OD-B7' decision.
 
@@ -150,6 +150,12 @@ results and the stores are read, never written):
 7. post hoc: ``controls --pair P --platform PLAT`` (the control features'
    tallies), then ``posthoc`` (``posthoc.csv``, after ``analyze``);
 8. ``render``: figures (PNG + PDF + CSV) and ``index.html``.
+
+Pairs are named here by their aliases (HD1, HD2 development; HD3, HD4 held
+out; docs/local-configuration.md). ``--pair`` and ``--pairs`` take aliases or
+the pair ids the data use; directories, files and the tables use the data's
+ids (``data_pair``), the role is looked up by alias and the page's headings
+name the pairs through ``privacy.display``.
 """
 
 from __future__ import annotations
@@ -181,11 +187,12 @@ from merxen.annotation import segmentation_compare as sc
 from merxen.annotation.panel import ControlRegistry
 from merxen.annotation.schema import safe_token
 from merxen.annotation.vocab import HUMAN_BROAD_CLASSES
+from merxen.privacy import display, to_alias, to_real
 
 logger = logging.getLogger("segmentation_comparison")
 
-PAIRS: Final[tuple[str, ...]] = ("P7513", "P1212", "P7113", "P5011")
-DEVELOPMENT_PAIRS: Final[frozenset[str]] = frozenset({"P7513", "P1212"})
+PAIRS: Final[tuple[str, ...]] = ("HD1", "HD2", "HD3", "HD4")
+DEVELOPMENT_PAIRS: Final[frozenset[str]] = frozenset({"HD1", "HD2"})
 PLATFORMS: Final[tuple[str, ...]] = ("MERSCOPE", "XENIUM")
 MAIN_ARMS: Final[tuple[str, ...]] = ("reseg", "hybrid", "hybrid_matched")
 CONTEXT_ARMS: Final[tuple[str, ...]] = ("proseg_mask", "original_seg")
@@ -360,9 +367,23 @@ SHARE_COLUMNS: Final[tuple[str, ...]] = (
 # Small utilities
 
 
+def data_pair(pair: str) -> str:
+    """Return the data's pair id of an alias or pair id (to_alias, then to_real)."""
+    return to_real(to_alias(pair))
+
+
+def pair_argument(value: str) -> str:
+    """``--pair``: one of ``PAIRS`` by alias or pair id; the data's pair id."""
+    if to_alias(value) not in PAIRS:
+        raise argparse.ArgumentTypeError(
+            f"unknown pair (choose from {', '.join(PAIRS)} or their pair ids)"
+        )
+    return data_pair(value)
+
+
 def role(pair: str) -> str:
     """Return ``development`` or ``held_out`` (pre-registration rule 3)."""
-    return "development" if pair in DEVELOPMENT_PAIRS else "held_out"
+    return "development" if to_alias(pair) in DEVELOPMENT_PAIRS else "held_out"
 
 
 def sample_id(pair: str, platform: str) -> str:
@@ -1052,7 +1073,7 @@ def build_farm(
     locations: Locations,
     arm: str,
     qc_summary: pd.DataFrame,
-    pairs: Sequence[str] = PAIRS,
+    pairs: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Link an arm's outputs where the acceptance scripts read proseg_hybrid.
 
@@ -1060,7 +1081,7 @@ def build_farm(
         locations: Inputs and outputs.
         arm: The arm.
         qc_summary: ``research/lowcount/qc_summary.csv``.
-        pairs: Pairs.
+        pairs: The data's pair ids (default: all four).
 
     Returns:
         The farm record (every link and its target).
@@ -1068,6 +1089,7 @@ def build_farm(
     Raises:
         SystemExit: If the farm exists or an input is missing.
     """
+    pairs = [data_pair(pair) for pair in PAIRS] if pairs is None else list(pairs)
     farm = locations.farm(arm)
     if farm.exists():
         raise SystemExit(f"{farm} exists (never overwritten)")
@@ -1119,12 +1141,12 @@ def build_farm(
 
 
 def _pairs(args: argparse.Namespace) -> list[str]:
-    """The pairs a step covers (``--pairs``; all four by default)."""
+    """The data's pair ids a step covers (``--pairs``; all four by default)."""
     pairs = [item for item in str(getattr(args, "pairs", "") or "").split(",") if item]
-    unknown = sorted(set(pairs) - set(PAIRS))
+    unknown = sorted(pair for pair in pairs if to_alias(pair) not in PAIRS)
     if unknown:
         raise SystemExit(f"unknown pairs: {unknown}")
-    return pairs or list(PAIRS)
+    return [data_pair(pair) for pair in pairs or PAIRS]
 
 
 def command_farms(args: argparse.Namespace) -> int:
@@ -2190,7 +2212,7 @@ def h12_rows(
             )
             continue
         try:
-            score = report_scoring.score_h12(items, pair_id=pair)
+            score = report_scoring.score_h12(items, pair_id=pair, alias=to_alias(pair))
         except ValueError as error:
             rows.append(
                 {
@@ -4321,7 +4343,8 @@ def series_colours(names: Iterable[str]) -> dict[str, str]:
         elif name in COMPARISON_COLOURS:
             out[name] = COMPARISON_COLOURS[name]
         else:
-            key = name.split(" ")[0] if name.split(" ")[0] in PAIRS else name
+            first = name.split(" ")[0]
+            key = first if to_alias(first) in PAIRS else name
             slot.setdefault(key, len(slot))
             out[name] = OTHER_PALETTE[slot[key] % len(OTHER_PALETTE)]
     return out
@@ -4824,8 +4847,8 @@ def _by_role(frame: pd.DataFrame | None, columns: Sequence[str] | None = None) -
         return _html_table(frame, columns)
     parts = []
     for value, title in (
-        ("development", "Development pairs (P7513, P1212)"),
-        ("held_out", "Held-out donors (P7113, P5011; reported separately)"),
+        ("development", display("Development pairs (HD1, HD2)")),
+        ("held_out", display("Held-out donors (HD3, HD4; reported separately)")),
     ):
         parts.append(
             f"<h4>{title}</h4>" + _html_table(frame[frame["role"] == value], columns)
@@ -5205,12 +5228,12 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     prepare = commands.add_parser("matched-prepare")
     _common(prepare)
-    prepare.add_argument("--pair", required=True, choices=PAIRS)
+    prepare.add_argument("--pair", required=True, type=pair_argument)
     prepare.add_argument("--seed", type=int, default=sc.THINNING_SEED)
     prepare.set_defaults(handler=command_matched_prepare)
     task = commands.add_parser("matched-task")
     _common(task)
-    task.add_argument("--pair", required=True, choices=PAIRS)
+    task.add_argument("--pair", required=True, type=pair_argument)
     task.add_argument("--process", required=True, choices=("MAP", "RESOLVE", "REPORT"))
     task.add_argument("--env-bin", default=str(Path(sys.executable).parent))
     task.add_argument("--dry-run", action="store_true")
@@ -5231,7 +5254,7 @@ def build_parser() -> argparse.ArgumentParser:
     acceptance.set_defaults(handler=command_acceptance)
     transcripts = commands.add_parser("transcripts")
     _common(transcripts)
-    transcripts.add_argument("--pair", required=True, choices=PAIRS)
+    transcripts.add_argument("--pair", required=True, type=pair_argument)
     transcripts.add_argument(
         "--platform",
         required=True,
@@ -5241,7 +5264,7 @@ def build_parser() -> argparse.ArgumentParser:
     transcripts.set_defaults(handler=command_transcripts)
     controls = commands.add_parser("controls")
     _common(controls)
-    controls.add_argument("--pair", required=True, choices=PAIRS)
+    controls.add_argument("--pair", required=True, type=pair_argument)
     controls.add_argument(
         "--platform",
         required=True,

@@ -840,7 +840,7 @@ class MouseGateConfig(_AnnotationModel):
         g2_min_group_markers: G2 leaves out class groups with fewer derived
             markers.
         g2_min_marker_units: Units the top group of a marker
-            pseudo-label needs (``data/P1212`` rule).
+            pseudo-label needs (``data/HD2`` rule).
         g2_min_marker_share: Its share of the summed units.
         g2_min_pseudo_confident: G2 is not evaluated with fewer
             pseudo-labelled table cells.
@@ -934,7 +934,7 @@ class AnnotationRealQcConfig(_AnnotationModel):
             fewer than two classes left the referee is ``not_evaluable``.
             Mouse G2 reads ``mouse_gate.g2_min_group_markers``.
         marker_referee_min_marker_units: Units the top class of a marker
-            pseudo-label needs (``data/P1212``'s rule, as mouse G2).
+            pseudo-label needs (``data/HD2``'s rule, as mouse G2).
         marker_referee_min_marker_share: Its share of the summed units.
         marker_referee_min_pseudo_confident: The referee is
             ``not_evaluable`` with fewer scored cells (marker-pseudo-labelled
