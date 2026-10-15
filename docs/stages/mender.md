@@ -92,7 +92,7 @@ They also record `cross_platform_comparable` and its reasons: niches may be
 compared across platforms (or datasets) only when both runs use
 `--mender_cell_state_key ct_mender_state` (plan §4.9) and the pair's scope
 allows its branch-level states (`full`). The default `hierarchical_cluster`
-follows each dataset's gate and resolvability (P1212 MERSCOPE, broad-only,
+follows each dataset's gate and resolvability (HD2 MERSCOPE, broad-only,
 has 11 branch-level states where its Xenium partner has 20 leaves), so its
 niches are recorded as not comparable (`state_key:hierarchical_cluster`);
 cross-platform niche comparison needs a `ct_mender_state` run.

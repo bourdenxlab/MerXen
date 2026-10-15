@@ -68,15 +68,15 @@ Relative paths resolve against the CSV's own directory.
 
 ```csv
 image_key,image_path,alignment_matrix,channel_names,registration_channel
-post_xenium_if,Slide511_s2.ome.tiff,Slide511_s2_matrix.csv,DAPI;AF568;AF647,DAPI
-post_xenium_if_r2,Slide511_s2_round2.ome.tiff,Slide511_s2_round2_matrix.csv,DAPI;GFAP;IBA1,
+post_xenium_if,slide01_s2.ome.tiff,slide01_s2_matrix.csv,DAPI;AF568;AF647,DAPI
+post_xenium_if_r2,slide01_s2_round2.ome.tiff,slide01_s2_round2_matrix.csv,DAPI;GFAP;IBA1,
 ```
 
 Use the **lossless original** image for registration. The 10x conversion script
 commonly used to make Xenium Explorer-compatible pyramids writes JPEG 2000 with
 `compressionargs={'level': 85}`. In `imagecodecs` that `level` is a target PSNR
 in dB against the 16-bit full scale, so the pyramid carries about 3.5 counts
-RMS error per pixel (on P7513 only ~11 % of level-0 pixels were bit-identical).
+RMS error per pixel (on HD1 only ~11 % of level-0 pixels were bit-identical).
 The original and its pyramid share the level-0 grid, so the matrix exported for
 the pyramid applies to the original unchanged. If a lossless pyramid is needed,
 `compressionargs={'reversible': True}` is lossless.
@@ -120,7 +120,7 @@ would point to tissue deformation; rectangular blocks with sharp edges point
 to tile-stitching differences between the two acquisitions. Neither can be
 removed by an affine.
 
-### Worked example: P7513 post-Xenium IF
+### Worked example: HD1 post-Xenium IF
 
 Zeiss orthogonal projection, 3 channels (DAPI, AF568, AF647), 0.3434 µm/px,
 33,453 × 31,347 px; Xenium `morphology_focus` 47,618 × 51,313 px at 0.2125 µm/px.
