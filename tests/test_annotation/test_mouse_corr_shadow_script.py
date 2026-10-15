@@ -63,7 +63,7 @@ GOOD = {
 }
 
 
-def test_the_ported_expected_classes_follow_the_ag7_report() -> None:
+def test_the_ported_expected_classes_follow_the_ms1_report() -> None:
     module = _load()
     assert module.expected_pseudo_for_mmc("30 Astro-Epen", "319 Astro-TE NN") == {
         "Astro"

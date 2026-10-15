@@ -3305,7 +3305,7 @@ def run_v7_diagnostic(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Compute version-7 decisions beside a bundle, never applying them.
 
-    For a version-6 family (set a, ag7, VZG2, the P5011 pin) the
+    For a version-6 family (set a, MS1, MS2, the HD4 pin) the
     ensemble A (the version-7 emission members of plan §8.3 v7.3 as amended
     on 2026-09-29: R1 x 8 without a measured table, or
     ``ensemble_r1_seeds`` / ``ensemble_r3_seeds``) is simulated on the

@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from merxen import privacy
 from merxen.annotation import vocab
 
 # The generator needs PyYAML, which pyproject.toml does not declare yet
@@ -215,7 +216,7 @@ def test_generator_reproduces_the_committed_tables(
     notice = result.files["NOTICE"]
     assert "CC BY-NC 4.0" in notice
     assert "WHB-taxonomy 20240330" in notice
-    assert "/media/" not in notice and "/srv/" not in notice
+    assert not privacy.find_host_paths(notice)
     assert len(result.inputs) == 6
 
 

@@ -233,6 +233,6 @@ floors:
     # §5.4 mouse v1 (MERSCOPE) [L]: class 20 and subclass 50 for every WMB
     # class; re-evaluated in M6.
     floor_source: design_v1
-    panel_families: [mouse_ag7, mouse_vzg2]
+    panel_families: [mouse_ms1, mouse_ms2]
     platforms: [MERSCOPE]
     min_counts: {class: 20, subclass: 50}

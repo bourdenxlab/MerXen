@@ -6,7 +6,7 @@ own test set and engine and written to ``--out-dir/<target>/v7_diagnostic``
 (never to a store; the bundle is only read):
 
 * **(vii) the version-6 families** (``whb_set_a_297``, ``whb_set_c_265``,
-  ``seaad_set_a``, ``wmb_ag7``, ``wmb_vzg2``; the SSD1 bundles of (i-b)):
+  ``seaad_set_a``, ``wmb_ms1``, ``wmb_ms2``; the SSD1 bundles of (i-b)):
   ensemble A = the version-7 emission members of a family without a
   measured table (stage D: ``R1_contam_HO@0``, ``@1``, ``@2``; since the
   amendment of 2026-09-29, pre-registration §22.3: ``R1_contam_HO@0``,
@@ -31,11 +31,17 @@ and mapping seed 0.
 Usage::
 
     python scripts/acceptance/m3c_v7_diagnostic.py --out-dir $A/m3c/v7_diagnostic \\
-        --targets whb_set_a_297,whb_set_c_265,seaad_set_a,wmb_ag7,wmb_vzg2
+        --targets whb_set_a_297,whb_set_c_265,seaad_set_a,wmb_ms1,wmb_ms2
 
     python scripts/acceptance/m3c_v7_diagnostic.py --out-dir $A/m3c/v7_churn \\
-        --targets prime5k_mouse --bundle /srv/storage/.../wmb_panel/<hash> \\
+        --targets prime5k_mouse \\
+        --bundle $MERXEN_REFERENCE_STORE_LARGE/wmb_panel/<hash> \\
         --ensemble-b comparator
+
+The version-6 bundles are read from ``$MERXEN_LEGACY_REFERENCE_STORE`` and
+test sets also from ``$MERXEN_REFERENCE_STORE_LARGE`` (``.env``). A target
+may name a section by its real name or its alias (``wmb_ms1``); the output
+directories and records show it through ``privacy.display``.
 """
 
 from __future__ import annotations
@@ -53,19 +59,25 @@ from typing import Any, cast
 
 import pandas as pd
 
+from merxen import local_config
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from sample_labels import alias_key, display_text, display_tree  # noqa: E402
+
 logger = logging.getLogger("m3c_v7_diagnostic")
 
-STORE = Path("/media/mathieubo/SSD1/MerXen/annotation_references")
-LARGE = Path("/srv/storage/MerXen/annotation_references_large")
+STORE_VARIABLE = "MERXEN_LEGACY_REFERENCE_STORE"
+LARGE_VARIABLE = "MERXEN_REFERENCE_STORE_LARGE"
 # name -> (reference id, bundle hash prefix, validated_panel_genes.csv panel id,
 # platform of the chemistry resolution)
 V6_TARGETS: dict[str, tuple[str, str, str, str | None]] = {
     "whb_set_a_297": ("whb_frontal_supc_clus", "b6bfe83d", "human_set_a_297", None),
     "whb_set_c_265": ("whb_frontal_supc_clus", "5137090d", "human_set_c_265", None),
     "seaad_set_a": ("seaad_mr_panel", "d70cda25", "human_set_a_297", None),
-    "wmb_ag7": ("wmb_panel", "5a032858", "mouse_ag7_500", "MERSCOPE"),
-    "wmb_vzg2": ("wmb_panel", "daa8c4a6", "mouse_vzg2_815", "MERSCOPE"),
+    "wmb_ms1": ("wmb_panel", "5a032858", "mouse_ms1_500", "MERSCOPE"),
+    "wmb_ms2": ("wmb_panel", "daa8c4a6", "mouse_ms2_815", "MERSCOPE"),
 }
+PRIME5K_TARGET = "prime5k_mouse"
 # Stage D's fresh ensemble B (the failed test (iii); never re-used to evaluate
 # the amendment of 2026-09-29).
 STAGE_D_R1_SEEDS: tuple[int, ...] = (3, 4, 5)
@@ -73,8 +85,12 @@ STAGE_D_R3_SEEDS: tuple[int, ...] = (1,)
 ENSEMBLE_B_CHOICES = ("comparator", "stage_d")
 
 
+def _store() -> Path:
+    return local_config.require_path(STORE_VARIABLE, "the version-6 bundles")
+
+
 def _bundle(reference_id: str, prefix: str) -> Path:
-    matches = sorted((STORE / reference_id).glob(f"{prefix}*"))
+    matches = sorted((_store() / reference_id).glob(f"{prefix}*"))
     if len(matches) != 1:
         raise SystemExit(f"{reference_id}/{prefix}: {len(matches)} bundles")
     return matches[0]
@@ -152,7 +168,7 @@ def run_target(
         ensembl_ids=panel_genes,
     )
     chemistry = si.resolve_chemistry(panel_genes, species=species, platform=platform)
-    target_out = out_dir / name
+    target_out = out_dir / display_text(name)
     target_out.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     started_at = datetime.now(UTC).isoformat(timespec="seconds")
@@ -169,14 +185,17 @@ def run_target(
             chemistry=chemistry,
             out_dir=target_out,
             scratch_dir=scratch_dir / name,
-            store_roots=[STORE, LARGE],
+            store_roots=[
+                _store(),
+                local_config.require_path(LARGE_VARIABLE, "the large store"),
+            ],
             fresh_seeds=STAGE_D_R1_SEEDS if ensemble_b == "stage_d" else None,
             fresh_r3_seeds=STAGE_D_R3_SEEDS if ensemble_b == "stage_d" else None,
             comparator=ensemble_b == "comparator",
         )
     peak = sampler.peak()
     resources = {
-        "target": name,
+        "target": display_text(name),
         "bundle": str(bundle),
         "ensemble_b": ensemble_b,
         "started_at": started_at,
@@ -235,8 +254,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     scratch = args.scratch_dir or args.out_dir / "scratch"
     results = []
-    for name in [item.strip() for item in args.targets.split(",") if item.strip()]:
-        if name == "prime5k_mouse":
+    for target in [item.strip() for item in args.targets.split(",") if item.strip()]:
+        name = alias_key(target, (*V6_TARGETS, PRIME5K_TARGET))
+        if name == PRIME5K_TARGET:
             if args.bundle is None:
                 raise SystemExit("prime5k_mouse needs --bundle")
             results.append(
@@ -264,9 +284,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
         (args.out_dir / "RESOURCES.json").write_text(
-            json.dumps(results, indent=2) + "\n"
+            json.dumps(display_tree(results), indent=2) + "\n"
         )
-    (args.out_dir / "RESOURCES.json").write_text(json.dumps(results, indent=2) + "\n")
+    (args.out_dir / "RESOURCES.json").write_text(
+        json.dumps(display_tree(results), indent=2) + "\n"
+    )
     return 0
 
 

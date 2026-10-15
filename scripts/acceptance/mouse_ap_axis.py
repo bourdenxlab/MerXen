@@ -6,7 +6,7 @@ numbered §17 on the M6b branch and in the M6b evidence under ``$A/m6b``),
 plan §7.8 items 1, 2 and 4, MO10 (§14). The inputs are stage A's unpruned
 production WMB mappings of the 38 in-scope sections' 30k subsamples on the
 three gene sets (``--mouse-section-regions none``) and the M6 MAP outputs of
-ag7 proseg_hybrid and VZG2 original_seg. Subcommands, each writing under
+MS1 proseg_hybrid and MS2 original_seg. Subcommands, each writing under
 ``--out``:
 
 1. ``tables``: the MERFISH CCF view's per-section counts
@@ -16,7 +16,7 @@ ag7 proseg_hybrid and VZG2 original_seg. Subcommands, each writing under
    order of all 53 sections), each section's CCF regions (>= 1% and > 0.2%
    of its grey-matter cells) and the Allen confident-neuron subclass counts
    per section (AP-estimate validation).
-2. ``plan``: per section x gene set (and ag7 / VZG2) and per candidate rule
+2. ``plan``: per section x gene set (and MS1 / MS2) and per candidate rule
    (v1 plus the 95 candidates of (a)-(d) x (f)), the production region step
    (``mouse_regions.plan_region_step``) with the leave-neighbours-out shares:
    inferred, CCF, missed and extra regions, the drop list, the cells to
@@ -31,10 +31,10 @@ ag7 proseg_hybrid and VZG2 original_seg. Subcommands, each writing under
 4. ``summarise``: T2 after pruning (``mouse_gate.t2_share`` on the pruned
    subclass calls with the candidate's present regions and never-drop
    nodes), the Allen labels' T2 with the same regions and T2 subclasses
-   (``t2_allen``), relabelled cells, MO2 on ag7 and VZG2, the per-AP-bin
+   (``t2_allen``), relabelled cells, MO2 on MS1 and MS2, the per-AP-bin
    tables, the candidate table and the pre-registered selection (lowest
    maximum direct harm over the 38 sections and 3 gene sets, subject to MO2
-   on ag7 and VZG2 and constraint (ii) on T2; ties: fewer changes from v1,
+   on MS1 and MS2 and constraint (ii) on T2; ties: fewer changes from v1,
    then fewer drop decisions differing from v1, then the label). Constraint
    (ii) has two readings, both reported (``--t2-reading``):
    ``allen-relative`` (the default; §24 amendment of 2026-10-14, U1:
@@ -56,16 +56,23 @@ Usage::
     mouse_ap_axis.py tables --ccf-metadata VIEW.csv --region-share-bundle DIR \
         --section-table section_region_share.csv --out OUT
     mouse_ap_axis.py plan --out OUT --mapping-done DONE_DIR --subsamples DIR \
-        --real ag7=MAP_DIR --real vzg2=MAP_DIR --region-share-bundle DIR
+        --real ms1=MAP_DIR --real ms2=MAP_DIR --region-share-bundle DIR
     mouse_ap_axis.py remap --out OUT --gene-id-fallback-csv gene.csv \
         [--worker I --n-workers N --n-processors P]
     mouse_ap_axis.py summarise --out OUT --mapping-done DONE_DIR \
-        --subsamples DIR --real ag7=MAP_DIR --real vzg2=MAP_DIR \
+        --subsamples DIR --real ms1=MAP_DIR --real ms2=MAP_DIR \
         --region-share-bundle DIR [--taxonomy-bundle WMB_PANEL_DIR] \
         [--t2-reading allen-relative|registered]
     mouse_ap_axis.py mo10 --out OUT --preregistration PREREG.md
     mouse_ap_axis.py ap-estimate --out OUT --region-share-bundle DIR \
         --mapping-done DONE_DIR --subsamples DIR
+
+Sample names: the two real sections and their gene sets are named in the
+inputs (the mapping-done records, ``--real``) and the outputs as the data
+names them, ``privacy.to_real(form="name")`` of the aliases this script
+holds (``ms1``, ``ms2``): on a host with the alias table the names of the
+recorded M6b runs; ``--real`` and ``--gene-set`` accept a real name or an
+alias.
 
 Imports: numpy, pandas and merxen (the merxen analysis env; ``remap`` needs
 ``cell_type_mapper``).
@@ -91,6 +98,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from merxen import privacy
 from merxen.annotation.config import MouseRegionConfig
 from merxen.annotation.mouse_ap import (
     AP_BIN_LABELS,
@@ -122,8 +130,9 @@ from merxen.annotation.schema import meets_threshold
 
 logger = logging.getLogger("mouse_ap_axis")
 
-GENE_SETS: tuple[str, ...] = ("merfish500", "merfish_ag7", "merfish_vzg2")
-REAL_DATASETS: tuple[str, ...] = ("ag7", "vzg2")
+# Aliases; the data names them by ``data_name`` (privacy.to_real(form="name")).
+GENE_SETS: tuple[str, ...] = ("merfish500", "merfish_ms1", "merfish_ms2")
+REAL_DATASETS: tuple[str, ...] = ("ms1", "ms2")
 CLASS_LEVEL = "CCN20230722_CLAS"
 SUBCLASS_LEVEL = "CCN20230722_SUBC"
 PRIMARY_RUN = "wmb_panel"
@@ -157,11 +166,38 @@ T2_READINGS: tuple[str, ...] = (T2_READING_ALLEN, T2_READING_REGISTERED)
 T2_ALLEN_TOLERANCE = 1e-12
 # A selection under the Allen-relative reading is recorded after this heading.
 T2_ALLEN_AMENDMENT_HEADING = "### Amendment of 2026-10-14 (U1)"
-# E7 PRESENT_MANUAL: the manual anatomy of ag7 and VZG2 (MO3).
+# E7 PRESENT_MANUAL: the manual anatomy of MS1 and MS2 (MO3).
 MANUAL_REGIONS: dict[str, tuple[str, ...]] = {
-    "ag7": ("Isocortex", "OLF", "HPF", "CTXsp", "TH", "HY", "MB"),
-    "vzg2": ("Isocortex", "OLF", "HPF", "CTXsp", "TH", "HY", "MB"),
+    "ms1": ("Isocortex", "OLF", "HPF", "CTXsp", "TH", "HY", "MB"),
+    "ms2": ("Isocortex", "OLF", "HPF", "CTXsp", "TH", "HY", "MB"),
 }
+
+
+def data_name(name: str) -> str:
+    """Return how the data names a real section or gene set (an alias or not).
+
+    The recorded runs name them by the sections' display names
+    (``privacy.to_real(form="name")`` of the alias; R2 then R3).
+
+    Raises:
+        LocalConfigError: If no alias table is found and it is not disabled.
+    """
+    aliased = privacy.to_alias(name)
+    for key in (*REAL_DATASETS, *GENE_SETS):
+        if aliased.casefold() == key.casefold():
+            aliased = key
+            break
+    return privacy.to_real(aliased, form="name")
+
+
+def manual_regions(name: str) -> tuple[str, ...]:
+    """Return the manual regions (MO3) of a real section, by any name."""
+    aliased = privacy.to_alias(name).casefold()
+    return next(
+        regions for key, regions in MANUAL_REGIONS.items() if key.casefold() == aliased
+    )
+
+
 CCF_COLUMNS: tuple[str, ...] = (
     "cell_label",
     "brain_section_label",
@@ -536,12 +572,12 @@ def section_shares(
 
 @dataclass
 class Dataset:
-    """One scored query: a MERFISH section x gene set, or ag7 / VZG2.
+    """One scored query: a MERFISH section x gene set, or MS1 / MS2.
 
     Attributes:
         key: ``<gene_set>/<section>`` or ``real/<name>``.
         kind: ``merfish`` or ``real``.
-        gene_set: The gene set (``real`` for ag7 / VZG2).
+        gene_set: The gene set (``real`` for MS1 / MS2).
         section: The MERFISH section (the dataset name for real data).
         map_dir: The MAP output directory.
         bundle_path: The primary run's bundle.
@@ -635,7 +671,7 @@ def load_merfish_dataset(done: Mapping[str, Any], subsamples: Path) -> Dataset:
 
 
 def load_real_dataset(name: str, map_dir: Path) -> Dataset:
-    """Load an M6 MAP output (ag7 / VZG2) with its table cells' coordinates.
+    """Load an M6 MAP output (MS1 / MS2) with its table cells' coordinates.
 
     The coordinates are the H5AD's ``obsm["spatial"]`` matched by cell id,
     as ``pipeline._table_xy``.
@@ -738,7 +774,7 @@ def dataset_taxonomy(data: Dataset, override: str | None) -> WmbTaxonomy:
 
 
 def full_shares(bundle_dir: Path, structure_home: pd.DataFrame) -> RegionShares:
-    """The store bundle's shares with the full structure homes (ag7 / VZG2)."""
+    """The store bundle's shares with the full structure homes (MS1 / MS2)."""
     return RegionShares.from_tables(
         pd.read_parquet(bundle_dir / REGION_SHARE_FILE),
         pd.read_parquet(bundle_dir / REGION_HOME_FILE),
@@ -1062,7 +1098,9 @@ def plan_command(args: argparse.Namespace) -> int:
     done_files = sorted(Path(args.mapping_done).glob("*.json"))
     for path in done_files:
         done = json.loads(path.read_text())
-        if args.gene_set and done["gene_set"] not in args.gene_set:
+        if args.gene_set and done["gene_set"] not in {
+            data_name(name) for name in args.gene_set
+        }:
             continue
         if args.section and section_label(done["pair"]) not in args.section:
             continue
@@ -1071,6 +1109,7 @@ def plan_command(args: argparse.Namespace) -> int:
         )
     for item in args.real or []:
         name, _, map_dir = item.partition("=")
+        name = data_name(name)
         tasks.append(
             (
                 "real",
@@ -1491,7 +1530,7 @@ def candidate_table(
 
     Args:
         merfish: The in-scope MERFISH section rows.
-        real: The ag7 / VZG2 rows.
+        real: The MS1 / MS2 rows.
         bins: The per-bin rows.
         t2_reading: The reading of constraint (ii) that decides
             ``t2_ok`` and ``admissible`` (``T2_READINGS``); both readings'
@@ -1504,6 +1543,8 @@ def candidate_table(
         ValueError: For an unknown T2 reading.
     """
     _check_t2_reading(t2_reading)
+    # The real sections as the plan rows name them (data names).
+    names = {alias: data_name(alias) for alias in REAL_DATASETS}
     v1 = merfish[merfish["candidate"] == "v1"].set_index(["dataset"])["nodes"]
     v1_pairs = {
         dataset: {
@@ -1528,7 +1569,7 @@ def candidate_table(
         excess = _t2_excess(cand_bins)
         real_part = real[real["candidate"] == label]
         mo2: dict[str, bool | None] = {}
-        for name in REAL_DATASETS:
+        for name in names.values():
             entry = real_part[real_part["section"] == name]
             if entry.empty:
                 mo2[name] = None
@@ -1557,8 +1598,7 @@ def candidate_table(
                 "n_t2_bins_above_allen": int(
                     (excess.isna() | (excess > T2_ALLEN_TOLERANCE)).sum()
                 ),
-                "mo2_ag7": mo2.get("ag7"),
-                "mo2_vzg2": mo2.get("vzg2"),
+                **{f"mo2_{name}": mo2.get(name) for name in names.values()},
                 "mo2_ok": all(value is True for value in mo2.values()),
                 "admissible": t2_ok and all(value is True for value in mo2.values()),
                 "n_changes": candidate.n_changes,
@@ -1570,12 +1610,12 @@ def candidate_table(
                 "n_remap_missing": int(
                     part.get("remap_missing", pd.Series(False)).sum()
                 ),
-                "ag7_regions": real_part[real_part["section"] == "ag7"][
-                    "inferred"
-                ].tolist(),
-                "vzg2_regions": real_part[real_part["section"] == "vzg2"][
-                    "inferred"
-                ].tolist(),
+                **{
+                    f"{name}_regions": real_part[real_part["section"] == name][
+                        "inferred"
+                    ].tolist()
+                    for name in names.values()
+                },
             }
         )
     return pd.DataFrame(rows)
@@ -1625,7 +1665,10 @@ def summarise_command(args: argparse.Namespace) -> int:
     for path in sorted(Path(args.mapping_done).glob("*.json")):
         done = json.loads(path.read_text())
         done_by_key[f"{done['gene_set']}/{section_label(done['pair'])}"] = str(path)
-    real_dirs = dict(item.partition("=")[::2] for item in (args.real or []))
+    real_dirs = {
+        data_name(name): path
+        for name, path in (item.partition("=")[::2] for item in (args.real or []))
+    }
     tasks = []
     for path in sorted((out / "plan" / "rows").glob("*.parquet")):
         key = path.stem.replace("__", "/")
@@ -1720,8 +1763,7 @@ def candidates_report(
         "t2_ok_registered",
         "t2_ok_allen",
         "max_t2_excess_over_allen",
-        "mo2_ag7",
-        "mo2_vzg2",
+        *(f"mo2_{data_name(name)}" for name in REAL_DATASETS),
         "admissible",
         "n_changes",
         "n_drop_decisions_differing",
@@ -1998,7 +2040,7 @@ def mo10_command(args: argparse.Namespace) -> int:
     ].to_dict("records")
     verdict["mo3"] = {
         str(row["section"]): set(_split(row["inferred"]))
-        == set(MANUAL_REGIONS[str(row["section"])])
+        == set(manual_regions(str(row["section"])))
         for row in rows.to_dict("records")
     }
     _write_json(out / "mo10" / "mo10.json", verdict)
@@ -2126,7 +2168,9 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--out", required=True)
     plan.add_argument("--mapping-done", required=True)
     plan.add_argument("--subsamples", required=True)
-    plan.add_argument("--real", action="append", help="NAME=MAP_DIR (ag7, vzg2)")
+    plan.add_argument(
+        "--real", action="append", help="NAME=MAP_DIR (ms1, ms2: alias or real name)"
+    )
     plan.add_argument("--region-share-bundle", required=True)
     plan.add_argument("--gene-set", action="append")
     plan.add_argument("--section", action="append")

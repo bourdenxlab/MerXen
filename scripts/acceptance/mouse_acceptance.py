@@ -4,7 +4,7 @@
 Two subcommands. Both read their inputs read-only and write only to ``--out``.
 
 ``score``
-    Scores the mouse criteria of §9 (MO1-MO11) on ag7 and VZG2 with the gate
+    Scores the mouse criteria of §9 (MO1-MO11) on MS1 and MS2 with the gate
     M scoring protocol of pre-registration §25, then writes ``summary.json``,
     ``summary.html`` and ``tables/`` to ``--out``.
 
@@ -66,10 +66,17 @@ panels and nothing else).
 **Provenance.** Before anything is measured, every bundle path the inputs
 name (the reports' provenance, the MAP manifests, the resolve summaries,
 the PREP ``bundle_ref.json`` files, the negative control) must resolve to a
-real path inside ``/srv/storage/MerXen/annotation_references``. A path that
-is outside it as written is refused without being touched, so no SSD1 path
-is ever read. Any failure stops the scoring: every row is ``UNSCORED
+real path inside the reference store (``$MERXEN_REFERENCE_STORE``). A path
+that is outside it as written is refused without being touched, so no SSD1
+path is ever read. Any failure stops the scoring: every row is ``UNSCORED
 (provenance)``, the summary is still written, and the exit status is 3.
+
+**Sample names.** The datasets are keyed by their aliases (``ms1``, ``ms2``;
+docs/local-configuration.md). Keys read from the command line or a recorded
+file (``--dataset``, ``--pseudo-labels``, ``--sampler``, ``--mo2-full``, the
+exceptions' scopes, ``mo10.json``'s gene sets) may name a section by its real
+name or its alias; the outputs show the names through ``privacy.display``
+(``sample_labels``), so on a host with the alias table they are as before.
 
 **Verdicts** (``report_scoring``'s vocabulary): ``PASS``; ``FAIL``; ``FAIL
 (excepted)``; ``NOT_AVAILABLE`` (a scored row that could not be measured);
@@ -117,7 +124,9 @@ from typing import Any, Final
 import numpy as np
 import pandas as pd
 
+from merxen import local_config, privacy
 from merxen.annotation import report_scoring as sc
+from merxen.local_config import LocalConfigError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mouse_corr_shadow as corr  # noqa: E402
@@ -129,26 +138,31 @@ from mouse_ap_axis import (  # noqa: E402
     candidate_by_label,
 )
 from run_acceptance import load_trace  # noqa: E402
+from sample_labels import alias_key, display_tree  # noqa: E402
 
 logger = logging.getLogger("mouse_acceptance")
 
 REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 PREREGISTRATION: Final = REPO_ROOT / "docs/acceptance/annotation-v1-preregistration.md"
-# §25.3: every bundle comes from this store; nothing from SSD1.
-STORE_ROOT: Path = Path("/srv/storage/MerXen/annotation_references")
-EVIDENCE_ROOT: Final = Path("/srv/storage/MerXen/annotation_dev/evidence_20260926")
+# §25.3: every bundle comes from this store ($MERXEN_REFERENCE_STORE; tests
+# set this attribute); nothing from SSD1.
+STORE_ROOT: Path | None = None
+STORE_VARIABLE: Final = "MERXEN_REFERENCE_STORE"
+EVIDENCE_VARIABLE: Final = "MERXEN_EVIDENCE_ROOT"
+# MO1's marker pseudo-labels under the evidence root, whose mouse directories
+# are named by the sections' display names (privacy.to_real(form="name")).
 PSEUDO_LABELS: Final[dict[str, str]] = {
-    "ag7": "data/mouse_ag7/out/tables/C_pseudo_labels_per_cell.csv",
-    "vzg2": "data/mouse_vzg2/tables/C_pseudo_labels_per_cell_original_seg.csv.gz",
+    "ms1": "data/mouse_ms1/out/tables/C_pseudo_labels_per_cell.csv",
+    "ms2": "data/mouse_ms2/tables/C_pseudo_labels_per_cell_original_seg.csv.gz",
 }
 
-DATASETS: Final = ("ag7", "vzg2")
+DATASETS: Final = ("ms1", "ms2")
 SEGMENTATIONS: Final = ("original_seg", "proseg_hybrid", "reseg", "proseg_mask")
-# §9: "on proseg_hybrid unless stated"; VZG2's stated segmentation is
+# §9: "on proseg_hybrid unless stated"; MS2's stated segmentation is
 # original_seg (MO1, MO4, MO7); §24 constraint (i) names the same two.
 SCORED_SEGMENTATION: Final[dict[str, str]] = {
-    "ag7": "proseg_hybrid",
-    "vzg2": "original_seg",
+    "ms1": "proseg_hybrid",
+    "ms2": "original_seg",
 }
 # §9: "on proseg_hybrid unless stated". §25.2.1 (a tightening, recorded on
 # 2026-10-14 before any gate M run): the criteria that name no segmentation
@@ -160,7 +174,7 @@ SCORED_UNNAMED: Final[dict[str, tuple[str, ...]]] = {
     dataset: tuple(dict.fromkeys((segmentation, DEFAULT_SEGMENTATION)))
     for dataset, segmentation in SCORED_SEGMENTATION.items()
 }
-NEGATIVE_CONTROL: Final = "vzg2_invalid"
+NEGATIVE_CONTROL: Final = "ms2_invalid"
 FLIP_CRITERIA: Final = ("MO1", "MO2", "MO3", "MO4", "MO5", "MO6", "MO7", "MO8", "MO10")
 REPORTED_CRITERIA: Final = ("MO9", "MO11", "H18")
 TOLERANCE: Final = 1e-12
@@ -176,7 +190,7 @@ FULL_REMAP_RECORD: Final = "full_remap.json"
 FULL_REMAP_PARQUET: Final = "{sample_id}_mmc_wmb_panel_fullpruned.parquet"
 
 # §9 thresholds (plan §14, verbatim there).
-MO1_MIN: Final[dict[str, float]] = {"ag7": 0.89, "vzg2": 0.84}
+MO1_MIN: Final[dict[str, float]] = {"ms1": 0.89, "ms2": 0.84}
 MO2_LIMITS: Final[dict[str, float]] = {
     "t2_after": 0.001,
     "class_changes_outside": 0.0025,
@@ -189,11 +203,11 @@ MO4_FIXED_WINDOW: Final = (
 )
 ASTRO_EPEN: Final = "30 Astro-Epen"
 IMMUNE: Final = "34 Immune"
-# Points (percentage points of the allocated soft mass): VZG2 original_seg
-# Immune +-0.5 and Astro-Epen +-3; ag7 +-1 / +-5 [L; age caveat].
+# Points (percentage points of the allocated soft mass): MS2 original_seg
+# Immune +-0.5 and Astro-Epen +-3; MS1 +-1 / +-5 [L; age caveat].
 MO4_BANDS: Final[dict[str, dict[str, float]]] = {
-    "vzg2": {"astro_epen": 3.0, "immune": 0.5},
-    "ag7": {"astro_epen": 5.0, "immune": 1.0},
+    "ms2": {"astro_epen": 3.0, "immune": 0.5},
+    "ms1": {"astro_epen": 5.0, "immune": 1.0},
 }
 MO4_CLASSES: Final[dict[str, str]] = {"astro_epen": ASTRO_EPEN, "immune": IMMUNE}
 MO5_ENRICHMENT_MIN: Final = 10.0
@@ -215,7 +229,7 @@ MO10_LIMITS: Final[dict[str, float]] = {
     "missed_region": 0.001,
 }
 # §24: MO10 "passes when all three gene sets pass" (M6b-R's mo10.json keys).
-MO10_GENE_SETS: Final = ("merfish500", "merfish_ag7", "merfish_vzg2")
+MO10_GENE_SETS: Final = ("merfish500", "merfish_ms1", "merfish_ms2")
 MO11_ANTERIOR_AP_MM: Final = 6.0
 
 ANNOTATION_PROCESSES: Final = (
@@ -381,7 +395,7 @@ class Row:
     Attributes:
         criterion: ``MO1`` ... ``MO11`` or ``H18``.
         part: The part of the criterion (``marker_consistency`` ...).
-        dataset: ``ag7``, ``vzg2``, ``vzg2_invalid``, ``MERFISH`` or a bundle.
+        dataset: ``ms1``, ``ms2``, ``ms2_invalid``, ``MERFISH`` or a bundle.
         segmentation: The segmentation (``all``: a 4-segmentation section).
         value: The measured value (``None``: not measured).
         comparator: ``<=``, ``>=``, ``==``, ``|x| <=``, ``in``, ``!=`` or
@@ -539,6 +553,9 @@ class ApprovedException:
         approved: The approval date (ISO).
         quote: The user's approval, verbatim.
         recorded_in: Where the approval is recorded.
+        match_scope: The scope rows are matched with: its strings through
+            ``alias_key`` (an exception names a section by its real name or
+            its alias; R2). ``scope`` is recorded as written.
     """
 
     id: str
@@ -547,6 +564,7 @@ class ApprovedException:
     approved: str
     quote: str
     recorded_in: str = ""
+    match_scope: Mapping[str, Any] = field(default_factory=dict)
 
     def to_json(self: ApprovedException) -> dict[str, Any]:
         """Return the JSON record."""
@@ -638,9 +656,21 @@ def parse_exceptions(payload: Any) -> list[ApprovedException]:
                 approved=approved,
                 quote=quote,
                 recorded_in=str(entry.get("recorded_in") or ""),
+                match_scope={
+                    key: value if key in EXCEPTION_BOUNDS else _scope_keys(value)
+                    for key, value in scope.items()
+                },
             )
         )
     return out
+
+
+def _scope_keys(value: str | list[str]) -> str | list[str]:
+    """A scope value with section names as the script's keys (R2)."""
+    keys = (*DATASETS, NEGATIVE_CONTROL, *MO10_GENE_SETS)
+    if isinstance(value, str):
+        return alias_key(value, keys)
+    return [alias_key(item, keys) for item in value]
 
 
 def _scope_values(value: Any) -> list[str]:
@@ -681,7 +711,7 @@ def exception_covers(exception: ApprovedException, row: Row) -> tuple[bool, bool
     if exception.criterion != row.criterion:
         return False, False
     keys = row.full_scope()
-    for key, allowed in exception.scope.items():
+    for key, allowed in (exception.match_scope or exception.scope).items():
         if key in EXCEPTION_BOUNDS:
             continue
         options = [allowed] if isinstance(allowed, str) else list(allowed)
@@ -876,7 +906,7 @@ class SegOutputs:
     """One dataset x segmentation's published outputs (read-only).
 
     Attributes:
-        dataset: ``ag7`` or ``vzg2``.
+        dataset: ``ms1`` or ``ms2``.
         segmentation: The segmentation.
         root: The dataset's results root (``<outdir>/<pair>``).
         report: ``acceptance_metrics.json``, if present.
@@ -1044,7 +1074,7 @@ def mo1_measure(
     """Return MO1 over all marker-pseudo-confident table cells (M6's method).
 
     Args:
-        dataset: ``ag7`` or ``vzg2`` (the pseudo-label method).
+        dataset: ``ms1`` or ``ms2`` (the pseudo-label method).
         labels: The label table, indexed by cell id.
         pseudo: The dataset's marker pseudo-labels, indexed by cell id.
 
@@ -1053,7 +1083,7 @@ def mo1_measure(
         ``confident_cell_value`` (marker consistency of the confident class
         calls) and ``n_pseudo_confident``.
     """
-    scorer = corr.score_ag7 if dataset == "ag7" else corr.score_vzg2
+    scorer = corr.score_ms1 if dataset == "ms1" else corr.score_ms2
     scored = scorer(labels, pseudo)
     frame, mo1 = corr.dataset_tables(labels, scored)
     row = frame[(frame["floor"] == "none") & (frame["depth_bin"] == "all")]
@@ -1069,7 +1099,7 @@ def mo1_rows(
     pseudo_paths: Mapping[str, Path],
     measured: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[Row]:
-    """MO1: ag7 proseg_hybrid >= 0.89, VZG2 original_seg >= 0.84 (§9).
+    """MO1: MS1 proseg_hybrid >= 0.89, MS2 original_seg >= 0.84 (§9).
 
     Args:
         outputs: The datasets' outputs.
@@ -1549,7 +1579,7 @@ def mo4_rows(
 
 
 def mo5_rows(outputs: Mapping[str, Mapping[str, SegOutputs]]) -> list[Row]:
-    """MO5: VZG2 held-out enrichment >= 10x; astrocyte FPR <= 0.5%.
+    """MO5: MS2 held-out enrichment >= 10x; astrocyte FPR <= 0.5%.
 
     Both are scored on every segmentation of ``SCORED_UNNAMED`` (§25.2.1):
     the enrichment on the second section's (§9 names that section), the
@@ -1572,7 +1602,7 @@ def mo5_rows(outputs: Mapping[str, Mapping[str, SegOutputs]]) -> list[Row]:
                 ">=",
                 MO5_ENRICHMENT_MIN,
                 at_least(enrichment, MO5_ENRICHMENT_MIN),
-                primary and dataset == "vzg2",
+                primary and dataset == "ms2",
                 "acceptance_metrics.json (resolve summary spillover_checks)",
                 note=note,
             )
@@ -1663,7 +1693,7 @@ def mo7_rows(
     *,
     negative_bundles_checked: bool = True,
 ) -> list[Row]:
-    """MO7: the invalid VZG2 proseg_hybrid ``failed``; the scored sets not.
+    """MO7: the invalid MS2 proseg_hybrid ``failed``; the scored sets not.
 
     Args:
         outputs: The datasets' outputs.
@@ -2078,7 +2108,7 @@ def mo8_prep_rows(
 
 
 # ---------------------------------------------------------------------------
-# MO9 [L]: VZG2 registration and soft class JSD vs original_seg
+# MO9 [L]: MS2 registration and soft class JSD vs original_seg
 
 
 def soft_class_vector(out: SegOutputs | None) -> dict[str, float] | None:
@@ -2110,21 +2140,21 @@ def js_distance(p: Mapping[str, float], q: Mapping[str, float]) -> float:
 
 
 def mo9_rows(outputs: Mapping[str, Mapping[str, SegOutputs]]) -> list[Row]:
-    """MO9 [L] (reported): VZG2 registration passes; JSD vs original_seg <= 0.05.
+    """MO9 [L] (reported): MS2 registration passes; JSD vs original_seg <= 0.05.
 
     MO9 gates the use of the reseg and proseg outputs, not the flip (§9), so
-    every row is reported. ag7's JSD against proseg_hybrid is information,
+    every row is reported. MS1's JSD against proseg_hybrid is information,
     as at the M6 exit.
     """
     rows = []
     for segmentation in SEGMENTATIONS:
-        out = _get(outputs, "vzg2", segmentation)
+        out = _get(outputs, "ms2", segmentation)
         status = (out.gate.get("signal_status") or {}).get("g1") if out else None
         rows.append(
             Row(
                 "MO9",
                 "registration_g1",
-                "vzg2",
+                "ms2",
                 segmentation,
                 status,
                 "==",
@@ -2132,7 +2162,7 @@ def mo9_rows(outputs: Mapping[str, Mapping[str, SegOutputs]]) -> list[Row]:
                 None if status is None else str(status) == "pass",
                 False,
                 "resolve summary mouse_gate signal_status",
-                note=_missing(outputs, "vzg2"),
+                note=_missing(outputs, "ms2"),
                 beside={
                     "g1_density_ratio": out.value("MO7", "g1_density_ratio")
                     if out
@@ -2140,7 +2170,7 @@ def mo9_rows(outputs: Mapping[str, Mapping[str, SegOutputs]]) -> list[Row]:
                 },
             )
         )
-    for dataset, base in (("vzg2", "original_seg"), ("ag7", "proseg_hybrid")):
+    for dataset, base in (("ms2", "original_seg"), ("ms1", "proseg_hybrid")):
         reference = soft_class_vector(_get(outputs, dataset, base))
         for segmentation in SEGMENTATIONS:
             if segmentation == base:
@@ -2161,7 +2191,7 @@ def mo9_rows(outputs: Mapping[str, Mapping[str, SegOutputs]]) -> list[Row]:
                     "acceptance_metrics.json MO4 soft_share (34 classes)",
                     note=_missing(outputs, dataset)
                     or (
-                        "information (M6 exit practice)" if dataset == "ag7" else "[L]"
+                        "information (M6 exit practice)" if dataset == "ms1" else "[L]"
                     ),
                 )
             )
@@ -2860,6 +2890,84 @@ def _pairs(values: Sequence[str] | None, option: str) -> dict[str, str]:
     return out
 
 
+def dataset_key(text: str) -> str:
+    """Return the dataset key (``ms1``, ``ms2``) of a real name or alias (R2)."""
+    return alias_key(text, (*DATASETS, NEGATIVE_CONTROL))
+
+
+def _dataset_pairs(values: Sequence[str] | None, option: str) -> dict[str, str]:
+    """``_pairs`` whose keys name a dataset, keyed by ``dataset_key``.
+
+    A ``DATASET/SEGMENTATION`` key keeps its segmentation.
+    """
+    out: dict[str, str] = {}
+    for key, value in _pairs(values, option).items():
+        dataset, sep, segmentation = key.partition("/")
+        out[dataset_key(dataset) + sep + segmentation] = value
+    return out
+
+
+def store_root() -> Path:
+    """The gate M store (§25.3): ``STORE_ROOT``, else ``$MERXEN_REFERENCE_STORE``."""
+    if STORE_ROOT is not None:
+        return STORE_ROOT
+    return local_config.require_path(STORE_VARIABLE, "the gate M store (§25.3)")
+
+
+def pseudo_label_paths(
+    evidence_root: Path | None, given: Mapping[str, str], datasets: Iterable[str]
+) -> dict[str, Path]:
+    """MO1's pseudo-label CSV per dataset: ``--pseudo-labels``, else the evidence's.
+
+    The evidence archive names its mouse directories by the sections' display
+    names (``privacy.to_real(form="name")``, R3).
+
+    Args:
+        evidence_root: ``--evidence-root`` (``None``: ``$MERXEN_EVIDENCE_ROOT``,
+            read only when a scored dataset has no ``--pseudo-labels``).
+        given: ``--pseudo-labels`` by dataset key.
+        datasets: The datasets given (``--dataset``).
+
+    Returns:
+        Dataset to the CSV.
+    """
+    paths = {dataset: Path(value) for dataset, value in given.items()}
+    missing = [d for d in PSEUDO_LABELS if d in set(datasets) and d not in paths]
+    if missing:
+        root = evidence_root or local_config.require_path(
+            EVIDENCE_VARIABLE, "MO1's default pseudo-labels (or --pseudo-labels)"
+        )
+        for dataset in missing:
+            paths[dataset] = root / privacy.to_real(PSEUDO_LABELS[dataset], form="name")
+    return paths
+
+
+def aliased_mo10(payload: Any) -> Any:
+    """Return ``mo10.json`` with its section and gene-set keys aliased (R2).
+
+    M6b-R wrote the sections' real names into its gene-set keys and its MO2
+    and MO3 re-checks.
+    """
+    if not isinstance(payload, Mapping):
+        return payload
+    out = dict(payload)
+    if isinstance(out.get("gene_sets"), Mapping):
+        out["gene_sets"] = {
+            alias_key(str(key), MO10_GENE_SETS): value
+            for key, value in out["gene_sets"].items()
+        }
+    if isinstance(out.get("mo2"), list):
+        out["mo2"] = [
+            {**item, "section": dataset_key(str(item["section"]))}
+            if isinstance(item, Mapping) and item.get("section") is not None
+            else item
+            for item in out["mo2"]
+        ]
+    if isinstance(out.get("mo3"), Mapping):
+        out["mo3"] = {dataset_key(str(key)): ok for key, ok in out["mo3"].items()}
+    return out
+
+
 def full_remap_dirs(values: Sequence[str] | None) -> dict[tuple[str, str], Path]:
     """Parse ``--mo2-full``: one full re-map per scored (dataset, segmentation).
 
@@ -2883,6 +2991,7 @@ def full_remap_dirs(values: Sequence[str] | None) -> dict[tuple[str, str], Path]
                 f"--mo2-full: expected DATASET/SEGMENTATION=DIR, got {value!r}"
             )
         dataset, _, segmentation = key.partition("/")
+        dataset = dataset_key(dataset)
         if dataset not in SCORED_UNNAMED:
             raise ValueError(f"--mo2-full: unknown dataset {dataset!r}; use {DATASETS}")
         scored = SCORED_UNNAMED[dataset]
@@ -2920,14 +3029,16 @@ def score(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     )
     mode = EXPLORATORY if args.exploratory else REGISTERED
     roots = {
-        key: Path(value) for key, value in _pairs(args.dataset, "--dataset").items()
+        key: Path(value)
+        for key, value in _dataset_pairs(args.dataset, "--dataset").items()
     }
     unknown = set(roots) - set(DATASETS)
     if unknown:
         raise ValueError(
             f"--dataset: unknown dataset(s) {sorted(unknown)}; use {DATASETS}"
         )
-    _check_out(args.out, [*roots.values(), STORE_ROOT])
+    store = store_root()
+    _check_out(args.out, [*roots.values(), store])
     inputs: dict[str, str] = {}
 
     def track(path: Path) -> Path:
@@ -2949,7 +3060,7 @@ def score(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     trace = load_trace([track(path) for path in args.trace or []])
     full_dirs = full_remap_dirs(args.mo2_full)
     samplers: dict[tuple[str, str], dict[str, float]] = {}
-    for key, value in _pairs(args.sampler, "--sampler").items():
+    for key, value in _dataset_pairs(args.sampler, "--sampler").items():
         dataset, _, segmentation = key.partition("/")
         samplers[(dataset, segmentation)] = read_sampler(track(Path(value)))
     negative_path: Path | None = None
@@ -2970,7 +3081,7 @@ def score(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             )
     mo10 = None
     if args.mo10 is not None:
-        mo10 = _read_json(track(Path(args.mo10)))
+        mo10 = aliased_mo10(_read_json(track(Path(args.mo10))))
     exceptions: list[ApprovedException] = []
     if args.exceptions is not None:
         exceptions = parse_exceptions(_read_json(track(Path(args.exceptions))))
@@ -3025,7 +3136,7 @@ def score(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                     f"MO2 {dataset} {segmentation}: "
                     + full_mismatch[(dataset, segmentation)]
                 )
-    provenance = check_provenance(found, STORE_ROOT)
+    provenance = check_provenance(found, store)
 
     rows: list[Row] = []
     usage: list[dict[str, Any]] = []
@@ -3037,13 +3148,11 @@ def score(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 if record["ok"] and record["real_path"]
             }
         )
-        pseudo = {
-            dataset: Path(value)
-            for dataset, value in {
-                **{d: str(args.evidence_root / p) for d, p in PSEUDO_LABELS.items()},
-                **_pairs(args.pseudo_labels, "--pseudo-labels"),
-            }.items()
-        }
+        pseudo = pseudo_label_paths(
+            args.evidence_root,
+            _dataset_pairs(args.pseudo_labels, "--pseudo-labels"),
+            roots,
+        )
         rows += mo1_rows(outputs, pseudo)
         mo2: dict[tuple[str, str], Any] = {}
         mo2_problems: dict[tuple[str, str], str] = {}
@@ -3153,7 +3262,7 @@ def score(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 for dataset, segmentations in SCORED_UNNAMED.items()
             },
             "selection_lines": recorded,
-            "store_root": str(STORE_ROOT),
+            "store_root": str(store),
         },
         "readings": readings,
         "datasets": {dataset: str(root) for dataset, root in roots.items()},
@@ -3167,6 +3276,13 @@ def score(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         "rows": records,
         "inputs": inputs,
     }
+    # Labels as privacy.display shows them (R5); paths verbatim. An approval
+    # is recorded as its file holds it: its quote and record are the user's
+    # and the record's own words, which may name a section both ways.
+    summary = display_tree(_safe(summary))
+    for record, exception in zip(summary["exceptions"], exceptions, strict=True):
+        record.update(_safe(exception.to_json()))
+    records = summary["rows"]
     out_dir = args.out
     (out_dir / "tables").mkdir(parents=True, exist_ok=True)
     pd.DataFrame(records).to_csv(out_dir / "tables" / "rows.csv", index=False)
@@ -3183,10 +3299,23 @@ def score(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 # full-remap
 
 
-SSD1_ROOT: Final = "/media/mathieubo/SSD1"
+# The refused disk (SSD1): nothing under this prefix is read.
+REFUSED_PREFIX_VARIABLE: Final = "MERXEN_REFUSED_PATH_PREFIX"
 
 
-def _ssd1_strings(payload: Any) -> list[str]:
+def refused_prefix() -> str:
+    """The refused path prefix (``$MERXEN_REFUSED_PATH_PREFIX``, the SSD1 disk)."""
+    prefix = local_config.require_path(
+        REFUSED_PREFIX_VARIABLE, "full-remap refuses MAP inputs on the refused disk"
+    )
+    return str(prefix).rstrip("/") or "/"
+
+
+def _under(path: str, prefix: str) -> bool:
+    return path == prefix or path.startswith(prefix.rstrip("/") + "/")
+
+
+def _refused_strings(payload: Any, prefix: str) -> list[str]:
     found: list[str] = []
 
     def walk(node: Any) -> None:
@@ -3196,7 +3325,7 @@ def _ssd1_strings(payload: Any) -> list[str]:
         elif isinstance(node, list):
             for value in node:
                 walk(value)
-        elif isinstance(node, str) and node.startswith(SSD1_ROOT):
+        elif isinstance(node, str) and _under(node, prefix):
             found.append(node)
 
     walk(payload)
@@ -3243,7 +3372,7 @@ def full_remap(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(
             f"{map_dir}: the region step dropped nothing; no re-map to compare"
         )
-    check = check_provenance([(str(run.bundle_path), "map_manifest")], STORE_ROOT)
+    check = check_provenance([(str(run.bundle_path), "map_manifest")], store_root())
     if not check.ok:
         raise ValueError(f"provenance: {'; '.join(check.reasons)}")
     payload = _read_json(map_dir / "annotation_config.json")
@@ -3255,10 +3384,13 @@ def full_remap(args: argparse.Namespace) -> dict[str, Any]:
             panel_settings["gene_id_fallback_csv"] = path
     for species in args.drop_gene_table or []:
         (panel_settings.get("gene_tables") or {}).pop(species, None)
-    if _ssd1_strings(payload) or str(record.h5ad_path).startswith(SSD1_ROOT):
+    prefix = refused_prefix()
+    refused = _refused_strings(payload, prefix)
+    if refused or _under(str(record.h5ad_path), prefix):
         raise ValueError(
-            "the MAP configuration reads from SSD1: "
-            + ", ".join(sorted(set(_ssd1_strings(payload))))
+            "the MAP configuration reads from SSD1 (the refused disk, "
+            f"${REFUSED_PREFIX_VARIABLE}): "
+            + ", ".join(sorted(set(refused)))
             + " (replace each with --gene-table SPECIES=PATH or --drop-gene-table)"
         )
     config = AnnotationConfig.model_validate(payload).coupled_to_clustering(
@@ -3352,7 +3484,8 @@ def build_parser() -> argparse.ArgumentParser:
     scoring.add_argument(
         "--dataset",
         action="append",
-        help="ag7=ROOT or vzg2=ROOT: the results root <outdir>/<pair> of a dataset",
+        help="ms1=ROOT or ms2=ROOT (a section's alias or real name): the results "
+        "root <outdir>/<pair> of a dataset",
     )
     scoring.add_argument(
         "--trace", type=Path, action="append", help="Nextflow trace.tsv"
@@ -3385,7 +3518,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         help="DATASET=CSV (MO1; default: the evidence root's)",
     )
-    scoring.add_argument("--evidence-root", type=Path, default=EVIDENCE_ROOT)
+    scoring.add_argument(
+        "--evidence-root",
+        type=Path,
+        default=None,
+        help="the evidence archive: MO1's default pseudo-labels "
+        f"(default: ${EVIDENCE_VARIABLE})",
+    )
     scoring.add_argument("--preregistration", type=Path, default=PREREGISTRATION)
     for name, reading in READINGS.items():
         scoring.add_argument(
@@ -3436,7 +3575,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "full-remap":
         try:
             record = full_remap(args)
-        except ValueError as error:
+        except (ValueError, LocalConfigError) as error:
             parser.error(str(error))
         print(
             json.dumps({k: record[k] for k in ("parquet", "n_cells", "n_processors")})
@@ -3444,7 +3583,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         summary, status = score(args)
-    except ValueError as error:
+    except (ValueError, LocalConfigError) as error:
         parser.error(str(error))
     print(
         json.dumps(

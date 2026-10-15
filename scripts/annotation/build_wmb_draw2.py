@@ -22,13 +22,13 @@ cells after the build. ``bundle_ref.json`` of draw 2 and a small JSON record
 (``--record``: both hashes, the digests and the per-class availability) are
 written.
 
-Usage (the ag7 panel, as B1's PREP)::
+Usage (the MS1 panel, as B1's PREP)::
 
     python scripts/annotation/build_wmb_draw2.py \\
         --annotation-config annotation_config.json \\
         --panel-genes panel_genes.json \\
-        --store /srv/storage/MerXen/annotation_references \\
-        --store-large /srv/storage/MerXen/annotation_references_large \\
+        --store $MERXEN_REFERENCE_STORE \\
+        --store-large $MERXEN_REFERENCE_STORE_LARGE \\
         --scratch-dir prep_scratch \\
         --source wmb_h5ad_dir=<WMB-10Xv3 dir> \\
         --source wmb_mapping_stats=<precomputed stats h5> \\

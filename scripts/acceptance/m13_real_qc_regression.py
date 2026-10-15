@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """M13 C17: the real-data QC regression on the M8 human pairs (set a).
 
-Plan §12 M13 exit ("real-data QC is run as a regression on P7513, P1212,
-P7113, P5011"; the ag7 and VZG2 rows moved to M13b, chunk C22: see the
+Plan §12 M13 exit ("real-data QC is run as a regression on [HD1], [HD2],
+[HD3], [HD4]"; the MS1 and MS2 rows moved to M13b, chunk C22: see the
 ``mouse`` step below). The M8 RESOLVE
 outputs (``$A/m8/resolve/<pair>/{proseg_hybrid,reseg}``, read only) name the
 MAP run, the bundles (their ``resolved_build_hash``), the gate denominators
@@ -52,7 +52,7 @@ C15), and writes the outcome table under ``$A/m13/regression/``:
      new-panel human MERSCOPE family;
    * ``paired_concordance.csv`` (D21): the soft broad JSD on the shared
      mask (scored, point estimate) beside the whole section (reported);
-     P5011 proseg_hybrid is expected to warn (.235 / .227), the other pairs
+     HD4 proseg_hybrid is expected to warn (.235 / .227), the other pairs
      to pass (<= .154);
    * ``flag_rates.csv`` (D22): the literal reading of §8.8 (CHECK K6, H16's
      15% marking on class x platform strata) beside option (a) (each flag's
@@ -70,8 +70,8 @@ C15), and writes the outcome table under ``$A/m13/regression/``:
      be null on these version-6 bundles);
    * ``regression_summary.json`` and ``REPORT.txt``.
 
-4. ``mouse`` (M13b C22; not part of ``all``): the ag7 and VZG2 rows
-   (``MOUSE_EXPECTED``: ag7 on its four segmentations, VZG2 original_seg)
+4. ``mouse`` (M13b C22; not part of ``all``): the MS1 and MS2 rows
+   (``MOUSE_EXPECTED``: MS1 on its four segmentations, MS2 original_seg)
    read from mouse RESOLVE outputs that ran the warn-only mouse QC, given as
    ``--mouse-resolve <dataset>/<segmentation>=<annotation_resolve_out>``.
    They stay pending until the gate M runs (GM-RUNS) write those outputs;
@@ -98,11 +98,25 @@ Usage::
     PYTHONPATH=src python scripts/acceptance/m13_real_qc_regression.py all
     PYTHONPATH=src python scripts/acceptance/m13_real_qc_regression.py table
     PYTHONPATH=src python scripts/acceptance/m13_real_qc_regression.py mouse \
-        --mouse-resolve ag7/proseg_hybrid=<.../annotation_resolve_out> ...
+        --mouse-resolve MS1/proseg_hybrid=<.../annotation_resolve_out> ...
 
 ``--dry-run`` lists the registration checks and prints the RESOLVE commands
 (``mouse``: the given and the pending rows); it reads no store, runs nothing
 and writes nothing.
+
+Locations come from ``.env`` (``merxen.local_config``; each option
+overrides its variable): the evidence root ``$MERXEN_EVIDENCE_ROOT`` (``$A``:
+``--out`` defaults to ``$A/m13/regression``, ``--m8-resolve`` to
+``$A/m8/resolve``), ``--results`` ``$MERXEN_RESULTS_ROOT``, ``--store``
+``$MERXEN_LEGACY_REFERENCE_STORE`` (the store C17 ran with) and
+``--gene-id-fallback`` ``$MERXEN_GENE_ID_FALLBACK_CSV``. A step resolves only
+the ones it uses.
+
+Sample names: the pairs and mouse sections are held as aliases (``HD1`` ...,
+``MS1``, ``MS2``) and used as the data names them (``privacy.to_real``: the
+real pair ids of the M8 tree and the published results, the mouse sections'
+display names), so the outputs are as before on a host with the alias
+table; ``--pairs`` and ``--mouse-resolve`` accept a real name or an alias.
 """
 
 from __future__ import annotations
@@ -121,20 +135,27 @@ from typing import Any
 
 import pandas as pd
 
+from merxen import local_config, privacy
+from merxen.local_config import LocalConfigError
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from sample_labels import alias_key, display_text  # noqa: E402
+
 logger = logging.getLogger("m13_real_qc_regression")
 
-A = Path("/srv/storage/MerXen/annotation_dev/evidence_20260926")
-M8_RESOLVE = A / "m8" / "resolve"
-OUT = A / "m13" / "regression"
-RESULTS = Path("/srv/storage/MerXen/results")
-STORE = Path("/media/mathieubo/SSD1/MerXen/annotation_references")
-FALLBACK = Path(
-    "/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/expression_matrices/"
-    "WHB-10Xv3/20240330/WHB-10Xv3-Nonneurons-raw.h5ad"
-)
+# Locations (.env; the options override them): the evidence root ($A), under
+# which M8_RESOLVE and OUT lie, the published results, the store C17 ran with
+# and the gene-ID fallback table.
+EVIDENCE_VARIABLE = "MERXEN_EVIDENCE_ROOT"
+M8_RESOLVE = Path("m8") / "resolve"
+OUT = Path("m13") / "regression"
+RESULTS_VARIABLE = "MERXEN_RESULTS_ROOT"
+STORE_VARIABLE = "MERXEN_LEGACY_REFERENCE_STORE"
+FALLBACK_VARIABLE = "MERXEN_GENE_ID_FALLBACK_CSV"
 REPO = Path(__file__).resolve().parents[2]
 
-PAIRS: tuple[str, ...] = ("P7513", "P1212", "P7113", "P5011")
+# The M8 pairs, by alias (``pair_name`` gives the real pair id the data uses).
+PAIRS: tuple[str, ...] = ("HD1", "HD2", "HD3", "HD4")
 SEGMENTATIONS: tuple[str, ...] = ("proseg_hybrid", "reseg")
 # The scored segmentation of gate H (pre-registration §9); reseg is reported.
 SCORED_SEGMENTATION = "proseg_hybrid"
@@ -177,9 +198,9 @@ REFERENCE_SHAPE_KEYS: dict[str, str] = {
     "XENIUM": "xenium_cell_boundaries",
 }
 
-# D21 (plan §4): on the scored segmentation P5011 warns (shared mask .235,
-# whole section .227) and the other pairs pass (<= .154).
-PAIRED_EXPECTED_WARN: dict[str, tuple[float, float]] = {"P5011": (0.235, 0.227)}
+# D21 (plan §4): on the scored segmentation HD4 warns (shared mask .235,
+# whole section .227) and the other pairs pass (<= .154). Keyed by alias.
+PAIRED_EXPECTED_WARN: dict[str, tuple[float, float]] = {"HD4": (0.235, 0.227)}
 PAIRED_EXPECTED_PASS_MAX = 0.154
 # The new column of M13 C14 that M8's label tables predate: null on the
 # version-6 bundles of set a.
@@ -196,22 +217,24 @@ SINGLE_THREAD_ENV: dict[str, str] = {
     "NUMEXPR_NUM_THREADS": "1",
 }
 
-# The mouse rows of plan §12 M13b (M13b C22): ag7 on its four segmentations
-# and VZG2 original_seg, from the gate M runs' RESOLVE outputs (GM-RUNS).
+# The mouse rows of plan §12 M13b (M13b C22): MS1 on its four segmentations
+# and MS2 original_seg, from the gate M runs' RESOLVE outputs (GM-RUNS). Keyed
+# by alias; ``mouse_label`` gives the label the rows carry.
+MOUSE_SECTIONS: tuple[str, ...] = ("MS1", "MS2")
 MOUSE_EXPECTED: tuple[tuple[str, str], ...] = (
-    ("ag7", "original_seg"),
-    ("ag7", "proseg_hybrid"),
-    ("ag7", "proseg_mask"),
-    ("ag7", "reseg"),
-    ("VZG2", "original_seg"),
+    ("MS1", "original_seg"),
+    ("MS1", "proseg_hybrid"),
+    ("MS1", "proseg_mask"),
+    ("MS1", "reseg"),
+    ("MS2", "original_seg"),
 )
 MOUSE_DIR = "mouse"
 # RESOLVE's pair summary (``pipeline.resolve_summary_filename``).
 RESOLVE_SUMMARY_SUFFIX = "_resolve_summary.json"
 RESOLVE_SUMMARY_GLOB = f"*{RESOLVE_SUMMARY_SUFFIX}"
-# What the human table step does not cover.
+# What the human table step does not cover (written through display()).
 NOT_COVERED: tuple[str, ...] = (
-    "ag7 and VZG2 (mouse) rows: pending until the gate M runs (GM-RUNS) write "
+    "MS1 and MS2 (mouse) rows: pending until the gate M runs (GM-RUNS) write "
     "mouse RESOLVE outputs with the warn-only mouse QC; the mouse step reads "
     "them (M13b C22)",
     "proseg_mask and original_seg: no M8 RESOLVE outputs",
@@ -451,7 +474,7 @@ def resolve_command(
     registration: Mapping[str, Path],
     config_path: Path | None,
     protected_roots: Sequence[Path],
-    fallback: Path | None = FALLBACK,
+    fallback: Path | None = None,
     python: str = sys.executable,
 ) -> list[str]:
     """Return the ``merxen annotate-resolve`` command of one re-run.
@@ -668,7 +691,7 @@ def run_resolve(
     m8_root: Path,
     store: Path,
     protected_roots: Sequence[Path],
-    fallback: Path | None = FALLBACK,
+    fallback: Path | None = None,
     force: bool = False,
     dry_run: bool = False,
 ) -> list[list[str]]:
@@ -1072,7 +1095,7 @@ def paired_rows(
         One row: the shared-mask soft broad JSD (scored point estimate, with
         its CI), the whole section (reported), the outcome both sections
         record, and on the scored segmentation whether D21's expectation
-        holds (P5011 warns at .235 / .227, the other pairs pass at <= .154).
+        holds (HD4 warns at .235 / .227, the other pairs pass at <= .154).
     """
     jsd = list((summary.get("pair") or {}).get("jsd") or [])
     shared, whole = _jsd_row(jsd, "shared_mask"), _jsd_row(jsd, "whole_section")
@@ -1101,8 +1124,8 @@ def paired_rows(
     }
     if segmentation == SCORED_SEGMENTATION:
         value = shared.get("jsd")
-        if pair in PAIRED_EXPECTED_WARN:
-            shared_value, whole_value = PAIRED_EXPECTED_WARN[pair]
+        if privacy.to_alias(pair) in PAIRED_EXPECTED_WARN:
+            shared_value, whole_value = PAIRED_EXPECTED_WARN[privacy.to_alias(pair)]
             row["expected"] = f"warn ({shared_value:.3f} / {whole_value:.3f})"
             row["expectation_met"] = (
                 token == "warn"
@@ -1637,7 +1660,7 @@ def build_tables(
         "d22_flag_rates": d22_summary(tables["flag_rates"]),
         "d23_registration_g1": d23_verdict(tables["registration_g1"]),
         "nr1": nr1_summary(nr1),
-        "not_covered": list(NOT_COVERED),
+        "not_covered": [display_text(item) for item in NOT_COVERED],
     }
     (out_dir / "regression_summary.json").write_text(
         json.dumps(result, indent=2, default=str) + "\n", encoding="utf-8"
@@ -1867,8 +1890,8 @@ class MouseInput:
     """One mouse RESOLVE output of the regression (a gate M run's).
 
     Attributes:
-        dataset: ``ag7`` or ``VZG2`` (``MOUSE_EXPECTED``; others are read and
-            listed as not expected).
+        dataset: The section's label (``mouse_label``: MS1 or MS2 as the
+            data names them; others are read and listed as not expected).
         segmentation: The segmentation.
         resolve_dir: The RESOLVE output (``annotation_resolve_out``, with
             ``<pair>_resolve_summary.json``).
@@ -1902,7 +1925,31 @@ def parse_mouse_input(text: str) -> MouseInput:
         raise RegressionError(
             f"--mouse-resolve {text!r}: expected DATASET/SEGMENTATION=DIRECTORY"
         )
-    return MouseInput(dataset, segmentation, Path(directory))
+    return MouseInput(mouse_label(dataset), segmentation, Path(directory))
+
+
+def pair_name(pair: str) -> str:
+    """Return a pair (alias or real id) as the data names it (R2, then R3).
+
+    Raises:
+        LocalConfigError: If no alias table is found and it is not disabled.
+    """
+    return privacy.to_real(privacy.to_alias(pair), form="pair_id")
+
+
+def mouse_label(dataset: str) -> str:
+    """Return a mouse section (alias or real name) as its rows are labelled.
+
+    The label is the section's display name (``privacy.to_real(form="name")``
+    of its alias); a name that is no mouse section is kept.
+
+    Raises:
+        LocalConfigError: If no alias table is found and it is not disabled.
+    """
+    aliased = alias_key(dataset, MOUSE_SECTIONS)
+    if aliased not in MOUSE_SECTIONS:
+        return dataset
+    return privacy.to_real(aliased, form="name")
 
 
 def read_mouse_summary(item: MouseInput) -> dict[str, Any]:
@@ -1999,7 +2046,7 @@ def mouse_outcome_rows(
 
     Args:
         summary: A ``read_mouse_summary`` summary.
-        dataset: The dataset (``ag7``, ``VZG2``).
+        dataset: The dataset (its label, ``mouse_label``).
         segmentation: The segmentation.
 
     Returns:
@@ -2115,7 +2162,7 @@ def build_mouse_tables(out_dir: Path, inputs: Sequence[MouseInput]) -> dict[str,
     """
     if not inputs:
         raise RegressionError(
-            "no mouse RESOLVE output given: the ag7 and VZG2 rows stay pending "
+            "no mouse RESOLVE output given: the MS1 and MS2 rows stay pending "
             "until the gate M runs (GM-RUNS) write them"
         )
     labels = [item.label for item in inputs]
@@ -2148,7 +2195,10 @@ def build_mouse_tables(out_dir: Path, inputs: Sequence[MouseInput]) -> dict[str,
     folder.mkdir(parents=True, exist_ok=True)
     for name, rows in tables.items():
         _frame(rows).to_csv(folder / f"{name}.csv", index=False)
-    expected = [f"{dataset}/{segmentation}" for dataset, segmentation in MOUSE_EXPECTED]
+    expected = [
+        f"{mouse_label(dataset)}/{segmentation}"
+        for dataset, segmentation in MOUSE_EXPECTED
+    ]
     result: dict[str, Any] = {
         "code": _code_record(),
         "inputs": records,
@@ -2192,7 +2242,7 @@ def render_mouse_report(
     """
     code = result["code"]
     lines = [
-        "M13b C22: real-data QC regression, mouse rows (ag7, VZG2)",
+        display_text("M13b C22: real-data QC regression, mouse rows (MS1, MS2)"),
         "=" * 58,
         f"code {code.get('commit')} ({code.get('branch')}; dirty "
         f"{code.get('dirty')}); mouse RESOLVE outputs read only. The mouse QC "
@@ -2250,6 +2300,61 @@ def render_mouse_report(
 # CLI
 
 
+def _location(
+    value: Path | None, variable: str, purpose: str, *, required: bool
+) -> Path | None:
+    if value is not None:
+        return value
+    if required:
+        return local_config.require_path(variable, purpose)
+    return local_config.path(variable)
+
+
+def resolve_locations(args: argparse.Namespace) -> None:
+    """Fill the location options a step uses from ``.env`` (in place).
+
+    A step requires what it reads or runs with; the other locations are
+    only kept out of ``--out`` when they are set.
+
+    Raises:
+        LocalConfigError: If a location the step needs is not set.
+    """
+    step = args.step
+    human = step != "mouse"
+    runs = step in ("resolve", "all")
+    evidence = _location(
+        None, EVIDENCE_VARIABLE, "the evidence root", required=args.out is None
+    )
+    if args.out is None:
+        assert evidence is not None
+        args.out = evidence / OUT
+    if args.m8_resolve is None:
+        if human:
+            evidence = evidence or local_config.require_path(
+                EVIDENCE_VARIABLE, "the M8 RESOLVE tree (--m8-resolve)"
+            )
+        args.m8_resolve = None if evidence is None else evidence / M8_RESOLVE
+    args.results = _location(
+        args.results,
+        RESULTS_VARIABLE,
+        "the published results (--results)",
+        required=step in ("registration", "all") or runs,
+    )
+    args.store = (
+        None
+        if step == "mouse"
+        else _location(
+            args.store, STORE_VARIABLE, "the reference store (--store)", required=runs
+        )
+    )
+    args.gene_id_fallback = _location(
+        args.gene_id_fallback,
+        FALLBACK_VARIABLE,
+        "RESOLVE's gene-ID fallback table (--gene-id-fallback)",
+        required=runs and not args.dry_run,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
@@ -2258,12 +2363,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         choices=("registration", "resolve", "table", "all", "mouse"),
         help="step ('all' is the human steps; 'mouse' reads the mouse rows)",
     )
-    parser.add_argument("--out", type=Path, default=OUT)
-    parser.add_argument("--m8-resolve", type=Path, default=M8_RESOLVE)
-    parser.add_argument("--results", type=Path, default=RESULTS)
-    parser.add_argument("--store", type=Path, default=STORE)
-    parser.add_argument("--gene-id-fallback", type=Path, default=FALLBACK)
-    parser.add_argument("--pairs", nargs="+", default=list(PAIRS))
+    parser.add_argument(
+        "--out", type=Path, help=f"default: ${EVIDENCE_VARIABLE}/{OUT.as_posix()}"
+    )
+    parser.add_argument(
+        "--m8-resolve",
+        type=Path,
+        help=f"default: ${EVIDENCE_VARIABLE}/{M8_RESOLVE.as_posix()}",
+    )
+    parser.add_argument("--results", type=Path, help=f"default: ${RESULTS_VARIABLE}")
+    parser.add_argument("--store", type=Path, help=f"default: ${STORE_VARIABLE}")
+    parser.add_argument(
+        "--gene-id-fallback", type=Path, help=f"default: ${FALLBACK_VARIABLE}"
+    )
+    parser.add_argument(
+        "--pairs",
+        nargs="+",
+        default=list(PAIRS),
+        help="pairs (alias or real pair id; default: the four M8 pairs)",
+    )
     parser.add_argument("--segmentations", nargs="+", default=list(SEGMENTATIONS))
     parser.add_argument(
         "--variants", nargs="+", choices=VARIANTS, default=list(VARIANTS)
@@ -2292,19 +2410,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         format="%(asctime)s %(levelname)-8s %(message)s",
         datefmt="%H:%M:%S",
     )
-    mouse_inputs = [parse_mouse_input(text) for text in args.mouse_resolve]
-    if args.step == "mouse" and not mouse_inputs:
-        parser.error(
-            "mouse needs --mouse-resolve: the ag7 and VZG2 rows stay pending "
-            "until the gate M runs (GM-RUNS) write their RESOLVE outputs"
-        )
+    try:
+        mouse_inputs = [parse_mouse_input(text) for text in args.mouse_resolve]
+        if args.step == "mouse" and not mouse_inputs:
+            parser.error(
+                "mouse needs --mouse-resolve: the MS1 and MS2 rows stay pending "
+                "until the gate M runs (GM-RUNS) write their RESOLVE outputs"
+            )
+        resolve_locations(args)
+        args.pairs = [pair_name(pair) for pair in args.pairs]
+    except LocalConfigError as error:
+        parser.error(str(error))
     # The mouse step reads no reference store, so it never resolves the
-    # store's path (the default is on the damaged SSD1 disk).
+    # store's path (the legacy store is on the damaged SSD1 disk).
     protected = [
-        args.m8_resolve,
-        args.results,
-        *([] if args.step == "mouse" else [args.store]),
-        *(item.resolve_dir for item in mouse_inputs),
+        root
+        for root in (
+            args.m8_resolve,
+            args.results,
+            *([] if args.step == "mouse" else [args.store]),
+            *(item.resolve_dir for item in mouse_inputs),
+        )
+        if root is not None
     ]
     check_out_dir(args.out, protected)
     if args.step == "mouse":
@@ -2312,9 +2439,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             labels = [item.label for item in mouse_inputs]
             print("mouse rows given: " + ", ".join(labels))
             pending = [
-                f"{dataset}/{segmentation}"
+                f"{mouse_label(dataset)}/{segmentation}"
                 for dataset, segmentation in MOUSE_EXPECTED
-                if f"{dataset}/{segmentation}" not in labels
+                if f"{mouse_label(dataset)}/{segmentation}" not in labels
             ]
             print("mouse rows pending: " + (", ".join(pending) or "none"))
             return 0

@@ -1455,7 +1455,7 @@ def test_pooled_sets_are_reweighted_as_one_set_across_their_bins() -> None:
     and every B call 125 / 140: Kish n 4 x 110 x 140 / 250 = 246.4. Weighted
     per bin, the 30 deep A calls and the 20 shallow B calls would each weigh
     2.5 and the Kish n fall to 160: the failure that
-    ``pooled_composition_weights`` records on ag7.
+    ``pooled_composition_weights`` records on MS1.
     """
     good = (0.95, True)
     cells = tracked_cells(

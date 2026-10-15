@@ -1,29 +1,33 @@
 #!/usr/bin/env python
 """Mouse ``avg_correlation`` floor shadow study (plan §7.3; pre-registration §16).
 
-Reads the M6 mouse RESOLVE label tables of ag7 proseg_hybrid and VZG2
+Reads the M6 mouse RESOLVE label tables of MS1 proseg_hybrid and MS2
 original_seg (no correlation floor applied), applies the candidate class
 floors (none, 0.40, 0.50) to the confident class calls and scores, overall
 and per depth bin: class coverage of table cells, marker consistency of
 the confident class calls, and the marker consistency of the calls a floor
 removes. Marker pseudo-labels are MO1's own, ported verbatim:
 
-- ag7: ``data/mouse_ag7/out/tables/C_pseudo_labels_per_cell.csv``
+- MS1: ``data/mouse_ms1/out/tables/C_pseudo_labels_per_cell.csv``
   (``pseudo_fine``) with ``expected_pseudo_for_mmc`` of
-  ``data/mouse_ag7/scripts/ag7_sections_extra.py``;
-- VZG2: ``data/mouse_vzg2/tables/C_pseudo_labels_per_cell_original_seg.csv.gz``
+  ``data/mouse_ms1/scripts/ms1_sections_extra.py``;
+- MS2: ``data/mouse_ms2/tables/C_pseudo_labels_per_cell_original_seg.csv.gz``
   (``pseudo_class``) with the six-group map of
   ``review_scientific/mouse_marker_consistency.py``.
 
 Before any floor is scored, MO1 over all marker-pseudo-confident cells with
-the unpruned MAP labels must reproduce .9114 (ag7) and .8556 (VZG2) to three
+the unpruned MAP labels must reproduce .9114 (MS1) and .8556 (MS2) to three
 decimals; otherwise the study stops without a selection. The selection rule
 is the pre-registered one (``select_floor``).
 
+The sections are keyed by their aliases; the evidence archive's mouse
+directories by their display names (``privacy.to_real(form="name")``), and
+the outputs show the names through ``privacy.display`` (``sample_labels``).
+
 Usage::
 
-    mouse_corr_shadow.py --ag7-labels L1 --vzg2-labels L2 --out DIR
-        [--evidence-root A]
+    mouse_corr_shadow.py --ms1-labels L1 --ms2-labels L2 --out DIR
+        [--evidence-root $MERXEN_EVIDENCE_ROOT]
 """
 
 from __future__ import annotations
@@ -42,7 +46,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-EVIDENCE_ROOT = Path("/srv/storage/MerXen/annotation_dev/evidence_20260926")
+from merxen import local_config, privacy
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from sample_labels import display_text, display_tree  # noqa: E402
+
 FLOORS: tuple[float | None, ...] = (None, 0.40, 0.50)
 DEPTH_BINS: tuple[tuple[int, float], ...] = (
     (20, 50),
@@ -53,7 +61,13 @@ DEPTH_BINS: tuple[tuple[int, float], ...] = (
     (1000, 2000),
     (2000, math.inf),
 )
-MO1_BASELINE = {"ag7": 0.9114, "vzg2": 0.8556}
+DATASETS: tuple[str, ...] = ("ms1", "ms2")
+MO1_BASELINE = {"ms1": 0.9114, "ms2": 0.8556}
+# MO1's marker pseudo-labels under the evidence root (display-name directories).
+PSEUDO_LABELS: dict[str, str] = {
+    "ms1": "data/mouse_ms1/out/tables/C_pseudo_labels_per_cell.csv",
+    "ms2": "data/mouse_ms2/tables/C_pseudo_labels_per_cell_original_seg.csv.gz",
+}
 MO1_TOLERANCE = 0.0005  # three decimals
 # Pre-registered selection constants (§16).
 MIN_GAIN = 0.005
@@ -66,7 +80,7 @@ MIN_EXTRA_GAIN = 0.005
 MAX_EXTRA_LOSS = 0.01
 FLOAT32_TOLERANCE = 1e-6
 
-# data/mouse_ag7/scripts/ag7_sections_extra.py (verbatim).
+# data/mouse_ms1/scripts/ms1_sections_extra.py (verbatim).
 NN_CLASS_TO_BROAD = {
     30: "Astrocytes/Ependymal",
     31: "Oligodendrocyte lineage",
@@ -100,7 +114,7 @@ NN_SUBCLASS_EXPECT: list[tuple[str, set[str]]] = [
     ("OEC", set()),
 ]
 # review_scientific/mouse_marker_consistency.py (verbatim).
-VZG2_PSEUDO_GROUP = {
+MS2_PSEUDO_GROUP = {
     "Glut": "Neuron",
     "GABA": "Neuron",
     "Astro": "Astro",
@@ -122,7 +136,7 @@ def _class_num(name: str) -> int:
 
 
 def expected_pseudo_for_mmc(class_name: str, subclass_name: str) -> set[str] | None:
-    """Marker pseudo-classes consistent with a MapMyCells label (ag7 report)."""
+    """Marker pseudo-classes consistent with a MapMyCells label (MS1 report)."""
     n = _class_num(class_name)
     if n in NN_CLASS_TO_BROAD:
         for tok, exp in NN_SUBCLASS_EXPECT:
@@ -140,7 +154,7 @@ def expected_pseudo_for_mmc(class_name: str, subclass_name: str) -> set[str] | N
 
 
 def cls2(c: str) -> str:
-    """The VZG2 six-group class of a WMB class name (MO1 baseline)."""
+    """The MS2 six-group class of a WMB class name (MO1 baseline)."""
     code = int(c.split()[0])
     if code <= 29:
         return "Neuron"
@@ -158,8 +172,8 @@ class Scored:
     consistent_unpruned: np.ndarray
 
 
-def score_ag7(labels: pd.DataFrame, pseudo: pd.DataFrame) -> Scored:
-    """Score ag7 with the ag7 report's pseudo-labels and expected classes."""
+def score_ms1(labels: pd.DataFrame, pseudo: pd.DataFrame) -> Scored:
+    """Score MS1 with the MS1 report's pseudo-labels and expected classes."""
     fine = pseudo["pseudo_fine"].reindex(labels.index).astype(object)
     confident = fine.notna().to_numpy() & (fine.astype(str) != "unassigned").to_numpy()
 
@@ -184,11 +198,11 @@ def score_ag7(labels: pd.DataFrame, pseudo: pd.DataFrame) -> Scored:
     )
 
 
-def score_vzg2(labels: pd.DataFrame, pseudo: pd.DataFrame) -> Scored:
-    """Score VZG2 with the six-group map of the MO1 baseline."""
+def score_ms2(labels: pd.DataFrame, pseudo: pd.DataFrame) -> Scored:
+    """Score MS2 with the six-group map of the MO1 baseline."""
     classes = pseudo["pseudo_class"].reindex(labels.index).astype(object)
-    confident = classes.isin(list(VZG2_PSEUDO_GROUP)).to_numpy()
-    group = classes.map(VZG2_PSEUDO_GROUP).to_numpy(dtype=object)
+    confident = classes.isin(list(MS2_PSEUDO_GROUP)).to_numpy()
+    group = classes.map(MS2_PSEUDO_GROUP).to_numpy(dtype=object)
 
     def consistent(column: str) -> np.ndarray:
         called = labels[column].astype(object).to_numpy()
@@ -430,26 +444,30 @@ def report(
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the study (see the module docstring)."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--ag7-labels", type=Path, required=True)
-    parser.add_argument("--vzg2-labels", type=Path, required=True)
+    parser.add_argument("--ms1-labels", type=Path, required=True)
+    parser.add_argument("--ms2-labels", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--evidence-root", type=Path, default=EVIDENCE_ROOT)
+    local_config.add_location_argument(
+        parser,
+        "--evidence-root",
+        "MERXEN_EVIDENCE_ROOT",
+        help="the evidence archive (MO1's pseudo-labels)",
+    )
     args = parser.parse_args(argv)
     root = args.evidence_root
     pseudo_paths = {
-        "ag7": root / "data/mouse_ag7/out/tables/C_pseudo_labels_per_cell.csv",
-        "vzg2": root
-        / "data/mouse_vzg2/tables/C_pseudo_labels_per_cell_original_seg.csv.gz",
+        name: root / privacy.to_real(path, form="name")
+        for name, path in PSEUDO_LABELS.items()
     }
-    label_paths = {"ag7": args.ag7_labels, "vzg2": args.vzg2_labels}
+    label_paths = {"ms1": args.ms1_labels, "ms2": args.ms2_labels}
     args.out.mkdir(parents=True, exist_ok=False)
     frames: dict[str, pd.DataFrame] = {}
     mo1: dict[str, dict[str, Any]] = {}
-    for name in ("ag7", "vzg2"):
+    for name in DATASETS:
         labels = _read_labels(label_paths[name])
         pseudo = pd.read_csv(pseudo_paths[name], index_col=0)
         pseudo.index = pseudo.index.astype(str)
-        scored = (score_ag7 if name == "ag7" else score_vzg2)(labels, pseudo)
+        scored = (score_ms1 if name == "ms1" else score_ms2)(labels, pseudo)
         frame, check = dataset_tables(labels, scored)
         check["check"] = (
             check["mo1_unpruned"] is not None
@@ -457,7 +475,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         frames[name] = frame
         mo1[name] = check
-        frame.to_csv(args.out / f"corr_floor_{name}.csv", index=False)
+        frame.to_csv(args.out / f"corr_floor_{display_text(name)}.csv", index=False)
     inputs = {
         "script_sha256": _sha256(Path(__file__)),
         "git_commit": _git_commit(),
@@ -476,16 +494,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         selection, verdicts = select_floor(frames)
     else:
         selection, verdicts = None, {}
-    text = report(frames, mo1, selection, verdicts, inputs)
+    # Labels as privacy.display shows them (R5); paths verbatim.
+    text = display_text(report(frames, mo1, selection, verdicts, inputs))
     (args.out / "CORR_SHADOW_REPORT.txt").write_text(text, encoding="utf-8")
     (args.out / "corr_shadow.json").write_text(
         json.dumps(
-            {
-                "selection": selection,
-                "mo1": mo1,
-                "verdicts": verdicts,
-                "inputs": inputs,
-            },
+            display_tree(
+                {
+                    "selection": selection,
+                    "mo1": mo1,
+                    "verdicts": verdicts,
+                    "inputs": inputs,
+                }
+            ),
             indent=1,
             default=float,
         ),

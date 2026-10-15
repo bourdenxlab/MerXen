@@ -319,7 +319,7 @@ def test_standalone_lookup_takes_the_current_region_share_revision(
 
     REGION_SHARE_REVISION enters only that builder's build_hash, so the
     revision-2 bundle sits next to the revision-1 bundle in a store with the
-    same builder version (the /srv store holds both). A standalone lookup
+    same builder version (the storage RAID store holds both). A standalone lookup
     (``merxen annotate --store``) takes the current revision instead of
     refusing the store as ambiguous; with only revision 1 it still finds it
     and warns, and MAP's default rule then refuses it.

@@ -261,7 +261,7 @@ def code_commit(source_root: Path | None = None) -> tuple[str | None, str | None
     default="auto",
     show_default=True,
     help="7: also compute the resolvability version-7 decisions of a version-6 "
-    "family (set a, ag7, VZG2, the pinned P5011 family) as a diagnostic under "
+    "family (set a, MS1, MS2, the pinned HD4 family) as a diagnostic under "
     "<out-dir>/<reference>/v7_diagnostic: never written to the store, never "
     "applied (plan §8.3 v7.1). Version-7 families build version 7 anyway.",
 )

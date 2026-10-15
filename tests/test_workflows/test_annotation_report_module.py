@@ -1011,9 +1011,12 @@ REPORT_IMPORT_EXEMPTIONS = {
     ),
     "merxen.table_keys": "table-key validation of COMPUTE_CPU and FINALIZE",
 }
-# ``from merxen import <name>`` in the sources: only the version, which the
-# report writes to report_run.json (not deterministic, never staged).
-REPORT_PACKAGE_IMPORTS = {"__version__"}
+# ``from merxen import <name>`` in the sources: the version, which the report
+# writes to report_run.json (not deterministic, never staged), and the sample
+# alias module (``merxen.privacy``, stdlib only; PANEL and PREP read recorded
+# family ids and write labels through it). Its labels change with the private
+# alias table, which no fingerprint covers, not with the report's code.
+REPORT_PACKAGE_IMPORTS = {"__version__", "privacy"}
 
 
 def _report_sources() -> list[str]:

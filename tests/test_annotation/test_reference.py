@@ -57,6 +57,7 @@ from merxen.annotation.store import (
     large_panel_refusal,
     resolve_builder,
 )
+from merxen.annotation.store import file_sha256 as store_file_sha256
 from merxen.annotation.vocab import load_state_gene_ids, load_state_genes
 from merxen.cli import main as cli_main
 
@@ -1395,7 +1396,7 @@ def test_wmb_builder_samples_marker_cells_and_records_uncovered_nodes(
     assert universe["n_genes"] == 6 and universe["panel_genes_absent"] == [
         "ENSMUSG99999999999"
     ]
-    # Synthetic genes lie outside the validated ag7 | VZG2 universe.
+    # Synthetic genes lie outside the validated MS1 | MS2 universe.
     assert universe["universe_source"] == "panel"
     assert universe["validated_universe"] is False
     assert output["selfmap_test_cells_excluded"] is True
@@ -1500,13 +1501,25 @@ def test_wmb_sampling_reproduces_the_validated_recipe(tmp_path: Path) -> None:
     assert summary["n_sampled_cells"] == len(expected)
 
 
+@pytest.mark.parametrize("aliases", [False, True], ids=["disabled", "table"])
 def test_wmb_panel_inside_the_validated_universe_uses_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    small_resources: Any,
+    aliases: bool,
+    request: pytest.FixtureRequest,
 ) -> None:
-    # ag7 (500) and VZG2 (815) lie inside the 899-gene union their validated
+    # MS1 (500) and MS2 (815) lie inside the 899-gene union their validated
     # lookups were built on; raw-CPM normalisation over the union reproduces
     # them exactly (plan §7.1, R28).
     import anndata as ad
+    from test_privacy.synthetic import MOUSE, MOUSE2_NAME
+
+    names = ("ms1", "ms2")
+    if aliases:
+        # bundle.json records the universe labels through privacy.display.
+        request.getfixturevalue("fake_aliases")
+        names = (MOUSE, MOUSE2_NAME.lower())
 
     sources = write_wmb_sources(tmp_path)
     fake = FakeCtm(wmb_lookup).install(monkeypatch)
@@ -1533,7 +1546,11 @@ def test_wmb_panel_inside_the_validated_universe_uses_it(
         "builder_output"
     ]
     universe = output["marker_precompute"]["gene_universe"]
-    assert universe["universe_source"] == reference.WMB_UNIVERSE_VALIDATED
+    assert universe["universe_source"] == "validated_{}_{}_union".format(*names)
+    assert universe["validated_universe_asset"] == (
+        "wmb_marker_universe_{}_{}.csv".format(*names)
+    )
+    assert universe["validated_universe"] is True
     assert universe["n_genes"] == 8 and universe["n_extra_universe_genes"] == 2
     assert trained_genes == sorted(MOUSE_GENES)
     # Markers are still found on the panel genes only.
@@ -1545,8 +1562,56 @@ def test_the_packaged_wmb_universe_is_the_validated_union() -> None:
     universe = reference.validated_wmb_marker_universe()
     assert len(universe) == 899 and universe == sorted(set(universe))
     table = pd.read_csv(reference.ASSET_DIR / reference.WMB_MARKER_UNIVERSE_FILE)
-    assert int(table["in_ag7"].sum()) == 500 and int(table["in_vzg2"].sum()) == 815
+    assert int(table["in_ms1"].sum()) == 500 and int(table["in_ms2"].sum()) == 815
     assert all(gene.startswith("ENSMUSG") for gene in universe)
+
+
+def _universe_asset(directory: Path) -> Path:
+    path = directory / "wmb_marker_universe_ms1_ms2.csv"
+    path.write_bytes(
+        b"ensembl_id,gene_symbol,in_ms1,in_ms2\n"
+        b"ENSMUSG00000000001,A,True,False\nENSMUSG00000000002,B,True,True\n"
+    )
+    return path
+
+
+def test_the_universe_hash_covers_its_real_name_form(
+    tmp_path: Path, fake_aliases: Path
+) -> None:
+    """F1: name and header are hashed as they were before the aliases (R4)."""
+    from test_privacy.synthetic import MOUSE, MOUSE2_NAME
+
+    path = _universe_asset(tmp_path)
+    second = MOUSE2_NAME.lower()
+    real = path.read_bytes().replace(
+        b"in_ms1,in_ms2", f"in_{MOUSE},in_{second}".encode()
+    )
+    assert reference.wmb_marker_universe_hash(path) == {
+        f"wmb_marker_universe_{MOUSE}_{second}.csv": hashlib.sha256(real).hexdigest()
+    }
+
+
+def test_the_universe_hash_with_the_table_disabled_is_the_file_hash(
+    tmp_path: Path,
+) -> None:
+    path = _universe_asset(tmp_path)
+    assert reference.wmb_marker_universe_hash(path) == {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+    }
+    packaged = reference.ASSET_DIR / reference.WMB_MARKER_UNIVERSE_FILE
+    assert reference.wmb_marker_universe_hash(packaged) == {
+        packaged.name: store_file_sha256(packaged)
+    }
+
+
+def test_the_universe_hash_refuses_without_an_alias_table(
+    tmp_path: Path, no_alias_table: None
+) -> None:
+    """No silent alias-form hash (a PREP rebuild) when the table is missing."""
+    from merxen.local_config import LocalConfigError
+
+    with pytest.raises(LocalConfigError, match="no alias table"):
+        reference.wmb_marker_universe_hash(_universe_asset(tmp_path))
 
 
 def test_wmb_builder_requires_the_test_cells_while_resolvability_is_on(
