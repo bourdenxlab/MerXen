@@ -16,7 +16,9 @@ jobs:
         run: pip install uv
       - name: Install dependencies
         run: |
-          uv pip install --system -r requirements/requirements.lock
+          # The lock is the full pinned tree: install it as is, without re-resolving (see
+          # scripts/run_ci_checks.sh).
+          uv pip install --system --no-deps -r requirements/requirements.lock
           uv pip install --system -e . --no-deps
       - name: Lint
         run: ruff check .
