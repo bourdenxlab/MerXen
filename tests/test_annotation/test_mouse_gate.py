@@ -262,7 +262,7 @@ TRUTH_TABLE: list[tuple[str, dict[str, Any], str, bool, dict[str, str]]] = [
         {"g3": "not_evaluated"},
     ),
     (
-        "invalid VZG2 proseg_hybrid: G1 fails with a G4 warning",
+        "invalid MS2 proseg_hybrid: G1 fails with a G4 warning",
         {
             "registration": RegistrationSignal(density_ratio=1.33, shift_um=114.1),
             "astro_epen_points": 16.9,
@@ -505,21 +505,21 @@ def test_find_registration_check_discovers_the_qc_stage_outputs(
     qc = tmp_path / "qc"
     (qc / "a").mkdir(parents=True)
     (qc / "b").mkdir()
-    (qc / "a" / "ag7_merscope_registration_qc.json").write_text(
+    (qc / "a" / "ms1_merscope_registration_qc.json").write_text(
         json.dumps({"status": "pass", "density_ratio": 2.2, "shift_um": 0.0})
     )
-    (qc / "a" / "ag7_merscope_qc_summary.csv").write_text(
+    (qc / "a" / "ms1_merscope_qc_summary.csv").write_text(
         "dataset,registration_status,registration_density_ratio\nx,pass,9.9\n"
     )
-    (qc / "b" / "vzg2_merscope_qc_summary.csv").write_text(
+    (qc / "b" / "ms2_merscope_qc_summary.csv").write_text(
         "dataset,registration_status,registration_density_ratio\nx,warn,1.4\n"
     )
     (qc / "b" / "old_merscope_qc_summary.csv").write_text("dataset,n_cells\nx,1\n")
 
-    found = find_registration_check([qc], "AG7_MERSCOPE")
+    found = find_registration_check([qc], "MS1_MERSCOPE")
     assert found is not None and found.density_ratio == 2.2
     assert found.source is not None and found.source.endswith("_registration_qc.json")
-    summary = find_registration_check([qc / "a", qc / "b"], "VZG2_MERSCOPE")
+    summary = find_registration_check([qc / "a", qc / "b"], "MS2_MERSCOPE")
     assert summary is not None and (summary.density_ratio, summary.status) == (
         1.4,
         "warn",
@@ -527,18 +527,18 @@ def test_find_registration_check_discovers_the_qc_stage_outputs(
     # A published symlink to the same file is one check, recorded as found.
     published = tmp_path / "published"
     published.mkdir()
-    (published / "ag7_merscope_registration_qc.json").symlink_to(
-        qc / "a" / "ag7_merscope_registration_qc.json"
+    (published / "ms1_merscope_registration_qc.json").symlink_to(
+        qc / "a" / "ms1_merscope_registration_qc.json"
     )
-    linked = find_registration_check([published, qc / "a"], "AG7_MERSCOPE")
+    linked = find_registration_check([published, qc / "a"], "MS1_MERSCOPE")
     assert linked is not None and linked.source is not None
     assert linked.source.startswith(str(published))
     # A QC summary from before M0a holds no check; an absent sample has none.
     assert find_registration_check([qc], "OLD_MERSCOPE") is None
     assert find_registration_check([qc], "NONE_MERSCOPE") is None
-    (qc / "b" / "ag7_merscope_registration_qc.json").write_text("{}")
+    (qc / "b" / "ms1_merscope_registration_qc.json").write_text("{}")
     with pytest.raises(ValueError, match="several"):
-        find_registration_check([qc], "AG7_MERSCOPE")
+        find_registration_check([qc], "MS1_MERSCOPE")
 
 
 # --------------------------------------------------------------------------
@@ -581,7 +581,7 @@ def test_class_group_markers_leave_out_groups_with_too_few_genes() -> None:
     assert left_out == ["Microglia"]  # two genes
 
 
-def test_marker_pseudo_labels_use_the_p1212_rule() -> None:
+def test_marker_pseudo_labels_use_the_hd2_rule() -> None:
     markers, _ = class_group_markers(
         _group_profiles(), GROUP_OF, AnnotationFlagsConfig(), min_genes=2
     )
@@ -637,7 +637,7 @@ def test_class_group_markers_use_the_mean_of_the_group_classes() -> None:
 
 
 def test_marker_pseudo_labels_normalise_by_the_mean_positive_count() -> None:
-    """P1212: units = counts / the gene's mean positive count in the dataset."""
+    """HD2: units = counts / the gene's mean positive count in the dataset."""
     markers = {
         "Neurons": SpecificGenes("Neurons", np.array([0]), ("A",), ("A",), (30.0,)),
         "Microglia": SpecificGenes("Microglia", np.array([1]), ("B",), ("B",), (30.0,)),

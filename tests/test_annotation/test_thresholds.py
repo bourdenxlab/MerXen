@@ -484,12 +484,12 @@ def test_unknown_panels_take_the_max_over_known_and_simulated_floors(
 def test_mouse_subclass_floor_is_at_least_60_outside_real_data_families(
     make_trust: Callable[..., Any],
 ) -> None:
-    ag7 = floor_plan(
+    ms1 = floor_plan(
         "MERSCOPE", make_trust("validated_real", species="mouse"), species="mouse"
     )
-    assert ag7.floor("subclass", "30 Astro-Epen").min_counts == 50
-    assert ag7.floor("class", "30 Astro-Epen").min_counts == 20
-    assert ag7.floor("broad", "30 Astro-Epen").min_counts == 20
+    assert ms1.floor("subclass", "30 Astro-Epen").min_counts == 50
+    assert ms1.floor("class", "30 Astro-Epen").min_counts == 20
+    assert ms1.floor("broad", "30 Astro-Epen").min_counts == 20
     xenium = floor_plan(
         "XENIUM", make_trust("provisional", species="mouse"), species="mouse"
     )
@@ -515,9 +515,9 @@ def confident_share(share: float, n: int = 1000) -> np.ndarray:
     ("frac", "coverage", "segmented", "trust", "level", "warning"),
     [
         (0.50, 0.60, 2000, "validated_real", "full", False),
-        # P1212_M: A .234 -> broad_only; no warning (0.44 of table cells).
+        # HD2_M: A .234 -> broad_only; no warning (0.44 of table cells).
         (0.234, 0.442, 2890, "validated_real", "broad_only", False),
-        # P5011_M: A .127 -> broad_only with the segmented-object warning.
+        # HD4_M: A .127 -> broad_only with the segmented-object warning.
         (0.127, 0.40, 4300, "validated_real", "broad_only", True),
         (0.50, 0.20, 1000, "validated_real", "failed", False),
         (0.10, 0.20, 1000, "validated_real", "failed", False),

@@ -6,8 +6,8 @@ Plan §7.8 (M6b):
   [2.4, 3.0), [3.0, 4.5), [4.5, 6.0), [6.0, 7.5), [7.5, 9.0), [9.0, 10.4]
   (``ap_bin``), the bins of the per-AP-bin harm table (§7.8, MO10).
 - **AP estimate** (§7.8 item 4; E7 §5 step 1, prototyped in
-  ``data/mouse_vzg2/scripts/merfish_section_match.py`` and
-  ``data/mouse_ag7/scripts/ag7_sections_extra.py``): the neuron-subclass
+  ``data/mouse_ms2/scripts/merfish_section_match.py`` and
+  ``data/mouse_ms1/scripts/ms1_sections_extra.py``): the neuron-subclass
   composition of a section's confident neurons is matched to every
   MERFISH-C57BL6J-638850 section of the ``wmb_region_share`` bundle
   (``section_composition.parquet``, subclass rows) by the Bhattacharyya
@@ -56,7 +56,7 @@ NON_NEURONAL_SUFFIX: Final = " NN"
 # The AP estimate needs at least this many confident neurons.
 AP_ESTIMATE_MIN_CELLS: Final = 100
 AP_ESTIMATE_TOP_K: Final = 5
-# Softmax temperature of the top-k weighted AP (the ag7 prototype's 0.01).
+# Softmax temperature of the top-k weighted AP (the MS1 prototype's 0.01).
 AP_ESTIMATE_TEMPERATURE: Final = 0.01
 WINDOW_HALF_WIDTH: Final = 1
 # CCF-view columns the region tables read.

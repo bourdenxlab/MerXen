@@ -86,15 +86,15 @@ def test_build_gene_sets_intersects_on_ids_in_merfish_order() -> None:
         }
     )
     sets = module.build_gene_sets(
-        genes, {"ag7": ["ENSMUSG2", "ENSMUSG3", "X"], "vzg2": ["ENSMUSG1"]}
+        genes, {"ms1": ["ENSMUSG2", "ENSMUSG3", "X"], "ms2": ["ENSMUSG1"]}
     )
     assert sets["merfish500"]["gene_ids"].tolist() == [
         "ENSMUSG3",
         "ENSMUSG1",
         "ENSMUSG2",
     ]
-    assert sets["merfish_ag7"]["gene_symbol"].tolist() == ["C", "B"]
-    assert sets["merfish_vzg2"]["gene_ids"].tolist() == ["ENSMUSG1"]
+    assert sets["merfish_ms1"]["gene_symbol"].tolist() == ["C", "B"]
+    assert sets["merfish_ms2"]["gene_ids"].tolist() == ["ENSMUSG1"]
 
 
 def test_csr_rows_matches_scipy_row_indexing() -> None:
@@ -160,3 +160,55 @@ def test_prepared_query_is_readable_by_prepared_samples(tmp_path: Path) -> None:
     ]
     raw = raw_panel_from_h5ad(samples[0].h5ad_path)
     assert raw.native_id_column == "gene_ids"
+
+
+def test_gene_set_files_are_named_as_the_data_names_them(
+    tmp_path: Path, fake_aliases: Path
+) -> None:
+    """The gene sets are aliases in code; files and records use the data names."""
+    from test_privacy.synthetic import MOUSE, MOUSE2_NAME
+
+    module = _load()
+    genes = pd.DataFrame(
+        {
+            "gene_identifier": [f"ENSMUSG{i}" for i in range(500)],
+            "gene_symbol": [f"G{i}" for i in range(500)],
+        }
+    )
+    genes_csv = tmp_path / "gene.csv"
+    genes.to_csv(genes_csv, index=False)
+    panels = {
+        "ms1": [f"ENSMUSG{i}" for i in range(188)],
+        "ms2": [f"ENSMUSG{i}" for i in range(346)],
+    }
+    for name, ids in panels.items():
+        (tmp_path / f"{name}.json").write_text(json.dumps({"ensembl_ids": ids}))
+    out = tmp_path / "out"
+    module.main(
+        [
+            "gene-sets",
+            "--merfish-genes",
+            str(genes_csv),
+            "--ms1-panel",
+            str(tmp_path / "ms1.json"),
+            "--ms2-panel",
+            str(tmp_path / "ms2.json"),
+            "--out",
+            str(out),
+        ]
+    )
+    second = MOUSE2_NAME.lower()
+    assert sorted(path.name for path in (out / "gene_sets").iterdir()) == sorted(
+        ["merfish500.csv", f"merfish_{MOUSE}.csv", f"merfish_{second}.csv"]
+    )
+    summary = json.loads((out / "gene_sets.json").read_text())
+    assert list(summary["sets"]) == [
+        "merfish500",
+        f"merfish_{MOUSE}",
+        f"merfish_{second}",
+    ]
+    assert set(summary["inputs"]) == {
+        "merfish_genes",
+        f"{MOUSE}_panel",
+        f"{second}_panel",
+    }

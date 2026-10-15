@@ -1,7 +1,7 @@
 """Mouse dataset gate G1-G5 from label-free signals (plan §7.6, §8.6).
 
 Per-cell confidence cannot catch invalid data (class bootstrap >= 0.9 covers
-.742 of the invalid VZG2 proseg_hybrid vs .749 of ag7; R-rob), so the mouse
+.742 of the invalid MS2 proseg_hybrid vs .749 of MS1; R-rob), so the mouse
 gate reads signals that do not trust the labels. Its verdict has the human
 gate's form (§5.4): a **level** (``full``, ``broad_only``, ``failed``) and a
 separate **warning flag** with reasons.
@@ -45,13 +45,13 @@ Vascular cells, Microglia), each with the panel genes whose group profile
 (the mean of its classes' profiles) is >= ``specific_gene_ratio`` (20)
 times the largest profile outside the group and >= 1/1000 of it
 (immediate-early genes excluded); groups with fewer than 3 genes are left
-out. Cells are pseudo-labelled with ``data/P1212``'s rule (each gene's
+out. Cells are pseudo-labelled with ``data/HD2``'s rule (each gene's
 counts over its mean positive count in the dataset; group score = the sum;
 label when the top group has >= 1.5 units and >= 60% of the summed
 scores), and the consistency is the share of pseudo-labelled table cells
 whose MapMyCells class (pruned primary call, whatever its confidence) is
 in the same group. The 0.70 / 0.80 thresholds were set on MO1's
-hand-listed referee (.911 ag7, .856 VZG2); this derived referee reads
+hand-listed referee (.911 MS1, .856 MS2); this derived referee reads
 .80 / .82 there (M6 stage B), so its warning band is provisional [L].
 
 **Failed registration** (§7.5): annotation still runs, the gate is
@@ -335,7 +335,7 @@ def marker_pseudo_labels(
     min_units: float = 1.5,
     min_share: float = 0.6,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return ``data/P1212``'s marker pseudo-labels on derived marker sets.
+    """Return ``data/HD2``'s marker pseudo-labels on derived marker sets.
 
     Args:
         counts: Cells x query genes.

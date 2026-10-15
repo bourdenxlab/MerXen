@@ -56,6 +56,7 @@ import numpy as np
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from merxen import privacy
 from merxen.annotation.config import (
     AnnotationConfig,
     AnnotationPanelConfig,
@@ -460,13 +461,63 @@ class AnnotationPanel(_PanelModel):
 def load_annotation_panel(path: Path | str) -> AnnotationPanel:
     """Read and validate a ``panel_genes*.json`` file.
 
+    A family id recorded before the sample aliases (2026-10-14) is read as
+    its alias (``aliased_family``).
+
     Args:
         path: The file.
 
     Returns:
         The panel (its hash is re-checked against its IDs).
+
+    Raises:
+        LocalConfigError: If the family id is a recorded real name and no
+            alias table is found.
     """
-    return AnnotationPanel.model_validate_json(Path(path).read_text(encoding="utf-8"))
+    panel = AnnotationPanel.model_validate_json(Path(path).read_text(encoding="utf-8"))
+    return aliased_family(panel)
+
+
+# A family id the current code can write: its own, hash-derived id
+# (``panel_family``; every simulation-validated family has one).
+_OWN_FAMILY_ID: Final = re.compile(r"^(?:human|mouse)_[a-z_]+_[0-9a-f]{12}$")
+
+
+def aliased_family(panel: AnnotationPanel) -> AnnotationPanel:
+    """Return the panel with a recorded real-name family id as its alias.
+
+    The validated families' ids name samples by their aliases since
+    2026-10-14 (``validated_panels.csv``, floors); a panel file written
+    before then (a cached ``ANNOTATE_PANEL`` output, a recorded run) carries
+    the family's real name, which ``privacy.to_alias`` translates (privacy
+    rule R2), so trust inheritance, the resolvability version and the floors
+    see the same family as before. Ids the current code writes (a packaged
+    validated or pinned family, a hash-derived own id) are kept as they are,
+    so a host without the alias table reads them.
+
+    Args:
+        panel: A panel read from a file.
+
+    Returns:
+        The panel, with its family id aliased when it differs.
+
+    Raises:
+        LocalConfigError: If the family id needs translating and no alias
+            table is found.
+    """
+    family = panel.panel_family
+    if family is None or _OWN_FAMILY_ID.match(family.family_id):
+        return panel
+    from merxen.annotation import resolvability as res
+
+    if family.family_id in res.v6_family_ids():
+        return panel
+    aliased = privacy.to_alias(family.family_id)
+    if aliased == family.family_id:
+        return panel
+    return panel.model_copy(
+        update={"panel_family": family.model_copy(update={"family_id": aliased})}
+    )
 
 
 class BundleUse(_PanelModel):
@@ -883,7 +934,7 @@ def _first_id_column(table: pd.DataFrame) -> str | None:
 
     The values need not be Ensembl IDs: a column of symbols is still the
     declared ID column, and the resolver refuses it (``native_id_prefix``,
-    the ag7 symbols-as-IDs failure) instead of silently skipping it.
+    the MS1 symbols-as-IDs failure) instead of silently skipping it.
     """
     for column in NATIVE_ID_COLUMNS:
         if column in table.columns and any(

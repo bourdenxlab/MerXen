@@ -386,8 +386,8 @@ def test_version_selection_truth_table() -> None:
     cases = {
         # listed and inherited panels carry their validated family's id
         ("human_set_a", None): 6,
-        ("mouse_ag7", None): 6,
-        ("mouse_vzg2", None): 6,
+        ("mouse_ms1", None): 6,
+        ("mouse_ms2", None): 6,
         # pinned family (OD-E20) and a panel hash named by a pin
         ("human_merscope_ed7bc6bed989", None): 6,
         ("human_merscope_other", str(pins["panel_hash"].iloc[0])): 6,

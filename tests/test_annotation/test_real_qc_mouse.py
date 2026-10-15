@@ -176,7 +176,7 @@ def _mouse_qc(
 
 
 def test_a_seeded_mouse_section_records_every_check(make_trust: MakeTrust) -> None:
-    """ag7 / VZG2: version 6, <= 1,000 genes, MERSCOPE only (seeded)."""
+    """MS1 / MS2: version 6, <= 1,000 genes, MERSCOPE only (seeded)."""
     result = _mouse_qc(make_trust, gate=g4_gate())
     tokens = result.provenance().outcomes
     assert set(tokens) == MOUSE_GATE_CHECKS | {

@@ -8,8 +8,8 @@ Both flags are report-only: they never change a label or a status.
   class when the tree has no microglia subclass) is at least
   ``specific_gene_ratio`` (20) times the largest non-Immune class profile
   and at least ``specific_gene_min_share`` (1/1000) of the microglia
-  profile, immediate-early genes excluded. On the ag7 panel this gives E3's
-  five genes (Csf1r, Cx3cr1, Aif1, Blnk, C1qa), on VZG2 its 13. Fewer than
+  profile, immediate-early genes excluded. On the MS1 panel this gives E3's
+  five genes (Csf1r, Cx3cr1, Aif1, Blnk, C1qa), on MS2 its 13. Fewer than
   ``min_specific_genes`` (3) make the flag null with reason
   ``insufficient_panel_genes``. Per cell a binomial likelihood-ratio test
   on the counts ``k`` in those genes of ``n`` total counts compares
@@ -21,10 +21,10 @@ Both flags are report-only: they never change a label or a status.
   (ambient). ``microglia_stat`` = the statistic, ``microglia_weight`` = the
   maximising ``w``; flagged at statistic >= ``microglia_stat_min`` (10) and
   weight >= ``microglia_weight_min`` (0.05). The flag measures spill-over
-  **prevalence**, never a microglia count (8.6% of VZG2 cells vs 1.5%
+  **prevalence**, never a microglia count (8.6% of MS2 cells vs 1.5%
   microglia in MERFISH). E3 used supertype profiles; the bundle's are
-  subclass-level (supertype is dropped from the mapping tree), and on ag7 /
-  VZG2 the two agree on 99.8% of cells (M6 stage B).
+  subclass-level (supertype is dropped from the mapping tree), and on MS1 /
+  MS2 the two agree on 99.8% of cells (M6 stage B).
 - **False-positive check** (§8.6, MO5): the flag rate among marker
   astrocytes must not exceed ``microglia_fpr_max`` (0.5%); above it the
   flag is null with reason ``astrocyte_fpr``. Marker astrocytes are E3's
@@ -40,7 +40,7 @@ Both flags are report-only: they never change a label or a status.
 - **Held-out check** (§8.6, needs >= 6 genes): the genes are split into
   two halves by specificity rank (odd / even), the flag is rebuilt on the
   first half and the enrichment of the second half (counts per 1,000 in
-  flagged vs unflagged cells) is reported (E3 VZG2: 35-40x; MO5 >= 10x).
+  flagged vs unflagged cells) is reported (E3 MS2: 35-40x; MO5 >= 10x).
 - **Region coherence F1** (E7 §3): ``region_coherence`` = the share of a
   table cell's 30 nearest table-cell neighbours with its WMB class;
   ``flag_region_incoherent`` = a region-restricted class

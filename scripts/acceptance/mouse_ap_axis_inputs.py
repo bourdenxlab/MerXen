@@ -6,8 +6,8 @@ and plan §7.8 item 1. Three steps, each writing under ``--out``:
 
 1. ``gene-sets``: the three WMB panel gene sets, MERFISH 500 (the 500
    genes of the MERFISH-C57BL6J-638850 ``gene.csv``, Blank controls
-   excluded), MERFISH ∩ ag7 and MERFISH ∩ VZG2 (Ensembl IDs of the resolved
-   ag7 / VZG2 ``panel_genes.json``), in MERFISH ``gene.csv`` order
+   excluded), MERFISH ∩ MS1 and MERFISH ∩ MS2 (Ensembl IDs of the resolved
+   MS1 / MS2 ``panel_genes.json``), in MERFISH ``gene.csv`` order
    (``gene_sets/<name>.csv``, ``gene_sets.json``).
 2. ``subsample``: per in-scope section (CB + OB < 50% of grey cells in
    ``plan_rev2/ap_axis/section_region_share.csv``), the cells of the CCF view
@@ -28,10 +28,14 @@ and plan §7.8 item 1. Three steps, each writing under ``--out``:
 Usage::
 
     mouse_ap_axis_inputs.py gene-sets --merfish-genes gene.csv \
-        --ag7-panel ag7/panel_genes.json --vzg2-panel vzg2/panel_genes.json --out DIR
+        --ms1-panel ms1/panel_genes.json --ms2-panel ms2/panel_genes.json --out DIR
     mouse_ap_axis_inputs.py subsample --ccf-metadata VIEW.csv --h5ad RAW.h5ad \
         --section-table section_region_share.csv --out DIR
     mouse_ap_axis_inputs.py prepare --h5ad RAW.h5ad --out DIR
+
+The gene sets are keyed by the sections' aliases; the files and records
+name them as the data does (``privacy.to_real(form="name")``: on a host with
+the alias table the names of the recorded M6b inputs).
 
 Imports: numpy, pandas, h5py, anndata, scipy (the merxen analysis env).
 """
@@ -52,6 +56,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from merxen import privacy
+
 logger = logging.getLogger("mouse_ap_axis_inputs")
 
 SUBSAMPLE_CELLS = 30_000
@@ -59,12 +65,12 @@ SUBSAMPLE_SEED = 0
 MIN_COUNTS = 10
 PLATFORM = "MERSCOPE"
 SEGMENTATION = "allen_merfish"
-GENE_SET_NAMES: tuple[str, ...] = ("merfish500", "merfish_ag7", "merfish_vzg2")
-# Plan §7.8: MERFISH 500, MERFISH ∩ ag7 188, MERFISH ∩ VZG2 346.
+GENE_SET_NAMES: tuple[str, ...] = ("merfish500", "merfish_ms1", "merfish_ms2")
+# Plan §7.8: MERFISH 500, MERFISH ∩ MS1 188, MERFISH ∩ MS2 346.
 EXPECTED_GENE_SET_SIZES: dict[str, int] = {
     "merfish500": 500,
-    "merfish_ag7": 188,
-    "merfish_vzg2": 346,
+    "merfish_ms1": 188,
+    "merfish_ms2": 346,
 }
 CCF_COLUMNS: tuple[str, ...] = (
     "cell_label",
@@ -195,7 +201,7 @@ def build_gene_sets(
     Args:
         merfish_genes: MERFISH ``gene.csv`` (``gene_identifier``,
             ``gene_symbol``).
-        panels: ``{"ag7": ids, "vzg2": ids}``: resolved Ensembl IDs.
+        panels: ``{"ms1": ids, "ms2": ids}``: resolved Ensembl IDs.
 
     Returns:
         ``{name: DataFrame(gene_ids, gene_symbol)}`` for ``GENE_SET_NAMES``.
@@ -209,13 +215,18 @@ def build_gene_sets(
             "gene_symbol": genes["gene_symbol"].astype(str).to_numpy(),
         }
     )
-    ag7 = {str(value) for value in panels["ag7"]}
-    vzg2 = {str(value) for value in panels["vzg2"]}
+    ms1 = {str(value) for value in panels["ms1"]}
+    ms2 = {str(value) for value in panels["ms2"]}
     return {
         "merfish500": frame.reset_index(drop=True),
-        "merfish_ag7": frame[frame["gene_ids"].isin(ag7)].reset_index(drop=True),
-        "merfish_vzg2": frame[frame["gene_ids"].isin(vzg2)].reset_index(drop=True),
+        "merfish_ms1": frame[frame["gene_ids"].isin(ms1)].reset_index(drop=True),
+        "merfish_ms2": frame[frame["gene_ids"].isin(ms2)].reset_index(drop=True),
     }
+
+
+def data_name(name: str) -> str:
+    """How the files and records name a gene set or panel (R3, ``form="name"``)."""
+    return privacy.to_real(name, form="name")
 
 
 def rows_of(obs_labels: Sequence[str], wanted: Sequence[str]) -> np.ndarray:
@@ -310,8 +321,8 @@ def run_gene_sets(args: argparse.Namespace) -> None:
     """Write the three gene sets (step 1)."""
     genes = pd.read_csv(args.merfish_genes)
     panels = {
-        "ag7": json.loads(Path(args.ag7_panel).read_text())["ensembl_ids"],
-        "vzg2": json.loads(Path(args.vzg2_panel).read_text())["ensembl_ids"],
+        "ms1": json.loads(Path(args.ms1_panel).read_text())["ensembl_ids"],
+        "ms2": json.loads(Path(args.ms2_panel).read_text())["ensembl_ids"],
     }
     sets = build_gene_sets(genes, panels)
     out = Path(args.out) / "gene_sets"
@@ -321,15 +332,15 @@ def run_gene_sets(args: argparse.Namespace) -> None:
         expected = EXPECTED_GENE_SET_SIZES[name]
         if len(frame) != expected:
             raise SystemExit(f"{name}: {len(frame)} genes, expected {expected}")
-        frame.to_csv(out / f"{name}.csv", index=False)
-        summary["sets"][name] = {
+        frame.to_csv(out / f"{data_name(name)}.csv", index=False)
+        summary["sets"][data_name(name)] = {
             "n_genes": len(frame),
             "ids_sha256": cells_sha256(sorted(frame["gene_ids"])),
         }
     summary["inputs"] = {
         "merfish_genes": str(args.merfish_genes),
-        "ag7_panel": str(args.ag7_panel),
-        "vzg2_panel": str(args.vzg2_panel),
+        data_name("ms1_panel"): str(args.ms1_panel),
+        data_name("ms2_panel"): str(args.ms2_panel),
     }
     (Path(args.out) / "gene_sets.json").write_text(json.dumps(summary, indent=2))
     logger.info("gene sets: %s", {k: v["n_genes"] for k, v in summary["sets"].items()})
@@ -447,7 +458,8 @@ def run_prepare(args: argparse.Namespace) -> None:
     root = Path(args.out)
     summary = json.loads((root / "subsamples.json").read_text())
     sets = {
-        name: pd.read_csv(root / "gene_sets" / f"{name}.csv") for name in GENE_SET_NAMES
+        data_name(name): pd.read_csv(root / "gene_sets" / f"{data_name(name)}.csv")
+        for name in GENE_SET_NAMES
     }
     with h5py.File(args.h5ad, "r") as handle:
         var = handle["var"]
@@ -503,8 +515,8 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     genes = commands.add_parser("gene-sets")
     genes.add_argument("--merfish-genes", type=Path, required=True)
-    genes.add_argument("--ag7-panel", type=Path, required=True)
-    genes.add_argument("--vzg2-panel", type=Path, required=True)
+    genes.add_argument("--ms1-panel", type=Path, required=True)
+    genes.add_argument("--ms2-panel", type=Path, required=True)
     genes.add_argument("--out", type=Path, required=True)
     sample = commands.add_parser("subsample")
     sample.add_argument("--ccf-metadata", type=Path, required=True)

@@ -81,6 +81,7 @@ from typing import TYPE_CHECKING, Any, Final
 import numpy as np
 import pandas as pd
 
+from merxen import privacy
 from merxen.annotation.config import (
     KNOWN_REFERENCES,
     LARGE_PANEL_GENES,
@@ -239,13 +240,15 @@ WMB_KNOWN_LIMITATION: Final = (
     "their own and are listed in marker_unsupported_nodes, which RESOLVE "
     "reports as unresolved at that level."
 )
-# The validated WMB marker-precompute gene universe: the ag7 | VZG2 union of
-# research/selfmap/query_{ag7,vzg2}_full.h5ad (899 genes). raw-CPM
+# The validated WMB marker-precompute gene universe: the MS1 | MS2 union of
+# research/selfmap/query_{ms1,ms2}_full.h5ad (899 genes). raw-CPM
 # normalisation runs over the genes of the training h5ads, so the universe
 # changes the marker choice; a panel inside it uses it (and reproduces the
-# validated lookups exactly), any other panel uses its own genes.
-WMB_MARKER_UNIVERSE_FILE: Final = "wmb_marker_universe_ag7_vzg2.csv"
-WMB_UNIVERSE_VALIDATED: Final = "validated_ag7_vzg2_union"
+# validated lookups exactly), any other panel uses its own genes. The file
+# name and header carry the section aliases; the build hash covers their real
+# form (``wmb_marker_universe_hash``).
+WMB_MARKER_UNIVERSE_FILE: Final = "wmb_marker_universe_ms1_ms2.csv"
+WMB_UNIVERSE_VALIDATED: Final = "validated_ms1_ms2_union"
 # MERFISH-C57BL6J-638850-CCF cell metadata (manifest 20231215 / 20260711).
 MERFISH_CCF_METADATA_MD5: Final = "51dda47ab139e91357bc09bc4e12c073"
 MERFISH_CCF_METADATA_SIZE: Final = 1_606_515_935
@@ -431,9 +434,9 @@ DEFAULT_PREP_MAX_GB: Final = 40
 PREP_MAX_GB_FRACTION: Final = 0.625
 # Peak memory of the WMB query-marker step, the binding PREP step (plan
 # §8.7), measured at 8 processes (largest process, /usr/bin/time; M3b stage
-# D, evidence m3b/simulate/): VZG2 815 genes 25.8 GB, the Xenium Prime 5K
+# D, evidence m3b/simulate/): MS2 815 genes 25.8 GB, the Xenium Prime 5K
 # Mouse panel prefiltered to 1,992 candidates 37.7 GB and unfiltered (5,006
-# genes) 21.3 GB (ag7, 500 genes: 20.2 GB at 16 processes). The peak does
+# genes) 21.3 GB (MS1, 500 genes: 20.2 GB at 16 processes). The peak does
 # not grow with the candidate genes up to 5,006 (the plan's ~22 MB per gene
 # extrapolation is refuted), so within the measured range the prediction is
 # the largest measured peak; beyond it (untested) that peak is scaled with
@@ -4012,11 +4015,40 @@ def validated_wmb_marker_universe() -> list[str]:
     """Return the validated WMB marker-precompute universe (899 genes).
 
     Returns:
-        The ag7 | VZG2 union of the validated self-map queries, sorted.
+        The MS1 | MS2 union of the validated self-map queries, sorted.
     """
     from merxen.annotation.vocab import load_asset_table
 
     return sorted(load_asset_table(WMB_MARKER_UNIVERSE_FILE)["ensembl_id"])
+
+
+def wmb_marker_universe_hash(path: Path) -> dict[str, str]:
+    """Return the universe asset's ``{file name: sha256}`` build-hash entry.
+
+    The tracked asset names the two mouse sections by their aliases, in its
+    file name and in its header line; until 2026-10-14 both held the
+    sections' real names, and every existing ``wmb_panel`` build hash covers
+    that form. The entry is therefore computed on the real form: the file
+    name and the header line pass through ``privacy.to_real(form="name")``
+    (the gene rows hold no name), so existing bundles keep their hashes on a
+    host with the alias table (the Dwight site config gives it to every
+    task). Without a table ``to_real`` refuses, so PREP stops instead of
+    silently building new bundles; with the table disabled on purpose
+    (``MERXEN_ALIAS_FILE=none``: the tests, CI) the alias form is hashed.
+
+    Args:
+        path: The universe asset (``WMB_MARKER_UNIVERSE_FILE``).
+
+    Returns:
+        ``{real file name: sha256 of the real-form bytes}``.
+
+    Raises:
+        LocalConfigError: If no alias table is found and it is not disabled.
+    """
+    header, newline, rows = path.read_bytes().partition(b"\n")
+    real_header = privacy.to_real(header.decode("utf-8"), form="name")
+    digest = hashlib.sha256(real_header.encode("utf-8") + newline + rows)
+    return {privacy.to_real(path.name, form="name"): digest.hexdigest()}
 
 
 def _wmb_gene_universe(
@@ -4026,7 +4058,7 @@ def _wmb_gene_universe(
 
     An explicit ``wmb_marker_gene_universe`` source adds its genes to the
     panel's. Otherwise a panel whose genes (those in the WMB matrices) all
-    lie in the validated ag7 | VZG2 union uses that union, which reproduces
+    lie in the validated MS1 | MS2 union uses that union, which reproduces
     the validated lookups exactly (plan §7.1, R28); any other panel uses its
     own genes (a new family, validated by M3's shadow checks).
     """
@@ -4052,9 +4084,10 @@ def _wmb_gene_universe(
             universe_source = WMB_UNIVERSE_VALIDATED
         else:
             universe_source = "panel"
-            reason = (
+            # Output text written through display() (privacy rule R5).
+            reason = privacy.display(
                 f"{len(in_reference - set(validated))} panel gene(s) lie outside the "
-                "validated ag7 | VZG2 universe"
+                "validated MS1 | MS2 universe"
             )
             logger.warning(
                 "wmb_panel: %s; the marker precompute uses the panel's own genes "
@@ -4065,9 +4098,11 @@ def _wmb_gene_universe(
     return universe, {
         "n_panel_genes": panel.n_genes,
         "n_extra_universe_genes": len(set(extra) - set(wanted)),
-        "universe_source": universe_source,
+        # Recorded labels through display() (privacy rule R5): the names
+        # bundles recorded before the aliases, on a host with the alias table.
+        "universe_source": privacy.display(universe_source),
         "validated_universe": universe_source == WMB_UNIVERSE_VALIDATED,
-        "validated_universe_asset": WMB_MARKER_UNIVERSE_FILE,
+        "validated_universe_asset": privacy.display(WMB_MARKER_UNIVERSE_FILE),
         "not_validated_reason": reason,
         "n_genes": len(universe),
         "universe_sha256": hashlib.sha256("\n".join(universe).encode()).hexdigest(),
@@ -4132,7 +4167,7 @@ def build_wmb_panel(context: BuildContext) -> dict[str, Any]:
     ``max_cells_per_cluster`` (50) cells per cluster from the local
     WMB-10Xv3 h5ads, excluding the self-map test cells (required while
     resolvability is enabled), restricted to the marker universe (the
-    validated ag7 | VZG2 union for panels inside it, else the panel's own
+    validated MS1 | MS2 union for panels inside it, else the panel's own
     genes); (2) ``precompute_stats_abc`` -> the marker precompute; (3)
     reference markers and (4) query markers on the panel with the supertype
     level dropped and ``--n_processors`` / ``--max_gb`` explicit; (5) the
@@ -7916,9 +7951,9 @@ def _wmb_params(
         "marker_hierarchy": list(spec.hierarchy or WMB_HIERARCHY),
         "validated_mapping_md5": WMB_MAPPING_STATS_MD5,
         "matrix_pattern": f"*{WMB_H5AD_SUFFIX}",
-        "marker_universe": {
-            WMB_MARKER_UNIVERSE_FILE: file_sha256(asset_path(WMB_MARKER_UNIVERSE_FILE))
-        },
+        "marker_universe": wmb_marker_universe_hash(
+            asset_path(WMB_MARKER_UNIVERSE_FILE)
+        ),
         "validated_test_cells_sha256": WMB_SELFMAP_TEST_CELLS_PIN.sha256,
         "negative_gene_max_fraction": config.flags.negative_gene_max_fraction,
         **_state_and_vocab_params("mouse", (WMB_TAXONOMY_ID,)),

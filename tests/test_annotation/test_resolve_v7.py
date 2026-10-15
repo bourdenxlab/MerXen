@@ -929,12 +929,20 @@ V6_GOLDEN: dict[str, dict[str, str]] = {
     # provenance equals it once ``panel.real_data_qc`` is reset (checked
     # below). Mouse ``map_first`` stays opt-in (``clustering_squidpy_mode_
     # mouse`` is "legacy" until M9), so no production mouse output changes.
+    #
+    # Refreshed 2026-10-14 by the sample aliases (privacy rules): the
+    # ``provenance`` digest of each mouse scenario changed (here and in
+    # ``MOUSE_PROVENANCE_BEFORE_C22``); no other digest did. The only
+    # difference is ``thresholds.floors_sha256``, the recorded sha256 of the
+    # packaged ``floors_mouse.csv``, whose ``panel_family`` column now holds
+    # the section aliases (same floors, same rows). No label, status, flag or
+    # other provenance field moves.
     "mouse_v6_provisional": {
         "AG_MERSCOPE/labels": (
             "b280d2188f45d21e5d9edda6a2b514d0f4bf18e94b89a5eea38437d78f87e4be"
         ),
         "AG_MERSCOPE/provenance": (
-            "af15380f24e40d46d0b86374b550343a763b0f037dcf361e163824eed79524f1"
+            "8ab541b9d36e85e9332ce32f2317a59144416d5b260d16b36758697b8dd21947"
         ),
         "AG_MERSCOPE/summary": (
             "ad69c95bd0d26c56b9a69a5a82653fee0187cb94c636769cabe4bb3b7416d72a"
@@ -948,7 +956,7 @@ V6_GOLDEN: dict[str, dict[str, str]] = {
             "6c14f98d3e7a3d4c43a4321e9abd97989f612c73084adf1336f42f1b8ef03b9c"
         ),
         "AG_MERSCOPE/provenance": (
-            "abc77a1fdc974e231a6e8512b74460fc5cabb16dc3cf98fc7cb934ee4f00add1"
+            "dcbf701be46f2dc2e93833b5a5a25174a85987868919ecfeb987ef3918a9ccca"
         ),
         "AG_MERSCOPE/summary": (
             "22d97886fc9e989da98574c678a81f75dbf8bc898c38b9f72df7187e08e4edc6"
@@ -963,12 +971,12 @@ V6_GOLDEN: dict[str, dict[str, str]] = {
 MOUSE_PROVENANCE_BEFORE_C22: dict[str, dict[str, str]] = {
     "mouse_v6_provisional": {
         "AG_MERSCOPE/provenance": (
-            "786bbc3a774de00138da087690a1be95f3c64c94a710a41ac498a17d17f90e2f"
+            "f42a4598d6a008cf6c32db8d26700f27a6579f213e2a0a8e5ce217dd5dff19f8"
         ),
     },
     "mouse_no_tables": {
         "AG_MERSCOPE/provenance": (
-            "da8f9f22b7e3317ebce2f55ef948f46b29eee438e90f3ea24bf8806ec567ad65"
+            "c392a9799666854f994abd63fd41f5492b86b048cce5f34af7bd3bba426b758c"
         ),
     },
 }
