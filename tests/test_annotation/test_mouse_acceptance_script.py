@@ -8,6 +8,7 @@ and the registered readings are checked to be the defaults.
 
 from __future__ import annotations
 
+import html
 import importlib.util
 import json
 import os
@@ -1745,6 +1746,36 @@ def test_score_reads_real_names_and_shows_them_with_the_alias_table(
     assert set(table.loc[table["criterion"] == "MO1", "dataset"]) == set(names.values())
     html_text = (out / "summary.html").read_text()
     assert f"<td>{names[MS1]}</td>" in html_text
+
+
+def test_score_records_an_approval_as_written_with_the_alias_table(
+    e2e: tuple[list[str], Path, Path], tmp_path: Path, fake_aliases: Path
+) -> None:
+    """An approval's own words are never rewritten by the output labels (R5).
+
+    An exceptions file written after the aliases may name a section both
+    ways ("<name> (MS1)"); the summary records each approval as the file
+    holds it, as before the aliases.
+    """
+    from test_privacy.synthetic import MOUSE
+
+    args, _, _ = e2e
+    exceptions_path = Path(args[args.index("--exceptions") + 1])
+    exception = {
+        **EXCEPTION,
+        "id": f"U1-MO10-35-{MOUSE}-ms1",
+        "quote": f"1. go with recommendation for {MOUSE} (MS1) and MS2",
+        "recorded_in": f"pre-registration §24; {MOUSE} (MS1) 1.5 h",
+    }
+    exceptions_path.write_text(json.dumps({"exceptions": [exception]}))
+    out = tmp_path / "out"
+    assert M.main([*args, "--out", str(out)]) == 0
+    summary = json.loads((out / "summary.json").read_text())
+    record = summary["exceptions"][0]
+    assert record["applied_to"]
+    for key in ("id", "criterion", "scope", "approved", "quote", "recorded_in"):
+        assert record[key] == exception[key], key
+    assert html.escape(exception["quote"]) in (out / "summary.html").read_text()
 
 
 def test_display_keeps_paths_and_shows_labels(fake_aliases: Path) -> None:
