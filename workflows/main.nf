@@ -2088,6 +2088,10 @@ workflow {
     AnnotationSettings.useRowModes(
         samplesheetRows.collect { row -> row[AnnotationDefaults.ROW_MODE_COLUMN] }
     )
+    def rowModeSummary = AnnotationSettings.rowModeSummary(params, samplesheetRows)
+    if (rowModeSummary) {
+        log.info(rowModeSummary)
+    }
     def nearMissModeColumns = AnnotationSettings.nearMissModeColumns(
         samplesheetRows ? samplesheetRows[0].keySet() : []
     )
@@ -2098,12 +2102,10 @@ workflow {
             "Those rows follow the run's clustering mode."
         )
     }
-    if (AnnotationSettings.usesDeprecatedHumanLegacy(params)) {
-        log.warn(
-            "Human legacy clustering (clustering_squidpy_mode legacy) is deprecated: " +
-            "human runs map_first by default since M8 (pre-registration §20). " +
-            "The legacy mode stays available until it is removed in a later release."
-        )
+    // Legacy rows of a flipped species (human since M8, mouse since M9).
+    def deprecatedLegacyWarning = AnnotationSettings.deprecatedLegacyWarning(params)
+    if (deprecatedLegacyWarning) {
+        log.warn(deprecatedLegacyWarning)
     }
 
     sample_rows_raw_ch = samplesheet_ch.map { row ->

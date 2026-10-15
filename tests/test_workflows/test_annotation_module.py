@@ -1502,7 +1502,7 @@ def _compute_cases(root: Path, human: dict[str, Any]) -> dict[str, dict[str, Any
             "source_root": str(SRC),
         },
         # §20 D15: a map_first row of a legacy-mode run gets a map_first
-        # row's suffix (as forRow gives it), not the run's legacy "".
+        # row's suffix (as forRow gives it): "" since the mouse flip (§25).
         "compute_spec_mouse_row_opt_in": {
             "fn": "computeSpec",
             "params": {
@@ -1530,9 +1530,11 @@ def _compute_cases(root: Path, human: dict[str, Any]) -> dict[str, dict[str, Any
             },
             "source_root": str(SRC),
         },
-        "compute_spec_empty_suffix": {
+        "compute_spec_mouse_empty_suffix": {
             "fn": "computeSpec",
-            # Mouse has not flipped (human has, §20): "" is refused.
+            # Mouse has flipped (§25): an explicit "" is accepted. The refusal
+            # before a flip is covered with injected flips in
+            # test_annotation_defaults.py.
             "params": {
                 **map_first,
                 "species": "mouse",
@@ -2153,15 +2155,15 @@ def test_compute_spec_carries_suffix_policy_and_hierarchy_fingerprint(
         "mender_unassigned_state_policy": "exclude_from_features",
         "hierarchy_fingerprint": fingerprint,
     }
+    # Mouse has flipped (§25): its map_first rows are unsuffixed too.
     mouse_row = _value(harness, "compute_spec_mouse_row_opt_in")
-    assert mouse_row["table_key_suffix"] == "mapfirst"
+    assert mouse_row["table_key_suffix"] == ""
     human_row = _value(harness, "compute_spec_human_legacy_run_suffix")
     assert human_row["table_key_suffix"] == "mapfirst"
     policy = _value(harness, "compute_spec_policy")
     assert policy["table_key_suffix"] == "trial"
     assert policy["mender_unassigned_state_policy"] == "state"
-    # Before the flip an empty suffix would overwrite the legacy table.
-    assert "overwrite the legacy one" in _error(harness, "compute_spec_empty_suffix")
+    assert _value(harness, "compute_spec_mouse_empty_suffix")["table_key_suffix"] == ""
 
 
 @needs_nextflow

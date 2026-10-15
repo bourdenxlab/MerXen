@@ -325,6 +325,14 @@ TERMINAL_CASES: dict[str, dict[str, Any]] = {
         **MISSING_LEGACY_MARKERS,
         "annotation_panel_mode": "bogus",
     },
+    # Mouse has flipped too (M9, §25): its default rows behave as human's.
+    "mouse|default-mender": {"species": "mouse", "mender_enabled": True},
+    "mouse|stop-mapmycells-default": {"species": "mouse", "stop_stage": "mapmycells"},
+    "mouse|legacy-default-mender": {
+        "species": "mouse",
+        "clustering_squidpy_mode_mouse": "legacy",
+        "mender_enabled": True,
+    },
 }
 
 
@@ -434,6 +442,33 @@ def test_barrier_keeps_the_legacy_join_and_one_spec_per_pair() -> None:
         map_first.split(".combine(pair_terminal_specs_ch, by: 0)\n")[1]
         == (LEGACY_BARRIER.split(".join(pair_terminal_specs_ch)\n")[1])
     )
+
+
+@needs_nextflow
+def test_mouse_rows_follow_the_mouse_flip(main_nf_results: dict[str, Any]) -> None:
+    """A default mouse row runs map_first like a human one (M9, §25).
+
+    It takes every annotation key, skips the legacy MAPMYCELLS stage,
+    counts clustering at the MENDER barrier and writes the unsuffixed
+    tables; a mouse row set to legacy keeps the legacy settings.
+    """
+    mouse = _case(main_nf_results, "mouse|default-mender")
+    human = _case(main_nf_results, "map_first|default-mender")
+    assert mouse["mode"] == "map_first"
+    assert mouse["annotation_keys"] == human["annotation_keys"]
+    assert mouse["run_mapmycells"] is False
+    assert (mouse["terminal"], mouse["count"]) == ("clustering_squidpy", 1)
+    assert mouse["depth_tables"] == human["depth_tables"]
+    assert "clustered_table_key_suffix" not in mouse["depth_tables"][0]
+    # Hook H4: the map_first preflight, not the legacy marker checks.
+    errors = "\n".join(mouse["clustering_errors"])
+    assert "CLUSTERING_SQUIDPY broad marker lookup" not in errors
+    assert "P1 (mouse, clustering_squidpy_mode map_first)" in errors
+    stop = _case(main_nf_results, "mouse|stop-mapmycells-default")
+    assert stop["run_mapmycells"] is False
+    legacy = _case(main_nf_results, "mouse|legacy-default-mender")
+    assert legacy["mode"] == "legacy"
+    assert legacy["annotation_keys"] == []
 
 
 @needs_nextflow

@@ -216,7 +216,7 @@ def test_resolved_params_follow_the_include_order(
     )
     assert conda["annotation_reference_store"] is None
     assert conda["clustering_squidpy_mode_human"] == "map_first"
-    assert conda["clustering_squidpy_mode_mouse"] == "legacy"
+    assert conda["clustering_squidpy_mode_mouse"] == "map_first"
     # The store is a host location: the Dwight site config sets it (here the
     # tracked template, with placeholders).
     assert dwight["annotation_reference_store"] == (
