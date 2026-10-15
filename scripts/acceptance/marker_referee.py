@@ -62,7 +62,12 @@ from merxen.annotation.shadow import (
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from resolve_criteria import confident, referee_table_rows  # noqa: E402
-from shadow_baselines import PAIRS, PLATFORMS, _clustered_path  # noqa: E402
+from shadow_baselines import (  # noqa: E402
+    PAIRS,
+    PLATFORMS,
+    _clustered_path,
+    data_pairs,
+)
 
 logger = logging.getLogger("marker_referee")
 
@@ -289,7 +294,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resolve-root", type=Path, required=True)
     parser.add_argument("--results-root", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--pairs", default=",".join(PAIRS))
+    parser.add_argument("--pairs", default=",".join(PAIRS), help="pair aliases or ids")
     parser.add_argument("--segmentations", default=",".join(ALL_SEGMENTATIONS))
     parser.add_argument(
         "--check-against",
@@ -303,7 +308,7 @@ def main(argv: list[str] | None = None) -> int:
     referee: list[dict[str, Any]] = []
     disputes: list[dict[str, Any]] = []
     for segmentation in [item for item in args.segmentations.split(",") if item]:
-        for pair in [item for item in args.pairs.split(",") if item]:
+        for pair in data_pairs(args.pairs):
             resolve_dir = args.resolve_root / pair / segmentation
             summary_path = resolve_dir / f"{pair}_resolve_summary.json"
             if not summary_path.is_file():

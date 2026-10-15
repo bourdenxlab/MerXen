@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -11,6 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from merxen import privacy
 from merxen.annotation.shadow import (
     E1_REFEREE_MARKERS,
     evaluate_human_rules,
@@ -115,7 +117,7 @@ def test_ll_score_sample_and_decision(scripts: dict[str, ModuleType]) -> None:
     row, referee = scripts["shadow_ll"].score_sample(
         sample,
         calls,
-        pair="P7513",
+        pair="HD1",
         seg="proseg_hybrid",
         variant="capped",
         n_segmented=None,
@@ -126,7 +128,7 @@ def test_ll_score_sample_and_decision(scripts: dict[str, ModuleType]) -> None:
     assert row["cost_sea_below60"] == pytest.approx(4 / 40)
     assert row["ll_whb_agree_all"] == 1.0
     assert referee[0]["comparison"].startswith("WHB argmax vs LL")
-    metrics = pd.DataFrame([row, {**row, "pair": "P1212"}])
+    metrics = pd.DataFrame([row, {**row, "pair": "HD2"}])
     decisions = {
         item["decision"]: item for item in scripts["shadow_ll"].decision_rows(metrics)
     }
@@ -140,10 +142,115 @@ def test_ll_score_sample_and_decision(scripts: dict[str, ModuleType]) -> None:
     assert decisions["OD-B13"]["max_cost_sea_below60"] == pytest.approx(0.1)
 
 
+def test_ll_decision_finds_the_development_pairs_by_alias(
+    scripts: dict[str, ModuleType], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An alias table with invented pair ids (never real ones); the metrics
+    # carry the data's ids.
+    table = tmp_path / "aliases.tsv"
+    table.write_text(
+        "HD1\thuman_paired_donor\tpair_id\ttoken\tQ0101\n"
+        "HD3\thuman_paired_donor\tpair_id\ttoken\tQ0303\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(privacy.ALIAS_FILE_VAR, str(table))
+    privacy.clear_cache()
+    sample = _sample(scripts["shadow_baselines"])
+    labels = sample.labels  # type: ignore[attr-defined]
+    calls = pd.DataFrame(
+        {
+            "ll_broad_name": labels["ct_broad_name"].to_numpy(object),
+            "ll_mix_fraction": np.zeros(len(labels)),
+        },
+        index=labels.index,
+    )
+    row, _ = scripts["shadow_ll"].score_sample(
+        sample,
+        calls,
+        pair="Q0303",
+        seg="proseg_hybrid",
+        variant="capped",
+        n_segmented=None,
+    )
+    assert row["held_out"] is True
+    metrics = pd.DataFrame(
+        [
+            {**row, "pair": "Q0101", "od_b8_coverage_gain": 0.01},
+            {**row, "od_b8_coverage_gain": 0.5},
+        ]
+    )
+    vote = scripts["shadow_ll"].decision_rows(metrics)[0]
+    assert vote["max_coverage_gain_dev"] == pytest.approx(0.01)
+    assert vote["max_coverage_gain_all"] == pytest.approx(0.5)
+
+
+class _FirstPairError(Exception):
+    """Raised by a stand-in loader with the first pair a script reads."""
+
+
+def _invented_alias_table(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # An alias table with invented pair ids (never real ones).
+    table = tmp_path / "aliases.tsv"
+    table.write_text(
+        "".join(
+            f"HD{n}\thuman_paired_donor\tpair_id\ttoken\tQ0{n}0{n}\n"
+            for n in range(1, 5)
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(privacy.ALIAS_FILE_VAR, str(table))
+    privacy.clear_cache()
+
+
+def _stop_at_first_pair(*args: object) -> None:
+    raise _FirstPairError([arg for arg in args if isinstance(arg, str)])
+
+
+@pytest.mark.parametrize(
+    ("name", "loader"),
+    [("shadow_flags", "human_inputs"), ("shadow_glial_jsd", "load_sample")],
+)
+def test_c2_scripts_read_the_default_pairs_under_their_data_ids(
+    scripts: dict[str, ModuleType],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    loader: str,
+) -> None:
+    _invented_alias_table(tmp_path, monkeypatch)
+    runs = tmp_path / "runs"
+    (runs / "Q0101" / "proseg_hybrid").mkdir(parents=True)
+    (runs / "Q0101" / "proseg_hybrid" / "map_manifest.json").write_text("{}")
+    (tmp_path / "research" / "lowcount").mkdir(parents=True)
+    (tmp_path / "research" / "lowcount" / "qc_summary.csv").write_text(
+        "sample,seg,platform,n_cells\n"
+    )
+    monkeypatch.setattr(scripts[name], loader, _stop_at_first_pair)
+    argv = ["--runs-root", str(runs), "--results-root", str(tmp_path)]
+    argv += ["--out", str(tmp_path / "out")]
+    if name == "shadow_flags":
+        argv += ["--evidence-root", str(tmp_path)]
+        argv += ["--gene-id-fallback-csv", "x.csv"]
+        argv += ["--mouse-gene-id-fallback-csv", "y.csv"]
+    with pytest.raises(_FirstPairError) as stopped:
+        scripts[name].main(argv)
+    assert "Q0101" in stopped.value.args[0]
+
+
+@pytest.mark.parametrize("name", [*NAMES, "draw_spread", "marker_referee"])
+def test_scripts_compare_pairs_with_the_alias_constants_by_alias(name: str) -> None:
+    # The pair constants of shadow_baselines are aliases; the scripts read
+    # pairs given as aliases or data ids (data_pairs) and look them up by
+    # alias (is_held_out, to_alias), never by the raw value.
+    source = (SCRIPTS / f"{name}.py").read_text(encoding="utf-8")
+    assert "args.pairs.split(" not in source
+    assert not re.search(r"[^)] in HELD_OUT_PAIRS", source)
+
+
 def test_heldout_h4_rows_count_passing_classes(scripts: dict[str, ModuleType]) -> None:
     enrichment = pd.DataFrame(
         {
-            "pair": ["P7513"] * 7,
+            "pair": ["HD1"] * 7,
             "platform": ["XENIUM"] * 7,
             "variant": ["set_a"] * 7,
             "label_set": ["heldout_argmax"] * 7,
@@ -184,14 +291,14 @@ def test_ll_fidelity_rows_compare_the_port_with_e1_vii(
             "pred_supercluster": ["MGE interneuron", "Astrocyte", "Microglia"],
         },
         index=pd.Index([1, 2, 3]),
-    ).to_csv(preds / "LLmix_wbctx+platform__P7513_XENIUM.pred.csv")
+    ).to_csv(preds / "LLmix_wbctx+platform__HD1_XENIUM.pred.csv")
     pd.DataFrame(
         {
             "ll_broad_name": ["Neurons", "Astrocytes", "Astrocytes"],
             "ll_supercluster_name": ["CGE interneuron", "Astrocyte", "Astrocyte"],
         },
         index=pd.Index(["1", "2", "3"], name="cell_id"),
-    ).to_parquet(calls / "P7513_proseg_hybrid_P7513_XENIUM_capped.parquet")
+    ).to_parquet(calls / "HD1_proseg_hybrid_HD1_XENIUM_capped.parquet")
 
     [row] = scripts["shadow_ll"].e1_fidelity_rows(calls, preds)
 

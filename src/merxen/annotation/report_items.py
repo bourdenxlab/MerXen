@@ -1638,7 +1638,7 @@ def item_confidence_vs_counts(
         3,
         "confidence_vs_counts",
         "Confidence vs counts",
-        "flat bp (P1212, P5011), saturation (mouse, large panels)",
+        "flat bp (HD2, HD4), saturation (mouse, large panels)",
     )
     species = inputs.species
     levels = ("broad", "supercluster") if species == "human" else ("class", "subclass")
@@ -1764,7 +1764,7 @@ def item_purity(
         5,
         "negative_marker_purity",
         "Negative-marker purity",
-        "AQP4 / GJA1 in 66-74% of Xenium Exc cells (P7513 F3)",
+        "AQP4 / GJA1 in 66-74% of Xenium Exc cells (HD1 F3)",
     )
     rows = []
     for sample in inputs.ordered_samples():

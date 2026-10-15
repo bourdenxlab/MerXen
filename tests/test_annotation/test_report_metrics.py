@@ -458,10 +458,10 @@ def test_self_thinning_is_unreliable_when_one_class_dominates() -> None:
 
 
 def test_self_thinning_judges_labelled_cells_and_counts_unlabelled_apart() -> None:
-    """Regression (M7 review): P1212_MERSCOPE, 48% unlabelled, 43% Fibroblasts.
+    """Regression (M7 review): HD2_MERSCOPE, 48% unlabelled, 43% Fibroblasts.
 
     The report used to pass "Mixed/Unknown" as a class: it became the
-    dominant label at 48% (below the old 50% cut) and P1212_M was marked
+    dominant label at 48% (below the old 50% cut) and HD2_M was marked
     reliable, while ordinary cortex (Xenium, 53-62% Neurons) was not.
     """
     n_deep = 509
@@ -474,17 +474,17 @@ def test_self_thinning_judges_labelled_cells_and_counts_unlabelled_apart() -> No
     ]
     labelled = labels != ""
     argmax = np.r_[np.repeat("Fibroblasts", 401), np.repeat("Vascular cells", 108)]
-    p1212 = rm.self_thinning_eligibility(counts, labels, labelled, argmax=argmax)
-    assert p1212.eligible and not p1212.reliable
-    assert p1212.n_labelled == 264
-    assert p1212.unlabelled_share == pytest.approx(245 / 509)
-    assert "" not in p1212.composition
-    assert p1212.dominant_label == "Fibroblasts"
-    assert p1212.dominant_share == pytest.approx(219 / 264)
-    assert any(reason.startswith("unlabelled_share:") for reason in p1212.reasons)
-    assert any(reason.startswith("dominant:Fibroblasts") for reason in p1212.reasons)
-    assert p1212.evaluable_classes == ("Fibroblasts",)
-    assert p1212.argmax_composition["Fibroblasts"] == pytest.approx(401 / 509)
+    hd2 = rm.self_thinning_eligibility(counts, labels, labelled, argmax=argmax)
+    assert hd2.eligible and not hd2.reliable
+    assert hd2.n_labelled == 264
+    assert hd2.unlabelled_share == pytest.approx(245 / 509)
+    assert "" not in hd2.composition
+    assert hd2.dominant_label == "Fibroblasts"
+    assert hd2.dominant_share == pytest.approx(219 / 264)
+    assert any(reason.startswith("unlabelled_share:") for reason in hd2.reasons)
+    assert any(reason.startswith("dominant:Fibroblasts") for reason in hd2.reasons)
+    assert hd2.evaluable_classes == ("Fibroblasts",)
+    assert hd2.argmax_composition["Fibroblasts"] == pytest.approx(401 / 509)
     # Ordinary cortex: 55 / 29 / 16 neuron / astrocyte / other, all labelled.
     cortex = np.r_[
         np.repeat("Neurons", 550),

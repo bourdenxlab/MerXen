@@ -87,8 +87,8 @@ def test_final_level_covers_both_species_orders() -> None:
 
 def test_label_table_version_and_filename() -> None:
     assert LABEL_TABLE_VERSION == 1
-    assert label_table_filename("P7513_MERSCOPE") == (
-        "P7513_MERSCOPE_celltype_labels.parquet"
+    assert label_table_filename("HD1_MERSCOPE") == (
+        "HD1_MERSCOPE_celltype_labels.parquet"
     )
 
 

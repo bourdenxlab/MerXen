@@ -255,7 +255,7 @@ def test_aligned_copies_do_not_share_transformations_with_native() -> None:
         )
 
 
-def test_transform_points_dask_metadata_matches_p7113_shared_domain_order() -> None:
+def test_transform_points_dask_metadata_matches_hd3_shared_domain_order() -> None:
     """Derived transcript columns must match Dask metadata exactly."""
     source = pd.DataFrame(
         {

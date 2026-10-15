@@ -21,7 +21,7 @@ set c (production sensitivity run) and X1 on:
 
 The held-out-gene comparison (H4 with X1) is ``heldout_genes.py --variants
 set_a,set_c,x1``. The OD-B9 decision is made on effect size: the soft JSD
-difference X1 - set a on the development pairs (P7513, P1212) with its
+difference X1 - set a on the development pairs (HD1, HD2) with its
 paired 95% CI, compared with set c's gain over set a (the mandatory
 sensitivity), and H4 with X1 vs set a. The E1 referee is reported but is not
 neutral here: it scores raw panel counts, so it favours labellings mapped
@@ -69,13 +69,14 @@ from merxen.annotation.shadow import (
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from shadow_baselines import (  # noqa: E402
-    HELD_OUT_PAIRS,
     PAIRS,
     PLATFORMS,
     Sample,
     SectionTiles,
     _clustered_path,
     add_fallback_arguments,
+    data_pairs,
+    is_held_out,
     load_sample,
 )
 
@@ -135,7 +136,7 @@ def main(argv: list[str] | None = None) -> int:
     sample_rows: list[dict[str, Any]] = []
     comp_rows: list[dict[str, Any]] = []
     seg = "proseg_hybrid"
-    for pair in [p for p in args.pairs.split(",") if p]:
+    for pair in data_pairs(args.pairs):
         run_dir = args.runs_root / pair / seg
         manifest = load_map_manifest(run_dir / "map_manifest.json")
         panel = AnnotationPanel.model_validate_json(
@@ -230,7 +231,7 @@ def main(argv: list[str] | None = None) -> int:
                 "pair": pair,
                 "sample_id": sample_id,
                 "platform": platform,
-                "held_out": pair in HELD_OUT_PAIRS,
+                "held_out": is_held_out(pair),
                 "n_cells": len(sample.labels),
                 "share_factors_capped": float((np.abs(uncapped) > 2).mean()),
                 "factor_sd_log2": float(np.std(uncapped)),
@@ -301,7 +302,7 @@ def main(argv: list[str] | None = None) -> int:
                         "pair": pair,
                         "labelling": name,
                         "kind": kind,
-                        "held_out": pair in HELD_OUT_PAIRS,
+                        "held_out": is_held_out(pair),
                         "jsd": result.jsd,
                         "ci_low": result.ci_low,
                         "ci_high": result.ci_high,
@@ -335,7 +336,7 @@ def main(argv: list[str] | None = None) -> int:
                         "kind": kind,
                         "first": first,
                         "second": second,
-                        "held_out": pair in HELD_OUT_PAIRS,
+                        "held_out": is_held_out(pair),
                         "first_jsd": diff.first_jsd,
                         "second_jsd": diff.second_jsd,
                         "difference": diff.difference,

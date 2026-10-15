@@ -47,7 +47,7 @@ SELF_THINNING_MIN_COUNTS: Final = 200
 SELF_THINNING_MIN_CELLS: Final = 500
 # A self-thinning diagnostic whose deep cells are dominated by one class, or
 # whose deep cells mostly lack a truth label, says little (plan §9 item 1:
-# P1212_M's 509 such cells are 89% Vascular -> unreliable). Classes with at
+# HD2_M's 509 such cells are 89% Vascular -> unreliable). Classes with at
 # least SELF_THINNING_MIN_CLASS_CELLS labelled deep cells are evaluable; one
 # class holding SELF_THINNING_MAX_DOMINANT_SHARE or more of the labelled deep
 # cells, or more than SELF_THINNING_MAX_UNLABELLED_SHARE of the deep cells
@@ -1424,7 +1424,7 @@ def self_thinning_eligibility(
     beside it. The diagnostic is unreliable when more than
     ``max_unlabelled_share`` of the deep cells have no truth label, or when
     one class holds ``max_dominant_share`` or more of the labelled ones
-    (plan §9 item 1: P1212_M's 509 deep cells are 89% Vascular under E2's
+    (plan §9 item 1: HD2_M's 509 deep cells are 89% Vascular under E2's
     scheme, and about half of them have no confident broad label).
 
     Args:

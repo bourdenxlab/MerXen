@@ -43,7 +43,7 @@ FIXED_REFERENCE_NATIVE_ELEMENT: Final = "fixed_reference_native_element"
 TABLE_SPATIAL_ONLY: Final = "table_spatial_only"
 
 # Measured frame check (frame_consistency_metrics). In the same frame the
-# tissue-edge line lies about 80-110 um from the nearest cell (P7513 / P1212,
+# tissue-edge line lies about 80-110 um from the nearest cell (HD1 / HD2,
 # both platforms); applied to the aligned MERSCOPE cells it lies 870-2370 um
 # away, so a median above 300 um flags a suspected frame mismatch.
 FRAME_CHECK_EDGE_STEP_UM: Final = 25.0
