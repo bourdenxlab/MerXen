@@ -95,41 +95,41 @@
     "date": "2026-10-08",
     "derived_from": [
       {
-        "file": "P5822_MERSCOPE_celltype_labels.parquet",
-        "sample_id": "P5822_MERSCOPE",
+        "file": "HM1_MERSCOPE_celltype_labels.parquet",
+        "sample_id": "HM1_MERSCOPE",
         "segmentation": "proseg_hybrid",
         "sha256": "48c666352d6dbbbad661ca2b04ef5237490c8d222929b7af2af098d52bb213e1",
         "size": 36873033
       },
       {
-        "file": "P4815_MERSCOPE_celltype_labels.parquet",
-        "sample_id": "P4815_MERSCOPE",
+        "file": "HM2_MERSCOPE_celltype_labels.parquet",
+        "sample_id": "HM2_MERSCOPE",
         "segmentation": "proseg_hybrid",
         "sha256": "2208a4db38fc8a84acf0ea280c9e06ad6088b1a97cb6e0cfb8fed865c17418bc",
         "size": 17330759
       },
       {
-        "file": "P3518_MERSCOPE_celltype_labels.parquet",
-        "sample_id": "P3518_MERSCOPE",
+        "file": "HM3_MERSCOPE_celltype_labels.parquet",
+        "sample_id": "HM3_MERSCOPE",
         "segmentation": "proseg_hybrid",
         "sha256": "334e805f9d4c2c2f5cd6c3211ea2c58caaa28701c844c5b2ca205ba4ff376bb4",
         "size": 21577844
       },
       {
-        "file": "P7417_MERSCOPE_celltype_labels.parquet",
-        "sample_id": "P7417_MERSCOPE",
+        "file": "HM4_MERSCOPE_celltype_labels.parquet",
+        "sample_id": "HM4_MERSCOPE",
         "segmentation": "proseg_hybrid",
         "sha256": "f29794155db26f90c4c5d42c3d93d9e9682a0afc73ded22fd2cf19a9509332fb",
         "size": 19923174
       }
     ],
     "deriving_script": "scripts/annotation/build_np5_depth_profile.py",
-    "deriving_script_sha256": "200fc351e998c9d0f6e62014b32de40e5f45d496edf1a7ede97689a417c73150",
+    "deriving_script_sha256": "fe13f90bcc291a062a7f9bc706027c26cc0e281bdab6c595e469ef4e0cd5914f",
     "evidence": [
       "$A/m13/npf_run/np5_profile/source_manifest.json",
       "docs/acceptance/annotation-v1-preregistration.md \u00a723.20"
     ],
-    "evidence_root": "$A = /srv/storage/MerXen/annotation_dev/evidence_20260926",
+    "evidence_root": "$A = $MERXEN_EVIDENCE_ROOT",
     "licence": "in-house data, no public licence; the asset holds derived per-class depth histograms only",
     "licence_note": "in-house data: no public licence text applies",
     "method": "Every table cell of the sections, pooled, each cell once: a confident broad call coded by its E2 floor class (vocab.human_floor_class of ct_broad_name and ct_nt_name), every other table cell __not_confident__; one row per class and distinct total_counts with its cells. Gate P's NP5 gives a class with >= 100 confident broad calls its own depths and every other class the median of the confident broad calls (sim_inputs.FamilyDepthProfile; pre-registration \u00a723.20).",
@@ -147,7 +147,7 @@
       "primary_reference": "whb_frontal_supc_clus"
     },
     "segmentation": "MerXen proseg_hybrid",
-    "source_dataset": "the human_merscope_aa25d5a241d0 family's map_first RESOLVE label tables, sections P5822_MERSCOPE, P4815_MERSCOPE, P3518_MERSCOPE, P7417_MERSCOPE (in-house; proseg_hybrid)",
+    "source_dataset": "the human_merscope_aa25d5a241d0 family's map_first RESOLVE label tables, sections HM1_MERSCOPE, HM2_MERSCOPE, HM3_MERSCOPE, HM4_MERSCOPE (in-house; proseg_hybrid)",
     "source_files": [
       {
         "file": "source_manifest.json",
@@ -220,7 +220,7 @@
           "median_counts_table_cells": 213.0,
           "n_confident_broad": 131388,
           "n_table_cells": 260938,
-          "sample_id": "P5822_MERSCOPE"
+          "sample_id": "HM1_MERSCOPE"
         },
         {
           "classes": {
@@ -262,7 +262,7 @@
           "median_counts_table_cells": 146.0,
           "n_confident_broad": 63860,
           "n_table_cells": 118830,
-          "sample_id": "P4815_MERSCOPE"
+          "sample_id": "HM2_MERSCOPE"
         },
         {
           "classes": {
@@ -300,7 +300,7 @@
           "median_counts_table_cells": 355.0,
           "n_confident_broad": 102118,
           "n_table_cells": 152291,
-          "sample_id": "P3518_MERSCOPE"
+          "sample_id": "HM3_MERSCOPE"
         },
         {
           "classes": {
@@ -342,7 +342,7 @@
           "median_counts_table_cells": 249.0,
           "n_confident_broad": 93320,
           "n_table_cells": 147284,
-          "sample_id": "P7417_MERSCOPE"
+          "sample_id": "HM4_MERSCOPE"
         }
       ]
     },

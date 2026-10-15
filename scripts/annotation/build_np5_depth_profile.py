@@ -68,11 +68,19 @@ Usage::
 
     python scripts/annotation/build_np5_depth_profile.py \\
         --labels <section 1 label table> ... --labels <section 4 label table> \\
-        --sections P5822,P4815,P3518,P7417 \\
+        --sections HM1,HM2,HM3,HM4 \\
         --family-id human_merscope_aa25d5a241d0 --panel-hash aa25d5a241d0 \\
         --tissue brain_ff --date YYYY-MM-DD \\
-        --evidence-root /srv/storage/MerXen/annotation_dev/evidence_20260926 \\
-        --manifest <evidence root>/m13/npf_run/np5_profile/source_manifest.json
+        --evidence-root "$MERXEN_EVIDENCE_ROOT" \\
+        --manifest "$MERXEN_EVIDENCE_ROOT/m13/npf_run/np5_profile/source_manifest.json"
+
+``--evidence-root`` defaults to that ``.env`` variable (template
+``.env.example``). The label tables name their sections by real ids: the
+sidecar records every section by its alias (``merxen.privacy.to_alias``,
+which needs the alias table, ``MERXEN_ALIAS_FILE``), and ``--sections``
+accepts either form; the source manifest, a private record under the
+evidence root, keeps the ids as read. The sidecar writes the evidence root as
+the variable ``$MERXEN_EVIDENCE_ROOT``, never as a local path.
 
 ``--check`` writes nothing and exits 1 when the committed asset, its
 sidecar or the manifest differs from what the tables give. After writing,
@@ -98,6 +106,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from merxen import local_config, privacy
 from merxen.annotation import sim_inputs as si
 from merxen.annotation.diagnostics import own_family_id
 from merxen.annotation.schema import Columns
@@ -106,6 +115,8 @@ from merxen.annotation.vocab import NEURONS, human_floor_class
 logger = logging.getLogger("build_np5_depth_profile")
 
 SCRIPT_PATH = "scripts/annotation/build_np5_depth_profile.py"
+# What the sidecar's evidence_root records: ``$A`` stands for the .env variable.
+EVIDENCE_ROOT_TEXT = "$A = $MERXEN_EVIDENCE_ROOT"
 ASSET_PREFIX = "np5_depth__"
 DEFAULT_SEGMENTATION = "proseg_hybrid"
 MAP_FIRST = "map_first"
@@ -166,8 +177,9 @@ class SectionLabels:
         path: The label table.
         sha256: Its sha256.
         size: Its bytes.
-        sample_id: The section.
-        pair_id: Its pair (``None`` for a table without the column).
+        sample_id: The section, as the table records it (a real id; the
+            private source manifest keeps it, the sidecar writes ``sample``).
+        pair_id: Its pair (``None`` for a table without the column), as read.
         platform: Its platform.
         segmentation: Its segmentation.
         panel_hash: Its panel hash.
@@ -190,12 +202,32 @@ class SectionLabels:
     provenance: dict[str, Any]
 
     @property
+    def sample(self) -> str:
+        """The section's sample id as an alias (R2; what tracked files hold)."""
+        return privacy.to_alias(self.sample_id)
+
+    @property
+    def pair(self) -> str | None:
+        """The section's pair id as an alias (``None`` without the column)."""
+        return None if self.pair_id is None else privacy.to_alias(self.pair_id)
+
+    @property
+    def file_name(self) -> str:
+        """The label table's file name with its section as an alias."""
+        return privacy.to_alias(self.path.name)
+
+    @property
     def confident(self) -> np.ndarray:
         """Whether each table cell is a confident broad call."""
         return np.array([value is not None for value in self.classes], dtype=bool)
 
-    def summary(self) -> dict[str, Any]:
-        """Return the section's reported values (counts and medians)."""
+    def summary(self, *, aliased: bool = False) -> dict[str, Any]:
+        """Return the section's reported values (counts and medians).
+
+        Args:
+            aliased: Name the section by its alias (the sidecar); the source
+                manifest keeps the id as read.
+        """
         confident = self.confident
         per_class: dict[str, dict[str, Any]] = {}
         for name in sorted({str(v) for v in self.classes if v is not None}):
@@ -205,7 +237,7 @@ class SectionLabels:
                 "median_counts": float(np.median(values)),
             }
         return {
-            "sample_id": self.sample_id,
+            "sample_id": self.sample if aliased else self.sample_id,
             "n_table_cells": int(self.totals.size),
             "median_counts_table_cells": _median(self.totals),
             "n_confident_broad": int(confident.sum()),
@@ -228,11 +260,16 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _label(path: Path) -> str:
+    """A label table's file name for messages: its section as an alias."""
+    return privacy.to_alias(path.name)
+
+
 def _single(frame: pd.DataFrame, column: str, path: Path) -> str:
     values = frame[column].dropna().astype(str).unique()
     if len(values) != 1:
         raise ProfileBuildError(
-            f"{path.name}: {column} must hold one value, got {sorted(values)[:5]}"
+            f"{_label(path)}: {column} must hold one value, got {sorted(values)[:5]}"
         )
     return str(values[0])
 
@@ -241,28 +278,28 @@ def _run_provenance(provenance: Any, path: Path) -> dict[str, Any]:
     """The run facts a label table's provenance records (refusing others)."""
     if provenance is None:
         raise ProfileBuildError(
-            f"{path.name} carries no annotation provenance: not a RESOLVE output"
+            f"{_label(path)} carries no annotation provenance: not a RESOLVE output"
         )
     if provenance.mode != MAP_FIRST:
         raise ProfileBuildError(
-            f"{path.name} is a {provenance.mode} output, not a {MAP_FIRST} RESOLVE "
+            f"{_label(path)} is a {provenance.mode} output, not a {MAP_FIRST} RESOLVE "
             "output (D8: the family's first provisional map_first run)"
         )
     if provenance.species != "human":
         raise ProfileBuildError(
-            f"{path.name} is a {provenance.species} table; the floor classes of "
+            f"{_label(path)} is a {provenance.species} table; the floor classes of "
             "this asset are human (no mouse gate P before M6b)"
         )
     if provenance.anatomical_region != FRONTAL_CORTEX:
         raise ProfileBuildError(
-            f"{path.name} was resolved for the region "
+            f"{_label(path)} was resolved for the region "
             f"{provenance.anatomical_region!r}, not {FRONTAL_CORTEX!r} (D3 (a): "
             "the family's sections are frontal cortex)"
         )
     trust = None if provenance.panel is None else provenance.panel.panel_trust
     if trust != PROVISIONAL:
         raise ProfileBuildError(
-            f"{path.name}: the panel's trust is {trust!r}, not {PROVISIONAL!r} (D8: "
+            f"{_label(path)}: the panel's trust is {trust!r}, not {PROVISIONAL!r} (D8: "
             "the family's first provisional map_first run)"
         )
     primary = [
@@ -272,7 +309,7 @@ def _run_provenance(provenance: Any, path: Path) -> dict[str, Any]:
     ]
     if len(primary) != 1 or not primary[0].build_hash:
         raise ProfileBuildError(
-            f"{path.name}: the provenance names no single primary bundle build_hash"
+            f"{_label(path)}: the provenance names no single primary bundle build_hash"
         )
     gate = provenance.gate
     return {
@@ -311,7 +348,7 @@ def read_section(path: Path) -> SectionLabels:
     schema = pq.read_schema(path)
     missing = [column for column in LABEL_COLUMNS if column not in schema.names]
     if missing:
-        raise ProfileBuildError(f"{path.name} lacks the columns {missing}")
+        raise ProfileBuildError(f"{_label(path)} lacks the columns {missing}")
     raw = (schema.metadata or {}).get(LABELS_METADATA_KEY)
     provenance = (
         None if raw is None else AnnotationProvenance.from_uns_json(raw.decode())
@@ -326,7 +363,7 @@ def read_section(path: Path) -> SectionLabels:
         _single(frame, Columns.PAIR_ID, path) if Columns.PAIR_ID in frame else None
     )
     if _single(frame, Columns.SPECIES, path) != "human":
-        raise ProfileBuildError(f"{path.name}: the species column is not human")
+        raise ProfileBuildError(f"{_label(path)}: the species column is not human")
     table = frame[frame[Columns.IN_TABLE].astype(bool).to_numpy()]
     totals = table[Columns.TOTAL_COUNTS].to_numpy(np.int64)
     confident = (
@@ -352,7 +389,7 @@ def read_section(path: Path) -> SectionLabels:
     ]
     if lacking:
         raise ProfileBuildError(
-            f"{path.name}: confident broad calls without a floor class: {lacking}"
+            f"{_label(path)}: confident broad calls without a floor class: {lacking}"
         )
     return SectionLabels(
         path=path,
@@ -374,12 +411,17 @@ def _named_sections(
 ) -> None:
     """Refuse tables that are not exactly the family's named sections.
 
-    An entry names a section by its sample id or its pair id. Reading (i)
-    of pre-registration §23.20 pools every section of the family, so a
+    An entry names a section by its sample id or its pair id, as an alias or
+    as the table records it (R2: both sides are compared as aliases). Reading
+    (i) of pre-registration §23.20 pools every section of the family, so a
     named section without a table, a table of a section not named and an
     entry naming two sections are refused.
     """
-    entries = [str(entry).strip() for entry in expected_sections if str(entry).strip()]
+    entries = [
+        privacy.to_alias(str(entry).strip())
+        for entry in expected_sections
+        if str(entry).strip()
+    ]
     if not entries:
         raise ProfileBuildError(
             "name the family's sections (--sections): reading (i) pools every one"
@@ -389,9 +431,9 @@ def _named_sections(
     named: dict[str, list[str]] = {}
     for entry in entries:
         hits = [
-            section.sample_id
+            section.sample
             for section in sections
-            if entry in (section.sample_id, section.pair_id)
+            if entry in (section.sample, section.pair)
         ]
         if len(hits) > 1:
             raise ProfileBuildError(
@@ -408,7 +450,7 @@ def _named_sections(
         )
     covered = {hit for hits in named.values() for hit in hits}
     extra = sorted(
-        section.sample_id for section in sections if section.sample_id not in covered
+        section.sample for section in sections if section.sample not in covered
     )
     if extra:
         raise ProfileBuildError(
@@ -436,7 +478,7 @@ def check_sections(
     """
     if not sections:
         raise ProfileBuildError("give at least one label table")
-    ids = [section.sample_id for section in sections]
+    ids = [section.sample for section in sections]
     if len(set(ids)) != len(ids):
         raise ProfileBuildError(f"a section is given twice: {sorted(ids)}")
     _named_sections(sections, expected_sections)
@@ -444,12 +486,12 @@ def check_sections(
         level = section.provenance.get("gate_level")
         if level is None:
             raise ProfileBuildError(
-                f"{section.path.name} records no dataset gate level: not a human "
+                f"{section.file_name} records no dataset gate level: not a human "
                 "RESOLVE output whose gate can be checked"
             )
         if level == FAILED_GATE:
             raise ProfileBuildError(
-                f"the dataset gate of {section.sample_id} failed: the section has "
+                f"the dataset gate of {section.sample} failed: the section has "
                 "no confident call, but its cells would move the table median "
                 "and NP3's report-only histogram; reading (i) pools the family's "
                 "sections, so a failed one goes back to the user (pre-registration "
@@ -640,7 +682,10 @@ def build_profile(
             item["class"] for item in confident if item["n_cells"] < min_class_cells
         ),
     }
+    # The manifest (a private record under the evidence root) keeps the ids as
+    # read; the sidecar names every section by its alias.
     per_section = [section.summary() for section in sections]
+    per_section_aliased = [section.summary(aliased=True) for section in sections]
     run = {
         key: first.provenance[key]
         for key in (
@@ -679,7 +724,7 @@ def build_profile(
     text = _csv_text(rows)
     payload = text.encode("utf-8")
     asset_id = f"{ASSET_PREFIX}{family_id}"
-    sections_text = ", ".join(section.sample_id for section in sections)
+    sections_text = ", ".join(section.sample for section in sections)
     provenance: dict[str, Any] = {
         si.SOURCE_KIND_KEY: si.SOURCE_KIND_IN_HOUSE,
         "source_dataset": (
@@ -701,8 +746,8 @@ def build_profile(
         ],
         "derived_from": [
             {
-                "file": section.path.name,
-                "sample_id": section.sample_id,
+                "file": section.file_name,
+                "sample_id": section.sample,
                 "segmentation": section.segmentation,
                 "size": section.size,
                 "sha256": section.sha256,
@@ -735,13 +780,13 @@ def build_profile(
             f"$A/{manifest_relative}",
             "docs/acceptance/annotation-v1-preregistration.md §23.20",
         ],
-        "evidence_root": f"$A = {evidence_root}",
+        "evidence_root": EVIDENCE_ROOT_TEXT,
         "date": date,
         "use": (
             "gate-P NP5 input only (plan §14 NP5; M13 decision D8 with CHECK "
             "K7); never trust evidence, never a PREP input"
         ),
-        "summary": {"pooled": pooled, "sections": per_section},
+        "summary": {"pooled": pooled, "sections": per_section_aliased},
     }
     asset = si.SimInputAsset(
         schema_version=si.SIM_INPUTS_SCHEMA_VERSION,
@@ -846,7 +891,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--tissue", required=True, help="e.g. brain_ff")
     parser.add_argument("--chemistry", default=None, choices=si.CHEMISTRIES)
     parser.add_argument("--date", required=True, help="YYYY-MM-DD")
-    parser.add_argument("--evidence-root", type=Path, required=True)
+    local_config.add_location_argument(
+        parser,
+        "--evidence-root",
+        "MERXEN_EVIDENCE_ROOT",
+        "The evidence root (`$A`) the manifest lies under.",
+    )
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, default=si.SIM_INPUTS_DIR)
     parser.add_argument(
@@ -885,7 +935,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     try:
         built, files = build_files(args)
-    except ProfileBuildError as error:
+    except (ProfileBuildError, local_config.LocalConfigError) as error:
         logger.error("%s", error)
         return 1
     stale = []

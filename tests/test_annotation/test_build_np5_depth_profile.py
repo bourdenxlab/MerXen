@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from merxen import privacy
 from merxen.annotation import gate_p as gp
 from merxen.annotation import gate_p_run as run
 from merxen.annotation import sim_inputs as si
@@ -37,7 +38,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PANEL_HASH = "aa25d5a241d0" + "0" * 52
 FAMILY = own_family_id("human", ["MERSCOPE"], PANEL_HASH)
 BUILD_HASH = "b" * 64
-SECTIONS = ("P5822", "P4815", "P3518", "P7417")
+SECTIONS = ("HM1", "HM2", "HM3", "HM4")
 
 
 def _builder() -> Any:
@@ -236,14 +237,14 @@ def test_the_builder_writes_the_family_profile_asset(
     assert summary["classes_own_depths"] == ["Astro", "Exc", "Inh"]
     assert summary["classes_overall_median"] == ["Immune"]
     assert [item["sample_id"] for item in provenance["summary"]["sections"]] == [
-        "P5822",
-        "P4815",
-        "P3518",
-        "P7417",
+        "HM1",
+        "HM2",
+        "HM3",
+        "HM4",
     ]
     # --check: the written files are up to date; a changed table is stale.
     assert builder.main([*argv, "--check"]) == 0
-    _write(tmp_path / "tables", "P7417", cells=CELLS[:-1])
+    _write(tmp_path / "tables", "HM4", cells=CELLS[:-1])
     assert builder.main([*argv, "--check"]) == 1
 
 
@@ -262,24 +263,24 @@ def test_the_builder_writes_the_family_profile_asset(
         ({"no_provenance": True}, "carries no annotation provenance"),
         # Reading (i) pools every section of the family: one missing, one
         # not named, or one named twice goes back to the user.
-        ({"n_tables": 3}, r"sections \['P7417'\] have no label table"),
+        ({"n_tables": 3}, r"sections \['HM4'\] have no label table"),
         (
-            {"flag": "--sections", "value": "P5822,P4815,P3518,P7417,P9999"},
+            {"flag": "--sections", "value": "HM1,HM2,HM3,HM4,P9999"},
             r"sections \['P9999'\] have no label table",
         ),
         (
-            {"flag": "--sections", "value": "P5822,P4815,P3518"},
-            r"label tables of \['P7417'\] are not among the sections",
+            {"flag": "--sections", "value": "HM1,HM2,HM3"},
+            r"label tables of \['HM4'\] are not among the sections",
         ),
         (
-            {"flag": "--sections", "value": "P5822,P4815,P3518,P7417,P3518"},
+            {"flag": "--sections", "value": "HM1,HM2,HM3,HM4,HM3"},
             "names a section twice",
         ),
         # A failed dataset gate adds no confident call but moves the table
         # median; a table without a gate record cannot be checked.
         (
             {"provenance": {"gate": DatasetGateProvenance(level="failed")}},
-            "dataset gate of P7417 failed",
+            "dataset gate of HM4 failed",
         ),
         ({"provenance": {"gate": None}}, "records no dataset gate level"),
         # D3 (a): the family's sections are frontal cortex.
@@ -294,7 +295,7 @@ def test_the_builder_refuses_tables_of_another_run(
 ) -> None:
     tables = _four_sections(tmp_path)
     directory = tmp_path / "tables"
-    target = directory / "P7417_celltype_labels.parquet"
+    target = directory / "HM4_celltype_labels.parquet"
     provenance = _provenance(**change.get("provenance", {}))
     if "trust" in change:
         provenance = _provenance(
@@ -317,14 +318,14 @@ def test_the_builder_refuses_tables_of_another_run(
         if key in change:
             labels[key] = change[key] if key != "cells" else [*CELLS, *change[key]]
     if change.get("no_provenance"):
-        _labels("P7417").to_parquet(target, index=False)
+        _labels("HM4").to_parquet(target, index=False)
     else:
-        _write(directory, "P7417", provenance, **labels)
+        _write(directory, "HM4", provenance, **labels)
     if change.get("segmentation"):
         # Every section of another segmentation: refused as not the scored one.
         tables = [
             _write(directory, sample, segmentation=change["segmentation"])
-            for sample in ("P5822", "P4815", "P3518", "P7417")
+            for sample in ("HM1", "HM2", "HM3", "HM4")
         ]
     if change.get("duplicate"):
         tables = [*tables, tables[0]]
@@ -351,8 +352,8 @@ def test_a_class_with_exactly_100_calls_takes_its_own_depths(
     )
     tables = tmp_path / "tables"
     tables.mkdir()
-    path = _write(tables, "P5822", cells=cells)
-    assert builder.main(_argv(tmp_path, [path], sections="P5822")) == 0
+    path = _write(tables, "HM1", cells=cells)
+    assert builder.main(_argv(tmp_path, [path], sections="HM1")) == 0
     directory = tmp_path / "sim_inputs"
     asset = si.load_registry(directory)[f"np5_depth__{FAMILY}"]
     family = si.family_profile_from_asset(asset, directory)
@@ -397,6 +398,71 @@ def test_the_sections_are_named_by_sample_or_pair_id(
         builder._parse_args(
             [item for item in repeated if item not in ("--sections", by_sample)]
         )
+
+
+def test_the_sidecar_names_the_sections_by_alias_and_the_manifest_as_read(
+    builder: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2: label tables record real ids; the sidecar holds their aliases only.
+
+    The source manifest is a private record under the evidence root and keeps
+    the ids as read, so its sha256 (recorded in the sidecar) does not depend on
+    the alias table. ``--sections`` takes either form.
+    """
+    real = {"HM1": "Q5001", "HM2": "Q5002", "HM3": "Q5003", "HM4": "Q5004"}
+    table = tmp_path / "aliases.tsv"
+    table.write_text(
+        "".join(
+            f"{alias}\thuman_new_panel_donor\tpair_id\ttoken\t{name}\n"
+            for alias, name in real.items()
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(privacy.ALIAS_FILE_VAR, str(table))
+    privacy.clear_cache()
+    tables = _four_sections(tmp_path, suffix="_MERSCOPE")
+    by_name = [
+        _write(tmp_path / "tables", f"{real[sample]}_MERSCOPE") for sample in SECTIONS
+    ]
+    texts = []
+    for sections in (",".join(real.values()), ",".join(SECTIONS)):
+        argv = _argv(tmp_path, by_name, sections=sections)
+        built, files = builder.build_files(builder._parse_args(argv))
+        texts.append((built.csv_text, built.asset.provenance, files))
+    assert texts[0] == texts[1]
+    provenance = texts[0][1]
+    sidecar = json.dumps(provenance)
+    assert not any(name in sidecar for name in real.values())
+    assert [item["sample_id"] for item in provenance["summary"]["sections"]] == [
+        f"{sample}_MERSCOPE" for sample in SECTIONS
+    ]
+    assert [item["file"] for item in provenance["derived_from"]] == [
+        f"{sample}_MERSCOPE_celltype_labels.parquet" for sample in SECTIONS
+    ]
+    assert provenance["source_dataset"].count("_MERSCOPE") == len(SECTIONS)
+    manifest = json.loads(next(iter(texts[0][2].values())))
+    assert [item["sample_id"] for item in manifest["label_tables"]] == [
+        f"{name}_MERSCOPE" for name in real.values()
+    ]
+    assert [item["sample_id"] for item in manifest["sections"]] == [
+        f"{name}_MERSCOPE" for name in real.values()
+    ]
+    # The alias-named tables of the hermetic fixtures give the same asset.
+    assert (
+        built.csv_text
+        == builder.build_files(builder._parse_args(_argv(tmp_path, tables)))[0].csv_text
+    )
+
+
+def test_the_evidence_root_is_recorded_as_its_variable(
+    builder: Any, tmp_path: Path
+) -> None:
+    built, _ = builder.build_files(
+        builder._parse_args(_argv(tmp_path, _four_sections(tmp_path)))
+    )
+    provenance = built.asset.provenance
+    assert provenance["evidence_root"] == "$A = $MERXEN_EVIDENCE_ROOT"
+    assert str(tmp_path) not in json.dumps(provenance)
 
 
 def test_the_manifest_must_lie_under_the_evidence_root(

@@ -2,7 +2,7 @@
 """Remove the map_first tables and outputs a run added to published results.
 
 A map_first run into a legacy results directory (for example the M5 exit run
-on P7513 and P1212) adds, per pair:
+on HD1 and HD2) adds, per pair:
 
 - ``table_<layer>_clustering_squidpy_<suffix>`` in each platform's
   ``<outdir>/<pair>/<platform>/latest/latest_spatialdata.zarr`` (plan §4.8),
@@ -39,9 +39,14 @@ re-insert the entries).
 Usage::
 
     python scripts/annotation/remove_mapfirst_outputs.py \\
-        --outdir /srv/storage/MerXen/results --pair P7513 --pair P1212 \\
+        --outdir "$MERXEN_RESULTS_ROOT" --pair HD1 --pair HD2 \\
         --segmentation proseg_hybrid --quarantine <dir on the same disk> \\
         [--include-annotation-dirs --new-paths <run's new paths>] [--apply]
+
+``--outdir`` defaults to that ``.env`` variable (template ``.env.example``).
+``--pair`` takes an alias or a real pair id; the results directories are named
+by the real pair id, so an alias is translated with
+``merxen.privacy.to_real`` (which needs the alias table, ``MERXEN_ALIAS_FILE``).
 """
 
 from __future__ import annotations
@@ -60,6 +65,7 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from merxen import local_config, privacy  # noqa: E402
 from merxen.io.spatialdata_io import spatialdata_write_lock  # noqa: E402
 
 logger = logging.getLogger("remove_mapfirst_outputs")
@@ -447,7 +453,9 @@ def describe(plan: RemovalPlan) -> str:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--outdir", type=Path, required=True, help="Results root.")
+    local_config.add_location_argument(
+        parser, "--outdir", "MERXEN_RESULTS_ROOT", "Results root."
+    )
     parser.add_argument(
         "--pair", action="append", required=True, help="Pair id (repeatable)."
     )
@@ -496,6 +504,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.include_annotation_dirs and args.new_paths is None:
         parser.error("--include-annotation-dirs requires --new-paths")
+    # R3: results are keyed by the real pair id (an alias translates, a real id
+    # passes through).
+    args.pair = [privacy.to_real(pair, form="pair_id") for pair in args.pair]
     return args
 
 

@@ -18,10 +18,19 @@ the small fixtures of ``tests/test_annotation/data/``:
 - ``m3c_d3_fixtures.json``: each source's path under the evidence root and
   sha256, the D3 manifest and the derivation.
 
+The JSON holds no local path: the evidence root is written as the variable
+``$MERXEN_EVIDENCE_ROOT``, and the bundle and test-set directories the D3
+manifest records are written under their store variable
+(``$MERXEN_REFERENCE_STORE_LARGE/wmb_panel/<hash>``); a manifest path under
+none of the location variables is refused.
+
 Usage::
 
     python scripts/acceptance/m3c_d3_fixtures.py \\
-        --evidence-root /srv/storage/MerXen/annotation_dev/evidence_20260926
+        --evidence-root "$MERXEN_EVIDENCE_ROOT"
+
+``--evidence-root`` defaults to that ``.env`` variable (template
+``.env.example``); the store variables must be set as well.
 """
 
 from __future__ import annotations
@@ -36,6 +45,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+
+from merxen import local_config
 
 EFFICIENCY = "5k_real/sim/runs/mouse5k/D3/efficiency.csv"
 MANIFEST = "5k_real/sim/runs/mouse5k/D3/manifest.json"
@@ -52,10 +63,47 @@ PREDICTION_COLUMNS = (
     "cov_subclass_prov",
 )
 DEFAULT_OUTPUT = Path(__file__).resolve().parents[2] / "tests/test_annotation/data"
+# What the record's evidence_root says: ``$A`` stands for the .env variable.
+EVIDENCE_ROOT_TEXT = "$A = $MERXEN_EVIDENCE_ROOT"
+LOCATION_VARIABLES = ("MERXEN_REFERENCE_STORE_LARGE", "MERXEN_REFERENCE_STORE")
 
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def locate(value: object, key: str) -> object:
+    """Return a manifest path as ``$VARIABLE/relative`` (other values as is).
+
+    The D3 manifest's ``bundle`` and ``test_set`` entries are directories under
+    the large reference store.
+
+    Args:
+        value: The manifest entry.
+        key: Its key (for the message).
+
+    Returns:
+        The entry with its store prefix replaced by the variable's name.
+
+    Raises:
+        RuntimeError: If ``value`` is a path under none of the store variables
+            (the message names the key, never the path).
+    """
+    if not isinstance(value, str) or not value.startswith("/"):
+        return value
+    for name in LOCATION_VARIABLES:
+        root = local_config.path(name)
+        if root is None:
+            continue
+        try:
+            relative = Path(value).relative_to(root)
+        except ValueError:
+            continue
+        return f"${name}/{relative.as_posix()}"
+    raise RuntimeError(
+        f"d3_manifest[{key!r}] is a path under none of {', '.join(LOCATION_VARIABLES)} "
+        "(set them in .env)"
+    )
 
 
 def build(evidence_root: Path) -> dict[str, str]:
@@ -89,13 +137,13 @@ def build(evidence_root: Path) -> dict[str, str]:
     }
     record: dict[str, Any] = {
         "purpose": "M3c pre-registration §21 (ii): the D3 regression fixtures",
-        "evidence_root": "$A = /srv/storage/MerXen/annotation_dev/evidence_20260926",
+        "evidence_root": EVIDENCE_ROOT_TEXT,
         "sources": {
             name: {"path": f"$A/{name}", "sha256": _sha256(evidence_root / name)}
             for name in (EFFICIENCY, MANIFEST, PREDICTIONS, CALLS)
         },
         "d3_manifest": {
-            key: manifest.get(key)
+            key: locate(manifest.get(key), key)
             for key in (
                 "variant",
                 "bundle",
@@ -138,7 +186,12 @@ def build(evidence_root: Path) -> dict[str, str]:
 def main(argv: Sequence[str] | None = None) -> int:
     """Write the fixtures; ``--check`` exits 1 when a committed one is stale."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--evidence-root", type=Path, required=True)
+    local_config.add_location_argument(
+        parser,
+        "--evidence-root",
+        "MERXEN_EVIDENCE_ROOT",
+        "The evidence root (`$A`) holding the D3 sources.",
+    )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args(argv)

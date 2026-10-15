@@ -24,7 +24,10 @@ Usage::
         --out-dir $A/m3c/d3_regression \\
         --scratch-dir $A/m3c/d3_regression_scratch --n-processors 6
 
-where ``$A`` is ``/srv/storage/MerXen/annotation_dev/evidence_20260926``.
+where ``$A`` is the evidence root, ``$MERXEN_EVIDENCE_ROOT``. The bundle and
+the test set lie under the large reference store, ``$MERXEN_REFERENCE_STORE_LARGE``.
+``--evidence-root`` and ``--reference-store-large`` default to those ``.env``
+variables (template ``.env.example``).
 """
 
 from __future__ import annotations
@@ -42,6 +45,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from merxen import local_config
 from merxen.annotation import reference as ref
 from merxen.annotation import resolvability as res
 from merxen.annotation import sim_inputs as si
@@ -56,16 +60,15 @@ from merxen.annotation.memory import ProcessTreeSampler
 
 logger = logging.getLogger("m3c_d3_regression")
 
-EVIDENCE = Path("/srv/storage/MerXen/annotation_dev/evidence_20260926")
-BUNDLE = Path(
-    "/srv/storage/MerXen/annotation_references_large/wmb_panel/"
-    "c30f7eab413cba9e5e142c337d01140750f28967adff2100903f04893eced4f8"
+# Under $MERXEN_REFERENCE_STORE_LARGE: the 5K mouse bundle and phase 1's test set.
+BUNDLE_RELATIVE = Path(
+    "wmb_panel/c30f7eab413cba9e5e142c337d01140750f28967adff2100903f04893eced4f8"
 )
-TEST_SET = Path(
-    "/srv/storage/MerXen/annotation_references_large/wmb_selfmap_testset/"
-    "6c94b24030d2a0e4376ce4a7171b02d900cd87ad63a9322af4815ce54da3b21f"
+TEST_SET_RELATIVE = Path(
+    "wmb_selfmap_testset/6c94b24030d2a0e4376ce4a7171b02d900cd87ad63a9322af4815ce54da3b21f"
 )
-CONFIG = EVIDENCE / "m3b/simulate/configs/mouse.annotation_config.json"
+# Under $MERXEN_EVIDENCE_ROOT.
+CONFIG_RELATIVE = Path("m3b/simulate/configs/mouse.annotation_config.json")
 DATA = Path(__file__).resolve().parents[2] / "tests/test_annotation/data"
 KEY_NAME = "R3_measured_realdepth"
 TOLERANCE = 0.01
@@ -180,6 +183,18 @@ def compare(predictions: pd.DataFrame, fixture: pd.DataFrame) -> pd.DataFrame:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the replay; exit 0 when (ii-b) passes, 1 otherwise."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    local_config.add_location_argument(
+        parser,
+        "--evidence-root",
+        "MERXEN_EVIDENCE_ROOT",
+        "The evidence root (`$A`) holding the annotation config.",
+    )
+    local_config.add_location_argument(
+        parser,
+        "--reference-store-large",
+        "MERXEN_REFERENCE_STORE_LARGE",
+        "The large reference store holding the bundle and the test set.",
+    )
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--scratch-dir", type=Path, required=True)
     parser.add_argument("--n-processors", type=int, default=6)
@@ -187,6 +202,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--rules", default="all_measured,restricted", help="Comma-separated rules."
     )
     args = parser.parse_args(argv)
+    bundle_dir = args.reference_store_large / BUNDLE_RELATIVE
+    test_set_dir = args.reference_store_large / TEST_SET_RELATIVE
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
@@ -194,20 +211,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.scratch_dir.mkdir(parents=True, exist_ok=True)
     ref.set_prep_resources(n_processors=args.n_processors)
     started = time.monotonic()
-    config = AnnotationConfig.model_validate_json(CONFIG.read_text(encoding="utf-8"))
+    config = AnnotationConfig.model_validate_json(
+        (args.evidence_root / CONFIG_RELATIVE).read_text(encoding="utf-8")
+    )
     spec = AnnotationReferenceSpec(
         reference_id="wmb_panel", **KNOWN_REFERENCES["wmb_panel"]
     )
-    summary = json.loads((BUNDLE / res.RESOLVABILITY_SUMMARY_FILE).read_text())
-    engine = MmcBundle.from_dir(BUNDLE)
-    test = res.load_test_cells(TEST_SET)
+    summary = json.loads((bundle_dir / res.RESOLVABILITY_SUMMARY_FILE).read_text())
+    engine = MmcBundle.from_dir(bundle_dir)
+    test = res.load_test_cells(test_set_dir)
     composition = pd.read_csv(DATA / "m3c_real_composition_mouse5k.csv")
     fixture = pd.read_csv(DATA / "m3c_d3_predictions_mouse5k.csv")
     report: dict[str, Any] = {
         "test": "M3c pre-registration §21 (ii-b)",
         "started_utc": datetime.now(UTC).isoformat(timespec="seconds"),
-        "bundle": str(BUNDLE),
-        "test_set": str(TEST_SET),
+        "bundle": str(bundle_dir),
+        "test_set": str(test_set_dir),
         "n_test_cells": int(len(test.obs)),
         "n_processors": args.n_processors,
         "tolerance": TOLERANCE,
@@ -216,7 +235,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     lines = [
         "M3c pre-registration §21 (ii-b): replay of phase 1's D3 on the public "
         "5K section",
-        f"bundle {BUNDLE.name[:16]}, test set {TEST_SET.name[:16]} "
+        f"bundle {bundle_dir.name[:16]}, test set {test_set_dir.name[:16]} "
         f"({len(test.obs)} cells), {args.n_processors} processes",
         "",
     ]
