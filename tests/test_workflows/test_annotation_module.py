@@ -65,6 +65,7 @@ MAP_FIRST = WORKFLOWS / "subworkflows" / "clustering_map_first.nf"
 MAIN_NF = WORKFLOWS / "main.nf"
 ANNOTATION_CONFIG = WORKFLOWS / "conf" / "annotation.config"
 DWIGHT_ANNOTATION_CONFIG = WORKFLOWS / "conf" / "dwight.annotation.config"
+DWIGHT_SITE_CONFIG_EXAMPLE = WORKFLOWS / "conf" / "dwight.site.config.example"
 DWIGHT_CONFIG = WORKFLOWS / "conf" / "dwight.config"
 LIB_DIR = WORKFLOWS / "lib"
 REFERENCES_SOURCE = (LIB_DIR / "AnnotationReferences.groovy").read_text()
@@ -316,15 +317,19 @@ def test_dwight_runs_one_prep_at_a_time() -> None:
     block = _with_name_block(text, PREP)
     assert "maxForks = params.annotation_prep_max_forks" in block
     assert re.search(r"annotation_prep_max_forks = 1\b", text)
-    # Both stores are on /srv/storage (U6 (a), 2026-10-14: SSD1 is failing).
+    # The stores are host locations: no tracked config sets them, the Dwight
+    # site config template does (placeholders mirroring the real layout; both
+    # stores on the storage RAID since U6 (a), 2026-10-14: SSD1 is failing).
+    assert "annotation_reference_store" not in text
+    site = DWIGHT_SITE_CONFIG_EXAMPLE.read_text()
     assert (
-        'annotation_reference_store = "/srv/storage/MerXen/'
-        'annotation_references"' in text
+        'annotation_reference_store = "/path/to/storage/MerXen/'
+        'annotation_references"' in site
     )
-    # Panels above 1,000 genes go to their own store on /srv/storage (§8.7).
+    # Panels above 1,000 genes go to their own store (§8.7).
     assert (
-        'annotation_reference_store_large = "/srv/storage/MerXen/'
-        'annotation_references_large"' in text
+        'annotation_reference_store_large = "/path/to/storage/MerXen/'
+        'annotation_references_large"' in site
     )
 
 
@@ -1300,7 +1305,7 @@ def _cases(root: Path, params: dict[str, Any]) -> dict[str, dict[str, Any]]:
         },
         "map_arguments": {
             "fn": "mapArguments",
-            "pair_id": "P7513",
+            "pair_id": "HD1",
             "segmentation": "proseg_hybrid",
             "spec": {"species": "human"},
             "refs": [
@@ -1450,7 +1455,7 @@ def _resolve_cases(root: Path, human: dict[str, Any]) -> dict[str, dict[str, Any
             "source_root": str(report),
         },
         "fingerprint_repo": {"fn": "resolveRulesFingerprint", "source_root": str(SRC)},
-        "resolve_summary_file": {"fn": "resolveSummaryFile", "pair_id": "P7513"},
+        "resolve_summary_file": {"fn": "resolveSummaryFile", "pair_id": "HD1"},
     }
 
 
@@ -1961,7 +1966,7 @@ def test_map_arguments(harness: dict[str, Any]) -> None:
         "--species",
         "human",
         "--pair-id",
-        "P7513",
+        "HD1",
         "--segmentation",
         "proseg_hybrid",
         "--prepared-dir",
@@ -2057,7 +2062,7 @@ def test_resolve_arguments(harness: dict[str, Any]) -> None:
     for option in ("--store", "--current-bundles", "--bundle ", "--results-root"):
         assert option not in _value(harness, "resolve_arguments") + " "
     assert _value(harness, "resolve_summary_file") == (
-        f"P7513{pipeline_module.RESOLVE_SUMMARY_SUFFIX}"
+        f"HD1{pipeline_module.RESOLVE_SUMMARY_SUFFIX}"
     )
 
 
@@ -2487,7 +2492,7 @@ def test_prepare_only_runs_the_real_prep_script(tmp_path: Path) -> None:
     )
     fake.chmod(0o755)
     env["PATH"] = os.pathsep.join([str(bin_dir), env["PATH"]])
-    genes = tmp_path / "vzg2.csv"
+    genes = tmp_path / "ms2.csv"
     mouse_ids = [f"ENSMUSG{i:011d}" for i in range(80)]
     genes.write_text(
         "gene,ensembl_id\n"
@@ -2495,7 +2500,7 @@ def test_prepare_only_runs_the_real_prep_script(tmp_path: Path) -> None:
     )
     samplesheet = tmp_path / "samplesheet.csv"
     samplesheet.write_text(
-        "pair_id,analysis_mode,merscope_dir\nVZG2,merscope,/nonexistent/vzg2\n"
+        "pair_id,analysis_mode,merscope_dir\nMS2,merscope,/nonexistent/ms2\n"
     )
     wmb_h5ad = tmp_path / "wmb_h5ad"
     wmb_metadata = tmp_path / "wmb_metadata"

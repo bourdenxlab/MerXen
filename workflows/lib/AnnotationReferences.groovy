@@ -177,7 +177,7 @@ class AnnotationReferences {
             // <store>/.downloads and hashed there.
             wmb_selfmap_test_cells: "annotation_wmb_selfmap_test_cells_path",
             // Optional override of the marker universe; by default a panel
-            // inside the validated ag7 | VZG2 union uses it (plan §7.1).
+            // inside the validated MS1 | MS2 union uses it (plan §7.1).
             wmb_marker_gene_universe: "annotation_wmb_marker_gene_universe_path",
         ].asImmutable(),
         wmb_region_share: [

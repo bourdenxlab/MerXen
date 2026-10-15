@@ -19,6 +19,17 @@ command automatically receives Dwight's 72-CPU/640-GB local capacity,
 concurrency guards, GPU policy/locking, and local software and reference paths.
 `-profile dwight` is the explicit equivalent.
 
+The reference paths and the task temporary directory of Dwight are not in the
+repository: they come from the private `workflows/conf/dwight.site.config`
+(template `dwight.site.config.example`; found at `MERXEN_DWIGHT_SITE_CONFIG`
+when set). A `standard`, `dwight` or `local` launch without it stops at start-up
+with an error that names the variable, instead of silently rebuilding every
+reference bundle or filling the root disk with task temporary files; set
+`MERXEN_DWIGHT_SITE_CONFIG=none` to run without host locations on purpose. A
+worktree or a code export has no private file: export `MERXEN_ENV_FILE` and
+the site-config variables first (`scripts/annotation_dev/run_template.sh` does
+this from the `.env`). See [Configuration](configuration.md#site-configs-private-host-locations).
+
 Selecting any explicit profile suppresses the implicit `standard` profile. To
 combine Dwight with the Conda profile, use both names:
 
@@ -451,8 +462,13 @@ nextflow run workflows/main.nf -profile dwight,conda \
 ```
 
 The existing Slurm/Apptainer profiles describe the current scheduler and
-container mechanics, but they deliberately do not inherit Dwight. Supply the
-remaining site-specific host/reference settings before using:
+container mechanics, but they deliberately do not inherit Dwight. The image
+and the host directories the `apptainer` profile mounts come from the private
+`workflows/conf/site.config` (template `site.config.example`; found at
+`MERXEN_SITE_CONFIG` when set); an `apptainer` launch without a site config
+stops at start-up (`MERXEN_SITE_CONFIG=none` runs without a container on
+purpose). Supply the remaining site-specific host/reference settings before
+using:
 
 ```bash
 nextflow run workflows/main.nf -profile apptainer,gpu,azure_slurm_hpc \
