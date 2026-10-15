@@ -32,7 +32,10 @@ RUN ln -sf /usr/local/cargo/bin/proseg /usr/local/bin/proseg
 RUN python3 -m pip install --no-cache-dir "uv==0.11.7"
 WORKDIR /opt/merxen
 COPY requirements/requirements.lock ./requirements/requirements.lock
-RUN uv pip install --system --python /usr/bin/python3.12 --no-cache -r requirements/requirements.lock
+# The lock is the full pinned tree (uv pip compile), so it is installed with --no-deps:
+# re-resolving would follow cell_type_mapper's unpinned abc_atlas_access git URL to the
+# upstream head, which conflicts with the lock's pinned commit whenever upstream moves.
+RUN uv pip install --system --python /usr/bin/python3.12 --no-cache --no-deps -r requirements/requirements.lock
 COPY pyproject.toml README.md ./
 COPY src ./src
 RUN uv pip install --system --python /usr/bin/python3.12 --no-cache --no-deps .
