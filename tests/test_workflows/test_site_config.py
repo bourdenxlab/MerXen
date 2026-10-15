@@ -138,17 +138,59 @@ def test_the_real_dwight_site_config_agrees_with_the_env_file(
 
 # --- what Nextflow resolves ----------------------------------------------------
 
+# The private site configs (gitignored, .gitignore) that a checkout may hold
+# beside the templates; never copied into a test project.
+PRIVATE_SITE_CONFIGS = ("site.config", "*.site.config")
+
+
+def _copy_project(source: Path, target: Path) -> Path:
+    """Copy a ``workflows/`` tree without run state or private site configs."""
+    shutil.copytree(
+        source,
+        target,
+        ignore=shutil.ignore_patterns(
+            ".nextflow*", "work", "__pycache__", *PRIVATE_SITE_CONFIGS
+        ),
+    )
+    return target
+
+
+def test_the_project_copy_leaves_out_private_site_configs(tmp_path: Path) -> None:
+    """A checkout with installed site configs must not leak them into the copy.
+
+    The main checkout holds the real (gitignored) site configs beside the
+    templates; a copy that kept them would let discovery include them, so the
+    "no site config" tests would resolve real host locations and fail there.
+    """
+    source = tmp_path / "workflows"
+    (source / "conf").mkdir(parents=True)
+    for name in (
+        "site.config",
+        "dwight.site.config",
+        "other.site.config",
+        "site.config.example",
+        "dwight.site.config.example",
+        "dwight.config",
+    ):
+        (source / "conf" / name).write_text("params {}\n")
+
+    target = _copy_project(source, tmp_path / "copy")
+
+    assert sorted(path.name for path in (target / "conf").iterdir()) == [
+        "dwight.config",
+        "dwight.site.config.example",
+        "site.config.example",
+    ]
+
 
 @pytest.fixture
 def project(tmp_path: Path) -> Path:
-    """A copy of ``workflows/``, so discovery beside the configs can be tested."""
-    target = tmp_path / "project"
-    shutil.copytree(
-        WORKFLOWS,
-        target,
-        ignore=shutil.ignore_patterns(".nextflow*", "work", "__pycache__"),
-    )
-    return target
+    """A copy of ``workflows/``, so discovery beside the configs can be tested.
+
+    The copy holds the tracked files only: a checkout's installed site configs
+    stay out, so the tests see the same tree on every host.
+    """
+    return _copy_project(WORKFLOWS, tmp_path / "project")
 
 
 def _environment(**overrides: str | None) -> dict[str, str]:
