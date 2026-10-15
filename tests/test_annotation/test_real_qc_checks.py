@@ -53,19 +53,6 @@ HD4_JSD = [
 ]
 
 
-def __getattr__(name: str) -> Any:
-    """Transitional, for the privacy cleanup (docs/local-configuration.md).
-
-    The M13 regression test (another cleanup package's file) imports
-    ``HD4_JSD`` under its name from before the aliasing, which held the
-    pair's real id. Until that package's change merges, a missing ``*_JSD``
-    name resolves to it; remove this with the last such import.
-    """
-    if name.endswith("_JSD"):
-        return HD4_JSD
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
 def stratum(
     flag: str,
     cls: str,
