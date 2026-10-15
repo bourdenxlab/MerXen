@@ -50,7 +50,7 @@ the set a dry run's expected depth, pre-registration §23.21), clusters follow
 depth and segmentation quality as much as cell type. Measured
 on the four human pairs, the legacy MERSCOPE and Xenium `broad_class`
 compositions differed by a Jensen–Shannon distance of 0.51 / 1.00 / 0.66 /
-0.44 (P7513 / P1212 / P7113 / P5011), and P1212's MERSCOPE section had no
+0.44 (HD1 / HD2 / HD3 / HD4), and HD2's MERSCOPE section had no
 neurons at all (plan §0). There was also no per-cell confidence, and no way
 to say that a panel cannot separate two types at a given depth.
 
@@ -62,8 +62,8 @@ where an in-silico test on held-out reference cells (the *resolvability
 self-map*) shows that this panel reaches the precision target for that class
 at that depth. The clustering hierarchy (branch and leaf) is built from these
 labels; Leiden is kept only as a QC embedding. On the same pairs, the
-composition distance between platforms fell to about 0.13 / 0.14 (P7513 /
-P1212), with 0.3–0.6% of calls to implausible types (plan §0). These numbers
+composition distance between platforms fell to about 0.13 / 0.14 (HD1 /
+HD2), with 0.3–0.6% of calls to implausible types (plan §0). These numbers
 are evidence quoted from the plan, not recomputed here.
 
 The design rests on five principles:
@@ -184,8 +184,8 @@ reference, and has four states (`diagnostics.trust_state`):
 
 | State | When | What it does to the labels |
 |---|---|---|
-| `validated` | The family is listed in `validated_panels.csv`. Today: the human 296/297-gene set a and its 264/265-gene set c (both platforms, up to supercluster), and the mouse ag7 (500 genes) and VZG2 (815 genes) MERSCOPE panels (up to subclass). All are validated on real data. | Pre-registered default thresholds, packaged count floors, `ct_<L>_validated = true` on confident labels up to the validated level. |
-| `provisional` | Any other panel that passes the checks (custom panels, Xenium Prime 5K, the new-panel human MERSCOPE family, P5011's 268-gene MERSCOPE panel). | Stricter precision targets, thresholds that can only rise, floors that take the maximum of every known and simulated floor, a report banner and a dataset-gate warning. Labels are still emitted where the simulation allows. |
+| `validated` | The family is listed in `validated_panels.csv`. Today: the human 296/297-gene set a and its 264/265-gene set c (both platforms, up to supercluster), and the mouse MS1 (500 genes) and MS2 (815 genes) MERSCOPE panels (up to subclass). All are validated on real data. | Pre-registered default thresholds, packaged count floors, `ct_<L>_validated = true` on confident labels up to the validated level. |
+| `provisional` | Any other panel that passes the checks (custom panels, Xenium Prime 5K, the new-panel human MERSCOPE family, HD4's 268-gene MERSCOPE panel). | Stricter precision targets, thresholds that can only rise, floors that take the maximum of every known and simulated floor, a report banner and a dataset-gate warning. Labels are still emitted where the simulation allows. |
 | `broad_only` | The simulation finds the leaf resolvable for fewer than half of the classes at every depth up to 250 counts; or a non-validated panel has no self-map (fail-safe). | The leaf level (supercluster / subclass) is never attempted. |
 | `refused` | The gene list fails ID resolution (< 95% resolved), is the wrong species, has fewer than 50 genes in the reference or fewer than 10 root markers, or the simulation finds broad unresolvable at every depth up to 250 counts. | Primary reference: nothing is labelled, the dataset gate is `failed` (`panel_refused`) and every cell is `exclude_hard`. Secondary (SEA-AD): not mapped, and RESOLVE runs in the degraded `whb_only` mode (cells below 60 counts become `single_method`). |
 
@@ -436,8 +436,8 @@ Built once per (reference, panel) at PREP (`reference._run_self_map`,
 **Two versions of the self-map exist** (`reference.panel_resolvability_version`):
 
 - **Version 6**, a single simulation draw (R1 at seed 0), for the
-  real-data-validated families (set a, set c, ag7, VZG2, and panels that
-  inherit them) and for P5011's 268-gene MERSCOPE family, which is pinned to
+  real-data-validated families (set a, set c, MS1, MS2, and panels that
+  inherit them) and for HD4's 268-gene MERSCOPE family, which is pinned to
   it (`resolvability_v6_pins.csv`).
 - **Version 7** for every other family (custom panels, 5K panels, the
   new-panel human MERSCOPE family). Differences: grid values are total
@@ -497,7 +497,7 @@ level (`thresholds.FloorPlan.floor`). Every floor is at least the hard floor
 
 - **Real-data-validated families**, up to their validated level, use packaged
   floors per (level, class, platform): `floors_human.csv` (set a) and
-  `floors_mouse.csv` (ag7, VZG2). A platform or class without a row falls
+  `floors_mouse.csv` (MS1, MS2). A platform or class without a row falls
   back to the largest packaged floor of that class, with a warning.
 - **Other families** use max(hard floor, the largest packaged floor of that
   class on any platform or panel, the simulated floor = the smallest depth
@@ -521,7 +521,7 @@ Human packaged floors (set a; MERSCOPE / Xenium, counts):
 | Vascular | 10 / 10 | 10 / 30 |
 | Fibroblast | 10 / 10 | 10 / 30 |
 
-Mouse packaged floors (ag7 and VZG2, MERSCOPE): 20 counts at class (also used
+Mouse packaged floors (MS1 and MS2, MERSCOPE): 20 counts at class (also used
 at broad and NT) and 50 at subclass, for every WMB class.
 
 #### The dataset gate
@@ -683,7 +683,7 @@ Computed on the table cells after broad and before the leaf
 | Provisional primary panel | warning (and banner) |
 | A simulation-validated family with > 10% of confident labels outside its validated region at a chain level | warning |
 
-For example, P1212 and P5011 MERSCOPE are `broad_only` because fewer than
+For example, HD2 and HD4 MERSCOPE are `broad_only` because fewer than
 30% of their table cells reach 30 counts (plan D-C3).
 
 #### Supercluster (the leaf)
@@ -899,7 +899,7 @@ Mouse plausibility depends on where the section is, so MAP infers it
 
 #### Mouse levels
 
-| Level | Labels | Confidence | Threshold | Floor (ag7 / VZG2) | Parent | Check order |
+| Level | Labels | Confidence | Threshold | Floor (MS1 / MS2) | Parent | Check order |
 |---|---|---|---|---|---|---|
 | Broad | Neurons, Astrocytes/Ependymal, Oligodendrocyte lineage, OEC, Vascular cells, Microglia | class bp + same-broad runner-ups | 0.90 or max(0.90, t\*) | class floor, 20 | – | `low_counts` → `low_confidence` (no call) → `implausible` (broad name outside the 6) → `below_floor` → `not_resolvable` → `low_confidence` |
 | Class | 34 WMB classes (e.g. `01 IT-ET Glut`) | class bp | 0.90 or max(0.90, t\*) | 20 | broad | `low_counts` → `low_confidence` (no call) → `parent_unresolved` → `below_floor` → `not_resolvable` (not emitted, or a marker-unsupported node) → `low_confidence` (bp; then `avg_correlation` if a floor is configured, none by default). Then: a cell whose class was region-dropped and is not confident after re-map → `implausible` |
@@ -936,7 +936,7 @@ runs the real-data QC on the section (milestone M13b, chunk C22; details in
 [Mouse real-data QC in RESOLVE](stages/annotation.md#mouse-real-data-qc-in-resolve-m13b-warn-only)).
 It records the gate's own G1–G5 as checks (G4 with its MERFISH window and
 the AP estimate that chose it), the flag rates, and the checks that do not
-apply to the section as `not_applicable` with the reason (on ag7 and VZG2:
+apply to the section as `not_applicable` with the reason (on MS1 and MS2:
 paired concordance, the prefilter spot check, the version-7 coverage and
 depth-trend checks, the factor re-measure). It is **warn-only**: until gate M
 merges into `main` (D20 (b)) any effect that would lower the section becomes
@@ -984,14 +984,14 @@ below 100 counts).
   - *MO10 on it* fails only the missed-region clause at two MERFISH sections,
     which gate M carries as a written exception.
 - **Mouse real-data QC** (milestone M13b, chunk C22) runs warn-only (see
-  [above](#mouse-real-data-qc-warn-only)). Its ag7 and VZG2 regression rows
+  [above](#mouse-real-data-qc-warn-only)). Its MS1 and MS2 regression rows
   are pending until the gate M runs write their RESOLVE outputs.
 - **Mouse gate P** (milestone M13b, chunk C20): the second disjoint WMB
-  test draw is built for the ag7 and VZG2 panels, and gate P runs a mouse
+  test draw is built for the MS1 and MS2 panels, and gate P runs a mouse
   family only when it is given one (`--gate-p-wmb-draw2`; see
-  `docs/stages/annotation.md`, "The mouse path"). The ag7 / VZG2 dry run
+  `docs/stages/annotation.md`, "The mouse path"). The MS1 / MS2 dry run
   (C21) has not run; pre-registration §26 records its readings.
-- **Validated mouse families are MERSCOPE only** (ag7, VZG2). A mouse Xenium
+- **Validated mouse families are MERSCOPE only** (MS1, MS2). A mouse Xenium
   or new panel runs in the provisional regime.
 
 ### 2.7 Points to keep in mind
@@ -1019,7 +1019,7 @@ below 100 counts).
   it. The level is off by default and report-only.
 - **Region pruning is conservative at mouse class level**: cells that are not
   re-mapped keep their original bp, which still counts votes for dropped
-  nodes (about 1.3% of ag7 and 0.7% of VZG2 table cells would be
+  nodes (about 1.3% of MS1 and 0.7% of MS2 table cells would be
   class-confident only after a full re-map, per the stage docs).
 - **The consensus tier uses the fixed default** (0.73 human broad, 0.90
   mouse class), not the raised per-cell threshold, so tier 1 or 2 can sit on

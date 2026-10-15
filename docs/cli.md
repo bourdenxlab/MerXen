@@ -7,6 +7,11 @@ corresponds to exactly one Nextflow process, takes a single `--config
 <path>.json` argument, and validates it against the matching Pydantic model
 in [src/merxen/config.py](../src/merxen/config.py).
 
+Examples name samples by their aliases (HD1, MS1, ...; see
+[sample aliases](local-configuration.md#sample-aliases)) and host locations by `.env`
+variables (`$MERXEN_...`). The `merxen` commands read the samplesheet's pair
+ids, so give the real pair id (`.aliases.tsv`) where an example shows an alias.
+
 ```
 $ merxen --help
 Usage: merxen [OPTIONS] COMMAND [ARGS]...
@@ -460,8 +465,8 @@ for.
 ```bash
 merxen annotation-reference-prep --reference-id whb_frontal_supc_clus \
   --species human --panel-genes annotation_panel/panel_genes.json \
-  --store /srv/storage/MerXen/annotation_references \
-  --store-large /srv/storage/MerXen/annotation_references_large \
+  --store $MERXEN_REFERENCE_STORE \
+  --store-large $MERXEN_REFERENCE_STORE_LARGE \
   --source region_precompute=/path/to/region_frontal_a44_a45_a46_a32_acc \
   --auto-download --n-processors 8 --max-gb 40 --output bundle_ref.json
 ```
@@ -471,7 +476,7 @@ merxen annotation-reference-prep --reference-id whb_frontal_supc_clus \
 | `--reference-id ID` | Reference from the annotation config or the known references (plan §3.2). |
 | `--species human\|mouse` | Run species. |
 | `--panel-genes PATH` | `panel_genes*.json` (omit for panel-independent references such as `wmb_region_share`). |
-| `--store PATH`, `--store-large PATH` | Store roots; bundles of panels above 1,000 genes go to the large store (dwight: `/srv/storage/MerXen/annotation_references_large`) with their reference markers kept (plan §8.7); the per-parent marker prefilter is opt-in (`large_panel_marker_prefilter`). A builder refuses what it cannot build safely before any source is downloaded or hashed (`LargePanelRefusedError`): `whb_whole_ctx_panel` above 1,000 genes, and a large `wmb_panel` without the prefilter whose predicted query-marker peak (the measured 37.7 GB up to 5,006 genes, scaled beyond) exceeds the PREP reserve (`--max-gb` / 0.625; the prefilter is mandatory above it, OD-E8). |
+| `--store PATH`, `--store-large PATH` | Store roots; bundles of panels above 1,000 genes go to the large store (dwight: `$MERXEN_REFERENCE_STORE_LARGE`) with their reference markers kept (plan §8.7); the per-parent marker prefilter is opt-in (`large_panel_marker_prefilter`). A builder refuses what it cannot build safely before any source is downloaded or hashed (`LargePanelRefusedError`): `whb_whole_ctx_panel` above 1,000 genes, and a large `wmb_panel` without the prefilter whose predicted query-marker peak (the measured 37.7 GB up to 5,006 genes, scaled beyond) exceeds the PREP reserve (`--max-gb` / 0.625; the prefilter is mandatory above it, OD-E8). |
 | `--annotation-config PATH` | `AnnotationConfig` JSON. |
 | `--source NAME=PATH` | Reference source files, added to the spec's sources. |
 | `--scratch-dir PATH` | Parent of the build scratch directory (never inside a store). |
@@ -490,7 +495,7 @@ expanded to the files a builder reads before `build_hash` is computed):
 | `seaad_mr_panel` | `seaad_precomputed_stats`, optional `seaad_metadata_dir` (taxonomy tables); pinned files come from the download cache when absent. While resolvability is enabled also `whb_region_dir` (the WHB region reference directory), `whb_h5ad_dir` and `whb_metadata_dir` (the shared held-out test set) |
 | `whb_frontal_supc_clus_ho` (resolvability) | `whb_region_dir` (or `whb_region_cell_metadata`, or `whb_metadata_dir` with the WHB cell metadata and ROI map to rebuild it), `whb_h5ad_dir`, `whb_metadata_dir` (always with the WHB cell metadata: the other-region non-neuronal test cells); built by the WHB and SEA-AD builders through the store, or directly |
 | `wmb_selfmap_testset` (resolvability) | `wmb_selfmap_test_cells`, `wmb_h5ad_dir`, `wmb_metadata_dir`; built by the `wmb_panel` builder through the store, or directly |
-| `wmb_panel` | `wmb_h5ad_dir` (WMB-10Xv3 `*-raw.h5ad`; only those files are hashed), `wmb_metadata_dir` (`cell_metadata.csv`, taxonomy tables), `wmb_mapping_stats` (Allen `precomputed_stats_ABC_revision_230821.h5`), `wmb_selfmap_test_cells` (required while resolvability is enabled; a copy matching the pinned sha256 is seeded into `<download-dir>/local/wmb_selfmap/` and used from there), optional `wmb_marker_gene_universe` (default: the validated ag7 ∪ VZG2 union for panels inside it) |
+| `wmb_panel` | `wmb_h5ad_dir` (WMB-10Xv3 `*-raw.h5ad`; only those files are hashed), `wmb_metadata_dir` (`cell_metadata.csv`, taxonomy tables), `wmb_mapping_stats` (Allen `precomputed_stats_ABC_revision_230821.h5`), `wmb_selfmap_test_cells` (required while resolvability is enabled; a copy matching the pinned sha256 is seeded into `<download-dir>/local/wmb_selfmap/` and used from there), optional `wmb_marker_gene_universe` (default: the validated MS1 ∪ MS2 union for panels inside it) |
 | `wmb_region_share` | `merfish_ccf_metadata` (`cell_metadata_with_parcellation_annotation.csv`; from the download cache when absent, key `merfish_ccf_metadata`) |
 | `whb_whole_ctx_panel` (optional) | `whb_whole_precompute` |
 
@@ -547,15 +552,15 @@ The in-silico design aid for a panel before its data exist (plan §8.8,
 
 ```bash
 merxen annotation-panel-simulate --public-panel xenium_prime_5k_mouse \
-  --panel-dir /srv/storage/MerXen/annotation_dev/evidence_20260926/m3b/panels \
-  --store /srv/storage/MerXen/annotation_references \
-  --store-large /srv/storage/MerXen/annotation_references_large \
+  --panel-dir $MERXEN_EVIDENCE_ROOT/m3b/panels \
+  --store $MERXEN_REFERENCE_STORE \
+  --store-large $MERXEN_REFERENCE_STORE_LARGE \
   --annotation-config mouse.annotation_config.json \
   --param annotation_wmb_h5ad_dir=/path/WMB-10Xv3/20230630 \
   --param annotation_wmb_metadata_dir=/path/abc_atlas/metadata \
   --param annotation_wmb_mapping_stats_path=/path/precomputed_stats_ABC_revision_230821.h5 \
   --param annotation_wmb_selfmap_test_cells_path=/path/truth.csv \
-  --scratch-dir /srv/storage/.../scratch --out-dir /srv/storage/.../simulate/5k_mouse \
+  --scratch-dir $MERXEN_STORAGE_ROOT/.../scratch --out-dir $MERXEN_STORAGE_ROOT/.../simulate/5k_mouse \
   --n-processors 8 --max-gb 40 \
   --depth-profile-asset depth__xenium_prime__mouse_brain_ff
 ```
@@ -639,13 +644,13 @@ Outputs in `--out-dir`: `simulate_report.json`, `SIMULATE_REPORT.txt`,
 | `--store`, `--store-large`, `--download-dir`, `--auto-download` | As `annotation-reference-prep`. |
 | `--param NAME=PATH` | Reference sources by their Nextflow param name (`annotation_whb_h5ad_dir=...`); mapped to each reference's sources as `AnnotationReferences.SOURCE_PARAMS` does. |
 | `--annotation-config PATH` | `AnnotationConfig` JSON (production settings). |
-| `--scratch-dir PATH` | Build scratch and the unfiltered markers (large for 5K panels: use `/srv/storage`). |
+| `--scratch-dir PATH` | Build scratch and the unfiltered markers (large for 5K panels: use the storage RAID, `$MERXEN_STORAGE_ROOT`). |
 | `--n-processors N`, `--max-gb N` | ctm processes and reference-marker memory bound. |
 | `--prefilter-compare auto\|always\|off` | See step 4. |
 | `--depth-profile PATH`, `--depth-profile-asset ID` | The per-class (or pooled) depth profile of the headline; see step 3. |
 | `--profile-mode/--no-profile-mode`, `--profile-members LIST`, `--real-composition PATH` | Profile mode (default on with a profile), its members and the real composition its cells are weighted to; see step 3. |
 | `--expected-depth N` | Secondary line: the classes emitted at one median depth. |
-| `--resolvability-version auto\|7` | `7`: for a version-6 family (set a, ag7, VZG2, the pinned P5011 family) also compute the resolvability version-7 decisions (the eight emission members of plan §8.3 v7.3: R1 x 8, or R1 x 6 + R3 x 2 where a measured table exists) on the bundle's test set as a diagnostic: `<reference>/v7_diagnostic/` holds each ensemble's tables, `v7_diagnostic.json` and `V7_DIAGNOSTIC.txt` (version 6 vs 7 emitted triples lost and gained per level and regime). Never written to the store, never applied; the bundle and its emitted decisions are unchanged. Version-7 families build version 7 anyway (plan §8.3 v7.1). |
+| `--resolvability-version auto\|7` | `7`: for a version-6 family (set a, MS1, MS2, the pinned HD4 family) also compute the resolvability version-7 decisions (the eight emission members of plan §8.3 v7.3: R1 x 8, or R1 x 6 + R3 x 2 where a measured table exists) on the bundle's test set as a diagnostic: `<reference>/v7_diagnostic/` holds each ensemble's tables, `v7_diagnostic.json` and `V7_DIAGNOSTIC.txt` (version 6 vs 7 emitted triples lost and gained per level and regime). Never written to the store, never applied; the bundle and its emitted decisions are unchanged. Version-7 families build version 7 anyway (plan §8.3 v7.1). |
 | `--v7-fresh-seeds LIST`, `--v7-fresh-r3-seeds LIST` | A fresh version-7 ensemble B (R1 at these seeds, e.g. `3,4,5`; R3 at these seeds, default `1`; `--v7-fresh-r3-seed` is an alias) mapped beside ensemble A (the bundle's, or the diagnostic's); its emitted-triple churn is reported (pre-registration §21 (iii), (vii)). B must share no member with A. Diagnostic only. |
 | `--v7-comparator` | Ensemble B is the pre-registered comparator of the amended churn re-test (pre-registration §22.4): `R1_contam_HO@20`-`@25` + `R3_measured_HO@20`, `@21` where a measured table exists, else `R1_contam_HO@20`-`@27`. Diagnostic only. |
 | `--gate-p` | The gate-P programme after the simulation (NP1–NP9: leave-one-donor-out HO bundles, seeds 0 / 1, stress recipes; plan §8.8, §14; `merxen.annotation.gate_p_run`), writing `<out-dir>/gate_p`. Needs `--species` (M13 D4); a mouse family also needs its second disjoint WMB test draw (`--gate-p-wmb-draw2`, M13b C20). `scripts/acceptance/new_panel.py` wraps it. What needs no bundle is refused before any compute: a store that is or lies in the config's `reference_store` / `reference_store_large` (point `--store` and `--store-large` at the separate gate-P store, M13 D11 (b)), an output inside a store or holding an earlier gate-P run, the configured donors and seeds, and a missing NP5 depth (`--depth-profile-asset` or `--expected-depth`). What needs the built bundle is refused after PREP and before any gate-P build or mapping; `simulate_report.json` is written before gate P runs and records such a refusal under `gate_p`. |
@@ -674,11 +679,11 @@ under a `<root>/<pair>/<seg>/<step>/` layout (`clustering_squidpy`,
 
 ```bash
 merxen annotate --species human \
-  --from-clustered-h5ad results/P7513/proseg_hybrid/clustering_squidpy/clustering_squidpy_out/merscope/P7513_MERSCOPE_clustered.h5ad \
-  --from-clustered-h5ad results/P7513/proseg_hybrid/clustering_squidpy/clustering_squidpy_out/xenium/P7513_XENIUM_clustered.h5ad \
-  --store /srv/storage/MerXen/annotation_references \
+  --from-clustered-h5ad results/HD1/proseg_hybrid/clustering_squidpy/clustering_squidpy_out/merscope/HD1_MERSCOPE_clustered.h5ad \
+  --from-clustered-h5ad results/HD1/proseg_hybrid/clustering_squidpy/clustering_squidpy_out/xenium/HD1_XENIUM_clustered.h5ad \
+  --store $MERXEN_REFERENCE_STORE \
   --gene-id-fallback-csv /path/to/WHB/gene.csv \
-  --out shadow/P7513/proseg_hybrid
+  --out shadow/HD1/proseg_hybrid
 ```
 
 A mouse section (one MERSCOPE clustered H5AD) maps the same way. Its
@@ -696,10 +701,10 @@ segmentation on a loaded host, with a process-tree peak of 11.3–11.6 GiB
 
 ```bash
 merxen annotate --species mouse \
-  --from-clustered-h5ad results/ag7/proseg_hybrid/clustering_squidpy/clustering_squidpy_out/merscope/ag7_MERSCOPE_clustered.h5ad \
-  --store /srv/storage/MerXen/annotation_references \
-  --gene-id-fallback-csv /srv/storage/MerXen/references/abc_atlas/metadata/WMB-10X/20241115/gene.csv \
-  --out shadow/ag7/proseg_hybrid
+  --from-clustered-h5ad results/MS1/proseg_hybrid/clustering_squidpy/clustering_squidpy_out/merscope/MS1_MERSCOPE_clustered.h5ad \
+  --store $MERXEN_REFERENCE_STORE \
+  --gene-id-fallback-csv $MERXEN_MOUSE_GENE_TABLE \
+  --out shadow/MS1/proseg_hybrid
 ```
 
 | Option | Meaning |
@@ -773,11 +778,11 @@ not below a `--results-root`:
 
 ```bash
 merxen annotate-resolve \
-  --map-dir shadow/P7513/proseg_hybrid \
-  --current-bundles --store /srv/storage/MerXen/annotation_references \
+  --map-dir shadow/HD1/proseg_hybrid \
+  --current-bundles --store $MERXEN_REFERENCE_STORE \
   --gene-id-fallback-csv /path/to/WHB/gene.csv \
-  --n-segmented P7513_MERSCOPE=211744 --n-segmented P7513_XENIUM=167738 \
-  --out resolve/P7513/proseg_hybrid
+  --n-segmented HD1_MERSCOPE=211744 --n-segmented HD1_XENIUM=167738 \
+  --out resolve/HD1/proseg_hybrid
 ```
 
 A mouse MAP output is resolved with the mouse rules, gate and flags
@@ -789,11 +794,11 @@ composition window (G4); 1–5 minutes and at most 3.2 GB per section:
 
 ```bash
 merxen annotate-resolve \
-  --map-dir shadow/ag7/proseg_hybrid \
-  --gene-id-fallback-csv /srv/storage/MerXen/references/abc_atlas/metadata/WMB-10X/20241115/gene.csv \
-  --registration-qc results/ag7/merscope/proseg_hybrid/qc/qc_out/ag7_merscope_registration_qc.json \
+  --map-dir shadow/MS1/proseg_hybrid \
+  --gene-id-fallback-csv $MERXEN_MOUSE_GENE_TABLE \
+  --registration-qc results/MS1/merscope/proseg_hybrid/qc/qc_out/ms1_merscope_registration_qc.json \
   --mouse-g4-sections C57BL6J-638850.31,C57BL6J-638850.32,C57BL6J-638850.33 \
-  --out resolve/ag7/proseg_hybrid
+  --out resolve/MS1/proseg_hybrid
 ```
 
 | Option | Meaning |
@@ -814,7 +819,7 @@ merxen annotate-resolve \
 | `--registration-qc SID=PATH` | Registration G1: the QC stage's `*_registration_qc.json` or `*_qc_summary.csv` of the sample's segmentation (repeatable; a bare `PATH` for a single-sample MAP output). Mouse: gate G1; without a check G1 is not evaluated and the gate warns, and a pipeline task (`--require-bundle-refs`) refuses a mouse sample without one unless `--no-registration-qc` is given. Human: the real-data QC's registration G1 (its fail rule fails the dataset gate, `real_qc.registration_g1_effect`, since 2026-10-07; `warning` keeps it warn-only); without a check it is `not_evaluable`. |
 | `--registration-qc-dir DIR` | Registration G1 (mouse and human, as above): a QC stage output directory (repeatable); a sample without `--registration-qc` takes `<sample_id lower-case>_registration_qc.json` found under it (else `_qc_summary.csv` with registration columns). Two matches of one name are an error. |
 | `--no-registration-qc` | Mouse: resolve without the registration check (G1 not evaluated; the gate warns). Goes without `--registration-qc` and `--registration-qc-dir`. |
-| `--mouse-g4-sections LIST` | Mouse gate G4: comma-separated MERFISH-638850 sections (e.g. `C57BL6J-638850.31,C57BL6J-638850.32,C57BL6J-638850.33` for hippocampal / thalamic levels like ag7 and VZG2) whose pooled class shares are the composition window; default none (G4 not evaluated until M6b's AP estimate). |
+| `--mouse-g4-sections LIST` | Mouse gate G4: comma-separated MERFISH-638850 sections (e.g. `C57BL6J-638850.31,C57BL6J-638850.32,C57BL6J-638850.33` for hippocampal / thalamic levels like MS1 and MS2) whose pooled class shares are the composition window; default none (G4 not evaluated until M6b's AP estimate). |
 | `--platforms`, `--n-bootstrap`, `--tile-um`, `--seed`, `--results-root` | Resolve only these platforms; block-bootstrap replicates (200), tile edge (500 µm) and seed (0); a results tree `--out` must stay out of. |
 | `--run-record PATH` | Where the run record goes (default `<out>/<pair>_resolve_run.json`); the pipeline task writes it outside `annotation_resolve_out`, so that directory is byte-deterministic. |
 
@@ -863,10 +868,10 @@ publishes `<pair>/<seg>/annotation_report/annotation_report_out/` (see
 | `--no-figures`, `--no-expression`, `--items LIST`, `--strict` | Placeholders instead of drawn figures; skip the count-reading items (4, 7); build only these §9 items (12 is always built); fail on an item error instead of recording it as `failed`. |
 
 ```bash
-merxen annotation-report --pair P1212 --segmentation proseg_hybrid \
-  --results-root /srv/storage/MerXen/results \
-  --store /srv/storage/MerXen/annotation_references \
-  --out reports/P1212_proseg_hybrid
+merxen annotation-report --pair HD2 --segmentation proseg_hybrid \
+  --results-root $MERXEN_RESULTS_ROOT \
+  --store $MERXEN_REFERENCE_STORE \
+  --out reports/HD2_proseg_hybrid
 ```
 
 ## Writing a standalone config

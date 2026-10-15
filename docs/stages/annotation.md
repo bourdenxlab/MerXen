@@ -6,6 +6,11 @@
 > the exact rule behind each level with a worked example. This page is the
 > detailed reference, organised by milestone.
 
+Examples name samples by their aliases (HD1, MS1, ...; see
+[sample aliases](../local-configuration.md#sample-aliases)) and host locations by `.env`
+variables (`$MERXEN_...`). The `merxen` commands read the samplesheet's pair
+ids, so give the real pair id (`.aliases.tsv`) where an example shows an alias.
+
 Reference-based cell-type annotation replaces the legacy marker scoring of
 [Squidpy clustering](clustering-squidpy.md) when a species runs in
 `map_first` mode. It is being built milestone by milestone
@@ -115,8 +120,8 @@ Same-panel human pairs get set c, a cross-platform sensitivity panel
 `cell_type_mapper`'s raw-CPM normalisation runs over the genes of the
 marker-training h5ads, so the marker universe changes the markers. The
 validated mouse lookups (E3, E7, MO1) were built on the 899-gene union of
-the ag7 and VZG2 panels (`wmb_marker_universe_ag7_vzg2.csv`): a panel whose
-genes all lie inside it (ag7, VZG2 and their subsets) uses that union and
+the MS1 and MS2 panels (`wmb_marker_universe_ms1_ms2.csv`): a panel whose
+genes all lie inside it (MS1, MS2 and their subsets) uses that union and
 reproduces the validated lookups exactly; any other panel uses its own genes
 and is recorded as not the validated configuration
 (`validated_configuration` in `bundle.json`), to be checked by M3's shadow
@@ -319,7 +324,7 @@ review):
   (`RuleSettings.weight_trim_scope = "judged_set"`). Versions 2-3 capped
   at 10 times the median of the whole depth bin, which its commonest test
   types (neurons) set: in deep bins every glial type hit the same cap and
-  reweighting did nothing inside a called glial class (P7513 MERSCOPE
+  reweighting did nothing inside a called glial class (HD1 MERSCOPE
   broad Oligo at 120: COP and Oligodendrocyte both weighed 6.45). Bundles
   of those versions keep the per-bin trim when re-derived.
 - **Recorded.** Every decision carries the Kish effective n (the n of the
@@ -330,7 +335,7 @@ On the eight human shadow datasets, against the stage C weighting (one
 dataset-wide composition, no pooling or trim) on the same rows, this lifts
 the smallest Kish n of the reweighted broad bins with ≥ 50 confident calls
 from 3.9–20.5 to 85–171, and the largest single-cell weight share falls
-from up to 36% to at most 3.5% (broad) and 5.1% (supercluster); on ag7 no
+from up to 36% to at most 3.5% (broad) and 5.1% (supercluster); on MS1 no
 emitted bin has a cell above 16% of its weight
 (`m3b/review_fix/REVIEW_FIX_REPORT.txt` in the evidence archive). Types
 absent from a dataset get weight 0, so a class the dataset (almost) lacks
@@ -343,8 +348,8 @@ is not emitted there.
 |---|---|---|---|---|
 | set a WHB (297 genes) | 9,032 of the held-out donor's 32,606 (≤ 1,000 per supercluster; 2,425 reach 250 counts) | 14.1 min (2.8 GB) | held-out bundle 10.4 min (3.6 min extraction, 6 min source checksums) + self-map 1.9 min | `validated` |
 | set a SEA-AD | the same (held-out bundle reused) | 6.4 min (3.0 GB) | self-map 2.7 min | `validated` |
-| ag7 WMB (500) | 13,059 (11,913 + 1,146 non-neuronal; 61% reach 1,000 counts, 17% 2,000) | 63.7 min (20.2 GB, query markers) | test set 1.1 min + self-map 11.8 min | `validated` |
-| VZG2 WMB (815) | 13,059 (70% reach 1,000 counts, 27% 2,000) | 65.0 min (27.1 GB, query markers) | test set 0.8 min + self-map 14.5 min | `validated` |
+| MS1 WMB (500) | 13,059 (11,913 + 1,146 non-neuronal; 61% reach 1,000 counts, 17% 2,000) | 63.7 min (20.2 GB, query markers) | test set 1.1 min + self-map 11.8 min | `validated` |
+| MS2 WMB (815) | 13,059 (70% reach 1,000 counts, 27% 2,000) | 65.0 min (27.1 GB, query markers) | test set 0.8 min + self-map 14.5 min | `validated` |
 
 All within the §8.3 budget (human ~35, mouse ~25 min) and the PREP limits
 (≤ 2.5 h human, ≤ 2 h and ≤ 40 GB mouse); none of the four bundles gets a
@@ -353,14 +358,14 @@ self-map bundles new build hashes: the set a WHB and SEA-AD bundles were
 rebuilt in 1.6 and 2.0 min (the held-out test-set bundle is reused), the
 set c WHB bundle took 3.9 min with its own held-out test set; the rebuilt
 set a tables equal the v2 decisions re-derived from the stage C cells
-(`m3b/review_fix/VERIFY_REBUILD.txt`). The ag7 and VZG2 cells tables do not
+(`m3b/review_fix/VERIFY_REBUILD.txt`). The MS1 and MS2 cells tables do not
 change with version 2, so those bundles were not rebuilt; a pipeline PREP
 rebuilds them (new `build_hash`, about an hour each). Re-deriving the
 decisions reweighted to a dataset's composition takes seconds. Applied to
 the M3 shadow MAP runs of the eight human datasets (reweighted per depth
 bin, validated regime, version 2), broad is emitted for 71–85% of table
 cells and supercluster for 69–83% (0–13% of table cells in bins inherited
-from `D_max`; stage C, version 1: 59–82% and 59–83%); ag7 proseg_hybrid:
+from `D_max`; stage C, version 1: 59–82% and 59–83%); MS1 proseg_hybrid:
 class 97%, subclass 98% (version 1: 86%, 85%). The H18 exceptions are
 listed under Known limitations.
 
@@ -369,8 +374,8 @@ deep bins with the point precision in the rule, other-region non-neuronal
 human test cells; `m3b/followup/H18_FOLLOWUP.txt` in the evidence
 archive) gives every self-map bundle a new build hash. Rebuilt at 8
 processes: set a WHB 4.3 min (its new held-out test set 2.6 min, of which
-the other-region draw 7 s), SEA-AD 2.1 min, set c WHB 4.1 min, ag7 37.1 min
-(20.2 GB) and VZG2 45.1 min (27.1 GB). The set a test set holds 11,987
+the other-region draw 7 s), SEA-AD 2.1 min, set c WHB 4.1 min, MS1 37.1 min
+(20.2 GB) and MS2 45.1 min (27.1 GB). The set a test set holds 11,987
 cells: the donor's 9,032 plus 2,955 other-region nuclei (Microglia 757,
 Vascular 655, OPC 503, Fibroblast 433, COP 264, Astro 210, Oligo 133; none
 among the 125,481 frontal cells; 694 of clusters the held-out training
@@ -379,17 +384,17 @@ test cells (were 23, 5, 20). The mouse cells tables are unchanged (same
 test set and markers). Set a (PREP) now emits broad Vascular at 10–250 and
 Fibroblast at 15–250 counts. Reweighted to the eight human datasets, broad
 is resolvable for 67–97% of table cells and supercluster for 81–95%, 0–7%
-of table cells in pooled (extrapolated) bins; ag7 proseg_hybrid class 97%,
+of table cells in pooled (extrapolated) bins; MS1 proseg_hybrid class 97%,
 subclass 98% (2% pooled). RESOLVE reweights each pooled set as one set to
 the dataset's cells at `>= D_P` (`pooled_composition_weights`): with the
 per-bin weights, a deep bin where a dataset lacks a type let one row carry
-a whole set (ag7: 69 calls, Kish n 1). Reweighted decisions take 1.5–1.8 s
-per human dataset and 3.2–3.6 s on ag7.
+a whole set (MS1: 69 calls, Kish n 1). Reweighted decisions take 1.5–1.8 s
+per human dataset and 3.2–3.6 s on MS1.
 
 **Resolvability version 4** (M3b review 2, 2026-09-28;
 `m3b/review2/REVIEW2_H18.txt`) gives every self-map bundle a new build
 hash again. Rebuilt at 8 processes: set a WHB 4.2 min (held-out test set
-included), SEA-AD 2.1, set c WHB 4.1, ag7 36.7 min (20.2 GB) and VZG2
+included), SEA-AD 2.1, set c WHB 4.1, MS1 36.7 min (20.2 GB) and MS2
 44.7 min (27.1 GB). The set a test set holds 11,732 cells (the donor's
 8,777 without Miscellaneous 227, Splatter 22 and Amygdala excitatory 6,
 plus the same 2,955 other-region nuclei); the mouse cells tables are
@@ -401,8 +406,8 @@ re-derives from the stored cells (0 differing bins in the five bundles).
 keyed per-cell draws, the gene efficiency keyed per gene id (undone in
 version 6) and the training-cluster rule for the other-region cells give
 every self-map bundle a new build hash. Rebuilt at 8 processes: set a WHB 4.3 min
-(held-out test set 2.5 min), SEA-AD 2.2, set c WHB 4.2, ag7 36.9 min
-(20.2 GB) and VZG2 45.1 min (27.1 GB). The keyed simulation takes 7-9 s
+(held-out test set 2.5 min), SEA-AD 2.2, set c WHB 4.2, MS1 36.9 min
+(20.2 GB) and MS2 45.1 min (27.1 GB). The keyed simulation takes 7-9 s
 per human and 11-12 s per mouse recipe (one generator per simulated cell;
 version 4: 0.2-2.5 s). The set a test set holds 11,040 cells: the donor's
 8,777 plus 2,263 other-region nuclei; the rule left out 852 candidates of
@@ -431,7 +436,7 @@ pre-registered version-4 draw again, with the per-cell keys and the
 training-cluster rule of version 5, so version 6 is the outcome of the two
 requested changes alone. Rebuilt at 8 processes on a loaded host: set a
 WHB 2.9 min (the version-5 held-out test set reused), SEA-AD 4.9, set c
-WHB 2.4, ag7 43.5 min (20.2 GB) and VZG2 69.4 min (27.1 GB). Every stored
+WHB 2.4, MS1 43.5 min (20.2 GB) and MS2 69.4 min (27.1 GB). Every stored
 efficiency vector equals the pre-registered formula and the version-4
 bundle's; every stored summary equals the re-derived decisions; the set a
 decision rows equal the final follow-up's offline "e4" simulation (version-5
@@ -471,8 +476,8 @@ table) or the unfiltered `var` of the prepared H5AD. A published clustered
 H5AD declares the features its control filter recorded
 (`uns["merxen_clustering_squidpy"]["control_feature_filter"]`: kept and
 removed), not the `min_cells`-filtered `var`, so zero-count probes and
-`min_cells` filtering never change `panel_hash` (measured: the P7513 /
-P1212 and ag7 declared hashes equal the M3 shadow ones). The features
+`min_cells` filtering never change `panel_hash` (measured: the HD1 /
+HD2 and MS1 declared hashes equal the M3 shadow ones). The features
 `min_cells` dropped are no longer in `var`: on a native-ID platform their
 IDs come from the platform's panel file (`merxen annotate
 --declared-ids-file XENIUM=gene_panel.json`; a symbol can give another ID,
@@ -481,11 +486,11 @@ logged and listed as `declared_ids_incomplete` in `panel_report.json`. MAP
 maps them as query genes with zero counts (`undetected_declared_genes` in
 the run record), as the prepared H5AD would give them almost everywhere,
 so they never count as missing panel genes or trigger a subset bundle (M3b
-review 2; P5011 reseg MERSCOPE: 32 of 300 declared genes dropped, which
+review 2; HD4 reseg MERSCOPE: 32 of 300 declared genes dropped, which
 had requested an own-family subset bundle).
 
 A MERSCOPE codebook is read as Vizgen writes it: data rows may end with a
-trailing comma (the ag7 codebook VA00282), and its `id` column holds
+trailing comma (the MS1 codebook VA00282), and its `id` column holds
 transcript identifiers (Ensembl transcripts, RefSeq accessions, a UUID for
 a custom transgene) that are recorded (`recorded_id`) but never native gene
 IDs and never counted by the prefix rules below; only an `id` that is an
@@ -525,12 +530,12 @@ unresolved ones (reporter genes, isoform probes such as the Xenium MAPT 3R
   match the other species' table in exact case more often than the run
   species' table, or fewer than half of the run species' case-insensitive
   matches are exact (HGNC symbols are upper case, MGI symbols are not). On
-  the current panels: ag7 and VZG2 run as human are refused although the
+  the current panels: MS1 and MS2 run as human are refused although the
   case-insensitive fallback would map 487 / 500 and 788 / 815 of their
-  symbols to human IDs; the P7513 human panel run as mouse is refused;
+  symbols to human IDs; the HD1 human panel run as mouse is refused;
 - fewer than 95% of the non-control features resolve (`gene_id_resolution`);
 - fewer than 95% of the native ID values are Ensembl gene IDs of the run
-  species (`native_id_prefix`; symbols stored as IDs, the ag7 failure that
+  species (`native_id_prefix`; symbols stored as IDs, the MS1 failure that
   found 0 of 498 root markers, are listed as `symbols_as_ids`), or more
   than 5% carry another species' prefix (`other_species_ids`). Ensembl
   transcript IDs (MERSCOPE codebooks, isoform probes) do not count.
@@ -553,7 +558,7 @@ are built like any other (plan §8.7), with these differences:
 
 - **Large store, kept reference markers.** Bundles go to
   `annotation_reference_store_large` (dwight:
-  `/srv/storage/MerXen/annotation_references_large`) and keep the family's
+  `$MERXEN_REFERENCE_STORE_LARGE`) and keep the family's
   reference markers (`reference_markers/`), so a dataset missing some panel
   genes needs only a query-marker step (plan §8.7, D-G7). Bundles of panels
   up to 1,000 genes delete their reference markers as soon as the query
@@ -665,7 +670,7 @@ until they are; a standalone MAP on them logs that its tables are stale.
 
 A 5K pan-tissue panel needs more counts than a brain panel for the same
 classes (mouse class at 100 counts: 5 of 24 classes vs 12 for the 248-gene
-brain panel and 24 for VZG2), because its counts spread over many genes that
+brain panel and 24 for MS2), because its counts spread over many genes that
 do not separate brain types. All four panels are `provisional` (own
 families).
 
@@ -698,12 +703,12 @@ distribution), the public section's per-class depth profile ("XOA 3.0
 vendor segmentation, public 10x section"), the lung 5K / v1 ratios (a
 cross-tissue stress recipe for human Prime only) and the lung FFPE depth
 scenario. No asset raises a trust state, no depth profile crosses species,
-and version 6 (set a, ag7, VZG2, P5011 MERSCOPE) is byte-identical.
+and version 6 (set a, MS1, MS2, HD4 MERSCOPE) is byte-identical.
 
 **Resolvability version 7 in PREP (M3c, decision side).** The version is
 chosen per panel family: 6 for the families of `validated_panels.csv` (set a
-with set c, ag7, VZG2; by the family after trust inheritance or the listed
-panel hash) and the pins of `resolvability_v6_pins.csv` (P5011 MERSCOPE);
+with set c, MS1, MS2; by the family after trust inheritance or the listed
+panel hash) and the pins of `resolvability_v6_pins.csv` (HD4 MERSCOPE);
 7 for every other family (Xenium Prime 5K mouse and human, custom and unknown
 panels, the M13 custom MERSCOPE panel). `annotation.resolvability.version`
 (`auto`) may force 6; forcing 7 on a version-6 family is refused. A
@@ -870,7 +875,7 @@ simulation-validated families: status `validated` | `failed:NP<k>` |
 the first gate-P PR, M13). The seeded families are all `real_data`:
 `human_set_a` (the E5 296-gene set a, its post-M0e 297-gene form and their
 curated set c, 264 / 265 genes; validated up to `supercluster`),
-`mouse_ag7` (500) and `mouse_vzg2` (815; up to `subclass`).
+`mouse_ms1` (500) and `mouse_ms2` (815; up to `subclass`).
 `panel.validated_panels_path` in `annotation_config.json`
 (`AnnotationPanelConfig`) points to another directory with the same files.
 
@@ -880,9 +885,9 @@ with Jaccard ≥ 0.95 to a row that contains all that row's root markers
 `inherits` it; a subset panel keeps its parent's family; anything else is
 its own family. A family counts when it was validated on every platform
 the panel serves: one platform of a pair family run on its own
-(`per_platform`, e.g. the P5011 Xenium panel, set a plus one gene) keeps
+(`per_platform`, e.g. the HD4 Xenium panel, set a plus one gene) keeps
 the family, while a Xenium panel never inherits a MERSCOPE-only family
-such as VZG2. The family records the matched platforms
+such as MS2. The family records the matched platforms
 (`matched_platforms`).
 `panel_report.json` records the tables' sha256 (`validated_panels`) and, per
 annotation panel, `family_validation` (listed or not, basis and the trust
@@ -911,14 +916,14 @@ Refused, broad-only and provisional panels show a report banner; validated
 families never do. Measured on the current panels
 (`m3b/review_fix/diagnostics/` in the evidence archive): the builder-v3
 bundles of set a (WHB and SEA-AD, rebuilt at resolvability version 2), set c
-(WHB `af201f26`, built in the review fix), ag7 and VZG2 all carry a self-map
+(WHB `af201f26`, built in the review fix), MS1 and MS2 all carry a self-map
 and are `validated` (`real_data`) with no note and no resolvability
 constraint. Only the older builder-v2 set-c bundle (`f20d11b0`) has no
 self-map; it carries `resolvability_not_run`, and MAP no longer accepts it.
-Of the P5011 per-platform panels, the Xenium one (298 genes: set a plus one
+Of the HD4 per-platform panels, the Xenium one (298 genes: set a plus one
 gene) inherits `human_set_a` and is `validated`, the MERSCOPE one (268
 genes) is its own family and `provisional` (banner and gate warning, as H8
-expects); ag7 symbols run as human are `refused`
+expects); MS1 symbols run as human are `refused`
 (`gene_ids:species_mismatch`).
 
 ### Gate P: simulation-based validation of a panel family (M13)
@@ -954,7 +959,7 @@ PREP bundles, writes the simulation report and then runs gate P, writing
   starts (M13 D4). Both paths are implemented. A mouse family needs its
   second disjoint WMB test draw (`--gate-p-wmb-draw2`; M13b C20,
   [below](#the-mouse-path-m13b-c20)) and is refused before any compute
-  without it. No mouse family is scored before the ag7 / VZG2 dry run passes
+  without it. No mouse family is scored before the MS1 / MS2 dry run passes
   (M13b C21, started by the user).
 - `--store` and `--store-large` must name a separate gate-P store (M13 D11
   (b)). A store that is, or lies in, the config's `reference_store` or
@@ -1108,8 +1113,8 @@ plan §14 scores a mouse family on "the two disjoint test draws" instead.
   (`gate_p_run.GATE_P_RUN_READINGS_MOUSE`).
 
 Built for the seeded families on 2026-10-14 (code `d8dd1b7`), in
-`/srv/storage/MerXen/annotation_references`: ag7 (500 genes, draw 1
-`6c31f20b`) draw 2 `947410bd`, and VZG2 (815 genes, draw 1 `c499a7ea`) draw 2
+`$MERXEN_REFERENCE_STORE`: MS1 (500 genes, draw 1
+`6c31f20b`) draw 2 `947410bd`, and MS2 (815 genes, draw 1 `c499a7ea`) draw 2
 `d03f52b9`. Each holds 16,903 cells: 10,006 per supertype, 798 non-neuronal
 extra and 6,099 top-up. 26 of the 34 classes reach 700 pooled test cells,
 and those classes hold 94.5% of the pooled cells. The 8 that do not are 03
@@ -1154,7 +1159,7 @@ and NP1, NP2 and NP9 pass, NP8 passing or not applying.
 
 **Dry run.** Before a new family of a species is scored, gate P runs on that
 species' seeded families with `--gate-p-dry-run` (`gate_p.dry_run_verdict`;
-M13 D4, D28): set a for a human family, ag7 and VZG2 for a mouse family. The
+M13 D4, D28): set a for a human family, MS1 and MS2 for a mouse family. The
 dry run must pass at broad (class) for every class of C_P and at supercluster
 (subclass) for the classes H18 expects, less supercluster COP for human
 (pre-registration §18 C1; a mouse family has no exemption). A class H18 expects whose record is `not_evaluable` (fewer than
@@ -1299,7 +1304,7 @@ fail from the first family's gate-P PR on.
 
 ### Gate P on the new-panel human MERSCOPE family (M13)
 
-The first in-house custom family: P5822, P4815, P3518 and P7417 (four
+The first in-house custom family: HM1, HM2, HM3 and HM4 (four
 donors, frontal cortex, fresh-frozen, MERSCOPE only and unpaired), one
 496-gene Vizgen panel (`family_id` `human_merscope_aa25d5a241d0`, `panel_id`
 `human_merscope_hbv2_496`), resolvability version 7 with eight R1 members.
@@ -1354,7 +1359,7 @@ true).
 the run's outputs; re-runs in scratch). P1–P4 hold, and NR1 (downgrade-only
 mechanics, 16 of 16 section × segmentation runs) and NR2 (a) (an identical
 re-run gives the same label-table content) pass; no family-level concern
-fires. On proseg_hybrid (P5822 / P4815 / P3518 / P7417): gate `full` on all
+fires. On proseg_hybrid (HM1 / HM2 / HM3 / HM4): gate `full` on all
 four, confident broad coverage of table cells 0.504 / 0.537 / 0.671 / 0.634,
 marker referee 0.957–0.982, WHB–SEA-AD 7-class agreement 0.865–0.913,
 `flag_implausible` 0.28–0.88%, confident COP 0, seed 0 vs 1 switched 0%
@@ -1362,18 +1367,18 @@ marker referee 0.957–0.982, WHB–SEA-AD 7-class agreement 0.865–0.913,
 MAP peak RSS ≤ 11.3 GB. The warnings to read the labels with:
 
 - NR8: simulation over-predicts real coverage in 21–24 (level, class) rows
-  per section, by up to 0.54 at broad (P5822 Astro) and 0.60 at supercluster
-  (P7417 Inh). At broad only Oligo (all four), Exc on P3518 and Fibroblast on
-  P5822 are within 0.10. Read the class-depth predictions as optimistic for
+  per section, by up to 0.54 at broad (HM1 Astro) and 0.60 at supercluster
+  (HM4 Inh). At broad only Oligo (all four), Exc on HM3 and Fibroblast on
+  HM1 are within 0.10. Read the class-depth predictions as optimistic for
   this panel.
-- NR7: the gene-complexity gap exceeds 0.45 on P5822 (0.55) and P3518 (0.78),
+- NR7: the gene-complexity gap exceeds 0.45 on HM1 (0.55) and HM3 (0.78),
   in the open top bin (250 counts) only.
 - NR6: more than half of the flag strata are uninformative on all four
   sections.
 - NR9: registration G1 was not evaluated. The family's results hold no
   registration check from the QC stage, so every RESOLVE recorded it
   `not_evaluable`; computed read-only for the record, no section meets the
-  fail rule and P5822 would warn (density ratio 1.75). (A launch started
+  fail rule and HM1 would warn (density ratio 1.75). (A launch started
   after `qc` now stages the published checks where they exist; see the
   RESOLVE task above.)
 - NR13: the predicted levels were not recorded before the outputs were read.
@@ -1468,7 +1473,7 @@ QC-free re-run (pre-registration NR1).
 
 | Check | Function | Rule | Effect |
 |---|---|---|---|
-| Marker referee (human) | `human_referee.human_marker_referee` (the statistic), `marker_consistency_outcome` | mouse G2 ported to the primary WHB bundle's profiles: per broad class, the panel genes that pass the §8.6 specificity rule (>= 20x and >= 1/1000; immediate-early genes excluded; classes with < 3 markers left out); table cells pseudo-labelled with `data/P1212`'s rule (>= 1.5 units and >= 60% of the marker units); the share of pseudo-labelled cells with a confident `ct_broad` whose call equals the pseudo-label | warning below 0.75; gate capped at `broad_only` below 0.70 (trust and margins unchanged); `not_evaluable` with fewer than 2 classes with markers or fewer than 200 scored cells |
+| Marker referee (human) | `human_referee.human_marker_referee` (the statistic), `marker_consistency_outcome` | mouse G2 ported to the primary WHB bundle's profiles: per broad class, the panel genes that pass the §8.6 specificity rule (>= 20x and >= 1/1000; immediate-early genes excluded; classes with < 3 markers left out); table cells pseudo-labelled with `data/HD2`'s rule (>= 1.5 units and >= 60% of the marker units); the share of pseudo-labelled cells with a confident `ct_broad` whose call equals the pseudo-label | warning below 0.75; gate capped at `broad_only` below 0.70 (trust and margins unchanged); `not_evaluable` with fewer than 2 classes with markers or fewer than 200 scored cells |
 | Registration G1 (human) | `registration_g1_outcome` | §7.6 as defined there: the fail rule is density ratio < 1.5 or shift > 5 µm; otherwise the warning rule is density ratio < 2.0 | fail rule: the dataset gate fails (`registration_g1_effect = gate_failed`, the default since 2026-10-07; `warning` keeps it warn-only); warning rule: warning |
 | Paired concordance | `paired_concordance` | the pair's soft broad JSD on the shared-tissue mask (point estimate; the whole section reported) above 0.20 | supercluster-level cross-platform statistics withheld; `not_applicable` for an unpaired section; `not_evaluable` without a shared-mask value (the whole section is never scored in its place) |
 | Flag rates | `flag_rate_summary` | more than half of the (class x platform) strata of the contamination, diffuse and spill-over flags uninformative under H16's 15% marking (a stratum is uninformative when any of its flags is) | warning; the per-flag, pooled and own-switch readings are reported beside it |
@@ -1835,7 +1840,7 @@ PREPARE -> ANNOTATE_PANEL -> ANNOTATE_REFERENCE_PREP (per unique bundle)
   record. The scope is RESOLVE's `pair.cross_platform`, built from the
   panels, with each sample's dataset gate folded in (plan §5.4): a
   `broad_only` gate caps the pair at `broad_only` (flagged, reason
-  `dataset_gate:<sample>:broad_only`; P1212, whose MERSCOPE side is
+  `dataset_gate:<sample>:broad_only`; HD2, whose MERSCOPE side is
   broad-only, is `broad_only` although its panel allows `full`), a `failed`
   gate sets `none`. A `broad_only` pair may be compared across platforms
   at the broad class and lineage only, a `none` pair not at all
@@ -1865,8 +1870,8 @@ cortical depth rewrites the segmentation's base table
 (`table_MOSAIK_proseg_hybrid`, not the clustered one) with its depth columns
 while `cortical_depth_write_spatialdata_table` is `true`, PREP publishes to
 `<outdir>/annotation_reference_prep/`, and Nextflow writes its report,
-timeline and trace to `<outdir>/nextflow/`. The M5 exit run (P7513 and
-P1212, proseg_hybrid, 2026-09-29) added its results beside the legacy ones
+timeline and trace to `<outdir>/nextflow/`. The M5 exit run (HD1 and
+HD2, proseg_hybrid, 2026-09-29) added its results beside the legacy ones
 without changing any of them with a launch config (`-c`, which overrides
 the process definitions and both profiles) and three flags. On 8 CPUs and
 64 GB (the whole run) it took about 5 hours in two launches (COMPUTE_CPU
@@ -1928,7 +1933,7 @@ rows' layout does.
 The stores then gain `tables/<table>_clustering_squidpy_mapfirst` and a
 re-consolidated root `zarr.json`. Two properties of the consolidated
 metadata: a table write re-consolidates from disk, so it also drops entries
-of groups that are no longer on disk (P1212 Xenium carried 93 of a removed
+of groups that are no longer on disk (HD2 Xenium carried 93 of a removed
 `.table_MOSAIK_proseg_hybrid.merxen-backup-*` group); and
 `write_or_replace_element` replaces a table (MENDER_IMPORT on the
 `_mapfirst` table, and every legacy replacement) through such a backup
@@ -2102,7 +2107,7 @@ mouse sample's unpruned WMB run:
    cells follow it; any other class drops its subclasses below 0.1. A class
    losing every subclass is dropped as one node. Astro-Epen, OPC-Oligo,
    Vascular, Immune and Pineal, and classes without MERFISH grey cells, are
-   never dropped. For the manual ag7 / VZG2 set (Isocortex, HPF, OLF, CTXsp,
+   never dropped. For the manual MS1 / MS2 set (Isocortex, HPF, OLF, CTXsp,
    TH, HY, MB) this gives E7's 60 nodes exactly.
 4. **Pruned re-map.** Only the table cells whose unpruned class or subclass
    was dropped are mapped again, with `--nodes_to_drop` and the bundle's
@@ -2111,8 +2116,8 @@ mouse sample's unpruned WMB run:
    `cell_type_mapper` never meets a zero-marker parent. Every other cell
    keeps its label by construction, and also its unpruned bootstrap
    probability, which still counts the runner-up votes on dropped nodes:
-   against a full pruned re-map with the same seed, 1.31% (ag7
-   proseg_hybrid) and 0.69% (VZG2 original_seg) of the table cells are
+   against a full pruned re-map with the same seed, 1.31% (MS1
+   proseg_hybrid) and 0.69% (MS2 original_seg) of the table cells are
    class-confident only in the full re-map and none only in the subset
    (subclass: 1.19% / 0.50% vs 1.05% / 0.54%, re-draw noise). The subset
    re-map is therefore conservative at class (a one-directional coverage
@@ -2173,7 +2178,7 @@ evidence and on the M6b branch until it was merged):
 - MO10 scored on it fails only the missed-region clause at two MERFISH
   sections (.35, STR; .46, CTXsp). Gate M carries a written exception for
   them.
-- On ag7 and VZG2 it infers the same regions and drop list as v1.
+- On MS1 and MS2 it infers the same regions and drop list as v1.
 
 Its coupling needs structure-level homes. The `wmb_region_share` builder
 writes them from revision 2 (`region_structure_home.parquet`), and MAP refuses
@@ -2228,7 +2233,7 @@ the **direct harm** (table cells with Allen `average_correlation_score >=
 in the drop list, over table cells), the E7 oracle-relative harm
 (diagnostic), the re-mapped cells and, after the production pruned re-map
 (the MAP run's engine parameters including its process count, on which
-`cell_type_mapper`'s bootstrap draws depend), T2 after pruning; then per-AP-bin tables, MO2 on ag7 and VZG2, the
+`cell_type_mapper`'s bootstrap draws depend), T2 after pruning; then per-AP-bin tables, MO2 on MS1 and MS2, the
 candidate table and the pre-registered selection. The `mo10` step scores
 MO10 only once the pre-registration names the selected candidate.
 
@@ -2251,7 +2256,7 @@ rules fingerprint (as RESOLVE's `rules_fingerprint`) over
 change re-runs the deep-cached MAP under `-resume`.
 
 A published clustered H5AD of a small sample can have a `min_cells`-filtered
-`var` (P1212 and P5011 reseg MERSCOPE hold 299 and 268 of 300 features).
+`var` (HD2 and HD4 reseg MERSCOPE hold 299 and 268 of 300 features).
 Its declared panel is the control-filter record, so it keeps the prepared
 panel's hash and bundles; the filtered-out features have no native ID there
 and resolve by symbol (pair lookup, local gene table). MAP maps the genes
@@ -2408,7 +2413,7 @@ with a `ResolvabilityError` for every caller
   `share_source`, `predicted_coverage`, `resolvable_share`) and the flag's
   count per level. A version-6 sample has no such entry.
 
-Version-6 bundles (set a, set c, SEA-AD, ag7, VZG2, the pinned P5011
+Version-6 bundles (set a, set c, SEA-AD, MS1, MS2, the pinned HD4
 MERSCOPE family) and runs without tables give identical RESOLVE outputs
 apart from the new, all-null label column (`test_resolve_v7.py`: golden
 digests of the label tables, provenance and summaries computed with the code
@@ -2549,7 +2554,7 @@ the flags, and **warn-only**: it records outcomes and changes nothing.
    | Check | Mouse outcome |
    |---|---|
    | Flag rates | evaluated (H16's 15% marking on the class × platform strata) |
-   | Gene complexity | evaluated on a version-7 bundle that stores simulated `n_genes`; `not_evaluable` on version-6 bundles such as ag7's and VZG2's (D19 (a)) |
+   | Gene complexity | evaluated on a version-7 bundle that stores simulated `n_genes`; `not_evaluable` on version-6 bundles such as MS1's and MS2's (D19 (a)) |
    | Per-class coverage, non-neuronal depth trend | version 7 only: `not_applicable` on version 6 |
    | Prefilter spot check | `not_applicable` without a marker prefilter (panels of ≤ 1,000 genes); `not_evaluable` on a prefiltered bundle (no producer in RESOLVE) |
    | Factor re-measure | `not_applicable` without an R3 member; `not_evaluable` otherwise (no producer in RESOLVE) |
@@ -2573,14 +2578,14 @@ the flags, and **warn-only**: it records outcomes and changes nothing.
    only in the provenance (`panel.real_data_qc`); the QC-free mouse run still
    gives the digests from before the change.
 
-**Expected on ag7 and VZG2** (version-6 `wmb_panel` bundles of 500 and 815
+**Expected on MS1 and MS2** (version-6 `wmb_panel` bundles of 500 and 815
 genes, MERSCOPE only, seeded): G1–G5 as their gates decide; flag rates
 evaluated; gene complexity `not_evaluable`; paired concordance, the prefilter
 spot check, the coverage and depth-trend checks and the factor re-measure
 `not_applicable`. Their regression rows
 (`scripts/acceptance/m13_real_qc_regression.py mouse --mouse-resolve
-<dataset>/<segmentation>=<annotation_resolve_out>`: ag7 on its four
-segmentations and VZG2 original_seg) stay pending until the gate M runs
+<dataset>/<segmentation>=<annotation_resolve_out>`: MS1 on its four
+segmentations and MS2 original_seg) stay pending until the gate M runs
 write those RESOLVE outputs; the step also reports any QC effect a mouse
 sample applied (`no_effect_problems`).
 
@@ -2640,7 +2645,7 @@ sample on the pruned view of its WMB run (re-mapped cells merged in, see
 | Level | Confident when |
 |---|---|
 | Broad | The vocab broad class of the call (Neurons, Astrocytes/Ependymal, Oligodendrocyte lineage, OEC, Vascular cells, Microglia); the class bootstrap probabilities of the call and its same-broad runner-ups sum to >= 0.90, counts >= the floor, resolvability. |
-| Class | Confident broad, class bootstrap probability >= 0.90, the class floor (20 counts on ag7 / VZG2), resolvability, and `avg_correlation` >= `wmb_class_min_corr` when a floor is configured (real-data-validated families only; see the shadow study below). A cell whose unpruned class was region-dropped and whose re-mapped class is not confident is `implausible` at class and below (it falls back to broad). |
+| Class | Confident broad, class bootstrap probability >= 0.90, the class floor (20 counts on MS1 / MS2), resolvability, and `avg_correlation` >= `wmb_class_min_corr` when a floor is configured (real-data-validated families only; see the shadow study below). A cell whose unpruned class was region-dropped and whose re-mapped class is not confident is `implausible` at class and below (it falls back to broad). |
 | NT | Neurons only: confident class, the NT-summed probability (Glut / GABA / Other from the vocab), resolvability. |
 | Subclass (leaf) | Gate `full`, confident parent (NT for neurons, else class), bootstrap probability >= 0.80, the subclass floor (50), resolvability. A re-mapped cell (class or subclass dropped) whose new subclass is not confident is `implausible`. |
 | Supertype | Report-only (`allow_fine_levels`, OD-E4): confident subclass, 0.80, resolvability; never a leaf or in `ct_final`. |
@@ -2651,10 +2656,10 @@ auto-collapsed parent, or without a 10Xv3 marker cell, e.g.
 counts them).
 
 **Class `avg_correlation` floor** (§7.3; pre-registration §16): the M6
-shadow study scored floors 0.40 and 0.50 on ag7 proseg_hybrid and VZG2
+shadow study scored floors 0.40 and 0.50 on MS1 proseg_hybrid and MS2
 original_seg against class coverage and MO1's marker consistency by depth
 and selected **none** (0.40 changes consistency by < 0.001; 0.50 costs 7.7
-/ 10.2 points of class coverage, and on VZG2 removes calls nearly as
+/ 10.2 points of class coverage, and on MS2 removes calls nearly as
 marker-consistent as the kept ones), so `wmb_class_min_corr` stays unset
 and `ct_class_corr` is report-only. Were a floor configured, it would apply
 to the real-data-validated mouse families only (`avg_correlation` depends
@@ -2669,7 +2674,7 @@ before the statuses; level + warning flag as for human):
 | Signal | Source | Failed if | Warning if |
 |---|---|---|---|
 | G1 registration | `--registration-qc SID=PATH` or `--registration-qc-dir DIR`: the QC stage's `*_registration_qc.json` or `*_qc_summary.csv` (M0a check); required in a pipeline task unless `--no-registration-qc` | density ratio < 1.5, or shift > 5 µm against the platform's own cells | ratio < 2.0; no check given (standalone), or the check skipped |
-| G2 marker referee | the table cells' class calls against marker pseudo-labels: six class groups (the vocab broad classes), each with the panel genes whose group profile is >= 20x every other class's profile (E3 rule; groups with < 3 genes left out), labelled with `data/P1212`'s rule (>= 1.5 units and >= 60% of the marker units) | consistency < 0.70 | < 0.80, or fewer than 200 pseudo-labelled cells |
+| G2 marker referee | the table cells' class calls against marker pseudo-labels: six class groups (the vocab broad classes), each with the panel genes whose group profile is >= 20x every other class's profile (E3 rule; groups with < 3 genes left out), labelled with `data/HD2`'s rule (>= 1.5 units and >= 60% of the marker units) | consistency < 0.70 | < 0.80, or fewer than 200 pseudo-labelled cells |
 | G3 implausibility | pre-pruning T2 share, E7's definition: unpruned subclasses with >= 20 MERFISH grey-matter cells, outside the never-drop classes, with < 25% of those cells in the present divisions; also MO2's "T2 after pruning" on the pruned calls. Not evaluated (a note) when the step was disabled; a skipped step warns (above) | – | > 3% |
 | G4 composition | soft class shares against pooled MERFISH sections (the region-share bundle's `section_composition.parquet`): `--mouse-g4-sections`, else the AP estimate's section and its neighbours ([Mouse AP axis](#mouse-ap-axis-m6b)) | – | Astro-Epen outside ±5 points or Immune outside ±1 point |
 | G5 spill-over | `flag_microglial_spillover` rate | – | > 15% |
@@ -2687,16 +2692,16 @@ gate makes every table cell `not_attempted_gate` and `exclude_hard` (a
 failed registration check: plan §7.5). G2's marker sets are derived per
 panel, so the 0.70 / 0.80 thresholds, set on MO1's hand-listed referee
 (.911 / .856), are provisional there [L]: the derived referee reads .805 on
-ag7 proseg_hybrid and .819 on VZG2 original_seg (and .666 on the invalid
-VZG2 proseg_hybrid).
+MS1 proseg_hybrid and .819 on MS2 original_seg (and .666 on the invalid
+MS2 proseg_hybrid).
 
 **Mouse flags** (`merxen.annotation.mouse_flags`, §7.4, §8.6; report-only):
 
 - `microglia_stat`, `microglia_weight`, `flag_microglial_spillover`: E3's
   specific-gene binomial likelihood-ratio test. The genes are derived from
   the bundle's profiles (microglia subclass vs every non-Immune class:
-  ratio >= 20, share >= 1/1000, immediate-early genes excluded; ag7: Csf1r,
-  Cx3cr1, Aif1, Blnk, C1qa, as E3; VZG2: E3's 13); flagged at statistic >= 10
+  ratio >= 20, share >= 1/1000, immediate-early genes excluded; MS1: Csf1r,
+  Cx3cr1, Aif1, Blnk, C1qa, as E3; MS2: E3's 13); flagged at statistic >= 10
   and spill weight >= 0.05. Null with fewer than 3 genes
   (`insufficient_panel_genes`) or when more than 0.5% of the marker
   astrocytes are flagged. Marker astrocytes follow E3's AST rule: >= 2
@@ -2707,9 +2712,9 @@ VZG2 proseg_hybrid).
   the purity genes, so the check fires through the flag genes outside that
   set (with purity on every flag gene the rate would be 0 by construction,
   and the check is then recorded as not evaluated). With >= 6 genes the flag is rebuilt on half of them and the
-  held-out half's enrichment is reported (VZG2: 38x). It measures
+  held-out half's enrichment is reported (MS2: 38x). It measures
   spill-over prevalence, never a microglia count. Per cell it agrees with
-  E3 on 99.8% of ag7 and VZG2 cells (E3 used supertype profiles; the bundle
+  E3 on 99.8% of MS1 and MS2 cells (E3 used supertype profiles; the bundle
   has subclass profiles).
 - `flag_region_incoherent`, `region_coherence` (F1, E7 §3): a cell of one of
   E7's 23 region-restricted classes (`wmb_region_restricted_classes.csv`)
@@ -2724,16 +2729,16 @@ VZG2 proseg_hybrid).
 The M6 exit (plan §12 M6; `$A/m6/stageC/M6_EXIT_REPORT.txt` of the
 evidence archive) ran the standalone `merxen annotate` and `merxen
 annotate-resolve` with the defaults above on the published clustered H5ADs
-of ag7 (Ageing07) and VZG2 (the 2026-09-27 re-run with the offset fix),
-every segmentation, and on the old VZG2 proseg_hybrid from before the fix
+of MS1 and MS2 (the 2026-09-27 re-run with the offset fix),
+every segmentation, and on the old MS2 proseg_hybrid from before the fix
 (misregistered by about 114 µm) as the gate's negative control. G1 used the
-QC stage's registration check (VZG2 re-run) or the same M0a check computed
-on the run's own transcripts (ag7, the old run); G4 the pooled
+QC stage's registration check (MS2 re-run) or the same M0a check computed
+on the run's own transcripts (MS1, the old run); G4 the pooled
 MERFISH-638850 sections .31–.33 (AP 8.0–8.4 mm).
 
 **E7 reproduced.** On every section the inferred divisions are the manual
 set (Isocortex, OLF, HPF, CTXsp, TH, HY, MB) and the drop list is E7's 60
-nodes. The unpruned labels of ag7 proseg_hybrid and VZG2 original_seg are
+nodes. The unpruned labels of MS1 proseg_hybrid and MS2 original_seg are
 identical to E7's inputs, and E7's full-density T2 counts (395 and 712
 cells: subclasses with >= 20 MERFISH grey-matter cells, outside the
 never-drop classes, with < 25% of them in the present divisions; E7's
@@ -2750,32 +2755,32 @@ the full re-map and none only in the subset, a conservative coverage
 deficit of the plan's subset re-map; at subclass the differences are
 symmetric (1.19% / 1.05% and 0.50% / 0.54% confident only in one),
 re-draw noise (`$A/m6/review/SUBSET_VS_FULL_CONFIDENCE.txt`).
-The moved cells go where E7's did (ag7: MY Glut → MB Glut 122, → MB GABA
-54, MY GABA → MB GABA 51; VZG2: MY Glut → MB Glut 475, → MB GABA 102).
+The moved cells go where E7's did (MS1: MY Glut → MB Glut 122, → MB GABA
+54, MY GABA → MB GABA 51; MS2: MY Glut → MB Glut 475, → MB GABA 102).
 
 | Section, segmentation | Table cells | Gate | G1 ratio / shift (µm) | G2 | G3 | G4 Astro-Epen / Immune (points) | G5 spill-over | Confident class / subclass | F1 | Astro low-count |
 |---|---|---|---|---|---|---|---|---|---|---|
-| ag7 proseg_hybrid | 103,736 | `full` | 2.20 / 0 | .805 | .0038 | +1.8 / −0.5 | .062 | .732 / .618 | 0.82% | 2.2% |
-| ag7 reseg | 101,750 | `full` | 2.17 / 0 | .860 | .0037 | −3.6 / +0.3 | .056 | .823 / .706 | 0.81% | 1.6% |
-| ag7 original_seg | 136,033 | `full` + warning (G1, G2, G4) | 1.63 / – | .773 | .0065 | +7.1 / −0.6 | .057 | .610 / .489 | 1.25% | 11.4% |
-| ag7 proseg_mask | 103,766 | `full` + warning (G1) | 1.98 / 0 | .819 | .0040 | +0.8 / −0.3 | .059 | .727 / .613 | 0.79% | 3.3% |
-| VZG2 original_seg | 112,158 | `full` | 2.13 / – | .819 | .0063 | +2.2 / +0.1 | .095 | .825 / .759 | 0.28% | 0.5% |
-| VZG2 proseg_hybrid | 104,464 | `full` | 2.40 / 0 | .843 | .0060 | +1.3 / +0.4 | .096 | .859 / .794 | 0.24% | 0.3% |
-| VZG2 reseg | 104,276 | `full` + warning (G4) | 2.43 / 0 | .903 | .0069 | −3.2 / +1.1 | .090 | .911 / .841 | 0.29% | 0.2% |
-| VZG2 proseg_mask | 104,507 | `full` | 2.37 / 0 | .889 | .0057 | −1.0 / +0.8 | – (null: FPR) | .878 / .820 | 0.22% | 0.4% |
-| VZG2 proseg_hybrid, old (invalid) | 102,134 | `failed` + warning (G1, G2; G4) | 1.34 / 114 | .666 | .0058 | +16.4 / −0.7 | – (null: FPR) | 0 / 0 | 0.58% | 3.0% |
+| MS1 proseg_hybrid | 103,736 | `full` | 2.20 / 0 | .805 | .0038 | +1.8 / −0.5 | .062 | .732 / .618 | 0.82% | 2.2% |
+| MS1 reseg | 101,750 | `full` | 2.17 / 0 | .860 | .0037 | −3.6 / +0.3 | .056 | .823 / .706 | 0.81% | 1.6% |
+| MS1 original_seg | 136,033 | `full` + warning (G1, G2, G4) | 1.63 / – | .773 | .0065 | +7.1 / −0.6 | .057 | .610 / .489 | 1.25% | 11.4% |
+| MS1 proseg_mask | 103,766 | `full` + warning (G1) | 1.98 / 0 | .819 | .0040 | +0.8 / −0.3 | .059 | .727 / .613 | 0.79% | 3.3% |
+| MS2 original_seg | 112,158 | `full` | 2.13 / – | .819 | .0063 | +2.2 / +0.1 | .095 | .825 / .759 | 0.28% | 0.5% |
+| MS2 proseg_hybrid | 104,464 | `full` | 2.40 / 0 | .843 | .0060 | +1.3 / +0.4 | .096 | .859 / .794 | 0.24% | 0.3% |
+| MS2 reseg | 104,276 | `full` + warning (G4) | 2.43 / 0 | .903 | .0069 | −3.2 / +1.1 | .090 | .911 / .841 | 0.29% | 0.2% |
+| MS2 proseg_mask | 104,507 | `full` | 2.37 / 0 | .889 | .0057 | −1.0 / +0.8 | – (null: FPR) | .878 / .820 | 0.22% | 0.4% |
+| MS2 proseg_hybrid, old (invalid) | 102,134 | `failed` + warning (G1, G2; G4) | 1.34 / 114 | .666 | .0058 | +16.4 / −0.7 | – (null: FPR) | 0 / 0 | 0.58% | 3.0% |
 
 Shares are of table cells; G3 is the pre-pruning T2 share in E7's
 definition (the review re-run; equal to E7's counts on every section); "–"
 under G1 is the platform's own segmentation (no shift test), under G5 a
 spill-over flag nulled by its false-positive check. MO1 (marker consistency over
-all marker-pseudo-confident cells) is .9118 on ag7 proseg_hybrid and .8558
-on VZG2 original_seg (≥ .89 / .84); MO4 (soft class composition vs the
-MERFISH window) holds on both. The soft class JSD against VZG2 original_seg
+all marker-pseudo-confident cells) is .9118 on MS1 proseg_hybrid and .8558
+on MS2 original_seg (≥ .89 / .84); MO4 (soft class composition vs the
+MERFISH window) holds on both. The soft class JSD against MS2 original_seg
 (MO9, scored at M9 [L]) is 0.027 for the re-run proseg_hybrid, 0.061 for
 proseg_mask and 0.088 for reseg (base-2 distance over the 34 classes).
 
-**Negative control.** The old VZG2 proseg_hybrid is `failed` (G1: density
+**Negative control.** The old MS2 proseg_hybrid is `failed` (G1: density
 ratio 1.34, shift 114 µm; G2: .666 < .70) with the G4 warning (Astro-Epen
 +16.4 points), so every cell is `not_attempted_gate` and `exclude_hard`;
 without a registration check G2 alone still fails it. The re-run
@@ -2783,27 +2788,27 @@ proseg_hybrid of the same section is `full` without a warning (G1 2.40, G2
 .843). The spill-over rule's rate and the soft Astro-Epen share are the
 signals that move on the invalid data (12.8% of the cells, and 0.57% of
 its marker astrocytes, which nulls the flag; 33.8%); per-cell
-confidence does not (class bootstrap ≥ 0.9 on .733 of its cells, .739 on ag7
+confidence does not (class bootstrap ≥ 0.9 on .733 of its cells, .739 on MS1
 proseg_hybrid).
 
 **Flags** (report-only; rates over table cells): the spill-over flag fires
-on 5.6–6.2% of ag7 and 8.9–9.6% of VZG2 cells (proseg_mask's 8.3% is
+on 5.6–6.2% of MS1 and 8.9–9.6% of MS2 cells (proseg_mask's 8.3% is
 nulled, below; E3: 6.1% / 9.4%; spill-over prevalence, not microglia),
-with a held-out enrichment of 38× on VZG2
-original_seg (45–129× on the other VZG2 segmentations; ag7 has 5 derived
+with a held-out enrichment of 38× on MS2
+original_seg (45–129× on the other MS2 segmentations; MS1 has 5 derived
 genes, no held-out test). The false-positive check (review re-run; E3's
-MG_loose purity, the flag genes outside it: 2 on ag7, 10 on VZG2) flags
-1–2 of 16,495–26,156 ag7 marker astrocytes (≤ 0.012%) and 0.37–0.46% of
-VZG2's (original_seg 126 of 34,007: MO5 ≤ 0.5%), and nulls the flag on VZG2
+MG_loose purity, the flag genes outside it: 2 on MS1, 10 on MS2) flags
+1–2 of 16,495–26,156 MS1 marker astrocytes (≤ 0.012%) and 0.37–0.46% of
+MS2's (original_seg 126 of 34,007: MO5 ≤ 0.5%), and nulls the flag on MS2
 proseg_mask (0.54%) and the old invalid run (0.57%). F1 flags
-0.8% of ag7 (1.25% of original_seg) and 0.22–0.29% of VZG2 cells (MO6:
-0.2–1.0% on ag7 proseg_hybrid and VZG2 original_seg). `flag_astro_lowcount`
-flags 1.6–3.3% of ag7 cells (11.4% of original_seg, where 20% of the table
-cells have fewer than 100 counts) and 0.2–0.5% of VZG2 cells.
+0.8% of MS1 (1.25% of original_seg) and 0.22–0.29% of MS2 cells (MO6:
+0.2–1.0% on MS1 proseg_hybrid and MS2 original_seg). `flag_astro_lowcount`
+flags 1.6–3.3% of MS1 cells (11.4% of original_seg, where 20% of the table
+cells have fewer than 100 counts) and 0.2–0.5% of MS2 cells.
 
 **Uncovered subclasses.** The unpruned runs call the five uncovered
-subclasses for at most 2 cells per section (none on ag7 proseg_hybrid or
-VZG2 original_seg), and the pruned re-map sends 0–2 cells per section to
+subclasses for at most 2 cells per section (none on MS1 proseg_hybrid or
+MS2 original_seg), and the pruned re-map sends 0–2 cells per section to
 `157 RN Spp1 Glut`, a midbrain subclass the pruning keeps. None is emitted:
 they are `implausible` (a re-mapped cell whose new subclass is not
 confident), below their parent or region-dropped.
@@ -2813,14 +2818,14 @@ confident), below their parent or region-dropped.
 < 25% of its MERFISH cells in the present divisions (the stage C report's
 "plan" reading, withdrawn in review) would add never-drop subclasses the
 rule never removes (`316 Bergmann NN`, `320 Astro-OLF NN`, `317 Astro-CB
-NN`: 178 of 222 such calls on ag7 reseg are `316 Bergmann NN`), nearly
-never emitted (2 confident `320 Astro-OLF NN` subclass calls on ag7 reseg,
-1 on VZG2 proseg_hybrid).
+NN`: 178 of 222 such calls on MS1 reseg are `316 Bergmann NN`), nearly
+never emitted (2 confident `320 Astro-OLF NN` subclass calls on MS1 reseg,
+1 on MS2 proseg_hybrid).
 
 ### Mouse acceptance scorer (gate M, M9)
 
 `scripts/acceptance/mouse_acceptance.py score` scores the mouse criteria
-(pre-registration §9, MO1–MO11) on ag7 and VZG2 with the gate M protocol
+(pre-registration §9, MO1–MO11) on MS1 and MS2 with the gate M protocol
 of §25 and §24's amendment of 2026-10-14. It reads the published outputs
 read-only and writes `summary.json`, `summary.html` and `tables/rows.csv`
 to `--out`, which must lie outside every results root and the store.
@@ -2834,15 +2839,15 @@ other segmentations are reported (`INFO`).
 
 | Criterion | Source | Scored as |
 |---|---|---|
-| MO1 | label table + the M6 marker pseudo-labels (`mouse_corr_shadow.py`) | pruned class calls over all marker-pseudo-confident cells; ag7 ≥ 0.89, VZG2 ≥ 0.84 |
+| MO1 | label table + the M6 marker pseudo-labels (`mouse_corr_shadow.py`) | pruned class calls over all marker-pseudo-confident cells; MS1 ≥ 0.89, MS2 ≥ 0.84 |
 | MO2 | MAP output (`load_resolve_runs`), and a `full-remap` output per scored segmentation | T2 after pruning ≤ 0.1%, class ≤ 0.25% and subclass ≤ 1.5% changes outside dropped nodes, on the subset and the full re-map |
 | MO3 | MAP region record | inferred regions = the manual set |
-| MO4 | report soft shares; the region-share bundle's section composition | Astro-Epen and Immune points against MERFISH .31–.33 (VZG2 ±3 / ±0.5, ag7 ±5 / ±1); the gate's AP-estimate window beside |
+| MO4 | report soft shares; the region-share bundle's section composition | Astro-Epen and Immune points against MERFISH .31–.33 (MS2 ±3 / ±0.5, MS1 ±5 / ±1); the gate's AP-estimate window beside |
 | MO5 | report | MS2's held-out enrichment ≥ 10× on both of its scored segmentations; astrocyte FPR ≤ 0.5% on every scored segmentation of both sections (as the M6 exit measured it, and §25.2.1) |
 | MO6 | report | F1 rate in 0.2–1.0% |
-| MO7 | resolve summaries; the negative control's standalone run | the invalid VZG2 proseg_hybrid `failed`; the scored datasets not `failed` |
+| MO7 | resolve summaries; the negative control's standalone run | the invalid MS2 proseg_hybrid `failed`; the scored datasets not `failed` |
 | MO8 | Nextflow trace, sampler CSVs, `bundle.json` | per 4-segmentation section PANEL + MAP + RESOLVE ≤ 1.25 h and the largest MAP `peak_rss` ≤ 12 GB (4 processes); per `wmb_panel` bundle wall ≤ 2 h and tree RSS ≤ 40 GB (8 processes) |
-| MO9 [L] | resolve summaries, report soft shares | reported: VZG2 G1 per segmentation; soft class JSD vs original_seg ≤ 0.05 |
+| MO9 [L] | resolve summaries, report soft shares | reported: MS2 G1 per segmentation; soft class JSD vs original_seg ≤ 0.05 |
 | MO10 | M6b-R's `mo10.json` | per gene set: bin-mean harm, section maximum, T2 against the Allen labels' own T2 (per AP bin when `t2_bins` is given), missed regions; the 0.1% T2 verdict beside |
 | MO11 | resolve summaries | reported: the AP estimate and whether the section is anterior |
 | H18 | report, `resolvability_summary.json` | reported: PREP and reweighted bins emitted, thresholds the local rule would raise |
@@ -2858,8 +2863,8 @@ test, not gate M" for anything else). A section whose MAP ran with another
 process count, or whose count is recorded nowhere, has its MO8 rows
 `UNSCORED (process count)`. A MAP task without `peak_rss`, or a task
 without `realtime`, leaves the section's peak or time `NOT_AVAILABLE`.
-MO10 needs all three gene sets (`merfish500`, `merfish_ag7`,
-`merfish_vzg2`); one missing from `mo10.json` is `NOT_AVAILABLE`. Every
+MO10 needs all three gene sets (`merfish500`, `merfish_ms1`,
+`merfish_ms2`); one missing from `mo10.json` is `NOT_AVAILABLE`. Every
 run's region rule must be the selected candidate's, key by key (a key the
 run does not record counts as a difference); otherwise the MO10 rows are
 `UNSCORED (region rule)`.
@@ -2867,7 +2872,7 @@ run does not record counts as a difference); otherwise the MO10 rows are
 **Provenance.** Before anything is measured, every bundle path the
 reports, MAP manifests, resolve summaries, PREP `bundle_ref.json` files
 (`--prep-refs`), the negative control and the full re-map name must resolve
-to a real path inside `/srv/storage/MerXen/annotation_references`. A path
+to a real path inside `$MERXEN_REFERENCE_STORE`. A path
 outside it as written (an SSD1 path) is refused without being read. On any
 failure nothing is scored: the rows are `UNSCORED (provenance)`, the summary
 is still written and the exit status is 3. A negative control whose
@@ -2915,9 +2920,9 @@ one fails, and `INCOMPLETE` otherwise.
 
 ```bash
 python scripts/acceptance/mouse_acceptance.py score \
-  --dataset ag7=<ag7 outdir>/<ag7 pair> --dataset vzg2=<vzg2 outdir>/<vzg2 pair> \
+  --dataset ms1=<MS1 outdir>/<MS1 pair> --dataset ms2=<MS2 outdir>/<MS2 pair> \
   --trace <gate M run>/nextflow/trace.tsv --prep-refs <launch dir>/annotation_reference_prep \
-  --sampler vzg2/original_seg=<probe>/sampler.csv \
+  --sampler ms2/original_seg=<probe>/sampler.csv \
   --mo2-full DATASET/SEGMENTATION=<full-remap out> \
   --mo7-negative <standalone run dir> --mo10 <M6b-R out>/mo10/mo10.json \
   --exceptions exceptions.json --out <scratch>/gate_m
@@ -3026,9 +3031,9 @@ reading the `merxen annotate` outputs and the published inputs read-only:
 | `scripts/acceptance/shadow_ll.py` | 6, OD-B8 / OD-B13 | LL (vii) on every table cell; coverage and referee outcomes with and without the LL vote |
 | `scripts/acceptance/shadow_glial_jsd.py` | 7 | WHB vs SEA-AD glial JSD with a paired block-bootstrap CI |
 | `scripts/acceptance/resolve_criteria.py` | M4 | The human criteria (H1–H5, H7–H10, H16, H17) re-measured on `merxen annotate-resolve` label tables, with the pre-registered thresholds and the flip rule; H4 on the held-out re-maps, including RESOLVE itself run with the held-out WHB call |
-| `scripts/acceptance/marker_pseudo_labels.py` | M4, H9 | Ports of the marker pseudo-label methods of the P7513 (§C) and P1212 (§4) dataset reports, for H9 and H17 |
+| `scripts/acceptance/marker_pseudo_labels.py` | M4, H9 | Ports of the marker pseudo-label methods of the HD1 (§C) and HD2 (§4) dataset reports, for H9 and H17 |
 | `scripts/acceptance/draw_spread.py` | M8, D2 | The draw-spread table of a human self-map bundle (pre-registration §18 item 2): the 3 × 3 grid of per-cell × efficiency seeds (0–2), each draw simulated and mapped on the bundle's own (D1) test cells with the self-map's recorded worker count, decided alone (PREP unweighted, and reweighted to each dataset; `--resolve`: RESOLVE per draw, checked to have loaded the replaced bundle); H7, the H8 warning value, H18 (the panel family's floors), the would-raise list and the validated bins per draw and dataset. The scored draw is the bundle's stored rows (its re-map is the control); the cache is keyed by bundle and worker count; `draw_spread_run.json` records the code commit (git, `MERXEN_CODE_COMMIT` or the export's `COMMIT` file) and module sha256 |
-| `scripts/acceptance/mouse_corr_shadow.py` | M6, §7.3 | The mouse class `avg_correlation` floor study (none, 0.40, 0.50) on the ag7 proseg_hybrid and VZG2 original_seg label tables: MO1's check, coverage and marker consistency by depth, and the pre-registered selection (pre-registration §16) |
+| `scripts/acceptance/mouse_corr_shadow.py` | M6, §7.3 | The mouse class `avg_correlation` floor study (none, 0.40, 0.50) on the MS1 proseg_hybrid and MS2 original_seg label tables: MO1's check, coverage and marker consistency by depth, and the pre-registered selection (pre-registration §16) |
 
 The results and the decisions they feed (X1, OD-B6 / OD-B7, OD-B8, OD-B13, the
 H4 and H16 baselines) are in §11 of the pre-registration document.
@@ -3131,8 +3136,8 @@ both field sets against this table.
   figures label that platform "depth input invalid". A single platform, or
   coordinates not in one frame, is `not checked` and stays measured.
   Calibration on the published outputs: the native-frame (reseg) MERSCOPE
-  depth of the same cells gives .966 / r .987 (P7513) and .938 / r .978
-  (P1212); the published proseg_hybrid MERSCOPE depth, computed on the
+  depth of the same cells gives .966 / r .987 (HD1) and .938 / r .978
+  (HD2); the published proseg_hybrid MERSCOPE depth, computed on the
   aligned coordinates with native-frame boundaries, .530 / r .144 and
   .473 / r −.114.
 - *H12 CIs (pre-registration doc §17):* the bootstrap unit of the medians is
@@ -3155,7 +3160,7 @@ both field sets against this table.
   written) beside them. WM > GM keeps its square-tile CI, because white
   matter has no tangential position. For a dataset whose gate is not `full` (no
   supercluster labels) the ordering is `not_available` under both methods,
-  and so is the pair's replication (P1212: the MERSCOPE section is
+  and so is the pair's replication (HD2: the MERSCOPE section is
   broad-only).
 - *H12 WM > GM:* with a `white_matter` label in the depth output (the brain
   outline annotated) the share is compared between `white_matter` and
@@ -3170,7 +3175,7 @@ both field sets against this table.
   composition beside it; classes with ≥ 50 labelled deep cells are
   evaluable. The run is unreliable when more than 30% of the deep cells
   have no confident label or one class holds ≥ 80% of the labelled ones
-  (P1212_MERSCOPE: 48% unlabelled, 83% of the labelled Fibroblasts). The
+  (HD2_MERSCOPE: 48% unlabelled, 83% of the labelled Fibroblasts). The
   thinned re-map itself is v1.1 (§5.4).
 - *Sink-prone nodes (item 2):* COP and CGE (the plan's named sinks), and any
   node whose argmax share of its broad class exceeds its reference share of
@@ -3181,13 +3186,13 @@ both field sets against this table.
   correlation of log2(CPM+1) profiles, not a MapMyCells run.
 
 ```bash
-merxen annotation-report --pair P7513 --segmentation proseg_hybrid \
-  --results-root /srv/storage/MerXen/results \
-  --store /srv/storage/MerXen/annotation_references \
-  --out /path/outside/results/P7513_proseg_hybrid_report
+merxen annotation-report --pair HD1 --segmentation proseg_hybrid \
+  --results-root $MERXEN_RESULTS_ROOT \
+  --store $MERXEN_REFERENCE_STORE \
+  --out /path/outside/results/HD1_proseg_hybrid_report
 ```
 
-On the published P7513 and P1212 proseg_hybrid outputs a report takes
+On the published HD1 and HD2 proseg_hybrid outputs a report takes
 about 40 s and 4 GB (one process).
 
 ### `ANNOTATION_REPORT` in the pipeline (M7)
@@ -3238,9 +3243,9 @@ held-out-gene CSV is not produced in the pipeline, so item 8 is
   sequenced only by 10X Multiome, ≤ 0.2% of cells in any in-scope posterior
   section; user decision 2026-09-26). They are not filled in, but they stay
   in the mapping tree and the Allen means, so `cell_type_mapper` can still
-  assign them with their ancestors' markers (an ag7 run with the default,
+  assign them with their ancestors' markers (an MS1 run with the default,
   not the panel, lookup did: 12 cells as `157 RN Spp1 Glut`; the M6 exit
-  runs with the panel lookup call none of the five on ag7 or VZG2, see
+  runs with the panel lookup call none of the five on MS1 or MS2, see
   [Mouse exit on real data](#mouse-exit-on-real-data-m6)). Such labels have
   no marker support of their own: each mouse bundle lists these nodes in
   `marker_unsupported_nodes` (and `uncovered_subclasses`,
@@ -3254,21 +3259,21 @@ held-out-gene CSV is not produced in the pipeline, so item 8 is
   of the build so the test set is disjoint (as are 4 other clusters whose only
   sampled cells are test cells). It is still in the mapping tree (Allen
   means), is auto-collapsed in the lookup and is listed with the four above:
-  every `wmb_panel` bundle on ag7 and VZG2 reports 5 uncovered subclasses and
+  every `wmb_panel` bundle on MS1 and MS2 reports 5 uncovered subclasses and
   19 uncovered clusters.
 - Auto-collapsed parents are still assigned inside by `cell_type_mapper`
   (with their ancestors' markers); the nodes below them are in
   `marker_unsupported_nodes` and must not be emitted.
 - **Mouse scope.** The region rule is for coronal sections at AP 2.4–10.4
   mm that are not OB- or CB-dominated. Real data validate only the
-  hippocampal / thalamic level (ag7 and VZG2, AP 8.0–8.5 mm); on MERFISH the
+  hippocampal / thalamic level (MS1 and MS2, AP 8.0–8.5 mm); on MERFISH the
   rule's harm is anterior (AP 3.0–6.0 mm: missed OB slivers next to the AON
   drop OB-type interneurons), which M6b scores (plan §7.8). Give sagittal,
   OB- or CB-dominated sections an explicit `mouse_section_regions` or
   `none`.
 - **Parts of the mouse gate are provisional** (M6). G2's 0.70 / 0.80
   thresholds were set on MO1's hand-listed marker referee (.911 / .856 on
-  ag7 / VZG2), but the gate derives its markers per panel and reads .805 /
+  MS1 / MS2), but the gate derives its markers per panel and reads .805 /
   .819 on the same sections [L]. G4's window comes from the AP estimate
   (M6b), which is validated on held-out MERFISH sections only; the warning
   bands stay provisional on Xenium [L]. The pipeline's RESOLVE task stages the QC
@@ -3277,21 +3282,21 @@ held-out-gene CSV is not produced in the pipeline, so item 8 is
   one; a standalone run passes `--registration-qc` or
   `--registration-qc-dir`, and without either G1 is not evaluated and the
   gate warns. G1 is the signal that catches misregistered data: per-cell confidence does not
-  (class bootstrap ≥ 0.9 covers .733 of the invalid VZG2 proseg_hybrid cells
-  and .739 of ag7 proseg_hybrid's; M6 exit).
+  (class bootstrap ≥ 0.9 covers .733 of the invalid MS2 proseg_hybrid cells
+  and .739 of MS1 proseg_hybrid's; M6 exit).
 - **Mouse flags are report-only QC columns.** `flag_microglial_spillover`
   measures spill-over prevalence, never a microglia count, and a panel with
-  fewer than 6 derived microglia genes (ag7: 5) gets no held-out check.
+  fewer than 6 derived microglia genes (MS1: 5) gets no held-out check.
   F1 (`flag_region_incoherent`) catches only about a third of the sink calls
-  on good data (VZG2; E7 §3), so it does not replace pruning.
+  on good data (MS2; E7 §3), so it does not replace pruning.
 - **No mouse `avg_correlation` floor.** The M6 shadow study selected none
   (pre-registration §16); `ct_class_corr` is recorded only, and the v2
   mouse calibration (plan §7.3) revisits it.
-- **Only ag7, VZG2 and panels inside their gene union use the validated
+- **Only MS1, MS2 and panels inside their gene union use the validated
   mouse configuration.** A new mouse panel uses its own genes as the marker
   universe (not validated; `validated_configuration.marker_universe` false)
   until M3's shadow run repeats the MO1 / E3 marker-consistency checks on
-  it. Before this was fixed the pipeline built ag7 and VZG2 on their own
+  it. Before this was fixed the pipeline built MS1 and MS2 on their own
   genes too, and their lookups differed from the validated ones in 301 and
   142 of 368 parents (median Jaccard 0.979 and 0.992).
 - **H18 does not pass as written on the validated panels** (resolvability
@@ -3309,14 +3314,14 @@ held-out-gene CSV is not produced in the pipeline, so item 8 is
   counts: precision .83-.90, held-out-donor neurons and Oligodendrocytes
   called OPC; at 120 on five: precision .90-.94 but Kish n 88-90, so the
   Wilson bound misses), broad Oligo on seven (at 120 counts on five, at 15
-  on P7513 MERSCOPE, at 15-120 on both P5011) and supercluster Oligo on six
-  (at 120 on four, at 30-120 on both P5011; other-region COP cells of
+  on HD1 MERSCOPE, at 15-120 on both HD4) and supercluster Oligo on six
+  (at 120 on four, at 30-120 on both HD4; other-region COP cells of
   training clusters called Oligodendrocyte hold 9-26% of the called set's
   confident weight), and broad and supercluster Immune at 60
-  on P5011 MERSCOPE (held-out-donor deep-layer IT neurons called Immune,
-  7-10%). COP supercluster is never emitted. Mouse: VZG2 passes; ag7 PREP
+  on HD4 MERSCOPE (held-out-donor deep-layer IT neurons called Immune,
+  7-10%). COP supercluster is never emitted. Mouse: MS2 passes; MS1 PREP
   fails the Immune subclass at 100 (113 calls, precision .894, Wilson .824
-  < .83; as in version 4; it passes with seeds 1 and 2); reweighted, ag7
+  < .83; as in version 4; it passes with seeds 1 and 2); reweighted, MS1
   fails 05 OB-IMN GABA (at most 3 positive-weight confident calls at 250
   counts on proseg_hybrid and reseg; Kish n 34-82 on original_seg and
   proseg_mask) and the 09 CNU-LGE GABA subclass (precision .92, Kish n
@@ -3324,34 +3329,34 @@ held-out-gene CSV is not produced in the pipeline, so item 8 is
   reseg, original_seg, proseg_mask (version 4: 1 / 1, 1 / 1, 0 / 0, 0 / 0).
   Validated thresholds the local rule would raise (fit half ≥ 50 calls, at
   D ≥ 15 broad, 30 supercluster, 20 class, 50 subclass): set a 19 (PREP;
-  12-23 reweighted), SEA-AD 8, set c 6, ag7 39, VZG2 68; 0, 0, 5, 94 and
+  12-23 reweighted), SEA-AD 8, set c 6, MS1 39, MS2 68; 0, 0, 5, 94 and
   104 bins have no fit (`validated_thresholds_not_evaluable`).
-- **The H7 coverage proxy misses on P5011 MERSCOPE under version 6.** The
+- **The H7 coverage proxy misses on HD4 MERSCOPE under version 6.** The
   confident broad share of table cells after reweighting (validated
   regime; it ignores the SEA-AD vote, the COP rule on real cells and the
-  floors, so the real H7 values will be lower) is, version 4 → 6: P7513
-  MERSCOPE .683 → .683 (H7 asks ≥ .62), P7113 MERSCOPE .739 → .739 (≥
-  .67), P1212 MERSCOPE .354 → .354 (≥ .34), P5011 MERSCOPE .297 → .298
-  (≥ .30: fails); Xenium P7513 .610 → .605, P7113 .662 → .656, P1212 .528
-  → .523, P5011 .546 → .557 (≥ .44 / .39 / .29 / .40). Version 5's pass
-  (P5011 MERSCOPE .380) came from its unrequested redraw of the gene
+  floors, so the real H7 values will be lower) is, version 4 → 6: HD1
+  MERSCOPE .683 → .683 (H7 asks ≥ .62), HD3 MERSCOPE .739 → .739 (≥
+  .67), HD2 MERSCOPE .354 → .354 (≥ .34), HD4 MERSCOPE .297 → .298
+  (≥ .30: fails); Xenium HD1 .610 → .605, HD3 .662 → .656, HD2 .528
+  → .523, HD4 .546 → .557 (≥ .44 / .39 / .29 / .40). Version 5's pass
+  (HD4 MERSCOPE .380) came from its unrequested redraw of the gene
   efficiency, not from the two changes.
 - **The H18 / H7 verdicts depend on the simulation draw** (version 6,
   `m3b/final_followup/review3/FACTORIAL_ANALYSIS.txt`). A 3 × 3 grid on
   set a crossed the per-cell seed (thinning, spill, partner) with the
   efficiency seed (one realisation per cell, mapped at seed 0; the
   additive model's residual holds the interaction and the mapping noise).
-  Across it P5011 MERSCOPE's H7 proxy spans .297-.431 (below .30 in 2 of 9
-  cells, both with the seed-0 efficiency), P1212 MERSCOPE .320-.444 (below
+  Across it HD4 MERSCOPE's H7 proxy spans .297-.431 (below .30 in 2 of 9
+  cells, both with the seed-0 efficiency), HD2 MERSCOPE .320-.444 (below
   .34 in 1), the others stay ≥ .028 above target; the reweighted H18
   failures number 12-26 and set a PREP's 2-8 (both floor sets). Changing
   only the efficiency seed moves on average 6.3 of the 83 validated broad /
   supercluster bins per dataset (1-14), only the per-cell seed 4.4 (0-9),
   both 6.5; mapping the same simulated cells in another order (the
-  MapMyCells per-chunk bootstrap) 1.4 (0-2), and that alone moves P1212
+  MapMyCells per-chunk bootstrap) 1.4 (0-2), and that alone moves HD2
   MERSCOPE's proxy from .354 to .433 and adds 4 set a PREP failures. For
   the H7 proxy and the H18 counts neither factor is significant in this
-  grid (F(2, 4) < 6.94, except P1212 Xenium's H7 proxy: efficiency, range
+  grid (F(2, 4) < 6.94, except HD2 Xenium's H7 proxy: efficiency, range
   .007), and the residual is the largest component for most metrics; only
   broad OPC at 15 clearly follows the efficiency draw (it fails on all
   eight datasets with the seed-0 efficiency under every per-cell seed and
@@ -3371,7 +3376,7 @@ held-out-gene CSV is not produced in the pipeline, so item 8 is
   resolvability version 7, §8.8, §8.10; milestone M3c): per-class depth
   profiles, a draw ensemble with the measured 5K factors as one member,
   panel-card notes and a downgrade-only per-class coverage warning; no
-  empirical offset. Set a, ag7 and VZG2 keep resolvability version 6.
+  empirical offset. Set a, MS1 and MS2 keep resolvability version 6.
   *Implemented in M3c (2026-09-28):* the version-7 bundles of both 5K
   families exist. *Since the M3c follow-up (2026-10-06):* RESOLVE reads them
   (version-7 decisions, `flag_nonneuronal_high_depth` and the class-depth
@@ -3399,20 +3404,20 @@ held-out-gene CSV is not produced in the pipeline, so item 8 is
   `m4/STAGE_D_REPORT.txt`, `m4/CRITERIA_AFTER_M4.txt`). Without the
   resolvability tables RESOLVE reproduces the M3 shadow coverage exactly;
   with the version-6 tables reweighted to each dataset, broad
-  Oligodendrocytes are not emitted at 10-60 counts on P5011 MERSCOPE (no
+  Oligodendrocytes are not emitted at 10-60 counts on HD4 MERSCOPE (no
   confident broad Oligodendrocytes at all, against 14.8% of table cells
-  without the tables) and at 10 counts on P1212 MERSCOPE (15.8% vs 24.0%),
+  without the tables) and at 10 counts on HD2 MERSCOPE (15.8% vs 24.0%),
   and broad OPC at 10-15 counts on every dataset. The cells keep their
   confident lineage (branch `Oligodendrocyte lineage/unresolved`) and the
   soft compositions (`soft_broad_*`, H1) are unaffected, but confident-only
   compositions of these sections undercount the oligodendrocyte lineage.
-  Confident broad coverage falls by .093 (P1212 MERSCOPE) and .171 (P5011
-  MERSCOPE) against M3, H7 fails on P5011 MERSCOPE (.288 < .30) and P1212
+  Confident broad coverage falls by .093 (HD2 MERSCOPE) and .171 (HD4
+  MERSCOPE) against M3, H7 fails on HD4 MERSCOPE (.288 < .30) and HD2
   MERSCOPE gets the gate warning (.120 of segmented objects). In the set a
   self-map the wrong broad Oligodendrocyte calls are COP test cells called
   Oligodendrocyte; scoring those as correct at the broad level (a candidate
   fix for the M8 gate PR, measured but not adopted) restores every broad
-  Oligodendrocyte label (P1212 / P5011 MERSCOPE broad coverage .427 / .436).
+  Oligodendrocyte label (HD2 / HD4 MERSCOPE broad coverage .427 / .436).
   A decision for the gate PR (OD-B14).
 - **Set c of families without a curated list** uses the label-free rule,
   which drops far more genes than E5's validated set c (44-73 per pair on the
@@ -3427,12 +3432,12 @@ held-out-gene CSV is not produced in the pipeline, so item 8 is
   supercluster bp) and stays `provisional`
   ([details](#gate-p-on-the-new-panel-human-merscope-family-m13)). The
   mouse path exists since M13b C20 (2026-10-14), but no mouse family is
-  scored before the ag7 / VZG2 dry run (C21) passes.
+  scored before the MS1 / MS2 dry run (C21) passes.
 - **Simulation over-predicts real coverage on the new-panel family** (M13
   NR8). In 21–24 (level, class) rows per section the real confident share
   falls more than 0.10 below the class-depth prediction, by up to 0.54 at
   broad and 0.60 at supercluster; at broad only Oligo is within 0.10 on
-  every section (and Exc on P3518, Fibroblast on P5822). The per-class
+  every section (and Exc on HM3, Fibroblast on HM1). The per-class
   coverage warning fires accordingly. Treat a new panel's simulated coverage
   as optimistic until the family's real coverage is measured.
 
