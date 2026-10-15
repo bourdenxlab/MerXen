@@ -2092,7 +2092,7 @@ The source is `USER_DECISIONS_20261014.md` section E, which quotes the exchange 
 Names follow §25.1.1. This record comes after the gate M score and before both the re-score with the new exception and the mouse flip PR. It changes no reading, threshold or measured value.
 
 **The gate M result as scored.**
-- *Sources.* The score is `$A/m9/gatem/score/summary.json` (with `summary.html` beside it). It was written on 2026-10-14 at 20:11 UTC by the scorer at `15430d5`, with exit 0, provenance ok and no problems. The independent check is `$A/m9/gatem/score/VERIFY.md`. It recomputed every number without the scorer's code and agrees with every verdict.
+- *Sources.* The score is `$A/m9/gatem/score/summary.json` (with `summary.html` beside it). It was written on 2026-10-14 at 20:11 UTC by the scorer at `15430d5`, with exit 0, provenance ok and no problems. The independent check is `$A/m9/gatem/score/VERIFY.md`. It checked the MO1–MO8 numbers against the raw files without the scorer's functions. Every number it checked matches, and it found no wrong verdict, no exception beyond the approved ones and no provenance problem. Its minor findings, none of which changes a verdict, are in that file.
 - *Totals.* 67 PASS, 2 FAIL and 5 FAIL (excepted). The remaining rows are reported (INFO).
 - *The flip rule (MO1–MO8 and MO10): FAIL, on MO8's two section-time rows only.* The value is §25.1's realtime sum of PANEL + MAP + RESOLVE over the four segmentations:
   - MS1: 1.564 h, against 1.25 h;
