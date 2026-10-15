@@ -18,9 +18,9 @@ MAP step (`merxen annotate` and its pipeline process
 `CLUSTERING_SQUIDPY_ANNOTATE_MAP`), which maps samples onto the bundles, the
 RESOLVE step (label tables) and, since M5, `map_first` pipeline runs that
 build the map-first hierarchy from the labels
-([Map-first clustering runs](#map-first-clustering-runs-m5)). Human runs
-map_first by default since its flip (M8, pre-registration §20); mouse stays
-legacy until its flip (M9).
+([Map-first clustering runs](#map-first-clustering-runs-m5)). Both species
+run map_first by default: human since its flip (M8, pre-registration §20),
+mouse since its flip (M9, gate M, §25).
 
 ## Reference bundles
 
@@ -1589,7 +1589,7 @@ lock, and a run whose rows are all legacy instantiates none of them.
 |---|---|---|---|
 | `ANNOTATE_PANEL` | once per pair × segmentation | 1 CPU, 4 GB | `merxen annotation-panel` on the gene list (`--annotation_panel_genes_path`) or on the pair's prepared H5ADs; writes the declared panels and `required_bundles.json`. |
 | `ANNOTATE_REFERENCE_PREP` | once per unique (species, reference, `panel_hash`) across the run | 8 CPUs, 64 GB, 8 h; above 1,000 panel genes `annotation_prep_large_memory` and 24 h; one at a time on dwight | `merxen annotation-reference-prep`: gets the bundle from the store or builds it, and writes `bundle_ref.json`. Seconds when the bundle exists. |
-| `CLUSTERING_SQUIDPY_ANNOTATE_MAP` | once per pair × segmentation, after its last required bundle (`map_first` only) | 6 CPUs, 24 GB (48 GB above 1,000 panel genes); `annotation_max_forks` (2) at a time on dwight | `merxen annotate` on the pair's prepared H5ADs with exactly the bundle refs PREP resolved: the MapMyCells runs, the tidy parquets, the provisional labels and `map_manifest.json`, published to `<outdir>/<pair>/<seg>/annotation_map/annotation_map_out/`. |
+| `CLUSTERING_SQUIDPY_ANNOTATE_MAP` | once per pair × segmentation, after its last required bundle (`map_first` only) | 6 CPUs (4 for a mouse section), 24 GB (48 GB above 1,000 panel genes); `annotation_max_forks` (2) at a time on dwight | `merxen annotate` on the pair's prepared H5ADs with exactly the bundle refs PREP resolved: the MapMyCells runs, the tidy parquets, the provisional labels and `map_manifest.json`, published to `<outdir>/<pair>/<seg>/annotation_map/annotation_map_out/`. |
 | `CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE` | once per pair × segmentation, after its own MAP (`map_first` only) | 2 CPUs, 16 GB (32 GB above 1,000 panel genes); `annotation_resolve_max_forks` (4) at a time on dwight | `merxen annotate-resolve` on the MAP output, the prepared H5ADs, the panel and the same bundle refs: the label tables, annotation manifests and `<pair>_resolve_summary.json`, published to `<outdir>/<pair>/<seg>/annotation_resolve/annotation_resolve_out/` (see [Resolving](#resolving-merxen-annotate-resolve-m4)). 36-63 s per human pair × segmentation in the M4 shadow runs. |
 | `CLUSTERING_SQUIDPY_COMPUTE_CPU` | once per pair × segmentation, after its own RESOLVE (`map_first` only) | 8 CPUs, 32 GB, main environment, no GPU lock; `clustering_squidpy_max_forks` (4) at a time on dwight | `python -m merxen.clustering_squidpy_stages compute --mode map_first` on the prepared H5ADs and RESOLVE's label tables: the map-first hierarchy, legacy-compatible `obs` columns, QC embedding and stability diagnostic, under the legacy file names (`<sid>_clustered.h5ad`), so the shared `CLUSTERING_SQUIDPY_FINALIZE` writes the clustered table. 15-28 min and 2.3-3.5 GB per human proseg_hybrid section in the M5 stage A runs. |
 
@@ -1611,9 +1611,10 @@ five; a mouse section two), as soon as its last bundle is ready, so pairs
 with different panels never wait for each other. A pair whose panels are
 refused is released with no bundle; one whose PREP failed is dropped.
 
-MAP then runs with 6 MapMyCells worker processes (`--n-processors`
-`task.cpus`, one BLAS / numba thread each, `CUDA_VISIBLE_DEVICES` empty, this
-checkout's `src/` first on `PYTHONPATH`) after checking that the installed
+MAP then runs with 6 MapMyCells worker processes for human and 4 for mouse
+(`--n-processors` `task.cpus`, one BLAS / numba thread each,
+`CUDA_VISIBLE_DEVICES` empty, this checkout's `src/` first on `PYTHONPATH`)
+after checking that the installed
 `cell_type_mapper` is `annotation_ctm_version`. Its table cells and
 `min_counts` come from the clustering config, so they are the clustering
 run's. A refused panel is not a task failure: MAP writes a `map_manifest.json`
@@ -1726,16 +1727,18 @@ prepared H5ADs (`per_platform` panels, label-free set c) arrives with the
 
 ## Map-first clustering runs (M5)
 
-Human runs cluster in `map_first` mode by default since the M8 flip
-(pre-registration §20); mouse stays `legacy` until M9. A run selects its
-mode with `--clustering_squidpy_mode` (both species) or
+Both species cluster in `map_first` mode by default: human since the M8
+flip (pre-registration §20), mouse since the M9 flip (gate M, §25). A run
+selects its mode with `--clustering_squidpy_mode` (both species) or
 `--clustering_squidpy_mode_human` / `_mouse`, and a samplesheet row's
 `clustering_squidpy_mode` column (`legacy` / `map_first`) overrides the run
-for that row (§20 D15), so one run can opt single datasets in or out. Human
-`legacy` still works but is deprecated and logs a warning. After the flip a
-human `map_first` row writes the unsuffixed clustered tables (the legacy
-tables are replaced; keep a snapshot, or set
-`--clustering_squidpy_table_key_suffix mapfirst`, if you need them), MENDER
+for that row (§20 D15), so one run can opt single datasets in or out. The
+launch log lists every row's resolved mode ("Clustering mode per samplesheet
+row", also under `-preview`). `legacy` still works for either species but is
+deprecated and logs a warning. After a species' flip its `map_first` rows
+write the unsuffixed clustered tables (the legacy tables are replaced; keep a
+snapshot, or set `--clustering_squidpy_table_key_suffix mapfirst`, if you
+need them), MENDER
 uses the `exclude_from_features` policy for unassigned cells, the legacy
 `mapmycells` stage runs only when `--annotation_mode_mapmycells_stage legacy`
 and the row stops at `mapmycells`, and the run needs the reference-source and
@@ -1909,17 +1912,19 @@ nextflow -c map_first_into_published.config run workflows/main.nf -profile dwigh
     --mender_enabled true --cortical_depth_write_spatialdata_table false
 ```
 
-Since the human flip (pre-registration §20) a human `map_first` run writes
-the unsuffixed clustered tables unless `--clustering_squidpy_table_key_suffix
-mapfirst` is given, as above; without it, this recipe would replace the
-published legacy tables.
+Since the flips (human §20, mouse §25) a `map_first` run of either species
+writes the unsuffixed clustered tables unless
+`--clustering_squidpy_table_key_suffix mapfirst` is given, as above; without
+it, this recipe would replace the published legacy tables.
 
 Keep the rows' `stop_stage` at `mender` (or unset): a `map_first` row that
 stops at `mapmycells` with `--annotation_mode_mapmycells_stage legacy` runs
 the legacy MAPMYCELLS (hook H3), which publishes to the legacy `mapmycells/`
-(a human row's default, `skip`, does not). `-preview` does not show which tasks a row
-gets (it builds the static DAG of every invoked process without reading the
-samplesheet); a `-stub-run` on a synthetic copy of the rows' layout does.
+(the default of both species since their flips, `skip`, does not).
+`-preview` does not show which tasks a row gets (it builds the static DAG of
+every invoked process without running the samplesheet channels; the launch
+log lists each row's resolved mode); a `-stub-run` on a synthetic copy of the
+rows' layout does.
 The stores then gain `tables/<table>_clustering_squidpy_mapfirst` and a
 re-consolidated root `zarr.json`. Two properties of the consolidated
 metadata: a table write re-consolidates from disk, so it also drops entries
@@ -2937,6 +2942,62 @@ refuses to start when that configuration still names an SSD1 path
 (`--gene-table SPECIES=PATH` replaces a table, `--drop-gene-table SPECIES`
 leaves one out) or when the rebuilt query differs from the run's
 fingerprint. It is a MapMyCells run: take the host's heavy-compute lock.
+
+### The mouse switch (M9)
+
+Mouse runs `map_first` by default since M9, as human does since M8
+(`FLIPPED_SPECIES` in `merxen.annotation.config` and
+`AnnotationDefaults.groovy`; `clustering_squidpy_mode_mouse = "map_first"`).
+The switch merges into the integration branch only after the user has
+reviewed the gate M reports and exceptions (pre-registration §25.4, U9), and
+it reaches `main` only with gate H, as release 0.2.0 (U10).
+
+**Gate M.** Scored on MS1 (proseg_hybrid) and MS2 (original_seg, and
+proseg_hybrid for the criteria that name no segmentation), the mouse flip
+rule (MO1–MO8 and MO10) passes with the user's written exceptions:
+- MO10's three missed-region rows (§24's amendment, U1);
+- MO8's reference-prep memory peak on the two gate M panels, 47.7 and
+  56.8 GiB summed process-tree RSS against 40 GB (§25.1.1);
+- MO8's two section-time rows, MS1 1.56 h and MS2 2.30 h against 1.25 h
+  (§25.4). MAP was 94–95% of each sum; two MAP tasks ran at once on a loaded
+  host. Expect about 1.5–2.3 h of annotation task time per 4-segmentation
+  section under such load.
+
+MO8's other parts pass: MAP peak 11.3 and 11.6 GiB against 12 GB at 4
+processes, reference prep 0.86 and 0.90 h against 2 h. MO9 [L] is reported
+(MS2 proseg_hybrid clears it, reseg and proseg_mask do not), and MO11 is
+untested: both sections lie posterior of AP 6.0 mm.
+
+**What changes for a mouse row** (it now behaves as a human row):
+- blank rows and runs resolve to `map_first`, and a `legacy` row or run
+  logs a deprecation warning;
+- `map_first` rows write the **unsuffixed** clustered tables
+  (`<source table>_clustering_squidpy`), which replace the legacy tables of
+  the same store; `--clustering_squidpy_table_key_suffix mapfirst` keeps them
+  beside the legacy ones;
+- the legacy MAPMYCELLS stage no longer runs beside `map_first`
+  (`annotation_mode_mapmycells_stage` defaults to `skip`);
+- MAP runs 4 MapMyCells processes (`task.cpus`, and the default of a
+  standalone `merxen annotate --species mouse`), the count gate M measured;
+  human keeps 6. MapMyCells' bootstrap depends on the process count (§25.1),
+  so a mouse section mapped at another count can differ from gate M's labels
+  in a small share of re-mapped cells;
+- the preflight checks the mouse references' sources and stores, as for any
+  `map_first` row.
+
+**What stays.** The mouse default segmentation for MENDER stays
+`proseg_hybrid` (U8 keeps it; `mender_segmentations` is unchanged). A
+section estimated at AP < 6.0 mm keeps the report's MO11 banner
+(`anterior_section_mo11`) until the first real anterior section passes
+MO11. Mouse real-data QC stays warn-only until gate M merges into `main`
+(D20 (b)).
+
+**The first mouse section's store.** MS1's SpatialData store belongs to
+another lab member, who still uses its legacy tables. An unsuffixed mouse
+`map_first` run, which since M9 is the default, would replace them. Do not
+point such a run at that store without the agreement of both the user and
+that store's owner; gate M wrote only suffixed tables there, with that
+agreement.
 
 ## Shadow baselines (M3)
 

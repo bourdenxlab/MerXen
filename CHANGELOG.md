@@ -1,14 +1,26 @@
 # Changelog
 
-## 0.2.0 (unreleased; gate H of the robust cell-type annotation plan)
+## 0.2.0 (unreleased; gates H and M of the robust cell-type annotation plan)
 
 ### Changed: human clustering is map-first by default
 
-- Human runs now label cells with MapMyCells against the packaged reference bundles (WHB frontal cortex, with SEA-AD as the second vote), then build the hierarchy from those labels (`clustering_squidpy_mode_human = "map_first"`). This replaces the legacy Leiden-then-label flow. Mouse stays `legacy` until its own flip (M9).
+- Human runs now label cells with MapMyCells against the packaged reference bundles (WHB frontal cortex, with SEA-AD as the second vote), then build the hierarchy from those labels (`clustering_squidpy_mode_human = "map_first"`). This replaces the legacy Leiden-then-label flow. Mouse follows at M9 (next section).
 - **Tables.** A human `map_first` run writes the unsuffixed clustered tables (`table_<segmentation>_clustering_squidpy`), so a rerun into an existing results directory replaces the legacy tables. Keep a snapshot first, or set `--clustering_squidpy_table_key_suffix mapfirst`.
-- **Legacy MAPMYCELLS stage.** It no longer runs beside map-first for a flipped species. `annotation_mode_mapmycells_stage` now defaults to `skip` for human and `legacy` for mouse.
+- **Legacy MAPMYCELLS stage.** It no longer runs beside map-first for a flipped species. `annotation_mode_mapmycells_stage` now defaults to `skip` for a flipped species (human; mouse too since M9) and `legacy` otherwise.
 - **Inputs.** Human runs need the reference-source and reference-store params; preflight checks them. See [configuration](docs/configuration.md) and [reference-based annotation](docs/stages/annotation.md).
 - **Legacy mode.** Human `legacy` still runs, but it is deprecated and logs a warning.
+
+### Changed: mouse clustering is map-first by default (M9, gate M)
+
+- **The switch.** Mouse runs now label cells with MapMyCells against the WMB panel bundle, with the region step and the mouse gate, then build the hierarchy from those labels (`clustering_squidpy_mode_mouse = "map_first"`; `FLIPPED_SPECIES` and `DEFAULT_CLUSTERING_MODE` include mouse in Python and in `AnnotationDefaults.groovy`). Everything that follows the flip per species now does so for mouse as for human: the unsuffixed table keys, the default `skip` of the legacy MAPMYCELLS stage, the per-row `clustering_squidpy_mode` column and the preflight. This change merges into the integration branch only after the user has reviewed the gate M reports and exceptions (pre-registration §25.4, U9).
+- **Gate M.** The mouse flip rule (MO1–MO8 and MO10) passes on MS1 and MS2 with the user's written exceptions: MO10's three missed-region rows (§24, U1), MO8's reference-prep memory peak on the two gate M panels (§25.1.1), and MO8's section time, MS1 1.56 h and MS2 2.30 h against 1.25 h (§25.4). Expect about 1.5–2.3 h of annotation task time per 4-segmentation section on a loaded host. MO9 [L] is reported, and MO11 is untested (both sections lie posterior of AP 6.0 mm).
+- **Tables.** A mouse `map_first` run writes the unsuffixed clustered tables, so a rerun into an existing results directory or store replaces the legacy tables. Keep a snapshot first, or set `--clustering_squidpy_table_key_suffix mapfirst`.
+- **The first mouse section's store belongs to another lab member**, who still uses its legacy tables. No unsuffixed mouse run may target that store without the agreement of both the user and that store's owner. Gate M wrote only suffixed tables there, with that agreement.
+- **MAP processes.** Mouse MAP runs 4 MapMyCells processes by default, the count gate M measured (pre-registration §25.1): the `CLUSTERING_SQUIDPY_ANNOTATE_MAP` task's `cpus` follows the section's species, and a standalone `merxen annotate --species mouse` defaults to 4 (`MERXEN_ANNOTATION_MAP_N_PROCESSORS` still overrides both). Human keeps 6. MapMyCells' bootstrap depends on the process count. Mouse map records made without an explicit count now record 4 processes; this moved the mouse provenance digests of `tests/test_annotation/test_resolve_v7.py` (justified there).
+- **Legacy mode.** Mouse `legacy` still runs, but it is deprecated and logs a warning, as human `legacy` does (`AnnotationSettings.deprecatedLegacyWarning`, which replaces `usesDeprecatedHumanLegacy`).
+- **Row modes in the launch log.** The launch log lists each samplesheet row's resolved clustering mode ("Clustering mode per samplesheet row", also under `-preview`).
+- **Unchanged.** The mouse MENDER segmentation stays `proseg_hybrid` (U8 keeps it). A section estimated at AP < 6.0 mm keeps the report's MO11 banner until the first real anterior section passes MO11. Mouse real-data QC stays warn-only until gate M merges into `main` (D20 (b)).
+- Docs: [the mouse switch](docs/stages/annotation.md#the-mouse-switch-m9), [configuration](docs/configuration.md), [samplesheet](docs/samplesheet.md), [overview](docs/annotation-overview.md).
 
 ### Added
 
@@ -130,3 +142,4 @@
   - `rescore_2026-10-01/`: the user's decisions of 2026-10-01;
   - `segmentation_comparison/`: reseg vs proseg_hybrid.
 - The protocol and the user's decisions are in `docs/acceptance/annotation-v1-preregistration.md` §18–§20.
+- The mouse acceptance (gate M) is scored on MS1 and MS2 under the protocol of pre-registration §25, with the user's review decisions in §25.4. The re-score with the section-time exception gives 67 PASS and 7 FAIL (excepted), with no open problem; the user's review of the two original_seg reports (U9) is pending.

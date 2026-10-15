@@ -689,7 +689,10 @@ Ensembl ID and the panel is refused. The region step infers the section's
 divisions, prunes the tree and re-maps the dropped cells
 ([Mouse region step](stages/annotation.md#mouse-region-step-m6)). A
 100k-cell section takes 8–30 minutes at 6 processes, depending on the host
-load (136k cells: 32 minutes), and peaks at 3.4 GB.
+load (136k cells: 32 minutes), and peaks at 3.4 GB. Since M9 a mouse run
+maps with 4 processes by default: gate M's MAP tasks took 14–34 minutes per
+segmentation on a loaded host, with a process-tree peak of 11.3–11.6 GB
+(pre-registration §25.4).
 
 ```bash
 merxen annotate --species mouse \
@@ -710,7 +713,7 @@ merxen annotate --species mouse \
 | `--annotation-config PATH` | `AnnotationConfig` JSON (thresholds, `xplat_sensitivity_segmentations`, `ctm_version`, ...). |
 | `--clustering-config PATH` | With `--prepared-dir`: the `clustering_squidpy_config.json` of the run (pair id, sample platforms and `min_counts`, which `--min-counts` may not contradict). |
 | `--min-counts N` | Table-cell threshold (the clustering `min_counts`; default: the clustering config's, else 10). |
-| `--n-processors N` | MapMyCells processes (default `$MERXEN_ANNOTATION_MAP_N_PROCESSORS` or 6). |
+| `--n-processors N` | MapMyCells processes (default `$MERXEN_ANNOTATION_MAP_N_PROCESSORS`, else 6 for human and 4 for mouse, the count gate M measured). |
 | `--work-dir DIR` | Scratch for the query H5ADs, restricted lookups and extended JSONs (default `<out>/.work`, removed); refused inside a results tree, as `--out`. |
 | `--results-root DIR` | A results tree `--out` and `--work-dir` must stay out of (repeatable), on top of the inputs' own. |
 | `--keep-extended-json`, `--reuse/--no-reuse`, `--reuse-from DIR` | Keep the gzipped extended JSON; reuse identical runs of a `map_manifest.json` (default: `--out`). |
