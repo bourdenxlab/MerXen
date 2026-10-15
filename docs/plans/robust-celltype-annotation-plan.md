@@ -722,7 +722,7 @@ The legacy 0.15 neuron-split round and fixed branch resolutions do not exist in 
 - **Self-built means are v2:** only after re-running E3, E7 and MO1–MO5 on MS1 and MS2 original_seg with the new bundle, plus a self-map at N = 50 vs N = 100 (OD-C2); "cell-weighted centroids" does not hold (73% of leaves are capped at exactly 50 cells).
 - **Gene IDs:** symbols map through WMB `gene.csv` (all 500 + 815 map); other panels via the resolver (§8.4); the 16 GB gene-mapper DB is not needed.
 - **Evidence** (critic check 6, `research/selfmap/runs2`; MS1 unaffected by the MS2 bug): MS1 quarter depth in silico class .841 → .959, subclass .784 → .911, Immune recall .39 → .95; real MS1 MY GABA 219 → 77 cells, CB GABA 150 → 22; MS1 marker consistency over all 88,931 marker-pseudo-confident cells .886 (bf 0.9 default) → .911 (panel lookup, bf 0.5), .963 at class bp ≥ 0.9 (`review_feasibility/mo1_ms1_marker_consistency.csv`).
-- **MS2:** only original_seg results are valid (`exp/E3/mmc/REAL_vzg2orig_panelLK.csv`, `exp/E5/mmc/rt_MS2_original_seg_WMBpanelLK_np6.csv`); consistency .856 overall, .903 at class bp ≥ 0.9.
+- **MS2:** only original_seg results are valid (`exp/E3/mmc/REAL_ms2orig_panelLK.csv`, `exp/E5/mmc/rt_MS2_original_seg_WMBpanelLK_np6.csv`); consistency .856 overall, .903 at class bp ≥ 0.9.
 
 ### 7.2 Region handling (E7 design; `annotation/mouse_regions.py`)
 
@@ -1547,7 +1547,7 @@ Archived headers still name the old `$S` work directories (read `$S/<rel>` as `$
 | Datasets | `data/{HD1,HD2,mouse_ms2,mouse_ms1}/REPORT.md`; `data/mouse_ms2/tables/D_mmc_calibration_vs_markers.csv` |
 | E1 engine × reference | `exp/E1/{insilico_metrics,real_jsd,real_agreement,real_plausibility,real_marker_referee,real_consensus_coverage,ad_fit_did,seaad_to_whb_crosswalk,real_negpurity,real_negative_marker_genes}.csv`, `exp/E1/FINAL_REPORT.txt`, `exp/E1/e1lib.py` |
 | E2 calibration | `exp/E2/out/{tau_local_sources,thresholds2,real_vs_insilico_curve_diff,final_coverage_and_gate,classaware_floor_summary,classaware_floors_R1contamHO,cells_native}.csv*`, `exp/E2/ho/`, `exp/E2/FINAL_REPORT.txt` |
-| E3 mouse contamination | `exp/E3/{E3_real_summary,E3_insilico_summary}.csv`, `exp/E3/real/own_fraction.csv`, `exp/E3/09b_specific_flag.py`, `exp/E3/10_ownfrac.py`, `exp/E3/mmc/REAL_vzg2orig_panelLK.csv` |
+| E3 mouse contamination | `exp/E3/{E3_real_summary,E3_insilico_summary}.csv`, `exp/E3/real/own_fraction.csv`, `exp/E3/09b_specific_flag.py`, `exp/E3/10_ownfrac.py`, `exp/E3/mmc/REAL_ms2orig_panelLK.csv` |
 | E4 / E6 split rule, resolution | `exp/E4/tables/{E4_rule_scorecard_full,human_tau_core,runtime_full_scale,xplat_clusters_full_raw}.csv`, `exp/E4/e6/e6_resolution_optimum_summary.csv`, `exp/E4/e4_lib.py`, `exp/E4/FINAL_REPORT.txt` |
 | E5 gene set, runtime | `exp/E5/{E5_verdict_table,E5_compute_plan,E5_runtime_runs,E5_jsd}.csv`, `exp/E5/mmc/rt_MS2_original_seg_WMBpanelLK_np6.csv`, `exp/E5/FINAL_REPORT.txt` |
 | E7 mouse regions | `exp/E7/results/{metrics_runs,autoregion_v2_*}.csv`, `exp/E7/merfish/*.csv`, `exp/E7/{01_merfish_tables,03_prune_lookup,05c_hybrid_droplist,09_autoregion_v2}.py` |
