@@ -691,7 +691,7 @@ divisions, prunes the tree and re-maps the dropped cells
 100k-cell section takes 8–30 minutes at 6 processes, depending on the host
 load (136k cells: 32 minutes), and peaks at 3.4 GB. Since M9 a mouse run
 maps with 4 processes by default: gate M's MAP tasks took 14–34 minutes per
-segmentation on a loaded host, with a process-tree peak of 11.3–11.6 GB
+segmentation on a loaded host, with a process-tree peak of 11.3–11.6 GiB
 (pre-registration §25.4).
 
 ```bash
