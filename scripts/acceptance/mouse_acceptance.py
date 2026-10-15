@@ -3276,8 +3276,12 @@ def score(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         "rows": records,
         "inputs": inputs,
     }
-    # Labels as privacy.display shows them (R5); paths verbatim.
+    # Labels as privacy.display shows them (R5); paths verbatim. An approval
+    # is recorded as its file holds it: its quote and record are the user's
+    # and the record's own words, which may name a section both ways.
     summary = display_tree(_safe(summary))
+    for record, exception in zip(summary["exceptions"], exceptions, strict=True):
+        record.update(_safe(exception.to_json()))
     records = summary["rows"]
     out_dir = args.out
     (out_dir / "tables").mkdir(parents=True, exist_ok=True)
