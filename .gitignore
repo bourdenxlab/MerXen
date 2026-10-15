@@ -249,3 +249,9 @@ __marimo__/
 # Nextflow loads the pipeline's Groovy classes from workflows/lib; the Python
 # packaging rule lib/ above must not hide them.
 !/workflows/lib/
+
+# Private local configuration: never commit (docs/local-configuration.md).
+# .env is already ignored above.
+/.aliases.tsv
+/workflows/conf/site.config
+/workflows/conf/*.site.config
