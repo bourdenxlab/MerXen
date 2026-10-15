@@ -59,19 +59,25 @@ Ruff configuration (line length, rule set, isort) is in
 
 ## Pre-commit hooks
 
-Install both hook types after cloning:
+Install the hooks after cloning (the hook types pre-commit, pre-merge-commit,
+commit-msg and pre-push come from `default_install_hook_types`):
 
 ```bash
 pre-commit install
-pre-commit install --hook-type pre-push
 ```
 
 From [.pre-commit-config.yaml](../.pre-commit-config.yaml):
 
 - **On commit** — trailing-whitespace, EOF fixer, check-yaml, large-file
-  guard (500 KB), ruff lint + format.
-- **On push** — the lockfile-backed local CI checks: lint, format, type check,
-  and tests.
+  guard (500 KB), ruff lint + format, and the privacy check of the staged
+  lines and file names.
+- **On merge and on the commit message** — the privacy check.
+- **On push** — the privacy check of the branch name and every pushed commit,
+  then the lockfile-backed local CI checks: lint, format, type check, and
+  tests.
+
+The privacy hooks keep host paths and sample names out of the repository
+([Local configuration and privacy](local-configuration.md)).
 
 Both are local guardrails. They can be bypassed with `--no-verify`, but
 CI is the authoritative gate — don't bypass hooks unless you have a reason
