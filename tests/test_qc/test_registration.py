@@ -28,8 +28,8 @@ from merxen.qc.registration import (
     transcripts_in_windows,
 )
 
-# The VZG2 misregistration: segmentation minus truth, in microns.
-VZG2_OFFSET = np.array([21.86, 111.78])
+# The MS2 misregistration: segmentation minus truth, in microns.
+MS2_OFFSET = np.array([21.86, 111.78])
 TISSUE_UM = 1200.0
 
 
@@ -91,20 +91,20 @@ def test_registered_segmentation_passes_with_zero_offset() -> None:
 def test_misregistered_segmentation_warns_and_recovers_the_offset() -> None:
     centres, transcripts = _tissue()
 
-    result = _run(centres + VZG2_OFFSET, transcripts, reference=centres)
+    result = _run(centres + MS2_OFFSET, transcripts, reference=centres)
 
     assert result.status == RegistrationStatus.WARN
     assert result.density_ratio is not None and result.density_ratio < 1.5
     # Reported as reference minus segmentation, on a 2 um grid.
-    assert result.shift_x_um == pytest.approx(-VZG2_OFFSET[0], abs=2.0)
-    assert result.shift_y_um == pytest.approx(-VZG2_OFFSET[1], abs=2.0)
+    assert result.shift_x_um == pytest.approx(-MS2_OFFSET[0], abs=2.0)
+    assert result.shift_y_um == pytest.approx(-MS2_OFFSET[1], abs=2.0)
     assert len(result.reasons) == 2
 
 
 def test_density_alone_flags_misregistration_without_reference() -> None:
     centres, transcripts = _tissue()
 
-    result = _run(centres + VZG2_OFFSET, transcripts, reference=None)
+    result = _run(centres + MS2_OFFSET, transcripts, reference=None)
 
     assert result.status == RegistrationStatus.WARN
     assert result.shift_um is None
@@ -295,7 +295,7 @@ def _write_qc_config(tmp_path: Path, zarr_path: Path, *, strict: bool) -> Path:
 
 def test_qc_cli_warns_by_default_and_fails_when_strict(tmp_path: Path) -> None:
     zarr_path = tmp_path / "latest.zarr"
-    _xenium_like_sdata(VZG2_OFFSET).write(zarr_path)
+    _xenium_like_sdata(MS2_OFFSET).write(zarr_path)
     runner = CliRunner()
 
     lenient = runner.invoke(

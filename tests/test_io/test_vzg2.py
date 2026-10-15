@@ -40,9 +40,9 @@ from merxen.segmentation.pipeline import _load_dataset_sdata
 _MOSAIC_PX = 256
 _PX_PER_UM = 2.0
 # VZG2-style manifest whose micron bounding box starts below zero, like the
-# Vizgen MsBrain VZG2 region (bbox minimum -21.86, -111.78 um).
+# MS2 region (bbox minimum -21.86, -111.78 um).
 _NEGATIVE_BBOX = [-12.8, -25.6, 115.2, 102.4]
-# P1212 / P7513 / ag7 style: the mosaic starts at the micron origin.
+# HD2 / HD1 / MS1 style: the mosaic starts at the micron origin.
 _ZERO_BBOX = [0.0, 0.0, 128.0, 128.0]
 _CELL_CENTRES_UM = np.array(
     [
@@ -395,9 +395,9 @@ def test_vzg2_negative_bbox_mask_centroids_land_on_transcripts(
     caplog: pytest.LogCaptureFixture,
     use_override: bool,
 ) -> None:
-    """Regression for the VZG2 offset: a negative bbox origin must be kept.
+    """Regression for the MS2 offset: a negative bbox origin must be kept.
 
-    The 2026-09-08 VZG2 build used a transform without the bounding-box
+    The 2026-09-08 MS2 build used a transform without the bounding-box
     translation, which put every Cellpose/ProSeg cell (+21.9, +111.8) um away
     from its transcripts.
     """
@@ -484,7 +484,7 @@ def test_vzg2_stale_override_opt_out_warns_and_reproduces_offset(
         zarr_path, tmp_path, override_path
     )
 
-    # Segmentation minus truth equals minus the bbox minimum, as in VZG2.
+    # Segmentation minus truth equals minus the bbox minimum, as in MS2.
     expected_offset = -np.asarray(_NEGATIVE_BBOX[:2])
     shifted = _nearest_offsets(centroids_um, _CELL_CENTRES_UM + expected_offset)
     assert np.abs(shifted).max() < 0.5
@@ -516,7 +516,7 @@ def test_vzg2_zero_bbox_keeps_zero_offset(
     caplog: pytest.LogCaptureFixture,
     use_override: bool,
 ) -> None:
-    """P1212/P7513/ag7-style archives start at the micron origin."""
+    """HD2/HD1/MS1-style archives start at the micron origin."""
     centres = _CELL_CENTRES_UM + np.array([15.0, 20.0])
     override = _vizgen_micron_to_mosaic(_ZERO_BBOX) if use_override else None
     with caplog.at_level(logging.WARNING, logger="merxen.io.builders.vzg2"):
@@ -537,7 +537,7 @@ def test_canonical_merscope_export_keeps_zero_offset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Canonical exports (P1212/P7513/ag7) use the raw zero-origin CSV."""
+    """Canonical exports (HD2/HD1/MS1) use the raw zero-origin CSV."""
     # Force the local reader so the test does not depend on spatialdata_io.
     monkeypatch.setitem(
         sys.modules, "spatialdata_io", types.ModuleType("spatialdata_io")
