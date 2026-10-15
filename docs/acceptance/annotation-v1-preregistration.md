@@ -2088,6 +2088,71 @@ The source is `USER_DECISIONS_20261014.md` section E, which quotes the exchange 
 - `1867f978…` (no revision field, built on 2026-10-13) is not used.
 - This is the bundle the earlier text anticipated, so the label is neutral.
 
+### 25.4 Gate M review decisions (recorded 2026-10-15, after scoring, before the re-score and the flip PR)
+
+Names follow §25.1.1. This record comes after the gate M score and before both the re-score with the new exception and the mouse flip PR. It changes no reading, threshold or measured value.
+
+**The gate M result as scored.**
+- *Sources.* The score is `$A/m9/gatem/score/summary.json` (with `summary.html` beside it). It was written on 2026-10-14 at 20:11 UTC by the scorer at `15430d5`, with exit 0, provenance ok and no problems. The independent check is `$A/m9/gatem/score/VERIFY.md`. It checked the MO1–MO8 numbers against the raw files without the scorer's functions. Every number it checked matches, and it found no wrong verdict, no exception beyond the approved ones and no provenance problem. Its minor findings, none of which changes a verdict, are in that file.
+- *Totals.* 67 PASS, 2 FAIL and 5 FAIL (excepted). The remaining rows are reported (INFO).
+- *The flip rule (MO1–MO8 and MO10): FAIL, on MO8's two section-time rows only.* The value is §25.1's realtime sum of PANEL + MAP + RESOLVE over the four segmentations:
+  - MS1: 1.564 h, against 1.25 h;
+  - MS2: 2.296 h, against 1.25 h.
+
+  MAP is 94–95% of each sum. Two MAP tasks ran at once on a loaded host, which is the likely cause but is not proven.
+- *Everything else in the flip rule is PASS, or FAIL (excepted) under the written exceptions already on record.* The excepted rows are:
+  - MO8's PREP peak on the two panels: 47.701 GiB (`97a086d1…`, MS1) and 56.797 GiB (`af3fab09…`, MS2) (§25.1.1);
+  - MO10's three missed-region rows (§24's amendment, U1).
+- *MO8's other parts pass.* The MAP peak is 11.3 GiB (MS1) and 11.6 GiB (MS2), against 12 GiB at 4 processes. PREP wall is 0.861 h and 0.901 h, against 2 h.
+
+**The questions** (one multiple-choice tool call, put on 2026-10-14 at 20:32 UTC after the score and its check). **The user's answers** (2026-10-15 at 09:38 UTC). The tool result, verbatim:
+
+> Your questions have been answered: "MO8's time limit: [MS1] took 1.56 h and [MS2] 2.30 h against 1.25 h. Almost all of it is the mapping step, slowed by two mapping tasks running at once on a busy host. How should gate M handle it?"="Written exception (Recommended)", "Mouse default segmentation (U8). On 2026-09-27 you chose reseg for mouse. Gate M scored proseg_hybrid. reseg labels more cells (82%/91% vs 73%/86%), but [MS2] reseg drifts from MERFISH (it would fail both MO4 bands) and MO9 doesn't clear it (0.088 > 0.05). Which default should the switch ship?"="proseg_hybrid (Recommended)", "Version label for the switch (U10)?"="0.2.0 for H and M (Recommended)", "The switch PR needs your review of the two reports (U9). How should I proceed?"="Prepare PR, review before merge (Recommended)".
+
+The option texts shown with those answers, verbatim:
+- "Written exception (Recommended)": "Approve an exception for exactly these two section-time rows. Gate M then passes. Labelled LOOSENING, POST-HOC (easier to pass, chosen after the result)."
+- "proseg_hybrid (Recommended)": "Keep proseg_hybrid for mouse, as gate M scored it and as human uses. This reverses your 2026-09-27 mouse choice."
+- "0.2.0 for H and M (Recommended)": "One release for the human and mouse gates together, merged into main only when you say so."
+- "Prepare PR, review before merge (Recommended)": "I prepare the mouse switch PR into the integration branch now. It merges only after you confirm you've reviewed the two reports and the exceptions."
+
+The options the user did not choose were:
+- for MO8: "Timed re-run" and "Keep it as a failure";
+- for U8: "reseg, as decided";
+- for U10: "Mouse as 0.3.0";
+- for U9: "Wait for my review".
+
+In the quotation, [MS1] and [MS2] replace the two section names. The originals are in `annotation_dev/mouse_roadmap_20261013/USER_DECISIONS_20261014.md` section G, which quotes the exchange verbatim.
+
+**MO8 time: the written exception. LOOSENING, POST-HOC, approved in writing on 2026-10-15.**
+- *What it covers.* Exactly the two section-time rows of this gate M run: MS1 1.564 h and MS2 2.296 h, against 1.25 h. Their values stay on record, and their verdict becomes `FAIL (excepted)`.
+- *What it does not cover.*
+  - MO8's MAP peak (≤ 12 GB at 4 MapMyCells processes);
+  - MO8's PREP wall time (≤ 2 h per panel);
+  - the section time of any other run or section. The 1.25 h limit itself is unchanged.
+
+  A failure there goes back to the user.
+- *Post-hoc.* The question stated both values, so they were known when the answer was given.
+- *In the scorer.* A second exceptions file adds one entry per section: `criterion` `MO8`, `scope` `{"part": "section_time", "dataset": "<the section's dataset key>"}`, quoting this answer, with its own sha256. The same score command then runs once more into a new directory. The first score stays on record unchanged. No reading changes, so the re-score is not a score under another reading.
+- *In the flip PR.* The PR states the measured cost: about 1.5–2.3 h of annotation task time per 4-segmentation section on a loaded host.
+
+**U8: the mouse default segmentation stays proseg_hybrid.**
+- *The answer.* "proseg_hybrid (Recommended)", with the option text quoted above.
+- *What it reverses.* The mouse half of OD-B7 (decided 2026-09-27: proseg_hybrid for human, reseg for mouse). The human half and OD-B7′ (2026-10-01) are unchanged.
+- **Label: neutral as to scoring.** The user chose the option that keeps the segmentation gate M scored: MS1 on proseg_hybrid, and MS2 on proseg_hybrid and original_seg (§25.2.1). It changes no criterion, threshold or reading.
+- *No code changes.* `mender_segmentations` is already proseg_hybrid for both species, so the flip PR ships no segmentation change. reseg's `map_first` labels stay available for supplementary analysis.
+
+**U10: the version label.**
+- *The answer.* "0.2.0 for H and M (Recommended)".
+- *The reading.* 0.2.0 covers gates H and M together, and nothing merges into `main` until the user says so. The flip PR keeps the version at 0.2.0. This replaces the plan's "next minor (0.3.0 if second)" for gate M (plan §2.2).
+- **Label: neutral.** It changes no criterion.
+
+**U9: pending.**
+- *The answer.* "Prepare PR, review before merge (Recommended)".
+- *The reading.* The mouse flip PR into the integration branch is prepared now. It merges only after the user confirms two reviews:
+  - the two original_seg annotation reports, of MS1 and of MS2 (M7's mouse items);
+  - the written exceptions: MO10's three missed-region rows, MO8's PREP peak on the two panels, and MO8's two section-time rows.
+- Until the user confirms, M9's exit is not met and the flip PR does not merge.
+
 ## 26. M13b readings (U7; recorded 2026-10-14, before any mouse gate-P mapping)
 
 M13b (plan §12 M13b; the M13 chunks C20–C22) brings gate P to mouse:
