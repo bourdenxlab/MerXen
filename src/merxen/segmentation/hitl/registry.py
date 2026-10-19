@@ -123,6 +123,10 @@ def require_safe_custom_outputs(
         if name.startswith("persistent_")
         and (value := getattr(dataset, name)) is not None
     ]
+    if dataset.output_dir.is_dir():
+        # Default/staged outputs can themselves be links even when their parent
+        # arm is independent (for example a copied progress or nuclei artifact).
+        paths.extend(dataset.output_dir.iterdir())
     if include_source:
         paths.append(dataset.data_path)
     protected = _protected_paths(roots)

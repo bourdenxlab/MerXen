@@ -194,6 +194,17 @@ def test_model_preflight_and_protected_outdir(tmp_path: Path) -> None:
                 "check_preflight": True,
             }
         )
+    linked_bundle = tmp_path / "linked-bundle"
+    linked_bundle.mkdir()
+    (linked_bundle / "model").symlink_to(model)
+    (linked_bundle / "model.json").write_text(metadata.read_text())
+    cases.append(
+        {
+            "options": {**options, "xenium_cellpose_model": str(linked_bundle)},
+            "row": {},
+            "check_preflight": True,
+        }
+    )
     cases.append(
         {
             "options": {**options, "xenium_cellpose_model": "missing"},
@@ -202,11 +213,22 @@ def test_model_preflight_and_protected_outdir(tmp_path: Path) -> None:
         }
     )
     success_count = len(cases)
+    old_work = tmp_path / "old-work"
+    old_work.mkdir()
+    original = old_work / "published.npy"
+    original.write_bytes(b"baseline")
+    published_link = baseline / "published.npy"
+    published_link.symlink_to(original)
+    linked_arm = tmp_path / "linked-arm"
+    latest = linked_arm / "P1/xenium/latest"
+    latest.mkdir(parents=True)
+    (latest / "latest_spatialdata.zarr").symlink_to(original)
     for changes in [
         {"allow_candidate_model": False},
         {"outdir": str(baseline / "trial")},
         {"outdir": str(alias / "trial")},
         {"cellpose_tile_size_candidates": [6144, 4096]},
+        {"outdir": str(linked_arm)},
     ]:
         cases.append(
             {"options": {**options, **changes}, "row": {}, "check_preflight": True}
@@ -216,11 +238,12 @@ def test_model_preflight_and_protected_outdir(tmp_path: Path) -> None:
     assert results[0]["selected"]["cellpose"]["pretrained_model"] == str(model)
     for result, message in zip(
         results[success_count:],
-        ["candidate", "protected", "protected", "single"],
+        ["candidate", "protected", "protected", "single", "protected"],
         strict=True,
     ):
         assert message in result["error"]
-    assert list(baseline.iterdir()) == []
+    assert list(baseline.iterdir()) == [published_link]
+    assert original.read_bytes() == b"baseline"
 
 
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow unavailable")

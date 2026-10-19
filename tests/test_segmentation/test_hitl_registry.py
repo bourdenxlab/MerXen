@@ -254,6 +254,23 @@ def test_visible_baseline_mask_link_is_protected(
         require_safe_custom_outputs(custom_config)
 
 
+@pytest.mark.parametrize(
+    "name", ["cellpose_progress.json", "cellpose_nuclei_masks_tiled.npy"]
+)
+def test_default_staged_output_links_cannot_reach_baseline(
+    custom_config: SegmentationConfig, tmp_path: Path, name: str
+) -> None:
+    baseline = tmp_path / "published"
+    baseline.mkdir()
+    original = baseline / name
+    original.write_bytes(b"published artifact")
+    custom_config.dataset.output_dir.mkdir()
+    (custom_config.dataset.output_dir / name).symlink_to(original)
+    with pytest.raises(ValueError, match="protected baseline"):
+        pipeline.run_cellpose_segmentation(custom_config, force_rerun=True)
+    assert original.read_bytes() == b"published artifact"
+
+
 def test_custom_model_requires_protected_roots(
     custom_config: SegmentationConfig,
 ) -> None:

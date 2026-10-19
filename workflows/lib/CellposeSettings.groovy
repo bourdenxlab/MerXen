@@ -203,7 +203,8 @@ class CellposeSettings {
             def sourceInput = sourceValue?.toString()?.trim()
                 ? new File(sourceValue.toString()).canonicalFile.toPath() : null
             def protectedTargets = protectedPaths(policy.protected_output_roots)
-            if ([outdir, datasetDir, sourceOutput, sourceInput].findAll { it != null }
+            def existingArmTargets = protectedPaths([params.outdir.toString()])
+            if (([outdir, datasetDir, sourceOutput, sourceInput] + existingArmTargets).findAll { it != null }
                 .any { isProtected(it.toFile(), protectedTargets) }) {
                 throw new IllegalArgumentException('Custom-model arm targets a protected baseline')
             }
