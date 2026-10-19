@@ -112,6 +112,48 @@ def test_required_hitl_hooks_occur_once() -> None:
 
 
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow unavailable")
+def test_full_pipeline_preview_loads_model_library_without_scheduling(
+    tmp_path: Path,
+) -> None:
+    """Compile the real entry workflow with its library and an inert stock row."""
+    raw = tmp_path / "raw-xenium"
+    raw.mkdir()
+    samplesheet = tmp_path / "samplesheet.csv"
+    samplesheet.write_text(f"pair_id,xenium_dir\nP7513,{raw}\n")
+    output = tmp_path / "arm"
+    result = subprocess.run(
+        [
+            "nextflow",
+            "run",
+            str(ROOT / "workflows/main.nf"),
+            "-profile",
+            "conda",
+            "-preview",
+            "-ansi-log",
+            "false",
+            "-work-dir",
+            str(tmp_path / "work"),
+            "--samplesheet",
+            str(samplesheet),
+            "--analysis_mode",
+            "xenium",
+            "--only_stage",
+            "build_spatialdata",
+            "--outdir",
+            str(output),
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "NXF_OFFLINE": "true"},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not output.exists()
+
+
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow unavailable")
 def test_default_config_and_individual_platform_overrides(tmp_path: Path) -> None:
     cases = [{"options": _defaults(), "row": {}}]
     overrides = [
