@@ -153,7 +153,10 @@ def test_full_pipeline_preview_loads_model_library_without_scheduling(
         timeout=90,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert not output.exists()
+    # The entry workflow initializes its output/log directory during preview.
+    # Actual build or segmentation artifacts would mean a process was scheduled.
+    assert not list(output.rglob("source_spatialdata.zarr"))
+    assert not list(output.rglob("*.npy"))
 
 
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow unavailable")
