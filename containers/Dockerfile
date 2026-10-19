@@ -1,4 +1,5 @@
-FROM nvidia/cuda:12.3.2-cudnn9-devel-rockylinux9 AS compile-image
+# Match the CUDA minor used by the pinned torch runtime on Dwight.
+FROM nvidia/cuda:13.0.2-cudnn-devel-rockylinux9 AS compile-image
 
 # install required command-line tools
 RUN dnf install -y procps-ng
@@ -26,13 +27,13 @@ RUN ln -sf /usr/local/cargo/bin/proseg /usr/local/bin/proseg
 
 # Install the pinned dependency tree from the lockfile, then the checked-out
 # MerXen source without re-resolving its dependencies, so the image matches
-# CI. uv is required: pip rejects the lock (ResolutionImpossible) because
-# cell_type_mapper declares abc_atlas_access as an unpinned git URL while the
-# lock pins a commit.
+# CI. The generated lock includes the entire dependency tree. --no-deps avoids
+# re-resolving cell_type_mapper's unpinned abc_atlas_access Git URL against the
+# commit already pinned in the lock.
 RUN python3 -m pip install --no-cache-dir "uv==0.11.7"
 WORKDIR /opt/merxen
 COPY requirements/requirements.lock ./requirements/requirements.lock
-RUN uv pip install --system --python /usr/bin/python3.12 --no-cache -r requirements/requirements.lock
+RUN uv pip install --system --python /usr/bin/python3.12 --no-cache --no-deps -r requirements/requirements.lock
 COPY pyproject.toml README.md ./
 COPY src ./src
 RUN uv pip install --system --python /usr/bin/python3.12 --no-cache --no-deps .

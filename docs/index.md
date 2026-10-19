@@ -58,6 +58,8 @@ converge at alignment; dashed stations are governed by a parameter. See
 - [Python API overview](python-api.md) — subpackage map with key functions.
 - [CLI reference](cli.md) — every `merxen` subcommand.
 - [Development workflow](development.md) — testing, linting, contributing.
+- [Cellpose HITL testing guide](hitl/testing-guide.md) — runtime acceptance and
+  the planned custom-model checks.
 
 ## Project files at a glance
 

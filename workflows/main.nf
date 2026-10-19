@@ -2334,7 +2334,7 @@ workflow {
                 tuple(key, pairId, platform, segmentConfigJson)
         }
 
-    nuclei_task_results_ch = CELLPOSE_NUCLEI_SEGMENT(nuclei_segment_inputs_ch)
+    nuclei_task_results_ch = CELLPOSE_NUCLEI_SEGMENT(nuclei_segment_inputs_ch).segmentation
 
     nuclei_published_results_ch = segmentation_config_inputs_ch
         .filter {

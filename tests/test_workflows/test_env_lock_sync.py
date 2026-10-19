@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import re
+import tomllib
 from pathlib import Path
 from types import ModuleType
 
@@ -83,6 +84,22 @@ def test_dockerfile_installs_lockfile_with_uv_then_package_without_deps() -> Non
     assert "uv pip install" in package_line
     assert "--no-deps" in package_line, "the package must not re-resolve its deps"
     assert lock_installs[0] < package_installs[0]
+
+
+def test_cellpose_runtime_pins_match_lock_and_inference_guards() -> None:
+    """The CPU test lock and GPU environment must use the same model release."""
+    from merxen.segmentation.model_identity import CELLPOSE_VERSION, TORCH_MINOR
+
+    project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+    dependencies = project["project"]["dependencies"]
+    assert f"cellpose=={CELLPOSE_VERSION}" in dependencies
+    assert f"torch>={TORCH_MINOR},<2.15" in dependencies
+    lock_text = LOCK_PATH.read_text()
+    assert f"cellpose=={CELLPOSE_VERSION}\n" in lock_text
+    assert re.search(r"^torch==2\.14\.\d+$", lock_text, re.MULTILINE)
+    assert (
+        "FROM nvidia/cuda:13.0.2-cudnn-devel-rockylinux9" in DOCKERFILE_PATH.read_text()
+    )
 
 
 def test_update_env_text_replaces_existing_header(

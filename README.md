@@ -222,6 +222,10 @@ scripts/run_ci_checks.sh              # the same lockfile-backed checks as CI
 
 Day-to-day mechanics — testing, hooks, CI, debugging, adding a new pipeline stage — are in [Development workflow](docs/development.md).
 
+The [Cellpose HITL testing guide](docs/hitl/testing-guide.md) covers runtime
+acceptance, a read-only comparison with one published tile, and the planned
+custom-model checks.
+
 ## Built on
 
 MerXen orchestrates the work of a lot of other people. If you use this pipeline, please cite their works:

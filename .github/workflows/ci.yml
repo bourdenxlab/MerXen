@@ -16,7 +16,9 @@ jobs:
         run: pip install uv
       - name: Install dependencies
         run: |
-          uv pip install --system -r requirements/requirements.lock
+          # The generated lock includes the full dependency tree. Do not
+          # re-resolve upstream unpinned Git URLs against its pinned commits.
+          uv pip install --system --no-deps -r requirements/requirements.lock
           uv pip install --system -e . --no-deps
       - name: Lint
         run: ruff check .
