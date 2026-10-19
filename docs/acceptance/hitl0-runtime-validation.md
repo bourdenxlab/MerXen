@@ -56,16 +56,21 @@ The full Linux suite in Dwight's existing CI environment passed 761 tests, with
 3 slow tests deselected. The final acceptance harness passed all 12 focused tests,
 including actual Nextflow previews and output-path protection through symlinks.
 Ruff lint/format checks and mypy passed. The full-suite environment was reused;
-installation from the updated dependency lock remains covered by PR CI and the
-container check below.
+installation from the updated dependency lock remains covered by PR CI.
+Container validation is deferred as recorded below.
 
-## Refreshed container: pending user-run check
+## Refreshed container: deferred
 
-The `becalia` account cannot access Dwight's Docker daemon, and `sudo -n docker`
-reports that a password is required. Neither group membership nor Docker socket
-permissions were changed. The user will run the container build and GPU smoke
-test from their terminal using the commands in the testing guide. Operational
-acceptance of the container remains pending that result.
+The user confirmed that HITL-0 acceptance uses Dwight's existing Conda path and
+that container validation is deferred. The repository's container profile runs
+Apptainer SIF images; Docker daemon access is not a pipeline requirement. The
+previous request for a user-run Docker build and smoke test was withdrawn.
+
+Neither Apptainer nor Singularity is on Dwight's current PATH. No Docker access,
+group membership, socket permissions or container runtime installation was
+changed. The updated CUDA 13.0 Dockerfile remains an unvalidated build recipe;
+the site's existing CUDA 12.6 SIF has not been refreshed for the new pins. A
+future container check must validate a refreshed image through Apptainer.
 
 ## Confirmed HITL-1 behavior
 
@@ -74,4 +79,5 @@ acceptance of the container remains pending that result.
 - Require matching verified provenance for custom-model reuse.
 - Protect `/srv/storage/MerXen/results/` and its symlink aliases from custom-model
   writes; custom arms use separate output directories.
-- Complete HITL-0 acceptance and merge before implementing HITL-1 from `main`.
+- Use the passed Conda GPU check for HITL-0 acceptance; defer container
+  validation. Complete PR CI and merge before implementing HITL-1 from `main`.

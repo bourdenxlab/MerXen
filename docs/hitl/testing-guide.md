@@ -103,63 +103,30 @@ The source path above is the surviving source used by the published run. If it
 has been cleaned up, stop and validate an equivalent native image in the durable
 latest zarr before substituting it. Each repeat needs a fresh output directory.
 
-## 3. Check the refreshed container
+## 3. Container validation: deferred
 
-This requires access to Docker and NVIDIA container support on Dwight or another
-CUDA 13 compatible host. You can build the branch from your existing repository
-without switching the checkout used by production. The example uses `sudo docker`
-because the current Dwight account needs elevated Docker access:
+The agreed acceptance path for this milestone is Dwight's existing Conda
+environment, using steps 1 and 2 above. Container validation is deferred and is
+not an acceptance gate for HITL-0 or a prerequisite for starting HITL-1.
 
-```bash
-git fetch origin codex/hitl-segmentation
-export MERXEN_HITL_COMMIT=$(git rev-parse FETCH_HEAD)
-git archive --format=tar "$MERXEN_HITL_COMMIT" | sudo docker build --progress=plain \
-  --label "org.opencontainers.image.revision=$MERXEN_HITL_COMMIT" \
-  -f containers/Dockerfile -t merxen:hitl0 -
+MerXen's container execution profile uses **Apptainer with SIF images**, and the
+`gpu` profile adds `--nv` to GPU processes. Dwight's local workflow uses
+`-profile dwight,conda`. See [Running on a cluster](../running-the-pipeline.md#running-on-a-cluster)
+and [the execution profiles](../../workflows/nextflow.config).
 
-(
-  exec 9</tmp/merxen-dwight-gpu.lock
-  flock 9
-  sudo docker run --rm -i --gpus all \
-    -v "$HOME/.cellpose/models:/models:ro" \
-    -e CELLPOSE_LOCAL_MODELS_PATH=/models \
-    merxen:hitl0 python - <<'PY'
-import numpy as np
-import torch
-from merxen.config import CellposeConfig
-from merxen.segmentation.cellpose import (
-    build_cellpose_model,
-    extract_cellpose_probability_logits,
-    run_cellpose_model_eval,
-)
-from merxen.segmentation.model_identity import identify_cellpose_model
+The repository's Dockerfile is an existing image-build recipe; it does not make
+Docker a requirement for running the pipeline. The earlier instructions to run
+`sudo docker` were incorrect for this deployment and have been withdrawn.
+Apptainer can consume OCI registry images directly without a local Docker daemon;
+see [Apptainer's OCI support](https://apptainer.org/docs/user/main/docker_and_oci.html).
 
-assert torch.cuda.is_available()
-config = CellposeConfig(gpu=True)
-model = build_cellpose_model(config)
-assert model.device.type == "cuda"
-identity = identify_cellpose_model(model, config)
-image = np.zeros((256, 256, 3), dtype=np.uint8)
-image[80:176, 80:176, :2] = 127
-mask, flows, _ = run_cellpose_model_eval(model, image, config)
-assert mask.shape == (256, 256)
-assert extract_cellpose_probability_logits(flows, mask.shape).shape == mask.shape
-print(identity.model_dump_json())
-print("CONTAINER_GPU_SMOKE_OK")
-PY
-)
-```
-
-Expected: the image builds, the checkpoint checksum and runtime pass validation,
-and `CONTAINER_GPU_SMOKE_OK` is printed. The small artificial image is an API/GPU
-smoke check; no minimum cell count is required. `git archive` supplies tracked
-files only, so untracked data and local environment files are excluded from the
-build context. Mount the checked stock-model cache for the account running this
-command; adjust that cache path if using a different account.
-
-Report the build result, `MERXEN_HITL_COMMIT`, and the printed model identity and
-success marker. If either command fails, retain its exact error and build output;
-HITL-0's container acceptance stays pending until that failure is resolved.
+When container work resumes, choose an Apptainer host and an unprivileged build
+route, build or obtain a refreshed SIF, and run the checkpoint/runtime and GPU
+smoke tests with `apptainer exec --nv`. Neither Apptainer nor Singularity is on
+Dwight's current PATH. The existing site profile still names an older CUDA 12.6
+SIF; that artifact has not been rebuilt or validated against the new pins.
+Do not use it for this milestone's fresh-inference checks. The CUDA 13.0
+Dockerfile change remains unvalidated until the container work resumes.
 
 ## 4. Begin testing HITL-1 when its implementation branch is ready
 

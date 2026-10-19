@@ -11,6 +11,8 @@ are later milestones.
 - Land HITL-0 before HITL-1.
 - Use the current Dwight runtime as the baseline, after checking it directly.
 - Align the container's CUDA minor with Dwight.
+- Validate HITL-0 through Dwight's existing Conda path and defer container
+  validation. The pipeline's container runtime remains Apptainer.
 
 Dwight was checked on 2026-10-19: Cellpose 4.2.1.1, torch 2.14.0+cu130,
 torchvision 0.29.0, CUDA 13.0, NVIDIA driver 580.126.09. Its cached `cpsam_v2`
@@ -49,7 +51,7 @@ Validation on Dwight: 761 tests passed in the full Linux suite (3 slow tests
 deselected). The final acceptance-harness tests passed separately: 12 tests,
 including real Nextflow previews of separate and protected output paths. These
 checks used the existing CI environment; installation of the refreshed lock is
-also checked by PR CI and the pending container build. The local focused run
+also checked by PR CI. Container validation is deferred. The local focused run
 passed 175 tests with 6 platform-dependent skips. Ruff lint/format checks and
 mypy pass. An isolated Nextflow preview accepts the named output channels and
 existing ProSeg tuples.
@@ -59,10 +61,12 @@ GPU lock: all 3745 scored cells matched, AP at IoU 0.5 was 1.0, and mean matched
 IoU was 0.9999953134. The published mask and statistics checksums were unchanged.
 See the [validation record](../acceptance/hitl0-runtime-validation.md).
 
-The refreshed container still needs its build and CUDA smoke test. Docker access
-is unavailable to the current Dwight account, and passwordless sudo is disabled.
-The [testing guide](../hitl/testing-guide.md) contains the exact build, GPU smoke
-and repeatable tile-check commands, plus the HITL-1 acceptance checklist.
+The user confirmed that the Conda path is the acceptance target for this
+milestone. The Apptainer image build and GPU smoke test are deferred; the earlier
+Docker/sudo test instructions were withdrawn. The updated Dockerfile remains an
+unvalidated build recipe, and the site's existing CUDA 12.6 SIF has not been
+refreshed for the new pins. The [testing guide](../hitl/testing-guide.md) contains
+the repeatable Conda tile-check commands and the HITL-1 acceptance checklist.
 
 The local macOS full-suite attempt crashed in native clustering code; validation
 of the full suite therefore uses an isolated Linux checkout on Dwight.
