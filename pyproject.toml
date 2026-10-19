@@ -21,7 +21,9 @@ dependencies = [
     "spatialdata>=0.8.0,<0.9",
     "spatialdata-io>=0.6,<0.7",
     "xarray>=2024.0",
-    "cellpose>=3.0",
+    # Segmentation identity depends on this release's cpsam_v2 checkpoint/API.
+    "cellpose==4.2.1.1",
+    "torch>=2.14,<2.15",
     "scikit-image>=0.22",
     "scipy>=1.12",
     "shapely>=2.0",

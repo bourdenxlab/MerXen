@@ -110,17 +110,19 @@ only for rows whose effective `enable_alignment` value is `true`.
 
 ### Cellpose
 
-`segment_nuclei` uses DAPI only, the Cellpose `nuclei` model, and the same
-inference/tiling settings as cell Cellpose. Both masks use the default final
+`segment_nuclei` uses DAPI only, stock Cellpose-SAM v2 (`cpsam_v2`), and the same
+inference/tiling settings as cell Cellpose. Cellpose 4 ignores the former
+`model_type="nuclei"` and `model_type="cyto3"` settings; neither selected a
+different model. Both masks use the default final
 area filter of 5–400 µm². On Dwight,
 `cellpose_segment_max_forks = 1` and the shared GPU lock serialize both
 Cellpose process types.
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `cellpose_model_type` | `cyto3` | Cellpose model preset. |
+| `cellpose_model_type` | `cyto3` | Deprecated and ignored by Cellpose 4. Retained for legacy config JSON; both stages explicitly load `cpsam_v2`. |
 | `cellpose_gpu` | Dwight: `true` | Use GPU for inference. Other execution profiles choose their own hardware policy. |
-| `cellpose_diameter` | `null` | Cell diameter (px). `null` → Cellpose auto-estimates. |
+| `cellpose_diameter` | `null` | Rescale using this cell diameter (px). `null` preserves native scale with Cellpose-SAM. |
 | `cellpose_flow_threshold` | `0.7` | Cellpose flow threshold. |
 | `cellpose_cellprob` | `-5.0` | Cellpose cell probability threshold. |
 | `cellpose_tile_overlap` | `0.15` | Cellpose model's internal fractional tile overlap. |
@@ -139,6 +141,14 @@ Cellpose process types.
 | `cellpose_final_max_area_um2` | `400.0` | Drop final Cellpose masks larger than this area before ProSeg. |
 | `cellpose_final_filter_chunk_mb` | `256` | Approximate row-chunk size for streaming the final mask filter. |
 | `cellpose_segment_max_forks` | Dwight: `1` | Maximum concurrent GPU Cellpose processes. |
+
+The Python `CellposeConfig.pretrained_model` defaults to `cpsam_v2` and
+`use_bfloat16` defaults to `False`, matching Nextflow. The existing Nextflow
+config JSON is unchanged: Python supplies the model default. Both inference
+stages require Cellpose 4.2.1.1 and PyTorch 2.14.x; the lock records 2.14.0,
+verified on Dwight with CUDA 13.0. Fresh inference checks the stock checkpoint's
+SHA-256 and records its model identity beside the mask. See
+[segmentation provenance](stages/segmentation.md#model-provenance).
 
 ### Mask image quantification
 

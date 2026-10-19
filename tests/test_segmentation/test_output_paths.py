@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 from merxen.config import SegmentationConfig
+from merxen.segmentation.model_identity import model_identity_path, read_model_identity
 from merxen.segmentation.pipeline import (
     _labeled_mask_has_foreground,
     run_cellpose_nuclei_segmentation,
@@ -156,6 +157,12 @@ def test_cellpose_segmentation_reuses_outputs_without_staged_transform(
     assert outputs["transcripts_csv"].is_symlink()
     assert outputs["stitching_stats_path"].is_symlink()
     assert outputs["transforms_path"].exists()
+    identity_path = model_identity_path(outputs["cellpose_mask_path"])
+    assert identity_path.is_symlink()
+    identity = read_model_identity(outputs["cellpose_mask_path"])
+    assert identity.status == "unverified"
+    assert identity.cellpose_version is None
+    assert identity.torch_version is None
     assert json.loads(outputs["transforms_path"].read_text()) == {
         "x_transform": [0.25, 0.0, 0.0],
         "y_transform": [0.0, 0.25, 0.0],
@@ -339,7 +346,7 @@ def test_run_segmentation_pipeline_stages_persistent_outputs(
     nuclei_call = next(
         call for call in cellpose_calls if str(call["dataset_name"]).endswith(":nuclei")
     )
-    assert nuclei_call["cellpose_config"].model_type == "nuclei"
+    assert nuclei_call["cellpose_config"].pretrained_model == "cpsam_v2"
     assert nuclei_call["cellpose_config"].flow_threshold == cfg.cellpose.flow_threshold
     assert (
         nuclei_call["cellpose_config"].cellprob_threshold

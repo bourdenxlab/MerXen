@@ -1,4 +1,5 @@
-FROM nvidia/cuda:12.3.2-cudnn9-devel-rockylinux9 AS compile-image
+# Match the CUDA minor used by the pinned torch runtime on Dwight.
+FROM nvidia/cuda:13.0.2-cudnn-devel-rockylinux9 AS compile-image
 
 # install required command-line tools
 RUN dnf install -y procps-ng
