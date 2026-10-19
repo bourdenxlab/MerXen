@@ -98,6 +98,18 @@ def _protected_paths(roots: list[Path]) -> set[Path]:
     return protected
 
 
+def is_experimental_arm(config: SegmentationConfig) -> bool:
+    """Return whether custom weights or explicit stock controls need isolation.
+
+    Args:
+        config: Requested segmentation configuration.
+
+    Returns:
+        Whether strict arm protection and complete provenance are required.
+    """
+    return has_custom_model(config) or config.cellpose_model_policy.experimental_arm
+
+
 def require_safe_custom_outputs(
     config: SegmentationConfig, *, include_source: bool = True
 ) -> None:
@@ -111,11 +123,11 @@ def require_safe_custom_outputs(
     Raises:
         ValueError: If protection is unspecified or an output resolves into it.
     """
-    if not has_custom_model(config):
+    if not is_experimental_arm(config):
         return
     roots = config.cellpose_model_policy.protected_output_roots
     if not roots:
-        raise ValueError("Custom models require non-empty protected_output_roots")
+        raise ValueError("Experimental arms require non-empty protected_output_roots")
     dataset = config.dataset
     paths = [dataset.output_dir] + [
         value
@@ -247,6 +259,65 @@ def preflight_custom_model(
     )
 
 
+def preflight_stock_arm(
+    config: SegmentationConfig,
+    *,
+    transform_matrix: np.ndarray,
+    image_key: str,
+    allow_readonly_source: bool = False,
+) -> CellposeModelIdentity:
+    """Bind an explicit stock control to its image, filters, runtime and tile grid.
+
+    Args:
+        config: Effective stock-model control settings.
+        transform_matrix: Actual native micron-to-pixel affine.
+        image_key: Actual selected native image.
+        allow_readonly_source: Permit source reads by a read-only tile diagnostic.
+
+    Returns:
+        Complete expected identity for a new or reused stock control.
+
+    Raises:
+        ValueError: If the arm is unsafe, uses custom weights or has unpinned tiles.
+    """
+    require_safe_custom_outputs(config, include_source=not allow_readonly_source)
+    if has_custom_model(config):
+        raise ValueError("Stock-control preflight cannot validate custom weights")
+    if len(config.tiling.tile_size_candidates) != 1 or (
+        config.tiling.tile_size_candidates[0] < config.tiling.min_tile_size
+    ):
+        raise ValueError("Stock controls require a single pinned tile size")
+    native = (
+        "morphology_focus"
+        if config.dataset.platform == "XENIUM"
+        else "MERSCOPE_z_projection"
+    )
+    if image_key != native:
+        raise ValueError("Stock controls require the native image")
+    matrix = np.linalg.inv(transform_matrix)
+    sizes = tuple(float(np.linalg.norm(matrix[:2, axis])) for axis in (0, 1))
+    if not all(np.isfinite(size) and size > 0 for size in sizes):
+        raise ValueError("Native image affine has invalid pixel sizes")
+    cellpose_version, torch_version = require_cellpose_runtime()
+    return CellposeModelIdentity(
+        status="verified",
+        model_name="cpsam_v2",
+        weights_sha256=CPSAM_V2_SHA256,
+        cellpose_version=cellpose_version,
+        torch_version=torch_version,
+        cellpose_config=config.cellpose,
+        inference_context=CellposeInferenceContext(
+            platform=config.dataset.platform,
+            species=config.cellpose_model_policy.species,
+            channels=config.dataset.channels,
+            image_key=image_key,
+            pixel_size_um=(sizes[0], sizes[1]),
+            mask_filter=config.mask_filter,
+            tiling=config.tiling,
+        ),
+    )
+
+
 def require_matching_cached_model(
     mask_path: Path,
     config: SegmentationConfig,
@@ -265,7 +336,7 @@ def require_matching_cached_model(
     if not mask_path.exists():
         return
     recorded = read_model_identity(mask_path)
-    if has_custom_model(config):
+    if is_experimental_arm(config):
         if expected is None or recorded != expected:
             raise ValueError(
                 "Cached custom-model identity mismatch; use a separate outdir"

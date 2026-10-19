@@ -30,7 +30,7 @@ independent stock DAPI nuclei model and its settings unchanged.
 | `<platform>_cellpose_final_max_area_um2` | unset | Override the final cell area ceiling |
 | `<platform>_mask_max_eccentricity` | unset | Override the per-tile eccentricity limit; 1.0 disables exclusion by eccentricity |
 | `allow_candidate_model` | false | Explicitly permit a candidate bundle |
-| `cellpose_protected_output_roots` | Dwight: published results root | Roots protected from custom arms; required for custom selection on other hosts |
+| `cellpose_protected_output_roots` | Dwight: published results root | Roots protected from experimental arms; required on other hosts |
 
 Here `<platform>` is `xenium` or `merscope`. Numeric overrides also accept
 same-named samplesheet columns. Explicit zero is preserved. Values from a model's
@@ -40,6 +40,10 @@ Use a Nextflow JSON/YAML params file to supply a singleton tile-size list, for
 example `"cellpose_tile_size_candidates": [6144]`. A custom model must use its
 evaluated tile size; memory pressure causes refusal rather than silently choosing
 a differently normalized tile grid.
+Stock controls using the new per-platform overrides also require a single pinned
+tile size and a separate protected arm. Unknown historical stock masks remain
+reusable for ordinary runs; an explicit control refuses unknown or incomplete
+provenance so the requested change cannot silently reuse an older mask.
 
 ## Bundle metadata and preflight
 

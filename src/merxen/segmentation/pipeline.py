@@ -41,7 +41,9 @@ from merxen.segmentation.cellpose import (
 )
 from merxen.segmentation.hitl.registry import (
     has_custom_model,
+    is_experimental_arm,
     preflight_custom_model,
+    preflight_stock_arm,
     require_matching_cached_model,
     require_safe_custom_outputs,
 )
@@ -386,7 +388,7 @@ def _load_dataset_sdata(
                 requested_channels=dataset.channels,
                 as_float32=True,
             )
-            if has_custom_model(config) and source["channels"] != dataset.channels:
+            if is_experimental_arm(config) and source["channels"] != dataset.channels:
                 raise ValueError("Custom-model source is missing requested channels")
             height, width, _ = source["shape"]
             log_status(
@@ -408,7 +410,7 @@ def _load_dataset_sdata(
             )
 
         plane_keys = list_plane_keys(sdata.images, prefix=dataset.image_prefix)
-        if has_custom_model(config):
+        if is_experimental_arm(config):
             raise ValueError(
                 "Custom MERSCOPE models require native MERSCOPE_z_projection"
             )
@@ -461,7 +463,7 @@ def _load_dataset_sdata(
             raise RuntimeError(f"[{dataset.name}] No Xenium images found.")
         image_key = dataset.image_key or (
             "morphology_focus"
-            if has_custom_model(config)
+            if is_experimental_arm(config)
             else list(sdata.images.keys())[0]
         )
         if image_key not in sdata.images:
@@ -471,7 +473,7 @@ def _load_dataset_sdata(
             requested_channels=dataset.channels,
             as_float32=True,
         )
-        if has_custom_model(config) and source["channels"] != dataset.channels:
+        if is_experimental_arm(config) and source["channels"] != dataset.channels:
             raise ValueError(
                 "Custom-model source is missing one or more requested channels"
             )
@@ -522,7 +524,7 @@ def _preflight_model_selection(
 ) -> CellposeModelIdentity | None:
     """Validate custom arms before any entry point creates or replaces output."""
     require_safe_custom_outputs(config)
-    if not has_custom_model(config):
+    if not is_experimental_arm(config):
         return None
     native_key = (
         "morphology_focus"
@@ -531,23 +533,25 @@ def _preflight_model_selection(
     )
     if config.dataset.image_key not in (None, native_key):
         raise ValueError("Custom models require the native image element")
-    if config.cellpose.model_metadata_path is None:
-        raise ValueError("Custom models require model_metadata_path")
-    for path in (
-        Path(config.cellpose.pretrained_model),
-        config.cellpose.model_metadata_path,
-    ):
-        if not path.is_file():
-            raise FileNotFoundError(path)
+    if has_custom_model(config):
+        if config.cellpose.model_metadata_path is None:
+            raise ValueError("Custom models require model_metadata_path")
+        for path in (
+            Path(config.cellpose.pretrained_model),
+            config.cellpose.model_metadata_path,
+        ):
+            if not path.is_file():
+                raise FileNotFoundError(path)
     sdata, _fetch, _height, _width, matrix, _points = _load_dataset_sdata(config)
     image_key = (
         "morphology_focus"
         if config.dataset.platform == "XENIUM"
         else MERSCOPE_ZPROJ_IMAGE_NAME
     )
-    identity = preflight_custom_model(
-        config, transform_matrix=matrix, image_key=image_key
+    preflight = (
+        preflight_custom_model if has_custom_model(config) else preflight_stock_arm
     )
+    identity = preflight(config, transform_matrix=matrix, image_key=image_key)
     mask_path = config.dataset.persistent_mask_path or (
         config.dataset.output_dir / "cellpose_masks_tiled.npy"
     )
@@ -942,13 +946,13 @@ def run_cellpose_nuclei_segmentation(
             "model_metadata_path": config.nuclei_cellpose.model_metadata_path,
         }
     )
-    if has_custom_model(config) or (
+    if is_experimental_arm(config) or (
         config.nuclei_cellpose.model_fields_set - {"model_type", "pretrained_model"}
     ):
         nuclei_config.cellpose = config.nuclei_cellpose.model_copy(deep=True)
         if nuclei_config.cellpose.pretrained_model != "cpsam_v2":
             raise ValueError("HITL cell models require independent stock nuclei")
-    if has_custom_model(config) and dataset.platform == "XENIUM":
+    if is_experimental_arm(config) and dataset.platform == "XENIUM":
         nuclei_config.dataset.image_key = "morphology_focus"
     nuclei_config.mask_filter = config.nuclei_mask_filter
 
@@ -1229,7 +1233,7 @@ def run_segmentation_pipeline(
         if dataset.persistent_nuclei_mask_path
         else staged_nuclei_mask_path
     )
-    if not has_custom_model(config):
+    if not is_experimental_arm(config):
         require_matching_cached_model(reusable_mask, config)
     hybrid_complete = not config.proseg_hybrid.enabled or has_proseg_hybrid_refinement(
         persistent_latest_output,

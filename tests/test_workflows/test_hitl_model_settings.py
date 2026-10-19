@@ -14,6 +14,9 @@ import pytest
 
 from merxen.config import CellposeConfig, MaskFilterConfig, TilingConfig
 from merxen.segmentation.model_identity import (
+    CELLPOSE_VERSION,
+    CPSAM_V2_SHA256,
+    TORCH_MINOR,
     CellposeInferenceContext,
     CellposeModelIdentity,
 )
@@ -102,6 +105,10 @@ def test_required_hitl_hooks_occur_once() -> None:
     }
     for hook, name in files.items():
         assert (ROOT / name).read_text().count(f"hitl-hook:{hook}") == 1
+    library = (ROOT / "workflows/lib/CellposeSettings.groovy").read_text()
+    assert CPSAM_V2_SHA256 in library
+    assert CELLPOSE_VERSION in library
+    assert f"startsWith('{TORCH_MINOR}.')" in library
 
 
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow unavailable")
@@ -233,17 +240,25 @@ def test_model_preflight_and_protected_outdir(tmp_path: Path) -> None:
         cases.append(
             {"options": {**options, **changes}, "row": {}, "check_preflight": True}
         )
+    stock_options = {
+        **options,
+        "xenium_cellpose_model": None,
+        "xenium_cellpose_cellprob": 0,
+    }
+    cases.append({"options": stock_options, "row": {}, "check_preflight": True})
     results = _run_cases(tmp_path, cases)
     assert all("error" not in result for result in results[:success_count]), results
     assert results[0]["selected"]["cellpose"]["pretrained_model"] == str(model)
     for result, message in zip(
-        results[success_count:],
+        results[success_count:-1],
         ["candidate", "protected", "protected", "single", "protected"],
         strict=True,
     ):
         assert message in result["error"]
     assert list(baseline.iterdir()) == [published_link]
     assert original.read_bytes() == b"baseline"
+    assert "error" not in results[-1]
+    assert results[-1]["selected"]["cellpose_model_policy"]["experimental_arm"]
 
 
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow unavailable")
@@ -312,6 +327,31 @@ def test_downstream_selector_requires_matching_published_identity(
         "cellpose_tile_size_candidates": [6144],
         "outdir": str(arm),
     }
+    stock_arm = tmp_path / "stock-arm"
+    stock_dir = stock_arm / "P1/xenium/segmentation"
+    stock_dir.mkdir(parents=True)
+    (stock_dir / "cellpose_masks_tiled.npy").write_bytes(b"stock artifact")
+    stock_identity = identity.model_copy(deep=True)
+    stock_identity.model_name = "cpsam_v2"
+    stock_identity.weights_sha256 = CPSAM_V2_SHA256
+    stock_identity.cellpose_config = CellposeConfig(
+        gpu=False,
+        model_type="cyto3",
+        flow_threshold=0.7,
+        cellprob_threshold=0,
+    )
+    (stock_dir / "cellpose_model_identity.json").write_text(
+        stock_identity.model_dump_json()
+    )
+    (stock_dir / "cellpose_stitching_stats.json").write_text(
+        json.dumps({"model_identity": stock_identity.model_dump(mode="json")})
+    )
+    stock_options = {
+        **options,
+        "xenium_cellpose_model": None,
+        "xenium_cellpose_cellprob": 0,
+        "outdir": str(stock_arm),
+    }
     cases = [
         {"options": options, "row": {}, "check_preflight": True, "run_segment": False},
         {
@@ -322,7 +362,25 @@ def test_downstream_selector_requires_matching_published_identity(
         },
     ]
     before = sidecar.read_bytes(), stats.read_bytes()
+    cases.extend(
+        [
+            {
+                "options": stock_options,
+                "row": {},
+                "check_preflight": True,
+                "run_segment": False,
+            },
+            {
+                "options": {**stock_options, "xenium_cellpose_final_max_area_um2": 800},
+                "row": {},
+                "check_preflight": True,
+                "run_segment": False,
+            },
+        ]
+    )
     results = _run_cases(tmp_path, cases)
     assert "error" not in results[0]
     assert "identity mismatch" in results[1]["error"]
+    assert "error" not in results[2], results[2]
+    assert "identity mismatch" in results[3]["error"]
     assert (sidecar.read_bytes(), stats.read_bytes()) == before

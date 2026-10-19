@@ -24,7 +24,12 @@ from merxen.segmentation.cellpose import (
     iter_core_tiles,
     run_cellpose_tile,
 )
-from merxen.segmentation.hitl.registry import has_custom_model, preflight_custom_model
+from merxen.segmentation.hitl.registry import (
+    has_custom_model,
+    is_experimental_arm,
+    preflight_custom_model,
+    preflight_stock_arm,
+)
 from merxen.segmentation.mask_filter import (
     filter_labeled_mask_by_area,
 )
@@ -187,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     stats_sha = _sha256(args.baseline_stats)
     sdata, fetch, height, width, matrix, _points = _load_dataset_sdata(config)
     selected_key = config.dataset.image_key or (
-        "morphology_focus" if has_custom_model(config) else list(sdata.images)[0]
+        "morphology_focus" if is_experimental_arm(config) else list(sdata.images)[0]
     )
     if selected_key != args.image_key:
         raise ValueError("Production loader selected a different native image element")
@@ -208,14 +213,17 @@ def main(argv: list[str] | None = None) -> int:
     y0, y1, x0, x1 = score_bbox
     if y0 >= y1 or x0 >= x1:
         raise ValueError("Scoring margin leaves no tile interior")
+    preflight = (
+        preflight_custom_model if has_custom_model(config) else preflight_stock_arm
+    )
     expected_identity = (
-        preflight_custom_model(
+        preflight(
             config,
             transform_matrix=matrix,
             image_key=args.image_key,
             allow_readonly_source=True,
         )
-        if has_custom_model(config)
+        if is_experimental_arm(config)
         else None
     )
     import torch

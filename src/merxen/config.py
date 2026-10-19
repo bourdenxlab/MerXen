@@ -290,6 +290,7 @@ class CellposeModelPolicy(BaseModel):
     """Explicit custom-model opt-in and protected published output roots."""
 
     species: Literal["human", "mouse"] = "human"
+    experimental_arm: bool = False
     allow_candidate_model: bool = False
     protected_output_roots: list[Path] = Field(default_factory=list)
 

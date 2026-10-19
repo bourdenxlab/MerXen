@@ -15,6 +15,7 @@ from merxen.segmentation.hitl.registry import (
     CellposeModelMetadata,
     has_custom_model,
     preflight_custom_model,
+    preflight_stock_arm,
     require_matching_cached_model,
     require_safe_custom_outputs,
 )
@@ -400,3 +401,70 @@ def test_evaluation_settings_warn_without_changing_config(
     _preflight(custom_config)
     assert "final_max_area_um2" in caplog.text
     assert custom_config.mask_filter.final_max_area_um2 == 800
+
+
+def test_explicit_stock_control_cannot_reuse_unknown_stock_cache(
+    custom_config: SegmentationConfig,
+) -> None:
+    custom_config.cellpose = CellposeConfig(gpu=False, cellprob_threshold=0)
+    custom_config.cellpose_model_policy.experimental_arm = True
+    expected = preflight_stock_arm(
+        custom_config,
+        transform_matrix=np.diag([1 / 0.2125, 1 / 0.2125, 1]),
+        image_key="morphology_focus",
+    )
+    output = custom_config.dataset.output_dir
+    output.mkdir()
+    mask = output / "cellpose_masks_tiled.npy"
+    np.save(mask, np.ones((8, 8), np.uint32))
+    with pytest.raises(ValueError, match="identity mismatch"):
+        require_matching_cached_model(mask, custom_config, expected)
+    custom_config.cellpose_model_policy.experimental_arm = False
+    require_matching_cached_model(mask, custom_config)
+
+
+def test_stock_filter_control_identity_includes_area_threshold(
+    custom_config: SegmentationConfig,
+) -> None:
+    custom_config.cellpose = CellposeConfig(gpu=False)
+    custom_config.cellpose_model_policy.experimental_arm = True
+    custom_config.mask_filter.final_max_area_um2 = 800
+    expected = preflight_stock_arm(
+        custom_config,
+        transform_matrix=np.diag([1 / 0.2125, 1 / 0.2125, 1]),
+        image_key="morphology_focus",
+    )
+    assert expected.model_name == "cpsam_v2"
+    assert expected.inference_context is not None
+    assert expected.inference_context.mask_filter.final_max_area_um2 == 800
+
+
+def test_stock_control_pipeline_binds_context_without_model_metadata(
+    custom_config: SegmentationConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    custom_config.cellpose = CellposeConfig(gpu=False, cellprob_threshold=0)
+    custom_config.cellpose_model_policy.experimental_arm = True
+    monkeypatch.setattr(
+        pipeline,
+        "_load_dataset_sdata",
+        lambda _: (
+            object(),
+            object(),
+            8,
+            8,
+            np.diag([1 / 0.2125, 1 / 0.2125, 1]),
+            object(),
+        ),
+    )
+
+    def stop_before_inference(**kwargs: object) -> None:
+        expected = kwargs["expected_model_identity"]
+        assert expected is not None
+        assert expected.model_name == "cpsam_v2"
+        assert expected.inference_context is not None
+        assert expected.cellpose_config.cellprob_threshold == 0
+        raise RuntimeError("stop before inference")
+
+    monkeypatch.setattr(pipeline, "run_tiled_cellpose", stop_before_inference)
+    with pytest.raises(RuntimeError, match="stop before inference"):
+        pipeline.run_cellpose_segmentation(custom_config)
