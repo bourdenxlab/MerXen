@@ -45,20 +45,27 @@ No published masks were modified.
 
 ## Validation and remaining acceptance work
 
-Validation on Dwight: 745 tests passed in the full Linux suite (3 slow tests
-deselected). After the final staged-symlink lookup fix, all 181 focused
-segmentation, enrichment, schema and workflow tests passed on Linux. The local
-focused run passed 175 tests with 6 platform-dependent skips. Ruff lint/format
-checks and mypy pass. An isolated Nextflow preview accepts the named output
-channels and existing ProSeg tuples.
+Validation on Dwight: 761 tests passed in the full Linux suite (3 slow tests
+deselected). The final acceptance-harness tests passed separately: 12 tests,
+including real Nextflow previews of separate and protected output paths. These
+checks used the existing CI environment; installation of the refreshed lock is
+also checked by PR CI and the pending container build. The local focused run
+passed 175 tests with 6 platform-dependent skips. Ruff lint/format checks and
+mypy pass. An isolated Nextflow preview accepts the named output channels and
+existing ProSeg tuples.
 
-Before treating HITL-0 as operationally accepted:
+The P7513 production-context GPU tile check passed on 2026-10-19 under the shared
+GPU lock: all 3745 scored cells matched, AP at IoU 0.5 was 1.0, and mean matched
+IoU was 0.9999953134. The published mask and statistics checksums were unchanged.
+See the [validation record](../acceptance/hitl0-runtime-validation.md).
 
-1. Build and smoke-test the refreshed container on a CUDA 13 compatible host.
-2. In an idle, GPU-locked window, compare a P7513 Xenium production-context tile
-   with the published mask as specified by HITL-0. Investigate agreement below
-   the plan's expected 0.99 before proceeding to training.
+The refreshed container still needs its build and CUDA smoke test. Docker access
+is unavailable to the current Dwight account, and passwordless sudo is disabled.
+The [testing guide](../hitl/testing-guide.md) contains the exact build, GPU smoke
+and repeatable tile-check commands, plus the HITL-1 acceptance checklist.
 
 The local macOS full-suite attempt crashed in native clustering code; validation
-of the full suite therefore uses an isolated Linux checkout on Dwight. The GPU
-was active during implementation, so no real-data GPU inference was started.
+of the full suite therefore uses an isolated Linux checkout on Dwight.
+
+The user confirmed that HITL-1 must retain legacy stock-mask reuse and protect
+`/srv/storage/MerXen/results/`. HITL-1 follows acceptance and merge of HITL-0.
