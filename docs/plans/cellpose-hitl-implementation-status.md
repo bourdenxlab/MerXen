@@ -107,12 +107,20 @@ The user confirmed that HITL-1 must retain legacy stock-mask reuse and protect
 
 Local focused checks passed 217 tests with 10 platform/tool-dependent skips.
 After the final incomplete-cache checks, all 125 segmentation tests passed
-locally with 1 platform skip. Current Linux/Nextflow results are tracked in
-[PR #75](https://github.com/bourdenxlab/MerXen/pull/75).
+locally with 1 platform skip. Complete Linux CI passed 820 tests with 3 slow
+tests deselected and no skips, including executable Nextflow checks. Results
+are tracked in [PR #75](https://github.com/bourdenxlab/MerXen/pull/75).
 A broader macOS run passed 739 tests with 18 skips and 3 slow tests deselected,
 excluding the existing native clustering test module that crashes on this host.
-Ruff and mypy pass. Nextflow is unavailable
-locally; CI now installs pinned Nextflow 26.10.2 so the executable workflow checks
-run there. Dwight became unreachable over SSH during implementation; the
-HITL-1 real-tile repeat therefore remains pending. The earlier HITL-0 GPU result
-is recorded above. Container validation remains deferred.
+Ruff and mypy pass. CI installs pinned Nextflow 26.10.2; Dwight's installed
+26.04.4 also passed a main-workflow preview using the real P7513 source.
+
+After the VPN connection was restored, the HITL-1 candidate-fixture GPU check
+passed on Dwight using the production Conda runtime and shared GPU lock. All
+3745 scored cells matched, AP was 1.0, mean matched IoU was 0.9999953134, and
+the published mask/statistics checksums were unchanged. The verified identity
+includes the candidate path and complete inference context. See the
+[HITL-1 validation record](../acceptance/hitl1-model-validation.md) for the
+report location and reproduction instructions. Runs starting after segmentation
+verify saved mask identity when a model is selected, as confirmed by the user.
+Container validation remains deferred.

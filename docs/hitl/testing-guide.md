@@ -205,6 +205,10 @@ unchanged published checksums. The report's model name identifies the fixture
 path; the weights SHA remains the stock `cpsam_v2` checksum. This check runs one
 Cellpose tile and no ProSeg or full-section arm.
 
+The [completed Dwight validation](../acceptance/hitl1-model-validation.md)
+records the passing fixture run, runtime, agreement scores and preserved report
+location. Use fresh fixture and report directories for each repeat.
+
 To check the main-workflow wiring without scheduling segmentation, use the
 fixture's `nextflow-params.json` with a P7513 samplesheet and `-preview`:
 
