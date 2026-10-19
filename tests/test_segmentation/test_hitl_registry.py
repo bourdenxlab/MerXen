@@ -468,3 +468,59 @@ def test_stock_control_pipeline_binds_context_without_model_metadata(
     monkeypatch.setattr(pipeline, "run_tiled_cellpose", stop_before_inference)
     with pytest.raises(RuntimeError, match="stop before inference"):
         pipeline.run_cellpose_segmentation(custom_config)
+
+
+def test_partial_cache_without_mask_is_preserved_even_when_forced(
+    custom_config: SegmentationConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = custom_config.dataset.output_dir
+    output.mkdir()
+    probabilities = output / "cellpose_cellprobs_tiled.npy"
+    np.save(probabilities, np.ones((8, 8), np.float32))
+    before = probabilities.read_bytes()
+    monkeypatch.setattr(
+        pipeline,
+        "_load_dataset_sdata",
+        lambda _: (
+            object(),
+            object(),
+            8,
+            8,
+            np.diag([1 / 0.2125, 1 / 0.2125, 1]),
+            object(),
+        ),
+    )
+    with pytest.raises(ValueError, match="cache is incomplete"):
+        pipeline.run_cellpose_segmentation(custom_config, force_rerun=True)
+    assert probabilities.read_bytes() == before
+    assert not (output / "cellpose_masks_tiled.npy").exists()
+
+
+def test_independent_nuclei_do_not_inspect_in_progress_cell_cache(
+    custom_config: SegmentationConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = custom_config.dataset.output_dir
+    output.mkdir()
+    mask = output / "cellpose_masks_tiled.npy"
+    np.save(mask, np.ones((8, 8), np.uint32))
+    monkeypatch.setattr(
+        pipeline,
+        "_load_dataset_sdata",
+        lambda _: (
+            object(),
+            object(),
+            8,
+            8,
+            np.diag([1 / 0.2125, 1 / 0.2125, 1]),
+            object(),
+        ),
+    )
+
+    def stop(**kwargs: object) -> None:
+        assert kwargs["cellpose_config"].pretrained_model == "cpsam_v2"
+        raise RuntimeError("stop before nuclei inference")
+
+    monkeypatch.setattr(pipeline, "run_tiled_cellpose", stop)
+    with pytest.raises(RuntimeError, match="stop before nuclei inference"):
+        pipeline.run_cellpose_nuclei_segmentation(custom_config)
+    assert np.all(np.load(mask) == 1)

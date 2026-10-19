@@ -521,6 +521,8 @@ def _write_progress(path: Path, data: dict) -> None:
 # hitl-hook:C5
 def _preflight_model_selection(
     config: SegmentationConfig,
+    *,
+    check_cell_cache: bool = True,
 ) -> CellposeModelIdentity | None:
     """Validate custom arms before any entry point creates or replaces output."""
     require_safe_custom_outputs(config)
@@ -552,6 +554,8 @@ def _preflight_model_selection(
         preflight_custom_model if has_custom_model(config) else preflight_stock_arm
     )
     identity = preflight(config, transform_matrix=matrix, image_key=image_key)
+    if not check_cell_cache:
+        return identity
     mask_path = config.dataset.persistent_mask_path or (
         config.dataset.output_dir / "cellpose_masks_tiled.npy"
     )
@@ -872,7 +876,7 @@ def run_cellpose_nuclei_segmentation(
     force_rerun: bool = False,
 ) -> dict[str, Path]:
     """Run an independently reusable DAPI-only Cellpose nuclei segmentation."""
-    _preflight_model_selection(config)
+    _preflight_model_selection(config, check_cell_cache=False)
     dataset = config.dataset
     out_dir = Path(dataset.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

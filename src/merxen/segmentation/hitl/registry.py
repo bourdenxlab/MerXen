@@ -18,6 +18,7 @@ from merxen.segmentation.model_identity import (
     CellposeInferenceContext,
     CellposeModelIdentity,
     find_model_identity_path,
+    model_identity_path,
     read_model_identity,
     require_cellpose_runtime,
 )
@@ -334,6 +335,19 @@ def require_matching_cached_model(
         ValueError: If a custom mask is unverified, or recorded settings differ.
     """
     if not mask_path.exists():
+        if is_experimental_arm(config):
+            companions = [
+                mask_path,
+                model_identity_path(mask_path),
+                config.dataset.persistent_cellpose_stitching_stats_path
+                or mask_path.with_name("cellpose_stitching_stats.json"),
+                config.dataset.persistent_cellpose_cellprob_path
+                or mask_path.with_name("cellpose_cellprobs_tiled.npy"),
+                config.dataset.persistent_transcripts_path
+                or mask_path.with_name("transcripts_for_proseg.csv"),
+            ]
+            if any(path.exists() or path.is_symlink() for path in companions):
+                raise ValueError("Experimental cache is incomplete; use a fresh arm")
         return
     recorded = read_model_identity(mask_path)
     if is_experimental_arm(config):

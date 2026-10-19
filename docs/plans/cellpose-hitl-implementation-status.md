@@ -105,7 +105,10 @@ The user confirmed that HITL-1 must retain legacy stock-mask reuse and protect
   needed for these checks. The
   [model-selection reference](../stages/cellpose-hitl.md) documents the schema.
 
-Local focused checks passed 212 tests with 10 platform/tool-dependent skips.
+Local focused checks passed 217 tests with 10 platform/tool-dependent skips.
+After the final incomplete-cache checks, all 125 segmentation tests passed
+locally with 1 platform skip. Current Linux/Nextflow results are tracked in
+[PR #75](https://github.com/bourdenxlab/MerXen/pull/75).
 A broader macOS run passed 739 tests with 18 skips and 3 slow tests deselected,
 excluding the existing native clustering test module that crashes on this host.
 Ruff and mypy pass. Nextflow is unavailable
