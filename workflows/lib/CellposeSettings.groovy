@@ -211,6 +211,9 @@ class CellposeSettings {
     }
 
     static void preflight(row, rowSettings, params) {
+        def needsPublishedMasks = rowSettings.run_segment == false &&
+            rowSettings.stage_order.indexOf(rowSettings.start_stage) >
+                rowSettings.stage_order.indexOf('segment')
         rowSettings.active_platforms.each { platform ->
             def selected = settings(row, platform, params)
             if (!selected.cellpose_model_policy) {
@@ -240,7 +243,7 @@ class CellposeSettings {
                     (params.cellpose_tile_size_candidates[0] as int) < (params.cellpose_min_tile_size as int)) {
                     throw new IllegalArgumentException('Stock controls require a single pinned tile size')
                 }
-                if (rowSettings.run_segment == false) {
+                if (needsPublishedMasks) {
                     requirePublishedIdentity(rowSettings, platform, params, selected, null,
                         channelsForRow(row, platform))
                 }
@@ -280,7 +283,7 @@ class CellposeSettings {
             if (digest.digest().encodeHex().toString() != metadata.weights_sha256) {
                 throw new IllegalArgumentException('Custom model weights checksum mismatch')
             }
-            if (rowSettings.run_segment == false) {
+            if (needsPublishedMasks) {
                 requirePublishedIdentity(rowSettings, platform, params, selected, metadata, channels)
             }
         }

@@ -68,7 +68,10 @@ workflow {
                 CellposeSettings.preflight(entry.row,
                     [active_platforms: ['XENIUM'], species: 'human', pair_id: 'P1',
                      run_segment: entry.containsKey('run_segment')
-                         ? entry.run_segment : true],
+                         ? entry.run_segment : true,
+                     stage_order: ['build_spatialdata', 'segment_nuclei',
+                         'segment', 'enrich', 'qc'],
+                     start_stage: entry.start_stage ?: 'enrich'],
                     opts)
             }
             return [before: before, after: groovy.json.JsonOutput.prettyPrint(
@@ -261,6 +264,16 @@ def test_model_preflight_and_protected_outdir(tmp_path: Path) -> None:
             "check_preflight": True,
         }
     )
+    for stage in ("build_spatialdata", "segment_nuclei"):
+        cases.append(
+            {
+                "options": options,
+                "row": {},
+                "check_preflight": True,
+                "run_segment": False,
+                "start_stage": stage,
+            }
+        )
     success_count = len(cases)
     old_work = tmp_path / "old-work"
     old_work.mkdir()
