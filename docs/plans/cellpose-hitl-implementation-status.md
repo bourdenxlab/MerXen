@@ -6,6 +6,14 @@ Implementation started on 2026-10-19 from `main` at `a9625a9`, on
 limited to HITL-0; crop export, annotation, training and custom-model integration
 are later milestones.
 
+HITL-0 merged in [PR #74](https://github.com/bourdenxlab/MerXen/pull/74) at
+`6e7481a`. Its fresh-lock GitHub CI passed 760 tests with 5 skips and 3 slow tests
+deselected. The lock install uses `--no-deps` to preserve all generated pins
+without re-resolving upstream unpinned Git URLs.
+
+HITL-1 is implemented on `codex/hitl-1-model-plumbing`, based on that `main`.
+The section below records its current validation state.
+
 ## Confirmed decisions
 
 - Land HITL-0 before HITL-1.
@@ -73,3 +81,35 @@ of the full suite therefore uses an isolated Linux checkout on Dwight.
 
 The user confirmed that HITL-1 must retain legacy stock-mask reuse and protect
 `/srv/storage/MerXen/results/`. HITL-1 follows acceptance and merge of HITL-0.
+
+## HITL-1 implementation and validation
+
+- Optional per-platform bundle/path/hash model selectors and threshold/filter
+  overrides, including samplesheet inheritance and explicit zero values.
+  Unset options leave the legacy config JSON unchanged.
+- Strict `model.json` schema, actual weights checksums before/after loading,
+  candidate opt-in, native image/channel order, full-affine pixel-size checks,
+  exact runtime checks and a singleton evaluated tile size.
+- Verified custom-cache identities include image, filtering and tiling context.
+  All segmentation entry points refuse mismatches before replacement, including
+  forced reruns and the combined pipeline's fast path. Downstream-only model
+  selectors verify saved identities before scheduling work.
+- Protected roots cover visible paths, symlink aliases and published links into
+  old Nextflow work directories. Mutable source zarrs must also be independent;
+  the read-only tile diagnostic can read the published source explicitly.
+- Independent nuclei retain stock weights and global settings. C1–C5 and C7 are
+  each marked once. The production loop calls `run_cellpose_tile`; pre-extraction
+  hashes pin synthetic masks, logits and stitching statistics.
+- A stock-only candidate fixture helper and executable instructions in the
+  [testing guide](../hitl/testing-guide.md). No trained model or annotations are
+  needed for these checks. The
+  [model-selection reference](../stages/cellpose-hitl.md) documents the schema.
+
+Local focused checks passed 212 tests with 10 platform/tool-dependent skips.
+A broader macOS run passed 739 tests with 18 skips and 3 slow tests deselected,
+excluding the existing native clustering test module that crashes on this host.
+Ruff and mypy pass. Nextflow is unavailable
+locally; CI now installs pinned Nextflow 26.10.2 so the executable workflow checks
+run there. Dwight became unreachable over SSH during implementation; the
+HITL-1 real-tile repeat therefore remains pending. The earlier HITL-0 GPU result
+is recorded above. Container validation remains deferred.

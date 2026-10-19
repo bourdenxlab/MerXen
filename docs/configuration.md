@@ -110,8 +110,9 @@ only for rows whose effective `enable_alignment` value is `true`.
 
 ### Cellpose
 
-`segment_nuclei` uses DAPI only, stock Cellpose-SAM v2 (`cpsam_v2`), and the same
-inference/tiling settings as cell Cellpose. Cellpose 4 ignores the former
+`segment_nuclei` uses DAPI only, stock Cellpose-SAM v2 (`cpsam_v2`), and the global
+inference/tiling settings. Optional per-platform cell overrides leave nuclei
+settings unchanged. Cellpose 4 ignores the former
 `model_type="nuclei"` and `model_type="cyto3"` settings; neither selected a
 different model. Both masks use the default final
 area filter of 5–400 µm². On Dwight,
@@ -149,6 +150,11 @@ stages require Cellpose 4.2.1.1 and PyTorch 2.14.x; the lock records 2.14.0,
 verified on Dwight with CUDA 13.0. Fresh inference checks the stock checkpoint's
 SHA-256 and records its model identity beside the mask. See
 [segmentation provenance](stages/segmentation.md#model-provenance).
+
+Optional `<platform>_cellpose_model` selectors and per-platform threshold/filter
+overrides are documented in [Cellpose HITL model selection](stages/cellpose-hitl.md).
+They add configuration keys only when set and require separate, protected custom
+arms with verified provenance for reuse.
 
 ### Mask image quantification
 

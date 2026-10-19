@@ -25,6 +25,7 @@ from merxen.io.spatialdata_schema import (
 from merxen.segmentation import cellpose
 from merxen.segmentation import model_identity as identity_module
 from merxen.segmentation.model_identity import (
+    CellposeInferenceContext,
     CellposeModelIdentity,
     ensure_model_identity,
     find_model_identity_path,
@@ -118,6 +119,29 @@ def test_missing_checkpoint_fails_before_cellpose_can_fall_back(
     with pytest.raises(FileNotFoundError, match="pretrained_model"):
         cellpose.build_cellpose_model(
             CellposeConfig(pretrained_model=str(tmp_path / "missing"))
+        )
+
+
+@pytest.mark.usefixtures("pinned_runtime")
+def test_builder_refuses_wrong_checksum_before_loading_weights(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    weights = tmp_path / "model"
+    weights.write_bytes(b"changed checkpoint")
+    monkeypatch.setattr(
+        cellpose,
+        "cellpose_models",
+        SimpleNamespace(
+            MODEL_NAMES=["cpsam_v2"],
+            CellposeModel=lambda **_: pytest.fail("wrong weights must not be loaded"),
+        ),
+    )
+    with pytest.raises(ValueError, match="model_sha256 mismatch"):
+        cellpose.build_cellpose_model(
+            CellposeConfig(
+                pretrained_model=str(weights),
+                model_sha256="0" * 64,
+            )
         )
 
 
@@ -272,6 +296,24 @@ def test_conflicting_sidecar_and_stats_refuse_without_overwriting(
     assert (sidecar.read_bytes(), stats.read_bytes()) == before
 
 
+def test_hitl0_sidecar_remains_reusable_without_rewriting_optional_fields(
+    tmp_path: Path,
+) -> None:
+    """New optional provenance fields must not invalidate completed HITL-0 masks."""
+    mask = tmp_path / "cellpose_masks_tiled.npy"
+    payload = _identity().model_dump(mode="json")
+    payload.pop("inference_context")
+    payload["cellpose_config"].pop("model_sha256")
+    payload["cellpose_config"].pop("model_metadata_path")
+    sidecar = model_identity_path(mask)
+    sidecar.write_text(json.dumps(payload))
+    stats = tmp_path / "stats.json"
+    stats.write_text(json.dumps({"model_identity": payload}))
+    before = sidecar.read_bytes(), stats.read_bytes()
+    assert ensure_model_identity(mask, stats) == _identity()
+    assert (sidecar.read_bytes(), stats.read_bytes()) == before
+
+
 @pytest.mark.usefixtures("pinned_runtime")
 @pytest.mark.parametrize("write_stats", [False, True])
 def test_tiled_inference_records_loaded_identity_with_aligned_probabilities(
@@ -295,13 +337,25 @@ def test_tiled_inference_records_loaded_identity_with_aligned_probabilities(
     mask_path = tmp_path / "cellpose_masks_tiled.npy"
     stats_path = tmp_path / "stats.json"
     probs_path = tmp_path / "probabilities.npy"
+    config = CellposeConfig(pretrained_model=str(weights))
+    expected = identify_cellpose_model(Model(), config)
+    expected.inference_context = CellposeInferenceContext(
+        platform="XENIUM",
+        species="human",
+        channels=["DAPI", "18S"],
+        image_key="morphology_focus",
+        pixel_size_um=(0.2125, 0.2125),
+        mask_filter=MaskFilterConfig(),
+        tiling=TilingConfig(),
+    )
     cellpose.run_tiled_cellpose(
         fetch_tile_fn=lambda *bbox: np.arange(64, dtype=np.uint16).reshape(8, 8, 1),
         height=8,
         width=8,
         dataset_name="synthetic",
         output_mask_path=mask_path,
-        cellpose_config=CellposeConfig(pretrained_model=str(weights)),
+        cellpose_config=config,
+        expected_model_identity=expected,
         mask_filter_config=MaskFilterConfig(),
         tiling_config=TilingConfig(
             tile_size_candidates=[8],

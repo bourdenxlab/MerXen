@@ -333,8 +333,10 @@ def buildConfigForPlatform(row, pairId, platform) {
 }
 
 def segmentMetaForPlatform(row, platform, params) {
+    def modelSettings = CellposeSettings.settings(row, platform, params)
+    def extra = modelSettings ? [cellpose_settings: modelSettings] : [:]
     if (platform == "MERSCOPE") {
-        return [
+        return extra + [
             channels: parseChannels(row.merscope_channels, ["DAPI", "PolyT"]),
             image_prefix: chooseField(row, ["merscope_image_prefix"]) ?: null,
             z_range: parseRange(row.merscope_z_range, 0, 6),
@@ -349,7 +351,7 @@ def segmentMetaForPlatform(row, platform, params) {
     }
 
     if (platform == "XENIUM") {
-        return [
+        return extra + [
             channels: parseChannels(row.xenium_channels, ["DAPI", "18S"]),
             image_prefix: null,
             z_range: null,
@@ -1492,6 +1494,7 @@ def appendRegisterImagesPreflightChecks(errors, settings) {
 }
 
 def runPreflightChecks(row, settings, params) {
+    CellposeSettings.preflight(row, settings, params)
     def errors = []
     appendRegisterImagesPreflightChecks(errors, settings)
     appendClusteringSquidpyPreflightChecks(errors, settings, params)
@@ -2276,6 +2279,15 @@ workflow {
                     transcript_chunk_rows: params.transcript_chunk_rows,
                 ],
             ]
+
+            // hitl-hook:C4
+            if (meta.cellpose_settings) {
+                baseConfig.cellpose.putAll(meta.cellpose_settings.cellpose)
+                baseConfig.mask_filter.putAll(meta.cellpose_settings.mask_filter)
+                if (meta.cellpose_settings.cellpose_model_policy) {
+                    baseConfig.cellpose_model_policy = meta.cellpose_settings.cellpose_model_policy
+                }
+            }
 
             def segmentConfig = baseConfig + [
                 dataset: [

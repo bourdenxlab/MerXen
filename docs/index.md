@@ -38,6 +38,7 @@ converge at alignment; dashed stations are governed by a parameter. See
 ### Pipeline stages
 - [SpatialData build](stages/spatialdata-build.md)
 - [Segmentation](stages/segmentation.md) (Cellpose-SAM + ProSeg)
+- [Cellpose HITL model selection](stages/cellpose-hitl.md) (optional model plumbing)
 - [Enrichment](stages/enrichment.md)
 - [Image registration](stages/register-images.md) (post-Xenium IF onto the mask grid)
 - [Mask image quantification](stages/mask-image-quantification.md)

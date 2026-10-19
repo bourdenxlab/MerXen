@@ -55,6 +55,10 @@ eggs/
 .eggs/
 lib/
 lib64/
+# Nextflow's Groovy helpers are source, rather than Python build output.
+!workflows/lib/
+workflows/lib/*
+!workflows/lib/*.groovy
 parts/
 sdist/
 var/

@@ -19,6 +19,8 @@ class CellposeConfig(BaseModel):
 
     # hitl-hook:C1
     pretrained_model: str = Field(default="cpsam_v2", min_length=1)
+    model_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    model_metadata_path: Path | None = None
     model_type: str | None = None
     gpu: bool = True
     diameter: float | None = None
@@ -264,6 +266,7 @@ class DatasetConfig(BaseModel):
     data_path: Path
     channels: list[str]
     output_dir: Path
+    image_key: str | None = None
     persistent_latest_zarr_path: Path | None = None
     persistent_mask_path: Path | None = None
     persistent_cellpose_cellprob_path: Path | None = None
@@ -283,12 +286,21 @@ class DatasetConfig(BaseModel):
     proseg_overrides: dict[str, Any] = Field(default_factory=dict)
 
 
+class CellposeModelPolicy(BaseModel):
+    """Explicit custom-model opt-in and protected published output roots."""
+
+    species: Literal["human", "mouse"] = "human"
+    allow_candidate_model: bool = False
+    protected_output_roots: list[Path] = Field(default_factory=list)
+
+
 class SegmentationConfig(BaseModel):
     """Full configuration for the segmentation step."""
 
     dataset: DatasetConfig
     cellpose: CellposeConfig = CellposeConfig()
     nuclei_cellpose: CellposeConfig = CellposeConfig()
+    cellpose_model_policy: CellposeModelPolicy = CellposeModelPolicy()
     mask_filter: MaskFilterConfig = MaskFilterConfig()
     nuclei_mask_filter: MaskFilterConfig = MaskFilterConfig()
     tiling: TilingConfig = TilingConfig()

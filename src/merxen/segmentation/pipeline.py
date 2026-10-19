@@ -39,8 +39,15 @@ from merxen.segmentation.cellpose import (
     run_tiled_cellpose,
     synchronize_cellpose_probability_logits,
 )
+from merxen.segmentation.hitl.registry import (
+    has_custom_model,
+    preflight_custom_model,
+    require_matching_cached_model,
+    require_safe_custom_outputs,
+)
 from merxen.segmentation.mask_filter import filter_labeled_mask_by_area
 from merxen.segmentation.model_identity import (
+    CellposeModelIdentity,
     ensure_model_identity,
     model_identity_path,
 )
@@ -379,6 +386,8 @@ def _load_dataset_sdata(
                 requested_channels=dataset.channels,
                 as_float32=True,
             )
+            if has_custom_model(config) and source["channels"] != dataset.channels:
+                raise ValueError("Custom-model source is missing requested channels")
             height, width, _ = source["shape"]
             log_status(
                 f"[{dataset.name}] MERSCOPE projection image shape={height}x{width}, "
@@ -399,6 +408,10 @@ def _load_dataset_sdata(
             )
 
         plane_keys = list_plane_keys(sdata.images, prefix=dataset.image_prefix)
+        if has_custom_model(config):
+            raise ValueError(
+                "Custom MERSCOPE models require native MERSCOPE_z_projection"
+            )
         if dataset.z_range is None:
             selected_keys = [key for _, key in plane_keys]
         else:
@@ -446,12 +459,22 @@ def _load_dataset_sdata(
         matrix = _load_xenium_transform_matrix(config)
         if len(sdata.images) == 0:
             raise RuntimeError(f"[{dataset.name}] No Xenium images found.")
-        image_key = list(sdata.images.keys())[0]
+        image_key = dataset.image_key or (
+            "morphology_focus"
+            if has_custom_model(config)
+            else list(sdata.images.keys())[0]
+        )
+        if image_key not in sdata.images:
+            raise ValueError("Custom Xenium models require native morphology_focus")
         source = build_image_source(
             sdata.images[image_key],
             requested_channels=dataset.channels,
             as_float32=True,
         )
+        if has_custom_model(config) and source["channels"] != dataset.channels:
+            raise ValueError(
+                "Custom-model source is missing one or more requested channels"
+            )
         height, width, _ = source["shape"]
         log_status(
             f"[{dataset.name}] Xenium image='{image_key}' shape={height}x{width}, "
@@ -493,12 +516,62 @@ def _write_progress(path: Path, data: dict) -> None:
         pass
 
 
+# hitl-hook:C5
+def _preflight_model_selection(
+    config: SegmentationConfig,
+) -> CellposeModelIdentity | None:
+    """Validate custom arms before any entry point creates or replaces output."""
+    require_safe_custom_outputs(config)
+    if not has_custom_model(config):
+        return None
+    native_key = (
+        "morphology_focus"
+        if config.dataset.platform == "XENIUM"
+        else MERSCOPE_ZPROJ_IMAGE_NAME
+    )
+    if config.dataset.image_key not in (None, native_key):
+        raise ValueError("Custom models require the native image element")
+    if config.cellpose.model_metadata_path is None:
+        raise ValueError("Custom models require model_metadata_path")
+    for path in (
+        Path(config.cellpose.pretrained_model),
+        config.cellpose.model_metadata_path,
+    ):
+        if not path.is_file():
+            raise FileNotFoundError(path)
+    sdata, _fetch, _height, _width, matrix, _points = _load_dataset_sdata(config)
+    image_key = (
+        "morphology_focus"
+        if config.dataset.platform == "XENIUM"
+        else MERSCOPE_ZPROJ_IMAGE_NAME
+    )
+    identity = preflight_custom_model(
+        config, transform_matrix=matrix, image_key=image_key
+    )
+    mask_path = config.dataset.persistent_mask_path or (
+        config.dataset.output_dir / "cellpose_masks_tiled.npy"
+    )
+    require_matching_cached_model(mask_path, config, identity)
+    if mask_path.exists():
+        required = (
+            config.dataset.persistent_cellpose_cellprob_path
+            or mask_path.with_name("cellpose_cellprobs_tiled.npy"),
+            config.dataset.persistent_transcripts_path
+            or mask_path.with_name("transcripts_for_proseg.csv"),
+        )
+        if not all(path.exists() for path in required):
+            raise ValueError("Custom-model cache is incomplete; use a fresh outdir")
+    del sdata
+    return identity
+
+
 def run_cellpose_segmentation(
     config: SegmentationConfig,
     *,
     force_rerun: bool = False,
 ) -> dict[str, Path]:
     """Run Cellpose and prepare its mask-derived inputs for ProSeg."""
+    expected_identity = _preflight_model_selection(config)
     dataset = config.dataset
     out_dir = Path(dataset.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -534,6 +607,8 @@ def run_cellpose_segmentation(
     stitching_stats_path = (
         persistent_stitching_stats_path or staged_stitching_stats_path
     )
+    # hitl-hook:C3
+    require_matching_cached_model(mask_path, config, expected_identity)
     progress_path = out_dir / "cellpose_progress.json"
     _started_at = time.monotonic()
 
@@ -632,6 +707,7 @@ def run_cellpose_segmentation(
     mask_path.parent.mkdir(parents=True, exist_ok=True)
     mask_path = run_tiled_cellpose(
         fetch_tile_fn=fetch_tile_fn,
+        expected_model_identity=expected_identity,
         height=height,
         width=width,
         dataset_name=dataset.name,
@@ -792,6 +868,7 @@ def run_cellpose_nuclei_segmentation(
     force_rerun: bool = False,
 ) -> dict[str, Path]:
     """Run an independently reusable DAPI-only Cellpose nuclei segmentation."""
+    _preflight_model_selection(config)
     dataset = config.dataset
     out_dir = Path(dataset.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -861,8 +938,18 @@ def run_cellpose_nuclei_segmentation(
         update={
             "model_type": config.nuclei_cellpose.model_type,
             "pretrained_model": config.nuclei_cellpose.pretrained_model,
+            "model_sha256": config.nuclei_cellpose.model_sha256,
+            "model_metadata_path": config.nuclei_cellpose.model_metadata_path,
         }
     )
+    if has_custom_model(config) or (
+        config.nuclei_cellpose.model_fields_set - {"model_type", "pretrained_model"}
+    ):
+        nuclei_config.cellpose = config.nuclei_cellpose.model_copy(deep=True)
+        if nuclei_config.cellpose.pretrained_model != "cpsam_v2":
+            raise ValueError("HITL cell models require independent stock nuclei")
+    if has_custom_model(config) and dataset.platform == "XENIUM":
+        nuclei_config.dataset.image_key = "morphology_focus"
     nuclei_config.mask_filter = config.nuclei_mask_filter
 
     sdata, fetch_tile_fn, height, width, matrix, points_obj = _load_dataset_sdata(
@@ -940,6 +1027,8 @@ def run_proseg_segmentation(
     force_rerun: bool = False,
 ) -> dict[str, Path]:
     """Refine a prepared Cellpose prior with the CPU-only ProSeg tool."""
+    expected_identity = _preflight_model_selection(config)
+    require_matching_cached_model(Path(cellpose_mask_path), config, expected_identity)
     dataset = config.dataset
     out_dir = Path(dataset.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1106,6 +1195,7 @@ def run_segmentation_pipeline(
     force_rerun: bool = False,
 ) -> dict[str, Path]:
     """Run Cellpose then ProSeg in one process for CLI compatibility."""
+    _preflight_model_selection(config)
     dataset = config.dataset
     out_dir = Path(dataset.output_dir)
     staged_latest_output = out_dir / "proseg_base_latest.zarr"
@@ -1139,6 +1229,8 @@ def run_segmentation_pipeline(
         if dataset.persistent_nuclei_mask_path
         else staged_nuclei_mask_path
     )
+    if not has_custom_model(config):
+        require_matching_cached_model(reusable_mask, config)
     hybrid_complete = not config.proseg_hybrid.enabled or has_proseg_hybrid_refinement(
         persistent_latest_output,
         config.proseg_hybrid,

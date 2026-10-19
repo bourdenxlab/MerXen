@@ -18,15 +18,14 @@ from pathlib import Path
 import numpy as np
 
 from merxen.config import SegmentationConfig
-from merxen.io.image_source import prepare_cellpose_input
 from merxen.segmentation.cellpose import (
     build_cellpose_affine_to_microns,
     build_cellpose_model,
     iter_core_tiles,
-    run_cellpose_model_eval,
+    run_cellpose_tile,
 )
+from merxen.segmentation.hitl.registry import has_custom_model, preflight_custom_model
 from merxen.segmentation.mask_filter import (
-    filter_cell_by_regionprops,
     filter_labeled_mask_by_area,
 )
 from merxen.segmentation.model_identity import (
@@ -187,7 +186,10 @@ def main(argv: list[str] | None = None) -> int:
     before = _sha256(args.baseline_mask)
     stats_sha = _sha256(args.baseline_stats)
     sdata, fetch, height, width, matrix, _points = _load_dataset_sdata(config)
-    if list(sdata.images)[0] != args.image_key:
+    selected_key = config.dataset.image_key or (
+        "morphology_focus" if has_custom_model(config) else list(sdata.images)[0]
+    )
+    if selected_key != args.image_key:
         raise ValueError("Production loader selected a different native image element")
     if args.image_key.endswith("_aligned_nonrigid"):
         raise ValueError("Acceptance must use the native image element")
@@ -206,10 +208,16 @@ def main(argv: list[str] | None = None) -> int:
     y0, y1, x0, x1 = score_bbox
     if y0 >= y1 or x0 >= x1:
         raise ValueError("Scoring margin leaves no tile interior")
-    source_tile = fetch(
-        tile["tile_y0"], tile["tile_y1"], tile["tile_x0"], tile["tile_x1"]
+    expected_identity = (
+        preflight_custom_model(
+            config,
+            transform_matrix=matrix,
+            image_key=args.image_key,
+            allow_readonly_source=True,
+        )
+        if has_custom_model(config)
+        else None
     )
-    _, model_input, _ = prepare_cellpose_input(source_tile, factor_rescale=1.0)
     import torch
 
     if not torch.cuda.is_available():
@@ -219,23 +227,26 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError("Insufficient free GPU memory; retry in an idle window")
     model = build_cellpose_model(config.cellpose)
     identity = identify_cellpose_model(model, config.cellpose)
+    if expected_identity is not None:
+        identity.inference_context = expected_identity.inference_context
+        if identity != expected_identity:
+            raise ValueError("Loaded tile-check model differs from completed preflight")
     if model.device.type != "cuda":
         raise RuntimeError("Cellpose did not load onto CUDA")
     torch.cuda.reset_peak_memory_stats()
     logger.info("Running recorded production tile %d", args.tile_index)
-    raw, _flows, _styles = run_cellpose_model_eval(model, model_input, config.cellpose)
-    filtered = raw
-    if config.tiling.filter_per_tile:
-        filtered = filter_cell_by_regionprops(
-            raw,
-            max_eccentricity=config.mask_filter.max_eccentricity,
-            n_jobs=min(4, config.mask_filter.n_jobs),
-            min_area_percentile=config.mask_filter.min_area_percentile,
-            min_area_px=config.mask_filter.min_area_px,
-        )
+    result = run_cellpose_tile(
+        fetch,
+        tile,
+        model,
+        config.cellpose,
+        config.mask_filter,
+        filter_per_tile=config.tiling.filter_per_tile,
+        include_cellprobs=False,
+    )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     prediction_path = args.output_dir / "cellpose_masks_tiled.npy"
-    np.save(prediction_path, filtered.astype(np.uint32))
+    np.save(prediction_path, result.filtered_masks.astype(np.uint32))
     x_affine, y_affine = build_cellpose_affine_to_microns(matrix, 1.0)
     pixel_area = abs(x_affine[0] * y_affine[1] - x_affine[1] * y_affine[0])
     area_stats = filter_labeled_mask_by_area(

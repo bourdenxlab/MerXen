@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -23,8 +26,10 @@ from merxen.memory import (
 )
 from merxen.segmentation.mask_filter import filter_cell_by_regionprops
 from merxen.segmentation.model_identity import (
+    CellposeModelIdentity,
     identify_cellpose_model,
     model_identity_path,
+    read_model_identity,
     require_cellpose_runtime,
     write_model_identity,
 )
@@ -61,6 +66,11 @@ def build_cellpose_model(config: CellposeConfig) -> Any:
         raise FileNotFoundError(
             f"Cellpose pretrained_model does not exist: {config.pretrained_model}"
         )
+    if config.model_sha256 is not None:
+        with Path(config.pretrained_model).open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        if digest != config.model_sha256:
+            raise ValueError("Cellpose model_sha256 mismatch before checkpoint loading")
     return cellpose_models.CellposeModel(
         gpu=config.gpu,
         pretrained_model=config.pretrained_model,
@@ -487,6 +497,64 @@ def _write_stitching_stats(path: Path, stats: dict[str, Any]) -> None:
     path.write_text(json.dumps(stats, indent=2, sort_keys=True))
 
 
+@dataclass(frozen=True)
+class CellposeTileResult:
+    """Production model input and unstitched raw/filtered tile predictions."""
+
+    model_input: np.ndarray
+    raw_masks: np.ndarray
+    filtered_masks: np.ndarray
+    cellprob_logits: np.ndarray | None
+
+
+# hitl-hook:C7
+def run_cellpose_tile(
+    fetch_tile_fn: Callable[[int, int, int, int], np.ndarray],
+    tile: Mapping[str, int],
+    model: Any,
+    cellpose_config: CellposeConfig,
+    mask_filter_config: MaskFilterConfig,
+    *,
+    filter_per_tile: bool = True,
+    include_cellprobs: bool = True,
+) -> CellposeTileResult:
+    """Execute the same halo-tile input and filtering operation in every caller.
+
+    Args:
+        fetch_tile_fn: Native selected-channel image reader.
+        tile: Bounding box from the original full-image tile grid.
+        model: Loaded Cellpose model.
+        cellpose_config: Effective inference settings.
+        mask_filter_config: Effective per-tile filtering settings.
+        filter_per_tile: Apply the production region-property filter.
+        include_cellprobs: Extract probability logits when required by the caller.
+
+    Returns:
+        Whole-tile uint8 model input, raw/filtered labels and probability logits.
+    """
+    source = fetch_tile_fn(
+        tile["tile_y0"], tile["tile_y1"], tile["tile_x0"], tile["tile_x1"]
+    )
+    _, model_input, _ = prepare_cellpose_input(source, factor_rescale=1.0)
+    masks, flows, _styles = run_cellpose_model_eval(model, model_input, cellpose_config)
+    logits = (
+        extract_cellpose_probability_logits(flows, masks.shape)
+        if include_cellprobs
+        else None
+    )
+    filtered = masks
+    if filter_per_tile:
+        filtered = filter_cell_by_regionprops(
+            masks,
+            max_eccentricity=mask_filter_config.max_eccentricity,
+            n_jobs=max(1, min(mask_filter_config.n_jobs, 4)),
+            show_progress=False,
+            min_area_percentile=mask_filter_config.min_area_percentile,
+            min_area_px=mask_filter_config.min_area_px,
+        )
+    return CellposeTileResult(model_input, masks, filtered, logits)
+
+
 def run_tiled_cellpose(
     fetch_tile_fn: Any,
     height: int,
@@ -500,6 +568,7 @@ def run_tiled_cellpose(
     output_stitching_stats_path: Path | None = None,
     output_cellprob_path: Path | None = None,
     progress_callback: Any = None,
+    expected_model_identity: CellposeModelIdentity | None = None,
 ) -> Path:
     """Run tiled Cellpose segmentation across a full image.
 
@@ -518,27 +587,37 @@ def run_tiled_cellpose(
         memory_config: Memory management parameters.
         output_stitching_stats_path: Optional path for stitching diagnostics JSON.
         output_cellprob_path: Optional path for stitched Cellpose probability logits.
+        expected_model_identity: Completed preflight contract for a custom model.
 
     Returns:
         Path to the written mask .npy file.
     """
     # Validate the runtime and loaded weights before touching existing outputs.
+    is_custom = (
+        cellpose_config.pretrained_model != "cpsam_v2"
+        or cellpose_config.model_sha256 is not None
+        or cellpose_config.model_metadata_path is not None
+    )
+    if is_custom and (
+        expected_model_identity is None
+        or expected_model_identity.inference_context is None
+    ):
+        raise ValueError("Custom-model tiled inference requires completed preflight")
     model = build_cellpose_model(cellpose_config)
     identity = identify_cellpose_model(model, cellpose_config)
+    if expected_model_identity is not None:
+        identity.inference_context = expected_model_identity.inference_context
+        if identity != expected_model_identity:
+            raise ValueError("Loaded model identity differs from completed preflight")
     output_mask_path = Path(output_mask_path)
-    model_identity_path(output_mask_path).unlink(missing_ok=True)
-    if output_mask_path.exists():
-        output_mask_path.unlink()
-    if output_stitching_stats_path is not None:
-        output_stitching_stats_path = Path(output_stitching_stats_path)
-        if output_stitching_stats_path.exists():
-            output_stitching_stats_path.unlink()
-    if output_cellprob_path is not None:
-        output_cellprob_path = Path(output_cellprob_path)
-        output_cellprob_path.parent.mkdir(parents=True, exist_ok=True)
-        if output_cellprob_path.exists():
-            output_cellprob_path.unlink()
-
+    if (
+        expected_model_identity is not None
+        and output_mask_path.exists()
+        and (read_model_identity(output_mask_path) != expected_model_identity)
+    ):
+        raise ValueError(
+            "Existing output model identity mismatch before tiled inference"
+        )
     candidates = [
         int(x)
         for x in tiling_config.tile_size_candidates
@@ -558,6 +637,19 @@ def run_tiled_cellpose(
         candidates=candidates,
         dataset_name=dataset_name,
     )
+
+    model_identity_path(output_mask_path).unlink(missing_ok=True)
+    if output_mask_path.exists():
+        output_mask_path.unlink()
+    if output_stitching_stats_path is not None:
+        output_stitching_stats_path = Path(output_stitching_stats_path)
+        if output_stitching_stats_path.exists():
+            output_stitching_stats_path.unlink()
+    if output_cellprob_path is not None:
+        output_cellprob_path = Path(output_cellprob_path)
+        output_cellprob_path.parent.mkdir(parents=True, exist_ok=True)
+        if output_cellprob_path.exists():
+            output_cellprob_path.unlink()
 
     tiles = iter_core_tiles(
         height=height,
@@ -593,7 +685,6 @@ def run_tiled_cellpose(
 
     next_label = 1
     global_label_areas: dict[int, int] = {}
-    tile_filter_n_jobs = max(1, min(mask_filter_config.n_jobs, 4))
     stitch_stats: dict[str, Any] = {
         "dataset_name": dataset_name,
         "height": int(height),
@@ -632,35 +723,25 @@ def run_tiled_cellpose(
             warn_gb=memory_config.memory_warn_gb,
         )
 
-        tile = fetch_tile_fn(t["tile_y0"], t["tile_y1"], t["tile_x0"], t["tile_x1"])
-        _, img_seg, _ = prepare_cellpose_input(tile, factor_rescale=1.0)
-
-        masks, flows, styles = run_cellpose_model_eval(model, img_seg, cellpose_config)
-        cellprob_logits = (
-            extract_cellpose_probability_logits(flows, masks.shape)
-            if cellprob_mem is not None
-            else None
+        result = run_cellpose_tile(
+            fetch_tile_fn,
+            t,
+            model,
+            cellpose_config,
+            mask_filter_config,
+            filter_per_tile=tiling_config.filter_per_tile,
+            include_cellprobs=cellprob_mem is not None,
         )
-        raw_label_count = _count_positive_labels(masks)
-
-        if tiling_config.filter_per_tile:
-            masks = filter_cell_by_regionprops(
-                masks,
-                max_eccentricity=mask_filter_config.max_eccentricity,
-                n_jobs=tile_filter_n_jobs,
-                show_progress=False,
-                min_area_percentile=mask_filter_config.min_area_percentile,
-                min_area_px=mask_filter_config.min_area_px,
-            )
+        raw_label_count = _count_positive_labels(result.raw_masks)
 
         next_label, tile_stats = _stitch_core_owned_tile_labels(
-            tile_mask=masks,
+            tile_mask=result.filtered_masks,
             global_mask=mask_mem,
             tile=t,
             next_label=next_label,
             global_label_areas=global_label_areas,
             tiling_config=tiling_config,
-            tile_cellprobs=cellprob_logits,
+            tile_cellprobs=result.cellprob_logits,
             global_cellprobs=cellprob_mem,
         )
         tile_stats["raw_labels"] = raw_label_count
@@ -686,7 +767,7 @@ def run_tiled_cellpose(
                     duplicate_skipped=stitch_stats["duplicate_skipped"],
                 )
 
-        del tile, img_seg, masks, flows, styles, cellprob_logits
+        del result
         clear_cuda_cache()
 
         if i % int(memory_config.memory_check_every_chunks) == 0:
