@@ -98,17 +98,18 @@ def test_dwight_gpu_processes_use_one_fixed_host_lock(
         "CELLPOSE_NUCLEI_SEGMENT",
         "ALIGN",
         "CLUSTERING_SQUIDPY_COMPUTE",
+        "GASTON_TRAIN",
     ):
         assert f'withName: "{process_name}"' in dwight_config_text
     assert (
         dwight_config_text.count(
             'MERXEN_GPU_LOCK_FILE="${params.gpu_process_lock_file}"'
         )
-        == 4
+        == 5
     )
-    assert dwight_config_text.count('exec 9<"\\${MERXEN_GPU_LOCK_FILE}"') == 4
+    assert dwight_config_text.count('exec 9<"\\${MERXEN_GPU_LOCK_FILE}"') == 5
     assert 'exec 9>"\\${MERXEN_GPU_LOCK_FILE}"' not in dwight_config_text
-    assert dwight_config_text.count("set -o noclobber") == 4
+    assert dwight_config_text.count("set -o noclobber") == 5
     assert "${PWD}/.merxen_gpu.lock" not in combined_config_text
 
 

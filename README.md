@@ -179,6 +179,7 @@ Full documentation lives in [docs/](docs/) — start at [docs/index.md](docs/ind
 
 - **Usage** — [Getting started](docs/getting-started.md) · [Samplesheet format](docs/samplesheet.md) · [Running the pipeline](docs/running-the-pipeline.md) · [Configuration](docs/configuration.md) · [Local configuration and privacy](docs/local-configuration.md) · [Outputs](docs/outputs.md)
 - **Developer reference** — [Pipeline architecture](docs/pipeline.md) · [Metro map](docs/metro-map.md) · [Python API](docs/python-api.md) · [CLI reference](docs/cli.md) · [Development workflow](docs/development.md)
+- **GASTON** — [Spatial domains](docs/stages/gaston.md)
 
 <details>
 <summary><b>Repository layout</b></summary>
@@ -261,3 +262,6 @@ MerXen orchestrates the work of a lot of other people. If you use this pipeline,
 MIT — see [LICENSE](LICENSE). © 2025 Mathieu Bourdenx.
 
 Developed in collaboration with the [Bourdenx Lab](https://github.com/bourdenxlab).
+
+The optional [GASTON stage](docs/stages/gaston.md) uses separately licensed
+software; see [third-party notices](THIRD_PARTY_NOTICES.md).

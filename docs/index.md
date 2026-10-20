@@ -52,6 +52,7 @@ converge at alignment; dashed stations are governed by a parameter. See
 - [Squidpy clustering](stages/clustering-squidpy.md)
 - [Distance from object](stages/distance-from-object.md)
 - [MapMyCells](stages/mapmycells.md)
+- [GASTON spatial domains](stages/gaston.md)
 
 ### Developer reference
 - [Pipeline architecture](pipeline.md) — stage graph and data flow.
@@ -79,6 +80,8 @@ converge at alignment; dashed stations are governed by a parameter. See
 | [envs/environment.clustering-gpu.yml](../envs/environment.clustering-gpu.yml) | RAPIDS env used only by clustering compute |
 | [envs/environment.mender.yml](../envs/environment.mender.yml) | Pinned CPU environment used only by MENDER compute |
 | [containers/](../containers/) | Dockerfiles for the base, clustering-GPU and MENDER images |
+| [envs/environment.gaston.yml](../envs/environment.gaston.yml) | Pinned GASTON runtime |
+| [containers/Dockerfile.gaston](../containers/Dockerfile.gaston) | CUDA-enabled GASTON image |
 | [pyproject.toml](../pyproject.toml) | Dependencies, `merxen` entry point, tool config |
 | [.env.example](../.env.example) | Required environment variables |
 

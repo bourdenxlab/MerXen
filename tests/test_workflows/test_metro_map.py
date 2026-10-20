@@ -25,6 +25,16 @@ MODULES_DIR = REPO_ROOT / "workflows" / "modules"
 # Processes intentionally absent from the map, with the reason. The map is a
 # reader's overview, not a DAG dump; these carry no scientific meaning.
 OMITTED_PROCESSES = {
+    **dict.fromkeys(
+        [
+            "GASTON_PREPARE",
+            "GASTON_GLM_PCA",
+            "GASTON_TRAIN",
+            "GASTON_POSTPROCESS",
+            "GASTON_IMPORT",
+        ],
+        "optional GASTON analysis, documented in docs/stages/gaston.md",
+    ),
     "ENSURE_PROSEG": "bootstrap step that installs the ProSeg binary",
     "VIEWER_CACHE": "derived cache for the interactive viewer",
     "VALIDATE_ANALYSIS_LAYER": "pre-QC guard with no artifacts of its own",

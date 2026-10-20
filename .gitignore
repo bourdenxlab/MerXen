@@ -256,3 +256,6 @@ __marimo__/
 /.aliases.tsv
 /workflows/conf/site.config
 /workflows/conf/*.site.config
+
+# Exact LGPL source distributed with the optional GASTON runtime.
+!licenses/sources/glmpca-0.1.0.tar.gz
