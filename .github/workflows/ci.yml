@@ -20,11 +20,27 @@ jobs:
           # re-resolve upstream unpinned Git URLs against its pinned commits.
           uv pip install --system --no-deps -r requirements/requirements.lock
           uv pip install --system -e . --no-deps
+      - name: Verify locked Cellpose runtime
+        run: python -c 'from merxen.segmentation.model_identity import require_cellpose_runtime; print(require_cellpose_runtime())'
       - name: Lint
         run: ruff check .
       - name: Format check
         run: ruff format --check .
       - name: Type check
         run: mypy src/
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install Nextflow for executable workflow checks
+        env:
+          NXF_VER: 26.10.2
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "https://github.com/nextflow-io/nextflow/releases/download/v${NXF_VER}/nextflow" -o "$HOME/.local/bin/nextflow"
+          chmod +x "$HOME/.local/bin/nextflow"
+          "$HOME/.local/bin/nextflow" -version
+          echo "NXF_VER=${NXF_VER}" >> "$GITHUB_ENV"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Tests
         run: pytest -m "not slow"

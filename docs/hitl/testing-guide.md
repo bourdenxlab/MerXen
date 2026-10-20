@@ -6,13 +6,14 @@ all acceptance predictions and reports must go outside that directory.
 
 ## 1. Check the code without running segmentation
 
-On Dwight, check out the implementation branch in a separate test checkout:
+On Dwight, check out the implementation branch in a separate test checkout.
+Use `origin/main` instead once HITL-1 has merged:
 
 ```bash
 cd /home/becalia/code/MerXen
 git fetch origin
 export MERXEN_TEST_CHECKOUT=$(mktemp -d /srv/storage/MerXen/tmp/hitl-checkout.XXXXXX)
-git worktree add --detach "$MERXEN_TEST_CHECKOUT" origin/codex/hitl-segmentation
+git worktree add --detach "$MERXEN_TEST_CHECKOUT" origin/codex/hitl-1-model-plumbing
 cd "$MERXEN_TEST_CHECKOUT"
 export PYTHONPATH="$MERXEN_TEST_CHECKOUT/src"
 /srv/storage/MerXen/ci-venv/bin/python -m pytest \
@@ -128,40 +129,104 @@ SIF; that artifact has not been rebuilt or validated against the new pins.
 Do not use it for this milestone's fresh-inference checks. The CUDA 13.0
 Dockerfile change remains unvalidated until the container work resumes.
 
-## 4. Begin testing HITL-1 when its implementation branch is ready
+## 4. Test HITL-1 without training a model
 
-The following is the acceptance checklist for the upcoming implementation. Its
-custom-model parameters and fixture bundles are not available in HITL-0.
+From the test checkout, first run the new fast checks:
 
-First run the new model-selection, preflight, cache-identity and shared-tile tests.
-They must establish all of these outcomes before a real custom-model run:
+```bash
+/srv/storage/MerXen/ci-venv/bin/python -m pytest \
+  tests/test_segmentation/test_hitl_registry.py \
+  tests/test_segmentation/test_cellpose_tile.py \
+  tests/test_segmentation/test_model_identity.py \
+  tests/test_scripts/test_prepare_hitl1_fixture.py \
+  tests/test_workflows/test_hitl_model_settings.py \
+  tests/test_workflows/test_segmentation_subworkflow.py
+```
 
-| Scenario | Required behavior |
-|---|---|
-| No model or override parameters | Legacy config JSON unchanged; stock `cpsam_v2` selected |
-| Legacy stock outputs with unknown provenance | Reused as `unverified`; no forced regeneration |
-| Valid custom model and matching metadata | Selected only for its requested platform; nuclei stay stock |
-| Candidate model without explicit opt-in | Refused before inference |
-| Missing weights, wrong checksum, rejected status | Refused before inference |
-| Wrong channels, species, platform, resolution or runtime | Refused before inference |
-| Model/configuration differs from cached mask identity | Refused; existing artifacts unchanged |
-| Custom-model output targets the protected baseline, including a symlink alias | Refused; `--force-rerun` must not bypass this protection |
-| Shared tile function replacing the existing loop body | Identical synthetic masks, probability logits and stitching statistics |
+Expected: all tests pass, including the actual Nextflow checks (no skips on
+Dwight). They check byte-identical default configuration, each platform override,
+candidate opt-in, model/image/runtime mismatches, cache reuse and refusal, and
+protected paths through symlinks, including forced reruns. Synthetic output hashes
+were captured before the shared tile function was extracted.
 
-Then use P7513 in this order:
+Prepare a candidate fixture using the already verified stock weights:
 
-1. Preview the ordinary stock configuration and compare it byte for byte with
-   the saved control configuration. Preview must schedule no segmentation.
-2. Preview a valid custom-model fixture with explicit settings and a fresh arm
-   outdir outside the protected baseline. Verify the selected model, channel
-   order, pinned tile size and effective overrides.
-3. Try the intentionally invalid fixture variants above. Every case must fail
-   before GPU inference or output replacement; verify baseline checksums.
-4. Run a single tile through the shared production tile function, then repeat
-   with identical settings to check reuse. Change the model identity and confirm
-   that reuse is refused.
+```bash
+export MERXEN_TEST_PYTHON=/srv/storage/MerXen/work/conda/env-0e319c40ef50b2834c65ae2f7f53bbcd/bin/python
+export MERXEN_HITL1_FIXTURE=$(mktemp -d /srv/storage/MerXen/tmp/hitl1-fixture.XXXXXX)
+"$MERXEN_TEST_PYTHON" scripts/acceptance/prepare_hitl1_fixture.py \
+  --config /srv/storage/MerXen/work/d2/2bb63695bfa15cdb697b604cb6f624/segment_config.json \
+  --source-zarr /srv/storage/MerXen/work/c9/800bf12cfc879ab1368ba767fff599/spatialdata_out/source_spatialdata.zarr \
+  --weights "$HOME/.cellpose/models/cpsam_v2" \
+  --protected-root /srv/storage/MerXen/results \
+  --output-dir "$MERXEN_HITL1_FIXTURE"
+```
 
-The HITL-1 change will include the exact fixture locations and executable commands
-for these steps. A stock checkpoint may be wrapped in a clearly marked test
-manifest to test the plumbing; that does not establish that a fine-tuned model
-is accepted. Real annotation begins with HITL-2's pilot package.
+Inspect `model.json`, `segment_config.json` and `nextflow-params.json` in that
+directory. The fixture is marked **candidate**, with explicit opt-in in its
+config. It links only the stock weights and clears every persistent baseline
+output path. It creates no masks, training data or annotations. The fixture is
+for testing plumbing; it is not an accepted fine-tune.
+
+Run the same locked, production-context tile through the shared tile function:
+
+```bash
+export MERXEN_HITL1_CHECK_ROOT=$(mktemp -d /srv/storage/MerXen/tmp/hitl1-check.XXXXXX)
+nextflow run workflows/acceptance/hitl0_tile_check.nf \
+  -ansi-log false -work-dir "$MERXEN_HITL1_CHECK_ROOT/work" \
+  --source_root "$MERXEN_TEST_CHECKOUT" \
+  --python "$MERXEN_TEST_PYTHON" \
+  --config "$MERXEN_HITL1_FIXTURE/segment_config.json" \
+  --source_zarr /srv/storage/MerXen/work/c9/800bf12cfc879ab1368ba767fff599/spatialdata_out/source_spatialdata.zarr \
+  --baseline_mask /srv/storage/MerXen/results/P7513/xenium/segmentation/cellpose_masks_tiled.npy \
+  --baseline_stats /srv/storage/MerXen/results/P7513/xenium/segmentation/cellpose_stitching_stats.json \
+  --protected_root /srv/storage/MerXen/results \
+  --gpu_lock_file /tmp/merxen-dwight-gpu.lock \
+  --image_key morphology_focus --tile_index 44 \
+  --outdir "$MERXEN_HITL1_CHECK_ROOT/report"
+
+export MERXEN_TILE_REPORT="$MERXEN_HITL1_CHECK_ROOT/report/tile_check_out/tile_check.json"
+"$MERXEN_TEST_PYTHON" - <<'PY'
+import json
+import os
+from pathlib import Path
+
+report = json.loads(Path(os.environ["MERXEN_TILE_REPORT"]).read_text())
+assert report["baseline_unchanged"] and report["passed"], report
+assert report["model_identity"]["status"] == "verified"
+assert report["model_identity"]["inference_context"]["channels"] == ["DAPI", "18S"]
+print(json.dumps(report["agreement"], indent=2))
+print("HITL1_STOCK_FIXTURE_OK")
+PY
+```
+
+Expected: `HITL1_STOCK_FIXTURE_OK`, AP and mean matched IoU at least 0.99, and
+unchanged published checksums. The report's model name identifies the fixture
+path; the weights SHA remains the stock `cpsam_v2` checksum. This check runs one
+Cellpose tile and no ProSeg or full-section arm.
+
+The [completed Dwight validation](../acceptance/hitl1-model-validation.md)
+records the passing fixture run, runtime, agreement scores and preserved report
+location. Use fresh fixture and report directories for each repeat.
+
+To check the main-workflow wiring without scheduling segmentation, use the
+fixture's `nextflow-params.json` with a P7513 samplesheet and `-preview`:
+
+```bash
+nextflow run workflows/main.nf -profile dwight,conda -preview \
+  -params-file "$MERXEN_HITL1_FIXTURE/nextflow-params.json" \
+  --samplesheet /absolute/path/to/P7513-samplesheet.csv \
+  --analysis_mode xenium --stop_stage segment \
+  --outdir "$MERXEN_HITL1_FIXTURE/preview-arm"
+```
+
+Use a samplesheet whose active platform is Xenium and whose source paths exist;
+row settings override run defaults. Custom arms must copy any shared source
+zarr outside the protected baseline rather than link it. Preview still runs
+preflight but schedules no processes. The fast executable workflow tests above
+exercise every override and refusal using small fixtures.
+
+Cache-reuse checks use synthetic complete artifacts in the fast tests; a tile
+report is not a reusable full-section segmentation. Full-section custom arms,
+annotation and adoption decisions follow later milestones. Preserve failed
+reports and task logs rather than relaxing the agreement threshold.

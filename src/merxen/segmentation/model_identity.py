@@ -12,11 +12,23 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from merxen.config import CellposeConfig
+from merxen.config import CellposeConfig, MaskFilterConfig, TilingConfig
 
 CELLPOSE_VERSION = "4.2.1.1"
 TORCH_MINOR = "2.14"
 CPSAM_V2_SHA256 = "0f1cc3f7ecdd8a037a57c6c48d9d8921391be4cbce3fa9f13c3e3a2e1253c667"
+
+
+class CellposeInferenceContext(BaseModel):
+    """Image and filtering contract required for verified custom-model reuse."""
+
+    platform: Literal["MERSCOPE", "XENIUM"]
+    species: Literal["human", "mouse"]
+    channels: list[str]
+    image_key: str
+    pixel_size_um: tuple[float, float]
+    mask_filter: MaskFilterConfig
+    tiling: TilingConfig
 
 
 class CellposeModelIdentity(BaseModel):
@@ -29,6 +41,7 @@ class CellposeModelIdentity(BaseModel):
     cellpose_version: str | None = None
     torch_version: str | None = None
     cellpose_config: CellposeConfig | None = None
+    inference_context: CellposeInferenceContext | None = None
     evidence: str | None = None
 
     @model_validator(mode="after")
@@ -100,6 +113,8 @@ def identify_cellpose_model(
         raise ValueError("Cellpose loaded different weights from pretrained_model")
     with weights_path.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    if config.model_sha256 is not None and digest != config.model_sha256:
+        raise ValueError("Loaded Cellpose weights differ from model_sha256")
     if config.pretrained_model == "cpsam_v2" and digest != CPSAM_V2_SHA256:
         raise ValueError(
             f"Stock cpsam_v2 weights checksum mismatch: {digest}. "
@@ -225,7 +240,10 @@ def ensure_model_identity(mask_path: Path, stats_path: Path) -> CellposeModelIde
         else {"write_stitching_stats": False}
     )
     recorded = stats.get("model_identity")
-    if recorded is not None and recorded != payload:
+    if (
+        recorded is not None
+        and CellposeModelIdentity.model_validate(recorded) != identity
+    ):
         raise ValueError(f"Cellpose model identity disagrees with {stats_path}")
     if not model_identity_path(mask_path).exists():
         write_model_identity(mask_path, identity)

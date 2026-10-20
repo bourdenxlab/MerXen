@@ -13,6 +13,21 @@ from merxen.io.samplesheet import (
 )
 
 
+def test_parse_samplesheet_preserves_optional_model_selectors(tmp_path: Path) -> None:
+    """Keep registry hashes as strings and blank platform settings unset."""
+    csv_path = tmp_path / "samplesheet.csv"
+    csv_path.write_text(
+        "pair_id,xenium_cellpose_model,merscope_cellpose_model\n"
+        f"P1,{'a' * 64},\n"
+        "P2,/path/to/model-bundle,/path/to/merscope-model\n"
+    )
+    first, second = parse_samplesheet(csv_path)
+    assert first.xenium_cellpose_model == "a" * 64
+    assert first.merscope_cellpose_model is None
+    assert second.xenium_cellpose_model == "/path/to/model-bundle"
+    assert second.merscope_cellpose_model == "/path/to/merscope-model"
+
+
 def test_parse_samplesheet_supports_raw_dirs_and_cached_spatialdata(
     tmp_path: Path,
 ) -> None:
