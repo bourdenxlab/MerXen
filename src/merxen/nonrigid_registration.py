@@ -181,9 +181,12 @@ def estimate_nonrigid_flow(
             },
         )
 
+    correlation_scale = max(
+        1.0 - float(min_local_correlation),
+        float(np.finfo(np.float32).eps),
+    )
     correlation_weight = np.clip(
-        (correlation - float(min_local_correlation))
-        / max(1.0 - float(min_local_correlation), np.finfo(np.float32).eps),
+        (correlation - float(min_local_correlation)) / correlation_scale,
         0.0,
         1.0,
     )
