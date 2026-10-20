@@ -91,8 +91,10 @@ def test_clustering_config_h8_defaults_are_legacy() -> None:
     assert config.qc_leiden_resolution == 0.5
     assert config.table_key_suffix == ""
     # The stage config defaults to legacy (the legacy heredoc writes no mode);
-    # map_first runs set it. Mouse is still legacy by default; human flipped.
-    assert DEFAULT_CLUSTERING_MODE["mouse"] == config.mode
+    # map_first rows set it. Both species default to map_first since their
+    # flips (human M8, mouse M9), so a row's mode always comes from the row
+    # settings, never from this field's default.
+    assert set(DEFAULT_CLUSTERING_MODE.values()) == {"map_first"}
 
 
 def test_legacy_stage_json_loads_unchanged(tmp_path: Path) -> None:
@@ -114,15 +116,15 @@ def test_legacy_stage_json_loads_unchanged(tmp_path: Path) -> None:
 def test_resolved_defaults_give_a_valid_config(species: str) -> None:
     """Nextflow's default mode and suffix for either species validate.
 
-    Human runs map_first, unsuffixed, since its flip (§20); mouse is legacy.
+    Both species run map_first, unsuffixed, since their flips (human §20,
+    mouse §25).
     """
     mode = resolve_clustering_mode(species)  # type: ignore[arg-type]
     suffix = resolve_table_key_suffix(species, mode)  # type: ignore[arg-type]
 
     config = _clustering(mode=mode, table_key_suffix=suffix)
 
-    expected = "map_first" if species == "human" else "legacy"
-    assert (config.mode, config.table_key_suffix) == (expected, "")
+    assert (config.mode, config.table_key_suffix) == ("map_first", "")
 
 
 def test_map_first_fields_round_trip_through_json() -> None:

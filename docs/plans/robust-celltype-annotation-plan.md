@@ -1256,6 +1256,8 @@ Requested and approved by the user on 2026-09-30. Added to the plan before any M
   - *Exceptions:* the user approved a written exception for exactly the two section-time rows ("Written exception (Recommended)"; LOOSENING, POST-HOC). The re-score with it follows.
   - *U8:* the mouse default segmentation stays proseg_hybrid (OD-B7's mouse half reversed). *U10:* 0.2.0 covers gates H and M.
   - *U9, pending:* the flip PR into the integration branch is prepared. It merges only after the user confirms the review of the two original_seg reports and of the exceptions.
+  - *Re-score (2026-10-15):* with the section-time exception added, the flip rule passes: 67 PASS, 7 FAIL (excepted), no problem and nothing back to the user. The first score stays on record.
+  - *Flip PR open (2026-10-15):* `FLIPPED_SPECIES` and `DEFAULT_CLUSTERING_MODE` include mouse (Python and Groovy), `clustering_squidpy_mode_mouse = "map_first"`, mouse MAP runs 4 MapMyCells processes by default (human keeps 6), and mouse `legacy` logs the deprecation warning. The segmentation (proseg_hybrid, U8), the MO11 banner and the warn-only mouse real-data QC are unchanged. It merges into the integration branch only after U9, and it does not touch `main`.
 
 ### M10 `[feature]` (v1.1): LL, calibrated probabilities, measured recipe, gate v2 (4–6 days)
 

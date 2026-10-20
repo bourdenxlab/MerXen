@@ -937,12 +937,20 @@ V6_GOLDEN: dict[str, dict[str, str]] = {
     # packaged ``floors_mouse.csv``, whose ``panel_family`` column now holds
     # the section aliases (same floors, same rows). No label, status, flag or
     # other provenance field moves.
+    #
+    # Refreshed 2026-10-15 by the mouse flip (M9): the ``provenance`` digest
+    # of each mouse scenario changed (here and in
+    # ``MOUSE_PROVENANCE_BEFORE_C22``); no other digest did. The only
+    # difference is the MAP run record's ``n_processors``, 6 -> 4: the
+    # fixture maps without a process count, and the mouse default of
+    # ``pipeline.default_n_processors`` is now 4, the count gate M measured
+    # (pre-registration §25.1). Human digests are unchanged (human keeps 6).
     "mouse_v6_provisional": {
         "AG_MERSCOPE/labels": (
             "b280d2188f45d21e5d9edda6a2b514d0f4bf18e94b89a5eea38437d78f87e4be"
         ),
         "AG_MERSCOPE/provenance": (
-            "8ab541b9d36e85e9332ce32f2317a59144416d5b260d16b36758697b8dd21947"
+            "47aa5a28985812fd1a0b552c728a09535b7f425661d3a3111d5d20c8f1d17e68"
         ),
         "AG_MERSCOPE/summary": (
             "ad69c95bd0d26c56b9a69a5a82653fee0187cb94c636769cabe4bb3b7416d72a"
@@ -956,7 +964,7 @@ V6_GOLDEN: dict[str, dict[str, str]] = {
             "6c14f98d3e7a3d4c43a4321e9abd97989f612c73084adf1336f42f1b8ef03b9c"
         ),
         "AG_MERSCOPE/provenance": (
-            "dcbf701be46f2dc2e93833b5a5a25174a85987868919ecfeb987ef3918a9ccca"
+            "3b54d97ea4679ba82a2ff11e3344ab0a04d622d931ea70f768b10d0945278b41"
         ),
         "AG_MERSCOPE/summary": (
             "22d97886fc9e989da98574c678a81f75dbf8bc898c38b9f72df7187e08e4edc6"
@@ -967,16 +975,17 @@ V6_GOLDEN: dict[str, dict[str, str]] = {
     },
 }
 # The mouse provenance digests before M13b C22 (515017d), which the QC-free
-# mouse run (``real_qc.enabled`` false) still gives.
+# mouse run (``real_qc.enabled`` false) still gives, but for the MAP record's
+# mouse process count (4 since M9, above).
 MOUSE_PROVENANCE_BEFORE_C22: dict[str, dict[str, str]] = {
     "mouse_v6_provisional": {
         "AG_MERSCOPE/provenance": (
-            "f42a4598d6a008cf6c32db8d26700f27a6579f213e2a0a8e5ce217dd5dff19f8"
+            "c8781ff7847cfcb9ba533476a51f661deb6904a68d03276601c32956b2eb5863"
         ),
     },
     "mouse_no_tables": {
         "AG_MERSCOPE/provenance": (
-            "c392a9799666854f994abd63fd41f5492b86b048cce5f34af7bd3bba426b758c"
+            "6d9470e59f874c1d66de69aa3fca059ea1b8745db202478b4bf80423730247bc"
         ),
     },
 }

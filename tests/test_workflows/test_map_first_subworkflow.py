@@ -26,8 +26,9 @@ PREP, a large panel) and checks that:
 * COMPUTE_CPU runs once per pair x segmentation, after its own RESOLVE, on
   the RESOLVE output, in the main environment without a GPU lock, and emits
   FINALIZE's input shape;
-* MAP's, RESOLVE's and COMPUTE_CPU's resources follow the plan (6 CPUs,
-  24 GB / 48 GB above 1,000 genes; 2 CPUs, 16 GB / 32 GB; 8 CPUs, 32 GB);
+* MAP's, RESOLVE's and COMPUTE_CPU's resources follow the plan (6 CPUs, 4
+  for a mouse section, 24 GB / 48 GB above 1,000 genes; 2 CPUs, 16 GB /
+  32 GB; 8 CPUs, 32 GB);
 * a ``-resume`` run re-runs PREP (never cached) but keeps MAP, RESOLVE and
   COMPUTE_CPU cached, because they hash their inputs' content
   (``cache "deep"``);
@@ -908,10 +909,18 @@ def test_a_failed_prep_drops_only_the_branches_that_need_it(
 
 @needs_nextflow
 def test_map_resources_follow_the_panel_size(harness: dict[str, Any]) -> None:
+    """MAP: 6 CPUs, mouse 4 (gate M, §25.1); 24 GB, 48 GB above 1,000 genes.
+
+    The run's species is human, and F5's panel is a mouse section's: the
+    process count follows each branch's own species (its panel), so a human
+    branch keeps 6 beside it.
+    """
     rows = {tuple(row["tag"].split(":")): row for row in _rows(harness["trace"], MAP)}
     gib = 1024**3
+    assert ("F5", "original_seg") in rows
     for branch, row in rows.items():
-        assert row["cpus"] == "6", branch
+        expected_cpus = "4" if branch == ("F5", "original_seg") else "6"
+        assert row["cpus"] == expected_cpus, branch
         expected = 48 if branch == ("F8", "proseg_hybrid") else 24
         assert int(row["memory"]) == expected * gib, branch
 
@@ -1974,7 +1983,9 @@ def test_map_runs_the_real_script_with_the_pipeline_arguments(tmp_path: Path) ->
     assert set(records) == set(maps)
     for branch, record in records.items():
         argv, environment = record["argv"], record["env"]
-        assert argv[argv.index("--n-processors") + 1] == "6"
+        # Mouse maps with 4 processes (gate M, §25.1), human with 6.
+        processes = "4" if branch[0] == "F5" else "6"
+        assert argv[argv.index("--n-processors") + 1] == processes, branch
         assert argv[argv.index("--prepared-dir") + 1] == (
             "map_inputs/clustering_prepare_out"
         )

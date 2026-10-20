@@ -440,12 +440,12 @@ adding or replacing the final clustered table for the active segmentation:
 `table_MOSAIK_proseg_clustering_squidpy` for `reseg` and
 `table_original_clustering_squidpy` for `original_seg`. Set
 `--clustering_squidpy_write_spatialdata_table false` for H5AD-only output.
-A `map_first` run of a species that has not flipped (mouse, until M9)
-writes the same key with the suffix `_mapfirst` (e.g.
+A `map_first` run of a species that has not flipped writes the same key
+with the suffix `_mapfirst` (e.g.
 `table_MOSAIK_proseg_clustering_squidpy_mapfirst`;
-`clustering_squidpy_table_key_suffix`) and never the legacy table; a human
-`map_first` run writes the unsuffixed key since the human flip (M8) unless a
-suffix is given; its
+`clustering_squidpy_table_key_suffix`) and never the legacy table. Both
+species have flipped (human at M8, mouse at M9), so a `map_first` run writes
+the unsuffixed key, replacing the legacy table, unless a suffix is given; its
 clustered H5AD records the suffix, the MENDER policy and the pair's
 cross-platform scope in `uns["merxen_hierarchical_clustering"]`
 ([Map-first clustering runs](stages/annotation.md#map-first-clustering-runs-m5)).

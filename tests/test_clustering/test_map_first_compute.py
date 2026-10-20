@@ -318,10 +318,21 @@ def test_an_empty_suffix_before_the_flip_is_refused(
 ) -> None:
     """A map_first compute never writes the unsuffixed (legacy) key (OD-A3).
 
-    Human has flipped (pre-registration §20), so the labels are read as those
-    of mouse, which has not.
+    Both species have flipped (human §20, mouse §25), so the check runs as it
+    did before the mouse flip: the labels are read as those of mouse, and
+    only human counts as flipped.
     """
+    from merxen.annotation import config as annotation_config
+
     monkeypatch.setattr(map_first_module, "label_table_species", lambda _: "mouse")
+    monkeypatch.setattr(
+        annotation_config,
+        "resolve_table_key_suffix",
+        functools.partial(
+            annotation_config.resolve_table_key_suffix,
+            flipped_species=frozenset({"human"}),
+        ),
+    )
     config_path, prepared, labels, _ = _inputs(tmp_path)
     config = apply_mode_overrides(
         ClusteringSquidpyConfig.model_validate_json(config_path.read_text()),

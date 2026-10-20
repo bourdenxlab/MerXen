@@ -34,8 +34,10 @@ from merxen.annotation.panel import (
     load_annotation_panel,
 )
 from merxen.annotation.pipeline import (
+    DEFAULT_N_PROCESSORS_BY_SPECIES,
     MAP_MANIFEST_NAME,
     MOUSE_REGION_STEP,
+    N_PROCESSORS_ENV,
     PROVISIONAL_METADATA_KEY,
     PROVISIONAL_SUFFIX,
     MapError,
@@ -43,6 +45,7 @@ from merxen.annotation.pipeline import (
     annotate_map,
     build_sample_query,
     check_output_outside_inputs,
+    default_n_processors,
     load_map_manifest,
     load_samples,
     locate_bundle,
@@ -1016,9 +1019,26 @@ def test_map_bundles_needs_every_required_bundle(
     assert [run.run_id for run in runs] == ["whb_frontal_supc_clus"]
 
 
-def test_mouse_maps_with_the_drop_level_and_no_pruning_when_none(
-    tmp_path: Path, fake_mmc: FakeMmc
+def test_map_process_count_defaults_per_species(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """MAP maps with 6 processes for human and 4 for mouse (§25.1).
+
+    Mouse uses the count gate M measured; MapMyCells' bootstrap depends on
+    it. The environment override still applies to both species.
+    """
+    monkeypatch.delenv(N_PROCESSORS_ENV, raising=False)
+    assert DEFAULT_N_PROCESSORS_BY_SPECIES == {"human": 6, "mouse": 4}
+    assert default_n_processors() == default_n_processors("human") == 6
+    assert default_n_processors("mouse") == 4
+    monkeypatch.setenv(N_PROCESSORS_ENV, "3")
+    assert default_n_processors("mouse") == default_n_processors("human") == 3
+
+
+def test_mouse_maps_with_the_drop_level_and_no_pruning_when_none(
+    tmp_path: Path, fake_mmc: FakeMmc, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(N_PROCESSORS_ENV, raising=False)
     levels = [
         "CCN20230722_CLAS",
         "CCN20230722_SUBC",
@@ -1127,6 +1147,9 @@ def test_mouse_maps_with_the_drop_level_and_no_pruning_when_none(
     command = fake_mmc.calls[-1]["command"]
     assert command[command.index("--drop_level") + 1] == "CCN20230722_SUPT"
     assert "--nodes_to_drop" not in command
+    # Without a process count mouse maps with 4 (gate M, §25.1).
+    assert manifest.n_processors == 4
+    assert command[command.index("--type_assignment.n_processors") + 1] == "4"
     # The default rule is M6b's selection (variant m6b; pre-registration §24).
     assert manifest.mouse_region_step == MOUSE_REGION_STEP.format(variant="m6b")
     record = manifest.samples["AG_MERSCOPE"]

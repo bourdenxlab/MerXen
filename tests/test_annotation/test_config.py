@@ -40,30 +40,48 @@ from merxen.annotation.config import (
 from merxen.annotation.vocab import load_vocab
 
 
-def test_defaults_flip_human_only() -> None:
-    """Human runs map_first by default since M8 (§20); mouse stays legacy."""
+def test_defaults_flip_both_species() -> None:
+    """Both species run map_first by default: human since M8 (§20), mouse M9 (§25)."""
     config = AnnotationConfig()
     assert config.enabled is False
-    assert DEFAULT_CLUSTERING_MODE == {"human": "map_first", "mouse": "legacy"}
-    assert frozenset({"human"}) == FLIPPED_SPECIES
-    assert resolve_clustering_mode("human") == "map_first"
-    assert resolve_clustering_mode("mouse") == "legacy"
-    assert resolve_table_key_suffix("human", "legacy") == ""
-    assert resolve_table_key_suffix("human", "map_first") == ""
-    assert resolve_table_key_suffix("mouse", "map_first") == "mapfirst"
-    assert default_mapmycells_stage("human") == "skip"
-    assert default_mapmycells_stage("mouse") == "legacy"
+    assert DEFAULT_CLUSTERING_MODE == {"human": "map_first", "mouse": "map_first"}
+    assert frozenset({"human", "mouse"}) == FLIPPED_SPECIES
+    for species in ("human", "mouse"):
+        assert resolve_clustering_mode(species) == "map_first"
+        assert resolve_table_key_suffix(species, "legacy") == ""
+        assert resolve_table_key_suffix(species, "map_first") == ""
+        assert default_mapmycells_stage(species) == "skip"
+    # Legacy stays available on request, for either species.
+    assert resolve_clustering_mode("mouse", mode_mouse="legacy") == "legacy"
+    assert resolve_clustering_mode("human", mode_human="legacy") == "legacy"
+
+
+def test_mouse_before_its_flip_kept_the_suffixed_tables() -> None:
+    """The pre-flip rules still hold for a species outside FLIPPED_SPECIES."""
+    unflipped = frozenset({"human"})
+    assert (
+        resolve_table_key_suffix("mouse", "map_first", flipped_species=unflipped)
+        == "mapfirst"
+    )
+    assert default_mapmycells_stage("mouse", flipped_species=unflipped) == "legacy"
+    assert (
+        resolve_table_key_suffix("human", "map_first", flipped_species=unflipped) == ""
+    )
 
 
 def test_a_rows_mode_wins_over_every_param() -> None:
     """The samplesheet column clustering_squidpy_mode (§20 D15)."""
     assert resolve_clustering_mode("human", row_mode="legacy") == "legacy"
+    assert resolve_clustering_mode("mouse", row_mode=" Legacy ") == "legacy"
     assert (
         resolve_clustering_mode("mouse", mode="legacy", row_mode=" Map_First ")
         == "map_first"
     )
     assert resolve_clustering_mode("human", row_mode="  ") == "map_first"
-    assert resolve_clustering_mode("mouse", row_mode=None) == "legacy"
+    assert resolve_clustering_mode("mouse", row_mode=None) == "map_first"
+    assert (
+        resolve_clustering_mode("mouse", mode_mouse="legacy", row_mode=None) == "legacy"
+    )
     with pytest.raises(ValueError, match="clustering mode"):
         resolve_clustering_mode("human", row_mode="map-first")
 
@@ -549,15 +567,13 @@ def test_table_key_suffix_in_all_mode_and_flip_combinations(
 def test_explicit_table_key_suffix() -> None:
     assert resolve_table_key_suffix("mouse", "map_first", "trial2") == "trial2"
     # Before the flip an empty suffix would overwrite the legacy table (OD-A3).
+    unflipped = frozenset({"human"})
     with pytest.raises(ValueError, match="OD-A3"):
-        resolve_table_key_suffix("mouse", "map_first", "")
+        resolve_table_key_suffix("mouse", "map_first", "", flipped_species=unflipped)
     with pytest.raises(ValueError, match="OD-A3"):
-        resolve_table_key_suffix("mouse", "map_first", "  ")
-    flipped = frozenset({"mouse"})
-    assert (
-        resolve_table_key_suffix("mouse", "map_first", "", flipped_species=flipped)
-        == ""
-    )
+        resolve_table_key_suffix("mouse", "map_first", "  ", flipped_species=unflipped)
+    # Mouse has flipped (M9): an empty suffix is the default.
+    assert resolve_table_key_suffix("mouse", "map_first", "") == ""
     assert resolve_table_key_suffix("mouse", "legacy", "") == ""
     assert resolve_table_key_suffix("mouse", "legacy", "trial2") == ""
     with pytest.raises(ValueError, match="lower-case token"):

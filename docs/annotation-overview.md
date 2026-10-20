@@ -23,15 +23,15 @@ and the thresholds that acceptance was scored against are in the
 page and the code disagree, the code wins; the constants below were checked
 against the branch at `ff49f5c`.
 
-**Status in one paragraph.** Human runs use the new annotation by default
-(`clustering_squidpy_mode = map_first`). Mouse runs still default to the
-legacy annotation; a mouse `map_first` run works (standalone, or in the
-pipeline, where it writes a separate `_mapfirst` table), but mouse
-acceptance, the AP-axis rule hardening and the default switch are still to
-come (see [What is pending for mouse](#what-is-pending-for-mouse)). A
-`legacy` row calls none of the annotation processes, and a test pins the
-legacy clustering script text, its wiring and its parameter defaults, so
-legacy results and `-resume` are unchanged.
+**Status in one paragraph.** Human and mouse runs use the new annotation by
+default (`clustering_squidpy_mode = map_first`): human since gate H (M8),
+mouse since gate M (M9; the mouse switch merges into the integration branch
+only after the user's review of the gate M reports, see
+[What is pending for mouse](#what-is-pending-for-mouse)). `legacy` stays
+available for either species, is deprecated and logs a warning. A `legacy`
+row calls none of the annotation processes, and a test pins the legacy
+clustering script text, its wiring and its parameter defaults, so legacy
+results and `-resume` are unchanged.
 
 ---
 
@@ -134,7 +134,7 @@ All paths are under the run's `outdir` unless stated
 | `<pair>/<seg>/annotation_map/annotation_map_out/` | `<platform>/<sid>_mmc_<run_id>.parquet` (tidy MapMyCells output), `<platform>/<sid>_ct_provisional.parquet` (raw-threshold labels for inspection and the shadow evaluation only; no pipeline stage reads them), mouse `<sid>_mouse_regions.parquet` and the pruned re-map, `map_manifest.json`. |
 | `<pair>/<seg>/annotation_resolve/annotation_resolve_out/` | **`<platform>/<sid>_celltype_labels.parquet`** (the label table: one row per segmented object), `<platform>/<sid>_annotation_manifest.json` (provenance), `<pair>_resolve_summary.json` (gate, trust, coverage, flags, compositions, cross-platform statistics, real-data QC). |
 | `<pair>/<seg>/clustering_squidpy/clustering_squidpy_out/<platform>/` | `<sid>_clustered.h5ad`: table cells only, with every `ct_*` and `flag_*` column in `obs` plus the legacy-compatible columns. |
-| `<pair>/<platform>/latest/latest_spatialdata.zarr` | The clustered table `tables/<source table>_clustering_squidpy[_<suffix>]`, e.g. `table_MOSAIK_proseg_hybrid_clustering_squidpy`. Human `map_first` writes the **unsuffixed** key, so it replaces a legacy table of the same segmentation; mouse `map_first` writes `..._clustering_squidpy_mapfirst` until the mouse default switches. |
+| `<pair>/<platform>/latest/latest_spatialdata.zarr` | The clustered table `tables/<source table>_clustering_squidpy[_<suffix>]`, e.g. `table_MOSAIK_proseg_hybrid_clustering_squidpy`. `map_first` writes the **unsuffixed** key for both species (human since M8, mouse since M9), so it replaces a legacy table of the same segmentation unless `clustering_squidpy_table_key_suffix` is set (for example `mapfirst`). |
 | `<pair>/<seg>/annotation_report/annotation_report_out/` | `report.html`, figures, tables, `acceptance_metrics.json`. |
 
 **What goes into the SpatialData table.** `obs` gets every `ct_*` column
@@ -171,7 +171,8 @@ failed a check (it is null only for `low_counts`, `not_applicable` and
 | Region handling | A fixed list of superclusters implausible in frontal cortex; only `frontal_cortex` is supported | Divisions present in the section are inferred from confident neurons; implausible nodes are dropped and those cells re-mapped |
 | Dataset gate | Label-based: share of cells ≥ 30 counts, confident broad coverage | Label-free signals G1–G5 (registration, marker referee, implausibility, composition, spill-over) |
 | Real-data QC | Yes (downgrade-only) | Yes, warn-only: records outcomes, changes nothing (M13b) |
-| Default mode | `map_first` | `legacy` (until the mouse switch) |
+| Default mode | `map_first` (since M8) | `map_first` (since M9); sections estimated at AP < 6.0 mm carry the MO11 banner |
+| MAP processes | 6 | 4 (the count gate M measured, pre-registration §25.1) |
 
 ### 1.5 How far to trust a panel
 
@@ -341,7 +342,8 @@ level uses.
 MAP runs MapMyCells (`cell_type_mapper` 1.7.2, refused if another version is
 installed) on raw counts restricted to the panel's genes, with fixed
 settings: bootstrap factor 0.5, 100 iterations, seed 0, 6 worker processes
-(the default; the count is part of the run's reuse key), 5 runner-ups
+for human and 4 for mouse (the defaults; the count is part of the run's
+reuse key, and MapMyCells' bootstrap depends on it), 5 runner-ups
 (`mapmycells_engine.MmcEngineParams`). MapMyCells walks the taxonomy from
 the root. At each parent node, in each of 100 iterations it
 draws half of that parent's markers, correlates the cell (log2 CPM over the
@@ -955,10 +957,18 @@ below 100 counts).
 
 #### What is pending for mouse
 
-- **Default switch and acceptance.** Mouse runs `legacy` by default; a
-  `map_first` mouse run writes the `_mapfirst` table beside the legacy one.
-  The pre-registered mouse criteria (MO1–MO11) have not been scored as an
-  acceptance (plan §14, milestone M9).
+- **The user's review before the switch merges (U9).** Gate M scored
+  MO1–MO11 on MS1 and MS2 and passed the mouse flip rule with written
+  exceptions (pre-registration §25.4): MO10's three missed-region rows,
+  MO8's reference-prep memory peak on the two panels and MO8's two
+  section-time rows. The switch (mouse `map_first` by default, unsuffixed
+  tables, MAP at 4 processes) merges into the integration branch only after
+  the user confirms the review of the two original_seg reports and those
+  exceptions; until then M9's exit is not met.
+- **MO11** (the first real anterior section) is untested: both gate M
+  sections are posterior of AP 6.0 mm. A section estimated at AP < 6.0 mm
+  keeps the report's MO11 warning banner (`anterior_section_mo11`) until
+  the first real anterior section passes MO11.
 - **AP-axis rule** (milestone M6b). The AP estimate per section
   (`mouse_ap.estimate_ap`, recorded under `mouse_gate.ap_estimate`) and the
   G4 windows for all sections are in the code, and G4 uses the estimate by
