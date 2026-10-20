@@ -102,19 +102,16 @@ Never hand-edit the lockfile. Never install packages by running `pip install <pa
 
 ## Environment & Configuration
 
-- Store all configuration, secrets, and environment-specific values in environment variables.
-- Use `.env` files locally with `python-decouple` or `pydantic-settings` to load them.
-- Never hardcode secrets, API keys, file paths to local machines, or database credentials.
-- Commit a `.env.example` with placeholder values so new contributors know what's needed.
-- Add `.env` to `.gitignore`.
-
-```python
-from decouple import config
-
-DATABASE_URL = config("DATABASE_URL")
-API_KEY = config("API_KEY")
-DEBUG = config("DEBUG", default=False, cast=bool)
-```
+- Store all configuration, secrets and machine-specific values outside the code. Locations go in
+  the gitignored `.env` (template `.env.example`, placeholders only) or, for Nextflow, a gitignored
+  site config (`workflows/conf/*.site.config`, templates `*.site.config.example`).
+- Read `.env` through the project loader `merxen.local_config` (process environment first, then
+  `.env`). A missing value raises an error that names the variable; never add a built-in host
+  default.
+- Never commit file paths of a machine, secrets, credentials, or the names of samples, donors,
+  sections, slides, runs or instruments. Use the neutral aliases of the gitignored `.aliases.tsv`
+  (template `.aliases.example.tsv`). This applies to file names, commit messages, branch names and
+  pull-request text as well.
 
 
 ## Naming Conventions
@@ -250,6 +247,8 @@ Commit title format is required:
 - `[docs]:` documentation, comments, or docstrings.
 - `[chore]:` maintenance/configuration changes.
 
+A commit message, branch name or PR text never names a sample or a host path (the commit-msg and pre-push hooks check).
+
 
 ## Linting, Formatting & Hooks
 
@@ -317,11 +316,12 @@ repos:
         pass_filenames: false
 ```
 
-After cloning, every contributor must install both hook types:
+After cloning, every contributor must install the hooks. The hook types (pre-commit,
+pre-merge-commit, commit-msg, pre-push) come from `default_install_hook_types` in
+`.pre-commit-config.yaml`:
 
 ```bash
 pre-commit install
-pre-commit install --hook-type pre-push
 ```
 
 Note: these are local guardrails. Contributors can bypass them with `--no-verify`. CI (see below) is the authoritative gate that cannot be bypassed.

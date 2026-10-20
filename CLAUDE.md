@@ -41,3 +41,25 @@ python scripts/update_env_lock_hash.py
 - Do not install packages with `pip install <package>`. Add to `pyproject.toml` and regenerate the lockfile.
 - Do not commit to `main` directly. Use a feature branch and open a PR.
 - Exception: the robust cell-type annotation effort (`docs/plans/robust-celltype-annotation-plan.md`) uses the long-lived integration branch `feature/robust-celltype-annotation`. Milestone branches `feature/rca-m<N>-<slug>` are cut from it and merged into it by PR. Keep it current by merging `main` into it; never rebase it. Only acceptance-gate PRs merge it into `main`. Data-integrity bugfixes still go to `main` first and are then merged into it.
+
+## Privacy: no host paths, no sample names
+
+- Nothing committed may contain an absolute path of a machine (storage roots, mounts, home
+  directories, another host's directories) or the name of a sample: donor, section, slide, run or
+  instrument ids taken from a samplesheet, and colleagues' user names. This covers code, configs,
+  tests, docs, notebooks, file names, commit messages, branch names, PR titles and PR descriptions.
+- Locations live in gitignored files: `.env` (Python, scripts, tests, notebooks; template
+  `.env.example`), and the Nextflow site configs `workflows/conf/site.config` and
+  `workflows/conf/dwight.site.config` (templates `*.example`). Python reads `.env` through
+  `merxen.local_config`; a missing value is an error, never a built-in default.
+- Samples are named by aliases (HD1-HD4 paired human donors, HD1_IF / HD3_IF IF samples, HM1-HM4
+  new-panel human MERSCOPE donors, MS1 / MS2 mouse sections; docs/local-configuration.md). The
+  gitignored `.aliases.tsv` maps them to the real names. Code that reads a real name from data
+  translates it with `merxen.privacy.to_alias`; paths to existing data are built with
+  `merxen.privacy.to_real`.
+- Docs write locations as `.env` variables (`$MERXEN_EVIDENCE_ROOT/...`). Inside a verbatim
+  quotation a name or path is replaced by its alias or variable in square brackets.
+- The hooks enforce this (`pre-commit install`). Before `gh pr create` or `gh pr edit`, pipe the
+  title and body through `python3 scripts/privacy/check_private_text.py --stdin`.
+- Not sample names: public references (WHB, WMB, SEA-AD, MERFISH-638850 and its sections, the ABC
+  atlas, public 10x and Vizgen datasets) and the `.vzg2` file format.

@@ -1,0 +1,65 @@
+# MerXen alias table TEMPLATE (placeholders only). The real table is private:
+# one shared copy outside every repository, linked or copied as .aliases.tsv
+# (gitignored) or named by MERXEN_ALIAS_FILE (docs/local-configuration.md).
+# The loader refuses an unedited <placeholder> in the real column.
+#
+# Format: UTF-8, tab-separated, '#' starts a comment line, blank lines ignored.
+# Columns:
+#   alias        neutral alias used in tracked code, data, tests and docs;
+#                '-' = deny-only row (no alias)
+#   kind         what the real string is (human_paired_donor, human_if_sample,
+#                human_new_panel_donor, mouse_section, instrument, slide,
+#                run_stamp, user_name, person_name, host_dir, ...)
+#   form         which real form the row holds: pair_id (samplesheet pair id;
+#                to_real default), name (display nickname; display() default,
+#                falls back to pair_id), number (bare donor number), bulk_column,
+#                merscope_run, xenium_output, variant (aliased, never returned
+#                by to_real), deny (hook only). Forms are unique per alias,
+#                except variant and deny.
+#   match        token   case-insensitive, alphanumeric boundaries
+#                ident   bare number touching '_' or '-' (scanner, docs only)
+#                literal case-sensitive substring when translating data (the
+#                hooks and the docs rewrite match it in any case)
+#                regex   Python regex in the real column
+#                none    never matched (a form only to_real/display return)
+#   real         the real string (or regex for match=regex)
+#   skip_paths   optional comma-separated globs of tracked paths where the row is
+#                not checked (only a nickname that is also a public format name)
+#   placeholder  optional text written instead of the alias (deny rows default
+#                to <redacted>)
+#
+# alias	kind	form	match	real	skip_paths	placeholder
+
+# --- Human paired donors (Xenium + MERSCOPE; HD1, HD2 development, HD3, HD4 held out)
+HD1	human_paired_donor	pair_id	token	<real pair id>
+HD1	human_paired_donor	number	ident	<real donor number>
+HD1	human_paired_donor	bulk_column	literal	<real bulk-seq column>		bulk_HD1
+HD1	human_paired_donor	merscope_run	literal	<real MERSCOPE run id>		<HD1-merscope-run>
+HD1	human_paired_donor	xenium_output	literal	<real Xenium output folder>		<HD1-xenium-output>
+HD2	human_paired_donor	pair_id	token	<real pair id>
+HD3	human_paired_donor	pair_id	token	<real pair id>
+HD4	human_paired_donor	pair_id	token	<real pair id>
+
+# --- Human IF samples (MERSCOPE only; derived from the donor alias)
+HD1_IF	human_if_sample	pair_id	token	<real pair id>
+HD3_IF	human_if_sample	pair_id	token	<real pair id>
+
+# --- New-panel human MERSCOPE donors
+HM1	human_new_panel_donor	pair_id	token	<real pair id>
+HM2	human_new_panel_donor	pair_id	token	<real pair id>
+HM3	human_new_panel_donor	pair_id	token	<real pair id>
+HM4	human_new_panel_donor	pair_id	token	<real pair id>
+
+# --- Mouse sections
+MS1	mouse_section	pair_id	token	<real pair id>
+MS1	mouse_section	name	token	<real nickname>
+MS2	mouse_section	pair_id	literal	<real pair id>
+MS2	mouse_section	name	none	<real nickname>
+MS2	mouse_section	variant	regex	<regex of the nickname that skips the public format name>	<format files>
+
+# --- Deny-only rows (instruments, slides, run stamps, user names, host directories)
+-	instrument	deny	token	<instrument id>		<instrument>
+-	slide	deny	token	<slide id>		<slide>
+-	run_stamp	deny	literal	<run stamp>		<run-stamp>
+-	user_name	deny	token	<user name>		<user>
+-	host_dir	deny	literal	<host directory name>		<host-dir>
