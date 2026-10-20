@@ -34,7 +34,7 @@ For each listed image:
    and only with at least 20 usable windows; otherwise the Explorer matrix is
    kept and the reason is recorded.
 5. **Optionally refine non-rigidly.** A row with
-   `register_images_nonrigid=true` estimates bidirectional
+   `register_post_xenium_if_nonrigid=true` estimates bidirectional
    [`optical_flow_tvl1`](https://scikit-image.org/docs/stable/api/skimage.registration.html#skimage.registration.optical_flow_tvl1)
    between the affinely overlaid IF DAPI and `morphology_focus` DAPI at
    3.4 µm/px. Forward/backward consistency, local DAPI correlation,
@@ -69,9 +69,9 @@ quantification table is recomputed rather than reused.
 
 ## Inputs
 
-Set the optional `register_images_nonrigid` samplesheet column to `true` for
+Set the optional `register_post_xenium_if_nonrigid` samplesheet column to `true` for
 sections that should receive the guarded optical-flow pass. It defaults to
-`false`; the global `--register_images_nonrigid` parameter is only a fallback
+`false`; the global `--register_post_xenium_if_nonrigid` parameter is only a fallback
 for rows where the column is empty.
 
 Set `xenium_registered_images_csv` on a samplesheet row to a CSV with one row
@@ -200,7 +200,7 @@ image occupies 4.9 GB in the zarr, plus 0.3 GB for its viewer pyramid.
 | `reference_pixel_size_um` | `0.2125` | Xenium morphology pixel size ([10x Genomics](https://kb.10xgenomics.com/hc/en-us/articles/35386990499853-How-can-I-convert-coordinates-between-H-E-image-and-Xenium-data)). |
 | `matrix_scale_tolerance` | `0.02` | Accepted relative deviation of the matrix scale. |
 | `refine_affine` | `true` | Fit and apply the DAPI affine correction. Nextflow: `--register_images_refine_affine`. |
-| `nonrigid_enabled` | `false` | Apply guarded bidirectional TV-L1 after the final affine. Nextflow fallback: `--register_images_nonrigid`; row override: `register_images_nonrigid`. |
+| `nonrigid_enabled` | `false` | Apply guarded bidirectional TV-L1 after the final affine. Nextflow fallback: `--register_post_xenium_if_nonrigid`; row override: `register_post_xenium_if_nonrigid`. |
 | `nonrigid_pixel_size_um` / `nonrigid_smoothing_sigma_um` | `3.4` / `10` | Flow grid resolution and physical smoothing scale. |
 | `nonrigid_attachment` / `nonrigid_tightness` | `10` / `0.3` | TV-L1 data/regularization balance. |
 | `nonrigid_num_warp` / `nonrigid_num_iter` | `5` / `10` | TV-L1 coarse-to-fine warp and fixed-point counts. |
