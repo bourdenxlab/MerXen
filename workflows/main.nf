@@ -1589,6 +1589,15 @@ def rowSampleSettings(row, params) {
     def registerImagesEnabled = (
         activePlatforms.contains("XENIUM") && registeredImagesCsv != null
     )
+    def registerImagesNonrigid = boolOrDefault(
+        rowFieldOrDefault(
+            row,
+            "register_images_nonrigid",
+            params.register_images_nonrigid,
+        ),
+        false,
+        "register_images_nonrigid for ${pairId}",
+    )
     def spatialGeneAnalysisEnabled = boolOrDefault(
         rowFieldOrDefault(
             row,
@@ -1863,6 +1872,7 @@ def rowSampleSettings(row, params) {
         run_enrich: runEnrich,
         run_register_images: runRegisterImages,
         registered_images_csv: registeredImagesCsv,
+        register_images_nonrigid: registerImagesNonrigid,
         run_build_viewer_caches: runBuildViewerCaches,
         run_mask_image_quantification: runMaskImageQuantification,
         run_compute_cortical_depth: runComputeCorticalDepth,
@@ -2556,11 +2566,19 @@ workflow {
         .join(
             sample_rows_ch.flatMap { pairId, _row, settings ->
                 settings.run_register_images
-                    ? [tuple("${pairId}|XENIUM", settings.registered_images_csv)]
+                    ? [
+                        tuple(
+                            "${pairId}|XENIUM",
+                            settings.registered_images_csv,
+                            settings.register_images_nonrigid,
+                        )
+                    ]
                     : []
             }
         )
-        .map { key, pairId, platform, enrichedLatestZarr, registeredImagesCsv ->
+        .map {
+            key, pairId, platform, enrichedLatestZarr, registeredImagesCsv,
+            registerImagesNonrigid ->
             def registerImagesConfig = [
                 dataset_name: "${pairId}_${platform}",
                 platform: platform,
@@ -2568,6 +2586,19 @@ workflow {
                 output_dir: "register_images_out",
                 images: registeredImageSpecs(registeredImagesCsv),
                 refine_affine: params.register_images_refine_affine,
+                nonrigid_enabled: registerImagesNonrigid,
+                nonrigid_pixel_size_um: params.register_images_nonrigid_pixel_size_um,
+                nonrigid_attachment: params.register_images_nonrigid_attachment,
+                nonrigid_tightness: params.register_images_nonrigid_tightness,
+                nonrigid_num_warp: params.register_images_nonrigid_num_warp,
+                nonrigid_num_iter: params.register_images_nonrigid_num_iter,
+                nonrigid_smoothing_sigma_um: params.register_images_nonrigid_smoothing_sigma_um,
+                nonrigid_max_displacement_um: params.register_images_nonrigid_max_displacement_um,
+                nonrigid_max_cycle_error_um: params.register_images_nonrigid_max_cycle_error_um,
+                nonrigid_min_local_correlation: params.register_images_nonrigid_min_local_correlation,
+                nonrigid_min_jacobian: params.register_images_nonrigid_min_jacobian,
+                nonrigid_max_jacobian: params.register_images_nonrigid_max_jacobian,
+                nonrigid_min_confident_fraction: params.register_images_nonrigid_min_confident_fraction,
                 build_viewer_pyramid: params.viewer_cache_build_image_pyramid,
             ]
 
