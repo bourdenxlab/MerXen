@@ -1,0 +1,5 @@
+include THIRD_PARTY_NOTICES.md
+recursive-include licenses *
+include containers/Dockerfile.gaston
+include envs/environment.gaston.yml
+include scripts/collect_gaston_licenses.py

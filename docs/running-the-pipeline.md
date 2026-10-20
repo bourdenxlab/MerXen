@@ -39,16 +39,19 @@ Common optional parameters:
 | Flag | Description |
 |------|-------------|
 | `--outdir` | Where all outputs are published. Defaults to `./results`. |
+| `--species` | `human` (default) or `mouse`. The value applies to the whole invocation. |
 | `--analysis_mode` | `paired` (default), `merscope`, or `xenium`. Controls which platform columns are required and which stages are active. |
-| `--analysis_segmentation` | `both` (default), `all`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, or `proseg_hybrid`. `both` remains `reseg,original_seg`; `all` expands to `reseg,original_seg,proseg_mask,proseg_hybrid`. |
+| `--analysis_segmentation` | `all` (default), `both`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, or `proseg_hybrid`. `all` expands to `reseg,original_seg,proseg_mask,proseg_hybrid`; `both` restricts the run to `reseg,original_seg`. |
 | `--force_spatialdata_build` | Force rebuilding the SpatialData zarr even when a cached one exists. Defaults to `false`. |
 | `--force_proseg_rerun` | Force rebuilding ProSeg bases from the current Cellpose/transcript inputs rather than reusing persistent latest zarrs. Defaults to `false`. |
 | `--enable_alignment` | Run optional DAPI-only VALIS alignment and alignment QC before comparison. Paired mode only. Defaults to `false`. |
 | `--alignment_backend` | Alignment implementation: `valis` (default) or explicit `legacy_spateo`. |
-| `--mecr_enabled` | Run mutually exclusive co-expression rate analysis after QC. Defaults to `true`. |
+| `--mecr_enabled` | Run species-matched whole-brain mutually exclusive co-expression rate analysis after QC. Defaults to `true` for human and `false` for mouse because the complete WMB download is about 151 GB. |
 | `--cortical_depth_enabled` | Run cortical-depth tissue/depth annotation after clustering. Requires boundary GeoJSON annotations. Defaults to `false`. |
 | `--distance_from_object_enabled` | Run registered polygon-edge distance annotation and paired near-vs-far pseudobulk analysis. Defaults to `false`. |
 | `--distance_from_object_segmentations` | Object-distance branches; defaults to `proseg,original,cellpose`. The former names remain accepted aliases. |
+| `--mender_enabled` | Run independent CPU-only MENDER spatial-domain analysis. Defaults to `false`. |
+| `--mender_segmentations` | MENDER segmentation subset or `all`; defaults to `proseg_hybrid`. |
 | `--gaston_enabled` | Run terminal GASTON spatial-domain analysis. Defaults to `false`. |
 | `--gaston_segmentations` | Independent GASTON branches; defaults to `proseg_hybrid`, accepts comma-separated subsets or `all`. |
 | `--start_stage` / `--stop_stage` | Run a contiguous stage range. Defaults to the full pipeline. |
@@ -58,6 +61,7 @@ The samplesheet may also include `analysis_mode`, `enable_alignment`,
 `analysis_segmentation`, `cortical_depth_enabled`,
 `mecr_enabled`,
 `distance_from_object_enabled`, `distance_from_object_segmentations`,
+`mender_enabled`, `mender_segmentations`,
 `gaston_enabled`, `gaston_segmentations`, and the other `gaston_*` controls,
 `start_stage`, `stop_stage`, and `only_stage` columns.
 Non-empty row values override these command-line settings for that row only;
@@ -69,12 +73,12 @@ default in
 To use alignment for all paired rows by default, pass `--enable_alignment true`.
 To choose per row, add an `enable_alignment` column to the samplesheet and set
 paired rows to `true` or `false`; blank cells inherit `--enable_alignment`.
-Nextflow runs `ALIGN` in `environment.alignment.yml`. The default backend
+Nextflow runs `ALIGN` in `envs/environment.alignment.yml`. The default backend
 validates the locked VALIS 1.2 image-registration stack and installs the exact
 VALIS package without re-resolving its older NumPy metadata when necessary.
 The former expression-based implementation remains available with
 `--alignment_backend legacy_spateo`, which activates its pinned Spateo/Dynamo
-bootstrap. Other stages continue to use the regular `environment.yml`.
+bootstrap. Other stages continue to use the regular `envs/environment.yml`.
 GPU-heavy `CELLPOSE_SEGMENT` and `ALIGN` default to one task at a time. CPU-only
 `PROSEG_SEGMENT` runs independently on a normal CPU node after each Cellpose
 task. RAPIDS-backed `CLUSTERING_SQUIDPY` allows up to four queued local tasks,
@@ -82,13 +86,22 @@ but GPU execution is serialized by the shared workstation GPU lock when it is
 enabled. `GASTON_TRAIN` uses the same host-wide lock on Dwight, scatters one
 task per restart, and has `maxForks=1`; GLM-PCA and postprocessing are CPU-only.
 
+MENDER defaults to `hierarchical_cluster`, native centroids, a 20 µm radius,
+five scales, central-cell exclusion, and fixed Leiden resolution 0.8. Enabling
+it extends the historical clustering stop to `mender` when no later explicit
+stop is selected; this automatic extension does not implicitly enable
+MapMyCells. Reuse published clustering with `--only_stage mender`; see
+[MENDER spatial domains](stages/mender.md).
+
 Before any task inputs are emitted, the workflow runs stage-aware preflight
 checks for reference files required by the selected stage range. For example,
-`mecr` checks both complete WHB raw H5AD files plus the cell and taxonomy
-metadata used to derive its seven broad classes,
-`clustering_squidpy` with hierarchical mode checks the broad marker lookup and
-Allen taxonomy paths, while `mapmycells` checks whole-brain marker/stat files
-only when that module is selected and the requested reference mode needs them.
+`mecr` checks explicitly configured raw H5AD and metadata paths; missing WMB
+inputs are allowed through preflight when automatic reference download is
+enabled and are validated against Allen's manifest during download.
+`clustering_squidpy` with hierarchical mode likewise checks explicit broad
+marker and taxonomy paths or provisions compact WMB assets, while `mapmycells`
+checks explicitly configured marker/stat/gene-mapper files. Automatically
+downloaded assets are validated during cached download instead.
 When `compute_cortical_depth` is selected, preflight checks pial/tissue-edge
 annotation GeoJSONs or a combined role-labelled annotation GeoJSON for every
 active platform. Gray/white boundaries are optional for pial-only mask/QC
@@ -101,6 +114,40 @@ published clustered H5AD and latest zarr clustered table for every selected
 platform/segmentation. It never silently reruns clustering.
 Missing references stop the run immediately with the selected stages and paths
 that need attention.
+
+## Mouse datasets
+
+Run a mouse dataset by setting the invocation-wide species:
+
+```bash
+nextflow run workflows/main.nf \
+    --samplesheet workflows/samplesheet.csv \
+    --species mouse \
+    --outdir ./results
+```
+
+All ingest, segmentation, enrichment, image quantification, QC, alignment,
+comparison, visualization, and spatial analysis operations remain unchanged.
+Atlas-guided hierarchical clustering defaults on and automatically downloads
+the compact WMB marker, taxonomy, membership, and gene metadata into the
+configured reference cache. MECR remains opt-in for mouse because it downloads
+and streams the complete WMB 10Xv2, 10Xv3, and 10X Multiome raw reference
+(about 151 GB). If MapMyCells is selected, mouse mode defaults to a WMB
+whole-brain reference with `query_species=mouse`. One invocation must contain
+only one species.
+
+For a mouse run that enables MECR but temporarily skips all spatial-gene
+analysis while annotation GeoJSON files are unavailable:
+
+```bash
+nextflow run workflows/main.nf \
+    -profile dwight,conda \
+    --samplesheet workflows/samplesheet.csv \
+    --species mouse \
+    --mecr_enabled true \
+    --spatial_gene_analysis_enabled false \
+    --outdir ./results
+```
 
 ## Analysis mode
 
@@ -158,9 +205,9 @@ downstream processes receive explicit table and shape keys for the selected
 branch. A row-level `analysis_segmentation` value can restrict branches for one
 sample while other rows continue to use the global default.
 
-The segmentation stage generates `proseg_hybrid` by default. The
-backwards-compatible `both` selection remains `reseg,original_seg`. Use
-`--analysis_segmentation all` for all four branches, select `proseg_mask`
+The segmentation stage generates `proseg_hybrid` by default, and downstream
+analysis now selects all four branches by default. The backwards-compatible
+`both` selection remains `reseg,original_seg`. Select `proseg_mask`
 (`cellpose` is an alias) or `proseg_hybrid` alone, or provide a comma-separated
 combination such as `reseg,proseg_mask,proseg_hybrid`.
 
@@ -178,6 +225,19 @@ nextflow run workflows/main.nf \
 ```
 
 Completed stages are skipped; only the failed stage and its downstreams re-run.
+
+A task's hash covers its inputs, script text and environment definition, not
+the MerXen Python source. The Conda env installs MerXen in editable mode, so a
+change under `src/merxen/` leaves every hash unchanged. After a code fix,
+`-resume` reuses the cached tasks and their old outputs. Re-run the affected
+stages without `-resume`, and limit the run with the stage selectors described
+in [Running a subset of stages](#running-a-subset-of-stages).
+
+Under the `conda` profile each task's hash includes its conda env, so a change
+to an env file (for example the `requirements.lock` checksum in
+`envs/environment.yml` after a lockfile update) re-runs every task that uses
+that env, and everything downstream, even with `-resume`. See
+[Dependency management](development.md#dependency-management).
 
 ## Failure behavior
 
@@ -204,7 +264,10 @@ fully clean.
   platform(s) to be set in the samplesheet.
 - `--force_proseg_rerun true` — ignore persistent ProSeg latest zarrs and
   rebuild them from the current Cellpose masks and transcript exports. With
-  `-resume`, completed upstream Nextflow tasks can remain cached.
+  `-resume`, completed upstream Nextflow tasks can remain cached. It does not
+  rewrite the persisted `transcripts_for_proseg.csv`; to rebuild that CSV
+  (for example to apply the current control-feature filter), follow
+  [Applying the new filter to an existing dataset](stages/segmentation.md#applying-the-new-filter-to-an-existing-dataset).
 - `nextflow run ...` without `-resume` — blow away Nextflow's cache and
   re-run every Nextflow process. Stage-level persistent artifacts may still be
   reused unless the corresponding force flag is set. The `work/` directory
@@ -262,10 +325,12 @@ rerunning `ALIGN` or `ALIGN_QC`.
 
 Accepted stages are:
 
-`build_spatialdata`, `segment_nuclei`, `segment`, `enrich`, `mask_image_quantification`,
-`qc`, `mecr`, `align`, `align_qc`, `compare`, `visualize`,
-`spatial_gene_analysis`, `clustering_squidpy`, `compute_cortical_depth`, and
-`mapmycells`.
+`build_spatialdata`, `segment_nuclei`, `segment`, `enrich`, `register_images`,
+`mask_image_quantification`, `qc`, `mecr`, `align`, `align_qc`, `compare`,
+`visualize`, `spatial_gene_analysis`, `clustering_squidpy`,
+`compute_cortical_depth`, and `mapmycells`.
+`register_images` is only active for Xenium rows that set
+`xenium_registered_images_csv`; see [Image registration](stages/register-images.md).
 `mecr` is only active for rows whose effective `mecr_enabled` value is `true`.
 `spatial_gene_analysis` is only active for rows whose effective
 `spatial_gene_analysis_enabled` value is `true`; disabled rows continue from
@@ -325,23 +390,39 @@ need ProSeg because it reads published segmentation outputs.
 Starting at `mecr`, `compare`, `visualize`, `spatial_gene_analysis`, or
 `clustering_squidpy` with effective `enable_alignment=false` reads
 `${outdir}/${pair_id}/{merscope,xenium}/latest/latest_spatialdata.zarr`.
+An explicit `merscope_spatialdata_path` or `xenium_spatialdata_path` in the
+samplesheet overrides that published path when upstream enrichment is skipped.
+This supports downstream-only cross-pair runs, such as aligning an IF MERSCOPE
+section against the Xenium latest zarr from another pair ID; each explicit path
+must already be the fully enriched durable latest zarr required by the selected
+stage.
 In single-platform mode, starting at `mecr`, `visualize`, `spatial_gene_analysis`, or
 `clustering_squidpy` reads only
 `${outdir}/${pair_id}/<selected-platform>/latest/latest_spatialdata.zarr`.
-With effective `enable_alignment=true`, `ALIGN` updates
+With effective `enable_alignment=true`, `ALIGN` computes and embeds the
+transform, then uncached `MATERIALIZE_ALIGNMENT` reconciles
 `${outdir}/${pair_id}/merscope/latest/latest_spatialdata.zarr` in place with
-alignment metadata and `*_aligned_nonrigid` vector elements. Later stages read
-that updated MERSCOPE zarr and keep using
+the versioned manifest, aligned vectors/tables, fixed-grid masks/caches, and
+the full warped image. Later stages read that updated MERSCOPE zarr and keep using
 `${outdir}/${pair_id}/xenium/latest/latest_spatialdata.zarr` as the fixed
 reference.
 
-`mapmycells` is downstream of `clustering_squidpy`. By default it runs both the
-cached whole-brain reference and a configurable Allen WHB region reference
-(`mapmycells_reference_mode=both`). Run through it with `--stop_stage mapmycells`,
-or rerun only that stage with `--only_stage mapmycells` after clustering outputs
-already exist. Whole-brain-only runs require `--mapmycells_marker_lookup_path`
-and `--mapmycells_precomputed_stats_path`; region runs require
+`mapmycells` is downstream of `clustering_squidpy`. For human runs it defaults
+to both the Allen WHB whole-brain reference and a configurable WHB region
+reference (`mapmycells_reference_mode=both`). Mouse runs default to the WMB
+whole-brain reference; region mode is explicit because mouse ROI acronyms must
+be supplied. Missing published whole-brain assets are
+downloaded into `mapmycells_region_cache_dir`. Run through it with
+`--stop_stage mapmycells`, or rerun only that stage with `--only_stage
+mapmycells` after clustering outputs already exist. Region runs require
 `--mapmycells_region_labels`.
+
+Set `--mapmycells_reference_atlas wmb --mapmycells_query_species human` for
+human-to-Yao-2023-WMB mapping. The workflow downloads Allen's WMB stats,
+markers, and ortholog database automatically. A WMB region run additionally
+uses mouse ROI acronyms such as `MOp`; it downloads only the raw WMB expression
+shards represented by cells in the selected ROI. See [MapMyCells](stages/mapmycells.md#whole-mouse-brain-compatibility)
+for examples and storage requirements.
 
 If the mapper outputs already exist and only the final annotated H5AD/plots need
 to be regenerated, add `--mapmycells_plots_only true` to `--only_stage
@@ -377,7 +458,7 @@ nextflow run workflows/main.nf -profile apptainer,gpu,azure_slurm_hpc \
     --samplesheet workflows/samplesheet.csv --outdir ./results
 ```
 
-Both segmentation processes use the existing `environment.yml` or main
+Both segmentation processes use the existing `envs/environment.yml` or main
 MerXen image. The `gpu` profile adds Apptainer `--nv` only to GPU processes.
 `CELLPOSE_SEGMENT` requests the `gpu` queue and one GPU, while
 `PROSEG_SEGMENT` requests the `htc` queue without GPU flags. Override those

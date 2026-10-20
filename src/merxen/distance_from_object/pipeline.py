@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,11 @@ from merxen.config import (
     DistanceFromObjectTableConfig,
 )
 from merxen.cortical_depth.assign_cells import extract_cell_coordinates
+from merxen.cortical_depth.frames import (
+    ALIGNED_ELEMENT_SUFFIX,
+    BoundaryFrameMismatchError,
+    is_aligned_element_key,
+)
 from merxen.distance_from_object.annotations import (
     ObjectAnnotation,
     load_object_annotations,
@@ -37,7 +43,7 @@ from merxen.distance_from_object.pseudobulk import (
     retain_complete_pairs,
     run_paired_differential_expression,
 )
-from merxen.io.spatialdata_io import write_or_replace_element
+from merxen.io.spatialdata_io import spatialdata_write_lock, write_or_replace_element
 from merxen.memory import force_release, log_status
 
 
@@ -62,22 +68,31 @@ def run_distance_from_object(config: DistanceFromObjectConfig) -> dict[str, Path
     }
     summaries: dict[str, Any] = {}
 
-    log_status(f"[{config.dataset_name}] Loading SpatialData for object distances")
-    sdata_obj = sd.read_zarr(latest_path)
-    try:
-        for table_config in config.tables:
-            table_paths, summary = _annotate_table(
-                sdata_obj=sdata_obj,
-                table_config=table_config,
-                config=config,
-                annotations=annotations,
-                output_dir=output_dir,
-            )
-            paths.update(table_paths)
-            summaries[table_config.segmentation] = summary
-    finally:
-        del sdata_obj
-        force_release(note=f"after {config.dataset_name} distance from object")
+    # A write-back replaces whole tables, so hold the store lock from the read
+    # until the last table is persisted; otherwise a concurrent writer's
+    # columns are dropped. A run that only reads takes no lock.
+    store_lock: AbstractContextManager[object] = (
+        spatialdata_write_lock(latest_path)
+        if config.write_spatialdata_table
+        else nullcontext()
+    )
+    with store_lock:
+        log_status(f"[{config.dataset_name}] Loading SpatialData for object distances")
+        sdata_obj = sd.read_zarr(latest_path)
+        try:
+            for table_config in config.tables:
+                table_paths, summary = _annotate_table(
+                    sdata_obj=sdata_obj,
+                    table_config=table_config,
+                    config=config,
+                    annotations=annotations,
+                    output_dir=output_dir,
+                )
+                paths.update(table_paths)
+                summaries[table_config.segmentation] = summary
+        finally:
+            del sdata_obj
+            force_release(note=f"after {config.dataset_name} distance from object")
 
     summary_path = output_dir / "distance_from_object_summary.json"
     summary_path.write_text(
@@ -229,6 +244,21 @@ def _annotate_table(
         sdata_obj=sdata_obj,
         shape_key=shape_key,
     )
+    if (
+        is_aligned_element_key(shape_key)
+        and coordinates.source == f"shapes:{shape_key}"
+    ):
+        # Tables with obsm['spatial'] are read in the native frame, so reading
+        # this one from the aligned element would mix frames within one run.
+        raise BoundaryFrameMismatchError(
+            f"[{config.dataset_name}:{table_config.segmentation}] {table_key!r} has "
+            "no obsm['spatial'], so its cells would come from the aligned element "
+            f"{shape_key!r}, while tables with obsm['spatial'] are read in the "
+            "native frame. The frame of the object GeoJSON is not configurable "
+            "yet, so aligned cells are refused: run this stage for segmentations "
+            "whose tables carry obsm['spatial'] (proseg, original), or on a store "
+            "without *_aligned_nonrigid elements."
+        )
     assignments = assign_distances_to_objects(
         coordinates,
         annotations,
@@ -279,7 +309,7 @@ def _annotate_table(
             updated,
             source_table=table,
             table_key=table_key,
-            region=shape_key,
+            region=_native_element_key(sdata_obj, shape_key),
         )
         write_or_replace_element(
             sdata_obj,
@@ -352,6 +382,19 @@ def _resolve_shape_key(
     if region is not None and f"{region}_aligned_nonrigid" in sdata_obj.shapes:
         return f"{region}_aligned_nonrigid"
     return str(list(sdata_obj.shapes.keys())[0])
+
+
+def _native_element_key(sdata_obj: Any, shape_key: str | None) -> str | None:
+    """Return the native element of ``shape_key`` when it exists.
+
+    Written-back tables are native tables; retargeting their region to an
+    ``*_aligned_nonrigid`` element would misstate the frame of their
+    ``obsm['spatial']``.
+    """
+    if shape_key is None or not is_aligned_element_key(shape_key):
+        return shape_key
+    native = shape_key[: -len(ALIGNED_ELEMENT_SUFFIX)]
+    return native if native in sdata_obj.shapes else shape_key
 
 
 def _parse_table_for_spatialdata(

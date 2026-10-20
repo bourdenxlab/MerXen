@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import traceback
+from contextlib import ExitStack
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, cast
 
@@ -15,8 +17,14 @@ import spatialdata as sd
 from shapely.ops import transform as shapely_transform
 from spatialdata.transformations import Affine, Identity, set_transformation
 
+from merxen.alignment.manifest import (
+    ALIGNMENT_MANIFEST_ATTR,
+    NONRIGID_ELEMENT_SUFFIX,
+    initialize_alignment_manifest,
+)
 from merxen.alignment.register import (
     TransformResult,
+    load_required_valis_tissue_annotations,
     register_pair,
     transform_xy_for_result,
     write_valis_resume_manifest,
@@ -24,6 +32,7 @@ from merxen.alignment.register import (
 from merxen.alignment.transforms import apply_affine_matrix
 from merxen.config import AlignmentConfig
 from merxen.io.spatialdata_io import (
+    spatialdata_write_lock,
     write_or_replace_element,
     write_spatialdata_metadata,
 )
@@ -34,9 +43,8 @@ from merxen.io.spatialdata_schema import (
 )
 from merxen.io.transcript_io import first_existing_col
 
-MERXEN_ALIGNMENT_ATTR = "merxen_alignment"
+MERXEN_ALIGNMENT_ATTR = ALIGNMENT_MANIFEST_ATTR
 ALIGNMENT_COORDINATE_SYSTEM = "merxen_xenium"
-NONRIGID_ELEMENT_SUFFIX = "_aligned_nonrigid"
 logger = logging.getLogger(__name__)
 
 
@@ -45,9 +53,13 @@ def run_alignment_pipeline(config: AlignmentConfig) -> dict[str, Path]:
     cfg = config
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
 
-    xenium_sdata = sd.read_zarr(cfg.xenium_zarr_path)
-    merscope_sdata = sd.read_zarr(cfg.merscope_zarr_path)
     try:
+        # Validate the small annotation inputs before opening either potentially
+        # large SpatialData store, so configuration failures are immediate and
+        # identify the platform-specific file that needs attention.
+        load_required_valis_tissue_annotations(cfg)
+        xenium_sdata = sd.read_zarr(cfg.xenium_zarr_path)
+        merscope_sdata = sd.read_zarr(cfg.merscope_zarr_path)
         result = register_pair(merscope_sdata, xenium_sdata, cfg)
     except Exception as exc:
         dependency_versions: dict[str, str] = {}
@@ -102,12 +114,7 @@ def run_alignment_pipeline(config: AlignmentConfig) -> dict[str, Path]:
     _write_transform_json(result, transform_json)
 
     if cfg.write_aligned_zarrs:
-        moving_zarr_path = (
-            cfg.merscope_zarr_path
-            if cfg.moving_platform == "MERSCOPE"
-            else cfg.xenium_zarr_path
-        )
-        _write_moving_alignment_to_zarr(moving_zarr_path, result)
+        _initialize_alignment_contract(cfg, result)
     if cfg.backend == "valis":
         write_valis_resume_manifest(cfg)
 
@@ -129,6 +136,40 @@ def _write_transform_json(result: TransformResult, path: Path) -> None:
     path.write_text(json.dumps(_jsonable(payload), indent=2))
 
 
+def _initialize_alignment_contract(
+    config: AlignmentConfig,
+    result: TransformResult,
+) -> None:
+    """Persist a portable transform and incomplete v2 pair contract."""
+    moving_path = (
+        Path(config.merscope_zarr_path)
+        if config.moving_platform == "MERSCOPE"
+        else Path(config.xenium_zarr_path)
+    )
+    fixed_path = (
+        Path(config.xenium_zarr_path)
+        if config.fixed_platform == "XENIUM"
+        else Path(config.merscope_zarr_path)
+    )
+    with ExitStack() as stack:
+        for zarr_path in sorted(
+            {moving_path, fixed_path},
+            key=lambda item: str(item.resolve()),
+        ):
+            stack.enter_context(spatialdata_write_lock(zarr_path))
+        moving_sdata = sd.read_zarr(moving_path)
+        fixed_sdata = sd.read_zarr(fixed_path)
+        initialize_alignment_manifest(
+            config=config,
+            result=result,
+            moving_sdata=moving_sdata,
+            fixed_sdata=fixed_sdata,
+            moving_zarr_path=moving_path,
+        )
+        write_spatialdata_metadata(moving_sdata, write_attrs=True)
+        write_spatialdata_metadata(fixed_sdata, write_attrs=True)
+
+
 def _write_moving_alignment_to_zarr(
     zarr_path: Path,
     result: TransformResult,
@@ -138,7 +179,6 @@ def _write_moving_alignment_to_zarr(
 
     coordinate_system = _alignment_coordinate_system(result)
     rigid = _rigid_affine_transformation(result)
-    nonrigid_identity = Identity()
 
     shape_keys = (
         [
@@ -157,11 +197,7 @@ def _write_moving_alignment_to_zarr(
         )
         aligned_key = _nonrigid_element_key(key)
         aligned_shapes = _transform_shapes(sdata_obj.shapes[key], result)
-        set_transformation(
-            aligned_shapes,
-            nonrigid_identity,
-            to_coordinate_system=coordinate_system,
-        )
+        _place_in_alignment_frame(aligned_shapes, coordinate_system)
         write_or_replace_element(
             sdata_obj,
             aligned_key,
@@ -187,11 +223,7 @@ def _write_moving_alignment_to_zarr(
         )
         aligned_key = _nonrigid_element_key(key)
         aligned_points = _transform_points(sdata_obj.points[key], result)
-        set_transformation(
-            aligned_points,
-            nonrigid_identity,
-            to_coordinate_system=coordinate_system,
-        )
+        _place_in_alignment_frame(aligned_points, coordinate_system)
         write_or_replace_element(
             sdata_obj,
             aligned_key,
@@ -271,10 +303,18 @@ def _alignment_attrs_payload(result: TransformResult) -> dict[str, Any]:
 
 def _nonrigid_transform_payload(result: TransformResult) -> dict[str, Any] | None:
     if result.valis_transform is not None:
+        chain_path = result.metadata.get("transform_chain_path")
+        if chain_path is not None and Path(chain_path).exists():
+            transform_chain = json.loads(Path(chain_path).read_text())
+        else:
+            transform_chain = result.valis_transform.to_metadata()
         return {
             "type": "valis_sampled_displacement_field",
             "selected_mode": result.valis_transform.selected_mode,
-            "transform_chain": result.valis_transform.to_metadata(),
+            "transform_chain_path": (
+                None if chain_path is None else str(Path(chain_path).name)
+            ),
+            "transform_chain": transform_chain,
         }
     transform = result.nonrigid_transform
     if transform is None:
@@ -297,6 +337,7 @@ def _transform_shapes(
     gdf = shapes.copy()
     if "geometry" not in gdf.columns:
         gdf = gpd.GeoDataFrame(gdf, geometry=gdf.geometry)
+    _detach_attrs(gdf)
 
     def _xy_func(x: Any, y: Any, z: Any | None = None) -> Any:
         x_arr = np.asarray(x, dtype=np.float64)
@@ -342,7 +383,7 @@ def _transform_points(points_obj: Any, result: TransformResult) -> Any:
         ["y", "y_micron", "y_location", "global_y", "y_global_px", "observed_y"],
     )
     if x_col is None or y_col is None:
-        return points_obj
+        return _detach_attrs(points_obj.copy())
 
     raw_x_col = f"raw_{x_col}"
     raw_y_col = f"raw_{y_col}"
@@ -391,8 +432,52 @@ def _transform_points(points_obj: Any, result: TransformResult) -> Any:
 
     if hasattr(points_obj, "map_partitions"):
         meta = _part(points_obj._meta.copy())
-        return points_obj.map_partitions(_part, meta=meta)
-    return _part(points_obj)
+        return _detach_attrs(points_obj.map_partitions(_part, meta=meta))
+    return _detach_attrs(_part(points_obj))
+
+
+def _detach_attrs(element: Any) -> Any:
+    """Give a derived element its own deep copy of the source element's attrs.
+
+    SpatialData's ``attrs`` accessor for Dask points carries ``attrs`` over
+    shallowly on ``map_partitions`` and ``copy``: the derived element gets a new
+    top-level mapping, but the nested ``attrs["transform"]`` dict is the same
+    object as its source's, and SpatialData's ``set_transformation`` mutates
+    that dict in place. Without this, stamping the aligned copy with
+    ``Identity`` to the alignment coordinate system silently overwrote the
+    native element's rigid affine as well. pandas and GeoPandas copies already
+    deep-copy ``attrs``; detaching them too keeps every derived element
+    independent of how its library copies metadata.
+
+    Args:
+        element: Freshly derived points or shapes element.
+
+    Returns:
+        The same element, whose attrs no longer alias its source's.
+    """
+    detached = deepcopy(dict(element.attrs))
+    element.attrs.clear()
+    element.attrs.update(detached)
+    return element
+
+
+def _place_in_alignment_frame(element: Any, coordinate_system: str) -> None:
+    """Give an aligned vector element only its Identity to the alignment frame.
+
+    An aligned copy holds coordinates in the fixed platform's frame, but it
+    inherits every transformation of its native element. The inherited
+    ``global`` entry maps into the moving platform's own frame (for the vendor
+    MERSCOPE boundaries, the micron-to-mosaic-pixel scale), so it would draw the
+    aligned element unwarped on top of the native data. Aligned labels and
+    images already carry only the alignment frame; this makes the aligned
+    shapes and points match them. Call it on an element whose attrs no longer
+    alias the native element's (see :func:`_detach_attrs`).
+
+    Args:
+        element: Aligned points or shapes element.
+        coordinate_system: Name of the alignment coordinate system.
+    """
+    set_transformation(element, {coordinate_system: Identity()}, set_all=True)
 
 
 def _add_registered_table_centroids(

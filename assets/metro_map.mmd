@@ -1,0 +1,154 @@
+%% No %%metro title: the README and docs pages carry their own heading above
+%% the figure, and a "MerXen" title baked into the SVG duplicates it.
+%%metro style: light
+%%metro legend: bl
+
+%% Explicit section placement. The trunk runs left to right along the top row,
+%% drops at QC, and doubles back right to left along the second row, so the
+%% figure stays narrow enough for the labels to read at README width rather
+%% than stretching into one very wide, very short strip. The MECR spur leaves
+%% QC to the right and runs top to bottom, tucked into column 2 beneath Section
+%% Alignment: that column is right-aligned (it holds an RL and a TB section),
+%% so Enrichment and QC, Alignment and MECR rates share a right edge. The spur
+%% enters MECR rates from the right, not the top: entering from above routes it
+%% straight through the Alignment box, which --validate --strict rejects as a
+%% pass-through with no station interaction.
+%%
+%% Both section titles are kept short on purpose. nf-metro draws a header above
+%% its box only when no route crosses that band; the band scales with
+%% --font-scale, so at 1.4 a title over ~14 characters here (~11 for MECR rates)
+%% overruns into the descending trunk and the header is pushed to the side or
+%% below. "Section alignment" and "Co-expression" were both over the limit.
+%%metro grid: ingest | 0,0
+%%metro grid: segmentation | 1,0
+%%metro grid: tables | 2,0
+%%metro grid: coexpression | 2,2
+%%metro grid: registration | 2,1
+%%metro grid: comparative | 1,1
+%%metro grid: annotation | 0,1
+
+%% Lines. These are the MerXen brand colours, taken from the title logo in
+%% assets/MerXen_title.svg: the MERSCOPE line matches the purple of "Mer", the
+%% Xenium line the teal of "Xen", and the paired line the blue midpoint of the
+%% logo's underline gradient, where the two halves meet. Keep them in step with
+%% src/merxen/palette.py — tests/test_workflows/test_metro_map.py fails if the
+%% two drift apart. The toggleable line is dashed as well as coloured, so the
+%% map still parses in greyscale.
+%%metro line: merscope | MERSCOPE (Vizgen) | #8350FF
+%%metro line: xenium | Xenium (10x) | #17BCAC
+%%metro line: paired | Paired-section analysis | #3980BE
+%%metro line: optional | Toggleable stages | #EE7733 | dashed
+
+%% Termini. Cohort DE has no output icon simply because it needs none; the
+%% section is free to be wider than Ingest and build, since the render script
+%% aligns the left edges of column 0 rather than letting nf-metro right-align
+%% them. See the Styling section of docs/metro-map.md.
+%%metro dir: merscope_in | MERSCOPE | raw export
+%%metro dir: xenium_in | Xenium | raw export
+%%metro file: mecr_out | CSV | mecr_out
+%%metro file: compare_out | CSV | compare_out
+%%metro file: mapmycells_out | H5AD | mapmycells_out
+
+graph LR
+    subgraph ingest [Ingest and build]
+        %%metro exit: right | merscope, xenium
+        merscope_in[ ]
+        xenium_in[ ]
+        build_spatialdata[SpatialData build]
+
+        merscope_in -->|merscope| build_spatialdata
+        xenium_in -->|xenium| build_spatialdata
+    end
+
+    subgraph segmentation [Segmentation]
+        %%metro entry: left | merscope, xenium
+        %%metro exit: right | merscope, xenium, optional
+        cellpose_nuclei_segment[Cellpose nuclei]
+        cellpose_segment[Cellpose-SAM cells]
+        proseg_segment[ProSeg refine]
+        proseg_hybrid[ProSeg hybrid]
+
+        cellpose_nuclei_segment -->|merscope,xenium| cellpose_segment
+        cellpose_segment -->|merscope,xenium| proseg_segment
+        proseg_segment -->|optional| proseg_hybrid
+    end
+
+    subgraph tables [Enrichment and QC]
+        %%metro entry: left | merscope, xenium, optional
+        %%metro exit: bottom | merscope, xenium
+        %%metro exit: right | optional
+        enrich[Enrich]
+        register_images[Register images]
+        mask_image_quantification[Mask image quant.]
+        qc[QC]
+
+        enrich -->|merscope,xenium| mask_image_quantification
+        enrich -->|optional| register_images
+        register_images -->|optional| mask_image_quantification
+        mask_image_quantification -->|merscope,xenium,optional| qc
+    end
+
+    subgraph coexpression [MECR rates]
+        %%metro direction: TB
+        %%metro entry: right | optional
+        mecr_reference[MECR reference]
+        mecr[MECR]
+        mecr_out[ ]
+
+        mecr_reference -->|optional| mecr
+        mecr -->|optional| mecr_out
+    end
+
+    subgraph registration [Alignment]
+        %%metro direction: RL
+        %%metro entry: top | merscope, xenium
+        %%metro exit: left | paired
+        align[VALIS align]
+        materialize_alignment[Materialize]
+        align_qc[Alignment QC]
+
+        align -->|paired| materialize_alignment
+        materialize_alignment -->|paired| align_qc
+    end
+
+    subgraph comparative [Comparative analysis]
+        %%metro direction: RL
+        %%metro entry: right | paired
+        %%metro exit: left | optional
+        compare[Compare]
+        compare_out[ ]
+        visualize[Visualize]
+        spatial_gene_analysis[Spatial genes]
+        clustering_squidpy[Clustering]
+
+        compare -->|paired| compare_out
+        visualize -->|paired| spatial_gene_analysis
+        spatial_gene_analysis -->|paired,optional| clustering_squidpy
+    end
+
+    subgraph annotation [Annotation and DE]
+        %%metro direction: RL
+        %%metro entry: right | optional
+        compute_cortical_depth[Cortical depth]
+        distance_from_object_annotate[Distance annotate]
+        distance_from_object_cohort[Cohort DE]
+        mapmycells[MapMyCells]
+        mapmycells_out[ ]
+        mender[MENDER domains]
+
+        compute_cortical_depth -->|optional| distance_from_object_annotate
+        distance_from_object_annotate -->|optional| distance_from_object_cohort
+        mapmycells -->|optional| mapmycells_out
+    end
+
+    %% Inter-section edges
+    build_spatialdata -->|merscope,xenium| cellpose_nuclei_segment
+    proseg_segment -->|merscope,xenium| enrich
+    proseg_hybrid -->|optional| enrich
+    qc -->|optional| mecr_reference
+    qc -->|merscope,xenium| align
+    align_qc -->|paired| compare
+    align_qc -->|paired| visualize
+    clustering_squidpy -->|optional| compute_cortical_depth
+    clustering_squidpy -->|optional| mapmycells
+    clustering_squidpy -->|optional| mender

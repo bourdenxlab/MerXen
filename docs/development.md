@@ -48,19 +48,25 @@ Ruff configuration (line length, rule set, isort) is in
 
 ## Pre-commit hooks
 
-Install both hook types after cloning:
+Install the hooks after cloning (the hook types pre-commit, pre-merge-commit,
+commit-msg and pre-push come from `default_install_hook_types`):
 
 ```bash
 pre-commit install
-pre-commit install --hook-type pre-push
 ```
 
 From [.pre-commit-config.yaml](../.pre-commit-config.yaml):
 
 - **On commit** — trailing-whitespace, EOF fixer, check-yaml, large-file
-  guard (500 KB), ruff lint + format.
-- **On push** — the lockfile-backed local CI checks: lint, format, type check,
-  and tests.
+  guard (500 KB), ruff lint + format, and the privacy check of the staged
+  lines and file names.
+- **On merge and on the commit message** — the privacy check.
+- **On push** — the privacy check of the branch name and every pushed commit,
+  then the lockfile-backed local CI checks: lint, format, type check, and
+  tests.
+
+The privacy hooks keep host paths and sample names out of the repository
+([Local configuration and privacy](local-configuration.md)).
 
 Both are local guardrails. They can be bypassed with `--no-verify`, but
 CI is the authoritative gate — don't bypass hooks unless you have a reason
@@ -71,7 +77,7 @@ and intend to fix it before the PR is reviewed.
 [.github/workflows/ci.yml](../.github/workflows/ci.yml) runs on every push
 to `main` and every PR:
 
-1. Install from `requirements.lock` with `uv`, then `pip install -e . --no-deps`.
+1. Install from `requirements/requirements.lock` with `uv`, then `pip install -e . --no-deps`.
 2. `ruff check .`
 3. `ruff format --check .`
 4. `mypy src/`
@@ -84,7 +90,7 @@ scripts/run_ci_checks.sh
 ```
 
 The script creates or reuses `.ci-venv`, installs from
-[requirements.lock](../requirements.lock) with `uv`, installs the package with
+[requirements/requirements.lock](../requirements/requirements.lock) with `uv`, installs the package with
 `--no-deps`, then runs the same lint, format, type-check, and test commands as
 GitHub Actions on Linux. On macOS, the script defaults to a local editable
 `.[dev]` install instead of the lockfile because the lockfile can include
@@ -96,7 +102,7 @@ somewhere else. Set `MERXEN_CI_INSTALL_MODE` to control dependency installation:
 | Mode | Behavior |
 |------|----------|
 | `auto` | Default. Uses `locked` on Linux and `local` on macOS. |
-| `locked` | Install exactly from `requirements.lock`, then `pip install -e . --no-deps`. Use this for Linux/server parity. |
+| `locked` | Install exactly from `requirements/requirements.lock`, then `pip install -e . --no-deps`. Use this for Linux/server parity. |
 | `local` | Install `pip install -e ".[dev]"` through `uv` without the lockfile. Use this for macOS edit/test/push workflows when CUDA wheels are unavailable. |
 | `none` | Do not install dependencies; reuse the existing `.ci-venv`. |
 
@@ -155,33 +161,59 @@ git push origin HEAD --tags
   regenerate the lockfile:
 
   ```bash
-  uv pip compile pyproject.toml --extra dev -o requirements.lock
+  uv pip compile pyproject.toml --extra dev -o requirements/requirements.lock
+  python scripts/update_env_lock_hash.py
   ```
+
+  The second command refreshes the `# requirements.lock sha256:` header in
+  `envs/environment.yml`. Nextflow caches conda envs as
+  `work/conda/env-<hash of the env file's text>`, so without the header a
+  lockfile change would leave the cached env on the old dependency versions.
+  `tests/test_workflows/test_env_lock_sync.py` fails while the header is stale.
+
+  **A new header invalidates `-resume` under the `conda` profile.** Any change
+  to `envs/environment.yml`, the checksum included, gives the base env a new
+  `work/conda/env-*` path, and Nextflow includes each task's conda env in the
+  task hash. The first `-resume` under `-profile …,conda` after the change
+  therefore re-runs every task that uses the base env and everything
+  downstream of it: Cellpose, ProSeg, clustering, MapMyCells and the later
+  stages. The new env resolves the loose `pyproject.toml` ranges on the day it
+  is built, not the lock, so the re-run outputs can differ by more than the
+  intended dependency change. The checksum covers the lock's raw bytes, so a
+  regeneration that only rewrites `# via` comments has the same effect. Before
+  merging a lockfile change, snapshot the published outputs you need to keep
+  and plan a full rerun.
 
   When the dedicated registration stack changes, regenerate its separate lock:
 
   ```bash
   uv pip compile pyproject.toml --extra dev --group alignment-runtime \
-    --python-platform linux -o requirements.alignment.lock
+    --python-platform linux -o requirements/requirements.alignment.lock
   ```
 
 - **Never `pip install <pkg>` directly.** That leaves you out of sync with
   the lockfile and CI.
-- **Conda env (`environment.yml`)** is deliberately thin — Python 3.12, pip,
+- **Conda env (`envs/environment.yml`)** is deliberately thin — Python 3.12, pip,
   and `-e ".[dev]"`. All Python dependencies come through `pyproject.toml`.
-- **Alignment env (`environment.alignment.yml`)** installs
-  `requirements.alignment.lock` plus Java/libvips for Nextflow `ALIGN`.
+  It cannot install the lockfile, because pip rejects it (`ResolutionImpossible`:
+  `cell_type_mapper` declares `abc_atlas_access` as an unpinned git URL while the
+  lock pins a commit); its lockfile checksum header only forces Nextflow to
+  rebuild the env when the lock changes.
+- **Base image (`containers/Dockerfile`)** installs `requirements/requirements.lock`
+  with `uv`, then MerXen with `--no-deps`, like CI.
+- **Alignment env (`envs/environment.alignment.yml`)** installs
+  `requirements/requirements.alignment.lock` plus Java/libvips for Nextflow `ALIGN`.
   VALIS 1.2 is installed exactly with `--no-deps` after the locked
   NumPy-2-compatible runtime. The explicit legacy backend still bootstraps its
   pinned Spateo/Dynamo packages at runtime.
-- **Clustering GPU env (`environment.clustering-gpu.yml`)** contains RAPIDS and
+- **Clustering GPU env (`envs/environment.clustering-gpu.yml`)** contains RAPIDS and
   its Dask pin. It receives H5AD inputs only; SpatialData reads and writes stay
   in the base environment.
 
 For reproducible installs (CI, onboarding):
 
 ```bash
-uv pip install -r requirements.lock
+uv pip install -r requirements/requirements.lock
 pip install -e . --no-deps
 ```
 

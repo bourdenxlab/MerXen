@@ -16,9 +16,10 @@ import pandas as pd
 import spatialdata as sd
 from spatialdata.models import TableModel
 
+from merxen.alignment.manifest import NONRIGID_ELEMENT_SUFFIX
 from merxen.config import MaskImageQuantificationConfig
 from merxen.io.image_source import build_image_source, fetch_tile
-from merxen.io.spatialdata_io import write_or_replace_element
+from merxen.io.spatialdata_io import spatialdata_write_lock, write_or_replace_element
 from merxen.io.spatialdata_schema import (
     INSTANCE_ID_COLUMN,
     SOURCE_CELL_ID_COLUMN,
@@ -85,19 +86,17 @@ def build_mask_image_quantification_table(
     if not images:
         raise RuntimeError(f"[{dataset_name}] No image elements found to quantify.")
 
-    image_keys = [
-        image_key for image_key in images if not is_derived_cache_key(str(image_key))
-    ]
+    image_keys = _source_image_keys(sdata_obj)
     if not image_keys:
         raise RuntimeError(
             f"[{dataset_name}] No source image elements found to quantify after "
-            "excluding private viewer-cache images."
+            "excluding private viewer-cache and aligned images."
         )
     skipped_cache_images = len(images) - len(image_keys)
     log_status(
         f"[{dataset_name}] Quantifying {len(image_keys)} source image element(s) "
         f"over {label_ids.size:,} Cellpose masks; skipped "
-        f"{skipped_cache_images} private viewer-cache image(s)"
+        f"{skipped_cache_images} private viewer-cache or aligned image(s)"
     )
 
     matrix_parts: list[np.ndarray] = []
@@ -171,6 +170,27 @@ def run_mask_image_quantification(
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    # The image table and the hybrid-table join each replace a whole table, so
+    # the store lock is held from the read until both are persisted.
+    with spatialdata_write_lock(latest_path):
+        return _quantify_store(
+            config,
+            latest_path=latest_path,
+            mask_path=mask_path,
+            paths=paths,
+            force_rerun=force_rerun,
+        )
+
+
+def _quantify_store(
+    config: MaskImageQuantificationConfig,
+    *,
+    latest_path: Path,
+    mask_path: Path,
+    paths: dict[str, Path],
+    force_rerun: bool,
+) -> dict[str, Path]:
+    """Quantify one store and persist its tables; the caller holds its lock."""
     sdata_obj = sd.read_zarr(latest_path)
     try:
         existing_quantification = (
@@ -178,6 +198,16 @@ def run_mask_image_quantification(
             and config.table_key in sdata_obj.tables
             and _sidecar_outputs_exist(paths)
         )
+        if existing_quantification:
+            quantified = _quantified_image_keys(sdata_obj.tables[config.table_key])
+            current = set(_source_image_keys(sdata_obj))
+            if quantified != current:
+                # Images were registered or removed since the table was written.
+                log_status(
+                    f"[{config.dataset_name}] Image set changed (quantified "
+                    f"{sorted(quantified)}, now {sorted(current)}); re-quantifying."
+                )
+                existing_quantification = False
         if existing_quantification:
             if _hybrid_image_join_is_complete(
                 sdata_obj,
@@ -277,6 +307,13 @@ def join_cellpose_image_quantification_to_hybrid(
         ]
 
     updated = hybrid_table.copy()
+    previous_feature_obs_columns = [
+        column
+        for column in updated.obs.columns
+        if str(column).startswith(HYBRID_IMAGE_QUANTIFICATION_OBS_PREFIX)
+    ]
+    if previous_feature_obs_columns:
+        updated.obs.drop(columns=previous_feature_obs_columns, inplace=True)
     feature_names = image_table.var_names.astype(str).tolist()
     feature_obs_columns = _unique_spatialdata_obs_columns(
         [
@@ -404,19 +441,45 @@ def _hybrid_image_join_is_complete(
         return True
     if image_table_key not in sdata_obj.tables:
         return False
+    hybrid_table = sdata_obj.tables[PROSEG_HYBRID_TABLE_KEY]
     marker = dict(
-        sdata_obj.tables[PROSEG_HYBRID_TABLE_KEY].uns.get(
+        hybrid_table.uns.get(
             HYBRID_IMAGE_QUANTIFICATION_OBSM_KEY,
             {},
         )
     )
     expected_features = sdata_obj.tables[image_table_key].var_names.astype(str).tolist()
+    marker_obs_columns = marker.get("obs_columns")
+    current_obs_columns = [
+        str(column)
+        for column in hybrid_table.obs.columns
+        if str(column).startswith(HYBRID_IMAGE_QUANTIFICATION_OBS_PREFIX)
+    ]
     return (
         marker.get("source_table_key") == str(image_table_key)
         and marker.get("feature_names") == expected_features
-        and HYBRID_IMAGE_QUANTIFICATION_OBSM_KEY
-        in sdata_obj.tables[PROSEG_HYBRID_TABLE_KEY].obsm
+        and isinstance(marker_obs_columns, list)
+        and marker_obs_columns == current_obs_columns
+        and HYBRID_IMAGE_QUANTIFICATION_OBSM_KEY in hybrid_table.obsm
     )
+
+
+def _source_image_keys(sdata_obj: Any) -> list[str]:
+    images = getattr(sdata_obj, "images", None) or {}
+    # Aligned images are resampled onto the counterpart platform's grid, so they
+    # never match this dataset's Cellpose mask.
+    return [
+        str(key)
+        for key in images
+        if not is_derived_cache_key(str(key))
+        and not str(key).endswith(NONRIGID_ELEMENT_SUFFIX)
+    ]
+
+
+def _quantified_image_keys(table: ad.AnnData) -> set[str]:
+    if "image_key" not in table.var.columns:
+        return set()
+    return set(table.var["image_key"].astype(str))
 
 
 def _table_instance_ids(

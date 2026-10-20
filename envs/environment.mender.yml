@@ -1,0 +1,26 @@
+name: merxen-mender
+channels:
+  - conda-forge
+dependencies:
+  - python=3.9
+  - pip
+  - pip:
+      - numpy==1.22.2
+      - scipy==1.10.1
+      - scikit-learn==1.2.2
+      - pandas==2.0.0
+      - anndata==0.9.1
+      - scanpy==1.9.3
+      - squidpy==1.2.3
+      - xarray==0.21.0
+      - shapely==2.0.1
+      - seaborn==0.12.2
+      - matplotlib==3.7.1
+      - pyarrow==12.0.1
+      - pytest==7.4.4
+      - python-igraph==0.10.4
+      - leidenalg==0.9.1
+      - umap-learn==0.5.3
+      - multianndata==0.0.4
+      - urllib3==1.26.12
+      - MENDER @ git+https://github.com/yuanzhiyuan/MENDER.git@b29dc5ea352a2762cb7bf49d44ee661f0009f694

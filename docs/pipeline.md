@@ -7,6 +7,12 @@ channels.
 
 ## Stage graph
 
+![MerXen pipeline overview](images/merxen_metro_map.svg)
+
+The metro map is the orientation view; it omits the segmentation fan-out,
+per-row multiplicity, and single-platform mode. See [Metro map](metro-map.md)
+for the full list of simplifications. The graph below is the precise version.
+
 ```
 ┌───────────────────────┐
 │ samplesheet.csv (row) │
@@ -28,6 +34,12 @@ channels.
   ┌─────────────────┐
   │ ENRICH          │   per-shape gene assignment tables
   │                 │ → latest_input.zarr (with tables)
+  └────────┬────────┘
+           ▼
+  ┌─────────────────┐
+  │ REGISTER_IMAGES │   optional, Xenium: post-run IF onto
+  │                 │   the mask grid (Explorer matrix +
+  │                 │   DAPI affine refinement)
   └────────┬────────┘
            ▼
   ┌─────────────────┐
@@ -101,9 +113,10 @@ Nextflow params unless those
 columns are set in the samplesheet. For rows with `analysis_mode=paired`, both
 platforms traverse `BUILD_SPATIALDATA → SEGMENT → ENRICH →
 MASK_IMAGE_QUANTIFICATION → QC` independently and
-are rejoined after QC. The default-enabled `MECR_REFERENCE` task prepares one
-panel-restricted marker set from the complete WHB reference, and `MECR` scores
-each selected segmentation branch. MECR does not require or block alignment.
+are rejoined after QC. For rows with MECR enabled, `MECR_REFERENCE` prepares one
+panel-restricted marker set from the complete species-matched WHB or WMB
+reference, and `MECR` scores each selected segmentation branch. MECR does not
+require or block alignment.
 When the row's effective `cortical_depth_enabled` value is
 `true`, `COMPUTE_CORTICAL_DEPTH` runs as a terminal stage after
 `CLUSTERING_SQUIDPY` (consuming the clustering-updated zarr) so per-cell cluster
@@ -115,12 +128,14 @@ runs after cortical depth (when selected) or after clustering and consumes
 platform for `DISTANCE_FROM_OBJECT_COHORT`. If
 mask image quantification is disabled or skipped by a stage range, downstream
 stages consume the enriched zarr directly. If the row's effective
-`enable_alignment` value is `true`, `ALIGN` and `ALIGN_QC` run before
+`enable_alignment` value is `true`, `ALIGN`, `MATERIALIZE_ALIGNMENT`, and
+`ALIGN_QC` run before
 `COMPARE` / `VISUALIZE` / `SPATIAL_GENE_ANALYSIS` /
 `CLUSTERING_SQUIDPY`; otherwise the paired stages
 consume the quantified/enriched zarrs directly. In `analysis_mode=merscope` or
 `analysis_mode=xenium`, only the selected platform traverses those stages, and
-paired-only `ALIGN`, `ALIGN_QC`, and `COMPARE` are inactive for that row.
+paired-only `ALIGN`, `MATERIALIZE_ALIGNMENT`, `ALIGN_QC`, and `COMPARE` are
+inactive for that row.
 `MAPMYCELLS` consumes the AnnData files written by
 `CLUSTERING_SQUIDPY` and is opt-in because it requires local reference files.
 GASTON independently joins the reusable terminal token for each pair, which is
@@ -153,12 +168,14 @@ For a samplesheet row with `pair_id=EXAMPLE01`:
 | 2a | `CELLPOSE_SEGMENT` × 2 | `merxen cellpose-segment` | `source_spatialdata.zarr` | `cellpose_masks_tiled.npy`, stitching stats, seeded transcript CSV, affine JSON |
 | 2b | `PROSEG_SEGMENT` × 2 | `merxen proseg-segment` | Cellpose artifacts | durable `latest/latest_spatialdata.zarr` |
 | 3 | `ENRICH` × 2 | `merxen enrich` | latest zarr + Cellpose mask | same durable `latest/latest_spatialdata.zarr`, now enriched with per-shape counts tables |
+| 3r | `REGISTER_IMAGES` × 1 (Xenium, opt-in) | `merxen register-images` | enriched Xenium zarr + OME-TIFFs + Xenium Explorer matrices | same durable zarr, now with one image element per registered image, plus `register_images_out/` QC |
 | 4 | `MASK_IMAGE_QUANTIFICATION` × 2 | `merxen mask-image-quantification` | enriched zarr + Cellpose mask | same durable zarr, now with `table_MOSAIK_cellpose_image_quantification` plus sidecars |
 | 5 | `QC` × 2 | `merxen qc` | quantified/enriched zarr | `qc_out/` (metrics CSV, plots) |
-| 6a | `MECR_REFERENCE` × 1 | `merxen mecr-reference` | complete WHB reference + selected spatial panel | shared MECR marker/statistics tables |
+| 6a | `MECR_REFERENCE` × 1 | `merxen mecr-reference` | complete species-matched whole-brain reference + selected spatial panel | shared MECR marker/statistics tables |
 | 6b | `MECR` × 1 | `merxen mecr` | paired or single-platform count tables + shared markers | `mecr_out/` (pair rates, summaries, distribution plot) |
-| 6 | `ALIGN` × 1 | `merxen align` | both platforms' latest analysis-ready zarrs | in-place MERSCOPE aligned elements + transform metadata, when enabled |
-| 7 | `ALIGN_QC` × 1 | `merxen alignment-qc` | updated MERSCOPE zarr + original Xenium zarr | `alignment_qc_out/`, when enabled |
+| 6 | `ALIGN` × 1 | `merxen align` | both platforms' latest analysis-ready zarrs | portable transform bundle + incomplete alignment manifest, when enabled |
+| 6c | `MATERIALIZE_ALIGNMENT` × 1 | `merxen materialize-alignment` | both durable zarrs + transform bundle | reconciled MERSCOPE vectors, tables, labels, image, caches, and complete manifest |
+| 7 | `ALIGN_QC` × 1 | `merxen alignment-qc` | materialized MERSCOPE zarr + fixed Xenium zarr | `alignment_qc_out/`, when enabled |
 | 8 | `COMPARE` × 1 | `merxen compare` | updated MERSCOPE zarr if enabled; otherwise analysis-ready zarrs | `compare_out/` (gene comparison CSVs + metrics JSON) |
 | 9 | `VISUALIZE` × 1 | `merxen visualize` | updated MERSCOPE zarr if enabled; otherwise analysis-ready zarrs | `visualize_out/` (PNG plots) |
 | 10 | `SPATIAL_GENE_ANALYSIS` × 1 | `merxen spatial-gene-analysis` | same paired zarrs plus tissue annotations, after visualization in full runs | `spatial_gene_analysis_out/` (Moran/Geary plus signed-distance, nested pair-null, rankings, and diagnostic plots) |
@@ -167,11 +184,12 @@ For a samplesheet row with `pair_id=EXAMPLE01`:
 | 13a | `DISTANCE_FROM_OBJECT_ANNOTATE` × platform | `merxen distance-from-object` | durable zarr + registered object GeoJSON | table metadata, per-cell sidecars, and pair-level near/far pseudobulks, when enabled |
 | 13b | `DISTANCE_FROM_OBJECT_COHORT` × platform | `merxen distance-from-object-cohort` | all pair-level platform pseudobulks | paired PyDESeq2 results for each segmentation branch |
 | 14 | `MAPMYCELLS` × 1 | `merxen mapmycells` | clustered `.h5ad` files from `clustering_squidpy_out/` | `mapmycells_out/` (query `.h5ad`, CSV/JSON assignments, annotated `.h5ad`) |
-| 15a | `GASTON_PREPARE` × platform/segmentation | `python -m merxen.gaston_stages prepare` | clustered H5AD raw counts + native shape in latest zarr | checksummed sparse input bundle and native-coordinate QC |
-| 15b | `GASTON_GLM_PCA` × platform/segmentation | `python -m merxen.gaston_stages glmpca` | portable count bundle | GLM-PCA features and convergence metadata |
-| 15c | `GASTON_TRAIN` × restart | `python -m merxen.gaston_stages train` | GLM-PCA features + native coordinates | independently resumable model, loss history, and seed manifest |
-| 15d | `GASTON_POSTPROCESS` × platform/segmentation | `python -m merxen.gaston_stages postprocess` | all restart results | selected model/K, per-cell domains/isodepth, diagnostics, and plots |
-| 15e | `GASTON_IMPORT` × platform/segmentation | `python -m merxen.gaston_stages import` | standalone annotations + clustered H5AD/zarr | annotated H5AD and locked clustered-table merge |
+| 15 | `MENDER_PREPARE` → `MENDER_COMPUTE` → `MENDER_FINALIZE` → `MENDER_IMPORT` × platform/segmentation | internal isolated entry points | clustered H5AD + clustered SpatialData table + explicit native shape | standalone context/domain artifacts plus `mender_domain` in the clustered table, when enabled |
+| 16a | `GASTON_PREPARE` × platform/segmentation | `python -m merxen.gaston_stages prepare` | clustered H5AD raw counts + native shape in latest zarr | checksummed sparse input bundle and native-coordinate QC |
+| 16b | `GASTON_GLM_PCA` × platform/segmentation | `python -m merxen.gaston_stages glmpca` | portable count bundle | GLM-PCA features and convergence metadata |
+| 16c | `GASTON_TRAIN` × restart | `python -m merxen.gaston_stages train` | GLM-PCA features + native coordinates | independently resumable model, loss history, and seed manifest |
+| 16d | `GASTON_POSTPROCESS` × platform/segmentation | `python -m merxen.gaston_stages postprocess` | all restart results | selected model/K, per-cell domains/isodepth, diagnostics, and plots |
+| 16e | `GASTON_IMPORT` × platform/segmentation | `python -m merxen.gaston_stages import` | standalone annotations + clustered H5AD/zarr | annotated H5AD and locked clustered-table merge |
 
 In single-platform mode, platform-local steps run once per row, paired-only
 alignment and comparison are skipped, and visualization/spatial-gene/clustering

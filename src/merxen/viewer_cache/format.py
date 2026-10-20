@@ -42,13 +42,35 @@ VIEWER_DERIVED_CACHE_VERSION = 2
 LABEL_CACHE_VERSION = 2
 
 #: Largest-axis size at/under which a pyramid stops adding coarser levels.
-PYRAMID_MIN_SIZE = 4096
+#: The viewer stamps this into the marker it compares against, from
+#: ``SYNTHETIC_IMAGE_PYRAMID_MIN_SIZE`` (images) and
+#: ``LABEL_OUTLINE_PYRAMID_MIN_SIZE`` (labels + outlines) -- both 1024. It uses
+#: its own constant, never a configured value, so a cache built with any other
+#: min_size is rejected outright. This is NOT tunable.
+PYRAMID_MIN_SIZE = 1024
 
 #: Hard cap on the number of pyramid levels.
 PYRAMID_MAX_LEVELS = 10
 
-#: Default multiscale rechunk tile for coarse pyramid levels.
+#: Default multiscale rechunk tile for coarse pyramid levels. Mirrors the
+#: viewer's ``RASTER_DISPLAY_TILE_SIZE``, which it stamps as the outline
+#: marker's ``tile_size``.
 PYRAMID_TILE = 1024
+
+#: Value a fully covered outline pixel carries. Mirrors the viewer's
+#: ``OUTLINE_COVERAGE_MAX``; coarse levels average these to record fractional
+#: line coverage rather than re-tracing an opaque boundary per level.
+OUTLINE_COVERAGE_MAX = 255
+
+#: Outline pyramid algorithm id the viewer requires. ``coverage_mean_v1`` means
+#: "trace the outline once at full resolution, scale to 0..OUTLINE_COVERAGE_MAX,
+#: then mean-coarsen". Tracing each label level independently (the pre-v1
+#: behaviour) makes every coarse boundary pixel fully opaque and far too thick.
+OUTLINE_PYRAMID_MODE = "coverage_mean_v1"
+
+#: ``source`` recorded on an outline marker built by the coverage-mean pyramid.
+#: Not compared by the viewer, but kept identical to what the viewer writes.
+OUTLINE_SOURCE = "coverage_mean"
 
 
 def is_derived_cache_key(key: str) -> bool:
@@ -162,18 +184,30 @@ def outline_marker(
     *,
     source_label_key: str,
     width: int,
-    source: str,
     levels: int,
     source_shapes: list[list[int]],
+    min_size: int = PYRAMID_MIN_SIZE,
+    tile_size: int = PYRAMID_TILE,
+    value_max: int = OUTLINE_COVERAGE_MAX,
 ) -> dict[str, object]:
-    """Completion marker for a label outline pyramid cache."""
+    """Completion marker for a label outline pyramid cache.
+
+    ``min_size``, ``tile_size``, ``pyramid_mode`` and ``value_max`` are all
+    compared by the viewer's ``_derived_cache_complete``; omitting any one of
+    them makes it discard the cache and rebuild from scratch. ``source`` and
+    ``source_shapes`` are informational only.
+    """
     return {
         "version": VIEWER_DERIVED_CACHE_VERSION,
         "complete": True,
         "kind": "label_outline",
         "source_label_key": str(source_label_key),
         "width": int(width),
-        "source": str(source),
+        "min_size": int(min_size),
+        "tile_size": int(tile_size),
+        "pyramid_mode": OUTLINE_PYRAMID_MODE,
+        "value_max": int(value_max),
+        "source": OUTLINE_SOURCE,
         "levels": int(levels),
         "source_shapes": [[int(h), int(w)] for h, w in source_shapes],
     }

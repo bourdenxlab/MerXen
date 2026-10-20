@@ -13,6 +13,21 @@ from merxen.io.samplesheet import (
 )
 
 
+def test_parse_samplesheet_preserves_optional_model_selectors(tmp_path: Path) -> None:
+    """Keep registry hashes as strings and blank platform settings unset."""
+    csv_path = tmp_path / "samplesheet.csv"
+    csv_path.write_text(
+        "pair_id,xenium_cellpose_model,merscope_cellpose_model\n"
+        f"P1,{'a' * 64},\n"
+        "P2,/path/to/model-bundle,/path/to/merscope-model\n"
+    )
+    first, second = parse_samplesheet(csv_path)
+    assert first.xenium_cellpose_model == "a" * 64
+    assert first.merscope_cellpose_model is None
+    assert second.xenium_cellpose_model == "/path/to/model-bundle"
+    assert second.merscope_cellpose_model == "/path/to/merscope-model"
+
+
 def test_parse_samplesheet_supports_raw_dirs_and_cached_spatialdata(
     tmp_path: Path,
 ) -> None:
@@ -105,6 +120,23 @@ def test_validate_samplesheet_allows_merscope_only_mode(tmp_path: Path) -> None:
     validate_samplesheet(pairs, analysis_mode="merscope")
 
 
+def test_validate_samplesheet_allows_direct_vzg2_for_merscope(
+    tmp_path: Path,
+) -> None:
+    """The existing merscope_dir column should accept a direct VZG2 file."""
+    archive_path = tmp_path / "sample.vzg2"
+    archive_path.touch()
+    csv_path = tmp_path / "vzg2.csv"
+    csv_path.write_text(
+        f"pair_id,analysis_mode,merscope_dir\nP1,merscope,{archive_path}\n"
+    )
+
+    pairs = parse_samplesheet(csv_path)
+
+    assert pairs[0].merscope_dir == archive_path
+    validate_samplesheet(pairs)
+
+
 def test_validate_samplesheet_allows_xenium_only_mode_with_blank_merscope_fields(
     tmp_path: Path,
 ) -> None:
@@ -158,6 +190,19 @@ def test_validate_samplesheet_uses_row_level_analysis_mode(
     assert pairs[1].spatial_gene_analysis_transcript_analysis_enabled is False
     assert pairs[1].only_stage == "qc"
     validate_samplesheet(pairs)
+
+
+def test_parse_samplesheet_supports_mender_row_overrides(tmp_path: Path) -> None:
+    """MENDER enablement and segmentation selection can be set per row."""
+    csv_path = tmp_path / "mender.csv"
+    csv_path.write_text(
+        'pair_id,mender_enabled,mender_segmentations\nP1,true,"reseg,proseg_hybrid"\n'
+    )
+
+    pair = parse_samplesheet(csv_path)[0]
+
+    assert pair.mender_enabled is True
+    assert pair.mender_segmentations == "reseg,proseg_hybrid"
 
 
 def test_required_platforms_for_mode_rejects_unknown_mode() -> None:

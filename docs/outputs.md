@@ -35,6 +35,7 @@ ${outdir}/
 │   │   └── original_seg/
 │   │       └── qc/
 │   ├── alignment/
+│   ├── alignment_materialization/
 │   ├── alignment_qc/
 │   ├── reseg/
 │   │   ├── mecr/
@@ -61,11 +62,11 @@ ${outdir}/
 
 `<pair_id>` comes straight from the `pair_id` column of the samplesheet. In
 single-platform mode, only the selected `<platform>/` directory is present and
-paired-only `alignment/`, `alignment_qc/`, and `comparison/` directories are
-not written.
+paired-only `alignment/`, `alignment_materialization/`, `alignment_qc/`, and
+`comparison/` directories are not written.
 `reseg/`, `original_seg/`, `proseg_mask/`, and `proseg_hybrid/` are controlled
-by `--analysis_segmentation`; the default `both` writes the first two branches
-and `all` writes all four.
+by `--analysis_segmentation`; the default `all` writes all four branches, while
+an explicit `both` writes only `reseg` and `original_seg`.
 Upstream build, segmentation,
 enrichment, and latest SpatialData artifacts are shared.
 Every `.png` plot listed below is also written as a same-stem `.pdf`.
@@ -145,6 +146,7 @@ Path: `${outdir}/<pair_id>/<platform>/segmentation/`
 | `cellpose_nuclei_masks_tiled.npy` | DAPI-only Cellpose `nuclei` labels, retained independently of transcript assignment. |
 | `cellpose_nuclei_stitching_stats.json` | Equivalent stitching diagnostics for the nuclei mask. |
 | `transcripts_for_proseg.csv` | ProSeg input: per-transcript rows with seeded `cell_id`. Retained for debugging. |
+| `transcripts_for_proseg.transforms.json` | Pixel-to-micron affine that seeded `transcripts_for_proseg.csv`. A re-run refuses to reuse the CSV when it differs from the current transform. |
 
 ### Enrichment
 
@@ -154,6 +156,23 @@ Path: `${outdir}/<pair_id>/<platform>/enrichment/`
 |------|----------|
 | `latest_input.zarr` | Staged symlink to `../latest/latest_spatialdata.zarr`. |
 | `enrich_out/` | Assignment summary CSVs per shape (transcripts assigned, gene totals). |
+
+### Image registration
+
+Path: `${outdir}/<pair_id>/xenium/register_images/` (only for rows that set
+`xenium_registered_images_csv`)
+
+| File | Contents |
+|------|----------|
+| `latest_input.zarr` | Staged symlink to `../latest/latest_spatialdata.zarr`, updated in place with one image element per registered image plus its viewer pyramid. |
+| `register_images_out/*_registered_images.json` | Registered and removed image keys for the section. |
+| `register_images_out/*_<image_key>_registration_summary.json` | Explorer and final matrices, scale check, refinement status, residuals before/after. |
+| `register_images_out/*_<image_key>_registration_qc.png` / `.pdf` | DAPI overlay, residual-shift field, and residual histograms. |
+| `register_images_out/*_<image_key>_registration_local_shifts.csv` | Per-window residual shifts before and after refinement. |
+| `register_images_out/*_<image_key>_nonrigid_flow.npz` | Accepted coarse pull field, confidence mask, and its pixel-to-reference affine when non-rigid refinement was attempted. |
+| `register_images_out/*_<image_key>_nonrigid_qc.png` / `.pdf` | Affine and final DAPI overlays, applied displacement, confidence boundary, and local DAPI correlation. |
+
+See [Image registration](stages/register-images.md#reading-the-qc).
 
 ### Mask Image Quantification
 
@@ -191,13 +210,14 @@ Only present when `--cortical_depth_enabled true`.
 | `compute_cortical_depth_out/<segmentation>/*_cells_laplace_depth.png` | Cells colored by `laplace_depth`. PDF copy is also written. |
 | `compute_cortical_depth_out/<segmentation>/*_cells_equivolumetric_depth.png` | Cells colored by `equivolumetric_depth`. PDF copy is also written. |
 | `compute_cortical_depth_out/<segmentation>/*_cells_tissue_annotation.png` | All cells colored as `grey_matter`, `white_matter`, `excluded`, or `outside_brain`. PDF copy is also written. |
-| `compute_cortical_depth_out/cortical_depth_qc_summary.json` | Cell inside/outside counts, assigned counts, streamline thickness stats, failed/flagged streamlines, warnings. |
+| `compute_cortical_depth_out/cortical_depth_qc_summary.json` | Cell inside/outside counts, assigned counts, streamline thickness stats, failed/flagged streamlines, warnings (including `frame_mismatch_suspected:<segmentation>`), and per table the boundary frame, the cell coordinate source and the frame check `edge_to_nearest_cell_median_um` / `ribbon_bin_occupancy` ([Coordinate frame](stages/cortical-depth.md#coordinate-frame)). |
 
 The updated AnnData `obs` columns include `inside_cortical_ribbon`,
 `cortical_depth_annotation`, `laplace_depth`, `equivolumetric_depth`,
 `distance_to_pia_um`, `distance_to_wm_um`, `streamline_thickness_um`,
 `tangential_position_um`, `nearest_streamline_id`, `column_id`, and
-`cortical_depth_qc_flag`.
+`cortical_depth_qc_flag`; the table's `uns['cortical_depth']` records the
+boundary frame and cell coordinate source they were computed from.
 
 ### Distance from object
 
@@ -241,6 +261,7 @@ Path: `${outdir}/<pair_id>/<platform>/<analysis_segmentation>/qc/`
 | `qc_out/<dataset>_geometry_metrics.csv` | Per-cell geometry (area, perimeter, eccentricity, ...). |
 | `qc_out/<dataset>_cell_metrics.csv` | Per-cell transcripts_per_cell, genes_per_cell. |
 | `qc_out/<dataset>_qc.pkl` | Pickle with summary + DataFrames for fast reload. |
+| `qc_out/<dataset>_registration_qc.json` | Segmentation-to-transcript registration check (status, density ratio, offset against the platform's cells). See [stages/qc.md](stages/qc.md#registration-check). |
 | `qc_out/<dataset>_hybrid_cell_diagnostics.csv` | Hybrid construction diagnostics plus per-cell Cellpose/ProSeg count and area changes. Hybrid branch only. |
 | `qc_out/<dataset>_hybrid_assignment_sources.csv` | Hybrid transcript assignment-provenance counts and percentages. Hybrid branch only. |
 | `qc_out/<dataset>_hybrid_fallback_reasons.csv` | Cellpose-fallback reason counts and percentages. Hybrid branch only. |
@@ -260,11 +281,11 @@ Shared reference path: `${outdir}/mecr_reference/mecr_reference_out/`
 
 | File | Contents |
 |------|----------|
-| `mecr_reference_panel_genes.csv` | Union of spatial-panel genes requested from the complete WHB reference. |
+| `mecr_reference_panel_genes.csv` | Union of spatial-panel genes requested from the complete species-matched whole-brain reference. |
 | `mecr_reference_gene_statistics.csv` | Per-gene, per-broad-class detection fractions and Python Wilcoxon statistics, including threshold and uniqueness flags. |
 | `mecr_reference_markers.csv` | Unique broad-class markers that pass the paper's strict detection thresholds. |
 | `mecr_reference_pairs.csv` | Reference intersection, union, and MECR for every eligible cross-class marker pair. |
-| `mecr_reference_distribution.png` | WHB reference pair-MECR histogram with descriptive mean and median lines; neither line is used for pair selection. |
+| `mecr_reference_distribution.png` | Whole-brain reference pair-MECR histogram with descriptive mean and median lines; neither line is used for pair selection. |
 | `mecr_reference_manifest.json` | Reference paths, normalization, thresholds, class/cell counts, Wilcoxon settings, and output paths. |
 
 Per-branch path: `${outdir}/<pair_id>/<analysis_segmentation>/mecr/mecr_out/`
@@ -305,13 +326,21 @@ Only present for paired rows whose effective `enable_alignment` value is `true`.
 | `align_out/valis/` / `qc/` | Locked non-rigid VALIS artifacts plus partial-overlap candidates, seed-labelled physical objective plots and local score slice, overlays, checkerboards, feature, mask, displacement, and deformation diagnostics. |
 | `align_out/alignment_coords/` | Legacy coordinate diagnostics; retained as an empty contract directory for VALIS. |
 
-By default, `ALIGN` updates the existing MERSCOPE latest zarr in place. Raw
-vector elements remain untouched, the selected global affine is saved to
-`merxen_xenium`, and materialized selected VALIS coordinates use the existing
-`*_aligned_nonrigid` suffix for downstream compatibility. Their metadata says
-whether non-rigid or the global fallback was actually selected. Transformed
-points, shapes, and table centroids can carry an `in_shared_tissue_domain`
-flag. Xenium remains the fixed reference and is not copied.
+`alignment_materialization/materialization_summary.json` reports `complete` for
+a rebuild or `current` for a validated idempotent reuse. `ALIGN` only computes
+and embeds the transform; `MATERIALIZE_ALIGNMENT` updates the existing
+MERSCOPE latest Zarr in place. Native elements remain untouched. Derived points,
+shapes, and tables use `*_aligned_nonrigid`; labels use
+`<aligned_shape>_labels`; and the full multichannel image is
+`MERSCOPE_z_projection_aligned_nonrigid`. Pyramids and outlines use the normal
+viewer-cache naming convention in `merxen_xenium`.
+
+The MERSCOPE root `merxen_alignment` attribute is a version-2 manifest with
+fixed-grid geometry, transform/native fingerprints, mappings, dtype/channel
+metadata, artifact QC, and completion status. `_merxen_alignment/` holds a
+portable transform copy. The Xenium root contains a matching
+`merxen_alignment_pair_reference`; consumers should reject pair or transform
+fingerprint mismatches.
 
 ### Alignment QC
 
@@ -429,6 +458,29 @@ Additional QC artifacts are written under
 | `branch_neurons/<sample_id>_neurons_split_*` | Neuron Excitatory/Inhibitory/Other annotation tables, heatmap, plots, and split H5AD. |
 | `branch_neurons/split_<label>/...` | Per-neuron-split subtype H5AD plus UMAP, spatial scatter, spatial grid, panel-gene dotplot, and dotplot summary tables. |
 
+### MENDER spatial domains
+
+Path: `${outdir}/<pair_id>/<segmentation>/mender/mender_out/<platform>/`
+
+| File | Contents |
+|------|----------|
+| `<sample_id>_mender_annotated.h5ad` | Original clustered H5AD plus categorical `obs["mender_domain"]` and `uns["merxen_mender"]`. |
+| `<sample_id>_mender_context.h5ad` | MENDER context representation and context embedding; this potentially large matrix is not imported into SpatialData. |
+| `<sample_id>_mender_cells.parquet` | Immutable cell IDs, native coordinates, input state, and MENDER domain. |
+| `input/input_manifest.json` | Source H5AD/table/native shape, state counts, coordinate range, and exact MENDER settings. |
+| `tables/domain_sizes.tsv` | Domain sizes, state entropy, dominant composition, and number of states present. |
+| `tables/state_by_domain.tsv` | Long cell-state-by-domain counts and within-domain fractions. |
+| `tables/scale_neighbour_summary.tsv` | Minimum, median, mean, and maximum neighbour counts at every scale. |
+| `plots/spatial_domains.{png,pdf}` | Native-coordinate domain map. |
+| `plots/context_umap.{png,pdf}` | MENDER context embedding colored by domain. |
+| `plots/state_domain_heatmap.{png,pdf}` | Cell-state composition heatmap by domain. |
+| `mender_manifest.json` | Standalone artifact and provenance manifest. |
+| `spatialdata_import_manifest.json` | Shared-lock SpatialData import record and domain counts. |
+
+Only `mender_domain` and `uns["merxen_mender"]` are added to the derived
+clustered SpatialData table. Existing clustering, GASTON, cortical-depth, and
+MapMyCells annotations are preserved.
+
 ### MapMyCells
 
 Path: `${outdir}/<pair_id>/<analysis_segmentation>/mapmycells/`
@@ -436,6 +488,7 @@ Path: `${outdir}/<pair_id>/<analysis_segmentation>/mapmycells/`
 | File | Contents |
 |------|----------|
 | `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_query.h5ad` | Local mapper query AnnData with selected counts copied into `X`. |
+| `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_query_gene_ids.json` | Gene-ID resolution report: IDs recovered by the cached reference lookup or `annotation_gene_id_fallback_csv`, and the features left unresolved with their reasons. |
 | `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells.csv` | Per-cell MapMyCells assignments and confidence columns. |
 | `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_extended.json` | Full MapMyCells JSON result, including config, log, marker genes, and taxonomy tree. |
 | `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells.log` | MapMyCells run log. |
@@ -451,7 +504,7 @@ Path: `${outdir}/<pair_id>/<analysis_segmentation>/mapmycells/`
 | `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_spatial_supercluster_grid.png` | Small-multiple spatial grid with each supercluster highlighted in red against all other cells in grey. |
 | `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_annotated.h5ad` | Clustered AnnData with assignment columns added to `obs` using the `mapmycells_` prefix and mapper metadata in `uns["merxen_mapmycells"]`; plot paths are recorded, but plot images are separate PNGs. |
 | `mapmycells_out/region_<region_name>/<platform>/<pair_id>_<platform>_mapmycells_*` | Region-specific MapMyCells outputs when `mapmycells_reference_mode` includes `region`; annotated H5AD columns use `mapmycells_region_<region_name>_`. |
-| `mapmycells_out/<pair_id>_mapmycells_manifest.json` | Per-pair manifest summarizing selected reference mode, whole-brain and region references, ROI labels, filtering counts, bootstrap settings, and output paths. |
+| `mapmycells_out/<pair_id>_mapmycells_manifest.json` | Per-pair manifest summarizing selected reference mode, whole-brain and region references, ROI labels, filtering counts, bootstrap settings, output paths, the gene-ID fallback table used (`gene_id_fallback_csv`, or `gene_id_fallback_ignored` when it has no IDs of the query species), and the per-sample `gene_id_resolution` summaries. |
 
 ### GASTON spatial domains
 

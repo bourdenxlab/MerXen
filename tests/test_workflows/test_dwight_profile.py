@@ -107,6 +107,9 @@ def test_dwight_gpu_processes_use_one_fixed_host_lock(
         )
         == 5
     )
+    assert dwight_config_text.count('exec 9<"\\${MERXEN_GPU_LOCK_FILE}"') == 5
+    assert 'exec 9>"\\${MERXEN_GPU_LOCK_FILE}"' not in dwight_config_text
+    assert dwight_config_text.count("set -o noclobber") == 5
     assert "${PWD}/.merxen_gpu.lock" not in combined_config_text
 
 
@@ -155,3 +158,21 @@ def test_default_standard_and_dwight_profiles_resolve_equivalently() -> None:
         ):
             script = process[f"withName:{process_name}"]["beforeScript"]
             assert f'MERXEN_GPU_LOCK_FILE="{lock_path}"' in script
+            assert 'exec 9<"${MERXEN_GPU_LOCK_FILE}"' in script
+
+
+def test_dwight_sends_task_temporary_files_to_srv_storage() -> None:
+    """Task TMPDIR must point at /srv/storage, never the small root disk's /tmp."""
+    repo_root = Path(__file__).resolve().parents[2]
+    text = (repo_root / "workflows" / "conf" / "dwight.config").read_text()
+    assert re.search(r'task_tmp_dir\s*=\s*"/srv/storage/MerXen/tmp"', text)
+    assert re.search(r"\benv\s*\{\s*TMPDIR\s*=\s*params\.task_tmp_dir\s*\}", text)
+
+
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
+def test_dwight_resolves_task_tmpdir_to_srv_storage() -> None:
+    """The resolved dwight profile should export TMPDIR on /srv/storage to tasks."""
+    repo_root = Path(__file__).resolve().parents[2]
+    resolved = _resolved_config(repo_root / "workflows", profile="dwight")
+    assert resolved["env"]["TMPDIR"] == "/srv/storage/MerXen/tmp"
+    assert resolved["params"]["task_tmp_dir"] == "/srv/storage/MerXen/tmp"

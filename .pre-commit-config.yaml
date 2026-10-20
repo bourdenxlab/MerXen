@@ -1,22 +1,53 @@
+# `pre-commit install` installs every type below (the privacy hooks run at
+# commit, merge, commit-msg and push; docs/local-configuration.md).
+default_install_hook_types: [pre-commit, pre-merge-commit, commit-msg, pre-push]
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
       - id: trailing-whitespace
+        exclude: ^licenses/
       - id: end-of-file-fixer
+        exclude: ^licenses/
       - id: check-yaml
       - id: check-added-large-files
         args: ['--maxkb=500']
 
+  # Must match the pinned ruff in pyproject.toml and requirements/requirements.lock. This
+  # hook rewrites files on commit, so a mismatch against the version
+  # scripts/run_ci_checks.sh checks with on push makes commits unpushable.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.4.4
+    rev: v0.15.10
     hooks:
-      - id: ruff
+      - id: ruff-check
         args: [--fix]
       - id: ruff-format
 
   - repo: local
     hooks:
+      # No host paths or sample names in anything committed (CLAUDE.md).
+      # Stdlib only, run by the system python3; the alias table and .env are
+      # found as described in docs/local-configuration.md.
+      - id: privacy-staged
+        name: no host paths or sample names (staged lines, file names)
+        entry: python3 scripts/privacy/check_private_text.py --staged
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit, pre-merge-commit]
+      - id: privacy-commit-msg
+        name: no host paths or sample names (commit message)
+        entry: python3 scripts/privacy/check_private_text.py --commit-msg
+        language: system
+        stages: [commit-msg]
+      - id: privacy-push
+        name: no host paths or sample names (pushed commits, branch name)
+        entry: python3 scripts/privacy/check_private_text.py --pre-push
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
       - id: local-ci
         name: local CI checks
         entry: scripts/run_ci_checks.sh

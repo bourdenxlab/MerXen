@@ -20,6 +20,10 @@ from merxen.alignment.dapi import (
     mask_outline,
     process_dapi_image,
 )
+from merxen.alignment.tissue import (
+    AlignmentTissueAnnotation,
+    rasterize_alignment_tissue_annotation,
+)
 from merxen.config import (
     AlignmentImageConfig,
     DAPIProcessingConfig,
@@ -66,6 +70,8 @@ class RegistrationFrame:
     edge_artifact_metrics: dict[str, float]
     coordinate_metadata_source: str
     coordinate_metadata_trusted: bool
+    tissue_mask_unclipped: np.ndarray | None = None
+    tissue_annotation_metadata: dict[str, Any] | None = None
 
     @property
     def dataset_to_registration_matrix(self: RegistrationFrame) -> np.ndarray:
@@ -73,6 +79,17 @@ class RegistrationFrame:
         return np.asarray(
             self.original_to_registration_matrix @ self.dataset_to_image_matrix,
             dtype=np.float64,
+        )
+
+    @property
+    def tissue_scoring_mask(self: RegistrationFrame) -> np.ndarray:
+        """Return annotated tissue restricted to reliable registration pixels."""
+        return np.asarray(
+            (
+                (np.asarray(self.tissue_mask) > 0) & (np.asarray(self.valid_mask) > 0)
+            ).astype(np.uint8)
+            * 255,
+            dtype=np.uint8,
         )
 
 
@@ -158,6 +175,8 @@ def prepare_registration_frames(
     *,
     config: ValisAlignmentConfig,
     output_dir: Path,
+    fixed_tissue_annotation: AlignmentTissueAnnotation | None = None,
+    moving_tissue_annotation: AlignmentTissueAnnotation | None = None,
 ) -> tuple[RegistrationFrame, RegistrationFrame]:
     """Resample both DAPI images to one isotropic, padded registration canvas."""
     target_pixel_size = _shared_registration_pixel_size(fixed, moving, config)
@@ -179,6 +198,7 @@ def prepare_registration_frames(
         canvas_shape_rc=canvas_shape,
         target_pixel_size_um=target_pixel_size,
         processing=config.preprocessing,
+        tissue_annotation=fixed_tissue_annotation,
     )
     moving_reg = _prepare_one_frame(
         moving,
@@ -186,6 +206,7 @@ def prepare_registration_frames(
         canvas_shape_rc=canvas_shape,
         target_pixel_size_um=target_pixel_size,
         processing=config.preprocessing,
+        tissue_annotation=moving_tissue_annotation,
     )
     _save_frame_qc(fixed_reg, output_dir)
     _save_frame_qc(moving_reg, output_dir)
@@ -463,6 +484,7 @@ def _prepare_one_frame(
     canvas_shape_rc: tuple[int, int],
     target_pixel_size_um: float,
     processing: DAPIProcessingConfig,
+    tissue_annotation: AlignmentTissueAnnotation | None = None,
 ) -> RegistrationFrame:
     source = _materialize_downsampled(frame.image, target_shape_rc)
     support_mask = derive_acquired_support_mask(
@@ -475,26 +497,12 @@ def _prepare_one_frame(
         config=processing,
         acquired_support_mask=support_mask,
     )
-    tissue_mask = create_dapi_tissue_mask(
-        processed,
-        pixel_size_um=target_pixel_size_um,
-        config=processing,
-    )
     valid_mask = create_registration_validity_mask(
         target_shape_rc,
         pixel_size_um=target_pixel_size_um,
         edge_exclusion_um=float(processing.edge_exclusion_um),
         acquired_support_mask=support_mask,
     )
-    tissue_mask = np.where(valid_mask > 0, tissue_mask, 0).astype(
-        np.uint8,
-        copy=False,
-    )
-    if not np.any(tissue_mask):
-        raise ValueError(
-            f"{frame.platform} DAPI tissue mask contains no foreground after "
-            "excluding the acquisition-footprint boundary"
-        )
     edge_metrics = dapi_edge_artifact_metrics(
         processed,
         acquired_support_mask=support_mask,
@@ -509,10 +517,6 @@ def _prepare_one_frame(
         pad_y : pad_y + target_shape_rc[0],
         pad_x : pad_x + target_shape_rc[1],
     ] = processed
-    canvas_mask[
-        pad_y : pad_y + target_shape_rc[0],
-        pad_x : pad_x + target_shape_rc[1],
-    ] = tissue_mask
     canvas_support[
         pad_y : pad_y + target_shape_rc[0],
         pad_x : pad_x + target_shape_rc[1],
@@ -533,6 +537,46 @@ def _prepare_one_frame(
         ],
         dtype=np.float64,
     )
+    tissue_mask_unclipped: np.ndarray | None = None
+    tissue_annotation_metadata: dict[str, Any] | None = None
+    if tissue_annotation is None:
+        # Compatibility path for source-level diagnostics. The production VALIS
+        # dispatcher always supplies required manual annotations.
+        tissue_mask = create_dapi_tissue_mask(
+            processed,
+            pixel_size_um=target_pixel_size_um,
+            config=processing,
+        )
+        tissue_mask = np.where(valid_mask > 0, tissue_mask, 0).astype(
+            np.uint8,
+            copy=False,
+        )
+        canvas_mask[
+            pad_y : pad_y + target_shape_rc[0],
+            pad_x : pad_x + target_shape_rc[1],
+        ] = tissue_mask
+        tissue_annotation_metadata = {"source": "automatic_dapi_compatibility"}
+    else:
+        rasterized = rasterize_alignment_tissue_annotation(
+            tissue_annotation,
+            dataset_to_registration_matrix=(
+                original_to_registration @ frame.dataset_to_image_matrix
+            ),
+            shape_rc=canvas_shape_rc,
+            acquired_support_mask=canvas_support,
+            registration_pixel_size_um=target_pixel_size_um,
+        )
+        canvas_mask = rasterized.tissue
+        tissue_mask_unclipped = rasterized.unclipped
+        tissue_annotation_metadata = dict(rasterized.metadata)
+        tissue_annotation_metadata["fraction_outside_eroded_validity"] = float(
+            np.count_nonzero(
+                (np.asarray(canvas_mask) > 0) & (np.asarray(canvas_valid) == 0)
+            )
+            / max(1, np.count_nonzero(canvas_mask))
+        )
+    if not np.any(canvas_mask):
+        raise ValueError(f"{frame.platform} tissue mask contains no foreground")
     return RegistrationFrame(
         platform=frame.platform,
         image_key=frame.image_key,
@@ -548,6 +592,8 @@ def _prepare_one_frame(
         edge_artifact_metrics=edge_metrics,
         coordinate_metadata_source=frame.coordinate_metadata_source,
         coordinate_metadata_trusted=frame.coordinate_metadata_trusted,
+        tissue_mask_unclipped=tissue_mask_unclipped,
+        tissue_annotation_metadata=tissue_annotation_metadata,
     )
 
 
@@ -614,6 +660,50 @@ def _save_frame_qc(frame: RegistrationFrame, output_dir: Path) -> None:
         frame.valid_mask,
         photometric="minisblack",
     )
+    tifffile.imwrite(
+        output_dir / f"{prefix}_tissue_scoring_mask.tif",
+        frame.tissue_scoring_mask,
+        photometric="minisblack",
+    )
+    if frame.tissue_mask_unclipped is not None:
+        tifffile.imwrite(
+            output_dir / f"{prefix}_tissue_mask_before_support_clip.tif",
+            frame.tissue_mask_unclipped,
+            photometric="minisblack",
+        )
+    if frame.tissue_annotation_metadata is not None:
+        (output_dir / f"{prefix}_tissue_mask_metadata.json").write_text(
+            json.dumps(frame.tissue_annotation_metadata, indent=2)
+        )
+    if frame.tissue_annotation_metadata is not None and (
+        frame.tissue_annotation_metadata.get("source") == "manual_annotation"
+    ):
+        _save_tissue_annotation_overlay(
+            frame,
+            output_dir / f"{prefix}_tissue_annotation_overlay.png",
+        )
     (output_dir / f"{prefix}_dapi_edge_metrics.json").write_text(
         json.dumps(frame.edge_artifact_metrics, indent=2)
     )
+
+
+def _save_tissue_annotation_overlay(frame: RegistrationFrame, path: Path) -> None:
+    """Write processed DAPI with anatomical and reliable-domain outlines."""
+    import matplotlib.pyplot as plt
+
+    figure, axis = plt.subplots(figsize=(8, 8), constrained_layout=True)
+    axis.imshow(frame.processed_image, cmap="gray")
+    axis.contour(frame.tissue_mask > 0, levels=[0.5], colors=["lime"], linewidths=0.8)
+    axis.contour(
+        frame.tissue_scoring_mask > 0,
+        levels=[0.5],
+        colors=["cyan"],
+        linewidths=0.5,
+    )
+    axis.set_title(
+        f"{frame.platform} tissue annotation: anatomy=green, image scoring=cyan"
+    )
+    axis.axis("off")
+    figure.savefig(path, dpi=180, bbox_inches="tight")
+    figure.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
+    plt.close(figure)

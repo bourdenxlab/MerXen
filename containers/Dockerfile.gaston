@@ -38,6 +38,11 @@ RUN python3 -m pip install \
 # Scanpy/Squidpy dependencies cannot be imported.
 RUN python3 -c "import torch; import scanpy, squidpy; from gaston import dp_related, model_selection, neural_net; print(torch.__version__)"
 
+COPY LICENSE THIRD_PARTY_NOTICES.md /usr/share/merxen/licenses/
+COPY licenses/ /usr/share/merxen/licenses/licenses/
+COPY scripts/collect_gaston_licenses.py /opt/merxen/scripts/collect_gaston_licenses.py
+RUN python3 /opt/merxen/scripts/collect_gaston_licenses.py /usr/share/merxen/licenses/packages
+
 WORKDIR /opt/merxen
 COPY src ./src
 ENV PYTHONPATH=/opt/merxen/src

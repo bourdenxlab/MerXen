@@ -8,17 +8,26 @@ that the store still reloads through SpatialData.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
+import dask.dataframe as dd
 import geopandas as gpd
 import numpy as np
+import pandas as pd
 import pytest
 import xarray as xr
 import zarr
 from shapely.geometry import Polygon
 from spatialdata import SpatialData, read_zarr
-from spatialdata.models import Image2DModel, ShapesModel
+from spatialdata.models import Image2DModel, PointsModel, ShapesModel
 from spatialdata.transformations import Identity
 
+from merxen.io.spatialdata_schema import (
+    PROSEG_ID_NAMESPACE,
+    register_segmentation_branch,
+    stamp_merxen_schema,
+)
+from merxen.viewer_cache import build as build_module
 from merxen.viewer_cache import format as fmt
 from merxen.viewer_cache.build import (
     DEFAULT_SHAPE_KEYS,
@@ -49,9 +58,35 @@ def synthetic_store(tmp_path: Path) -> Path:
         index=[2, 94831, 7],  # non-contiguous integer instance ids
     )
     shapes = ShapesModel.parse(gdf)
+    points = PointsModel.parse(
+        dd.from_pandas(
+            pd.DataFrame(
+                {
+                    "x": [2.0, 7.0],
+                    "y": [2.0, 7.0],
+                    "gene": pd.Categorical(["A", "B"]),
+                    "transcript_id": np.asarray([1, 2], dtype=np.uint64),
+                }
+            ),
+            npartitions=1,
+        ),
+        coordinates={"x": "x", "y": "y"},
+        feature_key="gene",
+    )
     sd = SpatialData(
         images={"MERSCOPE_z_projection": image},
+        points={"transcripts": points},
         shapes={"MOSAIK_proseg": shapes},
+    )
+    stamp_merxen_schema(sd, primary_points_key="transcripts", platform="MERSCOPE")
+    register_segmentation_branch(
+        sd,
+        "proseg",
+        points_key="transcripts",
+        assignment_column=None,
+        shape_key="MOSAIK_proseg",
+        table_key=None,
+        id_namespace=PROSEG_ID_NAMESPACE,
     )
     sd.write(store)
     return store
@@ -119,6 +154,32 @@ def test_build_produces_viewer_trusted_caches(synthetic_store: Path) -> None:
     assert lp_key in sd.labels
     assert ol_key in sd.labels
     assert im_key in sd.images
+
+
+def test_build_serializes_with_another_store_writer(
+    synthetic_store: Path,
+    store_lock_contention: Any,
+) -> None:
+    """The cache build waits for a writer holding the store lock through another
+    staged symlink, and keeps the lock from its read until the last cache."""
+    params = ViewerCacheParams(
+        label_chunk_size=64, min_size=32, shape_keys=("MOSAIK_proseg",)
+    )
+
+    summary = store_lock_contention.run(
+        lambda staged: build_viewer_caches(
+            staged, "MERSCOPE", original_data_path=synthetic_store, params=params
+        ),
+        synthetic_store,
+        reads=[(build_module, "read_zarr")],
+        persists=[
+            (build_module, "write_or_replace_element"),
+            (build_module, "_stamp_marker"),
+        ],
+    )
+
+    assert summary["masks"]["MOSAIK_proseg"]["mask"] == "built"
+    assert summary["image_pyramid"] == "built"
 
 
 def test_build_is_idempotent(synthetic_store: Path) -> None:

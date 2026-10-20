@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import shutil
+import threading
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -22,6 +23,7 @@ import dask.dataframe as dd
 import numpy as np
 import pandas as pd
 import spatialdata as sd
+import zarr
 from spatialdata.models import PointsModel, ShapesModel, TableModel
 from spatialdata.transformations import get_transformation
 
@@ -65,33 +67,79 @@ _ELEMENT_TYPE_ALIASES = {
 
 
 def spatialdata_write_lock_path(zarr_path: Path | str) -> Path:
-    """Return the shared, store-adjacent MerXen writer lock path."""
-    return Path(f"{Path(zarr_path)}.merxen-write.lock")
+    """Return the shared MerXen writer lock path beside the real store.
+
+    Every path that reaches one store must map to one lock file, or concurrent
+    writers are not serialized. Nextflow stages a store into each task's work
+    directory as a symlink (some modules add a second hop), so a lock derived
+    from the unresolved path would sit beside each task's own symlink. The
+    path is therefore made absolute and every symlink in it is resolved before
+    the lock name is derived. A store that does not exist yet resolves through
+    its existing ancestors, so it gets the lock it keeps once written.
+
+    Args:
+        zarr_path: SpatialData Zarr path, possibly relative or through symlinks.
+
+    Returns:
+        ``<real store path>.merxen-write.lock``.
+    """
+    store_path = Path(zarr_path).resolve()
+    return store_path.with_name(f"{store_path.name}.merxen-write.lock")
+
+
+_HELD_WRITE_LOCKS = threading.local()
+
+
+def _write_locks_held_by_this_thread() -> set[Path]:
+    held: set[Path] | None = getattr(_HELD_WRITE_LOCKS, "lock_paths", None)
+    if held is None:
+        held = set()
+        _HELD_WRITE_LOCKS.lock_paths = held
+    return held
 
 
 @contextmanager
 def spatialdata_write_lock(zarr_path: Path | str) -> Iterator[Path]:
     """Serialize all additive MerXen writes to one SpatialData store.
 
-    The lock deliberately lives beside the Zarr so it is visible to every
-    process and cluster node that can mutate the shared store. Callers must
+    The lock deliberately lives beside the real Zarr (symlinks resolved) so it
+    is visible to every process and cluster node that can mutate the shared
+    store, whichever staged or symlinked path each one was given. Callers must
     acquire it before reading SpatialData and retain it until persistence is
     complete, preventing a stale read/modify/write cycle from dropping columns
     written by another terminal analysis.
+
+    The lock is not re-entrant: it is an ``flock`` on a file opened per call,
+    and a second open of that file conflicts with the first even in the same
+    process. A nested acquisition by the thread that already holds it would
+    therefore wait forever, so it raises instead. Helpers that run under a
+    caller's lock take the open store and do not lock again.
 
     Args:
         zarr_path: SpatialData Zarr whose table or elements will be updated.
 
     Yields:
         The store-adjacent lock path while the exclusive lock is held.
+
+    Raises:
+        RuntimeError: If this thread already holds the lock for the store.
     """
     lock_path = spatialdata_write_lock_path(zarr_path)
+    held = _write_locks_held_by_this_thread()
+    if lock_path in held:
+        raise RuntimeError(
+            f"This thread already holds the SpatialData write lock {lock_path}; "
+            "taking it again would deadlock. Pass the open store to a helper "
+            "that does not take the lock."
+        )
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a", encoding="utf-8") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
+        held.add(lock_path)
         try:
             yield lock_path
         finally:
+            held.discard(lock_path)
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
@@ -164,6 +212,8 @@ def write_or_replace_element(
                     element_type,
                 )
                 write_element(element_key, overwrite=False)
+        if _ELEMENT_TYPE_ALIASES.get(str(element_type).lower()) == "labels":
+            _deduplicate_written_labels(sdata_obj, element_key)
     else:
         path = getattr(sdata_obj, "path", None)
         write = getattr(sdata_obj, "write", None)
@@ -198,9 +248,112 @@ def _write_element_with_recoverable_backup(
         if element_path.exists() or element_path.is_symlink():
             remove_path(element_path)
         os.replace(backup_path, element_path)
+        _reconsolidate_metadata(sdata_obj, element_key, raise_errors=False)
         raise
     remove_path(backup_path)
+    # write_element consolidated the root metadata while the hidden backup group still
+    # existed; without this the root zarr.json keeps entries for the deleted backup.
+    _reconsolidate_metadata(sdata_obj, element_key, raise_errors=True)
     return True
+
+
+def _reconsolidate_metadata(
+    sdata_obj: Any,
+    element_key: str,
+    *,
+    raise_errors: bool,
+) -> None:
+    """Rewrite consolidated metadata after a backup removal or a metadata fix."""
+    has_consolidated = getattr(sdata_obj, "has_consolidated_metadata", None)
+    write_consolidated = getattr(sdata_obj, "write_consolidated_metadata", None)
+    if not callable(has_consolidated) or not callable(write_consolidated):
+        return
+    try:
+        if has_consolidated():
+            write_consolidated()
+    except Exception:
+        if raise_errors:
+            raise
+        logger.warning(
+            "Could not re-consolidate SpatialData metadata after restoring %s.",
+            element_key,
+            exc_info=True,
+        )
+
+
+def _deduplicate_written_labels(sdata_obj: Any, element_key: str) -> None:
+    """Drop the ``ome.labels`` repeat that ome-zarr adds when a label is rewritten."""
+    path = getattr(sdata_obj, "path", None)
+    if path is None:
+        return
+    removed = deduplicate_ome_labels_metadata(path)
+    if removed:
+        logger.debug(
+            "Removed %d repeated ome.labels entries after writing %s.",
+            len(removed),
+            element_key,
+        )
+        # write_element consolidated the root metadata with the repeated list.
+        _reconsolidate_metadata(sdata_obj, element_key, raise_errors=True)
+
+
+def deduplicate_ome_labels_metadata(
+    zarr_path: Path | str,
+    *,
+    dry_run: bool = False,
+) -> list[str]:
+    """Drop repeated names from the labels group's OME ``labels`` list.
+
+    ome-zarr's label writer appends the element name to this list on every
+    write, so each replacement of a stored label used to add another copy. The
+    first occurrence of each name is kept, so the list order is otherwise
+    unchanged. Only the ``labels`` group metadata is rewritten; the caller is
+    responsible for refreshing consolidated metadata in the root group.
+
+    Args:
+        zarr_path: SpatialData Zarr store whose ``labels`` group to check.
+        dry_run: Report the repeated entries without rewriting the metadata.
+
+    Returns:
+        The repeated entries that were removed (or, with ``dry_run``, would be),
+        in list order. Empty when the list is already unique or the store has no
+        labels list.
+    """
+    labels_path = Path(zarr_path) / "labels"
+    if not labels_path.is_dir():
+        return []
+    group = zarr.open_group(
+        str(labels_path),
+        mode="r" if dry_run else "r+",
+        use_consolidated=False,
+    )
+    attrs: dict[str, Any] = dict(group.attrs.asdict())
+    ome: dict[str, Any] = attrs["ome"] if isinstance(attrs.get("ome"), dict) else {}
+    # NGFF 0.5 (Zarr v3) nests the list under "ome"; NGFF 0.4 keeps it top-level.
+    is_nested = isinstance(ome.get("labels"), list)
+    names: list[str]
+    if is_nested:
+        names = ome["labels"]
+    elif isinstance(attrs.get("labels"), list):
+        names = attrs["labels"]
+    else:
+        return []
+
+    seen: set[str] = set()
+    removed: list[str] = []
+    for name in names:
+        if name in seen:
+            removed.append(name)
+        seen.add(name)
+    if not removed or dry_run:
+        return removed
+
+    unique = list(dict.fromkeys(names))
+    if is_nested:
+        group.attrs["ome"] = {**ome, "labels": unique}
+    else:
+        group.attrs["labels"] = unique
+    return removed
 
 
 def _delete_element_from_disk_or_path(
@@ -234,6 +387,23 @@ def _delete_element_from_disk_or_path(
             f"Cannot find on-disk SpatialData element store: {element_path}"
         )
     remove_path(element_path)
+
+
+def delete_element(sdata_obj: Any, key: str, element_type: str) -> None:
+    """Remove one element from disk and memory, keeping root metadata consistent.
+
+    Args:
+        sdata_obj: Disk-backed SpatialData object that holds the element.
+        key: Element name.
+        element_type: Element group, e.g. ``"images"`` or ``"tables"``.
+    """
+    element_key = str(key)
+    _delete_element_from_disk_or_path(sdata_obj, element_key, element_type)
+    container = _get_element_container(sdata_obj, element_type)
+    if element_key in container:
+        del container[element_key]
+    # Consolidated root metadata still lists the deleted group until rewritten.
+    _reconsolidate_metadata(sdata_obj, element_key, raise_errors=True)
 
 
 def write_spatialdata_metadata(
@@ -1332,45 +1502,6 @@ def upgrade_spatialdata_contract_in_memory(
                 id_namespace=ORIGINAL_ID_NAMESPACE,
                 legacy_aliases=("original_seg",),
             )
-        schema = dict(sdata_obj.attrs.get(MERXEN_SCHEMA_ATTR, {}))
-        native_branches = dict(schema.get("segmentations", {}))
-        suffix = "_aligned_nonrigid"
-        for branch, entry in native_branches.items():
-            if entry.get("coordinate_variant_of") is not None:
-                continue
-            aligned_points = f"{entry['points']}{suffix}"
-            aligned_shape = f"{entry['shape']}{suffix}"
-            if (
-                aligned_points not in sdata_obj.points
-                or aligned_shape not in sdata_obj.shapes
-            ):
-                continue
-            assignment_column = entry.get("assignment_column")
-            if (
-                assignment_column is not None
-                and assignment_column not in sdata_obj.points[aligned_points].columns
-            ):
-                continue
-            native_table = entry.get("table")
-            aligned_table = (
-                f"{native_table}{suffix}"
-                if native_table is not None
-                and f"{native_table}{suffix}" in sdata_obj.tables
-                else None
-            )
-            register_segmentation_branch(
-                sdata_obj,
-                f"{branch}{suffix}",
-                points_key=aligned_points,
-                assignment_column=assignment_column,
-                background_column=entry.get("background_column"),
-                assignment_source_column=entry.get("assignment_source_column"),
-                shape_key=aligned_shape,
-                table_key=aligned_table,
-                instance_key=str(entry.get("instance_key", INSTANCE_ID_COLUMN)),
-                id_namespace=str(entry.get("id_namespace", branch)),
-                coordinate_variant_of=str(branch),
-            )
     validate_merxen_schema(sdata_obj, deep=False)
     return True
 
@@ -1435,9 +1566,29 @@ def upgrade_spatialdata_contract(
     quality_column_alias: str | None = None,
     platform: str | None = None,
 ) -> bool:
-    """Atomically upgrade an existing store to the current MerXen contract."""
+    """Atomically upgrade an existing store to the current MerXen contract.
+
+    The store write lock is held from the read across the full rewrite and the
+    directory swap, so no other writer's changes land in the store being
+    replaced (they would be lost with the old copy).
+    """
     requested_path = Path(zarr_path)
     path = requested_path.resolve() if requested_path.is_symlink() else requested_path
+    with spatialdata_write_lock(path):
+        return _upgrade_spatialdata_contract_locked(
+            path,
+            quality_column_alias=quality_column_alias,
+            platform=platform,
+        )
+
+
+def _upgrade_spatialdata_contract_locked(
+    path: Path,
+    *,
+    quality_column_alias: str | None,
+    platform: str | None,
+) -> bool:
+    """Rewrite and swap one store; the caller holds its write lock."""
     sdata_obj = sd.read_zarr(path)
     changed = upgrade_spatialdata_contract_in_memory(
         sdata_obj,

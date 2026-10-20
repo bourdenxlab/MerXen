@@ -9,6 +9,12 @@ analyses with the same downstream stages that do not require both platforms.
 The pipeline is orchestrated by [Nextflow](https://www.nextflow.io/), with all
 scientific logic living in the installable Python package `merxen`.
 
+![MerXen pipeline overview](images/merxen_metro_map.svg)
+
+The two platform lines run the same per-platform stages independently and
+converge at alignment; dashed stations are governed by a parameter. See
+[Metro map](metro-map.md) for what the diagram does and does not show.
+
 ## Who these docs are for
 
 - **Users** running the pipeline on their own data — start at
@@ -32,7 +38,9 @@ scientific logic living in the installable Python package `merxen`.
 ### Pipeline stages
 - [SpatialData build](stages/spatialdata-build.md)
 - [Segmentation](stages/segmentation.md) (Cellpose-SAM + ProSeg)
+- [Cellpose HITL model selection](stages/cellpose-hitl.md) (optional model plumbing)
 - [Enrichment](stages/enrichment.md)
+- [Image registration](stages/register-images.md) (post-Xenium IF onto the mask grid)
 - [Mask image quantification](stages/mask-image-quantification.md)
 - [Cortical depth](stages/cortical-depth.md)
 - [QC](stages/qc.md)
@@ -48,9 +56,12 @@ scientific logic living in the installable Python package `merxen`.
 
 ### Developer reference
 - [Pipeline architecture](pipeline.md) — stage graph and data flow.
+- [Metro map](metro-map.md) — regenerating the pipeline overview diagram.
 - [Python API overview](python-api.md) — subpackage map with key functions.
 - [CLI reference](cli.md) — every `merxen` subcommand.
 - [Development workflow](development.md) — testing, linting, contributing.
+- [Cellpose HITL testing guide](hitl/testing-guide.md) — runtime acceptance and
+  the planned custom-model checks.
 
 ## Project files at a glance
 
@@ -61,13 +72,16 @@ scientific logic living in the installable Python package `merxen`.
 | [workflows/modules/](../workflows/modules/) | One `.nf` process per pipeline stage |
 | [src/merxen/](../src/merxen/) | Installable Python package |
 | [src/merxen/config.py](../src/merxen/config.py) | Pydantic config schemas |
+| [src/merxen/palette.py](../src/merxen/palette.py) | MerXen brand colours (figures, metro map, badges) |
 | [src/merxen/cli/](../src/merxen/cli/) | Click CLI entry points |
 | [tests/](../tests/) | pytest test suite, mirrors `src/merxen/` |
-| [environment.yml](../environment.yml) | Conda env (Python 3.12 + pip) |
-| [environment.alignment.yml](../environment.alignment.yml) | Conda env used by Nextflow `ALIGN` |
-| [environment.clustering-gpu.yml](../environment.clustering-gpu.yml) | RAPIDS env used only by clustering compute |
-| [environment.gaston.yml](../environment.gaston.yml) | Pinned GASTON, GLM-PCA, and postprocessing env |
-| [Dockerfile.gaston](../Dockerfile.gaston) | CUDA-enabled portable GASTON image |
+| [envs/environment.yml](../envs/environment.yml) | Conda env (Python 3.12 + pip) |
+| [envs/environment.alignment.yml](../envs/environment.alignment.yml) | Conda env used by Nextflow `ALIGN` |
+| [envs/environment.clustering-gpu.yml](../envs/environment.clustering-gpu.yml) | RAPIDS env used only by clustering compute |
+| [envs/environment.mender.yml](../envs/environment.mender.yml) | Pinned CPU environment used only by MENDER compute |
+| [containers/](../containers/) | Dockerfiles for the base, clustering-GPU and MENDER images |
+| [envs/environment.gaston.yml](../envs/environment.gaston.yml) | Pinned GASTON runtime |
+| [containers/Dockerfile.gaston](../containers/Dockerfile.gaston) | CUDA-enabled GASTON image |
 | [pyproject.toml](../pyproject.toml) | Dependencies, `merxen` entry point, tool config |
 | [.env.example](../.env.example) | Required environment variables |
 

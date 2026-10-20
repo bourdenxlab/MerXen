@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
+import importlib.metadata
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
 import sys
 import textwrap
+import urllib.parse
 import urllib.request
+import uuid
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -28,15 +38,20 @@ from matplotlib.lines import Line2D
 from scipy import sparse
 
 from merxen.config import MapMyCellsConfig
+from merxen.gene_ids import is_ensembl_gene_id
 from merxen.memory import force_release, log_status
 from merxen.plotting import prepare_plot_output, save_figure
 
 logger = logging.getLogger(__name__)
 
 MAPMYCELLS_PREFIX = "mapmycells_"
+MAPMYCELLS_WMB_PREFIX = "mapmycells_wmb_"
 MAPMYCELLS_REGION_PREFIX_TEMPLATE = "mapmycells_region_{region_name}_"
+MAPMYCELLS_WMB_REGION_PREFIX_TEMPLATE = "mapmycells_wmb_region_{region_name}_"
 MAPMYCELLS_UNS_KEY = "merxen_mapmycells"
+MAPMYCELLS_WMB_UNS_KEY = "merxen_mapmycells_wmb"
 MAPMYCELLS_REGION_UNS_KEY_TEMPLATE = "merxen_mapmycells_region_{region_name}"
+MAPMYCELLS_WMB_REGION_UNS_KEY_TEMPLATE = "merxen_mapmycells_wmb_region_{region_name}"
 MAPMYCELLS_ASSIGNMENT_COLOR_SUFFIX_CANDIDATES = (
     "subcluster_name",
     "cluster_name",
@@ -63,6 +78,8 @@ WHB_MANIFEST_URL = (
     "https://allen-brain-cell-atlas.s3.us-west-2.amazonaws.com/"
     "releases/20250531/manifest.json"
 )
+ABC_MANIFEST_CACHE_DIRECTORY = "abc_manifests"
+CELL_TYPE_MAPPER_DISTRIBUTION = "cell_type_mapper"
 WHB_DATASET_DIRECTORY = "WHB-10Xv3"
 WHB_TAXONOMY_DIRECTORY = "WHB-taxonomy"
 WHB_HIERARCHY = [
@@ -74,6 +91,50 @@ WHB_EXPRESSION_MATRIX_NAMES = (
     "WHB-10Xv3-Neurons",
     "WHB-10Xv3-Nonneurons",
 )
+WMB_DATASET_DIRECTORY = "WMB-10X"
+WMB_TAXONOMY_DIRECTORY = "WMB-taxonomy"
+WMB_EXPRESSION_DIRECTORIES = ("WMB-10Xv2", "WMB-10Xv3", "WMB-10XMulti")
+WMB_HIERARCHY = [
+    "CCN20230722_CLAS",
+    "CCN20230722_SUBC",
+    "CCN20230722_SUPT",
+    "CCN20230722_CLUS",
+]
+WMB_REGION_COLUMN = "region_of_interest_acronym"
+WMB_FEATURE_MATRIX_COLUMN = "feature_matrix_label"
+MMC_GENE_MAPPER_URL = (
+    "https://allen-brain-cell-atlas.s3.us-west-2.amazonaws.com/"
+    "mapmycells/mmc-gene-mapper/20250630/mmc_gene_mapper.2025-08-04.db"
+)
+MMC_GENE_MAPPER_SIZE = 16_219_131_904
+REGION_REFERENCE_MANIFEST_NAME = "region_reference_manifest.json"
+REGION_REFERENCE_CACHE_LAYOUT = "content_hashed"
+REGION_REFERENCE_LEGACY_LAYOUT = "legacy_in_place"
+REGION_REFERENCE_HASH_LENGTH = 16
+REGION_REFERENCE_REBUILD_INFIX = "-rebuild-"
+REGION_REFERENCE_STAGING_PREFIX = ".staging-"
+# Region manifest config keys that older MerXen versions did not record, with
+# the value those versions always used. Only WHB human region references were
+# built before these keys existed. drop_level is not listed: older versions
+# honoured it without recording it in the manifest, so a legacy reference's
+# drop_level is read from the cell_type_mapper metadata of its query markers.
+REGION_REFERENCE_LEGACY_CONFIG_DEFAULTS: dict[str, Any] = {
+    "reference_atlas": "whb",
+    "query_species": "human",
+}
+
+FULL_REFERENCE_MANIFEST_KEYS = {
+    "whb": {
+        "directory": WHB_DATASET_DIRECTORY,
+        "marker": ("query_markers.n10.20240221800", "json"),
+        "stats": ("precomputed_stats.siletti.training", "h5"),
+    },
+    "wmb": {
+        "directory": WMB_DATASET_DIRECTORY,
+        "marker": ("mouse_markers_230821", "json"),
+        "stats": ("precomputed_stats_ABC_revision_230821", "h5"),
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -106,7 +167,10 @@ def prepare_mapmycells_query(
     query_layer: str | None = "counts",
     gene_id_column: str | None = None,
     gene_id_lookup: dict[str, str] | None = None,
+    allow_gene_symbol_fallback: bool = False,
     obs_id_column: str | None = None,
+    gene_id_fallback: GeneIdFallbackTable | None = None,
+    gene_id_report_path: Path | str | None = None,
 ) -> Path:
     """Write a MapMyCells-ready H5AD query file.
 
@@ -114,6 +178,12 @@ def prepare_mapmycells_query(
     ``X`` and preserves raw counts in ``layers["counts"]``. MapMyCells expects
     the query matrix in ``X``, so this helper copies the selected layer into
     ``X`` before writing a local query file.
+
+    Gene IDs are taken from ``gene_id_column``, then, for ``ensembl_id`` only,
+    from ``gene_id_lookup`` and ``gene_id_fallback`` for features that still
+    lack a valid Ensembl ID. Features left without one keep their symbol as
+    ``var_name``: MapMyCells ignores them unless a gene-mapping database is
+    used. They are logged and listed in the report.
 
     Args:
         input_h5ad: Clustered AnnData from ``clustering_squidpy``.
@@ -123,7 +193,18 @@ def prepare_mapmycells_query(
         gene_id_column: Optional ``var`` column to use as gene identifiers.
         gene_id_lookup: Optional symbol-to-identifier lookup used to reconstruct
             a missing ``ensembl_id`` column in standalone MERSCOPE inputs.
+        allow_gene_symbol_fallback: Keep gene symbols as ``var_names`` when the
+            requested ID column is absent. Use only when the mapper receives a
+            gene-mapping database capable of resolving those symbols.
         obs_id_column: Optional ``obs`` column to use as cell identifiers.
+        gene_id_fallback: Optional local gene table, from
+            :func:`load_gene_id_fallback_table`, used last to fill missing IDs
+            when ``gene_id_column`` is ``ensembl_id``. It is not applied to
+            other columns, which may hold symbols, or when the ID column is
+            absent and symbols are deferred to the gene-mapping database.
+        gene_id_report_path: Optional JSON path for the gene-ID resolution
+            report: IDs recovered by the reference lookup or the fallback
+            table, and the features left unresolved with the reason.
 
     Returns:
         Path to the written query H5AD.
@@ -143,18 +224,41 @@ def prepare_mapmycells_query(
             adata.X = _copy_matrix(adata.layers[query_layer])
 
         if gene_id_column is not None:
+            input_id_is_valid = _valid_gene_id_flags(adata, gene_id_column)
             if gene_id_column not in adata.var.columns:
-                _restore_missing_gene_id_column(
-                    adata,
-                    gene_id_column=gene_id_column,
-                    gene_id_lookup=gene_id_lookup,
-                    input_h5ad=input_h5ad,
-                )
-            adata.var_names = _index_from_column_with_fallback(
-                adata.var,
-                column=gene_id_column,
-                fallback=adata.var_names,
+                if allow_gene_symbol_fallback and not gene_id_lookup:
+                    logger.info(
+                        "Keeping gene symbols for %s; MapMyCells will resolve them "
+                        "through the configured gene-mapping database.",
+                        input_h5ad.name,
+                    )
+                else:
+                    _restore_missing_gene_id_column(
+                        adata,
+                        gene_id_column=gene_id_column,
+                        gene_id_lookup=gene_id_lookup,
+                        input_h5ad=input_h5ad,
+                    )
+            elif gene_id_column == "ensembl_id" and gene_id_lookup:
+                _supplement_ensembl_id_column(adata, gene_id_lookup)
+            gene_id_report = _resolve_remaining_gene_ids(
+                adata,
+                gene_id_column=gene_id_column,
+                input_id_is_valid=input_id_is_valid,
+                gene_id_fallback=gene_id_fallback,
+                symbols_left_for_gene_mapping_db=allow_gene_symbol_fallback,
+                input_h5ad=input_h5ad,
             )
+            if gene_id_report_path is not None:
+                report_path = Path(gene_id_report_path)
+                report_path.parent.mkdir(parents=True, exist_ok=True)
+                report_path.write_text(json.dumps(gene_id_report, indent=2) + "\n")
+            if gene_id_column in adata.var.columns:
+                adata.var_names = _index_from_column_with_fallback(
+                    adata.var,
+                    column=gene_id_column,
+                    fallback=adata.var_names,
+                )
 
         if obs_id_column is not None:
             if obs_id_column not in adata.obs.columns:
@@ -230,6 +334,41 @@ def _restore_missing_gene_id_column(
     )
 
 
+def _supplement_ensembl_id_column(
+    adata: ad.AnnData,
+    gene_id_lookup: dict[str, str],
+) -> None:
+    """Fill invalid or blank Ensembl IDs from species-matched gene metadata."""
+    symbols = (
+        adata.var["gene"].astype(str).to_numpy()
+        if "gene" in adata.var.columns
+        else adata.var_names.astype(str).to_numpy()
+    )
+    existing = adata.var["ensembl_id"].astype(str).to_numpy()
+    casefold_lookup = {
+        str(symbol).strip().casefold(): str(gene_id).strip()
+        for symbol, gene_id in gene_id_lookup.items()
+        if str(symbol).strip() and is_ensembl_gene_id(gene_id)
+    }
+    supplemented = [
+        gene_id
+        if is_ensembl_gene_id(gene_id)
+        else casefold_lookup.get(str(symbol).strip().casefold(), "")
+        for gene_id, symbol in zip(existing, symbols, strict=True)
+    ]
+    n_added = sum(
+        not is_ensembl_gene_id(before) and is_ensembl_gene_id(after)
+        for before, after in zip(existing, supplemented, strict=True)
+    )
+    if n_added:
+        adata.var["ensembl_id"] = pd.Series(
+            supplemented,
+            index=adata.var_names,
+            dtype="object",
+        )
+        logger.info("Recovered %d additional Ensembl gene IDs.", n_added)
+
+
 def _load_reference_gene_id_lookup_if_needed(
     config: MapMyCellsConfig,
 ) -> dict[str, str]:
@@ -239,7 +378,10 @@ def _load_reference_gene_id_lookup_if_needed(
             continue
         clustered = ad.read_h5ad(sample.anndata_path, backed="r")
         try:
-            if "ensembl_id" not in clustered.var.columns:
+            if "ensembl_id" not in clustered.var.columns or not all(
+                is_ensembl_gene_id(value)
+                for value in clustered.var["ensembl_id"].astype(str)
+            ):
                 needs_lookup = True
                 break
         finally:
@@ -247,18 +389,47 @@ def _load_reference_gene_id_lookup_if_needed(
 
     if not needs_lookup:
         return {}
-    return _load_reference_gene_id_lookup(config.region_cache_dir)
-
-
-def _load_reference_gene_id_lookup(cache_dir: Path | str) -> dict[str, str]:
-    paths = sorted(
-        Path(cache_dir).glob(
-            "abc_whb/expression_matrices/WHB-10Xv3/*/WHB-10Xv3-*-raw.h5ad"
-        )
+    return _load_reference_gene_id_lookup(
+        config.region_cache_dir,
+        reference_atlas=config.reference_atlas,
     )
+
+
+def _load_reference_gene_id_lookup(
+    cache_dir: Path | str,
+    *,
+    reference_atlas: str = "whb",
+) -> dict[str, str]:
+    if reference_atlas == "whb":
+        paths = sorted(
+            path
+            for path in Path(cache_dir).rglob("WHB-10Xv3-*-raw.h5ad")
+            if "WHB-10Xv3" in path.parts
+        )
+    else:
+        gene_metadata_paths = sorted(
+            path
+            for path in Path(cache_dir).rglob("gene.csv")
+            if "WMB-10X" in path.parts
+        )
+        if gene_metadata_paths:
+            csv_lookup = _gene_id_lookup_from_csv(gene_metadata_paths[-1])
+            if csv_lookup:
+                logger.info(
+                    "Loaded %d symbol -> Ensembl ID mappings for standalone "
+                    "MapMyCells.",
+                    len(csv_lookup),
+                )
+                return csv_lookup
+        paths = sorted(
+            path
+            for path in Path(cache_dir).rglob("*-raw.h5ad")
+            if any(part.startswith("WMB-10X") for part in path.parts)
+        )
     if not paths:
         logger.warning(
-            "No WHB reference gene metadata found below MapMyCells cache %s.",
+            "No %s reference gene metadata found below MapMyCells cache %s.",
+            reference_atlas.upper(),
             cache_dir,
         )
         return {}
@@ -277,7 +448,7 @@ def _load_reference_gene_id_lookup(cache_dir: Path | str) -> dict[str, str]:
                 ensembl = str(ensembl_id).strip()
                 gene_symbol = str(symbol).strip()
                 if (
-                    not ensembl.startswith("ENSG")
+                    not is_ensembl_gene_id(ensembl)
                     or not gene_symbol
                     or gene_symbol.lower() in {"nan", "none"}
                 ):
@@ -293,6 +464,437 @@ def _load_reference_gene_id_lookup(cache_dir: Path | str) -> dict[str, str]:
     return lookup
 
 
+def _gene_id_lookup_from_csv(path: Path | str) -> dict[str, str]:
+    metadata = pd.read_csv(path)
+    id_column = next(
+        (
+            column
+            for column in ("gene_identifier", "ensembl_id", "gene_id")
+            if column in metadata.columns
+        ),
+        None,
+    )
+    symbol_column = next(
+        (
+            column
+            for column in ("gene_symbol", "symbol", "gene")
+            if column in metadata.columns
+        ),
+        None,
+    )
+    if id_column is None or symbol_column is None:
+        logger.warning("Reference gene metadata lacks ID/symbol columns: %s", path)
+        return {}
+    return {
+        str(symbol).strip(): str(gene_id).strip()
+        for gene_id, symbol in zip(
+            metadata[id_column].astype(str),
+            metadata[symbol_column].astype(str),
+            strict=True,
+        )
+        if str(symbol).strip() and is_ensembl_gene_id(gene_id)
+    }
+
+
+_GENE_TABLE_ID_COLUMNS = ("gene_identifier", "ensembl_id", "gene_id")
+_GENE_TABLE_SYMBOL_COLUMNS = ("gene_symbol", "symbol", "gene")
+_SPECIES_GENE_ID_PATTERNS = {
+    "human": re.compile(r"^ENSG\d+$"),
+    "mouse": re.compile(r"^ENSMUSG\d+$"),
+}
+_MISSING_SYMBOL_TOKENS = frozenset({"", "nan", "none"})
+
+
+@dataclass(frozen=True)
+class GeneIdFallbackTable:
+    """Species-filtered symbol to Ensembl gene ID lookup from a local table.
+
+    Attributes:
+        path: Local gene table the lookup was read from.
+        query_species: Species whose Ensembl prefix the IDs were filtered to.
+        ids_by_symbol: Distinct unversioned IDs for each exact gene symbol.
+        ids_by_casefold_symbol: Distinct IDs for each case-folded symbol.
+        n_rows: Rows read from the table.
+        n_species_rows: Rows kept after the species and symbol filters.
+    """
+
+    path: Path
+    query_species: str
+    ids_by_symbol: dict[str, tuple[str, ...]]
+    ids_by_casefold_symbol: dict[str, tuple[str, ...]]
+    n_rows: int
+    n_species_rows: int
+
+    def candidate_ids(self, symbol: str) -> tuple[str, ...]:
+        """Return the table's IDs for a symbol, preferring an exact-case match.
+
+        Args:
+            symbol: Query gene symbol.
+
+        Returns:
+            Distinct candidate Ensembl IDs; empty when the symbol is absent.
+        """
+        cleaned = symbol.strip()
+        return self.ids_by_symbol.get(cleaned) or self.ids_by_casefold_symbol.get(
+            cleaned.casefold(), ()
+        )
+
+    def describe(self) -> dict[str, Any]:
+        """Return JSON-serializable provenance for reports and manifests.
+
+        Returns:
+            Path, species and row counts of the table.
+        """
+        return {
+            "path": str(self.path),
+            "query_species": self.query_species,
+            "n_rows": self.n_rows,
+            "n_species_rows": self.n_species_rows,
+        }
+
+
+def load_gene_id_fallback_table(
+    path: Path | str,
+    *,
+    query_species: str = "human",
+) -> GeneIdFallbackTable:
+    """Load a local symbol to Ensembl gene ID table for MapMyCells queries.
+
+    Reads an Allen-style ``gene.csv`` (``gene_identifier`` and ``gene_symbol``
+    columns; ``ensembl_id`` / ``gene_id`` and ``symbol`` / ``gene`` are also
+    accepted, and ``.tsv`` files are tab-separated) or the ``var`` table of a
+    reference ``.h5ad``, whose index holds the IDs unless it has an ID column.
+    Only IDs with the query species' Ensembl prefix are kept, so a human table
+    never assigns IDs to a mouse query. Version suffixes are removed. Nothing
+    is downloaded.
+
+    Args:
+        path: Local gene table.
+        query_species: ``human`` (``ENSG`` IDs) or ``mouse`` (``ENSMUSG``).
+
+    Returns:
+        The species-filtered lookup.
+
+    Raises:
+        FileNotFoundError: If ``path`` is not an existing file.
+        ValueError: If the species is unsupported or the table lacks an ID or
+            a symbol column.
+    """
+    table_path = Path(path)
+    _require_existing_file(table_path, "MapMyCells gene-ID fallback table")
+    id_pattern = _SPECIES_GENE_ID_PATTERNS.get(query_species)
+    if id_pattern is None:
+        raise ValueError(
+            f"Unsupported query_species={query_species!r} for the gene-ID "
+            f"fallback table; expected one of {sorted(_SPECIES_GENE_ID_PATTERNS)}."
+        )
+    gene_ids, symbols = _read_gene_table(table_path)
+    ids_by_symbol: dict[str, set[str]] = {}
+    n_species_rows = 0
+    for raw_gene_id, raw_symbol in zip(gene_ids, symbols, strict=True):
+        gene_id = re.sub(r"\.\d+$", "", raw_gene_id.strip())
+        symbol = raw_symbol.strip()
+        if symbol.lower() in _MISSING_SYMBOL_TOKENS or not id_pattern.fullmatch(
+            gene_id
+        ):
+            continue
+        n_species_rows += 1
+        ids_by_symbol.setdefault(symbol, set()).add(gene_id)
+    ids_by_casefold_symbol: dict[str, set[str]] = {}
+    for symbol, symbol_ids in ids_by_symbol.items():
+        ids_by_casefold_symbol.setdefault(symbol.casefold(), set()).update(symbol_ids)
+
+    if n_species_rows == 0:
+        logger.warning(
+            "Gene-ID fallback table %s has no %s Ensembl IDs; it will not "
+            "resolve any query genes.",
+            table_path,
+            query_species,
+        )
+    else:
+        logger.info(
+            "Loaded %d %s symbols from gene-ID fallback table %s.",
+            len(ids_by_symbol),
+            query_species,
+            table_path,
+        )
+    return GeneIdFallbackTable(
+        path=table_path,
+        query_species=query_species,
+        ids_by_symbol={
+            symbol: tuple(sorted(symbol_ids))
+            for symbol, symbol_ids in ids_by_symbol.items()
+        },
+        ids_by_casefold_symbol={
+            symbol: tuple(sorted(symbol_ids))
+            for symbol, symbol_ids in ids_by_casefold_symbol.items()
+        },
+        n_rows=len(gene_ids),
+        n_species_rows=n_species_rows,
+    )
+
+
+def _read_gene_table(path: Path) -> tuple[list[str], list[str]]:
+    index_ids: list[str] | None = None
+    if path.suffix.lower() == ".h5ad":
+        reference = ad.read_h5ad(path, backed="r")
+        try:
+            table = reference.var.copy()
+            index_ids = reference.var_names.astype(str).tolist()
+        finally:
+            reference.file.close()
+    else:
+        is_tsv = ".tsv" in (suffix.lower() for suffix in path.suffixes)
+        table = pd.read_csv(
+            path,
+            sep="\t" if is_tsv else ",",
+            dtype=str,
+            keep_default_na=False,
+        )
+    id_column = next(
+        (column for column in _GENE_TABLE_ID_COLUMNS if column in table.columns),
+        None,
+    )
+    symbol_column = next(
+        (column for column in _GENE_TABLE_SYMBOL_COLUMNS if column in table.columns),
+        None,
+    )
+    gene_ids = (
+        table[id_column].astype(str).tolist() if id_column is not None else index_ids
+    )
+    if symbol_column is None or gene_ids is None:
+        raise ValueError(
+            f"Gene-ID fallback table {path} needs an Ensembl ID column "
+            f"({', '.join(_GENE_TABLE_ID_COLUMNS)}) and a symbol column "
+            f"({', '.join(_GENE_TABLE_SYMBOL_COLUMNS)}); found "
+            f"{list(table.columns)}."
+        )
+    return gene_ids, table[symbol_column].astype(str).tolist()
+
+
+def _query_gene_symbols(adata: ad.AnnData) -> list[str]:
+    values = (
+        adata.var["gene"].astype(str)
+        if "gene" in adata.var.columns
+        else adata.var_names.astype(str)
+    )
+    return [str(value).strip() for value in values]
+
+
+def _valid_gene_id_flags(adata: ad.AnnData, gene_id_column: str) -> list[bool]:
+    if gene_id_column not in adata.var.columns:
+        return [False] * adata.n_vars
+    return [is_ensembl_gene_id(value) for value in adata.var[gene_id_column]]
+
+
+def _resolve_remaining_gene_ids(
+    adata: ad.AnnData,
+    *,
+    gene_id_column: str,
+    input_id_is_valid: list[bool],
+    gene_id_fallback: GeneIdFallbackTable | None,
+    symbols_left_for_gene_mapping_db: bool,
+    input_h5ad: Path,
+) -> dict[str, Any]:
+    """Fill IDs the primary lookups missed and report where every ID came from."""
+    report: dict[str, Any] = {
+        "input_h5ad": str(input_h5ad),
+        "gene_id_column": gene_id_column,
+        "n_features": adata.n_vars,
+        "gene_id_fallback": (
+            None if gene_id_fallback is None else gene_id_fallback.describe()
+        ),
+        "gene_id_fallback_applied": False,
+    }
+    if gene_id_column not in adata.var.columns:
+        # Symbols are left for the gene-mapping database; mixing in fallback
+        # IDs would give the mapper a query with two identifier types.
+        report["deferred_to_gene_mapping_db"] = True
+        return report
+    if gene_id_column != "ensembl_id":
+        # Like the cached-reference lookup, the fallback only fills
+        # ``ensembl_id``. Another column may hold symbols for the gene-mapping
+        # database, and partly replacing them would mix identifier types.
+        if gene_id_fallback is not None:
+            logger.info(
+                "Not applying gene-ID fallback table %s to %s: "
+                "gene_id_column=%r is not 'ensembl_id'.",
+                gene_id_fallback.path,
+                input_h5ad.name,
+                gene_id_column,
+            )
+        report["ids_used_as_provided"] = True
+        return report
+
+    symbols = _query_gene_symbols(adata)
+    primary_id_is_valid = _valid_gene_id_flags(adata, gene_id_column)
+    fallback_positions: set[int] = set()
+    fallback_failures: dict[int, str] = {}
+    if gene_id_fallback is not None:
+        fallback_positions, fallback_failures = _apply_gene_id_fallback(
+            adata,
+            gene_id_column=gene_id_column,
+            symbols=symbols,
+            gene_id_fallback=gene_id_fallback,
+        )
+    final_ids = [str(value).strip() for value in adata.var[gene_id_column]]
+
+    # Without a fallback table, name what happens to the symbol instead.
+    default_reason = (
+        "left_as_symbol_for_gene_mapping_db"
+        if symbols_left_for_gene_mapping_db
+        else "no_fallback_table"
+    )
+    resolved_by_reference_lookup: dict[str, str] = {}
+    resolved_by_fallback: dict[str, str] = {}
+    unresolved: dict[str, str] = {}
+    n_unresolved = 0
+    for position, symbol in enumerate(symbols):
+        if position in fallback_positions:
+            resolved_by_fallback[symbol] = final_ids[position]
+        elif not primary_id_is_valid[position]:
+            n_unresolved += 1
+            unresolved[symbol] = fallback_failures.get(position, default_reason)
+        elif not input_id_is_valid[position]:
+            resolved_by_reference_lookup[symbol] = final_ids[position]
+
+    if resolved_by_fallback:
+        logger.info(
+            "Resolved %d Ensembl IDs in %s from gene-ID fallback table %s: %s",
+            len(resolved_by_fallback),
+            input_h5ad.name,
+            gene_id_fallback.path if gene_id_fallback is not None else None,
+            ", ".join(
+                f"{symbol}={gene_id}"
+                for symbol, gene_id in sorted(resolved_by_fallback.items())
+            ),
+        )
+    if unresolved:
+        listed = [
+            f"{symbol} ({reason})" for symbol, reason in sorted(unresolved.items())
+        ]
+        logger.warning(
+            "%d/%d features in %s have no Ensembl ID and %s: %s%s",
+            n_unresolved,
+            adata.n_vars,
+            input_h5ad.name,
+            (
+                "are left as symbols for the gene-mapping database"
+                if symbols_left_for_gene_mapping_db
+                else "will be ignored by MapMyCells"
+            ),
+            ", ".join(listed[:50]),
+            f", ... and {len(listed) - 50} more" if len(listed) > 50 else "",
+        )
+    report.update(
+        {
+            "gene_id_fallback_applied": gene_id_fallback is not None,
+            "unresolved_handling": (
+                "left_as_symbols_for_gene_mapping_db"
+                if symbols_left_for_gene_mapping_db
+                else "ignored_by_mapmycells"
+            ),
+            "n_input_gene_ids": sum(input_id_is_valid),
+            "n_resolved": adata.n_vars - n_unresolved,
+            "n_unresolved": n_unresolved,
+            "resolved_by_reference_lookup": resolved_by_reference_lookup,
+            "resolved_by_fallback": resolved_by_fallback,
+            "unresolved": unresolved,
+            "gene_ids": {
+                symbol: gene_id if is_ensembl_gene_id(gene_id) else ""
+                for symbol, gene_id in zip(symbols, final_ids, strict=True)
+            },
+        }
+    )
+    return report
+
+
+def _apply_gene_id_fallback(
+    adata: ad.AnnData,
+    *,
+    gene_id_column: str,
+    symbols: list[str],
+    gene_id_fallback: GeneIdFallbackTable,
+) -> tuple[set[int], dict[int, str]]:
+    """Fill invalid IDs from the fallback table; return filled and failed rows."""
+    column = adata.var[gene_id_column].astype(object).copy()
+    current = [str(value).strip() for value in column]
+    used_ids = {
+        re.sub(r"\.\d+$", "", gene_id)
+        for gene_id in current
+        if is_ensembl_gene_id(gene_id)
+    }
+    resolved_positions: set[int] = set()
+    failures: dict[int, str] = {}
+    for position, (gene_id, symbol) in enumerate(zip(current, symbols, strict=True)):
+        if is_ensembl_gene_id(gene_id):
+            continue
+        candidates = gene_id_fallback.candidate_ids(symbol)
+        if not candidates:
+            failures[position] = "not_in_fallback_table"
+        elif len(candidates) > 1:
+            failures[position] = "ambiguous_in_fallback_table"
+        elif candidates[0] in used_ids:
+            # Another feature already carries this ID; a duplicate would be
+            # renamed by var_names_make_unique and then ignored by the mapper.
+            failures[position] = "fallback_id_already_in_query"
+        else:
+            column.iloc[position] = candidates[0]
+            used_ids.add(candidates[0])
+            resolved_positions.add(position)
+    if resolved_positions:
+        adata.var[gene_id_column] = pd.Series(
+            column.to_numpy(),
+            index=adata.var_names,
+            dtype="object",
+        )
+    return resolved_positions, failures
+
+
+def summarize_gene_id_resolution(
+    reports: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Summarize per-sample gene-ID reports and compare recovered IDs.
+
+    For every gene whose ID was recovered by the reference lookup or the
+    fallback table, records the other samples of the pair that carry the same
+    ID and the symbol they use for it (for example MERSCOPE ``H2AX`` and
+    Xenium ``H2AFX``); an empty mapping means no other sample has that ID.
+
+    Args:
+        reports: Gene-ID resolution reports written by
+            :func:`prepare_mapmycells_query`, keyed by sample ID.
+
+    Returns:
+        Per-sample summaries without the full ``gene_ids`` tables.
+    """
+    symbols_by_id = {
+        sample_id: {
+            gene_id: symbol
+            for symbol, gene_id in report.get("gene_ids", {}).items()
+            if gene_id
+        }
+        for sample_id, report in reports.items()
+    }
+    summaries: dict[str, dict[str, Any]] = {}
+    for sample_id, report in reports.items():
+        summary = {key: value for key, value in report.items() if key != "gene_ids"}
+        recovered = {
+            **report.get("resolved_by_reference_lookup", {}),
+            **report.get("resolved_by_fallback", {}),
+        }
+        summary["recovered_gene_ids_in_other_samples"] = {
+            symbol: {
+                other_sample_id: other_symbols[gene_id]
+                for other_sample_id, other_symbols in symbols_by_id.items()
+                if other_sample_id != sample_id and gene_id in other_symbols
+            }
+            for symbol, gene_id in sorted(recovered.items())
+        }
+        summaries[sample_id] = summary
+    return summaries
+
+
 def run_mapmycells(config: MapMyCellsConfig) -> dict[str, dict[str, dict[str, Path]]]:
     """Run local MapMyCells assignment for every sample in a pair.
 
@@ -306,8 +908,24 @@ def run_mapmycells(config: MapMyCellsConfig) -> dict[str, dict[str, dict[str, Pa
         config.tmp_dir.mkdir(parents=True, exist_ok=True)
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
+    # Loaded before the reference builds so a bad configured path fails fast.
+    gene_id_fallback, gene_id_fallback_ignored = _load_configured_gene_id_fallback(
+        config
+    )
     references = _build_mapmycells_references(config)
     gene_id_lookup = _load_reference_gene_id_lookup_if_needed(config)
+    if (
+        not config.plots_only
+        and config.reference_atlas == "wmb"
+        and _samples_need_gene_mapping_db(config, gene_id_lookup)
+    ):
+        if config.gene_mapping_db_path is None:
+            config.gene_mapping_db_path = _resolve_gene_mapping_db(config)
+        logger.info(
+            "Using the WMB gene-mapping database because one or more queries "
+            "contain gene symbols that could not be resolved to Ensembl IDs "
+            "from cached WMB metadata."
+        )
     results: dict[str, dict[str, dict[str, Path]]] = {}
 
     for sample in config.samples:
@@ -327,48 +945,165 @@ def run_mapmycells(config: MapMyCellsConfig) -> dict[str, dict[str, dict[str, Pa
                 sample=sample,
                 reference=reference,
                 gene_id_lookup=gene_id_lookup,
+                gene_id_fallback=gene_id_fallback,
             )
         force_release(note=f"after MapMyCells {sample.sample_id}")
 
     manifest_path = config.output_dir / f"{config.pair_id}_mapmycells_manifest.json"
-    _write_results_manifest(manifest_path, config, references, results)
+    _write_results_manifest(
+        manifest_path,
+        config,
+        references,
+        results,
+        gene_id_resolution=summarize_gene_id_resolution(_read_gene_id_reports(results)),
+        gene_id_fallback_ignored=gene_id_fallback_ignored,
+    )
     return results
+
+
+def _load_configured_gene_id_fallback(
+    config: MapMyCellsConfig,
+) -> tuple[GeneIdFallbackTable | None, dict[str, str] | None]:
+    """Load the configured fallback table, dropping one without species IDs.
+
+    Args:
+        config: MapMyCells stage configuration.
+
+    Returns:
+        The table to apply, or ``None``, and a manifest note when a configured
+        table was ignored because it holds no IDs of the query species (for
+        example the human WHB table set on Dwight for a mouse run).
+    """
+    if config.gene_id_fallback_csv is None or config.plots_only:
+        return None, None
+    table = load_gene_id_fallback_table(
+        config.gene_id_fallback_csv,
+        query_species=config.query_species,
+    )
+    if table.n_species_rows:
+        return table, None
+    logger.info(
+        "Ignoring gene-ID fallback table %s for pair %s: it has no %s IDs.",
+        table.path,
+        config.pair_id,
+        config.query_species,
+    )
+    return None, {
+        "path": str(table.path),
+        "reason": f"no {config.query_species} Ensembl IDs",
+    }
+
+
+def _read_gene_id_reports(
+    results: dict[str, dict[str, dict[str, Path]]],
+) -> dict[str, dict[str, Any]]:
+    # Every reference prepares the same query for a sample, so the first
+    # report found is representative.
+    reports: dict[str, dict[str, Any]] = {}
+    for sample_id, reference_results in results.items():
+        for outputs in reference_results.values():
+            report_path = outputs.get("query_gene_ids_json")
+            if report_path is not None and report_path.exists():
+                reports[sample_id] = json.loads(report_path.read_text())
+                break
+    return reports
+
+
+def _samples_need_gene_mapping_db(
+    config: MapMyCellsConfig,
+    gene_id_lookup: dict[str, str],
+) -> bool:
+    casefold_lookup = {
+        str(symbol).strip().casefold(): str(gene_id).strip()
+        for symbol, gene_id in gene_id_lookup.items()
+        if str(symbol).strip() and is_ensembl_gene_id(gene_id)
+    }
+    for sample in config.samples:
+        if sample.gene_id_column is None or not sample.anndata_path.exists():
+            continue
+        clustered = ad.read_h5ad(sample.anndata_path, backed="r")
+        try:
+            if sample.gene_id_column not in clustered.var.columns:
+                return True
+            gene_ids = clustered.var[sample.gene_id_column].astype(str).to_numpy()
+            symbols = (
+                clustered.var["gene"].astype(str).to_numpy()
+                if "gene" in clustered.var.columns
+                else clustered.var_names.astype(str).to_numpy()
+            )
+            for gene_id, symbol in zip(gene_ids, symbols, strict=True):
+                if is_ensembl_gene_id(gene_id):
+                    continue
+                recovered = casefold_lookup.get(str(symbol).strip().casefold(), "")
+                if not is_ensembl_gene_id(recovered):
+                    return True
+        finally:
+            clustered.file.close()
+    return False
 
 
 def _build_mapmycells_references(config: MapMyCellsConfig) -> list[MapMyCellsReference]:
     references: list[MapMyCellsReference] = []
+    if (
+        not config.plots_only
+        and config.reference_atlas == "wmb"
+        and config.query_species == "human"
+    ):
+        config.gene_mapping_db_path = _resolve_gene_mapping_db(config)
     if config.reference_mode in {"whole_brain", "both"}:
-        if not config.plots_only and (
-            config.marker_lookup_path is None or config.precomputed_stats_path is None
-        ):
-            raise ValueError(
-                "Whole-brain MapMyCells requested but marker/stat paths are missing."
-            )
-        marker_lookup_path = config.marker_lookup_path or Path("")
-        precomputed_stats_path = config.precomputed_stats_path or Path("")
-        if not config.plots_only:
-            _require_existing_file(marker_lookup_path, "MapMyCells marker lookup")
-            _require_existing_file(
-                precomputed_stats_path, "MapMyCells precomputed stats"
-            )
+        if config.plots_only:
+            marker_lookup_path = config.marker_lookup_path or Path("")
+            precomputed_stats_path = config.precomputed_stats_path or Path("")
+            reference_manifest = {
+                "reference_type": "whole_brain",
+                "reference_atlas": config.reference_atlas,
+                "plots_only": True,
+            }
+        else:
+            (
+                marker_lookup_path,
+                precomputed_stats_path,
+                reference_manifest,
+            ) = _resolve_full_reference_artifacts(config)
         references.append(
             MapMyCellsReference(
-                name="whole_brain",
-                output_dir=config.output_dir,
+                name="whole_brain" if config.reference_atlas == "whb" else "wmb",
+                output_dir=(
+                    config.output_dir
+                    if config.reference_atlas == "whb"
+                    else config.output_dir / "wmb"
+                ),
                 marker_lookup_path=marker_lookup_path,
                 precomputed_stats_path=precomputed_stats_path,
-                column_prefix=MAPMYCELLS_PREFIX,
-                uns_key=MAPMYCELLS_UNS_KEY,
-                manifest={
-                    "reference_type": "whole_brain",
-                    "marker_lookup_path": str(config.marker_lookup_path or ""),
-                    "precomputed_stats_path": str(config.precomputed_stats_path or ""),
-                    "plots_only": bool(config.plots_only),
-                },
+                column_prefix=(
+                    MAPMYCELLS_PREFIX
+                    if config.reference_atlas == "whb"
+                    else MAPMYCELLS_WMB_PREFIX
+                ),
+                uns_key=(
+                    MAPMYCELLS_UNS_KEY
+                    if config.reference_atlas == "whb"
+                    else MAPMYCELLS_WMB_UNS_KEY
+                ),
+                manifest=reference_manifest,
             )
         )
     if config.reference_mode in {"region", "both"}:
         region_name = _sanitize_token(config.region_name)
+        if config.reference_atlas == "whb":
+            reference_name = f"region_{region_name}"
+            column_prefix = MAPMYCELLS_REGION_PREFIX_TEMPLATE.format(
+                region_name=region_name
+            )
+            uns_key = MAPMYCELLS_REGION_UNS_KEY_TEMPLATE.format(region_name=region_name)
+        else:
+            reference_name = f"wmb_region_{region_name}"
+            column_prefix = MAPMYCELLS_WMB_REGION_PREFIX_TEMPLATE.format(
+                region_name=region_name
+            )
+            uns_key = MAPMYCELLS_WMB_REGION_UNS_KEY_TEMPLATE.format(
+                region_name=region_name
+            )
         if config.plots_only:
             region_artifacts = RegionReferenceArtifacts(
                 marker_lookup_path=Path(""),
@@ -387,20 +1122,103 @@ def _build_mapmycells_references(config: MapMyCellsConfig) -> list[MapMyCellsRef
             region_artifacts = prepare_region_mapmycells_reference(config)
         references.append(
             MapMyCellsReference(
-                name=f"region_{region_name}",
-                output_dir=config.output_dir / f"region_{region_name}",
+                name=reference_name,
+                output_dir=config.output_dir / reference_name,
                 marker_lookup_path=region_artifacts.marker_lookup_path,
                 precomputed_stats_path=region_artifacts.precomputed_stats_path,
-                column_prefix=MAPMYCELLS_REGION_PREFIX_TEMPLATE.format(
-                    region_name=region_name
-                ),
-                uns_key=MAPMYCELLS_REGION_UNS_KEY_TEMPLATE.format(
-                    region_name=region_name
-                ),
+                column_prefix=column_prefix,
+                uns_key=uns_key,
                 manifest=region_artifacts.manifest,
             )
         )
     return references
+
+
+def _resolve_full_reference_artifacts(
+    config: MapMyCellsConfig,
+) -> tuple[Path, Path, dict[str, Any]]:
+    marker_path = config.marker_lookup_path
+    stats_path = config.precomputed_stats_path
+    if marker_path is not None:
+        _require_existing_file(marker_path, "MapMyCells marker lookup")
+    if stats_path is not None:
+        _require_existing_file(stats_path, "MapMyCells precomputed stats")
+
+    downloaded = False
+    if marker_path is None or stats_path is None:
+        if not config.auto_download_references:
+            raise ValueError(
+                "Whole-brain MapMyCells reference paths are missing and automatic "
+                "downloads are disabled."
+            )
+        manifest = _load_cached_abc_manifest(config.region_cache_dir)
+        keys = FULL_REFERENCE_MANIFEST_KEYS[config.reference_atlas]
+        directory = str(keys["directory"])
+        cache_dir = config.region_cache_dir / "abc_atlas"
+        if marker_path is None:
+            marker_name, marker_suffix = cast(tuple[str, str], keys["marker"])
+            marker_info = _manifest_file_info(
+                manifest,
+                directory,
+                "mapmycells",
+                marker_name,
+                "files",
+                marker_suffix,
+            )
+            marker_path = _ensure_manifest_file(marker_info, cache_dir)
+            downloaded = True
+        if stats_path is None:
+            stats_name, stats_suffix = cast(tuple[str, str], keys["stats"])
+            stats_info = _manifest_file_info(
+                manifest,
+                directory,
+                "mapmycells",
+                stats_name,
+                "files",
+                stats_suffix,
+            )
+            stats_path = _ensure_manifest_file(stats_info, cache_dir)
+            downloaded = True
+
+    if marker_path is None or stats_path is None:
+        raise RuntimeError("Could not resolve the MapMyCells full reference artifacts.")
+    return (
+        marker_path,
+        stats_path,
+        {
+            "reference_type": "whole_brain",
+            "reference_atlas": config.reference_atlas,
+            "query_species": config.query_species,
+            "marker_lookup_path": str(marker_path),
+            "precomputed_stats_path": str(stats_path),
+            "gene_mapping_db_path": _path_as_str(config.gene_mapping_db_path),
+            "downloaded": downloaded,
+        },
+    )
+
+
+def _resolve_gene_mapping_db(config: MapMyCellsConfig) -> Path:
+    if config.gene_mapping_db_path is not None:
+        _require_existing_file(config.gene_mapping_db_path, "MapMyCells gene mapper DB")
+        return config.gene_mapping_db_path
+    if not config.auto_download_references:
+        raise ValueError(
+            "WMB gene-symbol mapping requires gene_mapping_db_path when automatic "
+            "reference downloads are disabled."
+        )
+    output_path = (
+        config.region_cache_dir
+        / "abc_atlas"
+        / "mapmycells"
+        / "mmc-gene-mapper"
+        / "20250630"
+        / "mmc_gene_mapper.2025-08-04.db"
+    )
+    return _ensure_url_file(
+        MMC_GENE_MAPPER_URL,
+        output_path,
+        expected_size=MMC_GENE_MAPPER_SIZE,
+    )
 
 
 def _run_mapmycells_reference(
@@ -409,11 +1227,15 @@ def _run_mapmycells_reference(
     sample: Any,
     reference: MapMyCellsReference,
     gene_id_lookup: dict[str, str],
+    gene_id_fallback: GeneIdFallbackTable | None = None,
 ) -> dict[str, Path]:
     sample_dir = reference.output_dir / sample.platform.lower()
     sample_dir.mkdir(parents=True, exist_ok=True)
 
     query_h5ad = sample_dir / f"{sample.sample_id}_mapmycells_query.h5ad"
+    query_gene_ids_json = (
+        sample_dir / f"{sample.sample_id}_mapmycells_query_gene_ids.json"
+    )
     extended_json = sample_dir / f"{sample.sample_id}_mapmycells_extended.json"
     csv_path = sample_dir / f"{sample.sample_id}_mapmycells.csv"
     log_path = sample_dir / f"{sample.sample_id}_mapmycells.log"
@@ -455,7 +1277,10 @@ def _run_mapmycells_reference(
             query_layer=sample.query_layer,
             gene_id_column=sample.gene_id_column,
             gene_id_lookup=gene_id_lookup,
+            allow_gene_symbol_fallback=config.gene_mapping_db_path is not None,
             obs_id_column=sample.obs_id_column,
+            gene_id_fallback=gene_id_fallback,
+            gene_id_report_path=query_gene_ids_json,
         )
         command = build_mapmycells_command(
             config,
@@ -503,6 +1328,7 @@ def _run_mapmycells_reference(
         "spatial_plot": spatial_plot,
     }
     for key, path in {
+        "query_gene_ids_json": query_gene_ids_json,
         "umap_cluster_by_supercluster_dir": umap_cluster_by_supercluster_dir,
         "quality_scatter_plot": quality_scatter_plot,
         "supercluster_qc_plot": supercluster_qc_plot,
@@ -568,6 +1394,8 @@ def build_mapmycells_command(
         command.extend(["--max_gb", str(config.max_gb)])
     if config.tmp_dir is not None:
         command.extend(["--tmp_dir", str(config.tmp_dir)])
+    if config.gene_mapping_db_path is not None:
+        command.extend(["--gene_mapping.db_path", str(config.gene_mapping_db_path)])
     if config.verbose_csv:
         command.extend(["--verbose_csv", _bool_arg(config.verbose_csv)])
     command.extend(config.extra_args)
@@ -697,16 +1525,19 @@ def annotate_h5ad_with_mapmycells(
             "n_assignments": int(len(assignments)),
             "n_obs": int(adata.n_obs),
             "n_matched_obs": matched,
+            # The extended JSON (hundreds of MB for a full section) and the
+            # mapper logs stay as files next to this H5AD; only their paths
+            # and digests are recorded here.
             "extended_json_path": _path_as_str(extended_json_path),
-            "extended_json_text": _read_text_if_present(extended_json_path),
+            "extended_json_sha256": _sha256_if_present(extended_json_path),
             "command_json_path": _path_as_str(command_path),
             "command_json_text": _read_text_if_present(command_path),
             "log_path": _path_as_str(log_path),
-            "log_text": _read_text_if_present(log_path),
+            "log_sha256": _sha256_if_present(log_path),
             "stdout_log_path": _path_as_str(stdout_path),
-            "stdout_log_text": _read_text_if_present(stdout_path),
+            "stdout_log_sha256": _sha256_if_present(stdout_path),
             "stderr_log_path": _path_as_str(stderr_path),
-            "stderr_log_text": _read_text_if_present(stderr_path),
+            "stderr_log_sha256": _sha256_if_present(stderr_path),
             "reference_metadata": reference_metadata or {},
         }
         adata.write_h5ad(output_h5ad)
@@ -1856,67 +2687,215 @@ def _wrapped_title(value: str, *, width: int = 34) -> str:
 def prepare_region_mapmycells_reference(
     config: MapMyCellsConfig,
 ) -> RegionReferenceArtifacts:
-    """Download/cache and generate a strict WHB ROI-specific MapMyCells reference."""
+    """Build or reuse a strict WHB or WMB ROI reference in the shared cache.
+
+    Generated references are immutable: no build in the shared cache is ever
+    modified or deleted. Each build lives in its own directory,
+    ``references/<prefix>_<region>-<hash>``, named after a SHA-256 of the
+    reference configuration (:func:`_region_reference_config_payload`), and is
+    assembled in a private staging directory that is renamed into place only
+    once complete. Lookup order:
+
+    1. the newest complete content-hashed build for this configuration;
+    2. a legacy in-place reference, ``references/<prefix>_<region>``, adopted
+       read-only when its artefacts exist and its recorded configuration
+       matches (the atlas and query species, which older MerXen versions did
+       not record, are compared as their historical defaults; an unrecorded
+       ``drop_level`` is read from the cell_type_mapper metadata of the
+       legacy query markers, and the reference is not adopted when that
+       metadata is missing);
+    3. otherwise a new content-hashed build.
+
+    ``region_force_rebuild`` always writes a new build directory and leaves
+    every earlier build, including a legacy one, intact. The only directories
+    ever removed are private staging directories: that of a failed build, and
+    those that dead builders of the same configuration left behind, which are
+    cleared while holding that configuration's build lock.
+
+    Args:
+        config: Validated MapMyCells stage configuration.
+
+    Returns:
+        Paths to the marker lookup, precomputed stats and manifest of the
+        selected reference.
+    """
     region_name = _sanitize_token(config.region_name)
-    reference_dir = config.region_cache_dir / "references" / f"region_{region_name}"
-    precompute_dir = reference_dir / "precompute"
-    reference_marker_dir = reference_dir / "reference_markers"
-    query_marker_dir = reference_dir / "query_markers"
-    manifest_path = reference_dir / "region_reference_manifest.json"
-    region_cell_metadata_path = reference_dir / "region_cell_metadata.csv"
-    precomputed_stats_path = precompute_dir / "precomputed_stats.h5"
-    query_marker_path = (
-        query_marker_dir
-        / f"query_markers.n{config.region_query_markers_n_per_utility}.json"
-    )
+    reference_prefix = "region" if config.reference_atlas == "whb" else "wmb_region"
+    references_root = config.region_cache_dir / "references"
+    legacy_dir = references_root / f"{reference_prefix}_{region_name}"
     expected_config = _region_reference_config_payload(config, region_name)
+    config_hash = _region_reference_config_hash(expected_config)
+    build_stem = (
+        f"{reference_prefix}_{region_name}-{config_hash[:REGION_REFERENCE_HASH_LENGTH]}"
+    )
+    query_marker_name = (
+        f"query_markers.n{config.region_query_markers_n_per_utility}.json"
+    )
 
-    if (
-        not config.region_force_rebuild
-        and precomputed_stats_path.exists()
-        and query_marker_path.exists()
-        and manifest_path.exists()
-    ):
-        manifest = json.loads(manifest_path.read_text())
-        if manifest.get("config") == expected_config:
-            return RegionReferenceArtifacts(
-                marker_lookup_path=query_marker_path,
-                precomputed_stats_path=precomputed_stats_path,
-                manifest_path=manifest_path,
-                manifest=manifest,
+    def find_cached() -> RegionReferenceArtifacts | None:
+        cached = _newest_complete_region_build(
+            _region_reference_build_dirs(references_root, build_stem),
+            expected_config=expected_config,
+            config_hash=config_hash,
+            query_marker_name=query_marker_name,
+        )
+        if cached is not None:
+            return cached
+        return _adopt_legacy_region_reference(
+            legacy_dir,
+            expected_config=expected_config,
+            config_hash=config_hash,
+            query_marker_name=query_marker_name,
+        )
+
+    if not config.region_force_rebuild:
+        cached = find_cached()
+        if cached is not None:
+            return cached
+
+    references_root.mkdir(parents=True, exist_ok=True)
+    builds_before_lock = set(_region_reference_build_dirs(references_root, build_stem))
+    # MAPMYCELLS tasks for several pairs and segmentations share this cache.
+    # Serialise builds of one configuration so that concurrent tasks wait for,
+    # and then reuse, a single build instead of each writing their own.
+    with _exclusive_file_lock(references_root / f".{build_stem}.lock"):
+        _discard_stale_region_reference_staging_dirs(references_root, build_stem)
+        if config.region_force_rebuild:
+            # A build that finished while this call waited for the lock is
+            # already newer than the request, so it satisfies the rebuild.
+            cached = _newest_complete_region_build(
+                [
+                    build_dir
+                    for build_dir in _region_reference_build_dirs(
+                        references_root, build_stem
+                    )
+                    if build_dir not in builds_before_lock
+                ],
+                expected_config=expected_config,
+                config_hash=config_hash,
+                query_marker_name=query_marker_name,
             )
+        else:
+            cached = find_cached()
+        if cached is not None:
+            return cached
+        return _build_region_reference(
+            config,
+            references_root=references_root,
+            target_dir=_new_region_reference_build_dir(references_root, build_stem),
+            expected_config=expected_config,
+            config_hash=config_hash,
+            query_marker_name=query_marker_name,
+        )
 
-    if config.region_force_rebuild and reference_dir.exists():
-        shutil.rmtree(reference_dir)
-    elif reference_dir.exists():
-        for stale_dir in (precompute_dir, reference_marker_dir, query_marker_dir):
-            if stale_dir.exists():
-                shutil.rmtree(stale_dir)
+
+def _build_region_reference(
+    config: MapMyCellsConfig,
+    *,
+    references_root: Path,
+    target_dir: Path,
+    expected_config: dict[str, Any],
+    config_hash: str,
+    query_marker_name: str,
+) -> RegionReferenceArtifacts:
+    staging_dir = references_root / (
+        f"{REGION_REFERENCE_STAGING_PREFIX}{target_dir.name}-"
+        f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    )
+    staging_dir.mkdir()
+    logger.info(
+        "Building MapMyCells region reference %s in staging directory %s",
+        target_dir,
+        staging_dir,
+    )
+    try:
+        manifest = _generate_region_reference(
+            config,
+            build_dir=staging_dir,
+            final_dir=target_dir,
+            expected_config=expected_config,
+            config_hash=config_hash,
+            query_marker_name=query_marker_name,
+        )
+        # rename(2) is atomic within one filesystem, so readers only ever see
+        # a missing or a complete build directory.
+        staging_dir.rename(target_dir)
+    except BaseException:
+        _discard_region_reference_staging_dir(staging_dir)
+        raise
+    logger.info("Wrote MapMyCells region reference %s", target_dir)
+    return RegionReferenceArtifacts(
+        marker_lookup_path=target_dir / "query_markers" / query_marker_name,
+        precomputed_stats_path=target_dir / "precompute" / "precomputed_stats.h5",
+        manifest_path=target_dir / REGION_REFERENCE_MANIFEST_NAME,
+        manifest=manifest,
+    )
+
+
+def _generate_region_reference(
+    config: MapMyCellsConfig,
+    *,
+    build_dir: Path,
+    final_dir: Path,
+    expected_config: dict[str, Any],
+    config_hash: str,
+    query_marker_name: str,
+) -> dict[str, Any]:
+    precompute_dir = build_dir / "precompute"
+    reference_marker_dir = build_dir / "reference_markers"
+    query_marker_dir = build_dir / "query_markers"
+    region_cell_metadata_path = build_dir / "region_cell_metadata.csv"
+    precomputed_stats_path = precompute_dir / "precomputed_stats.h5"
+    query_marker_path = query_marker_dir / query_marker_name
     for directory in (precompute_dir, reference_marker_dir, query_marker_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
-    reference_inputs = _ensure_whb_reference_inputs(
-        config.region_cache_dir,
-        force_download=False,
-    )
+    if config.reference_atlas == "whb":
+        reference_inputs = _ensure_whb_reference_inputs(
+            config.region_cache_dir,
+            force_download=False,
+        )
+        region_column = "region_of_interest_label"
+        roi_map_path = reference_inputs["region_of_interest_structure_map"]
+        hierarchy = WHB_HIERARCHY
+    else:
+        reference_inputs = _ensure_wmb_reference_metadata_inputs(
+            config.region_cache_dir,
+            force_download=False,
+        )
+        region_column = WMB_REGION_COLUMN
+        roi_map_path = reference_inputs["region_of_interest_metadata"]
+        hierarchy = WMB_HIERARCHY
     filtered_summary = _write_region_cell_metadata(
         cell_metadata_path=reference_inputs["cell_metadata"],
         output_path=region_cell_metadata_path,
         region_labels=config.region_labels,
         min_cells_per_leaf=config.region_min_cells_per_leaf,
-        roi_map_path=reference_inputs["region_of_interest_structure_map"],
+        roi_map_path=roi_map_path,
+        region_column=region_column,
     )
+    if config.reference_atlas == "whb":
+        h5ad_path_list = [
+            reference_inputs["WHB-10Xv3-Neurons_raw"],
+            reference_inputs["WHB-10Xv3-Nonneurons_raw"],
+        ]
+    else:
+        matrix_labels = filtered_summary.get("feature_matrix_labels", [])
+        expression_inputs = _ensure_wmb_expression_inputs(
+            config.region_cache_dir,
+            matrix_labels=cast(list[str], matrix_labels),
+            force_download=False,
+        )
+        reference_inputs.update(expression_inputs)
+        h5ad_path_list = list(expression_inputs.values())
 
-    scratch_dir = _reference_scratch_dir(config, reference_dir)
+    scratch_dir = _reference_scratch_dir(config, build_dir)
     scratch_dir.mkdir(parents=True, exist_ok=True)
     _run_precomputation_abc(
         {
             "output_path": str(precomputed_stats_path),
-            "hierarchy": WHB_HIERARCHY,
-            "h5ad_path_list": [
-                str(reference_inputs["WHB-10Xv3-Neurons_raw"]),
-                str(reference_inputs["WHB-10Xv3-Nonneurons_raw"]),
-            ],
+            "hierarchy": hierarchy,
+            "h5ad_path_list": [str(path) for path in h5ad_path_list],
             "cell_metadata_path": str(region_cell_metadata_path),
             "cluster_annotation_path": str(reference_inputs["cluster_annotation_term"]),
             "cluster_membership_path": str(
@@ -1944,18 +2923,16 @@ def prepare_region_mapmycells_reference(
         reference_config["drop_level"] = config.drop_level
     _run_reference_markers(reference_config)
 
-    reference_marker_path_list = [
-        str(path) for path in sorted(reference_marker_dir.iterdir()) if path.is_file()
+    reference_marker_paths = [
+        path for path in sorted(reference_marker_dir.iterdir()) if path.is_file()
     ]
-    if not reference_marker_path_list:
+    if not reference_marker_paths:
         raise RuntimeError(
             f"No reference marker files were generated in {reference_marker_dir}"
         )
-    if query_marker_path.exists():
-        query_marker_path.unlink()
     query_config: dict[str, Any] = {
         "output_path": str(query_marker_path),
-        "reference_marker_path_list": reference_marker_path_list,
+        "reference_marker_path_list": [str(path) for path in reference_marker_paths],
         "n_processors": config.n_processors,
         "tmp_dir": str(scratch_dir),
         "n_per_utility": config.region_query_markers_n_per_utility,
@@ -1964,25 +2941,33 @@ def prepare_region_mapmycells_reference(
     if config.drop_level is not None:
         query_config["drop_level"] = config.drop_level
     _run_query_markers(query_config)
+    _require_existing_file(query_marker_path, "generated region query markers")
+
+    def final_path(path: Path) -> str:
+        return str(final_dir / path.relative_to(build_dir))
 
     manifest = {
         "reference_type": "region",
         "config": expected_config,
+        "config_hash": config_hash,
+        "cache_layout": REGION_REFERENCE_CACHE_LAYOUT,
+        "reference_dir": str(final_dir),
+        "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        **_cell_type_mapper_provenance(),
         "manifest_url": WHB_MANIFEST_URL,
-        "region_cell_metadata_path": str(region_cell_metadata_path),
-        "precomputed_stats_path": str(precomputed_stats_path),
-        "reference_marker_path_list": reference_marker_path_list,
-        "marker_lookup_path": str(query_marker_path),
+        "region_cell_metadata_path": final_path(region_cell_metadata_path),
+        "precomputed_stats_path": final_path(precomputed_stats_path),
+        "reference_marker_path_list": [
+            final_path(path) for path in reference_marker_paths
+        ],
+        "marker_lookup_path": final_path(query_marker_path),
         "filtering_summary": filtered_summary,
         "input_paths": {key: str(value) for key, value in reference_inputs.items()},
     }
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-    return RegionReferenceArtifacts(
-        marker_lookup_path=query_marker_path,
-        precomputed_stats_path=precomputed_stats_path,
-        manifest_path=manifest_path,
-        manifest=manifest,
+    (build_dir / REGION_REFERENCE_MANIFEST_NAME).write_text(
+        json.dumps(manifest, indent=2) + "\n"
     )
+    return manifest
 
 
 def _region_reference_config_payload(
@@ -1996,10 +2981,255 @@ def _region_reference_config_payload(
         "region_query_markers_n_per_utility": (
             config.region_query_markers_n_per_utility
         ),
-        "hierarchy": WHB_HIERARCHY,
+        "reference_atlas": config.reference_atlas,
+        "query_species": config.query_species,
+        "hierarchy": (
+            WHB_HIERARCHY if config.reference_atlas == "whb" else WMB_HIERARCHY
+        ),
         "normalization": "raw",
         "manifest_url": WHB_MANIFEST_URL,
+        "drop_level": config.drop_level,
     }
+
+
+def _region_reference_config_hash(payload: dict[str, Any]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _region_reference_build_dirs(references_root: Path, build_stem: str) -> list[Path]:
+    """Return the builds of one configuration, oldest first."""
+    if not references_root.is_dir():
+        return []
+    rebuild_prefix = f"{build_stem}{REGION_REFERENCE_REBUILD_INFIX}"
+    return sorted(
+        path
+        for path in references_root.iterdir()
+        if path.is_dir()
+        and (path.name == build_stem or path.name.startswith(rebuild_prefix))
+    )
+
+
+def _new_region_reference_build_dir(references_root: Path, build_stem: str) -> Path:
+    canonical = references_root / build_stem
+    if not canonical.exists():
+        return canonical
+    # The UTC timestamp sorts rebuilds after the canonical build and after
+    # each other, so the newest build is always the last one by name.
+    while True:
+        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        candidate = references_root / (
+            f"{build_stem}{REGION_REFERENCE_REBUILD_INFIX}{timestamp}"
+        )
+        if not candidate.exists():
+            return candidate
+
+
+def _newest_complete_region_build(
+    build_dirs: list[Path],
+    *,
+    expected_config: dict[str, Any],
+    config_hash: str,
+    query_marker_name: str,
+) -> RegionReferenceArtifacts | None:
+    for build_dir in sorted(build_dirs, reverse=True):
+        manifest_path = build_dir / REGION_REFERENCE_MANIFEST_NAME
+        precomputed_stats_path = build_dir / "precompute" / "precomputed_stats.h5"
+        marker_lookup_path = build_dir / "query_markers" / query_marker_name
+        manifest = _read_region_reference_manifest(manifest_path)
+        if (
+            manifest is None
+            or manifest.get("config") != expected_config
+            or manifest.get("config_hash") != config_hash
+            or not precomputed_stats_path.is_file()
+            or not marker_lookup_path.is_file()
+        ):
+            logger.warning(
+                "Ignoring incomplete or mismatched MapMyCells region reference %s; "
+                "it is left in place.",
+                build_dir,
+            )
+            continue
+        return RegionReferenceArtifacts(
+            marker_lookup_path=marker_lookup_path,
+            precomputed_stats_path=precomputed_stats_path,
+            manifest_path=manifest_path,
+            manifest=manifest,
+        )
+    return None
+
+
+def _adopt_legacy_region_reference(
+    legacy_dir: Path,
+    *,
+    expected_config: dict[str, Any],
+    config_hash: str,
+    query_marker_name: str,
+) -> RegionReferenceArtifacts | None:
+    """Reuse a reference built in place by older MerXen versions, read-only."""
+    manifest_path = legacy_dir / REGION_REFERENCE_MANIFEST_NAME
+    precomputed_stats_path = legacy_dir / "precompute" / "precomputed_stats.h5"
+    marker_lookup_path = legacy_dir / "query_markers" / query_marker_name
+    if not (
+        manifest_path.is_file()
+        and precomputed_stats_path.is_file()
+        and marker_lookup_path.is_file()
+    ):
+        return None
+    manifest = _read_region_reference_manifest(manifest_path)
+    if manifest is None:
+        return None
+    legacy_config = manifest.get("config")
+    if isinstance(legacy_config, dict) and "drop_level" not in legacy_config:
+        drop_level_found, drop_level = _read_query_marker_drop_level(marker_lookup_path)
+        if not drop_level_found:
+            logger.warning(
+                "Legacy MapMyCells region reference %s records no drop_level in "
+                "its manifest or query-marker metadata; it is left untouched and "
+                "a separate content-hashed reference is used instead.",
+                legacy_dir,
+            )
+            return None
+        legacy_config = {**legacy_config, "drop_level": drop_level}
+    if not isinstance(legacy_config, dict) or not _legacy_region_config_matches(
+        legacy_config, expected_config
+    ):
+        logger.info(
+            "Legacy MapMyCells region reference %s does not match the requested "
+            "configuration; it is left untouched and a separate content-hashed "
+            "reference is used instead.",
+            legacy_dir,
+        )
+        return None
+    logger.info("Adopting legacy MapMyCells region reference read-only: %s", legacy_dir)
+    # The manifest file is never rewritten. The copy handed downstream records
+    # where the artefacts actually are, because legacy manifests can carry
+    # stale absolute paths from before the cache was moved.
+    adopted = dict(manifest)
+    adopted.update(
+        {
+            "cache_layout": REGION_REFERENCE_LEGACY_LAYOUT,
+            "config_hash": config_hash,
+            "reference_dir": str(legacy_dir),
+            "resolved_precomputed_stats_path": str(precomputed_stats_path),
+            "resolved_marker_lookup_path": str(marker_lookup_path),
+        }
+    )
+    return RegionReferenceArtifacts(
+        marker_lookup_path=marker_lookup_path,
+        precomputed_stats_path=precomputed_stats_path,
+        manifest_path=manifest_path,
+        manifest=adopted,
+    )
+
+
+def _legacy_region_config_matches(
+    legacy_config: dict[str, Any],
+    expected_config: dict[str, Any],
+) -> bool:
+    if set(legacy_config) - set(expected_config):
+        return False
+    for key, expected_value in expected_config.items():
+        if key in legacy_config:
+            recorded_value = legacy_config[key]
+        elif key in REGION_REFERENCE_LEGACY_CONFIG_DEFAULTS:
+            recorded_value = REGION_REFERENCE_LEGACY_CONFIG_DEFAULTS[key]
+        else:
+            return False
+        if recorded_value != expected_value:
+            return False
+    return True
+
+
+def _read_query_marker_drop_level(path: Path) -> tuple[bool, str | None]:
+    """Return the drop_level cell_type_mapper recorded for a query-marker file.
+
+    Older MerXen versions passed ``drop_level`` to cell_type_mapper without
+    recording it in the region manifest, but cell_type_mapper writes its full
+    configuration to ``metadata.config`` of the query-marker JSON.
+
+    Args:
+        path: Query-marker JSON written by ``cell_type_mapper``.
+
+    Returns:
+        ``(True, drop_level)`` with the recorded value, which may be ``None``,
+        or ``(False, None)`` when the file or the field cannot be read.
+    """
+    try:
+        marker_lookup: object = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("Could not read MapMyCells query markers %s: %s", path, exc)
+        return (False, None)
+    metadata = (
+        marker_lookup.get("metadata") if isinstance(marker_lookup, dict) else None
+    )
+    ctm_config = metadata.get("config") if isinstance(metadata, dict) else None
+    if not isinstance(ctm_config, dict) or "drop_level" not in ctm_config:
+        return (False, None)
+    drop_level = ctm_config["drop_level"]
+    if drop_level is not None and not isinstance(drop_level, str):
+        return (False, None)
+    return (True, drop_level)
+
+
+def _read_region_reference_manifest(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        manifest: object = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("Could not read MapMyCells region manifest %s: %s", path, exc)
+        return None
+    if not isinstance(manifest, dict):
+        logger.warning("MapMyCells region manifest %s is not a JSON object", path)
+        return None
+    return cast(dict[str, Any], manifest)
+
+
+def _discard_stale_region_reference_staging_dirs(
+    references_root: Path,
+    build_stem: str,
+) -> None:
+    # Call only while holding the lock of this configuration. Its staging
+    # directories are created only under that lock, so any that remain belong
+    # to builders that died mid-build, for example on SIGTERM from a Nextflow
+    # cancel or a Slurm timeout, or on SIGKILL from the OOM killer.
+    staging_prefix = f"{REGION_REFERENCE_STAGING_PREFIX}{build_stem}-"
+    for path in sorted(references_root.iterdir()):
+        if (
+            path.name.startswith(staging_prefix)
+            and path.is_dir()
+            and not path.is_symlink()
+        ):
+            _discard_region_reference_staging_dir(path)
+
+
+def _discard_region_reference_staging_dir(staging_dir: Path) -> None:
+    # Only private staging directories are removed: that of a failed call, or
+    # one a dead builder of the same configuration left behind. They are never
+    # visible as builds, and completed builds are never deleted.
+    if not staging_dir.name.startswith(REGION_REFERENCE_STAGING_PREFIX):
+        raise ValueError(f"Refusing to remove non-staging directory {staging_dir}")
+    logger.warning("Removing incomplete region reference staging dir %s", staging_dir)
+    shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+@contextmanager
+def _exclusive_file_lock(lock_path: Path) -> Iterator[None]:
+    # On NFS, Linux emulates flock() with a whole-file POSIX lock, and an
+    # exclusive POSIX lock needs a descriptor opened for writing, so open the
+    # lock file read-write. Fall back to read-only only when another cache
+    # user created it without write permission for us; that still works on
+    # local filesystems, where flock() ignores the open mode.
+    try:
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o666)
+    except PermissionError:
+        descriptor = os.open(lock_path, os.O_RDONLY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
 
 
 def _reference_scratch_dir(config: MapMyCellsConfig, reference_dir: Path) -> Path:
@@ -2013,7 +3243,7 @@ def _ensure_whb_reference_inputs(
     *,
     force_download: bool = False,
 ) -> dict[str, Path]:
-    manifest = _load_abc_manifest()
+    manifest = _load_cached_abc_manifest(cache_dir)
     abc_cache_dir = cache_dir / "abc_whb"
     inputs: dict[str, Path] = {}
     for file_key in (
@@ -2073,7 +3303,240 @@ def _ensure_whb_reference_inputs(
     return inputs
 
 
+def _ensure_wmb_reference_metadata_inputs(
+    cache_dir: Path,
+    *,
+    force_download: bool = False,
+) -> dict[str, Path]:
+    manifest = _load_cached_abc_manifest(cache_dir)
+    abc_cache_dir = cache_dir / "abc_atlas"
+    inputs: dict[str, Path] = {}
+    for file_key in ("cell_metadata", "region_of_interest_metadata"):
+        info = _manifest_file_info(
+            manifest,
+            WMB_DATASET_DIRECTORY,
+            "metadata",
+            file_key,
+            "files",
+            "csv",
+        )
+        inputs[file_key] = _ensure_manifest_file(
+            info,
+            abc_cache_dir,
+            force_download=force_download,
+        )
+    for file_key in (
+        "cluster_annotation_term",
+        "cluster_to_cluster_annotation_membership",
+    ):
+        info = _manifest_file_info(
+            manifest,
+            WMB_TAXONOMY_DIRECTORY,
+            "metadata",
+            file_key,
+            "files",
+            "csv",
+        )
+        inputs[file_key] = _ensure_manifest_file(
+            info,
+            abc_cache_dir,
+            force_download=force_download,
+        )
+    return inputs
+
+
+def ensure_wmb_clustering_reference_inputs(
+    cache_dir: Path | str,
+) -> dict[str, Path]:
+    """Download or reuse the compact WMB inputs needed by clustering."""
+    manifest = _load_cached_abc_manifest(Path(cache_dir))
+    abc_cache_dir = Path(cache_dir) / "abc_atlas"
+    inputs: dict[str, Path] = {}
+
+    marker_name, marker_suffix = cast(
+        tuple[str, str],
+        FULL_REFERENCE_MANIFEST_KEYS["wmb"]["marker"],
+    )
+    marker_info = _manifest_file_info(
+        manifest,
+        WMB_DATASET_DIRECTORY,
+        "mapmycells",
+        marker_name,
+        "files",
+        marker_suffix,
+    )
+    inputs["marker_lookup"] = _ensure_manifest_file(marker_info, abc_cache_dir)
+
+    gene_info = _manifest_file_info(
+        manifest,
+        WMB_DATASET_DIRECTORY,
+        "metadata",
+        "gene",
+        "files",
+        "csv",
+    )
+    inputs["gene_metadata"] = _ensure_manifest_file(gene_info, abc_cache_dir)
+
+    for file_key in (
+        "cluster_annotation_term",
+        "cluster_to_cluster_annotation_membership",
+    ):
+        info = _manifest_file_info(
+            manifest,
+            WMB_TAXONOMY_DIRECTORY,
+            "metadata",
+            file_key,
+            "files",
+            "csv",
+        )
+        inputs[file_key] = _ensure_manifest_file(info, abc_cache_dir)
+    return inputs
+
+
+def ensure_wmb_mecr_reference_inputs(
+    cache_dir: Path | str,
+    *,
+    max_parallel_downloads: int = 4,
+) -> dict[str, Path]:
+    """Download or reuse the complete WMB 10x reference required by MECR."""
+    if max_parallel_downloads < 1:
+        raise ValueError("max_parallel_downloads must be at least 1")
+    manifest = _load_cached_abc_manifest(Path(cache_dir))
+    abc_cache_dir = Path(cache_dir) / "abc_atlas"
+    inputs = ensure_wmb_clustering_reference_inputs(cache_dir)
+
+    cell_metadata_info = _manifest_file_info(
+        manifest,
+        WMB_DATASET_DIRECTORY,
+        "metadata",
+        "cell_metadata",
+        "files",
+        "csv",
+    )
+    inputs["cell_metadata"] = _ensure_manifest_file(
+        cell_metadata_info,
+        abc_cache_dir,
+    )
+
+    expression_requests: list[tuple[str, dict[str, Any]]] = []
+    for directory in WMB_EXPRESSION_DIRECTORIES:
+        matrix_names = manifest["file_listing"][directory]["expression_matrices"]
+        for matrix_name in sorted(matrix_names):
+            info = _manifest_file_info(
+                manifest,
+                directory,
+                "expression_matrices",
+                matrix_name,
+                "raw",
+                "files",
+                "h5ad",
+            )
+            expression_requests.append((f"expression:{matrix_name}", info))
+
+    def ensure_expression_file(
+        request: tuple[str, dict[str, Any]],
+    ) -> tuple[str, Path]:
+        key, info = request
+        return key, _ensure_manifest_file(info, abc_cache_dir)
+
+    workers = min(max_parallel_downloads, len(expression_requests))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        for key, path in executor.map(ensure_expression_file, expression_requests):
+            inputs[key] = path
+    return inputs
+
+
+def _ensure_wmb_expression_inputs(
+    cache_dir: Path,
+    *,
+    matrix_labels: list[str],
+    force_download: bool = False,
+) -> dict[str, Path]:
+    if not matrix_labels:
+        raise ValueError(
+            "The filtered WMB metadata did not contain any feature_matrix_label "
+            "values, so expression matrices could not be selected."
+        )
+    manifest = _load_cached_abc_manifest(cache_dir)
+    abc_cache_dir = cache_dir / "abc_atlas"
+    inputs: dict[str, Path] = {}
+    for matrix_label in sorted(set(matrix_labels)):
+        match: tuple[str, dict[str, Any]] | None = None
+        for directory in WMB_EXPRESSION_DIRECTORIES:
+            matrices = manifest["file_listing"][directory]["expression_matrices"]
+            if matrix_label in matrices:
+                match = (directory, dict(matrices[matrix_label]))
+                break
+        if match is None:
+            raise KeyError(
+                f"WMB feature_matrix_label {matrix_label!r} was not found in "
+                f"{WMB_EXPRESSION_DIRECTORIES!r}."
+            )
+        directory, _ = match
+        info = _manifest_file_info(
+            manifest,
+            directory,
+            "expression_matrices",
+            matrix_label,
+            "raw",
+            "files",
+            "h5ad",
+        )
+        inputs[f"{matrix_label}_raw"] = _ensure_manifest_file(
+            info,
+            abc_cache_dir,
+            force_download=force_download,
+        )
+    return inputs
+
+
+def _load_cached_abc_manifest(cache_dir: Path) -> dict[str, Any]:
+    """Return the pinned Allen ABC release manifest, downloading it at most once.
+
+    ``WHB_MANIFEST_URL`` names a fixed release, so a local copy under
+    ``<cache_dir>/abc_manifests/`` never goes stale. With that copy, the file
+    paths and sizes it records let callers reuse already-cached Allen files
+    without any network access.
+    """
+    local_path = _abc_manifest_cache_path(cache_dir)
+    if local_path.is_file():
+        try:
+            cached: object = json.loads(local_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "Ignoring unreadable cached ABC manifest %s: %s", local_path, exc
+            )
+        else:
+            if isinstance(cached, dict) and isinstance(
+                cached.get("file_listing"), dict
+            ):
+                logger.info("Using cached Allen ABC manifest %s", local_path)
+                return cast(dict[str, Any], cached)
+            logger.warning("Ignoring malformed cached ABC manifest %s", local_path)
+
+    manifest = _load_abc_manifest()
+    tmp_path = local_path.with_name(
+        f"{local_path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+    )
+    try:
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        tmp_path.replace(local_path)
+    except OSError as exc:
+        # A read-only shared cache must not stop the run; the next call will
+        # simply download the manifest again.
+        logger.warning("Could not cache Allen ABC manifest at %s: %s", local_path, exc)
+        tmp_path.unlink(missing_ok=True)
+    return manifest
+
+
+def _abc_manifest_cache_path(cache_dir: Path) -> Path:
+    release_path = urllib.parse.urlsplit(WHB_MANIFEST_URL).path.lstrip("/")
+    return cache_dir / ABC_MANIFEST_CACHE_DIRECTORY / release_path
+
+
 def _load_abc_manifest() -> dict[str, Any]:
+    logger.info("Downloading Allen ABC manifest: %s", WHB_MANIFEST_URL)
     with urllib.request.urlopen(WHB_MANIFEST_URL) as response:
         manifest: object = json.loads(response.read().decode("utf-8"))
     if not isinstance(manifest, dict):
@@ -2092,7 +3555,7 @@ def _ensure_manifest_file(
     info: dict[str, Any],
     cache_dir: Path,
     *,
-    force_download: bool,
+    force_download: bool = False,
 ) -> Path:
     relative_path = Path(str(info["relative_path"]))
     output_path = cache_dir / relative_path
@@ -2104,26 +3567,67 @@ def _ensure_manifest_file(
     ):
         return output_path
 
+    return _ensure_url_file(
+        str(info["url"]),
+        output_path,
+        expected_size=expected_size,
+        force_download=force_download,
+    )
+
+
+def _ensure_url_file(
+    url: str,
+    output_path: Path,
+    *,
+    expected_size: int = 0,
+    force_download: bool = False,
+) -> Path:
+    if (
+        output_path.exists()
+        and not force_download
+        and _file_size_matches(output_path, expected_size)
+    ):
+        return output_path
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = output_path.with_name(f"{output_path.name}.tmp")
-    if tmp_path.exists():
-        tmp_path.unlink()
-    url = str(info["url"])
-    logger.info("Downloading Allen WHB reference file: %s", url)
-    with urllib.request.urlopen(url) as response, tmp_path.open("wb") as out:
-        while True:
-            chunk = response.read(1024 * 1024 * 16)
-            if not chunk:
-                break
-            out.write(chunk)
-    actual_size = tmp_path.stat().st_size
-    if expected_size and actual_size != expected_size:
-        tmp_path.unlink(missing_ok=True)
-        raise RuntimeError(
-            f"Downloaded {url} to {tmp_path}, but size was "
-            f"{actual_size} bytes; expected {expected_size} bytes."
+    lock_path = output_path.with_name(f"{output_path.name}.lock")
+    with lock_path.open("a+b") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        if (
+            output_path.exists()
+            and not force_download
+            and _file_size_matches(output_path, expected_size)
+        ):
+            return output_path
+        if force_download:
+            tmp_path.unlink(missing_ok=True)
+
+        offset = tmp_path.stat().st_size if tmp_path.exists() else 0
+        headers = {"Range": f"bytes={offset}-"} if offset else {}
+        request = urllib.request.Request(url, headers=headers)
+        logger.info(
+            "Downloading Allen reference file: %s (resume_offset=%d)", url, offset
         )
-    tmp_path.replace(output_path)
+        with urllib.request.urlopen(request) as response:
+            is_partial = getattr(response, "status", None) == 206
+            mode = "ab" if offset and is_partial else "wb"
+            with tmp_path.open(mode) as out:
+                while True:
+                    chunk = response.read(1024 * 1024 * 16)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+        actual_size = tmp_path.stat().st_size
+        if expected_size and actual_size != expected_size:
+            if actual_size > expected_size:
+                tmp_path.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"Downloaded {url} to {tmp_path}, but size was "
+                f"{actual_size} bytes; expected {expected_size} bytes. "
+                "The partial file was retained for a resumed download."
+            )
+        tmp_path.replace(output_path)
     return output_path
 
 
@@ -2138,13 +3642,14 @@ def _write_region_cell_metadata(
     region_labels: list[str],
     min_cells_per_leaf: int,
     roi_map_path: Path,
+    region_column: str = "region_of_interest_label",
 ) -> dict[str, Any]:
     if not region_labels:
         raise ValueError("At least one region label is required for region mapping.")
     cell_metadata = pd.read_csv(cell_metadata_path)
-    if "region_of_interest_label" not in cell_metadata.columns:
+    if region_column not in cell_metadata.columns:
         raise KeyError(
-            f"{cell_metadata_path} does not contain region_of_interest_label. "
+            f"{cell_metadata_path} does not contain {region_column}. "
             f"Available columns: {list(cell_metadata.columns)}"
         )
     if "cluster_alias" not in cell_metadata.columns:
@@ -2152,12 +3657,12 @@ def _write_region_cell_metadata(
             f"{cell_metadata_path} does not contain cluster_alias. "
             f"Available columns: {list(cell_metadata.columns)}"
         )
-    region_mask = cell_metadata["region_of_interest_label"].isin(region_labels)
+    region_mask = cell_metadata[region_column].isin(region_labels)
     region_cells = cell_metadata.loc[region_mask].copy()
     if region_cells.empty:
-        available = _available_roi_labels(roi_map_path)
+        available = _available_roi_labels(roi_map_path, region_column=region_column)
         raise ValueError(
-            "No WHB cells matched mapmycells_region_labels="
+            f"No {region_column} cells matched mapmycells_region_labels="
             f"{region_labels!r}. Available ROI labels include: {available[:20]}"
         )
 
@@ -2178,8 +3683,15 @@ def _write_region_cell_metadata(
     dropped_counts = leaf_counts[leaf_counts < min_cells_per_leaf]
     return {
         "requested_region_labels": list(region_labels),
+        "region_column": region_column,
         "matched_region_labels": sorted(
-            str(value) for value in region_cells["region_of_interest_label"].unique()
+            str(value) for value in region_cells[region_column].unique()
+        ),
+        "feature_matrix_labels": sorted(
+            str(value)
+            for value in filtered.get(WMB_FEATURE_MATRIX_COLUMN, pd.Series(dtype=str))
+            .dropna()
+            .unique()
         ),
         "n_cells_before_region_filter": int(len(cell_metadata)),
         "n_cells_after_region_filter": int(len(region_cells)),
@@ -2193,11 +3705,15 @@ def _write_region_cell_metadata(
     }
 
 
-def _available_roi_labels(roi_map_path: Path) -> list[str]:
+def _available_roi_labels(
+    roi_map_path: Path,
+    *,
+    region_column: str = "region_of_interest_label",
+) -> list[str]:
     roi_map = pd.read_csv(roi_map_path)
-    if "region_of_interest_label" not in roi_map.columns:
+    if region_column not in roi_map.columns:
         return []
-    return sorted(str(value) for value in roi_map["region_of_interest_label"].unique())
+    return sorted(str(value) for value in roi_map[region_column].unique())
 
 
 def _run_precomputation_abc(config: dict[str, Any]) -> None:
@@ -2349,6 +3865,16 @@ def _read_text_if_present(path: Path | str | None) -> str:
     return resolved.read_text(encoding="utf-8", errors="replace")
 
 
+def _sha256_if_present(path: Path | str | None) -> str | None:
+    if path is None:
+        return None
+    resolved = Path(path)
+    if not resolved.is_file():
+        return None
+    with resolved.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
 def _read_comment_header(path: Path | str) -> list[str]:
     comments: list[str] = []
     with Path(path).open(encoding="utf-8", errors="replace") as handle:
@@ -2442,12 +3968,26 @@ def _write_results_manifest(
     config: MapMyCellsConfig,
     references: list[MapMyCellsReference],
     results: dict[str, dict[str, dict[str, Path]]],
+    *,
+    gene_id_resolution: dict[str, dict[str, Any]] | None = None,
+    gene_id_fallback_ignored: dict[str, str] | None = None,
 ) -> None:
     payload = {
         "pair_id": config.pair_id,
         "reference_mode": config.reference_mode,
+        "reference_atlas": config.reference_atlas,
+        "query_species": config.query_species,
+        "auto_download_references": config.auto_download_references,
         "marker_lookup_path": _path_as_str(config.marker_lookup_path),
         "precomputed_stats_path": _path_as_str(config.precomputed_stats_path),
+        "gene_mapping_db_path": _path_as_str(config.gene_mapping_db_path),
+        "gene_id_fallback_csv": (
+            None
+            if gene_id_fallback_ignored is not None
+            else _path_as_str(config.gene_id_fallback_csv)
+        ),
+        "gene_id_fallback_ignored": gene_id_fallback_ignored,
+        "gene_id_resolution": gene_id_resolution or {},
         "region_name": config.region_name,
         "region_labels": list(config.region_labels),
         "region_cache_dir": str(config.region_cache_dir),
@@ -2459,6 +3999,7 @@ def _write_results_manifest(
         "bootstrap_iteration": config.bootstrap_iteration,
         "plots_only": bool(config.plots_only),
         "n_processors": config.n_processors,
+        **_cell_type_mapper_provenance(),
         "references": {reference.name: reference.manifest for reference in references},
         "samples": {
             sample_id: {
@@ -2469,6 +4010,32 @@ def _write_results_manifest(
         },
     }
     path.write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def _cell_type_mapper_provenance() -> dict[str, str | None]:
+    """Return the installed ``cell_type_mapper`` version and VCS commit.
+
+    The mapper subprocess runs with ``sys.executable``, so the distribution
+    installed in this interpreter is the one that produces the mapping.
+    """
+    try:
+        distribution = importlib.metadata.distribution(CELL_TYPE_MAPPER_DISTRIBUTION)
+    except importlib.metadata.PackageNotFoundError:
+        return {"cell_type_mapper_version": None, "cell_type_mapper_commit": None}
+    commit: str | None = None
+    direct_url_text = distribution.read_text("direct_url.json")
+    if direct_url_text:
+        try:
+            direct_url: object = json.loads(direct_url_text)
+        except ValueError:
+            direct_url = None
+        vcs_info = direct_url.get("vcs_info") if isinstance(direct_url, dict) else None
+        if isinstance(vcs_info, dict) and vcs_info.get("commit_id"):
+            commit = str(vcs_info["commit_id"])
+    return {
+        "cell_type_mapper_version": distribution.version,
+        "cell_type_mapper_commit": commit,
+    }
 
 
 def _bool_arg(value: bool) -> str:

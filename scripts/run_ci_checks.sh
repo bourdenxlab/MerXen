@@ -31,7 +31,7 @@ fi
 
 case "${install_mode}" in
     locked)
-        uv pip install --python "${venv_dir}/bin/python" -r requirements.lock
+        uv pip install --python "${venv_dir}/bin/python" --no-deps -r requirements/requirements.lock
         uv pip install --python "${venv_dir}/bin/python" -e . --no-deps
         ;;
     local)
@@ -57,6 +57,13 @@ fi
 "${venv_dir}/bin/ruff" check .
 "${venv_dir}/bin/ruff" format --check .
 "${venv_dir}/bin/mypy" src/
+
+# The metro map source is validated when nf-metro is available. The pytest
+# suite guards the map/pipeline correspondence without it, so a venv built in
+# 'none' install mode simply skips this.
+if [[ -x "${venv_dir}/bin/nf-metro" ]]; then
+    "${venv_dir}/bin/nf-metro" validate assets/metro_map.mmd
+fi
 
 case "${run_tests}" in
     true | 1 | yes)

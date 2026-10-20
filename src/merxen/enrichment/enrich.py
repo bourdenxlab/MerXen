@@ -22,6 +22,7 @@ from spatialdata.models import ShapesModel
 from spatialdata_io import xenium as xenium_reader
 from tqdm.auto import tqdm
 
+from merxen.alignment.manifest import invalidate_alignment_materialization
 from merxen.config import EnrichmentConfig
 from merxen.enrichment.assignment import clone_table_for_region
 from merxen.io.image_source import (
@@ -29,15 +30,25 @@ from merxen.io.image_source import (
     build_merscope_z_projection,
     image_to_cyx,
 )
-from merxen.io.spatialdata_io import write_or_replace_element
+from merxen.io.spatialdata_io import (
+    spatialdata_write_lock,
+    write_or_replace_element,
+    write_spatialdata_metadata,
+)
 from merxen.io.spatialdata_schema import (
     INSTANCE_ID_COLUMN,
+    MERXEN_SCHEMA_ATTR,
     SOURCE_CELL_ID_COLUMN,
 )
+from merxen.masks import register_missing_mask_branches
 from merxen.memory import force_release, log_status
 from merxen.path_utils import remove_path, stage_existing_output
 from merxen.segmentation.cellpose import build_cellpose_affine_to_microns
 from merxen.segmentation.mask_geometry import masks_to_labeled_polygons
+from merxen.segmentation.model_identity import (
+    find_model_identity_path,
+    read_model_identity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -716,10 +727,7 @@ def enrich_single_latest(
         if config.persistent_output_path is not None
         else latest_path
     )
-    mask_path = Path(config.mask_path)
-    nuclei_mask_path = Path(config.nuclei_mask_path)
     dataset_name = str(config.dataset_name).upper()
-    platform = config.platform.upper()
 
     if not latest_path.exists():
         raise FileNotFoundError(
@@ -727,17 +735,80 @@ def enrich_single_latest(
         )
 
     write_path = _resolve_enrichment_write_path(latest_path, target_path)
+    # Enrichment adds and replaces elements and rewrites the store's attrs, so
+    # the store lock is held from the read until the metadata is persisted.
+    with spatialdata_write_lock(write_path):
+        _enrich_store_in_place(
+            config,
+            write_path=write_path,
+            force_rerun=force_rerun,
+            polygon_n_jobs=polygon_n_jobs,
+            polygon_show_progress=polygon_show_progress,
+        )
+
+    if keep_backup:
+        log_status(
+            f"[{dataset_name}] keep_backup ignored; "
+            "enrichment writes elements in place."
+        )
+    if latest_path != write_path:
+        stage_existing_output(write_path, latest_path)
+    return write_path
+
+
+def _record_mask_model_identities(dst: Any, config: EnrichmentConfig) -> bool:
+    """Copy mask provenance into the registry without changing writer_versions."""
+    schema = dst.attrs.setdefault(MERXEN_SCHEMA_ATTR, {})
+    # Cell tables are registered in the later assignment stage. Retain the
+    # identities at schema level so that registration can copy them then.
+    identities = schema.setdefault("model_identities", {})
+    registry = schema.get("segmentations", {})
+    changed = False
+    for branch, mask_path in (
+        ("cellpose", config.mask_path),
+        ("cellpose_nuclei", config.nuclei_mask_path),
+    ):
+        existing = registry.get(branch, {}).get(
+            "model_identity", identities.get(branch)
+        )
+        if find_model_identity_path(Path(mask_path)) is None and existing is not None:
+            identity = existing
+        else:
+            identity = read_model_identity(Path(mask_path)).model_dump(mode="json")
+        if identities.get(branch) != identity:
+            identities[branch] = identity
+            changed = True
+        if branch in registry and registry[branch].get("model_identity") != identity:
+            registry[branch]["model_identity"] = identity
+            changed = True
+    return changed
+
+
+def _enrich_store_in_place(
+    config: EnrichmentConfig,
+    *,
+    write_path: Path,
+    force_rerun: bool,
+    polygon_n_jobs: int,
+    polygon_show_progress: bool,
+) -> None:
+    """Enrich the store at ``write_path``; the caller holds its write lock."""
+    mask_path = Path(config.mask_path)
+    nuclei_mask_path = Path(config.nuclei_mask_path)
+    dataset_name = str(config.dataset_name).upper()
+    platform = config.platform.upper()
+
     log_status(f"[{dataset_name}] Loading latest zarr for enrichment: {write_path}")
     dst = _read_latest_zarr_for_enrichment(write_path, platform, dataset_name)
 
     already_enriched = _is_already_enriched(dst, platform)
     if already_enriched and (not force_rerun):
+        if _record_mask_model_identities(dst, config):
+            write_spatialdata_metadata(dst, write_attrs=True)
         log_status(f"[{dataset_name}] Already enriched; skipping.")
         del dst
         force_release(note=f"after enrichment skip {dataset_name}")
-        if latest_path != write_path:
-            stage_existing_output(write_path, latest_path)
-        return write_path
+        return
 
     nuclei_missing = CELLPOSE_NUCLEI_SHAPE_NAME not in dst.shapes
     if not force_rerun and nuclei_missing and _is_enriched_except_nuclei(dst, platform):
@@ -768,14 +839,19 @@ def enrich_single_latest(
             nuclei_shapes,
             overwrite=False,
         )
+        register_missing_mask_branches(dst)
+        _record_mask_model_identities(dst, config)
+        invalidate_alignment_materialization(
+            dst,
+            reason="incremental Cellpose nucleus shapes added",
+        )
+        write_spatialdata_metadata(dst, write_attrs=True)
         del dst, nuclei_gdf
         force_release(note=f"after incremental nuclei enrichment ({dataset_name})")
-        if latest_path != write_path:
-            stage_existing_output(write_path, latest_path)
         log_status(
             f"[{dataset_name}] Incremental nuclei enrichment complete: {write_path}"
         )
-        return write_path
+        return
 
     overwrite_existing = bool(force_rerun or not already_enriched)
     if overwrite_existing and not force_rerun:
@@ -959,15 +1035,13 @@ def enrich_single_latest(
     else:
         raise ValueError(f"Unsupported platform: {config.platform}")
 
+    register_missing_mask_branches(dst)
+    _record_mask_model_identities(dst, config)
+    invalidate_alignment_materialization(
+        dst,
+        reason="native enrichment points, shapes, tables, or images replaced",
+    )
+    write_spatialdata_metadata(dst, write_attrs=True)
     del dst, src, cp_gdf, nuclei_gdf
     force_release(note=f"after in-place enrichment ({dataset_name})")
-
-    if keep_backup:
-        log_status(
-            f"[{dataset_name}] keep_backup ignored; "
-            "enrichment writes elements in place."
-        )
-    if latest_path != write_path:
-        stage_existing_output(write_path, latest_path)
     log_status(f"[{dataset_name}] Enrichment complete: {write_path}")
-    return write_path

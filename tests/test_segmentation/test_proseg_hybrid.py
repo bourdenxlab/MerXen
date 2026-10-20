@@ -3,18 +3,29 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
+from typing import Any
 
 import anndata as ad
 import dask.dataframe as dd
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import pytest
 import spatialdata as sd
 from scipy import sparse
 from shapely.geometry import Point, box
 from spatialdata.models import PointsModel, ShapesModel, TableModel
+from spatialdata.transformations import (
+    Affine,
+    BaseTransformation,
+    Identity,
+    Scale,
+    get_transformation,
+)
 
+from merxen.alignment.manifest import ALIGNMENT_MANIFEST_ATTR
 from merxen.config import ProsegHybridConfig
 from merxen.io.spatialdata_io import write_spatialdata_zarr
 from merxen.segmentation.proseg_hybrid import (
@@ -214,10 +225,13 @@ def test_overlap_assignment_uses_proseg_only_inside_overlap() -> None:
     ]
 
 
-def test_hybrid_refinement_roundtrips_spatialdata(
+def _write_hybrid_inputs(
     tmp_path: Path,
-) -> None:
-    """Hybrid shapes, point assignments, and counts should persist together."""
+    *,
+    points_transformations: dict[str, BaseTransformation] | None = None,
+    shapes_transformations: dict[str, BaseTransformation] | None = None,
+) -> tuple[Path, Path, Path]:
+    """Write a two-cell Proseg zarr, its Cellpose mask and transforms."""
     coordinates = [
         (x, y, assignment)
         for assignment, x_offset in [(0, 1.0), (1, 8.0)]
@@ -242,6 +256,7 @@ def test_hybrid_refinement_roundtrips_spatialdata(
         dd.from_pandas(points_df, npartitions=2),
         coordinates={"x": "x", "y": "y", "z": "z"},
         feature_key="gene",
+        transformations=points_transformations,
     )
     source_shape_gdf = gpd.GeoDataFrame(
         {
@@ -251,7 +266,9 @@ def test_hybrid_refinement_roundtrips_spatialdata(
         geometry="geometry",
         index=pd.Index([0, 1], name="cell"),
     )
-    source_shapes = ShapesModel.parse(source_shape_gdf)
+    source_shapes = ShapesModel.parse(
+        source_shape_gdf, transformations=shapes_transformations
+    )
     obs = pd.DataFrame(
         {
             "cell": [0, 1],
@@ -269,14 +286,16 @@ def test_hybrid_refinement_roundtrips_spatialdata(
         instance_key="cell",
     )
     zarr_path = tmp_path / "proseg.zarr"
-    write_spatialdata_zarr(
-        sd.SpatialData(
-            points={"transcripts": points},
-            shapes={"cell_boundaries": source_shapes},
-            tables={"table": table},
-        ),
-        zarr_path,
+    source = sd.SpatialData(
+        points={"transcripts": points},
+        shapes={"cell_boundaries": source_shapes},
+        tables={"table": table},
     )
+    source.attrs[ALIGNMENT_MANIFEST_ATTR] = {
+        "complete": True,
+        "artifacts": {"points/old": {"status": "complete"}},
+    }
+    write_spatialdata_zarr(source, zarr_path)
 
     masks = np.zeros((16, 16), dtype=np.uint32)
     masks[1:6, 1:6] = 1
@@ -293,6 +312,14 @@ def test_hybrid_refinement_roundtrips_spatialdata(
         )
     )
 
+    return zarr_path, mask_path, transforms_path
+
+
+def test_hybrid_refinement_roundtrips_spatialdata(
+    tmp_path: Path,
+) -> None:
+    """Hybrid shapes, point assignments, and counts should persist together."""
+    zarr_path, mask_path, transforms_path = _write_hybrid_inputs(tmp_path)
     config = ProsegHybridConfig(min_transcripts=10)
     run_proseg_hybrid_refinement(
         zarr_path,
@@ -319,3 +346,132 @@ def test_hybrid_refinement_roundtrips_spatialdata(
     assert HYBRID_ASSIGNMENT_COLUMN in augmented.columns
     assert augmented[HYBRID_ASSIGNMENT_COLUMN].notna().all()
     assert "qv" in augmented.columns
+    assert result.attrs[ALIGNMENT_MANIFEST_ATTR]["complete"] is False
+    assert (
+        result.attrs[ALIGNMENT_MANIFEST_ATTR]["invalidation_reason"]
+        == "ProSeg-hybrid points, shapes, and table replaced"
+    )
+
+
+def test_hybrid_refinement_serializes_with_another_store_writer(
+    tmp_path: Path,
+    store_lock_contention: Any,
+) -> None:
+    """The refinement waits for a writer holding the store lock through another
+    staged symlink, and keeps the lock from its read until the attrs are written."""
+    import merxen.segmentation.proseg_hybrid as hybrid_module
+
+    zarr_path, mask_path, transforms_path = _write_hybrid_inputs(tmp_path)
+    config = ProsegHybridConfig(min_transcripts=10)
+
+    store_lock_contention.run(
+        lambda staged: run_proseg_hybrid_refinement(
+            staged,
+            mask_path,
+            transforms_path,
+            config,
+            temp_root=tmp_path,
+        ),
+        zarr_path,
+        reads=[(sd, "read_zarr")],
+        persists=[
+            (hybrid_module, "write_or_replace_element"),
+            (hybrid_module, "write_spatialdata_metadata"),
+        ],
+    )
+
+    assert has_proseg_hybrid_refinement(zarr_path, config)
+
+
+def test_hybrid_shapes_take_the_transcripts_transformations(
+    tmp_path: Path,
+) -> None:
+    """Hybrid shapes are built from transcript x/y, so they share its frame.
+
+    The store's first shapes element here maps to 'global' in mosaic pixels, as
+    the vendor MERSCOPE boundaries do; the hybrid shapes must not copy it.
+    """
+    rigid = Affine(
+        np.array([[-0.99, -0.1, 11201.0], [-0.1, 0.995, 495.0], [0.0, 0.0, 1.0]]),
+        input_axes=("x", "y"),
+        output_axes=("x", "y"),
+    )
+    zarr_path, mask_path, transforms_path = _write_hybrid_inputs(
+        tmp_path,
+        points_transformations={"global": Identity(), "merxen_xenium": rigid},
+        shapes_transformations={"global": Scale([9.26, 9.26], axes=("x", "y"))},
+    )
+    run_proseg_hybrid_refinement(
+        zarr_path, mask_path, transforms_path, ProsegHybridConfig(min_transcripts=10)
+    )
+
+    result = sd.read_zarr(zarr_path)
+    hybrid = get_transformation(result.shapes[PROSEG_HYBRID_SHAPE_NAME], get_all=True)
+    assert set(hybrid) == {"global", "merxen_xenium"}
+    assert isinstance(hybrid["global"], Identity)
+    assert hybrid["merxen_xenium"].input_axes == ("x", "y")
+    np.testing.assert_allclose(
+        hybrid["merxen_xenium"].to_affine_matrix(
+            input_axes=("x", "y"), output_axes=("x", "y")
+        ),
+        rigid.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y")),
+    )
+
+
+def test_hybrid_shapes_refuse_a_transcript_transformation_that_mixes_in_z(
+    tmp_path: Path,
+) -> None:
+    """A z-dependent x/y map cannot be carried by 2D shapes exactly."""
+    tilted = Affine(
+        np.array(
+            [
+                [1.0, 0.0, 0.5, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        ),
+        input_axes=("x", "y", "z"),
+        output_axes=("x", "y", "z"),
+    )
+    zarr_path, mask_path, transforms_path = _write_hybrid_inputs(
+        tmp_path, points_transformations={"global": tilted}
+    )
+    with pytest.raises(ValueError, match="depend on z"):
+        run_proseg_hybrid_refinement(
+            zarr_path,
+            mask_path,
+            transforms_path,
+            ProsegHybridConfig(min_transcripts=10),
+        )
+
+
+def test_hybrid_refinement_writes_temporary_parts_in_the_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Partition files must not go to the system temporary directory."""
+    import merxen.segmentation.proseg_hybrid as hybrid_module
+
+    zarr_path, mask_path, transforms_path = _write_hybrid_inputs(tmp_path)
+    work = tmp_path / "task_work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    monkeypatch.delenv("MERXEN_TMPDIR", raising=False)
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "system_tmp_must_stay_unused"))
+    seen: list[Path] = []
+    real_temporary_directory = hybrid_module.tempfile.TemporaryDirectory
+
+    def recording_temporary_directory(
+        *args: Any, **kwargs: Any
+    ) -> tempfile.TemporaryDirectory[str]:
+        seen.append(Path(str(kwargs.get("dir"))))
+        return real_temporary_directory(*args, **kwargs)
+
+    monkeypatch.setattr(
+        hybrid_module.tempfile, "TemporaryDirectory", recording_temporary_directory
+    )
+    run_proseg_hybrid_refinement(
+        zarr_path, mask_path, transforms_path, ProsegHybridConfig(min_transcripts=10)
+    )
+    assert seen == [work]
+    assert not (tmp_path / "system_tmp_must_stay_unused").exists()

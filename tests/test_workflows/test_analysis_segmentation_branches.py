@@ -13,7 +13,7 @@ def test_nextflow_exposes_analysis_segmentation_branches() -> None:
     config_text = (repo_root / "workflows" / "nextflow.config").read_text()
 
     for expected in [
-        'analysis_segmentation = "both"',
+        'analysis_segmentation = "all"',
         "normalizeAnalysisSegmentation",
         "rowSampleSettings",
         "settings.analysis_segmentations",
@@ -31,13 +31,15 @@ def test_nextflow_exposes_analysis_segmentation_branches() -> None:
     assert (
         '"all": ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"]' in main_text
     )
+    assert 'rawValue == null ? "all"' in main_text
+    assert 'raw = "all"' in main_text
     assert '"proseg_mask": ["proseg_mask"]' in main_text
     assert '"cellpose": ["proseg_mask"]' in main_text
     assert "VALIDATE_ANALYSIS_LAYER" in main_text
 
 
 def test_analysis_zarrs_fan_out_after_platform_settings_join() -> None:
-    """Each platform zarr should be duplicated once per selected segmentation."""
+    """Each zarr should fan out over analysis and clustering-prerequisite branches."""
     repo_root = Path(__file__).resolve().parents[2]
     main_text = (repo_root / "workflows" / "main.nf").read_text()
     fanout = main_text[
@@ -49,7 +51,7 @@ def test_analysis_zarrs_fan_out_after_platform_settings_join() -> None:
     assert 'tuple("${pairId}|${platform}", settings)' in fanout
     assert ".join(analysis_layer_validation_gate_ch)" in fanout
     assert ".flatMap {" in fanout
-    assert "settings.analysis_layer_segmentations.collect { segmentation ->" in fanout
+    assert "settings.analysis_input_segmentations.collect { segmentation ->" in fanout
     assert '"${key}|${segmentation}",' in fanout
     assert 'tuple("${pairId}|${platform}", segmentation, settings)' not in fanout
 
@@ -162,6 +164,9 @@ def test_mask_image_quantification_resume_reuses_published_inputs() -> None:
     ]
     assert "settings.need_enriched_zarrs && !settings.run_enrich" in enrich_resume
     assert '"latest/latest_spatialdata.zarr"' in enrich_resume
+    assert 'chooseField(row, ["xenium_spatialdata_path"])' in enrich_resume
+    assert '"merscope_spatialdata_path"' in enrich_resume
+    assert "isBlankPath(explicitLatestZarr)" in enrich_resume
     assert "def enrichOut = latestZarr" in enrich_resume
     assert '"enrich/enrich_out"' not in enrich_resume
 
@@ -239,6 +244,25 @@ def test_compute_cortical_depth_stage_is_wired_after_clustering(
         "merxen compute-cortical-depth",
     ]:
         assert expected in module_text
+
+
+def test_cortical_depth_boundary_frame_is_explicit_and_validated(
+    combined_config_text: str,
+) -> None:
+    """The boundary frame defaults to native, has a samplesheet override,
+    reaches the stage config and is checked in preflight."""
+    repo_root = Path(__file__).resolve().parents[2]
+    main_text = (repo_root / "workflows" / "main.nf").read_text()
+
+    assert 'cortical_depth_boundary_frame = "native"' in combined_config_text
+    for expected in [
+        "def corticalDepthBoundaryFrame(row, platform, params)",
+        '"${prefix}_cortical_depth_boundary_frame"',
+        '"cortical_depth_boundary_frame"',
+        "boundary_frame: corticalDepthBoundaryFrame(row, platform, params),",
+        'if (!(boundaryFrame in ["native", "aligned"])) {',
+    ]:
+        assert expected in main_text
 
 
 def test_segment_bootstraps_proseg_from_configured_paths(
@@ -390,13 +414,16 @@ def test_mecr_stage_is_default_enabled_and_uses_one_reference_task(
         "mecr_reference_inputs_ch",
         "mergeMecrSamplesJson",
         ".collect()",
+        ".filter { samplesJsonValues -> !samplesJsonValues.isEmpty() }",
         "MECR_REFERENCE(mecr_reference_inputs_ch)",
         "MECR(mecr_inputs_ch)",
     ]:
         assert expected in main_text
 
     for expected in [
-        "mecr_enabled = true",
+        "mecr_enabled = null",
+        "mecr_reference_h5ad_paths = []",
+        "mecr_auto_download_reference = true",
         "mecr_marker_min_target_fraction = 0.25",
         "mecr_marker_max_other_fraction = 0.01",
         "mecr_barnyard_top_n_pairs = 6",
@@ -409,6 +436,9 @@ def test_mecr_stage_is_default_enabled_and_uses_one_reference_task(
 
     for expected in [
         "process MECR_REFERENCE",
+        '"reference_atlas"',
+        '"reference_h5ad_paths"',
+        '"auto_download_reference"',
         "process MECR",
         "merxen mecr-reference",
         "merxen mecr --config",

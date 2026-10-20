@@ -11,6 +11,7 @@ authoritative reference.
 ```
 merxen/
 ├── config.py            # Pydantic configs (pipeline contract)
+├── control_features.py  # registry of platform control features
 ├── memory.py            # RAM monitoring helpers
 ├── _typing.py           # shared small types
 ├── cli/                 # Click entry points (one per stage)
@@ -27,8 +28,8 @@ merxen/
 ```
 
 The subpackage structure mirrors the Nextflow stage graph:
-`build → segment-nuclei → segment → enrich → mask-image-quantification → qc → align →
-alignment-qc → compare → visualize → spatial-gene-analysis →
+`build → segment-nuclei → segment → enrich → register-images → mask-image-quantification → qc → align →
+materialize-alignment → alignment-qc → compare → visualize → spatial-gene-analysis →
 clustering-squidpy → compute-cortical-depth → distance-from-object →
 mapmycells → gaston`. Cortical depth is skipped unless `--cortical_depth_enabled true`
 is set. Alignment is skipped unless
@@ -97,7 +98,19 @@ with Groovy.
 - `iter_points_chunks(points_obj, ...)` — chunked iterator over a points
   table, with memory checks.
 - `write_proseg_csv_from_points(...)` — seed transcripts with cell IDs and
-  emit a ProSeg-friendly CSV.
+  emit a ProSeg-friendly CSV; with `control_platform` it drops control
+  features using `merxen.control_features`.
+
+### `merxen.control_features` — [control_features.py](../src/merxen/control_features.py)
+- `CONTROL_TOKENS` — case-insensitive control substrings shared by
+  clustering and transcript analyses.
+- `classify_control_transcripts(names, platform=..., is_gene=..., codeword_category=...)`
+  — flag control transcripts: a Xenium feature type decides where present,
+  name rules apply elsewhere. Also flags rows kept because their feature
+  type says gene although a control-name rule matches.
+- `control_transcript_mask(...)` — the control flags alone.
+- `matches_control_name_pattern(name, platform)` /
+  `control_token_mask(values)` — the anchored and substring name rules.
 
 ### `io.image_source` — [image_source.py](../src/merxen/io/image_source.py)
 - `build_image_source(image, as_float32)` — lazy image reader.
@@ -153,6 +166,24 @@ with Groovy.
 - `sanitize_table_key`, `resolve_points_cols`, `ensure_shape_has_cell_id`,
   `build_gene_list_from_base_table`, `clone_table_for_region`.
 
+## `merxen.image_registration`
+
+### `image_registration` — [image_registration.py](../src/merxen/image_registration.py)
+- `load_alignment_matrix(path)` — read and validate a Xenium Explorer 3×3 affine.
+- `check_matrix_scale(matrix, *, image_pixel_size_um, reference_pixel_size_um, tolerance)`
+  — reject inverted or micron-based matrices by their scale.
+- `measure_local_shifts(reference, moving, valid, *, window_px)` — windowed
+  phase-correlation residual shifts.
+- `fit_affine_displacement(centers_xy, shifts_xy)` — robust affine fit to a
+  shift field.
+- `run_image_registration(config, *, force_rerun)` — stage entry point.
+
+### `io.ome_tiff` — [ome_tiff.py](../src/merxen/io/ome_tiff.py)
+- `read_ome_tiff_info(path)` — levels, channel names, and pixel size without
+  reading pixels.
+- `open_ome_tiff_level(info, level, *, channel_names)` — lazy `(c, y, x)`
+  DataArray of one pyramid level.
+
 ## `merxen.mask_image_quantification`
 
 ### `mask_image_quantification` — [mask_image_quantification.py](../src/merxen/mask_image_quantification.py)
@@ -162,7 +193,8 @@ with Groovy.
   features to hybrid cells by their shared identifier without quantifying
   hybrid polygons.
 - `run_mask_image_quantification(config, *, force_rerun)` — stage entry point
-  that writes the SpatialData table and sidecar outputs.
+  that writes the SpatialData table and sidecar outputs. An existing table is
+  reused only when it covers exactly the zarr's current source images.
 
 ## `merxen.cortical_depth`
 
@@ -171,6 +203,10 @@ with Groovy.
 
 ### Internal modules
 - `boundaries.py` — read role-labelled GeoJSON boundaries and masks.
+- `frames.py` — `resolve_cell_coordinate_frame(...)`: pick the native or
+  `*_aligned_nonrigid` cell element matching `boundary_frame`, or refuse;
+  `frame_consistency_metrics(...)`: tissue-edge-to-cell distance and ribbon
+  occupancy behind the `frame_mismatch_suspected` QC warning.
 - `ribbon.py` — construct/rasterize the cortical ribbon.
 - `laplace.py` — sparse 2D Laplace solve and bilinear interpolation.
 - `streamlines.py` — normalized-gradient streamlines.
@@ -233,6 +269,9 @@ with large point tables and image pyramids.
   boundary/DAPI objective for already-aligned images, used to guard non-rigid
   selection.
 - `run_alignment_pipeline(config)` — CLI/Nextflow entry point for `ALIGN`.
+- `materialize_alignment(config)` — idempotently reconcile aligned vectors,
+  tables, fixed-grid masks/caches, and the full warped image from a portable
+  transform bundle.
 - `run_alignment_qc(config)` — DAPI QC collation for VALIS; legacy
   expression-grid QC is dispatched only for legacy results.
 - `fit_affine_matrix`, `fit_nonrigid_transform` — reusable global and legacy
@@ -252,7 +291,7 @@ See [Section alignment](stages/alignment.md).
 - `run_scanpy_clustering(adata, ...)` — filter, normalize, log-transform,
   PCA, neighbors, UMAP, and Leiden clustering. It accepts `key_added` and
   `input_layer` for branch reclustering from raw counts.
-- `load_atlas_marker_sets`, `score_clusters_by_atlas_markers` — WHB marker
+- `load_atlas_marker_sets`, `score_clusters_by_atlas_markers` — WHB/WMB marker
   parsing and cluster-level atlas marker scoring used by hierarchical mode.
 - `plot_qc_histograms`, `plot_umap`, `plot_spatial_scatter` — PNG writers.
 - `save_qc_metrics`, `save_clustered_adata` — CSV and `.h5ad` outputs.
@@ -303,10 +342,10 @@ See [Spatial gene analysis](stages/spatial-gene-analysis.md).
 
 ### `analysis.mecr`
 
-- `run_mecr_reference(config)` — stream the complete WHB neuron and non-neuron
-  references, discover panel-overlapping mutually exclusive broad-class
-  markers, and write audit tables.
-- `load_whb_panel_reference(config, panel_genes=...)` — join WHB taxonomy
+- `run_mecr_reference(config)` — stream a complete WHB or WMB reference,
+  discover panel-overlapping mutually exclusive broad-class markers, and write
+  audit tables.
+- `load_atlas_panel_reference(config, panel_genes=...)` — join atlas taxonomy
   metadata and build a sparse, panel-restricted normalized reference.
 - `discover_reference_markers(reference, ...)` — run Scanpy's Python Wilcoxon
   and apply the paper's strict detection and marker-uniqueness rules.
@@ -333,7 +372,10 @@ See [Mutually exclusive co-expression rate](stages/mecr.md).
 - `annotate_h5ad_with_mapmycells(input_h5ad, csv_path, output_h5ad)` — attach
   CSV assignment columns to `obs`.
 - `prepare_region_mapmycells_reference(config)` — build or reuse cached Allen
-  WHB ROI-specific precomputed stats and marker lookup files.
+  WHB- or WMB-ROI-specific precomputed stats and marker lookup files.
+- `ensure_wmb_clustering_reference_inputs`,
+  `ensure_wmb_mecr_reference_inputs` — resumable Allen WMB provisioning for
+  compact clustering assets or the complete raw MECR atlas.
 - `run_mapmycells(config)` — full stage entry point for `MAPMYCELLS`.
 
 See [MapMyCells](stages/mapmycells.md).

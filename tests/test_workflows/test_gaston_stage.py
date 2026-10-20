@@ -16,13 +16,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def test_gaston_defaults_and_independent_segmentation_selector() -> None:
     config = (REPO_ROOT / "workflows" / "nextflow.config").read_text()
     main = (REPO_ROOT / "workflows" / "main.nf").read_text()
-    assert 'analysis_segmentation = "both"' in config
+    assert 'analysis_segmentation = "all"' in config
     assert 'gaston_segmentations = "proseg_hybrid"' in config
     assert 'return selected ?: ["proseg_hybrid"]' in main
     assert '"all": ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"]' in main
     assert 'raw.split(",")' in main
     assert "requiredClusteringSegmentations = (" in main
-    assert "analysisSegmentations + gastonSegmentations" in main
+    assert "(runGaston ? gastonSegmentations : [])" in main
 
 
 def test_gaston_enable_disable_row_overrides_and_stage_extension() -> None:
@@ -42,7 +42,7 @@ def test_gaston_enable_disable_row_overrides_and_stage_extension() -> None:
 
 def test_gaston_extra_segmentations_do_not_activate_unrelated_branches() -> None:
     main = (REPO_ROOT / "workflows" / "main.nf").read_text()
-    assert "settings.analysis_layer_segmentations.collect" in main
+    assert "settings.analysis_input_segmentations.collect" in main
     assert "settings.analysis_segmentations.contains(_segmentation)" in main
     assert "!settings.analysis_segmentations.contains(_segmentation)" in main
     assert "settings.required_clustering_segmentations" in main
@@ -64,9 +64,9 @@ def test_gaston_per_pair_gate_has_known_cardinality_and_excludes_cohort() -> Non
     assert "pair_terminal_token_ch" in main
     assert "groupKey(pairId, expectedCount as int)" in main
     assert "DISTANCE_FROM_OBJECT_COHORT is intentionally outside this barrier" in main
-    assert "settings.active_platforms.size() + extraClustering.size()" in main
-    assert 'terminalStage != "clustering_squidpy"' in main
-    assert ".join(pair_terminal_token_ch)" in main
+    assert "settings.active_platforms.size()" in main
+    assert "settings.run_mapmycells" in main
+    assert ".combine(pair_terminal_token_ch, by: 0)" in main
 
 
 def test_gaston_process_graph_scatter_and_resume_contract() -> None:
@@ -101,19 +101,17 @@ def test_gaston_resources_and_apptainer_cuda_scope() -> None:
     assert 'withName: "GASTON_TRAIN"' in config
     assert 'memory = "48 GB"' in config
     assert (
-        'gaston_container = "file:///nfsdata/apptainer/merxen_gaston_79577c4.sif"'
+        "gaston_container = System.getenv('MERXEN_GASTON_CONTAINER') ?: null"
     ) in config
-    assert (
-        "containerOptions = '-B /data,/nfsdata -C --no-home --home $PWD --nv'" in config
-    )
+    assert "params.gaston_container_options + (use_gpu ? ' --nv' : '')" in config
     assert "gaston_train_max_forks = 1" in dwight
     assert "params.gpu_process_lock_file" in dwight
 
 
 def test_gaston_environment_is_pinned_and_separate() -> None:
-    environment = (REPO_ROOT / "environment.gaston.yml").read_text()
-    dockerfile = (REPO_ROOT / "Dockerfile.gaston").read_text()
-    base_environment = (REPO_ROOT / "environment.yml").read_text()
+    environment = (REPO_ROOT / "envs" / "environment.gaston.yml").read_text()
+    dockerfile = (REPO_ROOT / "containers" / "Dockerfile.gaston").read_text()
+    base_environment = (REPO_ROOT / "envs" / "environment.yml").read_text()
     for dependency in ("glmpca", "kneed", "scanpy", "squidpy"):
         assert dependency in environment.lower()
     assert "79577c45111b3442b808c8e620711b822965493b" in environment
@@ -236,10 +234,9 @@ def test_gaston_apptainer_import_and_cuda_smoke() -> None:
     """Validate the built site image when it is available on a GPU host."""
     if shutil.which("apptainer") is None:
         pytest.skip("apptainer is not installed")
-    image_value = os.environ.get(
-        "MERXEN_GASTON_APPTAINER_IMAGE",
-        "/nfsdata/apptainer/merxen_gaston_79577c4.sif",
-    )
+    image_value = os.environ.get("MERXEN_GASTON_APPTAINER_IMAGE")
+    if not image_value:
+        pytest.skip("MERXEN_GASTON_APPTAINER_IMAGE is not set")
     image = Path(image_value.removeprefix("file://"))
     if not image.is_file():
         pytest.skip(f"GASTON Apptainer image is unavailable: {image}")

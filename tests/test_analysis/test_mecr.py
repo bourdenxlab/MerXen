@@ -13,6 +13,7 @@ from scipy import sparse
 from merxen.analysis.mecr import (
     compute_mecr_pair_metrics,
     discover_reference_markers,
+    load_atlas_panel_reference,
     load_whb_panel_reference,
     plot_class_pair_mecr_heatmaps,
     plot_platform_mecr_comparison,
@@ -339,3 +340,105 @@ def test_load_whb_panel_reference_joins_taxonomy_and_aggregates_symbols(
         result.obs["broad_class"].astype(str).to_numpy() == "Astrocytes"
     )[0]
     assert np.count_nonzero(dense[astro_row]) == 1
+
+
+def test_wmb_reference_defaults_cover_whole_brain_classes(tmp_path: Path) -> None:
+    """WMB selection should supply its taxonomy and broad-class defaults."""
+    config = MecrReferenceConfig(
+        output_dir=tmp_path / "out",
+        samples=[
+            MecrSampleConfig(
+                sample_id="mouse",
+                platform="MERSCOPE",
+                zarr_path=tmp_path / "unused.zarr",
+            )
+        ],
+        reference_atlas="wmb",
+    )
+
+    assert config.taxonomy_level == "CCN20230722_CLAS"
+    assert config.target_broad_classes == [
+        "Neurons",
+        "Astrocytes/Ependymal",
+        "Oligodendrocyte lineage",
+        "OEC",
+        "Vascular cells",
+        "Microglia",
+    ]
+
+
+def test_load_wmb_panel_reference_streams_all_expression_shards(
+    tmp_path: Path,
+) -> None:
+    """Generic MECR reference loading should retain cells from every WMB shard."""
+    var = pd.DataFrame(
+        {"gene_symbol": ["Gnai3", "Slc17a7"]},
+        index=["ENSMUSG1", "ENSMUSG2"],
+    )
+    shard_paths: list[Path] = []
+    for index, (cell_labels, values) in enumerate(
+        (
+            (["glut_cell"], [[1, 3]]),
+            (["oec_cell", "unannotated_raw_cell"], [[4, 0], [2, 1]]),
+        )
+    ):
+        shard_path = tmp_path / f"wmb_{index}.h5ad"
+        ad.AnnData(
+            X=sparse.csr_matrix(values),
+            obs=pd.DataFrame(index=cell_labels),
+            var=var,
+        ).write_h5ad(shard_path)
+        shard_paths.append(shard_path)
+
+    cell_metadata_path = tmp_path / "cell_metadata.csv"
+    pd.DataFrame(
+        {
+            "cell_label": ["glut_cell", "oec_cell"],
+            "cluster_alias": ["1", "2"],
+        }
+    ).to_csv(cell_metadata_path, index=False)
+    taxonomy_path = tmp_path / "taxonomy.csv"
+    pd.DataFrame(
+        {
+            "label": ["class_glut", "class_oec"],
+            "name": ["01 IT-ET Glut", "32 OEC"],
+            "cluster_annotation_term_set_label": ["CCN20230722_CLAS"] * 2,
+        }
+    ).to_csv(taxonomy_path, index=False)
+    membership_path = tmp_path / "membership.csv"
+    pd.DataFrame(
+        {
+            "cluster_annotation_term_label": ["class_glut", "class_oec"],
+            "cluster_annotation_term_set_label": ["CCN20230722_CLAS"] * 2,
+            "cluster_alias": ["1", "2"],
+        }
+    ).to_csv(membership_path, index=False)
+    config = MecrReferenceConfig(
+        output_dir=tmp_path / "out",
+        samples=[
+            MecrSampleConfig(
+                sample_id="mouse",
+                platform="MERSCOPE",
+                zarr_path=tmp_path / "unused.zarr",
+            )
+        ],
+        reference_atlas="wmb",
+        reference_h5ad_paths=shard_paths,
+        cell_metadata_path=cell_metadata_path,
+        taxonomy_metadata_path=taxonomy_path,
+        cluster_membership_path=membership_path,
+        target_broad_classes=["Neurons", "OEC"],
+        reference_chunk_rows=1,
+    )
+
+    result = load_atlas_panel_reference(
+        config,
+        panel_genes=["Gnai3", "Slc17a7"],
+    )
+
+    assert result.shape == (2, 2)
+    assert set(result.obs["broad_class"].astype(str)) == {"Neurons", "OEC"}
+    assert (
+        result.uns["merxen_mecr_reference"]["n_raw_cells_without_taxonomy_metadata"]
+        == 1
+    )

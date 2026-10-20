@@ -22,14 +22,22 @@ from spatialdata import read_zarr
 from spatialdata.models import Image2DModel, Labels2DModel
 from spatialdata.transformations import Affine, get_transformation
 
-from merxen.io.image_source import image_to_cyx
-from merxen.io.spatialdata_io import write_or_replace_element
+from merxen.io.image_source import image_to_cyx, registered_image_keys
+from merxen.io.spatialdata_io import (
+    spatialdata_write_lock,
+    write_or_replace_element,
+    write_spatialdata_metadata,
+)
+from merxen.masks import discover_masks, register_missing_mask_branches
 from merxen.memory import force_release, log_status
 from merxen.viewer_cache.format import (
     DERIVED_CACHE_ATTR,
     LABEL_CACHE_ATTR,
     LABEL_CACHE_VERSION,
+    OUTLINE_COVERAGE_MAX,
+    OUTLINE_PYRAMID_MODE,
     PYRAMID_MIN_SIZE,
+    PYRAMID_TILE,
     VIEWER_DERIVED_CACHE_VERSION,
     derived_image_pyramid_cache_key,
     derived_label_pyramid_cache_key,
@@ -57,21 +65,23 @@ from merxen.viewer_cache.transform import resolve_mask_affine
 
 logger = logging.getLogger(__name__)
 
-#: Default segmentation shape keys to rasterize per platform. Only keys present
-#: in the store are built. Mirrors the viewer's mask targets: reseg (proseg),
-#: proseg hybrid, cellpose, and the original/instrument boundaries.
+# Retained as a source-compatible discovery hint for callers that imported the
+# old constant. Runtime defaults now come exclusively from ``discover_masks``.
 DEFAULT_SHAPE_KEYS: dict[str, tuple[str, ...]] = {
     "MERSCOPE": (
         "MOSAIK_proseg",
         "MOSAIK_proseg_hybrid",
         "MOSAIK_cellpose",
+        "cellpose_nuclei",
         "merscope_cell_boundaries",
     ),
     "XENIUM": (
         "MOSAIK_proseg",
         "MOSAIK_proseg_hybrid",
         "MOSAIK_cellpose",
+        "cellpose_nuclei",
         "xenium_cell_boundaries",
+        "xenium_nucleus",
     ),
 }
 
@@ -99,6 +109,10 @@ def build_viewer_caches(
 ) -> dict[str, Any]:
     """Pre-build viewer caches into the enriched store at ``zarr_path``.
 
+    The store write lock is held from the read until the last cache is written,
+    since label, pyramid, and attrs writes would otherwise interleave with
+    another writer's read-modify-write of the same store.
+
     Returns a summary dict of what was built/skipped per element.
     """
     params = params or ViewerCacheParams()
@@ -111,8 +125,31 @@ def build_viewer_caches(
         transform_path=Path(transform_path) if transform_path is not None else None,
     )
 
+    with spatialdata_write_lock(zarr_path):
+        return _build_viewer_caches_in_store(
+            zarr_path,
+            platform=platform,
+            x_transform=x_transform,
+            y_transform=y_transform,
+            params=params,
+        )
+
+
+def _build_viewer_caches_in_store(
+    zarr_path: Path,
+    *,
+    platform: str,
+    x_transform: tuple[float, float, float],
+    y_transform: tuple[float, float, float],
+    params: ViewerCacheParams,
+) -> dict[str, Any]:
+    """Build every cache into one store; the caller holds its write lock."""
     sdata = read_zarr(zarr_path)
-    image_key, base_cyx, channels, image_transform = _resolve_base_image(sdata)
+    if register_missing_mask_branches(sdata):
+        write_spatialdata_metadata(sdata, write_attrs=True)
+    image_key, base_cyx, channels, image_transform, image_cs = _resolve_base_image(
+        sdata
+    )
     height = int(base_cyx.sizes["y"])
     width = int(base_cyx.sizes["x"])
     x_coords = base_cyx.coords["x"].values if "x" in base_cyx.coords else None
@@ -127,7 +164,20 @@ def build_viewer_caches(
     chunk = int(params.label_chunk_size)
     chunks = (min(chunk, height), min(chunk, width))
 
-    shape_keys = params.shape_keys or DEFAULT_SHAPE_KEYS.get(platform, ())
+    registered_shape_keys = tuple(spec.shape_key for spec in discover_masks(sdata))
+    if params.shape_keys is None:
+        shape_keys = registered_shape_keys
+    else:
+        requested_shape_keys = set(map(str, params.shape_keys))
+        shape_keys = tuple(
+            key for key in registered_shape_keys if key in requested_shape_keys
+        )
+        ignored = requested_shape_keys - set(shape_keys)
+        if ignored:
+            logger.warning(
+                "Ignoring viewer-cache shapes that are not registered masks: %s",
+                sorted(ignored),
+            )
     existing_labels = {str(k) for k in sdata.labels}
     summary: dict[str, Any] = {"masks": {}, "image_pyramid": None}
 
@@ -148,11 +198,12 @@ def build_viewer_caches(
             spatialdata_affine=spatialdata_affine,
             inv_affine=inv_affine,
             params=params,
+            coordinate_system="global",
         )
         force_release(note=f"after viewer-cache build for {shape_key}")
 
     if params.build_image_pyramid:
-        summary["image_pyramid"] = _build_image_pyramid(
+        summary["image_pyramid"] = build_image_pyramid(
             sdata=sdata,
             zarr_path=zarr_path,
             image_key=image_key,
@@ -160,19 +211,27 @@ def build_viewer_caches(
             channels=channels,
             transform=image_transform,
             params=params,
+            coordinate_system=image_cs,
         )
 
     return summary
 
 
-def _resolve_base_image(sdata: Any) -> tuple[str, Any, list[str], Any]:
+def _resolve_base_image(sdata: Any) -> tuple[str, Any, list[str], Any, str]:
     """Return (key, (c,y,x) DataArray, channels, global transform) of the real image.
 
     Skips derived image caches so the label grid is never sized off a downsampled
     cache -- the same rule the viewer's ``_image_grid_for_labels`` uses.
     """
+    # Registered post-run images share the grid but may sort before the
+    # instrument image, so they must never become the base image.
+    registered = registered_image_keys(sdata)
     image_key = next(
-        (str(k) for k in sdata.images if not is_derived_cache_key(str(k))),
+        (
+            str(k)
+            for k in sdata.images
+            if not is_derived_cache_key(str(k)) and str(k) not in registered
+        ),
         None,
     )
     if image_key is None:
@@ -182,10 +241,17 @@ def _resolve_base_image(sdata: Any) -> tuple[str, Any, list[str], Any]:
         )
     base_cyx = image_to_cyx(sdata.images[image_key])
     channels = _channel_labels(base_cyx)
-    transform = get_transformation(
-        sdata.images[image_key], to_coordinate_system="global"
+    transformations = get_transformation(sdata.images[image_key], get_all=True)
+    coordinate_system = (
+        "global" if "global" in transformations else sorted(transformations)[0]
     )
-    return image_key, base_cyx, channels, transform
+    return (
+        image_key,
+        base_cyx,
+        channels,
+        transformations[coordinate_system],
+        coordinate_system,
+    )
 
 
 def _channel_labels(image_cyx: Any) -> list[str]:
@@ -212,6 +278,56 @@ def _spatialdata_affine(napari_affine: np.ndarray) -> Affine:
         ],
         input_axes=("x", "y"),
         output_axes=("x", "y"),
+    )
+
+
+def build_mask_cache_on_grid(
+    *,
+    sdata: Any,
+    zarr_path: Path,
+    platform: str,
+    shape_key: str,
+    label_key: str,
+    shape: tuple[int, int],
+    chunks: tuple[int, int],
+    pixel_to_world_matrix: Any,
+    coordinate_system: str,
+    params: ViewerCacheParams,
+) -> dict[str, Any]:
+    """Rasterize a registered mask and its caches on an explicit image grid.
+
+    Writes into the store behind ``sdata``; the caller must already hold that
+    store's write lock (this helper does not take it, so a caller that holds
+    it cannot deadlock on a second acquisition).
+    """
+    matrix = np.asarray(pixel_to_world_matrix, dtype=np.float64)
+    if matrix.shape != (3, 3):
+        raise ValueError("pixel_to_world_matrix must be a 3x3 affine")
+    napari_affine = np.asarray(
+        [
+            [matrix[1, 1], matrix[1, 0], matrix[1, 2]],
+            [matrix[0, 1], matrix[0, 0], matrix[0, 2]],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    return _build_mask_and_derived(
+        sdata=sdata,
+        zarr_path=Path(zarr_path),
+        platform=str(platform),
+        shape_key=str(shape_key),
+        label_key=str(label_key),
+        shape=shape,
+        chunks=chunks,
+        napari_affine=napari_affine,
+        spatialdata_affine=Affine(
+            matrix,
+            input_axes=("x", "y"),
+            output_axes=("x", "y"),
+        ),
+        inv_affine=np.linalg.inv(napari_affine),
+        params=params,
+        coordinate_system=str(coordinate_system),
     )
 
 
@@ -247,6 +363,7 @@ def _build_mask_and_derived(
     spatialdata_affine: Affine,
     inv_affine: np.ndarray,
     params: ViewerCacheParams,
+    coordinate_system: str,
 ) -> dict[str, Any]:
     """Rasterize one base mask then build its label pyramid + outline."""
     result: dict[str, Any] = {"label_key": label_key}
@@ -277,6 +394,7 @@ def _build_mask_and_derived(
             inv_affine=inv_affine,
             label_series=label_series,
             id_dtype=id_dtype,
+            coordinate_system=coordinate_system,
         )
         _stamp_marker(
             zarr_path,
@@ -299,6 +417,7 @@ def _build_mask_and_derived(
         base_da=base_da,
         transform=spatialdata_affine,
         params=params,
+        coordinate_system=coordinate_system,
     )
     result["outline"] = _build_outline(
         zarr_path=zarr_path,
@@ -307,6 +426,7 @@ def _build_mask_and_derived(
         base_da=base_da,
         transform=spatialdata_affine,
         params=params,
+        coordinate_system=coordinate_system,
     )
     return result
 
@@ -324,12 +444,16 @@ def _rasterize_base_mask(
     inv_affine: np.ndarray,
     label_series: Any,
     id_dtype: Any,
+    coordinate_system: str,
 ) -> int:
     """Write an empty label element, then fill its s0 array chunk-by-chunk."""
     height, width = shape
     empty = da.zeros(shape, chunks=chunks, dtype=id_dtype)
     label_da = xr.DataArray(empty, dims=("y", "x"))
-    elem = Labels2DModel.parse(label_da, transformations={"global": spatialdata_affine})
+    elem = Labels2DModel.parse(
+        label_da,
+        transformations={str(coordinate_system): spatialdata_affine},
+    )
     write_or_replace_element(
         sdata,
         label_key,
@@ -374,6 +498,7 @@ def _build_label_pyramid(
     base_da: Any,
     transform: Affine,
     params: ViewerCacheParams,
+    coordinate_system: str,
 ) -> str:
     cache_key = derived_label_pyramid_cache_key(label_key, params.downsample)
     if not params.force and _derived_complete(
@@ -386,7 +511,11 @@ def _build_label_pyramid(
     if len(levels) == 0:
         return "no-levels"
     tree = build_multiscale_tree(
-        levels, dims=("y", "x"), transform=transform, dtype=base_da.dtype
+        levels,
+        dims=("y", "x"),
+        transform=transform,
+        dtype=base_da.dtype,
+        coordinate_system=coordinate_system,
     )
     Labels2DModel.validate(tree)
     _write_derived(sdata, zarr_path, "labels", cache_key, tree)
@@ -413,6 +542,7 @@ def _build_outline(
     base_da: Any,
     transform: Affine,
     params: ViewerCacheParams,
+    coordinate_system: str,
 ) -> str:
     width = max(1, int(params.contour_width))
     cache_key = derived_outline_cache_key(label_key, width)
@@ -425,15 +555,19 @@ def _build_outline(
     )
     if len(outline_levels) == 0:
         return "no-levels"
-    source = "synthetic" if len(outline_levels) > 1 else "single"
     tree = build_multiscale_tree(
-        outline_levels, dims=("y", "x"), transform=transform, dtype=np.uint8
+        outline_levels,
+        dims=("y", "x"),
+        transform=transform,
+        dtype=np.uint8,
+        coordinate_system=coordinate_system,
     )
     Labels2DModel.validate(tree)
     _write_derived(sdata, zarr_path, "labels", cache_key, tree)
-    source_shapes = [
-        [int(level.shape[0]), int(level.shape[1])] for level in outline_levels
-    ]
+    # The viewer records the shapes of the SOURCE label element's scale levels
+    # here, not the outline's. ``base_da`` is that source's finest level, which is
+    # the only one the coverage-mean pyramid reads.
+    source_shapes = [[int(base_da.shape[0]), int(base_da.shape[1])]]
     _stamp_marker(
         zarr_path,
         "labels",
@@ -442,15 +576,15 @@ def _build_outline(
         outline_marker(
             source_label_key=label_key,
             width=width,
-            source=source,
             levels=len(outline_levels),
             source_shapes=source_shapes,
+            min_size=params.min_size,
         ),
     )
     return "built"
 
 
-def _build_image_pyramid(
+def build_image_pyramid(
     *,
     sdata: Any,
     zarr_path: Path,
@@ -459,7 +593,14 @@ def _build_image_pyramid(
     channels: list[str],
     transform: Any,
     params: ViewerCacheParams,
+    coordinate_system: str = "global",
 ) -> str:
+    """Build or refresh the viewer-compatible pyramid for one image element.
+
+    Writes into the store behind ``sdata``; the caller must already hold that
+    store's write lock (this helper does not take it, so a caller that holds
+    it cannot deadlock on a second acquisition).
+    """
     cache_key = derived_image_pyramid_cache_key(image_key, params.downsample)
     if not params.force and _derived_complete(
         zarr_path, "images", cache_key, "image_pyramid", image_key, params
@@ -476,6 +617,7 @@ def _build_image_pyramid(
         transform=transform,
         channels=channels,
         dtype=base_cyx.dtype,
+        coordinate_system=coordinate_system,
     )
     Image2DModel.validate(tree)
     _write_derived(sdata, zarr_path, "images", cache_key, tree)
@@ -516,7 +658,17 @@ def _derived_complete(
     if marker.get(source_field) != str(source_key):
         return False
     if kind == "label_outline":
-        return marker.get("width") == width
+        # Mirror every key the viewer's ``_derived_cache_complete`` compares. A
+        # marker missing any of these (or carrying a pre-coverage_mean_v1 outline)
+        # is treated as stale here so we rebuild it rather than leaving behind a
+        # cache the viewer will silently discard and regenerate itself.
+        return (
+            marker.get("width") == width
+            and marker.get("min_size") == params.min_size
+            and marker.get("tile_size") == PYRAMID_TILE
+            and marker.get("pyramid_mode") == OUTLINE_PYRAMID_MODE
+            and marker.get("value_max") == OUTLINE_COVERAGE_MAX
+        )
     return (
         marker.get("downsample") == params.downsample
         and marker.get("min_size") == params.min_size
@@ -524,19 +676,17 @@ def _derived_complete(
 
 
 def _write_derived(
-    sdata: Any, zarr_path: Path, group: str, cache_key: str, tree: Any
+    sdata: Any, _zarr_path: Path, group: str, cache_key: str, tree: Any
 ) -> None:
-    """Replace + persist one derived element, tolerating an existing on-disk copy."""
-    container = sdata.images if group == "images" else sdata.labels
-    exists = cache_key in _on_disk_group(zarr_path, group)
-    if cache_key in container:
-        del container[cache_key]
-    container[cache_key] = tree
-    sdata.write_element(cache_key, overwrite=exists)
+    """Replace + persist one derived element, tolerating an existing on-disk copy.
 
-
-def _on_disk_group(zarr_path: Path, group: str) -> set[str]:
-    group_dir = zarr_path / group
-    if not group_dir.exists():
-        return set()
-    return {p.name for p in group_dir.iterdir() if p.is_dir()}
+    Routed through ``write_or_replace_element`` rather than a bare
+    ``sdata.write_element(overwrite=True)``. SpatialData refuses an in-place
+    overwrite when the target path is a subfolder of the store already backing the
+    object -- which is always true for these caches, since they live inside the
+    enriched zarr they are derived from. A bare write therefore only ever
+    succeeded on a FIRST build; refreshing an existing cache aborted the run with
+    "Cannot overwrite. The target path of the write operation is in use". The
+    helper recognises that refusal and retries via a recoverable element backup.
+    """
+    write_or_replace_element(sdata, cache_key, group, tree, overwrite=True)

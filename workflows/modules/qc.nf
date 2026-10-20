@@ -61,6 +61,11 @@ process QC {
         val(shape_key)
 
     script:
+    // The platform's own cells are the reference for the registration offset.
+    def registrationReferenceShapeKey = platform == "MERSCOPE"
+        ? "merscope_cell_boundaries"
+        : "xenium_cell_boundaries"
+    def registrationStrict = params.qc_registration_strict ? "true" : "false"
     """
     set -euo pipefail
     export OMP_NUM_THREADS="${task.cpus}"
@@ -80,7 +85,9 @@ process QC {
   "latest_zarr_path": "${latest_zarr}",
   "output_dir": "qc_out",
   "table_key": "${table_key}",
-  "shape_key": "${shape_key}"
+  "shape_key": "${shape_key}",
+  "registration_reference_shape_key": "${registrationReferenceShapeKey}",
+  "registration_strict": ${registrationStrict}
 }
 JSON
 

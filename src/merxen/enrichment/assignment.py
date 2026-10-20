@@ -19,6 +19,7 @@ from spatialdata.transformations import get_transformation
 from tqdm.auto import tqdm
 
 from merxen.io.spatialdata_io import (
+    spatialdata_write_lock,
     write_or_replace_element,
     write_spatialdata_metadata,
     write_spatialdata_zarr,
@@ -454,7 +455,36 @@ def run_per_shape_assignment_for_dataset(
 ) -> list[dict[str, Any]]:
     """Compute and persist per-shape assignment tables for one enriched dataset."""
     latest_path = Path(latest_path)
-    dataset_name = str(dataset_name).upper()
+    # Tables, normalized shapes, and the store's attrs (or, without
+    # write_element, the whole store) are written back, so the store lock is
+    # held from the read until the last write.
+    with spatialdata_write_lock(latest_path):
+        return _assign_per_shape_tables(
+            str(dataset_name).upper(),
+            latest_path,
+            force_rerun=force_rerun,
+            chunk_rows=chunk_rows,
+            status_every_chunks=status_every_chunks,
+            table_prefix=table_prefix,
+            memory_check_every_chunks=memory_check_every_chunks,
+            max_ram_gb=max_ram_gb,
+            warn_ram_gb=warn_ram_gb,
+        )
+
+
+def _assign_per_shape_tables(
+    dataset_name: str,
+    latest_path: Path,
+    *,
+    force_rerun: bool,
+    chunk_rows: int,
+    status_every_chunks: int,
+    table_prefix: str,
+    memory_check_every_chunks: int,
+    max_ram_gb: float,
+    warn_ram_gb: float,
+) -> list[dict[str, Any]]:
+    """Write the per-shape tables of one store; the caller holds its lock."""
     log_status(
         f"[{dataset_name}] Loading enriched zarr for per-shape assignment: "
         f"{latest_path}"
@@ -468,9 +498,19 @@ def run_per_shape_assignment_for_dataset(
     if points_key is None:
         raise RuntimeError(f"[{dataset_name}] No primary transcript element found")
     points_obj = sdata_obj.points[points_key]
-    stamp_merxen_schema(sdata_obj, primary_points_key=points_key)
+    schema = stamp_merxen_schema(sdata_obj, primary_points_key=points_key)
     gene_list = build_gene_list_from_base_table(sdata_obj)
-    shape_keys = list(sdata_obj.shapes.keys())
+    coordinate_variant_shapes = {
+        str(entry.get("shape"))
+        for entry in dict(schema.get("segmentations", {})).values()
+        if isinstance(entry, dict) and entry.get("coordinate_variant_of") is not None
+    }
+    shape_keys = [
+        str(shape_key)
+        for shape_key in sdata_obj.shapes
+        if not str(shape_key).endswith("_aligned_nonrigid")
+        and str(shape_key) not in coordinate_variant_shapes
+    ]
     log_status(f"[{dataset_name}] Points key='{points_key}', shape layers={shape_keys}")
 
     summaries: list[dict[str, Any]] = []

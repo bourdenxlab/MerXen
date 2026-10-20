@@ -26,10 +26,17 @@ from shapely.geometry import MultiPoint, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import nearest_points, unary_union
 from spatialdata.models import PointsModel, ShapesModel, TableModel
-from spatialdata.transformations import get_transformation
+from spatialdata.transformations import (
+    Affine,
+    BaseTransformation,
+    Identity,
+    get_transformation,
+)
 
+from merxen.alignment.manifest import invalidate_alignment_materialization
 from merxen.config import ProsegHybridConfig
 from merxen.io.spatialdata_io import (
+    spatialdata_write_lock,
     write_or_replace_element,
     write_spatialdata_metadata,
 )
@@ -49,6 +56,7 @@ from merxen.io.spatialdata_schema import (
 from merxen.io.transcript_io import background_mask, first_existing_col
 from merxen.memory import force_release, log_status
 from merxen.segmentation.mask_geometry import masks_to_labeled_polygons
+from merxen.segmentation.tempdirs import large_temp_root
 
 logger = logging.getLogger(__name__)
 
@@ -804,6 +812,55 @@ def _cellpose_polygons_in_microns(
     return polygons
 
 
+def _planar_transformations(
+    transformations: dict[str, BaseTransformation],
+) -> dict[str, BaseTransformation] | None:
+    """Restrict the transcripts' transformations to x/y for 2D shapes.
+
+    Points read back from a store carry their transformations over x, y and z,
+    which SpatialData would otherwise attach to 2D shapes as an x/y -> z/x/y
+    map. Each transformation keeps its coordinate system and its exact x/y
+    part. ``Identity`` stays ``Identity``.
+
+    Args:
+        transformations: Every transformation of the transcripts element.
+
+    Returns:
+        The planar transformations, or ``None`` when there are none, so the
+        shapes parser applies its default.
+
+    Raises:
+        ValueError: If a transformation makes x or y depend on z, because 2D
+            shapes cannot carry it exactly.
+    """
+    planar: dict[str, BaseTransformation] = {}
+    for coordinate_system, transformation in transformations.items():
+        if isinstance(transformation, Identity):
+            planar[str(coordinate_system)] = Identity()
+            continue
+        matrix_xyz = np.asarray(
+            transformation.to_affine_matrix(
+                input_axes=("x", "y", "z"),
+                output_axes=("x", "y", "z"),
+            ),
+            dtype=np.float64,
+        )
+        if not np.allclose(matrix_xyz[:2, 2], 0.0):
+            raise ValueError(
+                f"The transcripts' transformation to {coordinate_system!r} makes "
+                "x/y depend on z, so it cannot place the 2D hybrid shapes."
+            )
+        planar[str(coordinate_system)] = Affine(
+            transformation.to_affine_matrix(
+                input_axes=("x", "y"),
+                output_axes=("x", "y"),
+            ),
+            input_axes=("x", "y"),
+            output_axes=("x", "y"),
+        )
+    return planar or None
+
+
 def _proseg_assignment_to_instance_ids(sdata_obj: Any) -> dict[int, int]:
     """Map stored ProSeg assignments to canonical positive instance IDs."""
     if "table" not in sdata_obj.tables:
@@ -1025,6 +1082,7 @@ def run_proseg_hybrid_refinement(
     cellpose_mask_path: Path | str,
     transforms_path: Path | str,
     config: ProsegHybridConfig,
+    temp_root: Path | str | None = None,
 ) -> dict[str, int | float | str]:
     """Build and persist the hybrid shape, assignments, and count table.
 
@@ -1033,6 +1091,10 @@ def run_proseg_hybrid_refinement(
         cellpose_mask_path: Original Cellpose label image used as the prior.
         transforms_path: JSON file containing pixel-to-micron affine terms.
         config: Hybrid refinement configuration.
+        temp_root: Directory for the partitioned transcript files written
+            during the refinement (several GB for a full section). Defaults to
+            ``$MERXEN_TMPDIR`` or the working directory, never the system
+            temporary directory (see ``tempdirs.large_temp_root``).
 
     Returns:
         Run-level refinement summary.
@@ -1053,7 +1115,26 @@ def run_proseg_hybrid_refinement(
     if not cellpose_polygons:
         raise RuntimeError("No Cellpose polygons were available for hybrid refinement.")
 
-    sdata_obj = sd.read_zarr(zarr_path)
+    # The refinement replaces the points element and writes the store's attrs,
+    # so the store lock is held from the read until the metadata is persisted.
+    with spatialdata_write_lock(zarr_path):
+        sdata_obj = sd.read_zarr(zarr_path)
+        return _refine_and_persist_hybrid_branch(
+            sdata_obj,
+            cellpose_polygons,
+            config,
+            temp_root=temp_root,
+        )
+
+
+def _refine_and_persist_hybrid_branch(
+    sdata_obj: Any,
+    cellpose_polygons: dict[int, BaseGeometry],
+    config: ProsegHybridConfig,
+    *,
+    temp_root: Path | str | None,
+) -> dict[str, int | float | str]:
+    """Build the hybrid branch in one store; the caller holds the store lock."""
     points_key = choose_primary_points_key(sdata_obj)
     if points_key is None:
         raise RuntimeError("No transcript points element is available.")
@@ -1114,13 +1195,14 @@ def run_proseg_hybrid_refinement(
         dtype="uint64",
         name=INSTANCE_ID_COLUMN,
     )
-    shape_transformations = None
-    if len(sdata_obj.shapes) > 0:
-        template_shape = sdata_obj.shapes[list(sdata_obj.shapes.keys())[0]]
-        shape_transformations = get_transformation(template_shape, get_all=True)
+    # The hybrid geometry is built from the transcripts' x/y, so it lives in
+    # their intrinsic frame and takes their transformations, not those of
+    # whichever shapes element the store happens to list first.
     hybrid_shapes = ShapesModel.parse(
         shape_gdf,
-        transformations=shape_transformations,
+        transformations=_planar_transformations(
+            get_transformation(points_obj, get_all=True)
+        ),
     )
 
     x_col, y_col, gene_col, assignment_col, _ = _points_columns(points_obj)
@@ -1136,7 +1218,9 @@ def run_proseg_hybrid_refinement(
     hybrid_counts: defaultdict[int, int] = defaultdict(int)
     polygons = [cell_results[cell_id].geometry for cell_id in cell_ids]
 
-    with tempfile.TemporaryDirectory(prefix="merxen-proseg-hybrid-") as temp_dir:
+    with tempfile.TemporaryDirectory(
+        prefix="merxen-proseg-hybrid-", dir=large_temp_root(temp_root)
+    ) as temp_dir:
         temp_path = Path(temp_dir)
         for partition_index, partition in enumerate(_iter_point_partitions(points_obj)):
             augmented = assign_transcripts_to_hybrid_masks(
@@ -1257,6 +1341,10 @@ def run_proseg_hybrid_refinement(
         shape_key=PROSEG_HYBRID_SHAPE_NAME,
         table_key=PROSEG_HYBRID_TABLE_NAME,
         id_namespace=PROSEG_ID_NAMESPACE,
+    )
+    invalidate_alignment_materialization(
+        sdata_obj,
+        reason="ProSeg-hybrid points, shapes, and table replaced",
     )
     validate_merxen_schema(sdata_obj, deep=False)
     write_spatialdata_metadata(sdata_obj, write_attrs=True)

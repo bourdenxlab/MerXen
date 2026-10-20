@@ -62,7 +62,7 @@ def build_spatialdata_artifact(
         )
         return output_path
 
-    raw_input_path = _resolve_raw_input_path(input_path)
+    raw_input_path = _resolve_raw_input_path(input_path, platform=config.platform)
     if raw_input_path is None:
         if reusable_source is None:
             raise FileNotFoundError(
@@ -128,9 +128,19 @@ def _find_reusable_source(
     return None
 
 
-def _resolve_raw_input_path(input_path: Path) -> Path | None:
-    """Resolve the raw input directory if one was supplied."""
+def _resolve_raw_input_path(
+    input_path: Path,
+    *,
+    platform: str,
+) -> Path | None:
+    """Resolve a supported raw input directory or platform archive."""
     if input_path.exists() and input_path.is_dir() and input_path.suffix != ".zarr":
+        return input_path
+    if (
+        platform.upper() == "MERSCOPE"
+        and input_path.is_file()
+        and input_path.suffix.lower() == ".vzg2"
+    ):
         return input_path
     return None
 

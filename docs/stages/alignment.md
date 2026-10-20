@@ -8,9 +8,9 @@
 
 Adjacent MERSCOPE and Xenium sections can differ by arbitrary rotation,
 translation, modest scale, partial tissue, and local section deformation.
-`ALIGN` maps the moving dataset into the fixed dataset's physical coordinate
-system. Xenium is fixed and MERSCOPE is moving by default; both are
-configurable.
+`ALIGN` computes the moving-to-fixed transform. `MATERIALIZE_ALIGNMENT` then
+reconciles the MERSCOPE store against that transform. Xenium is fixed and
+MERSCOPE is moving for materialization.
 
 The default backend uses only DAPI morphology for registration and QC. It does
 not use transcripts, expression, cell types, RNA images, or cell
@@ -32,11 +32,17 @@ The stage:
    create a positive high-pass rim. Robust clipping, compression, and mild
    CLAHE are followed by a 150 µm cosine taper measured inward from the actual
    support boundary.
-3. Creates a downsampled tissue-density mask with automatic thresholding,
-   closing, hole filling, physical-area filtering, and edge dilation. Multiple
-   substantial fragments are retained. The registration validity mask erodes
-   acquired support by 150 µm, and tissue outside that safe domain is excluded
-   from features, rigid scoring, and QC.
+3. Loads the platform-specific combined annotation GeoJSON from the existing
+   `merscope_cortical_depth_annotation_geojson` and
+   `xenium_cortical_depth_annotation_geojson` samplesheet columns. Every pial
+   piece is closed against the one shared tissue-edge line, the resulting
+   polygons are unioned, and all exclusion polygons are subtracted globally.
+   White-matter boundaries, ribbon polygons, and other annotation roles are
+   ignored. The geometry is mapped from dataset µm directly onto the
+   registration canvas and clipped only to acquired image support; no
+   thresholding, closing, hole filling, dilation, or erosion is applied.
+   Missing or invalid annotations fail the VALIS stage explicitly, even when
+   cortical-depth computation is disabled.
 4. Resamples both images to a shared isotropic physical pixel size and places
    them on a padded registration-only canvas. Source images and native
    SpatialData elements are not resampled or overwritten.
@@ -47,6 +53,11 @@ The stage:
    correlation, Dice, and DAPI normalized mutual information. Reflections are
    searched by default for paired MERSCOPE/Xenium sections, but the reflected
    candidate must beat the non-reflected candidate by a configured margin.
+   Full annotation masks drive Dice, coverage, and boundary terms. A separate
+   registration-validity mask erodes acquired support by 150 µm and restricts
+   only image-dependent operations such as SIFT, DAPI mutual information,
+   density correlation, and local deformation estimation. It never erodes the
+   hand-drawn anatomical boundary.
 6. Runs a final local orientation search on the selected handedness over
    ±2.5° and ±500 µm in X/Y. A dense coarse score volume locates nearby 3D
    maxima, and a finer grid tests whether each maximum persists away from the
@@ -112,20 +123,50 @@ Native SpatialData elements remain untouched. For compatibility with existing
 downstream branch selection, materialized selected VALIS vectors use the
 existing `*_aligned_nonrigid` suffix even when QC selected the global fallback.
 Their `merxen_alignment` metadata records the actual selected mode and backend.
-The native elements also receive the global affine in the configured named
-coordinate system (default `merxen_xenium`). Table centroids are preserved in
-`obsm["spatial"]` and added in `obsm["spatial_merxen_xenium"]`.
+Aligned tables are clones of their native parents with unchanged IDs and count
+matrices; their region and centroid coordinates are retargeted to the aligned
+shape. Native transformations, columns, assignments, tables, and images are
+not modified by alignment.
 
-Transformed points and shape centroids receive
-`in_shared_tissue_domain`. This marks the intersection of fixed tissue and
-registered moving tissue without discarding platform-only regions.
+## Materialization contract
+
+`ALIGN` writes a portable transform bundle and initializes an incomplete
+version-2 `merxen_alignment` manifest. `MATERIALIZE_ALIGNMENT` runs afterward
+and writes:
+
+- aligned copies of every eligible native point and shape element;
+- schema coordinate variants and native-table clones;
+- label images, label pyramids, and outlines for every registered cell or
+  nucleus mask; and
+- the full multichannel, source-dtype MERSCOPE image pulled onto the exact
+  Xenium scale-0 grid, plus its pyramid.
+
+The manifest records the pair roles, common coordinate system, fixed grid,
+transform and native-input fingerprints, native-to-aligned mappings, dtypes,
+channels, cache keys, per-artifact status, and QC. `complete=true` is written
+only after ID/count invariance, fixed-grid geometry, inverse round trips, DAPI
+agreement, image support, and schema validation pass. The Xenium store carries
+a matching lightweight pair/transform reference.
+
+Materialization always derives from unsuffixed native elements and atomically
+replaces stale outputs. A native revision change, an invalidated manifest, or a
+missing output triggers reconciliation. An interrupted manifest whose complete
+artifacts still validate is finalized without rematerializing them. VALIS
+raster pulls require the saved backward field; their inverse QC requires a
+95th-percentile round-trip error at most 1 µm and bounds the maximum by half the
+serialized field-grid step. Legacy affine-plus-RBF transforms use a sampled
+iterative inverse whose maximum error must pass its configured tolerance. The
+transform can be loaded from `align_out` or from the portable copy under the
+MERSCOPE Zarr.
 
 ## Nextflow and configuration
 
-`ALIGN` runs after per-platform `QC` and before paired downstream stages.
-`ALIGN_QC` collates the already-computed DAPI QC report and selected overlay;
-it does not recompute expression metrics. When alignment is disabled,
-downstream stages receive the enriched native zarrs directly.
+`ALIGN` runs after per-platform `QC`. `MATERIALIZE_ALIGNMENT` consumes its
+bundle and is deliberately not Nextflow-cached, so every `-resume` checks the
+current native-store revision before aligned analyses continue. `ALIGN_QC`
+collates the already-computed DAPI QC report and selected overlay; it does not
+recompute expression metrics. When alignment is disabled, downstream stages
+receive the enriched native zarrs directly.
 
 Important defaults in `workflows/nextflow.config` include:
 
@@ -135,6 +176,7 @@ Important defaults in `workflows/nextflow.config` include:
 | `alignment_fixed_platform` / `alignment_moving_platform` | `XENIUM` / `MERSCOPE` | Reference and transformed platforms. |
 | `alignment_*_image_key` | platform default | SpatialData DAPI image element. |
 | `alignment_*_pixel_size_um` | `null` | Optional validated physical-size override. |
+| samplesheet `<platform>_cortical_depth_annotation_geojson` | required for VALIS | Platform-specific combined pia/tissue-edge annotation used for the anatomical mask, regardless of whether cortical depth is enabled. |
 | `alignment_registration_source_max_dim_px` | `3200` | Bounds temporary padded registration images. |
 | `alignment_background_sigma_um` | `75` | Broad DAPI background scale. |
 | `alignment_background_boundary_mode` | `mirror` | Boundary mode used inside support-normalized Gaussian filtering. |
@@ -164,11 +206,18 @@ Important defaults in `workflows/nextflow.config` include:
 | `alignment_valis_non_rigid_backend` | `optical_flow` | Explicit non-rigid backend. |
 | `alignment_coordinate_system_name` | `merxen_xenium` | Registered SpatialData coordinate system. |
 | `alignment_resume` | `true` | Reload a complete parameter-compatible transform bundle for direct reruns. |
+| `alignment_materialize_vectors` / `alignment_materialize_labels` / `alignment_materialize_image` | `true` | Reconcile each aligned artifact family. |
+| `alignment_materialization_tile_size` / `alignment_materialization_chunk_size` | `1024` / `1024` | Bounded raster pull tile size and output chunk size. |
+| `alignment_materialization_force` / `alignment_materialization_reconcile` | `false` / `true` | Force replacement, or permit repair when the manifest is stale or invalid. |
+| `alignment_legacy_inverse_spacing` / `alignment_legacy_inverse_tolerance_um` | `16` / `1` | Legacy inverse grid spacing and accepted round-trip error. |
 
-The Pydantic `ValisAlignmentConfig` exposes the full preprocessing, masking,
+The Pydantic `ValisAlignmentConfig` exposes the full preprocessing,
 orientation, feature, transform, non-rigid, output, resume, and QC thresholds.
-Direct CLI JSON additionally supports external DAPI paths and explicit 3×3
-`dataset_to_image_matrix` values.
+The historical automatic-mask parameters remain parseable for compatibility
+but are not used by production VALIS registration. Direct CLI JSON must set
+`merscope_image.tissue_annotation_path` and
+`xenium_image.tissue_annotation_path`; it additionally supports external DAPI
+paths and explicit 3×3 `dataset_to_image_matrix` values.
 
 The orientation QC directory records both handedness branches in
 `orientation_candidates.json`, side-by-side candidate overlays, and an
@@ -182,7 +231,7 @@ and equivalent-flip fields.
 
 VALIS 1.2 declares NumPy `<2`, while SpatialData 0.8 requires NumPy 2. The
 dedicated alignment environment therefore installs the generated
-`requirements.alignment.lock` (including a NumPy-2-compatible OpenCV,
+`requirements/requirements.alignment.lock` (including a NumPy-2-compatible OpenCV,
 PyTorch/Kornia, SimpleITK, Java, and libvips stack), then installs the exact
 `valis-wsi==1.2.0` package without re-resolving its old dependency metadata.
 MerXen applies narrow compatibility aliases for the two removed NumPy scalar
@@ -218,15 +267,21 @@ VALIS run.
 | `transform_chain.json` | Explicit physical/pixel/registration frame chain and matrices. |
 | `forward_displacement_field.npz` / `backward_displacement_field.npz` | Sampled fields when non-rigid registration ran. |
 | `registration_summary.json` / `.csv` | Status (`non_rigid_pass`, `global_only`, or failure diagnostics) and stage-wise DAPI QC. |
-| `resume_manifest.json` | Exact input paths, platform roles, and VALIS parameters required before a completed bundle can be reused. |
-| `shared_tissue_mask.npy` / `.tif` | Valid cross-platform comparison domain on the original fixed DAPI pixel grid. |
+| `resume_manifest.json` | Exact input paths, annotation paths/content hashes, platform roles, and VALIS parameters required before a completed bundle can be reused. |
+| `shared_tissue_mask.npy` / `.tif` | Shared annotation-derived anatomical tissue domain on the original fixed DAPI pixel grid. |
 | `shared_tissue_mask_registration.npy` / `.tif` | The same domain on the padded registration grid used for point annotation. |
-| `registration_inputs/` | Processed DAPI images, tissue masks, outlines, edge-validity masks, and edge-artifact metrics. |
+| `registration_inputs/` | Processed DAPI images; annotation masks before/after support clipping; anatomical/scoring outlines and overlays; annotation provenance; edge-validity masks; and edge-artifact metrics. |
 | `registration_images/` | Stable fixed and pre-oriented TIFFs supplied to VALIS. |
 | `valis/` | VALIS registrar, summary, thumbnails, matches, overlaps, and deformation artifacts. |
 | `qc/partial_overlap/` | Before/after overlays, candidate contact sheet, robust-objective profile, and candidate metrics. |
 | `qc/` | Original, pre-oriented, global, non-rigid, checkerboard, mask, feature, displacement, Jacobian, and deformation-grid views. |
 | `alignment_coords/` | Legacy coordinate diagnostics; retained as an empty contract directory for VALIS. |
+
+`${outdir}/<pair_id>/alignment_materialization/materialization_summary.json`
+records whether reconciliation rebuilt outputs or found them current. The
+durable MERSCOPE Zarr contains the version-2 manifest, portable bundle under
+`_merxen_alignment/`, aligned vectors/tables, fixed-grid labels and caches, and
+`MERSCOPE_z_projection_aligned_nonrigid` with its pyramid.
 
 The separate `${outdir}/<pair_id>/alignment_qc/` directory contains a compact
 JSON/CSV copy of the selected DAPI QC and the downstream overlay PNG/PDF.

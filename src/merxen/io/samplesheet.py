@@ -16,7 +16,8 @@ class SamplePair:
 
     Attributes:
         pair_id: Unique identifier for this sample pair.
-        merscope_dir: Path to the raw MERSCOPE input folder.
+        merscope_dir: Path to the raw MERSCOPE input folder, a direct ``.vzg2``
+            archive, or a folder containing exactly one ``.vzg2`` archive.
         merscope_spatialdata_path: Optional path to a reusable built MERSCOPE
             SpatialData zarr.
         merscope_image_prefix: Prefix for matching z-plane image keys.
@@ -29,6 +30,8 @@ class SamplePair:
             SpatialData zarr.
         xenium_channels: Channel names for Xenium (e.g. ['DAPI', '18S']).
         xenium_min_qv: Minimum quality value for Xenium transcript filtering.
+        merscope_cellpose_model: Optional registry hash or model-bundle path.
+        xenium_cellpose_model: Optional registry hash or model-bundle path.
         merscope_voxel_layers: ProSeg voxel layers for MERSCOPE.
         xenium_voxel_layers: ProSeg voxel layers for Xenium.
         analysis_mode: Optional row-level override for the pipeline analysis
@@ -43,6 +46,8 @@ class SamplePair:
         spatial_gene_analysis_transcript_analysis_enabled: Optional row-level
             switch for the annotation-dependent transcript analysis within
             spatial-gene analysis.
+        mender_enabled: Optional row-level MENDER stage switch.
+        mender_segmentations: Optional independent MENDER segmentation selector.
         start_stage: Optional row-level first stage.
         stop_stage: Optional row-level final stage.
         only_stage: Optional row-level single-stage override.
@@ -64,11 +69,15 @@ class SamplePair:
     merscope_voxel_layers: int = 7
     xenium_voxel_layers: int = 2
     xenium_spec_path: Path | None = None
+    merscope_cellpose_model: str | None = None
+    xenium_cellpose_model: str | None = None
     analysis_mode: str | None = None
     enable_alignment: bool | None = None
     analysis_segmentation: str | None = None
     spatial_gene_analysis_enabled: bool | None = None
     spatial_gene_analysis_transcript_analysis_enabled: bool | None = None
+    mender_enabled: bool | None = None
+    mender_segmentations: str | None = None
     start_stage: str | None = None
     stop_stage: str | None = None
     only_stage: str | None = None
@@ -106,7 +115,8 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
         merscope_voxel_layers, xenium_voxel_layers, xenium_spec_path,
         analysis_mode, enable_alignment, analysis_segmentation, start_stage,
         stop_stage, only_stage, spatial_gene_analysis_enabled,
-        spatial_gene_analysis_transcript_analysis_enabled
+        spatial_gene_analysis_transcript_analysis_enabled, mender_enabled,
+        mender_segmentations, merscope_cellpose_model, xenium_cellpose_model,
         and all optional gaston_* row overrides
 
     Backward-compatible aliases:
@@ -172,6 +182,12 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
                     row.get("xenium_voxel_layers"), default=2
                 ),
                 xenium_spec_path=_optional_path(row.get("xenium_spec_path")),
+                merscope_cellpose_model=_optional_string(
+                    row.get("merscope_cellpose_model")
+                ),
+                xenium_cellpose_model=_optional_string(
+                    row.get("xenium_cellpose_model")
+                ),
                 analysis_mode=_optional_string(row.get("analysis_mode")),
                 enable_alignment=_parse_optional_bool(row.get("enable_alignment")),
                 analysis_segmentation=_optional_string(
@@ -183,6 +199,8 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
                 spatial_gene_analysis_transcript_analysis_enabled=_parse_optional_bool(
                     row.get("spatial_gene_analysis_transcript_analysis_enabled")
                 ),
+                mender_enabled=_parse_optional_bool(row.get("mender_enabled")),
+                mender_segmentations=_optional_string(row.get("mender_segmentations")),
                 start_stage=_optional_string(row.get("start_stage")),
                 stop_stage=_optional_string(row.get("stop_stage")),
                 only_stage=_optional_string(row.get("only_stage")),

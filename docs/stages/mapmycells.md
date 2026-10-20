@@ -1,9 +1,10 @@
 # MapMyCells
 
 Runs local Allen Institute MapMyCells annotation on the per-platform AnnData
-objects produced by the Squidpy clustering stage. By default it maps against
-both the Allen Whole Human Brain reference and a configurable strict WHB region
-reference.
+objects produced by the Squidpy clustering stage. It supports the Allen Whole
+Human Brain (WHB) taxonomy and the Yao et al. 2023 Whole Mouse Brain (WMB)
+taxonomy, including human-to-mouse ortholog mapping. WHB is the human default;
+with `--species mouse`, WMB whole-brain mapping becomes the workflow default.
 
 ## What it does
 
@@ -14,15 +15,21 @@ For each platform in a pair:
    into `X`. MapMyCells expects the query cell-by-gene matrix in `X`.
 3. Run MapMyCells locally through `python -m merxen.analysis.mapmycells_entrypoint`
    for the configured reference mode: `whole_brain`, `region`, or `both`.
-   The whole-brain path uses the configured marker lookup JSON and precomputed
-   stats HDF5 files. The region path builds or reuses a strict WHB ROI-specific
-   reference in the durable MapMyCells cache first.
+   The whole-brain path uses configured files or downloads Allen's published
+   marker lookup and precomputed-stat assets. The region path builds or reuses
+   a strict atlas/ROI-specific reference in the durable MapMyCells cache first.
 4. Save the extended JSON, CSV, mapper log, stdout/stderr logs, command
    manifest, query H5AD, standalone UMAP/spatial PNG/PDF plots, and a clustered H5AD
    annotated with MapMyCells assignments in `obs` columns prefixed with
    `mapmycells_`. The H5AD also records MapMyCells metadata in
    `uns["merxen_mapmycells"]`, including the paths to the separate PNGs; the
-   plot images themselves are not embedded in the H5AD.
+   plot images themselves are not embedded in the H5AD. The extended JSON and
+   the mapper, stdout and stderr logs are not embedded either. `uns` records
+   their paths and SHA-256 digests (`extended_json_sha256`, `log_sha256`,
+   `stdout_log_sha256`, `stderr_log_sha256`) and keeps only the short command
+   JSON as `command_json_text`. Annotated H5ADs written before this change
+   still embed these files as `*_text` entries. For the P7513 MERSCOPE
+   section, the embedded extended JSON was about 258 MB of a 652 MB file.
 
 Set `--mapmycells_plots_only true` to regenerate the annotated H5AD and plots
 from an existing published `mapmycells_out/` directory without preparing a new
@@ -31,15 +38,204 @@ useful after changing plot code. Use it with `--only_stage mapmycells` and the
 same `--outdir`, `--mapmycells_reference_mode`, and `--mapmycells_region_name`
 used for the original run.
 
+### Gene identifiers
+
+MapMyCells matches query genes to the reference by Ensembl ID, so any feature
+left with only a symbol is ignored by the mapper unless a gene-mapping database
+is used. When `mapmycells_gene_id_column` is `ensembl_id` (the default),
+`prepare_mapmycells_query` resolves it in this order:
+
+1. the ID already in the clustered `var` (vendor or Xenium-derived);
+2. the cached reference gene metadata found below `mapmycells_region_cache_dir`
+   (WHB raw H5AD `var` or WMB `gene.csv`), when present;
+3. the configured local fallback table `annotation_gene_id_fallback_csv`, for
+   features still lacking an ID.
+
+The fallback table is an Allen-style `gene.csv` (`gene_identifier` and
+`gene_symbol` columns; `ensembl_id` / `gene_id` and `symbol` / `gene` also
+work; `.tsv` is tab-separated) or a reference `.h5ad` whose `var` index holds
+the IDs. It is read locally and never downloaded. Only IDs with the query
+species' prefix (`ENSG` for human, `ENSMUSG` for mouse) are used, so a human
+table cannot assign IDs to a mouse query. A symbol is matched exactly first and
+then case-insensitively; it stays unresolved when the table gives it more than
+one ID or when its ID is already carried by another query feature. The fallback
+is not applied to any other `mapmycells_gene_id_column`, whose values may be
+symbols for the gene-mapping database and are used as provided, or when the ID
+column is absent and the symbols are left for the WMB gene-mapping database. A
+configured table with no IDs of the query species, such as the human WHB table
+in a mouse run, is not applied: the manifest sets `gene_id_fallback_csv` to
+`null` and records the path and reason under `gene_id_fallback_ignored`. The
+fallback does not change the legacy clustering annotation, which keeps its own
+lookup.
+
+On Dwight no WHB `gene.csv` is cached, so the profile points the fallback at
+the `var` of `WHB-10Xv3-Nonneurons-raw.h5ad` on SSD1, which holds the same
+59,357-gene `gene_identifier` / `gene_symbol` table. With it, the human
+MERSCOPE panel genes LIF, LIFR, SQSTM1 and H2AX, whose IDs are blank in the
+MERSCOPE `var`, map to `ENSG00000128342`, `ENSG00000113594`,
+`ENSG00000161011` and `ENSG00000188486`. The last is the ID Xenium carries for
+H2AFX (the previous symbol of H2AX), so the pair shares 297 panel IDs instead
+of 296 (checked on P7513 `proseg_hybrid`). Set
+`--annotation_gene_id_fallback_csv null` to disable it.
+
+Every prepared query writes `<sample_id>_mapmycells_query_gene_ids.json`,
+listing the IDs recovered from the cached reference metadata
+(`resolved_by_reference_lookup`) and from the fallback table
+(`resolved_by_fallback`), and each unresolved feature with its reason
+(`no_fallback_table`, `not_in_fallback_table`, `ambiguous_in_fallback_table`,
+`fallback_id_already_in_query`, or `left_as_symbol_for_gene_mapping_db` when
+there is no fallback table and a gene-mapping database will receive the symbol).
+`unresolved_handling` says whether unresolved features are ignored by MapMyCells
+or left as symbols for the gene-mapping database, and `gene_id_fallback_applied`
+whether the fallback table was used. Unresolved features are also logged as a
+warning. The pair manifest repeats these per sample under
+`gene_id_resolution`. Its `recovered_gene_ids_in_other_samples` field lists,
+for every recovered gene, the other samples that carry the same ID and the
+symbol they use for it (for example `{"H2AX": {"P7513_XENIUM": "H2AFX"}}`);
+an empty mapping means the gene is specific to that platform's panel.
+
 The default `mapmycells_bootstrap_factor` is `0.9` because these data are
 spatial transcriptomics panels where the newer single-cell-oriented lower
 defaults can be less stable.
 
-For region mode, `mapmycells_region_labels` contains Allen WHB
-`region_of_interest_label` values. The default is
+For human region mode, `mapmycells_region_labels` contains Allen WHB
+`region_of_interest_label` values. The human default is
 `["Human A44-A45", "Human A46", "Human A32", "Human ACC"]`, but the
 implementation accepts a list, a JSON list, or a comma-separated string so this
 can be adjusted to different frontal region sets later.
+
+## Whole Mouse Brain compatibility
+
+For a mouse dataset, the pipeline-level switch is sufficient for whole-brain
+mapping:
+
+```bash
+nextflow run workflows/main.nf \
+    --samplesheet workflows/samplesheet.csv \
+    --species mouse \
+    --outdir ./results \
+    --stop_stage mapmycells \
+    --mapmycells_region_cache_dir /durable/mapmycells-cache
+```
+
+This resolves to `reference_mode=whole_brain`, `reference_atlas=wmb`, and
+`query_species=mouse`. Mouse Ensembl IDs (`ENSMUSG…`) are retained from Xenium
+or reference metadata. For symbol-only MERSCOPE panels, MerXen uses cached WMB
+expression metadata where available; otherwise it downloads the gene-mapper
+database and lets MapMyCells resolve the symbols. The large gene database is
+therefore not normally needed when usable mouse Ensembl metadata already
+exists.
+
+Set `mapmycells_reference_atlas=wmb` to use the Yao et al. 2023 WMB taxonomy.
+For human MerXen queries, also keep `mapmycells_query_species=human`. MerXen then
+downloads and caches Allen's full-WMB precomputed stats, mouse marker lookup,
+and the `mmc_gene_mapper` ortholog database, and passes the database through
+`gene_mapping.db_path`. It also drops `CCN20230722_SUPT` by default, matching
+Allen's human-to-WMB example. `cell_type_mapper` 1.7.2 or newer is required.
+
+```bash
+nextflow run workflows/main.nf \
+    --samplesheet workflows/samplesheet.csv \
+    --outdir ./results \
+    --stop_stage mapmycells \
+    --mapmycells_reference_mode whole_brain \
+    --mapmycells_reference_atlas wmb \
+    --mapmycells_query_species human \
+    --mapmycells_region_cache_dir /durable/mapmycells-cache
+```
+
+The automatic full-WMB downloads are approximately 1.4 GB for stats, 14 MB for
+markers, and 16.2 GB for the cross-species gene database. Explicit
+`mapmycells_marker_lookup_path`, `mapmycells_precomputed_stats_path`, and
+`mapmycells_gene_mapping_db_path` values override the downloads.
+
+For a mouse-region-specific WMB reference, select mouse
+`region_of_interest_acronym` values such as `MOp` or `VIS`:
+
+```bash
+nextflow run workflows/main.nf \
+    --samplesheet workflows/samplesheet.csv \
+    --species mouse \
+    --outdir ./results \
+    --stop_stage mapmycells \
+    --mapmycells_reference_mode region \
+    --mapmycells_reference_atlas wmb \
+    --mapmycells_query_species mouse \
+    --mapmycells_region_name motor \
+    --mapmycells_region_labels MOp \
+    --mapmycells_region_cache_dir /durable/mapmycells-cache
+```
+
+Region generation downloads WMB metadata and only the raw expression-matrix
+shards named by the selected cells' `feature_matrix_label` values. Individual
+shards can be several GB, so the cache must have substantial free space.
+
+## Region reference cache
+
+Generated region references are immutable once written: MerXen never
+modifies or deletes a completed build in the shared cache. Each build lives in
+its own directory
+under `<mapmycells_region_cache_dir>/references/`, named
+`<prefix>_<region_name>-<hash>`, where `<prefix>` is `region` (WHB) or
+`wmb_region` (WMB) and `<hash>` is the first 16 hex digits of the SHA-256 of
+the reference configuration: region name and labels,
+`region_min_cells_per_leaf`, `region_query_markers_n_per_utility`, atlas,
+query species, hierarchy, normalization, Allen manifest URL and `drop_level`.
+Each directory holds `precompute/precomputed_stats.h5`, `reference_markers/`,
+`query_markers/query_markers.n<N>.json`, `region_cell_metadata.csv` and
+`region_reference_manifest.json`, which records the full `config_hash`,
+`created_at` and the paths of the build.
+
+For each run, MerXen picks the reference in this order:
+
+1. The newest complete content-hashed build for the requested configuration.
+2. A legacy in-place reference, `references/<prefix>_<region_name>/`, written
+   by MerXen before content-hashed builds existed. It is adopted **read-only**
+   when its stats and query-marker files exist and its recorded `config`
+   matches the request. `reference_atlas` and `query_species`, which older
+   versions did not record, are compared as the values those versions always
+   used: `reference_atlas = "whb"` and `query_species = "human"`. Older
+   versions did apply `drop_level` without recording it in the manifest, so
+   an unrecorded `drop_level` is read from `metadata.config.drop_level` in
+   the legacy query-marker JSON, which `cell_type_mapper` writes. If that
+   field is missing or unreadable, the legacy reference is not adopted and a
+   new build is made next to it. The manifest is never
+   rewritten; the copy recorded in outputs has `cache_layout =
+   "legacy_in_place"` and the resolved on-disk paths, because legacy
+   manifests can hold stale absolute paths from before the cache was moved.
+3. Otherwise, a new build. It is assembled in a private
+   `references/.staging-*` directory and renamed into place only when
+   complete, so other tasks never see a partial build. The provenance that
+   `cell_type_mapper` writes inside its own outputs (for example
+   `metadata.config` in the query-marker JSON) therefore names the staging
+   path; `region_reference_manifest.json` names the final paths. If the build
+   raises an error, only that staging directory is removed. A task that is
+   terminated mid-build leaves its `.staging-*` directory (about 2.4 GB for
+   the frontal WHB reference) behind, because MerXen installs no signal
+   handler: this happens on `SIGTERM` from a Nextflow cancel or a Slurm
+   timeout, and on `SIGKILL` from the OOM killer. Such a directory is never
+   used. The next build of the same configuration removes it while holding
+   that configuration's lock; staging directories of other configurations
+   are left alone.
+
+A configuration change therefore selects a different directory. It never
+invalidates, overwrites or deletes an existing build. Builds of one
+configuration are serialised with a `references/.<prefix>_<region_name>-<hash>.lock`
+file lock, so concurrent `MAPMYCELLS` tasks wait for one build and then reuse
+it. The lock file is opened read-write, which an exclusive `flock` needs on
+NFS; MerXen falls back to a read-only descriptor only when the lock file
+belongs to another cache user and is not writable, which works on local
+filesystems but not on NFS. The lock, and therefore the staging clean-up,
+assumes that `flock` is coordinated across every host that shares the cache,
+as it is on a local disk used by one host and on NFS mounted without
+`local_lock=flock` or `local_lock=all`.
+
+`mapmycells_region_force_rebuild=true` always writes a new
+`<prefix>_<region_name>-<hash>-rebuild-<UTC timestamp>` directory, which later
+runs then prefer, and it leaves every earlier build intact. A task that waited
+for another task's rebuild of the same configuration reuses that build. Each
+build uses about 2.4 GB for the frontal WHB reference, and old builds are
+never pruned automatically. Force a rebuild on a single pair, then turn it off.
 
 ## Nextflow process
 
@@ -74,13 +270,18 @@ Use `--only_stage mapmycells` to reuse an existing
 | `pair_id` | Pair identifier used in output paths. |
 | `output_dir` | Where `mapmycells_out/` is populated. |
 | `samples` | One or two sample configs: `sample_id`, `platform`, `anndata_path`, optional `query_layer`, optional `gene_id_column`, optional `obs_id_column`. |
-| `reference_mode` | `whole_brain`, `region`, or `both`; default is `both`. |
-| `marker_lookup_path` | Whole-brain JSON marker lookup file. Required only when `reference_mode` includes `whole_brain`. |
-| `precomputed_stats_path` | Whole-brain HDF5 precomputed stats file. Required only when `reference_mode` includes `whole_brain`. |
-| `region_name` / `region_labels` | Short region output name and one or more Allen WHB ROI labels used to build the strict region reference. |
-| `region_cache_dir` | Durable cache for Allen WHB downloads and generated region stats/marker files. |
+| `reference_mode` | `whole_brain`, `region`, or `both`; workflow default is `both` for human and `whole_brain` for mouse. |
+| `reference_atlas` | `whb` or `wmb`; the workflow selects WHB for human and WMB for mouse. |
+| `query_species` | `human` or `mouse`; controls whether WMB mapping needs cross-species gene mapping. |
+| `auto_download_references` | Download missing Allen stats, markers, and the WMB gene mapper into the durable cache. |
+| `marker_lookup_path` | Optional explicit whole-brain JSON marker lookup; otherwise downloaded when enabled. |
+| `precomputed_stats_path` | Optional explicit whole-brain HDF5 stats file; otherwise downloaded when enabled. |
+| `gene_mapping_db_path` | Optional `mmc_gene_mapper` SQLite database; required for human-to-WMB mapping when automatic downloads are disabled. |
+| `gene_id_fallback_csv` | Optional local gene table (Allen `gene.csv` layout or a reference `.h5ad` `var`) used only while preparing the query, for features still lacking an Ensembl ID; see [Gene identifiers](#gene-identifiers). |
+| `region_name` / `region_labels` | Short output name and WHB ROI labels or WMB ROI acronyms used to build the strict region reference. |
+| `region_cache_dir` | Durable cache for Allen WHB/WMB downloads and generated region stats/marker files. |
 | `region_min_cells_per_leaf` | Minimum ROI cells required for a leaf `cluster_alias` to stay in the region taxonomy. |
-| `region_force_rebuild` | Rebuild generated region reference files even if the cache manifest matches. |
+| `region_force_rebuild` | Build a new region reference directory even if a matching one exists; earlier builds are kept (see [Region reference cache](#region-reference-cache)). |
 | `region_query_markers_n_per_utility` | Marker count target for region `QueryMarkerRunner`. |
 | `drop_level` | Optional taxonomy level to drop before mapping, such as the Whole Mouse Brain supertype level. |
 | `normalization` | Passed to `type_assignment.normalization`; `raw` means MapMyCells converts query counts internally. |
@@ -91,9 +292,19 @@ Use `--only_stage mapmycells` to reuse an existing
 | `cloud_safe` / `flatten` / `verbose_csv` | Direct MapMyCells CLI options. |
 | `plots_only` | Reuse existing mapper CSV/extended JSON outputs and regenerate only annotated H5AD + plots. |
 
-When this stage is selected, workflow preflight validates whole-brain marker and
-precomputed-stat paths before any tasks start, unless `mapmycells_plots_only` is
-enabled or `reference_mode` excludes `whole_brain`.
+When explicit reference paths are configured, workflow preflight validates them
+before any tasks start. Automatically downloaded files are checked against the
+sizes in Allen's manifest and partial downloads can resume.
+
+The Allen ABC manifest names a fixed release, so MerXen downloads it once per
+cache and keeps a copy at `<cache>/abc_manifests/releases/<release>/manifest.json`.
+Here `<cache>` is `mapmycells_region_cache_dir`,
+`clustering_squidpy_broad_reference_cache_dir` or `mecr_reference_cache_dir`;
+on Dwight all three are the same SSD1 directory. The MapMyCells, WMB
+clustering-reference and MECR download helpers read that copy. When every file
+they need is already cached with the size the manifest records, they use no
+network. To prepare an offline cache, download the manifest to that path once.
+If the copy is unreadable, it is downloaded again.
 
 ## Outputs
 
@@ -102,6 +313,7 @@ Written under `mapmycells_out/<platform>/`:
 | Kind | File | Contents |
 |------|------|----------|
 | Query AnnData | `<sample_id>_mapmycells_query.h5ad` | Mapper input with query counts in `X`. |
+| Query gene-ID report | `<sample_id>_mapmycells_query_gene_ids.json` | Where each query Ensembl ID came from, the IDs recovered by the reference lookup or the fallback table, and the unresolved features with their reasons. |
 | CSV | `<sample_id>_mapmycells.csv` | Per-cell taxonomy assignments and probabilities. |
 | Extended JSON | `<sample_id>_mapmycells_extended.json` | Full MapMyCells result, config, logs, marker genes, and taxonomy tree. |
 | Log | `<sample_id>_mapmycells.log` | Mapper log output. |
@@ -115,7 +327,7 @@ Written under `mapmycells_out/<platform>/`:
 | Supercluster QC | `<sample_id>_mapmycells_supercluster_assignment_qc.png` | Supercluster cell counts, confidence summaries, and low-confidence fractions. |
 | Cluster QC | `<sample_id>_mapmycells_cluster_assignment_qc.png` | Cluster cell counts, confidence summaries, and low-confidence fractions. |
 | Supercluster spatial grid | `<sample_id>_mapmycells_spatial_supercluster_grid.png` | Small-multiple spatial grid with each supercluster highlighted in red against all other cells in grey. |
-| Annotated AnnData | `<sample_id>_mapmycells_annotated.h5ad` | Clustered AnnData with MapMyCells assignments added to `obs` and mapper metadata in `uns["merxen_mapmycells"]`. |
+| Annotated AnnData | `<sample_id>_mapmycells_annotated.h5ad` | Clustered AnnData with MapMyCells assignments added to `obs` and mapper metadata in `uns["merxen_mapmycells"]` (paths and SHA-256 digests of the extended JSON and logs, not their contents). |
 
 Each listed `.png` plot is also written as a same-stem `.pdf`.
 
@@ -124,6 +336,20 @@ Region-specific outputs use the same file names under
 H5AD columns use the prefix `mapmycells_region_<region_name>_`, and metadata is
 stored in `uns["merxen_mapmycells_region_<region_name>"]`.
 
+Full-WMB outputs are written under `mapmycells_out/wmb/<platform>/` with the
+`mapmycells_wmb_` column prefix. WMB region outputs are written under
+`mapmycells_out/wmb_region_<region_name>/<platform>/` with the
+`mapmycells_wmb_region_<region_name>_` prefix, keeping them distinct from WHB
+annotations.
+
 The stage also writes `<pair_id>_mapmycells_manifest.json` at the top of
 `mapmycells_out/`, including whole-brain and region reference paths, ROI labels,
-filtering counts, and per-sample outputs.
+filtering counts, per-sample outputs, the gene-ID fallback table
+(`gene_id_fallback_csv`, or `gene_id_fallback_ignored` when it has no IDs of the
+query species) and the per-sample `gene_id_resolution` summaries. It also
+records the installed `cell_type_mapper` distribution as
+`cell_type_mapper_version` and, for a git install, `cell_type_mapper_commit`.
+The mapper subprocess uses the same Python interpreter, so this is the version
+that mapped the cells. In plots-only mode it is the version that regenerated the
+plots. Each newly built region reference records the same two fields in its
+`region_reference_manifest.json`.

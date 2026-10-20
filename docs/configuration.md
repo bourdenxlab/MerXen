@@ -62,31 +62,41 @@ profile. Override either kind with `--<name>` on the command line.
 | Param | Default | Description |
 |-------|---------|-------------|
 | `outdir` | `./results` | Output root. |
+| `species` | `human` | Dataset species for the whole invocation: `human` or `mouse`. Controls reference-backed defaults; mixed-species samplesheets are not supported. |
 | `analysis_mode` | `paired` | Fallback row mode: `paired`, `merscope`, or `xenium`. A non-empty samplesheet `analysis_mode` value overrides this per row. |
 | `enable_alignment` | `false` | Fallback row alignment switch. A non-empty samplesheet `enable_alignment` value overrides this per row; alignment only applies to paired rows. |
-| `analysis_segmentation` | `both` | Fallback downstream analysis branches after enrichment. Valid values: `both`, `all`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, `proseg_hybrid`; comma-separated combinations are accepted. `both` remains `reseg,original_seg`, while `all` includes all four branches. A non-empty samplesheet value overrides this per row. |
+| `analysis_segmentation` | `all` | Fallback downstream analysis branches after enrichment. Valid values: `all`, `both`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, `proseg_hybrid`; comma-separated combinations are accepted. `all` includes all four branches, while `both` restricts analysis to `reseg,original_seg`. A non-empty samplesheet value overrides this per row. |
+| `register_images_refine_affine` | `true` | Refine each Xenium Explorer matrix with a robust DAPI-to-DAPI affine fit before resampling registered images. The stage itself is enabled per row by `xenium_registered_images_csv`; see [stages/register-images.md](stages/register-images.md). |
+| `register_post_xenium_if_nonrigid` | `false` | Fallback switch for guarded post-Xenium IF DAPI TV-L1 refinement after the affine fit. A samplesheet value overrides this per row. |
 | `mask_image_quantification_enabled` | `true` | Insert the Cellpose-mask image quantification stage between enrichment and QC. A non-empty samplesheet `mask_image_quantification_enabled` value overrides this per row. |
-| `mecr_enabled` | `true` | Insert mutually exclusive co-expression rate analysis after QC. A non-empty samplesheet `mecr_enabled` value overrides this per row. |
+| `mecr_enabled` | species-dependent | Insert species-matched whole-brain mutually exclusive co-expression rate analysis after QC. Defaults to `true` for human and `false` for mouse; mouse may opt in to the complete WMB reference. |
 | `spatial_gene_analysis_enabled` | `true` | Insert spatial gene analysis between visualization and clustering. A non-empty samplesheet value overrides this per row; disabled rows proceed directly from visualization to clustering. |
 | `spatial_gene_analysis_transcript_analysis_enabled` | `true` | Run the annotation-dependent transcript-pattern component inside spatial gene analysis. A non-empty samplesheet value overrides this per row; `false` retains cell-level autocorrelation without requiring tissue GeoJSON files. |
 | `cortical_depth_enabled` | `false` | Insert the cortical-depth stage after clustering. Requires per-sample pial/tissue-edge annotations, with optional gray/white boundaries for depth pieces. A non-empty samplesheet `cortical_depth_enabled` value overrides this per row. |
 | `distance_from_object_enabled` | `false` | Insert registered polygon-edge distance analysis after cortical depth/clustering. A non-empty samplesheet value overrides this per row. |
 | `distance_from_object_segmentations` | `proseg, original, cellpose` | Cell-table branches for object distance. Legacy `reseg`, `original_seg`, and `proseg_mask` values remain accepted aliases. A samplesheet value may override this per row. |
+| `mender_enabled` | `false` | Enable independent per-platform/per-segmentation MENDER spatial-domain analysis. A non-empty samplesheet value may override this per row. |
+| `mender_segmentations` | `proseg_hybrid` | MENDER branches: any comma-separated subset of `reseg`, `original_seg`, `proseg_mask`, and `proseg_hybrid`, or `all`. A non-empty samplesheet value may override this per row. |
 | `gaston_enabled` | `false` | Run GASTON as an opt-in terminal stage. A non-empty samplesheet value overrides this per row. |
 | `gaston_segmentations` | `proseg_hybrid` | Independent GASTON branch selector: any segmentation, a comma-separated subset, or `all`. This does not change `analysis_segmentation`. |
 | `force_spatialdata_build` | `false` | Rebuild SpatialData zarrs even if cached. |
+| `merscope_allow_transform_override_mismatch` | `false` | VZG2 builds fail when `merscope_transform_path` places the mosaic more than 1 µm away from the archive manifest. `true` keeps the override with a warning, for archives whose `bbox_microns` is known to be wrong. See [stages/spatialdata-build.md](stages/spatialdata-build.md). |
 | `force_proseg_rerun` | `false` | Rebuild ProSeg bases from the current Cellpose/transcript inputs instead of reusing a persistent `latest_spatialdata.zarr`. Useful with `-resume` after upstream inputs were rebuilt. |
+| `qc_registration_strict` | `false` | Fail the QC task (instead of only warning in its outputs) when the segmentation registration check flags cells that do not sit on their transcripts. See [stages/qc.md](stages/qc.md#registration-check). |
 | `start_stage` | `build_spatialdata` | Fallback first stage. Skipped upstream stages are read from published outputs. A samplesheet `start_stage` value overrides this per row. |
-| `stop_stage` | `clustering_squidpy` | Fallback last stage. This includes `spatial_gene_analysis`, which runs between visualization and clustering. MapMyCells is available after clustering but opt-in because it requires reference files. A samplesheet `stop_stage` value overrides this per row. |
+| `stop_stage` | `clustering_squidpy` | Fallback last stage. This includes `spatial_gene_analysis`, which runs between visualization and clustering. MapMyCells is available after clustering but opt-in because its atlas downloads are large. A samplesheet `stop_stage` value overrides this per row. |
 | `only_stage` | `null` | Fallback single-stage selector. A row-level `only_stage` overrides row start/stop values; row start/stop values suppress the global `only_stage` fallback for that row. |
 | `gpu_process_lock_enabled` | Dwight: `true` | Serialize local GPU-heavy processes so `CELLPOSE_SEGMENT`, GPU `ALIGN`, and GPU `CLUSTERING_SQUIDPY` do not compete for one workstation GPU. ProSeg does not take this lock. |
 | `gpu_process_lock_file` | Dwight: `/tmp/merxen-dwight-gpu.lock` | One host-wide lock shared by tasks and concurrent launches on Dwight. |
+| `task_tmp_dir` | Dwight: `/srv/storage/MerXen/tmp` | Exported to every task as `TMPDIR`, so library temporary files land on the `/srv/storage` RAID rather than `/tmp` on the small root disk. The directory must exist (`mkdir -p` it once per host). ProSeg and the proseg_hybrid refinement write their large intermediates to `$MERXEN_TMPDIR` if set, otherwise to the task's work directory, never to the system temporary directory. |
 
 Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
-`build_spatialdata`, `segment_nuclei`, `segment`, `enrich`, `mask_image_quantification`,
-`qc`, `mecr`, `align`, `align_qc`, `compare`, `visualize`,
-`spatial_gene_analysis`, `clustering_squidpy`, `compute_cortical_depth`,
-`distance_from_object`, `mapmycells`, and `gaston`.
+`build_spatialdata`, `segment_nuclei`, `segment`, `enrich`, `register_images`,
+`mask_image_quantification`, `qc`, `mecr`, `align`, `align_qc`, `compare`,
+`visualize`, `spatial_gene_analysis`, `clustering_squidpy`,
+`compute_cortical_depth`, `distance_from_object`, `mender`, `mapmycells`, and `gaston`.
+`register_images` is available only for rows that set
+`xenium_registered_images_csv` and process Xenium.
 `mask_image_quantification` is
 available only when the effective `mask_image_quantification_enabled` value is
 `true`. `compute_cortical_depth` is available only when the effective
@@ -97,25 +107,29 @@ only for rows whose effective `enable_alignment` value is `true`.
 `spatial_gene_analysis_enabled` value is `true`.
 `distance_from_object` is available only when the effective
 `distance_from_object_enabled` value is `true`.
+`mender` is available only when the effective `mender_enabled` value is `true`.
 `gaston` is available only when the effective `gaston_enabled` value is
 `true`. Enabling it extends the historical default stop from clustering to
-GASTON, but an explicitly supplied stop remains authoritative.
+GASTON. Explicit `only_stage` selections and non-default stop stages stay exact.
 `align`, `align_qc`, and `compare` are available only when
 `analysis_mode = paired`.
 
 ### Cellpose
 
-`segment_nuclei` uses DAPI only, the Cellpose `nuclei` model, and the same
-inference/tiling settings as cell Cellpose. Both masks use the default final
+`segment_nuclei` uses DAPI only, stock Cellpose-SAM v2 (`cpsam_v2`), and the global
+inference/tiling settings. Optional per-platform cell overrides leave nuclei
+settings unchanged. Cellpose 4 ignores the former
+`model_type="nuclei"` and `model_type="cyto3"` settings; neither selected a
+different model. Both masks use the default final
 area filter of 5–400 µm². On Dwight,
 `cellpose_segment_max_forks = 1` and the shared GPU lock serialize both
 Cellpose process types.
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `cellpose_model_type` | `cyto3` | Cellpose model preset. |
+| `cellpose_model_type` | `cyto3` | Deprecated and ignored by Cellpose 4. Retained for legacy config JSON; both stages explicitly load `cpsam_v2`. |
 | `cellpose_gpu` | Dwight: `true` | Use GPU for inference. Other execution profiles choose their own hardware policy. |
-| `cellpose_diameter` | `null` | Cell diameter (px). `null` → Cellpose auto-estimates. |
+| `cellpose_diameter` | `null` | Rescale using this cell diameter (px). `null` preserves native scale with Cellpose-SAM. |
 | `cellpose_flow_threshold` | `0.7` | Cellpose flow threshold. |
 | `cellpose_cellprob` | `-5.0` | Cellpose cell probability threshold. |
 | `cellpose_tile_overlap` | `0.15` | Cellpose model's internal fractional tile overlap. |
@@ -135,12 +149,46 @@ Cellpose process types.
 | `cellpose_final_filter_chunk_mb` | `256` | Approximate row-chunk size for streaming the final mask filter. |
 | `cellpose_segment_max_forks` | Dwight: `1` | Maximum concurrent GPU Cellpose processes. |
 
+The Python `CellposeConfig.pretrained_model` defaults to `cpsam_v2` and
+`use_bfloat16` defaults to `False`, matching Nextflow. The existing Nextflow
+config JSON is unchanged: Python supplies the model default. Both inference
+stages require Cellpose 4.2.1.1 and PyTorch 2.14.x; the lock records 2.14.0,
+verified on Dwight with CUDA 13.0. Fresh inference checks the stock checkpoint's
+SHA-256 and records its model identity beside the mask. See
+[segmentation provenance](stages/segmentation.md#model-provenance).
+
+Optional `<platform>_cellpose_model` selectors and per-platform threshold/filter
+overrides are documented in [Cellpose HITL model selection](stages/cellpose-hitl.md).
+They add configuration keys only when set and require separate, protected custom
+arms with verified provenance for reuse.
+
 ### Mask image quantification
 
 | Param | Default | Description |
 |-------|---------|-------------|
 | `mask_image_quantification_enabled` | `true` | Run Cellpose-mask image quantification after enrichment by default. |
 | `mask_image_quantification_max_forks` | Dwight: `3` | Maximum concurrent quantification processes. |
+
+### Image registration
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `register_images_refine_affine` | `true` | Apply the DAPI affine refinement on top of each Xenium Explorer matrix. |
+| `register_post_xenium_if_nonrigid` | `false` | Apply guarded TV-L1 optical flow after the affine refinement. A non-empty samplesheet value overrides this per row. |
+| `register_post_xenium_if_nonrigid_pixel_size_um` | `3.4` | Physical pixel size of the flow-estimation grid. This is fine enough for nucleus-scale shifts without fitting raw Xenium pixels. |
+| `register_post_xenium_if_nonrigid_attachment` | `10` | TV-L1 data-attachment weight; lower values favour a smoother field. |
+| `register_post_xenium_if_nonrigid_tightness` | `0.3` | TV-L1 tightness parameter. |
+| `register_post_xenium_if_nonrigid_num_warp` / `register_post_xenium_if_nonrigid_num_iter` | `5` / `10` | TV-L1 coarse-to-fine warps and fixed-point iterations. |
+| `register_post_xenium_if_nonrigid_smoothing_sigma_um` | `10` | Physical Gaussian smoothing scale for the confidence-weighted accepted field. |
+| `register_post_xenium_if_nonrigid_max_displacement_um` | `20` | Reject raw vectors above this displacement and cap the accepted field. |
+| `register_post_xenium_if_nonrigid_max_cycle_error_um` | `5` | Maximum forward/backward inconsistency for a raw vector to contribute. |
+| `register_post_xenium_if_nonrigid_min_local_correlation` | `0.2` | Minimum local post-warp DAPI correlation for a raw vector to contribute. |
+| `register_post_xenium_if_nonrigid_min_jacobian` / `register_post_xenium_if_nonrigid_max_jacobian` | `0.5` / `2` | Allowed local area change of the final mapping; the guarded field is attenuated until these bounds hold. |
+| `register_post_xenium_if_nonrigid_min_confident_fraction` | `0.1` | Reject the complete non-rigid pass when too little overlapping tissue supports it. |
+| `register_images_max_forks` | Dwight: `2` | Maximum concurrent registration processes. |
+
+`REGISTER_IMAGES` requests 8 CPUs and 32 GB (P7513 optical-flow validation peaked at 2.7 GB; full registration remains bounded by image resampling). The viewer pyramid of each
+registered image follows `viewer_cache_build_image_pyramid`.
 
 ### Viewer caches
 
@@ -159,6 +207,7 @@ Cellpose process types.
 | Param | Default | Description |
 |-------|---------|-------------|
 | `cortical_depth_enabled` | `false` | Run `COMPUTE_CORTICAL_DEPTH` as a terminal stage after `CLUSTERING_SQUIDPY`. |
+| `cortical_depth_boundary_frame` | `native` | Frame the boundary GeoJSONs are drawn in: `native` (each section's own coordinates) or `aligned` (the pair's fixed-section frame). Selects the native or `*_aligned_nonrigid` cell element and refuses combinations that cannot match; see [Coordinate frame](stages/cortical-depth.md#coordinate-frame). Samplesheet override: `<platform>_cortical_depth_boundary_frame`. |
 | `cortical_depth_coordinate_unit_um` | `1.0` | Microns per coordinate unit in annotation/cell coordinates. Use the image pixel size if annotations are in pixel coordinates; keep `1.0` when coordinates are already microns. |
 | `cortical_depth_raster_resolution_um` | `5.0` | Finite-difference raster spacing. Smaller values improve geometry fidelity and increase memory/time. |
 | `cortical_depth_raster_padding_um` | `null` | Optional padding around the ribbon bounds. `null` uses a small automatic padding. |
@@ -238,18 +287,18 @@ install paths trigger a `sudo` prompt.
 
 ### Alignment
 
-Alignment is optional and runs in the isolated `environment.alignment.yml`.
+Alignment is optional and runs in the isolated `envs/environment.alignment.yml`.
 The default `valis` backend registers DAPI morphology only; it does not use
 transcripts, expression, cell labels, or RNA-derived images. The former method
 is retained as the explicit `legacy_spateo` backend. Non-alignment stages keep
-using `environment.yml`.
+using `envs/environment.yml`.
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `enable_alignment` | `false` | Run `ALIGN` and `ALIGN_QC` between QC and comparison by default. A samplesheet `enable_alignment` value can override this per paired row. |
+| `enable_alignment` | `false` | Run registration, materialization, and `ALIGN_QC` between QC and comparison by default. A samplesheet `enable_alignment` value can override this per paired row. |
 | `alignment_backend` | `valis` | `valis` (DAPI-only default) or `legacy_spateo`. |
 | `alignment_fixed_platform` / `alignment_moving_platform` | `XENIUM` / `MERSCOPE` | Reference and transformed dataset. They must differ. |
-| `alignment_conda` | `environment.alignment.yml` | Conda env file or existing env path used only for `ALIGN`. |
+| `alignment_conda` | `envs/environment.alignment.yml` | Conda env file or existing env path used only for `ALIGN`. |
 | `alignment_bootstrap_dependencies` | `true` | Install the exact selected backend package when its dependency check fails. The locked transitive VALIS stack is already part of the conda environment. |
 | `alignment_valis_requirement` | `valis-wsi==1.2.0` | Exact package installed with `--no-deps` after the locked NumPy-2-compatible runtime. |
 | `alignment_device` | Dwight: `auto` | DISK/LightGlue device; automatically uses CUDA when available. Use `cpu` for an explicit CPU fallback. |
@@ -257,6 +306,15 @@ using `environment.yml`.
 | `alignment_pytorch_cuda_alloc_conf` | Dwight: `expandable_segments:True,max_split_size_mb:256` | PyTorch allocator setting exported by `ALIGN`. |
 
 #### VALIS DAPI input and preprocessing
+
+VALIS alignment requires both platform-specific combined annotation files in
+the samplesheet: `merscope_cortical_depth_annotation_geojson` and
+`xenium_cortical_depth_annotation_geojson`. This requirement is independent of
+`cortical_depth_enabled`. Direct CLI JSON uses
+`merscope_image.tissue_annotation_path` and
+`xenium_image.tissue_annotation_path`. The annotation's pial pieces and single
+shared tissue edge define the anatomical mask; exclusions are subtracted, all
+other roles are ignored, and no mask morphology is performed.
 
 | Param | Default | Description |
 |-------|---------|-------------|
@@ -272,11 +330,11 @@ using `environment.yml`.
 | `alignment_clahe_clip_limit` | `0.01` | Mild local contrast limit. |
 | `alignment_smoothing_sigma_um` | `3.0` | Nuclear-density smoothing scale. |
 | `alignment_edge_taper_um` | `150.0` | Cosine taper measured inward from the acquired MERSCOPE FOV footprint (or rectangular support on other inputs), applied only to temporary registration images and fields. |
-| `alignment_edge_exclusion_um` | `150.0` | Acquired-support margin excluded from tissue masks, feature detection, rigid scoring, and non-rigid estimation. |
-| `alignment_mask_smoothing_sigma_um` | `20.0` | Tissue-density mask smoothing scale. |
-| `alignment_mask_closing_radius_um` | `30.0` | Tissue-mask closing radius. |
-| `alignment_mask_min_area_um2` / `alignment_mask_hole_area_um2` | `25000.0` / `25000.0` | Minimum retained fragment area and maximum filled-hole area. |
-| `alignment_mask_dilation_um` | `10.0` | Edge dilation for robust partial-tissue support. |
+| `alignment_edge_exclusion_um` | `150.0` | Acquired-support margin excluded from feature/intensity/non-rigid scoring. It does not erode the annotation-derived anatomical mask used for overlap and boundaries. |
+| `alignment_mask_smoothing_sigma_um` | `20.0` | Deprecated automatic-mask compatibility value; unused by production VALIS registration. |
+| `alignment_mask_closing_radius_um` | `30.0` | Deprecated automatic-mask compatibility value; unused by production VALIS registration. |
+| `alignment_mask_min_area_um2` / `alignment_mask_hole_area_um2` | `25000.0` / `25000.0` | Deprecated automatic-mask compatibility values; unused by production VALIS registration. |
+| `alignment_mask_dilation_um` | `10.0` | Deprecated automatic-mask compatibility value; the annotation-derived mask is not dilated. |
 
 #### Orientation, VALIS, and transform output
 
@@ -319,8 +377,31 @@ using `environment.yml`.
 | `alignment_valis_field_sample_spacing_px` | `8` | Spacing for serialized forward/backward displacement fields. |
 | `alignment_coordinate_system_name` | `merxen_xenium` | Named fixed-platform SpatialData coordinate system. |
 | `alignment_transform_transcripts` / `alignment_transform_centroids` / `alignment_transform_polygons` | `true` / `true` / `true` | Materialize selected registered vectors and table centroid coordinates. |
-| `alignment_mark_shared_tissue_domain` | `true` | Annotate transformed points, shapes, and centroids with the valid shared-tissue domain. |
-| `alignment_resume` | `true` | Reuse a complete transform bundle when its stored VALIS parameters and platform roles match. Nextflow `-resume` remains the normal workflow-level cache. |
+| `alignment_mark_shared_tissue_domain` | `true` | Annotate transformed points, shapes, and centroids with the shared annotation-derived anatomical tissue domain. |
+| `alignment_resume` | `true` | Reuse a complete transform bundle when its stored VALIS parameters, platform roles, and annotation content hashes match. Nextflow `-resume` remains the normal workflow-level cache. |
+
+#### Alignment materialization
+
+`MATERIALIZE_ALIGNMENT` runs its revision check even under Nextflow `-resume`.
+It uses the same isolated alignment environment but has a separate 12 CPU,
+120 GB process request.
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `alignment_materialization_enabled` | `true` | Enable the post-registration reconciliation stage. |
+| `alignment_materialize_vectors` / `alignment_materialize_labels` / `alignment_materialize_image` | `true` / `true` / `true` | Materialize aligned vectors/tables, registered mask rasters/caches, and the full image/pyramid. |
+| `alignment_materialization_source_image_key` | `MERSCOPE_z_projection` | Native multichannel MERSCOPE image to warp. |
+| `alignment_materialization_fixed_image_key` | `morphology_focus` | Xenium scale-0 image defining the output grid. |
+| `alignment_materialization_output_image_key` | `MERSCOPE_z_projection_aligned_nonrigid` | Aligned image element key. |
+| `alignment_materialization_tile_size` / `alignment_materialization_chunk_size` | `1024` / `1024` | Destination tile and output chunk edge lengths. Image chunks are `(1, chunk, chunk)`. |
+| `alignment_materialization_image_interpolation` / `alignment_materialization_image_fill_value` | `bilinear` / `0` | Image pull interpolation and value outside source support. |
+| `alignment_materialization_label_pyramid_downsample` / `alignment_materialization_image_pyramid_downsample` | `4` / `4` | Downsampling factors for derived pyramids. |
+| `alignment_materialization_pyramid_min_size` / `alignment_materialization_outline_width` | `1024` / `1` | Pyramid stopping size and label-outline width. |
+| `alignment_materialization_force` | `false` | Rebuild all enabled aligned outputs even when the manifest is current. |
+| `alignment_materialization_reconcile` | `true` | Repair stale, invalid, or missing outputs. When false, a non-current store raises instead. |
+| `alignment_legacy_inverse_spacing` / `alignment_legacy_inverse_iterations` / `alignment_legacy_inverse_tolerance_um` | `16` / `25` / `1` | Sample spacing, iteration cap, and maximum forward round-trip error for legacy RBF inversion. |
+| `alignment_roundtrip_sample_spacing` | `256` | Fixed-grid sampling stride for final inverse QC. |
+| `alignment_materialization_max_forks` | `1` | Dwight concurrency guard for the materializer. |
 
 #### VALIS QC selection
 
@@ -380,28 +461,57 @@ The following settings are read only when
 | `clustering_squidpy_spatial_scatter_point_size` | `2.0` | Point size for regular spatial scatter plots. |
 | `clustering_squidpy_figure_dpi` | `180` | DPI for PNG plots. |
 | `clustering_squidpy_use_gpu` | Dwight: `true` | Use RAPIDS single-cell acceleration when available. |
-| `clustering_squidpy_gpu_conda` | `environment.clustering-gpu.yml` | Dedicated RAPIDS environment used only by `CLUSTERING_SQUIDPY_COMPUTE`. |
-| `clustering_squidpy_gpu_container` | Site GPU image path | Dedicated RAPIDS image used only by `CLUSTERING_SQUIDPY_COMPUTE` with Apptainer. Build it from `Dockerfile.clustering-gpu` or override this path. |
+| `clustering_squidpy_gpu_conda` | `envs/environment.clustering-gpu.yml` | Dedicated RAPIDS environment used only by `CLUSTERING_SQUIDPY_COMPUTE`. |
+| `clustering_squidpy_gpu_container` | Site GPU image path | Dedicated RAPIDS image used only by `CLUSTERING_SQUIDPY_COMPUTE` with Apptainer. Build it from `containers/Dockerfile.clustering-gpu` or override this path. |
 | `clustering_squidpy_max_forks` | Dwight: `4` | Maximum concurrent Squidpy clustering tasks. GPU-backed tasks still share the local GPU lock when enabled. |
 | `clustering_squidpy_gpu_vram_monitor` | Dwight: `true` | Run a lightweight `nvidia-smi` sampler around each `CLUSTERING_SQUIDPY_COMPUTE` task. |
 | `clustering_squidpy_gpu_vram_monitor_interval_seconds` | `2` | Sampling interval for the clustering GPU VRAM monitor. |
 | `clustering_squidpy_write_spatialdata_table` | `true` | Add or replace a final clustered AnnData table in each source `latest_spatialdata.zarr`. |
-| `clustering_squidpy_hierarchical_enabled` | `true` | Run broad atlas-guided annotation and per-branch subclustering. Set to `false` for the legacy one-shot Leiden workflow. |
+| `clustering_squidpy_hierarchical_enabled` | `true` | Run broad atlas-guided annotation and per-branch subclustering using the species-matched atlas. |
 | `clustering_squidpy_broad_leiden_resolution` | `0.2` | Low-resolution Leiden round used for broad atlas annotation. |
 | `clustering_squidpy_subcluster_leiden_resolution` | `0.5` | Default Leiden resolution for non-neuron broad-class branches. |
 | `clustering_squidpy_subcluster_resolution_overrides` | `[:]` | Optional Nextflow map from broad class or neuron split label to a custom branch Leiden resolution. |
 | `clustering_squidpy_neuron_split_leiden_resolution` | `0.15` | Coarse neuron round used before Excitatory/Inhibitory/Other annotation. |
 | `clustering_squidpy_neuron_subcluster_leiden_resolution` | `0.5` | Default Leiden resolution for neuron subtype branches. |
 | `clustering_squidpy_min_branch_cells` | `50` | Smallest branch/split size that will be reclustered. Smaller groups keep labels but skip PCA/UMAP/Leiden. |
-| `clustering_squidpy_broad_marker_lookup_path` | WHB marker JSON path | MapMyCells query marker lookup used for atlas-guided cluster annotation. |
-| `clustering_squidpy_broad_taxonomy_metadata_path` | WHB taxonomy CSV path | Allen `cluster_annotation_term.csv` used to map marker lookup IDs to atlas labels. |
-| `clustering_squidpy_broad_cluster_membership_path` | WHB membership CSV path | Allen membership metadata used for neuron neurotransmitter split labels. |
-| `clustering_squidpy_broad_reference_cache_dir` | Dwight: `/media/mathieubo/SSD1/MerXen/mapmycells` | Cache searched for WHB taxonomy metadata and reference H5AD gene-symbol metadata. Other host profiles must provide their own reference locations. |
-| `clustering_squidpy_broad_marker_level` | `CCN202210140_SUPC` | Atlas taxonomy level scored for broad annotations. |
+| `clustering_squidpy_broad_reference_atlas` | species-dependent | `whb` for human or `wmb` for mouse. Must agree with `species` when hierarchy is enabled. |
+| `clustering_squidpy_broad_marker_lookup_path` | atlas/cache-dependent | WHB or WMB MapMyCells marker lookup used for atlas-guided cluster annotation. |
+| `clustering_squidpy_broad_taxonomy_metadata_path` | atlas/cache-dependent | Allen `cluster_annotation_term.csv` used to map marker lookup IDs to atlas labels. |
+| `clustering_squidpy_broad_cluster_membership_path` | atlas/cache-dependent | Allen membership metadata used for neuron neurotransmitter split labels. |
+| `clustering_squidpy_broad_reference_cache_dir` | `<outdir>/mapmycells_cache` | Cache searched for matching WHB/WMB taxonomy, markers, and reference H5AD gene-symbol metadata. The Dwight profile points this at its shared cache. |
+| `clustering_squidpy_broad_auto_download_reference` | `true` | Download missing compact WMB marker, taxonomy, membership, and gene metadata into the reference cache. WHB continues to use configured local inputs. |
+| `clustering_squidpy_broad_reference_gene_metadata_paths` | `[]` | Optional reference H5AD files used to bridge panel symbols to species-appropriate Ensembl IDs. |
+| `clustering_squidpy_broad_marker_level` | atlas-dependent | `CCN202210140_SUPC` for WHB or `CCN20230722_CLAS` for WMB. |
 | `clustering_squidpy_broad_min_marker_overlap` | `3` | Minimum query-panel marker overlap required to score an atlas label. |
 | `clustering_squidpy_broad_max_markers_per_label` | `80` | Maximum resolved markers used per atlas label. |
 | `clustering_squidpy_broad_score_margin_threshold` | `0.0` | Minimum difference between best and runner-up atlas scores; lower margins become `Mixed/Unknown`. |
 | `clustering_squidpy_broad_unknown_label` | `Mixed/Unknown` | Label used when no atlas marker set scores confidently. |
+
+### MENDER spatial domains
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `mender_enabled` | `false` | Enable the terminal MENDER stage. |
+| `mender_segmentations` | `proseg_hybrid` | One segmentation, a comma-separated subset, or `all`. |
+| `mender_cell_state_key` | `hierarchical_cluster` | Required categorical cell-state column; ordinary Leiden is never used as a fallback. |
+| `mender_missing_state_policy` | `error` | Reject missing or empty cell states. |
+| `mender_nn_mode` | `radius` | MENDER neighbourhood mode. |
+| `mender_radius_um` | `20.0` | Radius increment in native micrometres for each scale. |
+| `mender_n_scales` | `5` | Number of spatial context scales. |
+| `mender_count_rep` | `s` | Per-scale (`s`) rather than accumulated (`a`) state frequencies. |
+| `mender_include_self` | `false` | Exclude the central cell so domains are driven by surrounding neighbourhood composition. |
+| `mender_clustering_mode` | `resolution` | `resolution` passes a negative Leiden resolution; `target_k` passes a positive domain target. |
+| `mender_leiden_resolution` | `0.8` | Fixed layer-focused resolution, passed to MENDER as `-0.8`. |
+| `mender_target_k` | `null` | Required integer of at least 2 only in target-K mode. |
+| `mender_random_seed` | `666` | MENDER tutorial seed. |
+| `mender_run_umap` | `true` | Generate the context embedding. |
+| `mender_write_spatialdata_table` | `true` | Import `mender_domain` into the derived clustered SpatialData table. |
+| `mender_conda` | `envs/environment.mender.yml` | Old compatible CPU environment used only by compute. |
+| `mender_container` | Site MENDER SIF path | CPU-only image built from `containers/Dockerfile.mender`; override for portable Apptainer runs. |
+| `mender_compute_max_forks` | Dwight: `2` | At 192 GB per compute task, at most 384 GB is reserved concurrently. |
+
+See [MENDER spatial domains](stages/mender.md) for the data contract, restart
+mode, output layout, and CPU container instructions.
 
 ### GASTON spatial domains
 
@@ -429,8 +539,8 @@ The following settings are read only when
 | `gaston_keep_seed_models` | `false` | Publish every seed model instead of only the selected model. |
 | `gaston_keep_checkpoints` | `best` | Published checkpoint policy: `none`, `best`, or `all`. |
 | `gaston_max_genes` | `10000` | Maximum eligible non-control panel genes exported from raw counts. |
-| `gaston_conda` | `environment.gaston.yml` | Pinned GASTON/GLM-PCA environment used outside the base MerXen environment. |
-| `gaston_container` | Dwight site image | CUDA-enabled Apptainer image built from `Dockerfile.gaston`; override for another site. |
+| `gaston_conda` | `envs/environment.gaston.yml` | Pinned GASTON/GLM-PCA environment used outside the base MerXen environment. |
+| `gaston_container` | `$MERXEN_GASTON_CONTAINER` or unset | CUDA-enabled Apptainer image built from `containers/Dockerfile.gaston`; override for another site. |
 
 The Conda environment pins CUDA 11.8 and MKL 2024.0.0 for PyTorch 2.0.1
 binary compatibility. Training tasks validate the shared Torch/GASTON runtime
@@ -466,15 +576,18 @@ contracts.
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `mecr_enabled` | `true` | Run mutually exclusive co-expression rate analysis after QC. May be overridden per samplesheet row. |
-| `mecr_neurons_h5ad_path` | Complete WHB-10Xv3 neuron raw H5AD | Allen Whole Human Brain neuronal expression matrix. |
-| `mecr_nonneurons_h5ad_path` | Complete WHB-10Xv3 non-neuron raw H5AD | Allen Whole Human Brain non-neuronal expression matrix. |
-| `mecr_cell_metadata_path` | WHB-10Xv3 cell metadata CSV | Maps H5AD cell labels to cluster aliases. |
-| `mecr_taxonomy_metadata_path` | WHB taxonomy annotation CSV | Resolves taxonomy node labels. |
-| `mecr_cluster_membership_path` | WHB cluster-membership CSV | Maps cluster aliases to taxonomy nodes. |
-| `mecr_taxonomy_level` | `CCN202210140_SUPC` | WHB taxonomy level used before the existing broad-class collapse. |
+| `mecr_enabled` | human: `true`; mouse: `false` | Run species-matched whole-brain mutually exclusive co-expression rate analysis after QC. Mouse is opt-in because the complete WMB raw reference is about 151 GB. |
+| `mecr_reference_h5ad_paths` | `[]` | Optional complete list of raw reference H5AD shards. WMB auto-download populates all 10Xv2, 10Xv3, and 10X Multiome shards. |
+| `mecr_neurons_h5ad_path` | Complete WHB-10Xv3 neuron raw H5AD | Legacy WHB neuronal input used when the generic list is empty. |
+| `mecr_nonneurons_h5ad_path` | Complete WHB-10Xv3 non-neuron raw H5AD | Legacy WHB non-neuronal input used when the generic list is empty. |
+| `mecr_cell_metadata_path` | Atlas-dependent | Maps raw H5AD cell labels to cluster aliases. |
+| `mecr_taxonomy_metadata_path` | Atlas-dependent | Resolves taxonomy node labels. |
+| `mecr_cluster_membership_path` | Atlas-dependent | Maps cluster aliases to taxonomy nodes. |
+| `mecr_reference_cache_dir` | `<outdir>/mapmycells_cache` | Durable Allen reference cache. The Dwight profile uses `/media/mathieubo/SSD1/MerXen/mapmycells`. |
+| `mecr_auto_download_reference` | `true` | For mouse, download or reuse the complete WMB raw reference and metadata. Downloads are resumable and use four concurrent transfers. |
+| `mecr_taxonomy_level` | atlas-dependent | `CCN202210140_SUPC` for WHB or `CCN20230722_CLAS` for WMB. |
 | `mecr_gene_symbol_column` | `gene_symbol` | Reference `var` column containing gene symbols. |
-| `mecr_target_broad_classes` | Seven core classes | Neurons, oligodendrocytes, oligodendrocyte precursors, astrocytes, microglia, fibroblasts, and vascular cells. |
+| `mecr_target_broad_classes` | atlas-dependent | Seven WHB core classes or six WMB classes: neurons, Astro-Epen, OPC-Oligo, OEC, vascular, and immune/microglia. |
 | `mecr_marker_min_target_fraction` | `0.25` | A marker must be detected in strictly more than this fraction of its target class. |
 | `mecr_marker_max_other_fraction` | `0.01` | A marker must be detected in strictly less than this fraction of the remaining retained cells. |
 | `mecr_normalize_target_sum` | `10000.0` | Full-library per-cell normalization target before `log1p` and Wilcoxon. |
@@ -495,20 +608,24 @@ runs once, and is shared across all samples and segmentation branches. See
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `mapmycells_reference_mode` | `both` | Which references to run: `whole_brain`, `region`, or `both`. |
-| `mapmycells_marker_lookup_path` | WHB marker JSON path | JSON marker lookup file for the whole-brain reference. Required when `reference_mode` includes `whole_brain`. |
-| `mapmycells_precomputed_stats_path` | WHB stats H5 path | HDF5 precomputed stats file for the whole-brain reference. Required when `reference_mode` includes `whole_brain`. |
-| `mapmycells_region_name` | `frontal_a44_a45_a46_a32_acc` | Short safe name used in region output directories and annotation prefixes. |
-| `mapmycells_region_labels` | `["Human A44-A45", "Human A46", "Human A32", "Human ACC"]` | Allen WHB `region_of_interest_label` values used to build the strict region reference. May be a Nextflow list, JSON list, or comma-separated string. |
-| `mapmycells_region_cache_dir` | Dwight: `/media/mathieubo/SSD1/MerXen/mapmycells` | Durable cache for Allen WHB downloads and generated region reference files. Other host profiles must provide their own location. |
+| `mapmycells_reference_mode` | species-dependent | Human: `both`; mouse: `whole_brain`. May be overridden with `whole_brain`, `region`, or `both`. |
+| `mapmycells_reference_atlas` | species-dependent | Human: Whole Human Brain (`whb`); mouse: Yao 2023 Whole Mouse Brain (`wmb`). |
+| `mapmycells_query_species` | `species` | Query species. Human-to-WMB mapping enables Allen ortholog mapping; mouse queries require WMB. |
+| `mapmycells_auto_download_references` | `true` | Download missing published stats, markers, and the WMB gene-mapper DB into the durable cache. |
+| `mapmycells_marker_lookup_path` | `null` | Optional explicit marker JSON. When unset, download the atlas-appropriate Allen asset. |
+| `mapmycells_precomputed_stats_path` | `null` | Optional explicit stats H5. When unset, download the atlas-appropriate Allen asset. |
+| `mapmycells_gene_mapping_db_path` | `null` | Optional `mmc_gene_mapper` SQLite DB. Human-to-WMB runs download it when automatic downloads are enabled. |
+| `mapmycells_region_name` | species-dependent | Human: `frontal_a44_a45_a46_a32_acc`; mouse: `region`. Short safe name used in region output directories and annotation prefixes. |
+| `mapmycells_region_labels` | species-dependent | Human defaults to the four frontal WHB labels. Mouse defaults empty and requires explicit WMB `region_of_interest_acronym` values for region mode. |
+| `mapmycells_region_cache_dir` | `<outdir>/mapmycells_cache` | Durable cache for Allen WHB/WMB downloads, the gene mapper, and generated region reference files. The Dwight profile overrides this with `/media/mathieubo/SSD1/MerXen/mapmycells`. |
 | `mapmycells_region_min_cells_per_leaf` | `10` | Drop region taxonomy leaf aliases with fewer cells than this before precomputing stats. |
-| `mapmycells_region_force_rebuild` | `false` | Rebuild the generated region reference even if matching cached files exist. |
+| `mapmycells_region_force_rebuild` | `false` | Build a new region reference directory even if a matching cached build exists. Earlier builds are never deleted; see [MapMyCells region reference cache](stages/mapmycells.md#region-reference-cache). |
 | `mapmycells_region_query_markers_n_per_utility` | `10` | Marker count target passed to Allen's `QueryMarkerRunner` for the region reference. |
 | `mapmycells_drop_level` | `null` | Optional taxonomy level to drop before mapping. |
 | `mapmycells_normalization` | `raw` | Query normalization passed to MapMyCells. |
 | `mapmycells_bootstrap_factor` | `0.9` | Marker downsampling factor for bootstrapping; default keeps the historical spatial-data setting. |
 | `mapmycells_bootstrap_iteration` | `100` | Number of bootstrap iterations. |
-| `mapmycells_n_processors` | Dwight: `8` | Number of worker processes passed to MapMyCells. |
+| `mapmycells_n_processors` | `4` (Dwight: `8`) | Number of worker processes passed to MapMyCells and to the region reference builders. |
 | `mapmycells_chunk_size` | `null` | Optional cells-per-worker chunk size. |
 | `mapmycells_rng_seed` | `null` | Optional mapper random seed. |
 | `mapmycells_max_gb` | `null` | Optional memory budget for H5AD conversion. |
@@ -518,8 +635,9 @@ runs once, and is shared across all samples and segmentation branches. See
 | `mapmycells_verbose_csv` | `false` | Include verbose confidence columns when supported by the mapper. |
 | `mapmycells_plots_only` | `false` | Reuse existing mapper CSV/extended JSON outputs in published `mapmycells_out/` and regenerate only the annotated H5AD and plots. |
 | `mapmycells_query_layer` | `counts` | AnnData layer copied into `X` before mapping. Use `null` to keep current `X`. |
-| `mapmycells_gene_id_column` | `null` | Optional `var` column used as gene identifiers for the query H5AD. |
+| `mapmycells_gene_id_column` | `ensembl_id` | `var` column used as query gene identifiers. Human `ENSG` and mouse `ENSMUSG` IDs are preserved; missing mouse IDs can be recovered from WMB metadata or the gene-mapper DB. |
 | `mapmycells_obs_id_column` | `null` | Optional `obs` column used as cell identifiers for the query H5AD. |
+| `annotation_gene_id_fallback_csv` | `null`; Dwight: WHB `WHB-10Xv3-Nonneurons-raw.h5ad` on SSD1 | Local symbol-to-Ensembl table (Allen `gene.csv` layout, or a reference `.h5ad` whose `var` index holds the IDs) used only when preparing the MapMyCells query, for features still lacking an ID after the `var` column and the cached reference metadata. Applied only when `mapmycells_gene_id_column` is `ensembl_id`, and only IDs of the query species are used (a table with none, such as the human Dwight default in a mouse run, is skipped and recorded as `gene_id_fallback_ignored`); nothing is downloaded. Preflight checks that the file exists. Recovered and unresolved genes are listed in `<sample_id>_mapmycells_query_gene_ids.json` and the pair manifest. Legacy clustering annotation is unaffected. Set to `null` to disable. |
 
 ### Resource limits
 
@@ -560,6 +678,7 @@ for every task. Portable per-process CPU/memory requests remain in
 | `VIEWER_CACHE` | 8 | 60 GB | `viewer_cache_max_forks` = 9 |
 | `QC` | 4 | 24 GB | unbounded |
 | `ALIGN` | 12 | 100 GB | `alignment_max_forks` = 1 |
+| `MATERIALIZE_ALIGNMENT` | 12 | 120 GB | `alignment_materialization_max_forks` = 1 |
 | `ALIGN_QC` | 4 | 32 GB | unbounded |
 | `COMPARE` | 4 | 32 GB | unbounded |
 | `VISUALIZE` | 4 | 32 GB | unbounded |
@@ -577,7 +696,9 @@ On Dwight, `CELLPOSE_SEGMENT`, `ALIGN` when `alignment_device != "cpu"`, and
 `CLUSTERING_SQUIDPY` when `clustering_squidpy_use_gpu=true`, and
 `GASTON_TRAIN` when `gaston_use_gpu=true` also share the
 host-wide `gpu_process_lock_file`. The lock is held for the full process shell,
-then released automatically when the task exits.
+then released automatically when the task exits. The file is created as a
+world-readable empty file and opened read-only before calling `flock`, so a
+lock created by one workstation user remains usable by other users.
 
 A future HPC profile should provide its own executor, capacity/concurrency,
 software paths, reference paths, worker counts, and GPU policy. The portable

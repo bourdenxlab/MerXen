@@ -6,13 +6,14 @@ include { CELLPOSE_NUCLEI_SEGMENT; SEGMENT } from "./modules/segmentation"
 include { ENRICH } from "./modules/enrichment"
 include { VIEWER_CACHE } from "./modules/viewer_cache"
 include { MASK_IMAGE_QUANTIFICATION } from "./modules/mask_image_quantification"
+include { REGISTER_IMAGES } from "./modules/register_images"
 include { COMPUTE_CORTICAL_DEPTH } from "./modules/compute_cortical_depth"
 include {
     DISTANCE_FROM_OBJECT_ANNOTATE;
     DISTANCE_FROM_OBJECT_COHORT
 } from "./modules/distance_from_object"
 include { VALIDATE_ANALYSIS_LAYER; QC } from "./modules/qc"
-include { ALIGN; ALIGN_QC } from "./modules/alignment"
+include { ALIGN; MATERIALIZE_ALIGNMENT; ALIGN_QC } from "./modules/alignment"
 include { COMPARE } from "./modules/comparison"
 include { VISUALIZE } from "./modules/visualization"
 include { SPATIAL_GENE_ANALYSIS } from "./modules/spatial_gene_analysis"
@@ -23,6 +24,12 @@ include {
     CLUSTERING_SQUIDPY_FINALIZE
 } from "./modules/clustering_squidpy"
 include { MAPMYCELLS } from "./modules/mapmycells"
+include {
+    MENDER_PREPARE;
+    MENDER_COMPUTE;
+    MENDER_FINALIZE;
+    MENDER_IMPORT
+} from "./modules/mender"
 include {
     GASTON_PREPARE;
     GASTON_GLM_PCA;
@@ -103,6 +110,43 @@ def normalizeAnalysisMode(rawValue) {
     return aliases[key]
 }
 
+def normalizeSpecies(rawValue) {
+    def raw = rawValue == null ? "human" : rawValue.toString().trim().toLowerCase()
+    def aliases = [
+        "human": "human",
+        "homo_sapiens": "human",
+        "homo sapiens": "human",
+        "mouse": "mouse",
+        "mus_musculus": "mouse",
+        "mus musculus": "mouse",
+    ]
+    if (!aliases.containsKey(raw)) {
+        throw new IllegalArgumentException(
+            "Unknown species '${rawValue}'. Valid values: human, mouse"
+        )
+    }
+    return aliases[raw]
+}
+
+def effectiveClusteringHierarchicalEnabled(params) {
+    return boolOrDefault(
+        params.clustering_squidpy_hierarchical_enabled,
+        true,
+        "clustering_squidpy_hierarchical_enabled",
+    )
+}
+
+def effectiveClusteringReferenceAtlas(params) {
+    if (params.clustering_squidpy_broad_reference_atlas != null &&
+        params.clustering_squidpy_broad_reference_atlas.toString().trim()) {
+        return params.clustering_squidpy_broad_reference_atlas
+            .toString()
+            .trim()
+            .toLowerCase()
+    }
+    return normalizeSpecies(params.species) == "mouse" ? "wmb" : "whb"
+}
+
 def activePlatformsForMode(analysisMode) {
     if (analysisMode == "paired") {
         return ["MERSCOPE", "XENIUM"]
@@ -117,9 +161,9 @@ def activePlatformsForMode(analysisMode) {
 }
 
 def normalizeAnalysisSegmentation(rawValue) {
-    def raw = rawValue == null ? "both" : rawValue.toString().trim()
+    def raw = rawValue == null ? "all" : rawValue.toString().trim()
     if (!raw) {
-        raw = "both"
+        raw = "all"
     }
     def aliases = [
         "both": ["reseg", "original_seg"],
@@ -165,7 +209,59 @@ def normalizeAnalysisSegmentation(rawValue) {
                 }
             }
         }
-    return selected ? selected : ["reseg", "original_seg"]
+    return selected ? selected : [
+        "reseg",
+        "original_seg",
+        "proseg_mask",
+        "proseg_hybrid",
+    ]
+}
+
+def normalizeMenderSegmentations(rawValue) {
+    def values = rawValue instanceof Collection
+        ? rawValue
+        : rawValue.toString().split(",")
+    def aliases = [
+        "all": ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"],
+        "reseg": ["reseg"],
+        "resegmented": ["reseg"],
+        "proseg": ["reseg"],
+        "original": ["original_seg"],
+        "original_seg": ["original_seg"],
+        "instrument": ["original_seg"],
+        "proseg_mask": ["proseg_mask"],
+        "cellpose": ["proseg_mask"],
+        "mask": ["proseg_mask"],
+        "proseg_hybrid": ["proseg_hybrid"],
+        "hybrid": ["proseg_hybrid"],
+    ]
+    def selected = []
+    values.each { value ->
+        def key = value
+            .toString()
+            .trim()
+            .toLowerCase()
+            .replaceAll(/[^a-z0-9]+/, "_")
+            .replaceAll(/^_+|_+$/, "")
+        if (!key) {
+            return
+        }
+        if (!aliases.containsKey(key)) {
+            throw new IllegalArgumentException(
+                "Unknown mender segmentation '${value}'. Valid values: " +
+                "all, reseg, original_seg, proseg_mask, proseg_hybrid"
+            )
+        }
+        aliases[key].each { segmentation ->
+            if (!selected.contains(segmentation)) {
+                selected << segmentation
+            }
+        }
+    }
+    if (!selected) {
+        throw new IllegalArgumentException("mender_segmentations must not be empty")
+    }
+    return selected
 }
 
 def normalizeGastonSegmentations(rawValue) {
@@ -275,6 +371,18 @@ def buildConfigForPlatform(row, pairId, platform) {
     def input = requirePlatformInput(row, pairId, platform)
     if (platform == "MERSCOPE") {
         def zRange = parseRange(row.merscope_z_range, 0, 6)
+        def merscopeOptions = [
+            z_layers: (zRange[0]..zRange[1]).collect { layer -> layer as int },
+        ]
+        // Only set when requested, so default build configs (and their task
+        // hashes) are unchanged.
+        if (boolOrDefault(
+            params.merscope_allow_transform_override_mismatch,
+            false,
+            "merscope_allow_transform_override_mismatch"
+        )) {
+            merscopeOptions.allow_transform_override_mismatch = true
+        }
         return [
             dataset_name: "${pairId}_MERSCOPE",
             platform: "MERSCOPE",
@@ -282,9 +390,7 @@ def buildConfigForPlatform(row, pairId, platform) {
             output_path: "spatialdata_out/source_spatialdata.zarr",
             persistent_output_path: input.spatialdataPath ?: null,
             merscope_transform_path: chooseField(row, ["merscope_transform_path"]) ?: null,
-            merscope: [
-                z_layers: (zRange[0]..zRange[1]).collect { layer -> layer as int },
-            ],
+            merscope: merscopeOptions,
             xenium: [:],
         ]
     }
@@ -306,8 +412,10 @@ def buildConfigForPlatform(row, pairId, platform) {
 }
 
 def segmentMetaForPlatform(row, platform, params) {
+    def modelSettings = CellposeSettings.settings(row, platform, params)
+    def extra = modelSettings ? [cellpose_settings: modelSettings] : [:]
     if (platform == "MERSCOPE") {
-        return [
+        return extra + [
             channels: parseChannels(row.merscope_channels, ["DAPI", "PolyT"]),
             image_prefix: chooseField(row, ["merscope_image_prefix"]) ?: null,
             z_range: parseRange(row.merscope_z_range, 0, 6),
@@ -322,7 +430,7 @@ def segmentMetaForPlatform(row, platform, params) {
     }
 
     if (platform == "XENIUM") {
-        return [
+        return extra + [
             channels: parseChannels(row.xenium_channels, ["DAPI", "18S"]),
             image_prefix: null,
             z_range: null,
@@ -389,8 +497,13 @@ def analysisLayerKeys(platform, segmentation) {
     throw new IllegalArgumentException("Unknown analysis segmentation: ${segmentation}")
 }
 
-def clusteredAnalysisTableKey(platform, segmentation) {
-    def sourceTableKey = analysisLayerKeys(platform, segmentation).table_key
+def clusteredSpatialdataTableKey(sourceTableKey, segmentation) {
+    if (segmentation == "reseg" || sourceTableKey == "table_MOSAIK_proseg") {
+        return "table_MOSAIK_proseg_clustering_squidpy"
+    }
+    if (segmentation == "original_seg" || sourceTableKey == "table_original") {
+        return "table_original_clustering_squidpy"
+    }
     return "${sourceTableKey}_clustering_squidpy"
 }
 
@@ -411,7 +524,9 @@ def gastonConfigJson(
         clustered_h5ad_path: "clustered_input.h5ad",
         latest_zarr_path: latestZarr.toString(),
         source_table_key: layerKeys.table_key,
-        clustered_table_key: clusteredAnalysisTableKey(platform, segmentation),
+        clustered_table_key: clusteredSpatialdataTableKey(
+            layerKeys.table_key, segmentation,
+        ),
         shape_key: layerKeys.shape_key,
         output_dir: "gaston_out",
         use_gpu: gaston.use_gpu,
@@ -626,6 +741,7 @@ def corticalDepthConfigForPlatform(
         annotation_path: optionalNormalizedPathString(
             corticalDepthAnnotationPath(row, platform, "annotation")
         ),
+        boundary_frame: corticalDepthBoundaryFrame(row, platform, params),
         coordinate_unit_um: params.cortical_depth_coordinate_unit_um,
         raster_resolution_um: params.cortical_depth_raster_resolution_um,
         raster_padding_um: params.cortical_depth_raster_padding_um,
@@ -712,6 +828,10 @@ def normalizeStage(rawValue, paramName) {
         "nuclei_cellpose": "segment_nuclei",
         "enrich": "enrich",
         "enrichment": "enrich",
+        "register_images": "register_images",
+        "register_image": "register_images",
+        "image_registration": "register_images",
+        "registered_images": "register_images",
         "build_viewer_caches": "build_viewer_caches",
         "viewer_caches": "build_viewer_caches",
         "viewer_cache": "build_viewer_caches",
@@ -753,6 +873,8 @@ def normalizeStage(rawValue, paramName) {
         "celltype_mapping": "mapmycells",
         "map_my_cells": "mapmycells",
         "mapmycells": "mapmycells",
+        "mender": "mender",
+        "spatial_domains": "mender",
         "gaston": "gaston",
         "topography": "gaston",
         "topographic_domains": "gaston",
@@ -760,11 +882,11 @@ def normalizeStage(rawValue, paramName) {
     if (!aliases.containsKey(key)) {
         throw new IllegalArgumentException(
             "Unknown ${paramName} '${raw}'. Valid stages: " +
-            "build_spatialdata, segment_nuclei, segment, enrich, " +
+            "build_spatialdata, segment_nuclei, segment, enrich, register_images, " +
             "build_viewer_caches, mask_image_quantification, " +
             "compute_cortical_depth, distance_from_object, qc, align, align_qc, " +
             "compare, visualize, spatial_gene_analysis, mecr, " +
-            "clustering_squidpy, mapmycells, gaston"
+            "clustering_squidpy, mender, mapmycells, gaston"
         )
     }
     return aliases[key]
@@ -779,9 +901,16 @@ def activeStageOrder(
     distanceFromObjectEnabled,
     viewerCacheEnabled,
     mecrEnabled,
-    gastonEnabled
+    menderEnabled,
+    registerImagesEnabled,
+    gastonEnabled = false
 ) {
     def stages = ["build_spatialdata", "segment_nuclei", "segment", "enrich"]
+    // Registered images join the zarr before the viewer cache and quantification
+    // so both see the new channels.
+    if (registerImagesEnabled) {
+        stages += ["register_images"]
+    }
     if (viewerCacheEnabled) {
         stages += ["build_viewer_caches"]
     }
@@ -813,6 +942,9 @@ def activeStageOrder(
         stages += ["distance_from_object"]
     }
     stages += ["mapmycells"]
+    if (menderEnabled) {
+        stages += ["mender"]
+    }
     if (gastonEnabled) {
         stages += ["gaston"]
     }
@@ -824,7 +956,8 @@ def validateStage(
     stages,
     paramName,
     alignmentEnabled,
-    spatialGeneAnalysisEnabled
+    spatialGeneAnalysisEnabled,
+    menderEnabled
 ) {
     if (!stages.contains(stage)) {
         def hint = ""
@@ -842,6 +975,12 @@ def validateStage(
         }
         if (stage == "spatial_gene_analysis" && !spatialGeneAnalysisEnabled) {
             hint = " Pass --spatial_gene_analysis_enabled true to use spatial gene analysis."
+        }
+        if (stage == "mender" && !menderEnabled) {
+            hint = " Pass --mender_enabled true to use MENDER."
+        }
+        if (stage == "register_images") {
+            hint = " Set xenium_registered_images_csv for this Xenium row to register images."
         }
         if (stage == "gaston") {
             hint = " Pass --gaston_enabled true to use GASTON."
@@ -862,7 +1001,7 @@ def stageInRange(stage, startStage, stopStage, stages) {
 }
 
 def currentPairTerminalStage(settings) {
-    if (settings.gaston_bypass_terminal_gate) {
+    if (settings.gaston_bypass_terminal_gate || settings.mender_bypass_terminal_gate) {
         return null
     }
     if (settings.run_mapmycells) {
@@ -882,17 +1021,17 @@ def currentPairTerminalStage(settings) {
 }
 
 def currentPairTerminalExpectedCount(settings, terminalStage) {
-    def extraClustering = settings.required_clustering_segmentations.findAll {
-        segmentation -> !settings.analysis_segmentations.contains(segmentation)
-    }
     if (terminalStage == "mapmycells") {
+        def extraClustering = settings.required_clustering_segmentations.findAll {
+            segmentation -> !settings.analysis_segmentations.contains(segmentation)
+        }
         return settings.analysis_segmentations.size() + extraClustering.size()
     }
     if (terminalStage in [
         "distance_from_object_annotation",
         "compute_cortical_depth",
     ]) {
-        return settings.active_platforms.size() + extraClustering.size()
+        return settings.active_platforms.size()
     }
     if (terminalStage == "clustering_squidpy") {
         return settings.required_clustering_segmentations.size()
@@ -935,62 +1074,110 @@ def appendPreflightFileCheck(errors, rawPath, label) {
     }
 }
 
-def findCachedTaxonomyMetadataPath(rawCacheDir) {
+def findCachedAtlasFilePath(rawCacheDir, referenceAtlas, filename) {
     if (isBlankPath(rawCacheDir)) {
         return null
     }
     def root = normalizedPath(rawCacheDir)
-    def taxonomyRoot = root.resolve("abc_whb/metadata/WHB-taxonomy").toFile()
-    if (!taxonomyRoot.isDirectory()) {
+    if (!root.toFile().isDirectory()) {
         return null
     }
+    def taxonomyDir = referenceAtlas == "wmb" ? "WMB-taxonomy" : "WHB-taxonomy"
     def matches = []
-    taxonomyRoot.eachDir { versionDir ->
-        def candidate = versionDir.toPath().resolve("cluster_annotation_term.csv")
-        if (candidate.toFile().exists()) {
-            matches << candidate
+    root.toFile().eachFileRecurse { candidate ->
+        if (candidate.isFile() && candidate.name == filename) {
+            if (filename.endsWith(".json") || candidate.toPath().any { part ->
+                part.toString() == taxonomyDir
+            }) {
+                matches << candidate.toPath()
+            }
         }
     }
     return matches ? matches.sort { path -> path.toString() }[-1] : null
 }
 
 def appendClusteringSquidpyPreflightChecks(errors, settings, params) {
-    def hierarchicalEnabled = boolOrDefault(
-        params.clustering_squidpy_hierarchical_enabled,
-        true,
-        "clustering_squidpy_hierarchical_enabled",
-    )
+    def hierarchicalEnabled = effectiveClusteringHierarchicalEnabled(params)
     if (!(settings.run_clustering_squidpy && hierarchicalEnabled)) {
         return
     }
-    appendPreflightFileCheck(
-        errors,
-        params.clustering_squidpy_broad_marker_lookup_path,
-        "CLUSTERING_SQUIDPY broad marker lookup",
+    def referenceAtlas = effectiveClusteringReferenceAtlas(params)
+    def expectedAtlas = settings.species == "mouse" ? "wmb" : "whb"
+    if (referenceAtlas != expectedAtlas) {
+        errors << (
+            "CLUSTERING_SQUIDPY species ${settings.species} requires " +
+            "--clustering_squidpy_broad_reference_atlas ${expectedAtlas}"
+        )
+        return
+    }
+    def markerLookupPath = params.clustering_squidpy_broad_marker_lookup_path ?:
+        (referenceAtlas == "whb" ? params.clustering_squidpy_whb_marker_lookup_path : null)
+    def taxonomyMetadataPath = params.clustering_squidpy_broad_taxonomy_metadata_path ?:
+        (referenceAtlas == "whb" ? params.clustering_squidpy_whb_taxonomy_metadata_path : null)
+    def clusterMembershipPath = params.clustering_squidpy_broad_cluster_membership_path ?:
+        (referenceAtlas == "whb" ? params.clustering_squidpy_whb_cluster_membership_path : null)
+    def autoDownloadReference = boolOrDefault(
+        params.clustering_squidpy_broad_auto_download_reference,
+        true,
+        "clustering_squidpy_broad_auto_download_reference",
     )
-    if (isBlankPath(params.clustering_squidpy_broad_taxonomy_metadata_path)) {
-        def cachedTaxonomy = findCachedTaxonomyMetadataPath(
-            params.clustering_squidpy_broad_reference_cache_dir,
+    def referenceCacheDir = isBlankPath(
+        params.clustering_squidpy_broad_reference_cache_dir
+    ) ? normalizedPath(params.outdir).resolve("mapmycells_cache") :
+        params.clustering_squidpy_broad_reference_cache_dir
+    if (isBlankPath(markerLookupPath) &&
+        !(referenceAtlas == "wmb" && autoDownloadReference)) {
+        def markerFilename = referenceAtlas == "wmb"
+            ? "mouse_markers_230821.json"
+            : "query_markers.n10.20240221800.json"
+        def cachedMarker = findCachedAtlasFilePath(
+            referenceCacheDir,
+            referenceAtlas,
+            markerFilename,
+        )
+        if (cachedMarker == null) {
+            errors << (
+                "Missing CLUSTERING_SQUIDPY ${referenceAtlas.toUpperCase()} " +
+                "broad marker lookup: set " +
+                "--clustering_squidpy_broad_marker_lookup_path or populate " +
+                "${referenceCacheDir} with ${markerFilename}"
+            )
+        }
+    } else if (!isBlankPath(markerLookupPath)) {
+        appendPreflightFileCheck(
+            errors,
+            markerLookupPath,
+            "CLUSTERING_SQUIDPY broad marker lookup",
+        )
+    }
+    if (isBlankPath(taxonomyMetadataPath) &&
+        !(referenceAtlas == "wmb" && autoDownloadReference)) {
+        def cachedTaxonomy = findCachedAtlasFilePath(
+            referenceCacheDir,
+            referenceAtlas,
+            "cluster_annotation_term.csv",
         )
         if (cachedTaxonomy == null) {
             errors << (
-                "Missing CLUSTERING_SQUIDPY broad taxonomy metadata: " +
+                "Missing CLUSTERING_SQUIDPY ${referenceAtlas.toUpperCase()} " +
+                "broad taxonomy metadata: " +
                 "set --clustering_squidpy_broad_taxonomy_metadata_path " +
                 "or provide a cache containing " +
-                "abc_whb/metadata/WHB-taxonomy/*/cluster_annotation_term.csv"
+                "${referenceAtlas == 'wmb' ? 'WMB-taxonomy' : 'WHB-taxonomy'}" +
+                "/**/cluster_annotation_term.csv"
             )
         }
-    } else {
+    } else if (!isBlankPath(taxonomyMetadataPath)) {
         appendPreflightFileCheck(
             errors,
-            params.clustering_squidpy_broad_taxonomy_metadata_path,
+            taxonomyMetadataPath,
             "CLUSTERING_SQUIDPY broad taxonomy metadata",
         )
     }
-    if (!isBlankPath(params.clustering_squidpy_broad_cluster_membership_path)) {
+    if (!isBlankPath(clusterMembershipPath)) {
         appendPreflightFileCheck(
             errors,
-            params.clustering_squidpy_broad_cluster_membership_path,
+            clusterMembershipPath,
             "CLUSTERING_SQUIDPY broad cluster membership metadata",
         )
     }
@@ -1008,18 +1195,48 @@ def appendMapMyCellsPreflightChecks(errors, settings, params) {
         return
     }
     def referenceMode = params.mapmycells_reference_mode == null
-        ? "both"
+        ? (settings.species == "mouse" ? "whole_brain" : "both")
         : params.mapmycells_reference_mode.toString().trim().toLowerCase()
+    def referenceAtlas = params.mapmycells_reference_atlas == null
+        ? (settings.species == "mouse" ? "wmb" : "whb")
+        : params.mapmycells_reference_atlas.toString().trim().toLowerCase()
+    def markerLookupPath = params.mapmycells_marker_lookup_path ?:
+        (referenceAtlas == "whb" ? params.mapmycells_whb_marker_lookup_path : null)
+    def precomputedStatsPath = params.mapmycells_precomputed_stats_path ?:
+        (referenceAtlas == "whb" ? params.mapmycells_whb_precomputed_stats_path : null)
+    def autoDownloadReferences = params.mapmycells_auto_download_references == null
+        ? true
+        : params.mapmycells_auto_download_references.toString().trim().toLowerCase() == "true"
     if (referenceMode in ["whole_brain", "both"]) {
+        if (!autoDownloadReferences || markerLookupPath) {
+            appendPreflightFileCheck(
+                errors,
+                markerLookupPath,
+                "MAPMYCELLS whole-brain marker lookup",
+            )
+        }
+        if (!autoDownloadReferences || precomputedStatsPath) {
+            appendPreflightFileCheck(
+                errors,
+                precomputedStatsPath,
+                "MAPMYCELLS whole-brain precomputed stats",
+            )
+        }
+    }
+    if (params.mapmycells_gene_mapping_db_path) {
         appendPreflightFileCheck(
             errors,
-            params.mapmycells_marker_lookup_path,
-            "MAPMYCELLS whole-brain marker lookup",
+            params.mapmycells_gene_mapping_db_path,
+            "MAPMYCELLS gene mapping database",
         )
+    }
+    def geneIdFallbackPath = params.annotation_gene_id_fallback_csv
+    if (!isBlankPath(geneIdFallbackPath) &&
+        geneIdFallbackPath.toString().trim().toLowerCase() != "false") {
         appendPreflightFileCheck(
             errors,
-            params.mapmycells_precomputed_stats_path,
-            "MAPMYCELLS whole-brain precomputed stats",
+            geneIdFallbackPath,
+            "MAPMYCELLS gene-ID fallback table (annotation_gene_id_fallback_csv)",
         )
     }
 }
@@ -1087,6 +1304,33 @@ def corticalDepthAnnotationPath(row, platform, role) {
     return chooseField(row, candidatesByRole[role] ?: [])
 }
 
+// Frame the platform's depth boundary GeoJSONs are drawn in: "native" (the
+// section's own dataset microns, the default and how the annotations are
+// drawn) or "aligned" (the pair's fixed-section frame). A row-level
+// <platform>_cortical_depth_boundary_frame / cortical_depth_boundary_frame
+// value overrides --cortical_depth_boundary_frame.
+def corticalDepthBoundaryFrame(row, platform, params) {
+    def prefix = platform.toString().toLowerCase()
+    def raw = chooseField(row, [
+        "${prefix}_cortical_depth_boundary_frame",
+        "cortical_depth_boundary_frame",
+    ])
+    if (raw == null) {
+        raw = params.cortical_depth_boundary_frame
+    }
+    def frame = raw == null ? "" : raw.toString().trim().toLowerCase()
+    return frame ?: "native"
+}
+
+def alignmentTissueAnnotationPath(row, platform) {
+    def prefix = platform.toString().toLowerCase()
+    return chooseField(row, [
+        "${prefix}_cortical_depth_annotation_geojson",
+        "${prefix}_cortical_depth_annotations_geojson",
+        "${prefix}_cortical_depth_annotation_path",
+    ])
+}
+
 def distanceFromObjectAnnotationPath(row, platform) {
     def prefix = platform.toString().toLowerCase()
     return chooseField(row, [
@@ -1107,6 +1351,13 @@ def appendCorticalDepthPreflightChecks(errors, row, settings, _params) {
     }
     settings.active_platforms.each { platform ->
         def labelPrefix = "COMPUTE_CORTICAL_DEPTH ${settings.pair_id}:${platform}"
+        def boundaryFrame = corticalDepthBoundaryFrame(row, platform, _params)
+        if (!(boundaryFrame in ["native", "aligned"])) {
+            errors << (
+                "${labelPrefix} cortical_depth_boundary_frame must be " +
+                "'native' or 'aligned', got '${boundaryFrame}'"
+            )
+        }
         def annotationPath = corticalDepthAnnotationPath(row, platform, "annotation")
         if (!isBlankPath(annotationPath)) {
             appendPreflightFileCheck(
@@ -1131,6 +1382,23 @@ def appendCorticalDepthPreflightChecks(errors, row, settings, _params) {
                 )
             }
         }
+    }
+}
+
+def appendAlignmentAnnotationPreflightChecks(errors, row, settings, params) {
+    if (
+        !settings.run_align ||
+        params.alignment_backend.toString().trim().toLowerCase() != "valis"
+    ) {
+        return
+    }
+    ["MERSCOPE", "XENIUM"].each { platform ->
+        appendPreflightFileCheck(
+            errors,
+            alignmentTissueAnnotationPath(row, platform),
+            "ALIGN ${settings.pair_id}:${platform} combined pia/tissue-edge " +
+                "annotation GeoJSON",
+        )
     }
 }
 
@@ -1192,14 +1460,198 @@ def appendMecrPreflightChecks(errors, settings, params) {
     if (!settings.run_mecr) {
         return
     }
+    def referenceAtlas = settings.species == "mouse" ? "wmb" : "whb"
+    def autoDownloadReference = boolOrDefault(
+        params.mecr_auto_download_reference,
+        true,
+        "mecr_auto_download_reference",
+    )
+    def referenceH5adPaths = normalizeOptionalStringList(
+        params.mecr_reference_h5ad_paths
+    ) ?: []
+    def neuronsPath = params.mecr_neurons_h5ad_path ?:
+        (referenceAtlas == "whb" ? params.mecr_whb_neurons_h5ad_path : null)
+    def nonneuronsPath = params.mecr_nonneurons_h5ad_path ?:
+        (referenceAtlas == "whb" ? params.mecr_whb_nonneurons_h5ad_path : null)
+    def cellMetadataPath = params.mecr_cell_metadata_path ?:
+        (referenceAtlas == "whb" ? params.mecr_whb_cell_metadata_path : null)
+    def taxonomyMetadataPath = params.mecr_taxonomy_metadata_path ?:
+        (referenceAtlas == "whb" ? params.mecr_whb_taxonomy_metadata_path : null)
+    def clusterMembershipPath = params.mecr_cluster_membership_path ?:
+        (referenceAtlas == "whb" ? params.mecr_whb_cluster_membership_path : null)
+    if (referenceAtlas == "wmb" && autoDownloadReference) {
+        referenceH5adPaths.eachWithIndex { rawPath, index ->
+            appendPreflightFileCheck(
+                errors,
+                rawPath,
+                "MECR WMB raw H5AD ${index + 1}",
+            )
+        }
+        [
+            [cellMetadataPath, "WMB cell metadata"],
+            [taxonomyMetadataPath, "WMB taxonomy metadata"],
+            [clusterMembershipPath, "WMB cluster membership metadata"],
+        ].each { rawPath, label ->
+            if (!isBlankPath(rawPath)) {
+                appendPreflightFileCheck(errors, rawPath, "MECR ${label}")
+            }
+        }
+        return
+    }
+    referenceH5adPaths.eachWithIndex { rawPath, index ->
+        appendPreflightFileCheck(
+            errors,
+            rawPath,
+            "MECR ${referenceAtlas.toUpperCase()} raw H5AD ${index + 1}",
+        )
+    }
+    if (!referenceH5adPaths) {
+        [
+            [neuronsPath, "${referenceAtlas.toUpperCase()} neuron raw H5AD"],
+            [nonneuronsPath, "${referenceAtlas.toUpperCase()} non-neuron raw H5AD"],
+        ].each { rawPath, label ->
+            appendPreflightFileCheck(errors, rawPath, "MECR ${label}")
+        }
+    }
     [
-        [params.mecr_neurons_h5ad_path, "WHB neuron raw H5AD"],
-        [params.mecr_nonneurons_h5ad_path, "WHB non-neuron raw H5AD"],
-        [params.mecr_cell_metadata_path, "WHB cell metadata"],
-        [params.mecr_taxonomy_metadata_path, "WHB taxonomy metadata"],
-        [params.mecr_cluster_membership_path, "WHB cluster membership metadata"],
+        [cellMetadataPath, "${referenceAtlas.toUpperCase()} cell metadata"],
+        [taxonomyMetadataPath, "${referenceAtlas.toUpperCase()} taxonomy metadata"],
+        [clusterMembershipPath, "${referenceAtlas.toUpperCase()} cluster membership metadata"],
     ].each { rawPath, label ->
         appendPreflightFileCheck(errors, rawPath, "MECR ${label}")
+    }
+}
+
+def appendMenderPreflightChecks(errors, settings, params) {
+    if (!(settings.run_mender && settings.mender_published_output_mode)) {
+        return
+    }
+    settings.mender_segmentations.each { segmentation ->
+        settings.active_platforms.each { platform ->
+            def sampleId = "${settings.pair_id}_${platform}"
+            def clusteredH5ad = normalizedPath(
+                publishedPairPath(
+                    params.outdir,
+                    settings.pair_id,
+                    "${segmentation}/clustering_squidpy/" +
+                    "clustering_squidpy_out/${platform.toLowerCase()}/" +
+                    "${sampleId}_clustered.h5ad",
+                )
+            )
+            if (!clusteredH5ad.toFile().isFile()) {
+                errors << (
+                    "Missing MENDER clustered H5AD for " +
+                    "${settings.pair_id}:${platform}:${segmentation}: ${clusteredH5ad}"
+                )
+            }
+            def latestZarr = normalizedPath(
+                publishedDatasetPath(
+                    params.outdir,
+                    settings.pair_id,
+                    platform,
+                    "latest/latest_spatialdata.zarr",
+                )
+            )
+            if (!latestZarr.toFile().isDirectory()) {
+                errors << (
+                    "Missing MENDER latest SpatialData Zarr for " +
+                    "${settings.pair_id}:${platform}:${segmentation}: ${latestZarr}"
+                )
+            } else {
+                def layerKeys = analysisLayerKeys(platform, segmentation)
+                def tableKey = clusteredSpatialdataTableKey(
+                    layerKeys.table_key,
+                    segmentation,
+                )
+                def tablePath = latestZarr.resolve("tables").resolve(tableKey)
+                if (!tablePath.toFile().exists()) {
+                    errors << (
+                        "Missing MENDER clustered SpatialData table '${tableKey}' " +
+                        "for ${settings.pair_id}:${platform}:${segmentation}: " +
+                        "${tablePath}"
+                    )
+                }
+            }
+        }
+    }
+}
+
+def registeredImageSpecs(rawCsvPath) {
+    // One row per image: image_key, image_path, alignment_matrix, and optional
+    // channel_names (";"-separated) and registration_channel ("none" disables
+    // refinement). Relative paths resolve against the CSV's own directory.
+    def csvPath = normalizedPath(rawCsvPath)
+    def manifestRows = csvPath.splitCsv(header: true, strip: true)
+    if (!manifestRows) {
+        throw new IllegalArgumentException(
+            "Registered-images CSV ${csvPath} lists no images"
+        )
+    }
+    def specs = []
+    manifestRows.eachWithIndex { manifestRow, index ->
+        def label = "${csvPath} row ${index + 2}"
+        def imageKey = chooseField(manifestRow, ["image_key"])
+        def imagePath = chooseField(manifestRow, ["image_path"])
+        def matrixPath = chooseField(
+            manifestRow,
+            ["alignment_matrix", "alignment_matrix_path"],
+        )
+        if (!imageKey || !imagePath || !matrixPath) {
+            throw new IllegalArgumentException(
+                "${label} must set image_key, image_path and alignment_matrix"
+            )
+        }
+        def channelNames = chooseField(manifestRow, ["channel_names"])
+        def registrationChannel = chooseField(
+            manifestRow,
+            ["registration_channel"],
+        ) ?: "DAPI"
+        specs << [
+            image_key: imageKey,
+            image_path: csvPath.parent.resolve(imagePath).normalize().toString(),
+            alignment_matrix_path: csvPath.parent.resolve(matrixPath).normalize().toString(),
+            channel_names: channelNames
+                ? channelNames.split(";").collect { name -> name.trim() }.findAll { name -> name }
+                : null,
+            registration_channel: registrationChannel.toLowerCase() == "none"
+                ? null
+                : registrationChannel,
+        ]
+    }
+    return specs
+}
+
+def appendRegisterImagesPreflightChecks(errors, settings) {
+    if (!settings.run_register_images) {
+        return
+    }
+    def csvPath = settings.registered_images_csv
+    if (!normalizedPath(csvPath).toFile().exists()) {
+        errors << "Missing xenium_registered_images_csv: ${csvPath}"
+        return
+    }
+    def specs = []
+    try {
+        specs = registeredImageSpecs(csvPath)
+    } catch (IllegalArgumentException exc) {
+        errors << exc.message
+        return
+    }
+    def keys = specs.collect { spec -> spec.image_key }
+    if (keys.unique(false).size() != keys.size()) {
+        errors << "Duplicate image_key values in ${csvPath}: ${keys}"
+    }
+    specs.each { spec ->
+        appendPreflightFileCheck(
+            errors,
+            spec.image_path,
+            "registered image ${spec.image_key}",
+        )
+        appendPreflightFileCheck(
+            errors,
+            spec.alignment_matrix_path,
+            "alignment matrix for ${spec.image_key}",
+        )
     }
 }
 
@@ -1239,7 +1691,10 @@ def appendGastonPreflightChecks(errors, settings, params) {
                     "${settings.pair_id}:${platform}:${segmentation}: ${latestZarr}"
                 )
             } else {
-                def tableKey = clusteredAnalysisTableKey(platform, segmentation)
+                def layerKeys = analysisLayerKeys(platform, segmentation)
+                def tableKey = clusteredSpatialdataTableKey(
+                    layerKeys.table_key, segmentation,
+                )
                 def tablePath = latestZarr.resolve("tables").resolve(tableKey)
                 if (!tablePath.toFile().exists()) {
                     errors << (
@@ -1254,13 +1709,17 @@ def appendGastonPreflightChecks(errors, settings, params) {
 }
 
 def runPreflightChecks(row, settings, params) {
+    CellposeSettings.preflight(row, settings, params)
     def errors = []
+    appendRegisterImagesPreflightChecks(errors, settings)
     appendClusteringSquidpyPreflightChecks(errors, settings, params)
     appendMapMyCellsPreflightChecks(errors, settings, params)
+    appendAlignmentAnnotationPreflightChecks(errors, row, settings, params)
     appendCorticalDepthPreflightChecks(errors, row, settings, params)
     appendSpatialGeneTranscriptPreflightChecks(errors, row, settings, params)
     appendDistanceFromObjectPreflightChecks(errors, row, settings, params)
     appendMecrPreflightChecks(errors, settings, params)
+    appendMenderPreflightChecks(errors, settings, params)
     appendGastonPreflightChecks(errors, settings, params)
     if (errors) {
         throw new IllegalArgumentException(
@@ -1310,6 +1769,7 @@ def rowSampleSettings(row, params) {
         error "Found samplesheet row with missing pair_id: ${row}"
     }
 
+    def species = normalizeSpecies(params.species)
     def analysisMode = normalizeAnalysisMode(
         rowFieldOrDefault(row, "analysis_mode", params.analysis_mode)
     )
@@ -1341,6 +1801,21 @@ def rowSampleSettings(row, params) {
         ),
         true,
         "viewer_cache_enabled for ${pairId}",
+    )
+    def registeredImagesCsv = optionalNormalizedPathString(
+        chooseField(row, ["xenium_registered_images_csv"])
+    )
+    def registerImagesEnabled = (
+        activePlatforms.contains("XENIUM") && registeredImagesCsv != null
+    )
+    def registerPostXeniumIfNonrigid = boolOrDefault(
+        rowFieldOrDefault(
+            row,
+            "register_post_xenium_if_nonrigid",
+            params.register_post_xenium_if_nonrigid,
+        ),
+        false,
+        "register_post_xenium_if_nonrigid for ${pairId}",
     )
     def spatialGeneAnalysisEnabled = boolOrDefault(
         rowFieldOrDefault(
@@ -1380,8 +1855,16 @@ def rowSampleSettings(row, params) {
     )
     def mecrEnabled = boolOrDefault(
         rowFieldOrDefault(row, "mecr_enabled", params.mecr_enabled),
-        true,
+        species == "human",
         "mecr_enabled for ${pairId}",
+    )
+    def menderEnabled = boolOrDefault(
+        rowFieldOrDefault(row, "mender_enabled", params.mender_enabled),
+        false,
+        "mender_enabled for ${pairId}",
+    )
+    def menderSegmentations = normalizeMenderSegmentations(
+        rowFieldOrDefault(row, "mender_segmentations", params.mender_segmentations)
     )
     def gastonEnabled = boolOrDefault(
         rowFieldOrDefault(row, "gaston_enabled", params.gaston_enabled),
@@ -1604,6 +2087,8 @@ def rowSampleSettings(row, params) {
         distanceFromObjectEnabled,
         viewerCacheEnabled,
         mecrEnabled,
+        menderEnabled,
+        registerImagesEnabled,
         gastonEnabled,
     )
     def startStage = normalizeStage(startStageRaw, startParamName)
@@ -1614,6 +2099,7 @@ def rowSampleSettings(row, params) {
         startParamName,
         alignmentEnabled,
         spatialGeneAnalysisEnabled,
+        menderEnabled,
     )
     validateStage(
         stopStage,
@@ -1621,14 +2107,19 @@ def rowSampleSettings(row, params) {
         stopParamName,
         alignmentEnabled,
         spatialGeneAnalysisEnabled,
+        menderEnabled,
     )
     // Opt-in terminal analyses extend the historical clustering stop default.
     // Explicit only_stage selections and non-default stop stages remain exact.
+    def autoExtendedToMender = false
     def autoExtendedToGaston = false
     if (!onlyStageRaw && stopStage == "clustering_squidpy") {
         if (gastonEnabled && stageOrder.contains("gaston")) {
             stopStage = "gaston"
             autoExtendedToGaston = true
+        } else if (menderEnabled && stageOrder.contains("mender")) {
+            stopStage = "mender"
+            autoExtendedToMender = true
         } else if (distanceFromObjectEnabled && stageOrder.contains("distance_from_object")) {
             stopStage = "distance_from_object"
         } else if (corticalDepthEnabled && stageOrder.contains("compute_cortical_depth")) {
@@ -1651,6 +2142,12 @@ def rowSampleSettings(row, params) {
     )
     def runSegment = stageInRange("segment", startStage, stopStage, stageOrder)
     def runEnrich = stageInRange("enrich", startStage, stopStage, stageOrder)
+    def runRegisterImages = stageInRange(
+        "register_images",
+        startStage,
+        stopStage,
+        stageOrder,
+    )
     def runBuildViewerCaches = stageInRange(
         "build_viewer_caches",
         startStage,
@@ -1694,20 +2191,33 @@ def rowSampleSettings(row, params) {
         stageOrder,
     )
     def runMapMyCells = stageInRange("mapmycells", startStage, stopStage, stageOrder)
-    // The historical default ended at clustering. Extending it for opt-in
-    // GASTON must not implicitly activate the otherwise explicitly selected
-    // MapMyCells terminal stage that lies between clustering and GASTON.
-    if (autoExtendedToGaston) {
+    // Extending the historical clustering stop for MENDER must not implicitly
+    // activate MapMyCells, which otherwise lies between clustering and MENDER.
+    if (autoExtendedToMender || autoExtendedToGaston) {
         runMapMyCells = false
     }
     def runGaston = stageInRange("gaston", startStage, stopStage, stageOrder)
-    def requiredClusteringSegmentations = analysisSegmentations
-    if (runGaston && runClusteringSquidpy) {
-        requiredClusteringSegmentations = (
-            analysisSegmentations + gastonSegmentations
-        ).unique()
+    def runMender = stageInRange("mender", startStage, stopStage, stageOrder)
+    def requiredClusteringSegmentations = (
+        analysisSegmentations + (runMender ? menderSegmentations : []) +
+        (runGaston ? gastonSegmentations : [])
+    ).unique()
+    def analysisInputSegmentations = runClusteringSquidpy
+        ? requiredClusteringSegmentations
+        : analysisSegmentations
+    if (menderEnabled) {
+        validateMenderParams(params)
     }
-    def analysisLayerSegmentations = requiredClusteringSegmentations
+    if (
+        runMender &&
+        runClusteringSquidpy &&
+        !effectiveClusteringHierarchicalEnabled(params)
+    ) {
+        throw new IllegalArgumentException(
+            "MENDER clustering prerequisites require " +
+            "--clustering_squidpy_hierarchical_enabled true"
+        )
+    }
     def needAnalysisZarrs =
         runQc ||
         runAlign ||
@@ -1733,16 +2243,26 @@ def rowSampleSettings(row, params) {
 
     return [
         pair_id: pairId,
+        species: species,
         analysis_mode: analysisMode,
         enable_alignment: alignmentEnabled,
         active_platforms: activePlatforms,
         paired_mode: pairedMode,
         analysis_segmentations: analysisSegmentations,
-        analysis_layer_segmentations: analysisLayerSegmentations,
+        analysis_input_segmentations: analysisInputSegmentations,
         required_clustering_segmentations: requiredClusteringSegmentations,
+        mender_segmentations: menderSegmentations,
         gaston_segmentations: gastonSegmentations,
         gaston: gastonSettings,
         distance_from_object_segmentations: distanceFromObjectSegmentations,
+        alignment_annotation_paths: [
+            MERSCOPE: optionalNormalizedPathString(
+                alignmentTissueAnnotationPath(row, "MERSCOPE")
+            ),
+            XENIUM: optionalNormalizedPathString(
+                alignmentTissueAnnotationPath(row, "XENIUM")
+            ),
+        ],
         spatial_gene_analysis_enabled: spatialGeneAnalysisEnabled,
         spatial_gene_analysis_transcript_analysis_enabled: (
             spatialGeneAnalysisEnabled && spatialGeneTranscriptAnalysisEnabled
@@ -1752,12 +2272,15 @@ def rowSampleSettings(row, params) {
         stop_stage: stopStage,
         selected_stages: stageOrder.findAll { stage ->
             stageInRange(stage, startStage, stopStage, stageOrder) &&
-                !(autoExtendedToGaston && stage == "mapmycells")
+                !((autoExtendedToMender || autoExtendedToGaston) && stage == "mapmycells")
         },
         run_build: runBuild,
         run_segment_nuclei: runSegmentNuclei,
         run_segment: runSegment,
         run_enrich: runEnrich,
+        run_register_images: runRegisterImages,
+        registered_images_csv: registeredImagesCsv,
+        register_post_xenium_if_nonrigid: registerPostXeniumIfNonrigid,
         run_build_viewer_caches: runBuildViewerCaches,
         run_mask_image_quantification: runMaskImageQuantification,
         run_compute_cortical_depth: runComputeCorticalDepth,
@@ -1770,7 +2293,20 @@ def rowSampleSettings(row, params) {
         run_visualize: runVisualize,
         run_spatial_gene_analysis: runSpatialGeneAnalysis,
         run_clustering_squidpy: runClusteringSquidpy,
+        run_mender: runMender,
         run_mapmycells: runMapMyCells,
+        mender_published_output_mode: runMender && !runClusteringSquidpy,
+        mender_bypass_terminal_gate: (
+            runMender &&
+            (
+                (onlyStageRaw && startStage == "mender") ||
+                (!runMapMyCells &&
+                 !runDistanceFromObject &&
+                 !runComputeCorticalDepth &&
+                 !runClusteringSquidpy)
+            )
+        ),
+        run_terminal_analyses: runMender || runGaston,
         run_gaston: runGaston,
         gaston_published_output_mode: runGaston && !runClusteringSquidpy,
         gaston_bypass_terminal_gate: (
@@ -1785,6 +2321,7 @@ def rowSampleSettings(row, params) {
         ),
         need_build_results: runSegmentNuclei || runSegment || runEnrich,
         need_enriched_zarrs: (
+            runRegisterImages ||
             runBuildViewerCaches ||
             runMaskImageQuantification ||
             runComputeCorticalDepth ||
@@ -1800,12 +2337,26 @@ def rowSampleSettings(row, params) {
 }
 
 def validateMapMyCellsParams(params) {
+    def pipelineSpecies = normalizeSpecies(params.species)
     def mapMyCellsReferenceMode = params.mapmycells_reference_mode == null
-        ? "both"
+        ? (pipelineSpecies == "mouse" ? "whole_brain" : "both")
         : params.mapmycells_reference_mode.toString().trim().toLowerCase()
     def mapMyCellsPlotsOnly = params.mapmycells_plots_only == null
         ? false
         : params.mapmycells_plots_only.toString().trim().toLowerCase() == "true"
+    def mapMyCellsReferenceAtlas = params.mapmycells_reference_atlas == null
+        ? (pipelineSpecies == "mouse" ? "wmb" : "whb")
+        : params.mapmycells_reference_atlas.toString().trim().toLowerCase()
+    def mapMyCellsQuerySpecies = params.mapmycells_query_species == null
+        ? pipelineSpecies
+        : params.mapmycells_query_species.toString().trim().toLowerCase()
+    def mapMyCellsAutoDownload = params.mapmycells_auto_download_references == null
+        ? true
+        : params.mapmycells_auto_download_references.toString().trim().toLowerCase() == "true"
+    def markerLookupPath = params.mapmycells_marker_lookup_path ?:
+        (mapMyCellsReferenceAtlas == "whb" ? params.mapmycells_whb_marker_lookup_path : null)
+    def precomputedStatsPath = params.mapmycells_precomputed_stats_path ?:
+        (mapMyCellsReferenceAtlas == "whb" ? params.mapmycells_whb_precomputed_stats_path : null)
     if (!(mapMyCellsReferenceMode in ["whole_brain", "region", "both"])) {
         throw new IllegalArgumentException(
             "Invalid MAPMYCELLS --mapmycells_reference_mode " +
@@ -1813,27 +2364,105 @@ def validateMapMyCellsParams(params) {
             "whole_brain, region, both"
         )
     }
+    if (!(mapMyCellsReferenceAtlas in ["whb", "wmb"])) {
+        throw new IllegalArgumentException(
+            "Invalid MAPMYCELLS --mapmycells_reference_atlas " +
+            "'${params.mapmycells_reference_atlas}'. Valid values: whb, wmb"
+        )
+    }
+    if (!(mapMyCellsQuerySpecies in ["human", "mouse"])) {
+        throw new IllegalArgumentException(
+            "Invalid MAPMYCELLS --mapmycells_query_species " +
+            "'${params.mapmycells_query_species}'. Valid values: human, mouse"
+        )
+    }
+    if (mapMyCellsQuerySpecies != pipelineSpecies) {
+        throw new IllegalArgumentException(
+            "MAPMYCELLS query species '${mapMyCellsQuerySpecies}' does not match " +
+            "pipeline --species ${pipelineSpecies}"
+        )
+    }
+    if (pipelineSpecies == "mouse" && mapMyCellsReferenceAtlas != "wmb") {
+        throw new IllegalArgumentException(
+            "Mouse MAPMYCELLS queries currently require " +
+            "--mapmycells_reference_atlas wmb"
+        )
+    }
     if (!mapMyCellsPlotsOnly &&
         mapMyCellsReferenceMode in ["whole_brain", "both"] &&
-        !params.mapmycells_marker_lookup_path) {
+        !mapMyCellsAutoDownload &&
+        !markerLookupPath) {
         throw new IllegalArgumentException(
             "Missing required parameter for MAPMYCELLS: --mapmycells_marker_lookup_path"
         )
     }
     if (!mapMyCellsPlotsOnly &&
         mapMyCellsReferenceMode in ["whole_brain", "both"] &&
-        !params.mapmycells_precomputed_stats_path) {
+        !mapMyCellsAutoDownload &&
+        !precomputedStatsPath) {
         throw new IllegalArgumentException(
             "Missing required parameter for MAPMYCELLS: --mapmycells_precomputed_stats_path"
         )
     }
     if (!mapMyCellsPlotsOnly &&
+        mapMyCellsReferenceAtlas == "wmb" &&
+        mapMyCellsQuerySpecies == "human" &&
+        !mapMyCellsAutoDownload &&
+        !params.mapmycells_gene_mapping_db_path) {
+        throw new IllegalArgumentException(
+            "Human-to-WMB MAPMYCELLS requires " +
+            "--mapmycells_gene_mapping_db_path when automatic downloads are disabled"
+        )
+    }
+    if (!mapMyCellsPlotsOnly &&
         mapMyCellsReferenceMode in ["region", "both"] &&
+        pipelineSpecies == "mouse" &&
         !params.mapmycells_region_labels) {
         throw new IllegalArgumentException(
             "Missing required parameter for MAPMYCELLS region mode: " +
             "--mapmycells_region_labels"
         )
+    }
+}
+
+def validateMenderParams(params) {
+    def mode = params.mender_clustering_mode.toString().trim().toLowerCase()
+    if (!(mode in ["resolution", "target_k"])) {
+        throw new IllegalArgumentException(
+            "Invalid --mender_clustering_mode '${params.mender_clustering_mode}'. " +
+            "Use resolution or target_k."
+        )
+    }
+    if ((params.mender_radius_um as float) <= 0.0) {
+        throw new IllegalArgumentException("--mender_radius_um must be positive")
+    }
+    if ((params.mender_n_scales as int) <= 0) {
+        throw new IllegalArgumentException("--mender_n_scales must be positive")
+    }
+    if ((params.mender_leiden_resolution as float) <= 0.0) {
+        throw new IllegalArgumentException(
+            "--mender_leiden_resolution must be positive"
+        )
+    }
+    if (mode == "target_k" &&
+        (params.mender_target_k == null || (params.mender_target_k as int) < 2)) {
+        throw new IllegalArgumentException(
+            "--mender_target_k must be at least 2 in target_k mode"
+        )
+    }
+    if (!(params.mender_nn_mode.toString() in ["radius", "k", "ring"])) {
+        throw new IllegalArgumentException("Invalid --mender_nn_mode")
+    }
+    if (!(params.mender_count_rep.toString() in ["s", "a"])) {
+        throw new IllegalArgumentException("Invalid --mender_count_rep")
+    }
+    if (params.mender_missing_state_policy.toString() != "error") {
+        throw new IllegalArgumentException(
+            "Invalid --mender_missing_state_policy; only strict 'error' is supported"
+        )
+    }
+    if (!params.mender_cell_state_key?.toString()?.trim()) {
+        throw new IllegalArgumentException("--mender_cell_state_key must not be empty")
     }
 }
 
@@ -1860,6 +2489,10 @@ workflow {
             "analysis segmentations=${settings.analysis_segmentations.join(', ')}; " +
             "distance segmentations=" +
             "${settings.distance_from_object_segmentations.join(', ')}; " +
+            "mender=${settings.run_mender}; " +
+            "mender segmentations=${settings.mender_segmentations.join(', ')}; " +
+            "required clustering segmentations=" +
+            "${settings.required_clustering_segmentations.join(', ')}; " +
             "GASTON segmentations=${settings.gaston_segmentations.join(', ')}; " +
             "selected stages=${settings.selected_stages.join(' -> ')}"
         )
@@ -2076,6 +2709,15 @@ workflow {
                 ],
             ]
 
+            // hitl-hook:C4
+            if (meta.cellpose_settings) {
+                baseConfig.cellpose.putAll(meta.cellpose_settings.cellpose)
+                baseConfig.mask_filter.putAll(meta.cellpose_settings.mask_filter)
+                if (meta.cellpose_settings.cellpose_model_policy) {
+                    baseConfig.cellpose_model_policy = meta.cellpose_settings.cellpose_model_policy
+                }
+            }
+
             def segmentConfig = baseConfig + [
                 dataset: [
                     name: "${pairId}_${platform}",
@@ -2133,7 +2775,7 @@ workflow {
                 tuple(key, pairId, platform, segmentConfigJson)
         }
 
-    nuclei_task_results_ch = CELLPOSE_NUCLEI_SEGMENT(nuclei_segment_inputs_ch)
+    nuclei_task_results_ch = CELLPOSE_NUCLEI_SEGMENT(nuclei_segment_inputs_ch).segmentation
 
     nuclei_published_results_ch = segmentation_config_inputs_ch
         .filter {
@@ -2300,19 +2942,30 @@ workflow {
 
     enrich_task_results_ch = ENRICH(enrich_inputs_ch)
 
-    enrich_published_results_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
+    enrich_published_results_ch = sample_rows_ch.flatMap { pairId, row, settings ->
         if (!(settings.need_enriched_zarrs && !settings.run_enrich)) {
             []
         } else {
             settings.active_platforms.collect { platform ->
                 def key = "${pairId}|${platform}"
-                def latestZarr = requireExistingPath(
-                    publishedDatasetPath(
+                def explicitLatestZarr = platform == "MERSCOPE"
+                    ? chooseField(row, [
+                        "merscope_spatialdata_path",
+                        "merscope_zarr_path",
+                    ])
+                    : chooseField(row, ["xenium_spatialdata_path"])
+                // Cross-pair restarts may intentionally combine durable latest
+                // zarrs that live under different source pair IDs.
+                def latestZarrPath = isBlankPath(explicitLatestZarr)
+                    ? publishedDatasetPath(
                         params.outdir,
                         pairId,
                         platform,
                         "latest/latest_spatialdata.zarr",
-                    ),
+                    )
+                    : explicitLatestZarr
+                def latestZarr = requireExistingPath(
+                    latestZarrPath,
                     "ENRICH latest zarr for ${pairId}:${platform}",
                 )
                 // The published latest zarr is the only ENRICH artifact consumed
@@ -2336,6 +2989,87 @@ workflow {
                 java.nio.file.Paths.get(enrichedLatestZarr.toString()).toRealPath().toString(),
             )
     }
+
+    // Register externally acquired images (e.g. post-Xenium IF) onto the Xenium
+    // mask grid. This writer of the shared store runs before the viewer cache and
+    // mask image quantification, which then pick up the new image channels.
+    register_images_inputs_ch = enriched_zarrs_ch
+        .join(
+            sample_rows_ch.flatMap { pairId, _row, settings ->
+                settings.run_register_images
+                    ? [
+                        tuple(
+                            "${pairId}|XENIUM",
+                            settings.registered_images_csv,
+                            settings.register_post_xenium_if_nonrigid,
+                        )
+                    ]
+                    : []
+            }
+        )
+        .map {
+            key, pairId, platform, enrichedLatestZarr, registeredImagesCsv,
+            registerPostXeniumIfNonrigid ->
+            def registerImagesConfig = [
+                dataset_name: "${pairId}_${platform}",
+                platform: platform,
+                latest_zarr_path: "latest_input.zarr",
+                output_dir: "register_images_out",
+                images: registeredImageSpecs(registeredImagesCsv),
+                refine_affine: params.register_images_refine_affine,
+                nonrigid_enabled: registerPostXeniumIfNonrigid,
+                nonrigid_pixel_size_um: params.register_post_xenium_if_nonrigid_pixel_size_um,
+                nonrigid_attachment: params.register_post_xenium_if_nonrigid_attachment,
+                nonrigid_tightness: params.register_post_xenium_if_nonrigid_tightness,
+                nonrigid_num_warp: params.register_post_xenium_if_nonrigid_num_warp,
+                nonrigid_num_iter: params.register_post_xenium_if_nonrigid_num_iter,
+                nonrigid_smoothing_sigma_um: params.register_post_xenium_if_nonrigid_smoothing_sigma_um,
+                nonrigid_max_displacement_um: params.register_post_xenium_if_nonrigid_max_displacement_um,
+                nonrigid_max_cycle_error_um: params.register_post_xenium_if_nonrigid_max_cycle_error_um,
+                nonrigid_min_local_correlation: params.register_post_xenium_if_nonrigid_min_local_correlation,
+                nonrigid_min_jacobian: params.register_post_xenium_if_nonrigid_min_jacobian,
+                nonrigid_max_jacobian: params.register_post_xenium_if_nonrigid_max_jacobian,
+                nonrigid_min_confident_fraction: params.register_post_xenium_if_nonrigid_min_confident_fraction,
+                build_viewer_pyramid: params.viewer_cache_build_image_pyramid,
+            ]
+
+            tuple(
+                key,
+                pairId,
+                platform,
+                groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(registerImagesConfig)),
+                enrichedLatestZarr,
+            )
+        }
+
+    register_images_results_ch = REGISTER_IMAGES(register_images_inputs_ch)
+
+    registered_zarrs_ch = register_images_results_ch.map {
+        key, pairId, platform, registeredLatestZarr, _registerImagesOutDir ->
+            tuple(
+                key,
+                pairId,
+                platform,
+                java.nio.file.Paths.get(registeredLatestZarr.toString()).toRealPath().toString(),
+            )
+    }
+
+    register_images_passthrough_ch = enriched_zarrs_ch
+        .join(
+            sample_rows_ch.flatMap { pairId, _row, settings ->
+                settings.active_platforms
+                    .findAll { platform ->
+                        settings.need_enriched_zarrs &&
+                            !(settings.run_register_images && platform == "XENIUM")
+                    }
+                    .collect { platform -> tuple("${pairId}|${platform}", true) }
+            }
+        )
+        .map { key, pairId, platform, enrichedLatestZarr, _runFlag ->
+            tuple(key, pairId, platform, enrichedLatestZarr)
+        }
+
+    post_registration_zarrs_ch = registered_zarrs_ch.mix(register_images_passthrough_ch)
 
     // Pre-build the napari viewer's derived caches (label masks + label/outline
     // pyramids + image pyramid) into the enriched latest zarr. This is a separate
@@ -2366,7 +3100,7 @@ workflow {
         }
     }
 
-    viewer_cache_inputs_ch = enriched_zarrs_ch
+    viewer_cache_inputs_ch = post_registration_zarrs_ch
         .join(viewer_cache_gate_ch)
         .join(viewer_cache_transform_ch)
         .map { key, pairId, platform, enrichedLatestZarr, _runFlag, transformPath ->
@@ -2418,7 +3152,7 @@ workflow {
         }
     }
 
-    viewer_cache_passthrough_ch = enriched_zarrs_ch
+    viewer_cache_passthrough_ch = post_registration_zarrs_ch
         .join(viewer_cache_passthrough_gate_ch)
         .map { key, pairId, platform, enrichedLatestZarr, _runFlag ->
             tuple(key, pairId, platform, enrichedLatestZarr)
@@ -2549,7 +3283,7 @@ workflow {
         .join(analysis_layer_validation_gate_ch)
         .flatMap {
             key, pairId, platform, enrichedLatestZarr, settings ->
-            settings.analysis_layer_segmentations.collect { segmentation ->
+            settings.analysis_input_segmentations.collect { segmentation ->
                 def layerKeys = analysisLayerKeys(platform, segmentation)
                 tuple(
                     "${key}|${segmentation}",
@@ -2572,8 +3306,7 @@ workflow {
         .filter {
             _key, _pairId, _platform, _segmentation, _latestZarr,
             _tableKey, _shapeKey, settings, _validationJson ->
-                settings.run_qc &&
-                    settings.analysis_segmentations.contains(_segmentation)
+                settings.run_qc && settings.analysis_segmentations.contains(_segmentation)
         }
         .map {
             key, pairId, platform, segmentation, latestZarr,
@@ -2596,7 +3329,7 @@ workflow {
             []
         } else {
             settings.active_platforms.collectMany { platform ->
-                settings.analysis_segmentations.collect { segmentation ->
+                settings.analysis_input_segmentations.collect { segmentation ->
                     tuple("${pairId}|${platform}|${segmentation}", settings)
                 }
             }
@@ -2700,7 +3433,13 @@ workflow {
     mecr_reference_inputs_ch = mecr_samples_ch
         .map { _pairId, _segmentation, samplesJson -> samplesJson }
         .collect()
-        .map { samplesJsonValues -> mergeMecrSamplesJson(samplesJsonValues) }
+        .filter { samplesJsonValues -> !samplesJsonValues.isEmpty() }
+        .map { samplesJsonValues ->
+            def referenceAtlas = normalizeSpecies(params.species) == "mouse"
+                ? "wmb"
+                : "whb"
+            tuple(referenceAtlas, mergeMecrSamplesJson(samplesJsonValues))
+        }
     mecr_reference_results_ch = MECR_REFERENCE(mecr_reference_inputs_ch)
     mecr_inputs_ch = mecr_samples_ch
         .combine(mecr_reference_results_ch)
@@ -2785,12 +3524,32 @@ workflow {
 
     align_inputs_ch = paired_zarrs_ch
         .filter { _pairId, _merscopePath, _xeniumPath, settings -> settings.run_align }
-        .map { pairId, merscopePath, xeniumPath, _settings ->
-            tuple(pairId, merscopePath, xeniumPath)
+        .map { pairId, merscopePath, xeniumPath, settings ->
+            def isValis = params.alignment_backend
+                .toString()
+                .trim()
+                .toLowerCase() == "valis"
+            def legacyPlaceholder = params.samplesheet
+            tuple(
+                pairId,
+                merscopePath,
+                xeniumPath,
+                file(
+                    isValis
+                        ? settings.alignment_annotation_paths.MERSCOPE
+                        : legacyPlaceholder
+                ),
+                file(
+                    isValis
+                        ? settings.alignment_annotation_paths.XENIUM
+                        : legacyPlaceholder
+                ),
+            )
         }
 
-    alignment_task_results_ch = ALIGN(align_inputs_ch)
-        .map { pairId, merscopePath, xeniumPath, alignOut ->
+    alignment_registration_results_ch = ALIGN(align_inputs_ch)
+    alignment_task_results_ch = MATERIALIZE_ALIGNMENT(alignment_registration_results_ch)
+        .map { pairId, merscopePath, xeniumPath, alignOut, _materializationSummary ->
             tuple(
                 pairId,
                 merscopePath,
@@ -2874,7 +3633,7 @@ workflow {
         if (!(settings.need_alignment_downstream && !settings.run_align_qc)) {
             []
         } else {
-            [tuple(pairId, settings.analysis_layer_segmentations)]
+            [tuple(pairId, settings.analysis_input_segmentations)]
         }
     }
 
@@ -2892,7 +3651,7 @@ workflow {
         if (!(settings.need_alignment_downstream && settings.run_align_qc)) {
             []
         } else {
-            [tuple(pairId, settings.analysis_layer_segmentations)]
+            [tuple(pairId, settings.analysis_input_segmentations)]
         }
     }
 
@@ -2967,8 +3726,8 @@ workflow {
         .filter {
             _pairId, _segmentation, _merscopePath, _xeniumPath, _merscopeTableKey,
             _merscopeShapeKey, _xeniumTableKey, _xeniumShapeKey, settings ->
-                settings.run_compare
-                    && settings.analysis_segmentations.contains(_segmentation)
+                settings.run_compare &&
+                    settings.analysis_segmentations.contains(_segmentation)
         }
         .map {
             pairId, segmentation, merscopePath, xeniumPath, merscopeTableKey,
@@ -3063,20 +3822,18 @@ workflow {
         analysis_samples_from_aligned_pairs_ch.mix(analysis_samples_from_dataset_ch)
 
     visualize_without_compare_ch = analysis_samples_ch
-        .filter { _pairId, _segmentation, _samplesJson, settings ->
-            settings.run_visualize &&
-                settings.analysis_segmentations.contains(_segmentation) &&
-                !settings.run_compare
+        .filter { _pairId, segmentation, _samplesJson, settings ->
+            settings.analysis_segmentations.contains(segmentation) &&
+                settings.run_visualize && !settings.run_compare
         }
         .map { pairId, segmentation, samplesJson, _settings ->
             tuple(pairId, segmentation, samplesJson)
         }
 
     visualize_after_compare_ch = analysis_samples_ch
-        .filter { _pairId, _segmentation, _samplesJson, settings ->
-            settings.run_visualize &&
-                settings.analysis_segmentations.contains(_segmentation) &&
-                settings.run_compare
+        .filter { _pairId, segmentation, _samplesJson, settings ->
+            settings.analysis_segmentations.contains(segmentation) &&
+                settings.run_visualize && settings.run_compare
         }
         .map { pairId, segmentation, samplesJson, _settings ->
             tuple("${pairId}|${segmentation}", pairId, segmentation, samplesJson)
@@ -3095,10 +3852,9 @@ workflow {
     }
 
     spatial_gene_analysis_without_visualize_ch = analysis_samples_ch
-        .filter { _pairId, _segmentation, _samplesJson, settings ->
-            settings.run_spatial_gene_analysis &&
-                settings.analysis_segmentations.contains(_segmentation) &&
-                !settings.run_visualize
+        .filter { _pairId, segmentation, _samplesJson, settings ->
+            settings.analysis_segmentations.contains(segmentation) &&
+                settings.run_spatial_gene_analysis && !settings.run_visualize
         }
         .map { pairId, segmentation, samplesJson, settings ->
             tuple(
@@ -3110,10 +3866,9 @@ workflow {
         }
 
     spatial_gene_analysis_after_visualize_ch = analysis_samples_ch
-        .filter { _pairId, _segmentation, _samplesJson, settings ->
-            settings.run_spatial_gene_analysis &&
-                settings.analysis_segmentations.contains(_segmentation) &&
-                settings.run_visualize
+        .filter { _pairId, segmentation, _samplesJson, settings ->
+            settings.analysis_segmentations.contains(segmentation) &&
+                settings.run_spatial_gene_analysis && settings.run_visualize
         }
         .map { pairId, segmentation, samplesJson, settings ->
             tuple(
@@ -3192,12 +3947,11 @@ workflow {
     }
 
     clustering_without_dependencies_ch = analysis_samples_ch
-        .filter { _pairId, _segmentation, _samplesJson, settings ->
+        .filter { _pairId, segmentation, _samplesJson, settings ->
             settings.run_clustering_squidpy &&
                 (
-                    !settings.analysis_segmentations.contains(_segmentation) ||
-                    (!settings.run_visualize &&
-                     !settings.run_spatial_gene_analysis)
+                    !settings.analysis_segmentations.contains(segmentation) ||
+                    (!settings.run_visualize && !settings.run_spatial_gene_analysis)
                 )
         }
         .map { pairId, segmentation, samplesJson, _settings ->
@@ -3205,9 +3959,9 @@ workflow {
         }
 
     clustering_after_visualize_ch = analysis_samples_ch
-        .filter { _pairId, _segmentation, _samplesJson, settings ->
+        .filter { _pairId, segmentation, _samplesJson, settings ->
             settings.run_clustering_squidpy &&
-                settings.analysis_segmentations.contains(_segmentation) &&
+                settings.analysis_segmentations.contains(segmentation) &&
                 settings.run_visualize &&
                 !settings.run_spatial_gene_analysis
         }
@@ -3220,9 +3974,9 @@ workflow {
         }
 
     clustering_after_spatial_gene_analysis_ch = analysis_samples_ch
-        .filter { _pairId, _segmentation, _samplesJson, settings ->
+        .filter { _pairId, segmentation, _samplesJson, settings ->
             settings.run_clustering_squidpy &&
-                settings.analysis_segmentations.contains(_segmentation) &&
+                settings.analysis_segmentations.contains(segmentation) &&
                 settings.run_spatial_gene_analysis
         }
         .map { pairId, segmentation, samplesJson, _settings ->
@@ -3577,27 +4331,30 @@ workflow {
 
     mapmycells_results_ch = MAPMYCELLS(mapmycells_inputs_ch)
 
-    // Reusable per-pair barrier for independent terminal analyses. Each event is
-    // grouped with a known pair-specific cardinality, so a completed pair never
-    // waits for branches belonging to any other pair. Cohort summaries are not
-    // included. GASTON and future terminal analyses such as MENDER consume the
-    // token independently and can therefore overlap with each other.
+    // Reusable per-pair barrier for independent terminal analyses. Each event
+    // is grouped with a known pair-specific cardinality, so no pair waits for
+    // another pair. Cohort summaries are intentionally outside the barrier.
+    // MENDER consumes this token without depending on other terminal analyses.
     pair_terminal_specs_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
-        def terminalStage = currentPairTerminalStage(settings)
-        if (terminalStage == null) {
+        if (!settings.run_terminal_analyses) {
             []
         } else {
-            [tuple(
-                pairId,
-                terminalStage,
-                currentPairTerminalExpectedCount(settings, terminalStage),
-            )]
+            def terminalStage = currentPairTerminalStage(settings)
+            if (terminalStage == null) {
+                []
+            } else {
+                [tuple(
+                    pairId,
+                    terminalStage,
+                    currentPairTerminalExpectedCount(settings, terminalStage),
+                )]
+            }
         }
     }
 
     pair_terminal_immediate_ch = sample_rows_ch.flatMap {
         pairId, _row, settings ->
-            if (currentPairTerminalStage(settings) == null) {
+            if (settings.run_terminal_analyses && currentPairTerminalStage(settings) == null) {
                 [tuple(pairId, true)]
             } else {
                 []
@@ -3621,13 +4378,11 @@ workflow {
         pairId, _segmentation, _samplesJson, _clusteringOutDir ->
             tuple(pairId, "clustering_squidpy", true)
     }
-    gaston_extra_clustering_gate_ch = sample_rows_ch.flatMap {
+    terminal_extra_clustering_gate_ch = sample_rows_ch.flatMap {
         pairId, _row, settings ->
-            def terminalStage = currentPairTerminalStage(settings)
-            if (!(settings.run_gaston &&
-                  settings.run_clustering_squidpy &&
-                  terminalStage != null &&
-                  terminalStage != "clustering_squidpy")) {
+            if (!(settings.run_terminal_analyses &&
+                  settings.run_mapmycells &&
+                  settings.run_clustering_squidpy)) {
                 []
             } else {
                 settings.required_clustering_segmentations
@@ -3635,31 +4390,26 @@ workflow {
                         !settings.analysis_segmentations.contains(segmentation)
                     }
                     .collect { segmentation ->
-                        tuple("${pairId}|${segmentation}", pairId, terminalStage)
+                        tuple("${pairId}|${segmentation}", pairId)
                     }
             }
     }
-    gaston_extra_clustering_terminal_events_ch = clustering_results_ch
+    terminal_extra_clustering_terminal_events_ch = clustering_results_ch
         .map { pairId, segmentation, _samplesJson, _clusteringOutDir ->
             tuple("${pairId}|${segmentation}", pairId)
         }
-        .join(gaston_extra_clustering_gate_ch)
-        .map { _branchKey, pairId, expectedPairId, terminalStage ->
-            if (pairId != expectedPairId) {
-                throw new IllegalStateException(
-                    "GASTON extra clustering pair mismatch: ${pairId} != ${expectedPairId}"
-                )
-            }
-            tuple(pairId, terminalStage, true)
+        .join(terminal_extra_clustering_gate_ch)
+        .map { _branchKey, pairId, _expectedPairId ->
+            tuple(pairId, "mapmycells", true)
         }
     pair_terminal_events_ch = mapmycells_terminal_events_ch
         .mix(distance_terminal_events_ch)
         .mix(cortical_terminal_events_ch)
         .mix(clustering_terminal_events_ch)
-        .mix(gaston_extra_clustering_terminal_events_ch)
+        .mix(terminal_extra_clustering_terminal_events_ch)
 
     pair_terminal_grouped_ch = pair_terminal_events_ch
-        .join(pair_terminal_specs_ch)
+        .combine(pair_terminal_specs_ch, by: 0)
         .filter { _pairId, eventStage, _done, expectedStage, _expectedCount ->
             eventStage == expectedStage
         }
@@ -3672,6 +4422,218 @@ workflow {
     pair_terminal_token_ch = pair_terminal_immediate_ch.mix(
         pair_terminal_grouped_ch
     )
+
+    mender_current_clustering_gate_ch = sample_rows_ch.flatMap {
+        pairId, _row, settings ->
+            if (!(settings.run_mender && settings.run_clustering_squidpy)) {
+                []
+            } else {
+                settings.mender_segmentations.collect { segmentation ->
+                    tuple("${pairId}|${segmentation}", settings)
+                }
+            }
+    }
+
+    mender_current_artifacts_ch = clustering_results_ch
+        .map { pairId, segmentation, samplesJson, clusteringOutDir ->
+            tuple(
+                "${pairId}|${segmentation}",
+                pairId,
+                segmentation,
+                samplesJson,
+                clusteringOutDir,
+            )
+        }
+        .join(mender_current_clustering_gate_ch)
+        .flatMap {
+            _segmentationKey,
+            pairId,
+            segmentation,
+            samplesJson,
+            clusteringOutDir,
+            settings ->
+                def samples = new groovy.json.JsonSlurper().parseText(
+                    samplesJson.toString()
+                )
+                samples.collect { sample ->
+                    def platform = sample.platform.toString()
+                    def sampleId = sample.sample_id.toString()
+                    def clusteredH5ad = java.nio.file.Paths.get(
+                        clusteringOutDir.toString()
+                    ).resolve(platform.toLowerCase()).resolve(
+                        "${sampleId}_clustered.h5ad"
+                    )
+                    tuple(
+                        pairId,
+                        "${pairId}|${segmentation}|${platform}",
+                        segmentation,
+                        platform,
+                        sampleId,
+                        clusteredH5ad,
+                        java.nio.file.Paths.get(
+                            sample.zarr_path.toString()
+                        ).toRealPath().toString(),
+                        settings,
+                    )
+                }
+        }
+
+    mender_published_artifacts_ch = sample_rows_ch.flatMap {
+        pairId, _row, settings ->
+            if (!(settings.run_mender && settings.mender_published_output_mode)) {
+                []
+            } else {
+                settings.mender_segmentations.collectMany { segmentation ->
+                    settings.active_platforms.collect { platform ->
+                        def sampleId = "${pairId}_${platform}"
+                        def clusteredH5ad = normalizedPath(
+                            publishedPairPath(
+                                params.outdir,
+                                pairId,
+                                "${segmentation}/clustering_squidpy/" +
+                                "clustering_squidpy_out/" +
+                                "${platform.toLowerCase()}/" +
+                                "${sampleId}_clustered.h5ad",
+                            )
+                        )
+                        def latestZarr = normalizedPath(
+                            publishedDatasetPath(
+                                params.outdir,
+                                pairId,
+                                platform,
+                                "latest/latest_spatialdata.zarr",
+                            )
+                        ).toRealPath().toString()
+                        tuple(
+                            pairId,
+                            "${pairId}|${segmentation}|${platform}",
+                            segmentation,
+                            platform,
+                            sampleId,
+                            clusteredH5ad,
+                            latestZarr,
+                            settings,
+                        )
+                    }
+                }
+            }
+    }
+
+    mender_artifacts_ch = mender_current_artifacts_ch.mix(
+        mender_published_artifacts_ch
+    )
+
+    mender_inputs_ch = mender_artifacts_ch
+        .combine(pair_terminal_token_ch, by: 0)
+        .map {
+            pairId,
+            taskKey,
+            segmentation,
+            platform,
+            sampleId,
+            clusteredH5ad,
+            latestZarr,
+            _settings,
+            terminalToken ->
+                def layerKeys = analysisLayerKeys(platform, segmentation)
+                def clusteredTableKey = clusteredSpatialdataTableKey(
+                    layerKeys.table_key,
+                    segmentation,
+                )
+                tuple(
+                    taskKey,
+                    pairId,
+                    segmentation,
+                    platform,
+                    sampleId,
+                    latestZarr,
+                    clusteredTableKey,
+                    layerKeys.shape_key,
+                    clusteredH5ad.toAbsolutePath().toString(),
+                    clusteredH5ad,
+                    terminalToken,
+                )
+        }
+
+    mender_finalize_lookup_ch = mender_inputs_ch.map {
+        taskKey,
+        _pairId,
+        _segmentation,
+        _platform,
+        _sampleId,
+        _latestZarr,
+        _clusteredTableKey,
+        _nativeShapeKey,
+        _sourceH5adPath,
+        clusteredH5ad,
+        _terminalToken ->
+            tuple(taskKey, clusteredH5ad)
+    }
+
+    mender_prepared_ch = MENDER_PREPARE(mender_inputs_ch)
+    mender_computed_ch = MENDER_COMPUTE(mender_prepared_ch)
+    mender_finalize_inputs_ch = mender_computed_ch
+        .map {
+            taskKey,
+            pairId,
+            segmentation,
+            platform,
+            sampleId,
+            spatialdataPath,
+            sourceSpatialdataTable,
+            nativeShapeKey,
+            sourceH5adPath,
+            menderConfig,
+            preparedDir,
+            computedDir ->
+                tuple(
+                    taskKey,
+                    pairId,
+                    segmentation,
+                    platform,
+                    sampleId,
+                    spatialdataPath,
+                    sourceSpatialdataTable,
+                    nativeShapeKey,
+                    sourceH5adPath,
+                    menderConfig,
+                    preparedDir,
+                    computedDir,
+                )
+        }
+        .join(mender_finalize_lookup_ch)
+        .map {
+            taskKey,
+            pairId,
+            segmentation,
+            platform,
+            sampleId,
+            spatialdataPath,
+            sourceSpatialdataTable,
+            nativeShapeKey,
+            sourceH5adPath,
+            menderConfig,
+            preparedDir,
+            computedDir,
+            clusteredH5ad ->
+                tuple(
+                    taskKey,
+                    pairId,
+                    segmentation,
+                    platform,
+                    sampleId,
+                    spatialdataPath,
+                    sourceSpatialdataTable,
+                    nativeShapeKey,
+                    sourceH5adPath,
+                    menderConfig,
+                    preparedDir,
+                    computedDir,
+                    clusteredH5ad,
+                )
+        }
+    mender_finalized_ch = MENDER_FINALIZE(mender_finalize_inputs_ch)
+    MENDER_IMPORT(mender_finalized_ch)
 
     gaston_current_clustering_gate_ch = sample_rows_ch.flatMap {
         pairId, _row, settings ->
@@ -3795,7 +4757,7 @@ workflow {
     }
 
     gaston_inputs_ch = gaston_artifacts_ch
-        .join(pair_terminal_token_ch)
+        .combine(pair_terminal_token_ch, by: 0)
         .map {
             pairId,
             branchKey,

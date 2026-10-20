@@ -14,6 +14,7 @@ import pandas as pd
 import spatialdata as sd
 from spatialdata_io import xenium as xenium_reader
 
+from merxen._typing import AffineComponent
 from merxen.config import SegmentationConfig
 from merxen.io.image_source import (
     MERSCOPE_ZPROJ_IMAGE_NAME,
@@ -32,11 +33,26 @@ from merxen.io.transcript_io import resolve_col, write_proseg_csv_from_points
 from merxen.memory import force_release, log_status
 from merxen.path_utils import remove_path, stage_existing_output
 from merxen.segmentation.cellpose import (
+    assign_labels_from_masks,
     build_cellpose_affine_to_microns,
+    invert_mask_affine,
     run_tiled_cellpose,
     synchronize_cellpose_probability_logits,
 )
+from merxen.segmentation.hitl.registry import (
+    has_custom_model,
+    is_experimental_arm,
+    preflight_custom_model,
+    preflight_stock_arm,
+    require_matching_cached_model,
+    require_safe_custom_outputs,
+)
 from merxen.segmentation.mask_filter import filter_labeled_mask_by_area
+from merxen.segmentation.model_identity import (
+    CellposeModelIdentity,
+    ensure_model_identity,
+    model_identity_path,
+)
 from merxen.segmentation.proseg import run_proseg_refinement
 from merxen.segmentation.proseg_hybrid import (
     has_proseg_hybrid_refinement,
@@ -44,6 +60,13 @@ from merxen.segmentation.proseg_hybrid import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Reusing transcripts_for_proseg.csv: leading rows compared against the mask,
+# and the share of seeded rows that must reproduce their label (float32
+# coordinates flip only a few pixel-edge rows; a stale affine flips nearly all).
+_SEEDING_CHECK_ROWS = 200_000
+_SEEDING_MIN_INFORMATIVE_ROWS = 1_000
+_SEEDING_MIN_AGREEMENT = 0.9
 
 
 def _labeled_mask_has_foreground(
@@ -98,21 +121,48 @@ def _pixel_area_um2_from_affine(
 def _load_merscope_transform_matrix(config: SegmentationConfig) -> np.ndarray:
     """Load the MERSCOPE micron-to-mosaic transform matrix."""
     dataset = config.dataset
+    built_path = Path(dataset.data_path) / "micron_to_mosaic_pixel_transform.csv"
     candidates: list[Path] = []
     if dataset.transform_path is not None:
         candidates.append(Path(dataset.transform_path))
-    candidates.append(Path(dataset.data_path) / "micron_to_mosaic_pixel_transform.csv")
+    candidates.append(built_path)
 
     for candidate in candidates:
         if not candidate.exists():
             continue
         matrix = np.loadtxt(candidate)
         if matrix.shape == (3, 3):
+            if candidate != built_path and built_path.exists():
+                _require_matching_build_transform(matrix, candidate, built_path)
             return matrix
     raise FileNotFoundError(
         "Could not determine MERSCOPE transform. "
         "Set dataset.transform_path or include "
         "'micron_to_mosaic_pixel_transform.csv' in the SpatialData zarr."
+    )
+
+
+def _require_matching_build_transform(
+    matrix: np.ndarray,
+    override_path: Path,
+    built_path: Path,
+) -> None:
+    """Fail when the override no longer matches the transform used at build time.
+
+    Points, shapes, and the enrichment stage use the transform recorded in the
+    SpatialData zarr. Converting masks with a different override (for example
+    after the CSV was corrected but the build was reused) would misregister
+    every Cellpose/ProSeg output against the transcripts.
+    """
+    built = np.loadtxt(built_path)
+    if built.shape == (3, 3) and np.allclose(matrix, built, rtol=1e-6, atol=1e-3):
+        return
+    raise ValueError(
+        f"MERSCOPE transform_path {override_path} differs from the transform the "
+        f"SpatialData zarr was built with ({built_path}). Rebuild the SpatialData "
+        "(for example with --force_spatialdata_build true) or point "
+        "merscope_transform_path at the transform used for the build. "
+        f"transform_path={matrix.tolist()}, built={built.tolist()}"
     )
 
 
@@ -159,11 +209,10 @@ def _load_xenium_transform_matrix(config: SegmentationConfig) -> np.ndarray:
     )
 
 
-def _write_cellpose_transforms(
+def _derive_cellpose_transforms(
     config: SegmentationConfig,
-    transforms_path: str | Path,
-) -> Path:
-    """Derive and write the reusable mask-to-micron transform sidecar."""
+) -> tuple[AffineComponent, AffineComponent]:
+    """Derive the mask-to-micron affine from the configured transform."""
     platform = config.dataset.platform.upper()
     if platform == "MERSCOPE":
         matrix = _load_merscope_transform_matrix(config)
@@ -172,13 +221,21 @@ def _write_cellpose_transforms(
     else:
         raise ValueError(f"Unsupported platform: {config.dataset.platform}")
 
-    x_transform, y_transform = build_cellpose_affine_to_microns(
+    return build_cellpose_affine_to_microns(
         matrix,
         scale_factor=1.0,
         x0=0.0,
         y0=0.0,
     )
-    path = Path(transforms_path)
+
+
+def _write_transforms_json(
+    path: str | Path,
+    x_transform: AffineComponent,
+    y_transform: AffineComponent,
+) -> Path:
+    """Write a mask-to-micron affine as ``{"x_transform", "y_transform"}`` JSON."""
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
@@ -191,6 +248,127 @@ def _write_cellpose_transforms(
         + "\n"
     )
     return path
+
+
+def _write_cellpose_transforms(
+    config: SegmentationConfig,
+    transforms_path: str | Path,
+) -> Path:
+    """Derive and write the reusable mask-to-micron transform sidecar."""
+    x_transform, y_transform = _derive_cellpose_transforms(config)
+    return _write_transforms_json(transforms_path, x_transform, y_transform)
+
+
+def _seeding_transforms_path(transcripts_csv: Path) -> Path:
+    """Return the sidecar recording which affine seeded a ProSeg transcript CSV."""
+    return transcripts_csv.with_suffix(".transforms.json")
+
+
+def _seeding_label_agreement(
+    transcripts_csv: Path,
+    mask_path: Path,
+    x_transform: AffineComponent,
+    y_transform: AffineComponent,
+    *,
+    n_rows: int = _SEEDING_CHECK_ROWS,
+) -> tuple[float, int]:
+    """Compare a CSV's stored seeds with the mask labels under an affine.
+
+    Seeds are the mask label at each transcript's micron coordinates, so a CSV
+    seeded with the same affine reproduces them (up to float32 rounding of the
+    coordinates at pixel edges) while a CSV seeded with a shifted affine does
+    not.
+
+    Args:
+        transcripts_csv: ProSeg transcript CSV with ``x_micron``, ``y_micron``
+            and ``cell_id`` columns.
+        mask_path: Labeled Cellpose mask (``.npy``) the CSV was seeded from.
+        x_transform: Mask-pixel-to-micron affine terms ``(a, b, tx)`` for x.
+        y_transform: Mask-pixel-to-micron affine terms ``(a, b, ty)`` for y.
+        n_rows: Number of leading CSV rows to compare.
+
+    Returns:
+        Tuple of the fraction of informative rows whose stored ``cell_id``
+        equals the looked-up label, and the number of informative rows (rows
+        where either label is non-zero).
+    """
+    rows = pd.read_csv(
+        transcripts_csv,
+        usecols=["x_micron", "y_micron", "cell_id"],
+        nrows=n_rows,
+    )
+    masks = np.load(mask_path, mmap_mode="r")
+    a_inv, b = invert_mask_affine(x_transform, y_transform)
+    expected = assign_labels_from_masks(
+        rows["x_micron"].to_numpy(np.float64),
+        rows["y_micron"].to_numpy(np.float64),
+        masks,
+        a_inv=a_inv,
+        b=b,
+    ).astype(np.int64)
+    stored = rows["cell_id"].to_numpy(np.int64)
+    informative = (stored != 0) | (expected != 0)
+    n_informative = int(np.count_nonzero(informative))
+    if n_informative == 0:
+        return 1.0, 0
+    agreement = float(np.mean(stored[informative] == expected[informative]))
+    return agreement, n_informative
+
+
+def _require_seeding_matches_transforms(
+    dataset_name: str,
+    transcripts_csv: Path,
+    mask_path: Path,
+    x_transform: AffineComponent,
+    y_transform: AffineComponent,
+) -> None:
+    """Fail when a reusable ProSeg CSV was seeded with a different mask affine.
+
+    The CSV's ``cell_id`` seeds are fixed when it is written. Reusing one after
+    the transform was corrected (as for the 2026-09-08 VZG2 outputs) would give
+    ProSeg seeds that are offset from their Cellpose cells. A CSV written by
+    this module records its affine in :func:`_seeding_transforms_path`; older
+    CSVs are checked against the mask directly and then get that record.
+    """
+    sidecar = _seeding_transforms_path(transcripts_csv)
+    if sidecar.exists():
+        recorded = json.loads(sidecar.read_text())
+        if np.allclose(
+            recorded["x_transform"], x_transform, rtol=1e-6, atol=1e-6
+        ) and np.allclose(recorded["y_transform"], y_transform, rtol=1e-6, atol=1e-6):
+            return
+        reason = (
+            f"{sidecar} records x_transform={recorded['x_transform']}, "
+            f"y_transform={recorded['y_transform']}"
+        )
+    else:
+        agreement, n_informative = _seeding_label_agreement(
+            transcripts_csv, mask_path, x_transform, y_transform
+        )
+        if n_informative < _SEEDING_MIN_INFORMATIVE_ROWS:
+            logger.warning(
+                "[%s] Could not verify that %s was seeded with the current "
+                "mask-to-micron transform (%d seeded rows checked); reusing it",
+                dataset_name,
+                transcripts_csv,
+                n_informative,
+            )
+            return
+        if agreement >= _SEEDING_MIN_AGREEMENT:
+            _write_transforms_json(sidecar, x_transform, y_transform)
+            return
+        reason = (
+            f"only {agreement:.1%} of {n_informative:,} checked rows carry the "
+            "mask label found at their coordinates"
+        )
+    raise ValueError(
+        f"[{dataset_name}] {transcripts_csv} was seeded with a different "
+        f"mask-to-micron transform than the current x_transform={list(x_transform)}, "
+        f"y_transform={list(y_transform)} ({reason}). Reusing it would offset the "
+        f"ProSeg seeds from their cells. Move it, {mask_path} and the Cellpose "
+        "probabilities aside (or run merxen cellpose-segment --force-rerun) so "
+        "Cellpose re-runs and re-seeds the transcripts."
+    )
 
 
 def _load_dataset_sdata(
@@ -210,6 +388,8 @@ def _load_dataset_sdata(
                 requested_channels=dataset.channels,
                 as_float32=True,
             )
+            if is_experimental_arm(config) and source["channels"] != dataset.channels:
+                raise ValueError("Custom-model source is missing requested channels")
             height, width, _ = source["shape"]
             log_status(
                 f"[{dataset.name}] MERSCOPE projection image shape={height}x{width}, "
@@ -219,9 +399,7 @@ def _load_dataset_sdata(
             def fetch_tile_fn(y0: int, y1: int, x0: int, x1: int) -> np.ndarray:
                 return fetch_tile(source, y0, y1, x0, x1)
 
-            points_key = choose_primary_points_key(sdata)
-            if points_key is None:
-                raise RuntimeError(f"[{dataset.name}] No transcript points found.")
+            points_key = _require_transcript_points(sdata, dataset.name)
             return (
                 sdata,
                 fetch_tile_fn,
@@ -232,6 +410,10 @@ def _load_dataset_sdata(
             )
 
         plane_keys = list_plane_keys(sdata.images, prefix=dataset.image_prefix)
+        if is_experimental_arm(config):
+            raise ValueError(
+                "Custom MERSCOPE models require native MERSCOPE_z_projection"
+            )
         if dataset.z_range is None:
             selected_keys = [key for _, key in plane_keys]
         else:
@@ -256,9 +438,7 @@ def _load_dataset_sdata(
         def fetch_tile_fn(y0: int, y1: int, x0: int, x1: int) -> np.ndarray:
             return fetch_merscope_projected_tile(plane_sources, y0, y1, x0, x1)
 
-        points_key = choose_primary_points_key(sdata)
-        if points_key is None:
-            raise RuntimeError(f"[{dataset.name}] No transcript points found.")
+        points_key = _require_transcript_points(sdata, dataset.name)
         return sdata, fetch_tile_fn, height, width, matrix, sdata.points[points_key]
 
     if platform == "XENIUM":
@@ -281,12 +461,22 @@ def _load_dataset_sdata(
         matrix = _load_xenium_transform_matrix(config)
         if len(sdata.images) == 0:
             raise RuntimeError(f"[{dataset.name}] No Xenium images found.")
-        image_key = list(sdata.images.keys())[0]
+        image_key = dataset.image_key or (
+            "morphology_focus"
+            if is_experimental_arm(config)
+            else list(sdata.images.keys())[0]
+        )
+        if image_key not in sdata.images:
+            raise ValueError("Custom Xenium models require native morphology_focus")
         source = build_image_source(
             sdata.images[image_key],
             requested_channels=dataset.channels,
             as_float32=True,
         )
+        if is_experimental_arm(config) and source["channels"] != dataset.channels:
+            raise ValueError(
+                "Custom-model source is missing one or more requested channels"
+            )
         height, width, _ = source["shape"]
         log_status(
             f"[{dataset.name}] Xenium image='{image_key}' shape={height}x{width}, "
@@ -296,12 +486,27 @@ def _load_dataset_sdata(
         def fetch_tile_fn(y0: int, y1: int, x0: int, x1: int) -> np.ndarray:
             return fetch_tile(source, y0, y1, x0, x1)
 
-        points_key = choose_primary_points_key(sdata)
-        if points_key is None:
-            raise RuntimeError(f"[{dataset.name}] No transcript points found.")
+        points_key = _require_transcript_points(sdata, dataset.name)
         return sdata, fetch_tile_fn, height, width, matrix, sdata.points[points_key]
 
     raise ValueError(f"Unsupported platform: {dataset.platform}")
+
+
+def _require_transcript_points(sdata: Any, dataset_name: str) -> str:
+    """Resolve transcript points with a specific VZG2 limitation message."""
+    points_key = choose_primary_points_key(sdata)
+    if points_key is not None:
+        return points_key
+    vzg2_metadata = getattr(sdata, "attrs", {}).get("merxen_vzg2")
+    if isinstance(vzg2_metadata, dict):
+        raise RuntimeError(
+            f"[{dataset_name}] This source was built from .vzg2 only. Vizgen does "
+            "not publish a decoder for its packed transcript coordinates, so "
+            "MerXen cannot run transcript-dependent resegmentation from this "
+            "archive alone. Supply detected_transcripts.csv or "
+            "detected_transcripts.parquet from the original MERSCOPE export."
+        )
+    raise RuntimeError(f"[{dataset_name}] No transcript points found.")
 
 
 def _write_progress(path: Path, data: dict) -> None:
@@ -313,12 +518,68 @@ def _write_progress(path: Path, data: dict) -> None:
         pass
 
 
+# hitl-hook:C5
+def _preflight_model_selection(
+    config: SegmentationConfig,
+    *,
+    check_cell_cache: bool = True,
+) -> CellposeModelIdentity | None:
+    """Validate custom arms before any entry point creates or replaces output."""
+    require_safe_custom_outputs(config)
+    if not is_experimental_arm(config):
+        return None
+    native_key = (
+        "morphology_focus"
+        if config.dataset.platform == "XENIUM"
+        else MERSCOPE_ZPROJ_IMAGE_NAME
+    )
+    if config.dataset.image_key not in (None, native_key):
+        raise ValueError("Custom models require the native image element")
+    if has_custom_model(config):
+        if config.cellpose.model_metadata_path is None:
+            raise ValueError("Custom models require model_metadata_path")
+        for path in (
+            Path(config.cellpose.pretrained_model),
+            config.cellpose.model_metadata_path,
+        ):
+            if not path.is_file():
+                raise FileNotFoundError(path)
+    sdata, _fetch, _height, _width, matrix, _points = _load_dataset_sdata(config)
+    image_key = (
+        "morphology_focus"
+        if config.dataset.platform == "XENIUM"
+        else MERSCOPE_ZPROJ_IMAGE_NAME
+    )
+    preflight = (
+        preflight_custom_model if has_custom_model(config) else preflight_stock_arm
+    )
+    identity = preflight(config, transform_matrix=matrix, image_key=image_key)
+    if not check_cell_cache:
+        return identity
+    mask_path = config.dataset.persistent_mask_path or (
+        config.dataset.output_dir / "cellpose_masks_tiled.npy"
+    )
+    require_matching_cached_model(mask_path, config, identity)
+    if mask_path.exists():
+        required = (
+            config.dataset.persistent_cellpose_cellprob_path
+            or mask_path.with_name("cellpose_cellprobs_tiled.npy"),
+            config.dataset.persistent_transcripts_path
+            or mask_path.with_name("transcripts_for_proseg.csv"),
+        )
+        if not all(path.exists() for path in required):
+            raise ValueError("Custom-model cache is incomplete; use a fresh outdir")
+    del sdata
+    return identity
+
+
 def run_cellpose_segmentation(
     config: SegmentationConfig,
     *,
     force_rerun: bool = False,
 ) -> dict[str, Path]:
     """Run Cellpose and prepare its mask-derived inputs for ProSeg."""
+    expected_identity = _preflight_model_selection(config)
     dataset = config.dataset
     out_dir = Path(dataset.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -354,10 +615,17 @@ def run_cellpose_segmentation(
     stitching_stats_path = (
         persistent_stitching_stats_path or staged_stitching_stats_path
     )
+    # hitl-hook:C3
+    require_matching_cached_model(mask_path, config, expected_identity)
     progress_path = out_dir / "cellpose_progress.json"
     _started_at = time.monotonic()
 
     def _stage_outputs() -> tuple[Path, Path, Path, Path, Path]:
+        ensure_model_identity(mask_path, stitching_stats_path)
+        identity_path = model_identity_path(mask_path)
+        staged_identity_path = model_identity_path(staged_mask_path)
+        if identity_path != staged_identity_path:
+            stage_existing_output(identity_path, staged_identity_path)
         if transcripts_csv != staged_transcripts_csv:
             stage_existing_output(transcripts_csv, staged_transcripts_csv)
         if mask_path != staged_mask_path:
@@ -399,8 +667,20 @@ def run_cellpose_segmentation(
     )
     if reusable_outputs_exist:
         if _labeled_mask_has_foreground(mask_path):
+            current_x_transform, current_y_transform = _derive_cellpose_transforms(
+                config
+            )
+            _require_seeding_matches_transforms(
+                dataset.name,
+                transcripts_csv,
+                mask_path,
+                current_x_transform,
+                current_y_transform,
+            )
             if not transforms_path.exists():
-                _write_cellpose_transforms(config, transforms_path)
+                _write_transforms_json(
+                    transforms_path, current_x_transform, current_y_transform
+                )
             log_status(f"[{dataset.name}] Reusing existing Cellpose outputs")
             if not stitching_stats_path.exists():
                 stitching_stats_path.parent.mkdir(parents=True, exist_ok=True)
@@ -435,6 +715,7 @@ def run_cellpose_segmentation(
     mask_path.parent.mkdir(parents=True, exist_ok=True)
     mask_path = run_tiled_cellpose(
         fetch_tile_fn=fetch_tile_fn,
+        expected_model_identity=expected_identity,
         height=height,
         width=width,
         dataset_name=dataset.name,
@@ -507,13 +788,20 @@ def run_cellpose_segmentation(
     platform = dataset.platform.upper()
     qv_col = None
     min_qv = None
-    excluded_gene_pattern = None
+    # Control features (negative controls, blank / unassigned / deprecated
+    # codewords, genomic controls) are dropped on both platforms using the
+    # shared registry; Xenium's is_gene / codeword_category take precedence.
+    is_gene_col = resolve_col(points_obj, ["is_gene"], required=False)
+    codeword_category_col = (
+        None
+        if is_gene_col is not None
+        else resolve_col(points_obj, ["codeword_category"], required=False)
+    )
     if platform == "XENIUM":
         qv_col = resolve_col(
             points_obj, ["qv", "quality", "quality_value"], required=False
         )
         min_qv = dataset.min_qv
-        excluded_gene_pattern = r"^(Deprecated|NegControl|Unassigned|Intergenic)"
     elif platform == "MERSCOPE":
         qv_col = resolve_col(
             points_obj,
@@ -522,6 +810,8 @@ def run_cellpose_segmentation(
         )
 
     transcripts_csv.parent.mkdir(parents=True, exist_ok=True)
+    # A record of an earlier seeding must not outlive the CSV it described.
+    _seeding_transforms_path(transcripts_csv).unlink(missing_ok=True)
     mask_mmap = np.load(mask_path, mmap_mode="r")
     prep_stats = write_proseg_csv_from_points(
         points_obj=points_obj,
@@ -535,7 +825,9 @@ def run_cellpose_segmentation(
         gene_col=gene_col,
         qv_col=qv_col,
         min_qv=min_qv,
-        excluded_gene_pattern=excluded_gene_pattern,
+        control_platform=platform,
+        is_gene_col=is_gene_col,
+        codeword_category_col=codeword_category_col,
         chunk_rows=config.memory.transcript_chunk_rows,
         dataset_name=dataset.name,
         status_every_chunks=config.memory.transcript_status_every_chunks,
@@ -548,15 +840,11 @@ def run_cellpose_segmentation(
         f"{prep_stats['n_seeded']:,} ({prep_stats['pct_seeded']:.2f}%)"
     )
 
-    transforms_path.write_text(
-        json.dumps(
-            {
-                "x_transform": list(x_transform),
-                "y_transform": list(y_transform),
-            },
-            indent=2,
-        )
-        + "\n"
+    _write_transforms_json(transforms_path, x_transform, y_transform)
+    # Recorded beside the (possibly persistent) CSV so a later reuse can tell
+    # which affine seeded it.
+    _write_transforms_json(
+        _seeding_transforms_path(transcripts_csv), x_transform, y_transform
     )
     if not stitching_stats_path.exists():
         stitching_stats_path.write_text(
@@ -588,6 +876,7 @@ def run_cellpose_nuclei_segmentation(
     force_rerun: bool = False,
 ) -> dict[str, Path]:
     """Run an independently reusable DAPI-only Cellpose nuclei segmentation."""
+    _preflight_model_selection(config, check_cell_cache=False)
     dataset = config.dataset
     out_dir = Path(dataset.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -610,6 +899,11 @@ def run_cellpose_nuclei_segmentation(
     started_at = time.monotonic()
 
     def _stage_outputs() -> tuple[Path, Path]:
+        ensure_model_identity(mask_path, stats_path)
+        identity_path = model_identity_path(mask_path)
+        staged_identity_path = model_identity_path(staged_mask_path)
+        if identity_path != staged_identity_path:
+            stage_existing_output(identity_path, staged_identity_path)
         if mask_path != staged_mask_path:
             stage_existing_output(mask_path, staged_mask_path)
         if stats_path.exists() and stats_path != staged_stats_path:
@@ -649,8 +943,21 @@ def run_cellpose_nuclei_segmentation(
     nuclei_config = config.model_copy(deep=True)
     nuclei_config.dataset.channels = ["DAPI"]
     nuclei_config.cellpose = config.cellpose.model_copy(
-        update={"model_type": config.nuclei_cellpose.model_type}
+        update={
+            "model_type": config.nuclei_cellpose.model_type,
+            "pretrained_model": config.nuclei_cellpose.pretrained_model,
+            "model_sha256": config.nuclei_cellpose.model_sha256,
+            "model_metadata_path": config.nuclei_cellpose.model_metadata_path,
+        }
     )
+    if is_experimental_arm(config) or (
+        config.nuclei_cellpose.model_fields_set - {"model_type", "pretrained_model"}
+    ):
+        nuclei_config.cellpose = config.nuclei_cellpose.model_copy(deep=True)
+        if nuclei_config.cellpose.pretrained_model != "cpsam_v2":
+            raise ValueError("HITL cell models require independent stock nuclei")
+    if is_experimental_arm(config) and dataset.platform == "XENIUM":
+        nuclei_config.dataset.image_key = "morphology_focus"
     nuclei_config.mask_filter = config.nuclei_mask_filter
 
     sdata, fetch_tile_fn, height, width, matrix, points_obj = _load_dataset_sdata(
@@ -728,6 +1035,8 @@ def run_proseg_segmentation(
     force_rerun: bool = False,
 ) -> dict[str, Path]:
     """Refine a prepared Cellpose prior with the CPU-only ProSeg tool."""
+    expected_identity = _preflight_model_selection(config)
+    require_matching_cached_model(Path(cellpose_mask_path), config, expected_identity)
     dataset = config.dataset
     out_dir = Path(dataset.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -894,6 +1203,7 @@ def run_segmentation_pipeline(
     force_rerun: bool = False,
 ) -> dict[str, Path]:
     """Run Cellpose then ProSeg in one process for CLI compatibility."""
+    _preflight_model_selection(config)
     dataset = config.dataset
     out_dir = Path(dataset.output_dir)
     staged_latest_output = out_dir / "proseg_base_latest.zarr"
@@ -927,6 +1237,8 @@ def run_segmentation_pipeline(
         if dataset.persistent_nuclei_mask_path
         else staged_nuclei_mask_path
     )
+    if not is_experimental_arm(config):
+        require_matching_cached_model(reusable_mask, config)
     hybrid_complete = not config.proseg_hybrid.enabled or has_proseg_hybrid_refinement(
         persistent_latest_output,
         config.proseg_hybrid,

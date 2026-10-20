@@ -117,6 +117,7 @@ def load_boundary_annotations(
     ribbon_path: Path | str | None = None,
     annotation_path: Path | str | None = None,
     smoothing_window: int = 0,
+    tissue_mask_only: bool = False,
 ) -> BoundaryAnnotationSet:
     """Load pial/white-matter boundaries and optional masks from GeoJSON files.
 
@@ -132,6 +133,8 @@ def load_boundary_annotations(
             ``role``, ``type``, ``name``, ``label``, or ``classification`` are
             matched against documented role aliases.
         smoothing_window: Optional moving-average window for line coordinates.
+        tissue_mask_only: Parse only pia, tissue edge, and global exclusions.
+            White-matter and ribbon annotations are ignored entirely.
 
     Returns:
         Parsed and validated boundary annotations.
@@ -156,12 +159,16 @@ def load_boundary_annotations(
             pial_by_piece, _lines_by_piece_from_features(combined, "pia")
         )
 
-    if wm_path is not None:
-        wm = read_line_annotation(wm_path, role="wm")
-        if wm is not None:
-            wm_by_piece.setdefault("piece_1", []).append(wm)
-    else:
-        _extend_line_groups(wm_by_piece, _lines_by_piece_from_features(combined, "wm"))
+    if not tissue_mask_only:
+        if wm_path is not None:
+            wm = read_line_annotation(wm_path, role="wm")
+            if wm is not None:
+                wm_by_piece.setdefault("piece_1", []).append(wm)
+        else:
+            _extend_line_groups(
+                wm_by_piece,
+                _lines_by_piece_from_features(combined, "wm"),
+            )
 
     side_lines: list[LineString] = []
     if side_boundary_path is not None:
@@ -169,21 +176,32 @@ def load_boundary_annotations(
     side_lines.extend(_lines_from_features(combined, "side"))
     side_lines = [smooth_line(line, smoothing_window) for line in side_lines]
 
-    if exclusion_path is not None:
-        exclusions_by_piece.setdefault("piece_1", []).extend(
-            read_polygon_annotations(exclusion_path, role="exclusion")
+    global_exclusions: list[Polygon] = []
+    if tissue_mask_only:
+        if exclusion_path is not None:
+            global_exclusions.extend(
+                read_polygon_annotations(exclusion_path, role="exclusion")
+            )
+        global_exclusions.extend(_polygons_from_features(combined, "exclusion"))
+    else:
+        if exclusion_path is not None:
+            exclusions_by_piece.setdefault("piece_1", []).extend(
+                read_polygon_annotations(exclusion_path, role="exclusion")
+            )
+        _extend_polygon_groups(
+            exclusions_by_piece,
+            _polygons_by_piece_from_features(combined, "exclusion"),
         )
-    _extend_polygon_groups(
-        exclusions_by_piece, _polygons_by_piece_from_features(combined, "exclusion")
-    )
 
-    if ribbon_path is not None:
-        ribbon_polygons = read_polygon_annotations(ribbon_path, role="ribbon")
-        if ribbon_polygons:
-            ribbons_by_piece.setdefault("piece_1", []).extend(ribbon_polygons)
-    _extend_polygon_groups(
-        ribbons_by_piece, _polygons_by_piece_from_features(combined, "ribbon")
-    )
+    if not tissue_mask_only:
+        if ribbon_path is not None:
+            ribbon_polygons = read_polygon_annotations(ribbon_path, role="ribbon")
+            if ribbon_polygons:
+                ribbons_by_piece.setdefault("piece_1", []).extend(ribbon_polygons)
+        _extend_polygon_groups(
+            ribbons_by_piece,
+            _polygons_by_piece_from_features(combined, "ribbon"),
+        )
 
     piece_ids = sorted(
         set(pial_by_piece)
@@ -195,7 +213,7 @@ def load_boundary_annotations(
         raise ValueError("Missing pial boundary annotation.")
 
     pieces: list[BoundaryPieceAnnotations] = []
-    for piece_id in piece_ids:
+    for piece_index, piece_id in enumerate(piece_ids):
         pial = _merge_piece_lines(
             pial_by_piece.get(piece_id, []), f"{piece_id} pial boundary"
         )
@@ -219,7 +237,11 @@ def load_boundary_annotations(
                 tissue_piece_id=piece_id,
                 pial=pial,
                 wm=wm,
-                exclusions=tuple(exclusions_by_piece.get(piece_id, ())),
+                exclusions=tuple(
+                    global_exclusions
+                    if tissue_mask_only and piece_index == 0
+                    else exclusions_by_piece.get(piece_id, ())
+                ),
                 ribbon=ribbon,
             )
         )

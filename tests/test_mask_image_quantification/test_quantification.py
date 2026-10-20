@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import anndata as ad
 import numpy as np
@@ -12,6 +13,7 @@ import pytest
 import xarray as xr
 from spatialdata.models import TableModel
 
+import merxen.mask_image_quantification as quantification_module
 from merxen.config import MaskImageQuantificationConfig
 from merxen.mask_image_quantification import (
     HYBRID_IMAGE_QUANTIFICATION_OBS_PREFIX,
@@ -332,6 +334,113 @@ def test_hybrid_image_obs_column_sanitization_avoids_collisions() -> None:
     assert len(set(result.table.obs.columns)) == len(result.table.obs.columns)
 
 
+def test_rejoining_hybrid_image_features_replaces_stale_obs_columns() -> None:
+    """A repeated join replaces its reserved columns without suffixing names."""
+    first_image_table = ad.AnnData(
+        X=np.asarray([[10.0]], dtype=float),
+        obs=pd.DataFrame(
+            {
+                "instance_id": np.asarray([1], dtype=np.uint64),
+                "mask_pixel_count": [5],
+            },
+            index=["1"],
+        ),
+        var=pd.DataFrame(index=["morphology_focus__DAPI__mean"]),
+    )
+    hybrid_table = ad.AnnData(
+        X=np.asarray([[1]], dtype=np.int64),
+        obs=pd.DataFrame(
+            {"instance_id": np.asarray([1], dtype=np.uint64)},
+            index=["1"],
+        ),
+        var=pd.DataFrame(index=["GeneA"]),
+    )
+    first_join = join_cellpose_image_quantification_to_hybrid(
+        first_image_table,
+        hybrid_table,
+    ).table
+    first_join.obs[
+        f"{HYBRID_IMAGE_QUANTIFICATION_OBS_PREFIX}removed_image__p62__mean"
+    ] = 99.0
+
+    second_image_table = ad.AnnData(
+        X=np.asarray([[20.0, 30.0]], dtype=float),
+        obs=pd.DataFrame(
+            {
+                "instance_id": np.asarray([1], dtype=np.uint64),
+                "mask_pixel_count": [7],
+            },
+            index=["1"],
+        ),
+        var=pd.DataFrame(
+            index=[
+                "morphology_focus__DAPI__mean",
+                "post_xenium_if__p62__mean",
+            ]
+        ),
+    )
+    result = join_cellpose_image_quantification_to_hybrid(
+        second_image_table,
+        first_join,
+    )
+
+    marker = result.table.uns[HYBRID_IMAGE_QUANTIFICATION_OBSM_KEY]
+    prefixed_columns = [
+        str(column)
+        for column in result.table.obs.columns
+        if str(column).startswith(HYBRID_IMAGE_QUANTIFICATION_OBS_PREFIX)
+    ]
+    assert prefixed_columns == marker["obs_columns"]
+    assert prefixed_columns == [
+        f"{HYBRID_IMAGE_QUANTIFICATION_OBS_PREFIX}morphology_focus__DAPI__mean",
+        f"{HYBRID_IMAGE_QUANTIFICATION_OBS_PREFIX}post_xenium_if__p62__mean",
+    ]
+    assert result.table.obs[prefixed_columns].iloc[0].tolist() == [20.0, 30.0]
+    assert result.table.obs["cellpose_image_mask_pixel_count"].tolist() == [7.0]
+
+
+def test_hybrid_join_completeness_rejects_orphaned_obs_columns() -> None:
+    """A marker cannot hide stale columns left by an earlier image join."""
+    image_table = ad.AnnData(
+        X=np.asarray([[10.0]], dtype=float),
+        obs=pd.DataFrame(
+            {"instance_id": np.asarray([1], dtype=np.uint64)},
+            index=["1"],
+        ),
+        var=pd.DataFrame(index=["morphology_focus__DAPI__mean"]),
+    )
+    hybrid_table = ad.AnnData(
+        X=np.asarray([[1]], dtype=np.int64),
+        obs=pd.DataFrame(
+            {"instance_id": np.asarray([1], dtype=np.uint64)},
+            index=["1"],
+        ),
+        var=pd.DataFrame(index=["GeneA"]),
+    )
+    joined = join_cellpose_image_quantification_to_hybrid(
+        image_table,
+        hybrid_table,
+    ).table
+    sdata = SimpleNamespace(
+        tables={
+            MASK_IMAGE_QUANTIFICATION_TABLE_KEY: image_table,
+            "table_MOSAIK_proseg_hybrid": joined,
+        }
+    )
+
+    assert quantification_module._hybrid_image_join_is_complete(
+        sdata,
+        image_table_key=MASK_IMAGE_QUANTIFICATION_TABLE_KEY,
+    )
+    joined.obs[
+        f"{HYBRID_IMAGE_QUANTIFICATION_OBS_PREFIX}morphology_focus__DAPI__mean_1"
+    ] = 10.0
+    assert not quantification_module._hybrid_image_join_is_complete(
+        sdata,
+        image_table_key=MASK_IMAGE_QUANTIFICATION_TABLE_KEY,
+    )
+
+
 def test_run_quantification_persists_hybrid_feature_join(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -406,3 +515,174 @@ def test_run_quantification_persists_hybrid_feature_join(
     updated = sdata.tables["table_MOSAIK_proseg_hybrid"]
     assert HYBRID_IMAGE_QUANTIFICATION_OBSM_KEY in updated.obsm
     np.testing.assert_array_equal(updated.X, np.asarray([[5], [7]]))
+
+
+def _patch_in_memory_zarr(
+    monkeypatch: pytest.MonkeyPatch,
+    sdata: SimpleNamespace,
+) -> list[str]:
+    writes: list[str] = []
+
+    def _fake_write(
+        sdata_obj: SimpleNamespace,
+        key: str,
+        element_type: str,
+        value: object,
+        *,
+        overwrite: bool = True,
+    ) -> bool:
+        del overwrite
+        writes.append(key)
+        getattr(sdata_obj, element_type)[key] = value
+        return True
+
+    monkeypatch.setattr(
+        "merxen.mask_image_quantification.sd.read_zarr", lambda _: sdata
+    )
+    monkeypatch.setattr(
+        "merxen.mask_image_quantification.TableModel.parse",
+        lambda table, **_: table,
+    )
+    monkeypatch.setattr(
+        "merxen.mask_image_quantification.write_or_replace_element",
+        _fake_write,
+    )
+    return writes
+
+
+def test_existing_quantification_is_reused_when_images_are_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A rerun with the same source images must not rewrite the table."""
+    latest = tmp_path / "latest.zarr"
+    latest.mkdir()
+    mask_path = tmp_path / "mask.npy"
+    np.save(mask_path, np.array([[1, 1], [2, 0]], dtype=np.uint32))
+    sdata = SimpleNamespace(
+        images={"img": _image(np.ones((2, 2, 1)), ["DAPI"])},
+        tables={},
+    )
+    writes = _patch_in_memory_zarr(monkeypatch, sdata)
+    cfg = MaskImageQuantificationConfig(
+        dataset_name="P1_XENIUM",
+        platform="XENIUM",
+        latest_zarr_path=latest,
+        mask_path=mask_path,
+        output_dir=tmp_path / "quant_out",
+    )
+
+    run_mask_image_quantification(cfg)
+    run_mask_image_quantification(cfg)
+
+    assert writes == [MASK_IMAGE_QUANTIFICATION_TABLE_KEY]
+
+
+def test_quantification_serializes_with_another_store_writer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    store_lock_contention: Any,
+) -> None:
+    """Quantification waits for a writer holding the store lock through another
+    staged symlink, and keeps the lock from its read until the table is written."""
+    latest = tmp_path / "latest.zarr"
+    latest.mkdir()
+    mask_path = tmp_path / "mask.npy"
+    np.save(mask_path, np.array([[1, 1], [2, 0]], dtype=np.uint32))
+    sdata = SimpleNamespace(
+        images={"img": _image(np.ones((2, 2, 1)), ["DAPI"])},
+        tables={},
+    )
+    writes = _patch_in_memory_zarr(monkeypatch, sdata)
+
+    store_lock_contention.run(
+        lambda staged: run_mask_image_quantification(
+            MaskImageQuantificationConfig(
+                dataset_name="P1_XENIUM",
+                platform="XENIUM",
+                latest_zarr_path=staged,
+                mask_path=mask_path,
+                output_dir=tmp_path / "quant_out",
+            )
+        ),
+        latest,
+        reads=[(quantification_module.sd, "read_zarr")],
+        persists=[(quantification_module, "write_or_replace_element")],
+    )
+
+    assert writes == [MASK_IMAGE_QUANTIFICATION_TABLE_KEY]
+
+
+def test_newly_registered_image_triggers_requantification(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Channels of an image added after quantification must not be skipped."""
+    latest = tmp_path / "latest.zarr"
+    latest.mkdir()
+    mask_path = tmp_path / "mask.npy"
+    np.save(mask_path, np.array([[1, 1], [2, 0]], dtype=np.uint32))
+    sdata = SimpleNamespace(
+        images={"morphology_focus": _image(np.ones((2, 2, 1)), ["DAPI"])},
+        tables={},
+    )
+    writes = _patch_in_memory_zarr(monkeypatch, sdata)
+    cfg = MaskImageQuantificationConfig(
+        dataset_name="P1_XENIUM",
+        platform="XENIUM",
+        latest_zarr_path=latest,
+        mask_path=mask_path,
+        output_dir=tmp_path / "quant_out",
+    )
+    run_mask_image_quantification(cfg)
+
+    sdata.images["post_xenium_if"] = _image(
+        np.arange(4, dtype=np.float64).reshape(2, 2, 1),
+        ["p62"],
+    )
+    run_mask_image_quantification(cfg)
+
+    assert writes == [MASK_IMAGE_QUANTIFICATION_TABLE_KEY] * 2
+    table = sdata.tables[MASK_IMAGE_QUANTIFICATION_TABLE_KEY]
+    assert set(table.var["image_key"]) == {"morphology_focus", "post_xenium_if"}
+    assert "post_xenium_if__p62__mean" in table.var_names
+
+
+def test_aligned_counterpart_image_is_not_quantified(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An aligned image lives on the counterpart grid, not this mask's grid.
+
+    Alignment materializes ``MERSCOPE_z_projection_aligned_nonrigid`` into the
+    MERSCOPE store after quantification has run. A rerun must neither treat it
+    as a newly registered image nor try to quantify it over the native masks.
+    """
+    latest = tmp_path / "latest.zarr"
+    latest.mkdir()
+    mask_path = tmp_path / "mask.npy"
+    np.save(mask_path, np.array([[1, 1], [2, 0]], dtype=np.uint32))
+    sdata = SimpleNamespace(
+        images={"MERSCOPE_z_projection": _image(np.ones((2, 2, 1)), ["DAPI"])},
+        tables={},
+    )
+    writes = _patch_in_memory_zarr(monkeypatch, sdata)
+    cfg = MaskImageQuantificationConfig(
+        dataset_name="P1_MERSCOPE",
+        platform="MERSCOPE",
+        latest_zarr_path=latest,
+        mask_path=mask_path,
+        output_dir=tmp_path / "quant_out",
+    )
+    run_mask_image_quantification(cfg)
+
+    sdata.images["MERSCOPE_z_projection_aligned_nonrigid"] = _image(
+        np.ones((3, 3, 1)),
+        ["DAPI"],
+    )
+    run_mask_image_quantification(cfg)
+    assert writes == [MASK_IMAGE_QUANTIFICATION_TABLE_KEY]
+
+    run_mask_image_quantification(cfg, force_rerun=True)
+    table = sdata.tables[MASK_IMAGE_QUANTIFICATION_TABLE_KEY]
+    assert set(table.var["image_key"]) == {"MERSCOPE_z_projection"}

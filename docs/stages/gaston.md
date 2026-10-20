@@ -77,3 +77,27 @@ workflow does not silently recluster them.
 
 See [Configuration](../configuration.md) for all controls and
 [Outputs](../outputs.md) for the published layout.
+
+## Licenses and redistribution
+
+GASTON is BSD 3-Clause. Its GLM-PCA dependency is LGPLv3 or later and remains
+a separate, replaceable Python package. MerXen's own code stays MIT-licensed.
+The full upstream notices, both GNU license texts, and the exact GLM-PCA source
+distribution are preserved in [licenses](../../licenses/). See
+[third-party notices](../../THIRD_PARTY_NOTICES.md) for the pinned versions,
+redistribution requirements and instructions for replacing GLM-PCA.
+
+Build the GASTON image from the repository root with
+`docker build -f containers/Dockerfile.gaston -t merxen-gaston .`. The image
+includes those notices and source plus an inventory of installed Python package
+licenses under `/usr/share/merxen/licenses/`; it also retains the base image's
+NVIDIA and operating-system notices. Keep these materials with redistributed
+images or bundled Conda environments.
+
+For Apptainer, set `--gaston_container` to your built image or export
+`MERXEN_GASTON_CONTAINER` before launching Nextflow. Conda runs use the
+isolated `envs/environment.gaston.yml` runtime.
+
+Additional site bind mounts can be supplied through `--gaston_container_options`
+or the exported `MERXEN_GASTON_CONTAINER_OPTIONS` variable. Automatic input
+mounts remain enabled, and training adds `--nv` only when GPU use is requested.

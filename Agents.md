@@ -19,8 +19,11 @@ my_project/
 ├── notebooks/           # Exploratory only — no production logic here
 ├── docs/
 ├── pyproject.toml       # Single source of truth for dependencies and tool config
-├── environment.yml      # Conda env: python version, system-level deps, pip install
-├── requirements.lock    # Pinned dependency tree — generated, never hand-edited
+├── envs/                # Conda envs: python version, system-level deps, pip install
+│   └── environment.yml
+├── containers/          # Dockerfiles for any images the project builds
+├── requirements/        # Pinned dependency trees — generated, never hand-edited
+│   └── requirements.lock
 ├── .pre-commit-config.yaml
 ├── .env.example         # Template for environment variables (never commit .env)
 ├── .gitignore
@@ -33,6 +36,7 @@ Rules:
 - Tests mirror the package structure under `tests/`.
 - Notebooks are for exploration and communication. If logic in a notebook is needed in production, refactor it into `src/`.
 - Data files and model weights do not go in the repo. Use `.gitignore` to exclude them.
+- Conda environment files live in `envs/` and image definitions in `containers/`, so the root stays limited to files that tooling requires there. Lockfiles stay at the root because `uv`, CI, and `pip install -r` all assume that location.
 
 
 ## Dependency Management
@@ -58,7 +62,7 @@ dev = [
 ]
 ```
 
-### environment.yml
+### envs/environment.yml
 
 Keep this thin. Use it only for what conda handles better than pip: the Python version and system-level compiled dependencies. Defer everything else to pyproject.toml.
 
@@ -72,7 +76,8 @@ dependencies:
   # that pip can't install cleanly (GDAL, CUDA, etc.)
   - pip
   - pip:
-      - -e ".[dev]"
+      # Relative to this file's directory — conda runs pip from there.
+      - -e "../[dev]"
 ```
 
 Do not duplicate dependencies across environment.yml and pyproject.toml. If it can be installed via pip, it belongs in pyproject.toml.
@@ -82,13 +87,13 @@ Do not duplicate dependencies across environment.yml and pyproject.toml. If it c
 Generate a lockfile to pin the full resolved dependency tree:
 
 ```bash
-uv pip compile pyproject.toml --extra dev -o requirements.lock
+uv pip compile pyproject.toml --extra dev -o requirements/requirements.lock
 ```
 
-Commit `requirements.lock` to version control. Regenerate it when you add or update dependencies. For reproducible installs (CI, onboarding):
+Commit `requirements/requirements.lock` to version control. Regenerate it when you add or update dependencies. For reproducible installs (CI, onboarding):
 
 ```bash
-uv pip install -r requirements.lock
+uv pip install -r requirements/requirements.lock
 pip install -e . --no-deps
 ```
 
@@ -97,19 +102,16 @@ Never hand-edit the lockfile. Never install packages by running `pip install <pa
 
 ## Environment & Configuration
 
-- Store all configuration, secrets, and environment-specific values in environment variables.
-- Use `.env` files locally with `python-decouple` or `pydantic-settings` to load them.
-- Never hardcode secrets, API keys, file paths to local machines, or database credentials.
-- Commit a `.env.example` with placeholder values so new contributors know what's needed.
-- Add `.env` to `.gitignore`.
-
-```python
-from decouple import config
-
-DATABASE_URL = config("DATABASE_URL")
-API_KEY = config("API_KEY")
-DEBUG = config("DEBUG", default=False, cast=bool)
-```
+- Store all configuration, secrets and machine-specific values outside the code. Locations go in
+  the gitignored `.env` (template `.env.example`, placeholders only) or, for Nextflow, a gitignored
+  site config (`workflows/conf/*.site.config`, templates `*.site.config.example`).
+- Read `.env` through the project loader `merxen.local_config` (process environment first, then
+  `.env`). A missing value raises an error that names the variable; never add a built-in host
+  default.
+- Never commit file paths of a machine, secrets, credentials, or the names of samples, donors,
+  sections, slides, runs or instruments. Use the neutral aliases of the gitignored `.aliases.tsv`
+  (template `.aliases.example.tsv`). This applies to file names, commit messages, branch names and
+  pull-request text as well.
 
 
 ## Naming Conventions
@@ -193,7 +195,7 @@ def split_dataset(
 
 The README must cover:
 1. What the project does (one paragraph).
-2. How to set up the environment (`conda env create -f environment.yml`).
+2. How to set up the environment (`conda env create -f envs/environment.yml`).
 3. How to install pre-commit hooks (both commit and push types).
 4. How to run tests (`pytest`).
 5. How to run the main workflow / entry points.
@@ -220,6 +222,7 @@ for attempt in range(MAX_RETRIES):
 - Commit directly to `main` by default for normal local work.
 - If changes are serious, risky, breaking, or span unrelated areas, ask whether they should go on a new branch before committing.
 - When using branches, branch from `main`, keep them short-lived, merge via pull request, and delete them after merge.
+- Exception: a long-lived integration branch is allowed only when a plan in `docs/plans/` names it; it follows the same PR, CI and commit-prefix rules and is deleted when the effort closes. Milestone branches may be cut from it and merged back into it by PR, and are deleted after merge.
 
 ### Commit messages
 
@@ -243,6 +246,8 @@ Commit title format is required:
 - `[test]:` testing-related changes.
 - `[docs]:` documentation, comments, or docstrings.
 - `[chore]:` maintenance/configuration changes.
+
+A commit message, branch name or PR text never names a sample or a host path (the commit-msg and pre-push hooks check).
 
 
 ## Linting, Formatting & Hooks
@@ -311,11 +316,12 @@ repos:
         pass_filenames: false
 ```
 
-After cloning, every contributor must install both hook types:
+After cloning, every contributor must install the hooks. The hook types (pre-commit,
+pre-merge-commit, commit-msg, pre-push) come from `default_install_hook_types` in
+`.pre-commit-config.yaml`:
 
 ```bash
 pre-commit install
-pre-commit install --hook-type pre-push
 ```
 
 Note: these are local guardrails. Contributors can bypass them with `--no-verify`. CI (see below) is the authoritative gate that cannot be bypassed.
@@ -345,7 +351,7 @@ jobs:
         run: pip install uv
       - name: Install dependencies
         run: |
-          uv pip install --system -r requirements.lock
+          uv pip install --system -r requirements/requirements.lock
           uv pip install --system -e . --no-deps
       - name: Lint
         run: ruff check .
@@ -358,7 +364,7 @@ jobs:
 ```
 
 Notes:
-- CI uses `requirements.lock` for deterministic installs — not a fresh resolve.
+- CI uses `requirements/requirements.lock` for deterministic installs — not a fresh resolve.
 - CI uses pip/uv directly, not conda. Conda is a local development convenience; CI needs speed and reproducibility. If you need system-level libraries in CI, install them with `apt-get` in a prior step.
 - Set up branch protection: Settings → Branches → Add rule for `main` → check "Require status checks to pass before merging" and select the CI job.
 

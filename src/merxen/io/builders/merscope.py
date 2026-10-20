@@ -103,6 +103,16 @@ def write_merscope_spatialdata(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    from merxen.io.builders.vzg2 import resolve_vzg2_path, write_vzg2_spatialdata
+
+    if resolve_vzg2_path(input_path) is not None:
+        return write_vzg2_spatialdata(
+            input_path=input_path,
+            output_path=output_path,
+            build_config=build_config,
+            transform_path_override=transform_path_override,
+        )
+
     z_layers = (
         list(build_config.z_layers)
         if build_config.z_layers is not None
@@ -444,9 +454,8 @@ def read_merscope_spatialdata_local(
         transcript_path_parquet = path / MerscopeKeys.TRANSCRIPTS_FILE_PARQUET
         transcript_path_csv = path / MerscopeKeys.TRANSCRIPTS_FILE_CSV
         if transcript_path_parquet.exists():
-            table = pd.read_parquet(transcript_path_parquet, engine="pyarrow")
-            points[f"{dataset_id}_transcripts"] = _parse_transcript_table(
-                table,
+            points[f"{dataset_id}_transcripts"] = _get_parquet_points(
+                transcript_path_parquet,
                 transform,
             )
         elif transcript_path_csv.exists():
@@ -551,6 +560,15 @@ def _parse_transcript_table(
     npartitions = max(1, min(16, len(table) // 1_000_000 + 1))
     ddf = dd.from_pandas(table, npartitions=npartitions)
 
+    return _parse_transcript_ddf(ddf, transformations)
+
+
+def _parse_transcript_ddf(
+    ddf: dd.DataFrame,
+    transformations: dict[str, BaseTransformation],
+) -> dd.DataFrame:
+    """Parse an already-normalized lazy transcript table as spatial points."""
+
     parse_kwargs: dict[str, Any] = {
         "coordinates": {
             "x": MerscopeKeys.GLOBAL_X,
@@ -567,6 +585,48 @@ def _parse_transcript_table(
     transcripts = PointsModel.parse(ddf, **parse_kwargs)
     transcripts["gene"] = transcripts["gene"].astype("category")
     return cast(dd.DataFrame, transcripts)
+
+
+def _get_parquet_points(
+    transcript_path: Path,
+    transformations: dict[str, BaseTransformation],
+) -> dd.DataFrame:
+    """Read a large transcript Parquet lazily and parse it as spatial points."""
+    table = dd.read_parquet(
+        transcript_path,
+        engine="pyarrow",
+        split_row_groups=True,
+    )
+    index_columns = [
+        column
+        for column in table.columns
+        if not str(column).strip() or str(column).startswith("__index_level_")
+    ]
+    if index_columns:
+        table = table.drop(columns=index_columns)
+    if MerscopeKeys.GENE_KEY not in table.columns and "feature_name" in table.columns:
+        table = table.rename(columns={"feature_name": MerscopeKeys.GENE_KEY})
+
+    required = [
+        MerscopeKeys.GLOBAL_X,
+        MerscopeKeys.GLOBAL_Y,
+        MerscopeKeys.GLOBAL_Z,
+        MerscopeKeys.GENE_KEY,
+    ]
+    missing = [col for col in required if col not in table.columns]
+    if missing:
+        raise ValueError(f"Transcript table is missing required columns: {missing}")
+
+    dtype_map = {
+        MerscopeKeys.GLOBAL_X: "float64",
+        MerscopeKeys.GLOBAL_Y: "float64",
+        MerscopeKeys.GLOBAL_Z: "float64",
+        MerscopeKeys.GENE_KEY: "string",
+    }
+    if MerscopeKeys.CELL_ID in table.columns:
+        dtype_map[MerscopeKeys.CELL_ID] = "string"
+    table = table.astype(dtype_map).dropna(subset=required)
+    return _parse_transcript_ddf(table, transformations)
 
 
 def _rioxarray_load_merscope(
@@ -641,9 +701,23 @@ def _get_polygons(
 ) -> geopandas.GeoDataFrame:
     """Read the cell boundary parquet file and parse it into shapes."""
     geo_df = geopandas.read_parquet(boundaries_path)
-    geo_df = geo_df.rename_geometry("geometry")
+    if geo_df.geometry.name != "geometry":
+        geo_df = geo_df.rename_geometry("geometry")
     geo_df = geo_df[geo_df[MerscopeKeys.Z_INDEX] == 0]
-    geo_df = geo_df[geo_df.geometry.is_valid]
+    invalid = ~geo_df.geometry.is_valid
+    if bool(invalid.any()):
+        logger.warning(
+            "[MERSCOPE] Repairing %d self-intersecting canonical cell polygons",
+            int(invalid.sum()),
+        )
+        geo_df.loc[invalid, "geometry"] = geo_df.loc[invalid, "geometry"].buffer(0)
+    valid = geo_df.geometry.is_valid & ~geo_df.geometry.is_empty
+    if not bool(valid.all()):
+        logger.warning(
+            "[MERSCOPE] Dropping %d unrecoverable canonical cell polygons",
+            int((~valid).sum()),
+        )
+        geo_df = geo_df[valid]
     geo_df.geometry = geo_df.geometry.map(_to_multi_polygon)
     geo_df.index = geo_df[MerscopeKeys.METADATA_CELL_KEY].astype(str)
     return ShapesModel.parse(geo_df, transformations=transformations)

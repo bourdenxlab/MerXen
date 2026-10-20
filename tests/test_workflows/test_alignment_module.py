@@ -18,6 +18,12 @@ def test_alignment_workflow_defaults_to_valis_and_preserves_legacy_backend() -> 
         '"moving_platform"',
         '"merscope_image"',
         '"xenium_image"',
+        '"tissue_annotation_path"',
+        (
+            "path(merscope_tissue_annotation, stageAs: "
+            '"merscope_tissue_annotation.geojson")'
+        ),
+        'path(xenium_tissue_annotation, stageAs: "xenium_tissue_annotation.geojson")',
         '"valis"',
         '"legacy_spateo"',
         '"resume": ${params.alignment_resume}',
@@ -44,13 +50,26 @@ def test_alignment_workflow_defaults_to_valis_and_preserves_legacy_backend() -> 
         "alignment_qc_non_rigid_minimum_nmi_improvement = 0.0",
         "alignment_qc_non_rigid_maximum_coherent_rotation_degrees = 0.25",
         "alignment_qc_non_rigid_maximum_coherent_translation_um = 25.0",
+        "process MATERIALIZE_ALIGNMENT",
+        "cache false",
+        "materialize-alignment",
+        "--summary materialization_summary.json",
+        "alignment_materialization_enabled = true",
+        "alignment_materialization_max_forks = 1",
+        'withName: "MATERIALIZE_ALIGNMENT"',
+        'memory = "120 GB"',
     ]:
         assert expected in module_text or expected in config_text
 
     main_text = (repo_root / "workflows" / "main.nf").read_text()
     assert 'alignOut.resolve("alignment_transform.json")' in main_text
     assert 'alignOut.resolve("alignment_coords")' in main_text
+    assert "appendAlignmentAnnotationPreflightChecks" in main_text
+    assert "alignmentTissueAnnotationPath(row, platform)" in main_text
+    assert "settings.alignment_annotation_paths.MERSCOPE" in main_text
+    assert "settings.alignment_annotation_paths.XENIUM" in main_text
     assert "tuple(pairId, merscopeLatest, xeniumLatest, alignOut)" in main_text
+    assert "MATERIALIZE_ALIGNMENT(alignment_registration_results_ch)" in main_text
     assert (
         '"transform_json_path": "${align_out}/alignment_transform.json"' in module_text
     )
@@ -59,18 +78,16 @@ def test_alignment_workflow_defaults_to_valis_and_preserves_legacy_backend() -> 
 def test_alignment_environment_uses_the_generated_runtime_lock() -> None:
     """The isolated stage environment must consume the VALIS runtime lock."""
     repo_root = Path(__file__).resolve().parents[2]
-    environment_text = (repo_root / "environment.alignment.yml").read_text()
-    lock_text = (repo_root / "requirements.alignment.lock").read_text()
-    pyproject_text = (repo_root / "pyproject.toml").read_text()
+    environment_text = (repo_root / "envs" / "environment.alignment.yml").read_text()
+    lock_text = (repo_root / "requirements" / "requirements.alignment.lock").read_text()
     config_text = (repo_root / "workflows" / "nextflow.config").read_text()
     cell_type_mapper_commit = "d79f2a5a0780170be392da3ba0e7d0eb86a36238"
 
-    assert "-r requirements.alignment.lock" in environment_text
+    assert "-r ../requirements/requirements.alignment.lock" in environment_text
     assert "openjdk=11" in environment_text
     assert "libvips>=8.11" in environment_text
     assert "numpy==2.2.6" in lock_text
     assert "opencv-contrib-python-headless==4.12.0.88" in lock_text
     assert cell_type_mapper_commit in lock_text
-    assert cell_type_mapper_commit in pyproject_text
     assert "conda.enabled = true" in config_text
     assert "conda = params.alignment_conda" in config_text

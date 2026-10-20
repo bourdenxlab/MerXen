@@ -1,6 +1,7 @@
 # Stage 2 — Segmentation
 
-Runs two image-based segmentations: a DAPI-only Cellpose `nuclei` model and a
+Runs two image-based segmentations using stock Cellpose-SAM v2 (`cpsam_v2`): a
+DAPI-only nuclei segmentation and a
 cell segmentation on DAPI/PolyT (MERSCOPE) or DAPI/18S (Xenium). The cell mask
 is then refined using the actual transcript positions with ProSeg. The nuclei
 mask remains independent of transcript assignment and is retained for
@@ -8,7 +9,7 @@ subcellular transcript analysis.
 
 ## What it does
 
-1. Run DAPI-only Cellpose with the `nuclei` model and write an independently
+1. Run DAPI-only Cellpose-SAM v2 and write an independently
    reusable nuclei mask.
 2. Load the SpatialData zarr from stage 1 and pick the cell channels.
 3. Tile the image, run Cellpose on each tile, merge masks back into a
@@ -35,7 +36,7 @@ The module has three independently scheduled processes per dataset:
 
 | Process | Tool | Process request | Dwight profile behavior |
 |---------|------|-----------------|-------------------------|
-| `CELLPOSE_NUCLEI_SEGMENT` | DAPI-only Cellpose `nuclei` model | 12 CPUs, 212 GB RAM | `cellpose_segment_max_forks = 1`; shared workstation GPU lock when `cellpose_gpu=true` |
+| `CELLPOSE_NUCLEI_SEGMENT` | DAPI-only Cellpose-SAM v2 | 12 CPUs, 212 GB RAM | `cellpose_segment_max_forks = 1`; shared workstation GPU lock when `cellpose_gpu=true` |
 | `CELLPOSE_SEGMENT` | Cellpose-SAM | 12 CPUs, 212 GB RAM | `cellpose_segment_max_forks = 1`; shared workstation GPU lock when `cellpose_gpu=true` |
 | `PROSEG_SEGMENT` | ProSeg | 32 CPUs, 220 GB RAM | `proseg_segment_max_forks = 2`; no GPU lock |
 
@@ -67,6 +68,8 @@ published nuclei mask and fails early if it is absent.
   - `segment_out/cellpose_cellprobs_tiled.npy` — aligned Cellpose probability
     logits (float32) supplied to ProSeg.
   - `segment_out/cellpose_nuclei_masks_tiled.npy` — DAPI-only nuclei labels.
+  - `segment_out/cellpose_model_identity.json` — cell-mask model provenance.
+  - `segment_out/cellpose_nuclei_model_identity.json` — nuclei-mask model provenance.
   - `segment_out/transcripts_for_proseg.csv` — transcripts with seeded cell ids.
   - `segment_out/cellpose_transforms.json` — affine metadata handed from
     Cellpose to ProSeg.
@@ -83,6 +86,46 @@ probability logits, transcript export, and transform metadata. When the
 pipeline is also launched with `-resume`, already completed Cellpose tasks
 remain eligible for the Nextflow cache: this flag forces `PROSEG_SEGMENT`, not
 either Cellpose process.
+
+Persistent Cellpose outputs (masks, probabilities and
+`transcripts_for_proseg.csv`) are reused when a Cellpose task re-runs. The
+CSV's `cell_id` seeds are fixed by the mask-to-micron affine it was written
+with, so reuse first checks it against the affine derived from the current
+transform. `transcripts_for_proseg.transforms.json`, written beside the CSV,
+records that affine; for an older CSV without it, the first 200,000 rows must
+reproduce their stored label from the mask (at least 90% of seeded rows), and
+the record is then written. A mismatch fails the task: move the CSV, masks and
+probabilities aside so Cellpose re-runs and re-seeds. The check rejects the
+stored 2026-09-08 VZG2 CSV under the corrected transform (0% agreement) and
+accepts P1212, P5011, P7113 and P7513 on both platforms (100%).
+
+## Model provenance
+
+HITL-0 explicitly selects stock `cpsam_v2` for both platforms and the independent
+DAPI-only nuclei segmentation. Cellpose 4 ignored the former `cyto3` and
+`nuclei` model-type values. Fresh inference requires Cellpose 4.2.1.1 and
+PyTorch 2.14.x, uses float32 by default, and checks the stock checkpoint against
+SHA-256 `0f1cc3f7ecdd8a037a57c6c48d9d8921391be4cbce3fa9f13c3e3a2e1253c667`.
+Runtime and checkpoint validation happen before existing outputs are removed.
+
+On successful inference, each mask gets a model-identity JSON with the actual
+checkpoint checksum, effective Cellpose configuration, Cellpose version and
+loaded PyTorch version (including its CUDA build suffix). The same identity
+is included in stitching statistics, even when detailed statistics are disabled.
+Reusing outputs preserves the sidecar. A legacy mask without recorded identity
+gets `status: unverified`, unknown weights/configuration/versions, and a note to
+consult its original task log; it is never attributed to today's environment.
+
+Enrichment copies these records into `merxen_schema.model_identities` and the
+corresponding segmentation registry entries when they are registered. Later
+assignment or coordinate-variant registration retains the identity.
+`writer_versions` continues to describe the environment writing the zarr.
+
+Fine-tuning, annotation packages and opt-in per-platform custom models remain
+later milestones of the [HITL plan](../plans/cellpose-hitl-segmentation-plan.md).
+Rebuilding the conda environment after this dependency update changes its
+Nextflow cache hash and can restart resumed tasks; schedule that rebuild between
+pipeline runs. Published masks retain their existing provenance.
 
 ## Python entry points
 
@@ -116,8 +159,8 @@ SegmentationConfig
 │   ├── MERSCOPE: image_prefix, z_range, transform_path
 │   ├── Xenium: xenium_spec_path, min_qv
 │   └── proseg_overrides: dict      # per-platform voxel_layers
-├── cellpose: CellposeConfig         # model_type, gpu, diameter, thresholds
-├── nuclei_cellpose: CellposeConfig  # nuclei model; other inference defaults match
+├── cellpose: CellposeConfig         # pretrained_model, gpu, diameter, thresholds
+├── nuclei_cellpose: CellposeConfig  # stock cpsam_v2; other inference defaults match
 ├── mask_filter: MaskFilterConfig    # eccentricity, area percentile
 ├── nuclei_mask_filter: MaskFilterConfig
 ├── tiling: TilingConfig             # tile sizes, stitch overlap, duplicate policy
@@ -148,9 +191,12 @@ MerXen deliberately overrides several of those defaults:
 The following values match upstream: 200 burn-in samples, nuclear
 reassignment 0.2, diffusion probability 0.2, cell compactness 0.04,
 initial expansion 0, maximum transcript-to-nucleus distance 60 µm, and
-Cellpose probability discount 0.85. Xenium QV ≥20 and negative-control
-exclusion now match the Xenium preset, while MERSCOPE `transcript_score` is
-passed as ProSeg's quality column without adding a score threshold.
+Cellpose probability discount 0.85. Xenium QV ≥20 matches the Xenium
+preset, while MERSCOPE `transcript_score` is passed as ProSeg's quality
+column without adding a score threshold. Control-feature exclusion covers
+more than the upstream presets: every Xenium preset prefix plus the other
+documented Xenium control names, and MERSCOPE blanks, which ProSeg's own
+MERSCOPE preset does not exclude (see step 5).
 
 ## Walkthrough
 
@@ -181,8 +227,9 @@ passed as ProSeg's quality column without adding a score threshold.
    `memory.transcript_chunk_rows`, looks each transcript's pixel location
    up in the mask, and writes a row with `x_micron`, `y_micron`, `z_micron`,
    `feature_name`, `cell_id` (0 if outside any cell), `transcript_id`, and
-   `qv`. Xenium transcripts below `dataset.min_qv` and Xenium control features
-   matching `^(Deprecated|NegControl|Unassigned|Intergenic)` are dropped.
+   `qv`. Xenium transcripts below `dataset.min_qv` are dropped, and so are
+   control features on both platforms (see
+   [Control features](#control-features-in-the-proseg-input)).
    MERSCOPE `transcript_score` is passed through ProSeg as `qv` and restored
    under its platform-native name in the latest zarr.
 6. **Process handoff.** Nextflow stages the mask, probability logits,
@@ -220,6 +267,105 @@ passed as ProSeg's quality column without adding a score threshold.
    a transcript ProSeg marked as background. Otherwise the overlap remains
    unassigned.
 
+## Control features in the ProSeg input
+
+`write_proseg_csv_from_points` drops control transcripts before ProSeg sees
+them, using the shared registry in
+[control_features.py](../../src/merxen/control_features.py). A transcript
+with a usable feature type is judged by that type alone; the name rules apply
+only to transcripts without one:
+
+1. **Feature type (Xenium, preferred).** The transcript is dropped when
+   `is_gene` is false, or, where `is_gene` is missing, when
+   `codeword_category` is not `predesigned_gene` or `custom_gene`. XOA ≥ 3.0
+   writes both columns to `transcripts.parquet` and the source SpatialData
+   keeps them. This catches every non-`Gene Expression` feature type:
+   negative control probe, negative control codeword, genomic control
+   (Xenium Prime 5K), unassigned codeword and deprecated codeword. A
+   transcript whose feature type says gene is kept even when its name
+   matches a rule below.
+2. **Anchored name** (rows without a feature type: all MERSCOPE rows, and
+   Xenium data from before XOA 3.0). Xenium names starting with
+   `NegControl`, `Unassigned`, `Deprecated`, `Intergenic` (5K genomic
+   controls are `Intergenic_Region_*`), `GenomicControl`, `BLANK_`
+   (unassigned codewords before XOA renamed them) or `antisense_` (negative
+   control probes in pre-release data, which has no feature-type column).
+   MERSCOPE names matching `^Blank-\d+$`.
+3. **Substring fallback** (rows without a feature type): names containing
+   `blank`, `control`, `negative`, `negcontrol`, `unassigned` or `deprecated`,
+   case-insensitive. These are the tokens clustering already uses to remove
+   control variables, so ProSeg and clustering drop the same features.
+
+Because the feature type decides, a custom-panel gene whose name starts with
+one of these prefixes (for example `antisense_`) stays in the ProSeg input
+on XOA ≥ 3.0 data. On data without a feature type the name rules still drop
+it; that is the price of recognising pre-release controls.
+
+The CSV writer logs how many control transcripts and features it dropped.
+It warns, with feature names:
+
+- when a control was recognised only by its feature type (the registry then
+  needs the new name);
+- when a feature was kept because its feature type says gene although its
+  name matches a control-name rule, with the number of transcripts involved.
+  Check whether the feature is a real gene or a registry rule is too broad.
+
+Until this change the filter was `^(Deprecated|NegControl|Unassigned|Intergenic)`
+on Xenium only. **It affects future segmentation runs only.** Existing
+`transcripts_for_proseg.csv` files, ProSeg outputs and downstream results are
+not rewritten. Measured on the current source SpatialData (read-only,
+2026-09-26):
+
+| Dataset | Transcripts | Old filter removes | New filter removes |
+|---------|------------:|-------------------:|-------------------:|
+| P7513 Xenium | 18,054,865 | 69,168 (0.38%) | 69,168 (0.38%) |
+| P7513 MERSCOPE | 24,923,743 | 0 | 205,966 (0.83%, 50 `Blank-*`) |
+| VZG2 MERSCOPE (mouse) | 214,805,552 | 0 | 1,114,243 (0.52%, 85 `Blank-*`) |
+
+On the four human Xenium sections (P7513, P7113, P1212, P5011) the new
+filter removes exactly the old filter's transcripts: their only control
+types are negative control probes and codewords and unassigned codewords,
+and no feature typed as a gene matches a control-name rule. The change
+matters for MERSCOPE, and for Xenium Prime 5K or custom panels with
+`BLANK_` / genomic-control features. The tables MerXen builds from the
+ProSeg output points (ProSeg, ProSeg hybrid, Cellpose mask, nuclei and
+boundary tables) follow the CSV: new MERSCOPE runs no longer carry the
+`Blank-*` variables. With no control variables and no other control source,
+their clustering `control_counts` / `pct_control_counts` are NaN, as for
+Xenium ProSeg tables already, so per-cell blank QC is unavailable on new
+MERSCOPE ProSeg-derived tables. No filter uses these columns. Vizgen's own
+`table_original` keeps its blank matrix in `obsm["blank"]`.
+
+### Applying the new filter to an existing dataset
+
+No pipeline flag rewrites `transcripts_for_proseg.csv`. `CELLPOSE_SEGMENT`
+reuses the persisted CSV, mask and probability logits whenever all three
+exist, and `--force_proseg_rerun` forces only `PROSEG_SEGMENT`, which reads
+that same CSV. On its own, `--force_proseg_rerun true` therefore rebuilds the
+ProSeg base from the old CSV, blanks included, without any warning. To apply
+the new filter to one `<pair_id>` / `<platform>` (lower case, as in the
+output tree):
+
+1. Move `${outdir}/<pair_id>/<platform>/segmentation/transcripts_for_proseg.csv`
+   aside, and keep it until the new run has been checked. Without it,
+   `CELLPOSE_SEGMENT` reruns Cellpose (on the GPU when enabled) and
+   overwrites the persistent `cellpose_masks_tiled.npy`,
+   `cellpose_cellprobs_tiled.npy` and `cellpose_stitching_stats.json` in the
+   same folder before writing the new CSV. Copy those elsewhere first if the
+   old mask must be kept. The nuclei mask is reused.
+2. Run the pipeline with `--force_proseg_rerun true` and without `-resume`.
+   Without the flag, `PROSEG_SEGMENT` reuses the persistent
+   `${outdir}/<pair_id>/<platform>/latest/latest_spatialdata.zarr` built from
+   the old CSV. With `-resume`, Nextflow may reuse the cached
+   `CELLPOSE_SEGMENT` task, because the Python change does not alter its task
+   hash. The flag applies to every ProSeg task in the run, so restrict the
+   samplesheet to the rows being refreshed (and, with `analysis_mode`, to the
+   platform).
+3. Later stages keep their own persistent outputs unless their force flags
+   are set (see
+   [Forcing a full rebuild](../running-the-pipeline.md#forcing-a-full-rebuild));
+   check that the outputs you rely on were rebuilt from the new latest zarr.
+
 ## Outputs
 
 | File | Contents |
@@ -232,6 +378,7 @@ passed as ProSeg's quality column without adding a score threshold.
 | `cellpose_stitching_stats.json` | Tile stitching diagnostics: accepted labels, duplicates, conflicts, edge-touching labels, and thresholds. |
 | `cellpose_nuclei_stitching_stats.json` | Equivalent tile-stitching diagnostics for nuclei. |
 | `transcripts_for_proseg.csv` | The transcript CSV fed into ProSeg. Retained for debugging. |
+| `transcripts_for_proseg.transforms.json` | Pixel-to-micron affine that seeded the CSV; checked before the CSV is reused. |
 | `cellpose_transforms.json` | Pixel-to-micron affine terms used by the ProSeg process. |
 
 The durable zarr contains `MOSAIK_proseg_hybrid` SpatialData/GeoParquet

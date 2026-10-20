@@ -1,0 +1,40 @@
+name: Privacy
+# PR title, description and commit messages must not name a host path or a
+# sample (CLAUDE.md, docs/local-configuration.md). A light job of its own, so
+# an edited description is re-checked without re-running the test job. CI has
+# no alias table, so only the generic rules run here (host paths, donor ids);
+# real names are checked by the local hooks.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  pr-text:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      # The text reaches the script through the environment, never through
+      # shell interpolation. The branch name is checked here as well: locally,
+      # pre-commit skips the push hook for a branch with no new commits.
+      - name: PR branch name
+        env:
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: printf '%s\n' "$PR_BRANCH" | python3 scripts/privacy/check_private_text.py --stdin
+      - name: PR title and description
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: printf '%s\n\n%s\n' "$PR_TITLE" "$PR_BODY" | python3 scripts/privacy/check_private_text.py --stdin
+      - name: PR commit messages
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: git log --format=%B "${BASE_SHA}..${HEAD_SHA}" | python3 scripts/privacy/check_private_text.py --stdin

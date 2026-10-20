@@ -99,16 +99,29 @@ def gene_totals_from_points(
 
 
 def apply_dataset_filter(gene_counts: pd.Series, dataset_name: str) -> pd.Series:
-    """Remove platform-specific control probes from gene counts."""
+    """Remove platform-specific control probes from gene counts.
+
+    Xenium controls are the ``NegControlProbe`` / ``NegControlCodeword`` /
+    ``UnassignedCodeword`` features; MERSCOPE controls are the ``Blank-*``
+    codewords.
+
+    Args:
+        gene_counts: Per-gene counts indexed by gene name.
+        dataset_name: Platform name (``XENIUM`` or ``MERSCOPE``, any case).
+            Other names are returned unfiltered.
+
+    Returns:
+        A copy of ``gene_counts`` without the platform's control features.
+    """
     idx = gene_counts.index.astype(str)
     if dataset_name.upper() == "XENIUM":
-        keep = ~idx.str.contains("Blank", na=False)
-    elif dataset_name.upper() == "MERSCOPE":
         keep = ~idx.str.contains(
             "UnassignedCodeword|NegControlCodeword|NegControlProbe",
             regex=True,
             na=False,
         )
+    elif dataset_name.upper() == "MERSCOPE":
+        keep = ~idx.str.contains("Blank", na=False)
     else:
         keep = pd.Series(True, index=gene_counts.index)
     return gene_counts.loc[keep].copy()

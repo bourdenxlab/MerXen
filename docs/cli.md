@@ -19,6 +19,7 @@ Commands:
   cellpose-nuclei-segment
                       Run reusable DAPI-only Cellpose nuclei segmentation
   enrich             Enrich a segmented zarr with per-shape tables
+  register-images    Register OME-TIFF images with Xenium Explorer matrices
   mask-image-quantification
                       Quantify image channels over final Cellpose masks
   compute-cortical-depth
@@ -29,12 +30,14 @@ Commands:
                       Run paired near-vs-far PyDESeq2 by platform
   qc                 Compute geometry and assignment QC metrics
   align              Align MERSCOPE into paired Xenium coordinates
+  materialize-alignment
+                      Reconcile aligned vectors, rasters, and image outputs
   alignment-qc       Compute post-alignment QC metrics
   compare            Run cross-platform gene-level comparison
   visualize          Generate visualization artifacts for a pair
   spatial-gene-analysis
                       Run cell and transcript-coordinate spatial gene analysis
-  mecr-reference     Discover MECR markers in the complete WHB reference
+  mecr-reference     Discover MECR markers in a complete whole-brain reference
   mecr               Score mutually exclusive co-expression rates
   clustering-squidpy Run Scanpy/Squidpy clustering analysis
   mapmycells         Run local MapMyCells cell type assignment
@@ -113,6 +116,25 @@ merxen enrich --config enrich_config.json [--force-rerun]
 | `--force-rerun` | Overwrite existing shape layers and tables. |
 
 Details: [Stage 3 — Enrichment](stages/enrichment.md).
+
+---
+
+## `merxen register-images`
+
+Register external OME-TIFF images (e.g. post-Xenium IF) onto the reference
+image grid using Xenium Explorer matrices, refine the affine on DAPI, and write
+the resampled images into the SpatialData zarr.
+
+```bash
+merxen register-images --config register_images_config.json [--force-rerun]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--config PATH` | JSON validated against `ImageRegistrationConfig`. |
+| `--force-rerun` | Re-register images even when an identical registration is recorded. |
+
+Details: [Image registration](stages/register-images.md).
 
 ---
 
@@ -201,11 +223,26 @@ merxen align --config align_config.json
 
 The default JSON backend is `valis`; set `backend` to `legacy_spateo` to run
 the former implementation. The recommended reproducible setup is
-`environment.alignment.yml`, which installs `requirements.alignment.lock` and
+`envs/environment.alignment.yml`, which installs `requirements/requirements.alignment.lock` and
 the exact VALIS package. Validate either backend with
 `merxen check-alignment-deps --backend valis|legacy_spateo`.
 
 Details: [Section alignment](stages/alignment.md).
+
+---
+
+## `merxen materialize-alignment`
+
+Reconcile all enabled aligned artifacts from a saved or embedded transform.
+
+```bash
+merxen materialize-alignment --config align_config.json \
+  --summary materialization_summary.json
+```
+
+The command validates `AlignmentConfig.materialization`, writes JSON status to
+stdout and optionally to the machine-readable `--summary` path, and refuses
+stale or missing output when `reconcile=false` unless `force=true`.
 
 ---
 
@@ -279,7 +316,7 @@ Details: [Spatial gene analysis](stages/spatial-gene-analysis.md).
 ## `merxen mecr-reference`
 
 Discover paper-standard mutually exclusive broad-class markers in the complete
-WHB-10Xv3 reference for the selected spatial panel.
+species-matched WHB or WMB reference for the selected spatial panel.
 
 ```bash
 merxen mecr-reference --config mecr_reference_config.json

@@ -157,6 +157,8 @@ def plot_pair_sanity_crops(
     assignment_shape_key: str | None = SANITY_ASSIGNMENT_SHAPE_KEY,
     merscope_assignment_shape_key: str | None = None,
     xenium_assignment_shape_key: str | None = None,
+    merscope_assignment_column: str | None = None,
+    xenium_assignment_column: str | None = None,
 ) -> Path:
     """Plot paired MOSAIK-style 250 um sanity crops for MERSCOPE and Xenium."""
     output_path = prepare_plot_output(output_path)
@@ -178,6 +180,7 @@ def plot_pair_sanity_crops(
             if merscope_assignment_shape_key is not None
             else assignment_shape_key
         ),
+        assignment_column=merscope_assignment_column,
         prefer_aligned_vectors=merscope_plan.prefer_aligned_vectors,
         zarr_path=merscope_zarr_path,
     )
@@ -192,6 +195,7 @@ def plot_pair_sanity_crops(
             if xenium_assignment_shape_key is not None
             else assignment_shape_key
         ),
+        assignment_column=xenium_assignment_column,
         prefer_aligned_vectors=xenium_plan.prefer_aligned_vectors,
         zarr_path=xenium_zarr_path,
     )
@@ -219,6 +223,7 @@ def plot_single_sanity_crop(
     zarr_path: Path | str | None = None,
     crop_size_um: float = SANITY_CROP_SIZE_UM,
     assignment_shape_key: str | None = SANITY_ASSIGNMENT_SHAPE_KEY,
+    assignment_column: str | None = None,
 ) -> Path:
     """Plot one MOSAIK-style sanity crop for a single platform dataset."""
     output_path = prepare_plot_output(output_path)
@@ -238,6 +243,7 @@ def plot_single_sanity_crop(
         crop_bbox=crop_bbox,
         crop_size_um=crop_size_um,
         assignment_shape_key=assignment_shape_key,
+        assignment_column=assignment_column,
         prefer_aligned_vectors=prefer_aligned,
         zarr_path=zarr_path,
     )
@@ -266,6 +272,7 @@ def plot_sanity_crop_panel(
     crop_bbox: tuple[float, float, float, float] | None = None,
     center_xy: tuple[float, float] | None = None,
     assignment_shape_key: str | None = SANITY_ASSIGNMENT_SHAPE_KEY,
+    assignment_column: str | None = None,
     prefer_aligned_vectors: bool = True,
     zarr_path: Path | str | None = None,
 ) -> None:
@@ -342,6 +349,7 @@ def plot_sanity_crop_panel(
         max_points=SANITY_MAX_TRANSCRIPTS_PER_PANEL,
         random_state=SANITY_RANDOM_STATE,
         assignment_shape_key=assignment_shape_key,
+        assignment_column=assignment_column,
         prefer_aligned_points=prefer_aligned_vectors,
         prefer_aligned_assignment=prefer_aligned_vectors,
     )
@@ -1065,6 +1073,7 @@ def _crop_points(
     max_points: int | None,
     random_state: int,
     assignment_shape_key: str | None,
+    assignment_column: str | None = None,
     prefer_aligned_points: bool = True,
     prefer_aligned_assignment: bool = True,
 ) -> tuple[pd.DataFrame, str, str | None]:
@@ -1086,6 +1095,16 @@ def _crop_points(
     )
     if x_col is None or y_col is None:
         raise KeyError(f"Could not resolve x/y columns in points[{points_key}]")
+    if assignment_column is not None:
+        if assignment_column not in pts.columns:
+            raise KeyError(
+                f"assignment_column='{assignment_column}' not found in "
+                f"points[{points_key}]. Available: {list(pts.columns)}"
+            )
+        # The branch stores its own per-transcript assignment (ProSeg for
+        # reseg), so read it instead of testing which drawn polygon each
+        # transcript falls inside.
+        assignment_shape_key = None
     if (
         prefer_aligned_assignment
         and assignment_shape_key is not None
@@ -1105,7 +1124,10 @@ def _crop_points(
             ["hybrid_assignment_source"],
         )
     else:
-        assign_col = _first_existing_col(pts, ["assignment", "cell", "cell_id"])
+        assign_col = assignment_column or _first_existing_col(
+            pts,
+            ["assignment", "cell", "cell_id"],
+        )
         background_col = _first_existing_col(pts, ["background"])
         assignment_source_col = None
 

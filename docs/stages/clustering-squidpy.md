@@ -41,21 +41,26 @@ For each active platform in the run:
    `table_MOSAIK_proseg_clustering_squidpy`; `original_seg` writes
    `table_original_clustering_squidpy`.
 
-By default, the one-shot output path still writes `<sample_id>_clustered.h5ad`,
-but the clustering inside that file comes from an atlas-guided hierarchy:
+For human runs, the one-shot output path still writes
+`<sample_id>_clustered.h5ad`, but the clustering inside that file comes from an
+atlas-guided hierarchy. Mouse runs default to the species-agnostic one-shot
+Leiden workflow; WMB hierarchy can be enabled explicitly after configuring WMB
+reference assets.
 
 1. Run a broad low-resolution Leiden round into `obs["leiden_broad"]`.
-2. Score broad clusters against Allen WHB/MapMyCells marker sets, resolving
+2. Score broad clusters against matching Allen WHB or WMB MapMyCells marker sets, resolving
    markers by Ensembl ID first and gene symbol second. When the query has only
-   symbols, the stage auto-loads WHB reference H5AD `gene_symbol` metadata from
-   `reference_cache_dir` to bridge Ensembl marker IDs to panel symbols.
+   symbols, the stage auto-loads matching reference H5AD `gene_symbol` metadata
+   from `reference_cache_dir` to bridge Ensembl marker IDs to panel symbols.
 3. Write `obs["broad_atlas_label"]` and the collapsed `obs["broad_class"]`.
    The built-in broad classes are oligodendrocytes, OPCs, astrocytes, neurons,
-   microglia, fibroblasts, and vascular cells. Confident extra WHB labels such
-   as Ependymal or Choroid plexus are retained.
+   microglia, fibroblasts, and vascular cells. Confident extra atlas labels such
+   as Ependymal or Choroid plexus are retained. Combined WMB classes such as
+   `Astro-Epen` and `OPC-Oligo` remain explicitly combined rather than being
+   mislabeled as one constituent lineage.
 4. Recluster each broad class from `layers["counts"]`, so every branch is
    renormalized and recomputes PCA, neighbors, UMAP, and Leiden.
-5. Split neurons into `Excitatory`, `Inhibitory`, and `Other` with WHB
+5. Split neurons into `Excitatory`, `Inhibitory`, and `Other` with atlas
    neuronal marker groups, then subtype-cluster each split.
 6. Write per-round UMAP/spatial plots, annotation heatmaps, marker tables,
    branch H5ADs, and a manifest under `<sample_id>_hierarchical/`.
@@ -108,12 +113,12 @@ only `VISUALIZE` is active, clustering waits for visualisation.
 | `spatial_point_size` | Highlight point size for spatial cluster grid plots. |
 | `spatial_scatter_point_size` | Point size for regular spatial scatter plots. |
 | `figure_dpi` | PNG output DPI. |
-| `use_gpu` | Use RAPIDS single-cell acceleration when available. |
+| `use_gpu` | Use RAPIDS single-cell acceleration when available. CPU and GPU runs give different partitions; see [CPU and GPU engines](#cpu-and-gpu-engines). |
 | `clustering_squidpy_max_forks` | Nextflow-side concurrency guard. The Dwight profile sets `4`; its GPU-backed tasks still share one workstation GPU lock. Other host profiles must choose their own limit and GPU policy. |
 | `clustering_squidpy_gpu_vram_monitor` | Nextflow wrapper flag that records `nvidia-smi` VRAM samples for each clustering task. Defaults to `true`. |
 | `clustering_squidpy_gpu_vram_monitor_interval_seconds` | Sampling interval for the VRAM monitor. Defaults to `2`. |
 | `write_spatialdata_table` | Add or replace the final clustered table in each sample's source `latest_spatialdata.zarr`. Defaults to `true`; set `--clustering_squidpy_write_spatialdata_table false` for H5AD-only output. |
-| `hierarchical_enabled` | Run broad atlas annotation plus branch subclustering. Defaults to `true`; set `false` for the legacy one-shot Leiden workflow. |
+| `hierarchical_enabled` | Run broad atlas annotation plus branch subclustering. Workflow default is `true` for both species. |
 | `broad_round` | Round-specific broad clustering settings. Default Leiden resolution `0.2`; unspecified fields inherit top-level filtering/PCA/UMAP settings. |
 | `subcluster_round` | Default non-neuron branch settings. Default Leiden resolution `0.5`. |
 | `subcluster_resolution_overrides` | Optional map from broad class or neuron split label to a Leiden resolution override. |
@@ -122,10 +127,25 @@ only `VISUALIZE` is active, clustering waits for visualisation.
 | `min_branch_cells` | Branches smaller than this are labeled but not reclustered. Default `50`. |
 | `broad_annotation` | Marker lookup, Allen taxonomy metadata/cache path, marker overlap limits, and ambiguity thresholds for atlas-guided cluster labels. |
 
-When this stage is selected and hierarchical mode is enabled, workflow preflight
-requires the broad marker lookup and taxonomy metadata to exist before any tasks
-start. The Dwight profile supplies its local marker, taxonomy, membership, and
-reference-cache paths. Other profiles must provide paths to their own copies.
+When this stage is selected and hierarchical mode is enabled, human hierarchy
+uses WHB `CCN202210140_SUPC`; mouse hierarchy uses WMB
+`CCN20230722_CLAS`. Missing WMB marker, taxonomy, membership, and gene metadata
+are downloaded automatically into the durable cache. The published WMB marker
+lookup lacks direct class markers for five classes; MerXen recovers three from
+their subclass markers. Allen publishes no class or subclass markers for the
+two singleton classes `15 HY Gnrh1 Glut` and `25 Pineal Glut`, so they are
+reported and omitted from marker scoring. The other 32 WMB classes remain
+available. The Dwight profile supplies WHB-specific fallback paths without
+overriding WMB discovery.
+
+For example, run mouse hierarchy with a durable cache:
+
+```bash
+nextflow run workflows/main.nf \
+    --samplesheet workflows/samplesheet.csv \
+    --species mouse \
+    --clustering_squidpy_broad_reference_cache_dir /durable/mapmycells-cache
+```
 
 ## Outputs
 
@@ -148,7 +168,7 @@ replacing the derived clustered table for the active analysis segmentation. The
 table contains the same final filtered cells, UMAP/spatial coordinates, counts
 layer, and clustering/cell-type columns as `<sample_id>_clustered.h5ad`.
 
-The compute process uses `environment.clustering-gpu.yml` under the Conda
+The compute process uses `envs/environment.clustering-gpu.yml` under the Conda
 profile. A run with no `-profile` selects `standard`, which loads Dwight's
 72-CPU/640-GB local-executor capacity, workstation concurrency limits, shared
 GPU lock, and local reference paths. The equivalent explicit Conda selection
@@ -163,13 +183,13 @@ Selecting another profile does not inherit `standard`; provide equivalent
 host settings in that profile or a combined site config. Under the Apptainer
 profile, set
 `clustering_squidpy_gpu_container` to an image built from
-`Dockerfile.clustering-gpu`. SpatialData is intentionally absent from this
+`containers/Dockerfile.clustering-gpu`. SpatialData is intentionally absent from this
 environment; only H5AD files cross the process boundary.
 
 Build and select the dedicated image with, for example:
 
 ```bash
-docker build -f Dockerfile.clustering-gpu -t merxen-clustering-gpu .
+docker build -f containers/Dockerfile.clustering-gpu -t merxen-clustering-gpu .
 apptainer build merxen-clustering-gpu.sif docker-daemon://merxen-clustering-gpu
 nextflow run workflows/main.nf -profile apptainer,gpu \
   --clustering_squidpy_gpu_container \
@@ -203,6 +223,97 @@ With hierarchical mode enabled, additional artifacts are written under
 | Branch dotplot tables | `branch_<class>/tables/dotplot/...` | Per-subcluster mean expression and fraction-expressing summaries for panel genes. |
 | Neuron split | `branch_neurons/<sample_id>_neurons_split_*` | Excitatory/Inhibitory/Other annotation tables, split `.h5ad`, heatmap under `plots/annotation/`, and plots under `plots/*/`. |
 | Neuron subclusters | `branch_neurons/split_<label>/...` | Per-split neuron subtype `.h5ad`, UMAP, spatial plot, spatial grid, panel-gene dotplot, and dotplot tables. |
+
+## CPU and GPU engines
+
+`use_gpu` (`--clustering_squidpy_use_gpu`; `false` by default, `true` in the
+Dwight profile) switches every clustering round between two implementations.
+If `use_gpu` is true but `rapids_singlecell` cannot be imported, the round logs
+a warning and runs on the CPU path.
+
+| Step | CPU path (`scanpy-igraph`) | GPU path (`rapids_singlecell`) |
+|------|----------------------------|--------------------------------|
+| PCA | `sc.pp.pca` | `rsc.pp.pca`; sparse input is cast to float64 and fitted with chunked incremental PCA |
+| Neighbours | `sc.pp.neighbors`: exact brute-force kNN below 8,192 cells (euclidean metric), approximate pynndescent from 8,192 cells | `rsc.pp.neighbors`: exact brute-force kNN |
+| UMAP | `sc.tl.umap` (umap-learn) | `rsc.tl.umap` (cuML) |
+| Leiden | `sc.tl.leiden(flavor="igraph", n_iterations=2, directed=False)` | `rsc.tl.leiden` (cuGraph, float32 edge weights, library default `n_iterations=100` in rapids-singlecell 0.15.2) |
+
+Both paths pass the same `random_seed` to every step, but they do not produce
+the same partitions. On the stored GPU broad-round neighbour graphs of seven
+datasets, CPU `leidenalg` (RBConfiguration, 2 iterations, seeds 0 and 1) at
+resolution 0.2 agreed with the stored GPU partitions only at ARI 0.57-0.91, and
+the number of clusters can differ (P1212 MERSCOPE: 2 on GPU, 3-4 on CPU). That
+comparison used `leidenalg`, not the pipeline's `scanpy-igraph` CPU path, which
+was not itself compared against the GPU path. Running the whole CPU path adds
+further differences from PCA and kNN.
+Compare, or rerun, clustering results only when the same engine produced them,
+and check the recorded engine before rerunning a published result on another
+host.
+
+### Recorded provenance
+
+Every Leiden round records its engine and effective settings as H5AD- and
+zarr-safe scalars and JSON strings (no `/` in keys, no lists of records). The
+fields are written to the clustered H5ADs and to the clustered SpatialData
+table.
+
+`uns["merxen_clustering_params_<key>"]`, where `<key>` is the round's `obs`
+cluster column, gains these fields next to the existing parameters
+(`leiden_resolution`, `random_seed`, `effective_neighbors`, `gpu_used`, ...):
+
+| Field | Meaning |
+|-------|---------|
+| `engine` | Leiden engine: `scanpy-igraph` or `rapids_singlecell`. |
+| `engine_versions` | JSON string of library versions, e.g. `{"igraph": "1.0.0", "scanpy": "1.12.1"}` or `{"cugraph": ..., "rapids_singlecell": "0.15.2", "scanpy": ...}`; `null` for a version that could not be read. |
+| `embedding_engine` | Library that ran PCA, neighbours, and UMAP: `scanpy` or `rapids_singlecell`. |
+| `leiden_flavor` | `igraph` (CPU) or `cugraph` (GPU). |
+| `leiden_n_iterations` | Leiden iteration cap applied: `2` on CPU; on GPU the value rapids-singlecell recorded in `uns[<key>]["params"]`, else its signature default (`-1` if neither could be read). |
+| `leiden_random_state` | Seed passed to Leiden (and to PCA, neighbours, and UMAP). |
+| `n_pcs_used` / `n_neighbors_used` | Principal components and neighbour count actually used after clipping to the data size. |
+| `gpu_requested` | Whether `use_gpu` was set; with `gpu_used` it shows a CPU fallback. |
+
+`uns["merxen_leiden_provenance"]` maps a round key to one JSON string holding
+the same information (`engine`, `engine_versions`, `embedding_engine`,
+`flavor`, `n_iterations`, `random_state`, `resolution`, `n_pcs_used`,
+`n_neighbors_used`, `gpu_requested`, `gpu_used`, `key_added`, and for branch
+rounds `branch` and `neuron_split`). In `<sample_id>_clustered.h5ad` it covers
+every round of the run:
+
+| Round key | Round |
+|-----------|-------|
+| `leiden` | One-shot clustering (hierarchy disabled). |
+| `leiden_broad` | Broad round. |
+| `leiden_subcluster_<class>` | Non-neuron branch, e.g. `leiden_subcluster_astrocytes`. |
+| `leiden_neuron_split` | Neuron Excitatory/Inhibitory/Other split. |
+| `leiden_neuron_subcluster_<split>` | Neuron subtype round, e.g. `leiden_neuron_subcluster_excitatory`. |
+
+`<class>` and `<split>` are the lower-case tokens used in the `branch_<class>/`
+and `split_<split>/` directory names. Branch H5ADs hold the rounds that
+produced them (for example `leiden_broad` and `leiden_subcluster`), and each
+clustered entry of the hierarchical manifest names its round in
+`leiden_provenance_key` (`split_leiden_provenance_key` for the neuron split).
+
+```python
+import json
+
+import anndata as ad
+
+adata = ad.read_h5ad("P7513_MERSCOPE_clustered.h5ad")
+for round_key, record in adata.uns["merxen_leiden_provenance"].items():
+    record = json.loads(record)
+    print(round_key, record["engine"], record["n_iterations"], record["resolution"])
+```
+
+Outputs written before these fields existed still carry the engine's own
+record of each round in `uns["<round key>"]["params"]` (`n_iterations`,
+`random_state`, `resolution`; for example `leiden_broad` in P5011 MERSCOPE has
+100, 0, 0.2), plus `gpu_used` in `uns["merxen_clustering_params_<key>"]`
+(`merxen_clustering_params` and `merxen_clustering_params_leiden` for one-shot
+runs). `uns["neighbors"]["params"]["method"]` is `"rapids"` for the GPU path
+and `"umap"` for the CPU path. In those outputs `<sample_id>_clustered.h5ad`
+holds only the broad round's record; branch rounds are recorded under
+`leiden_subcluster`, `leiden_neuron_split`, and `leiden_neuron_subcluster` in
+the branch H5ADs.
 
 ## Notebook
 

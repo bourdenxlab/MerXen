@@ -8,6 +8,7 @@ import click
 
 from merxen.config import QCConfig, load_config_from_json
 from merxen.qc.metrics import compute_dataset_qc, save_dataset_qc
+from merxen.qc.registration import RegistrationStatus
 
 
 @click.command(name="qc")
@@ -28,9 +29,22 @@ def qc_command(config_path: Path) -> None:
         cfg.dataset_name,
         table_key=cfg.table_key,
         shape_key=cfg.shape_key,
+        registration_check=cfg.registration_check,
+        registration_reference_shape_key=cfg.registration_reference_shape_key,
     )
     paths = save_dataset_qc(qc_result, cfg.output_dir, cfg.dataset_name)
 
     click.echo("QC complete:")
     for key, value in paths.items():
         click.echo(f"- {key}: {value}")
+
+    registration = qc_result.get("registration_qc")
+    if registration is not None and registration["status"] == RegistrationStatus.WARN:
+        message = f"[{cfg.dataset_name}] registration check warning: " + "; ".join(
+            registration["reasons"]
+        )
+        if cfg.registration_strict:
+            raise click.ClickException(
+                message + " (failing because registration_strict is set)"
+            )
+        click.echo(f"WARNING: {message}", err=True)

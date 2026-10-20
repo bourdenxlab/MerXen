@@ -42,7 +42,7 @@ from merxen.alignment.qc import (
     rigid_qc_passes,
     select_non_rigid_result,
 )
-from merxen.alignment.register import register_pair
+from merxen.alignment.register import register_pair, write_valis_resume_manifest
 from merxen.alignment.transforms import apply_affine_matrix, fit_affine_matrix
 from merxen.alignment.valis_register import (
     _HostTensorResultProxy,
@@ -822,6 +822,42 @@ def test_dapi_metrics_report_partial_tissue_cropping() -> None:
     assert metrics["fixed_overlap_fraction"] == pytest.approx(0.75)
 
 
+def test_dapi_metrics_keep_anatomical_overlap_separate_from_valid_pixels() -> None:
+    """Validity should gate intensities without eroding full-tissue Dice."""
+    y, x = np.indices((80, 100))
+    tissue = (x >= 10) & (x < 90) & (y >= 10) & (y < 70)
+    fixed = np.where(tissue, (3 * x + 5 * y) % 251, 0).astype(np.uint8)
+    moving = fixed.copy()
+    rng = np.random.default_rng(14)
+    corrupted = tissue & (x < 45)
+    moving[corrupted] = rng.integers(
+        0,
+        255,
+        size=int(np.count_nonzero(corrupted)),
+        dtype=np.uint8,
+    )
+    valid = np.ones_like(tissue)
+    valid[:, :45] = False
+
+    unrestricted = compute_dapi_metrics(fixed, moving, tissue, tissue)
+    restricted = compute_dapi_metrics(
+        fixed,
+        moving,
+        tissue,
+        tissue,
+        fixed_valid_mask=valid,
+        moving_valid_mask=valid,
+    )
+
+    assert restricted["tissue_dice"] == pytest.approx(1.0)
+    assert restricted["fixed_overlap_fraction"] == pytest.approx(1.0)
+    assert (
+        restricted["normalized_mutual_information"]
+        > unrestricted["normalized_mutual_information"]
+    )
+    assert restricted["density_correlation"] > unrestricted["density_correlation"]
+
+
 def test_smooth_non_rigid_field_maps_known_landmarks() -> None:
     """A smooth sampled deformation must interpolate known landmark offsets."""
     x = np.linspace(0.0, 100.0, 6)
@@ -1049,11 +1085,43 @@ def test_register_pair_resumes_complete_parameter_compatible_bundle(
 ) -> None:
     """Direct reruns should load a finished transform without reopening DAPI."""
     output_dir = tmp_path / "align_out"
+    annotation_payload = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"role": "pia"},
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [[0.0, 0.0], [8.0, 0.0]],
+                },
+            },
+            {
+                "type": "Feature",
+                "properties": {"role": "tissue_edge"},
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [
+                        [0.0, 0.0],
+                        [0.0, 8.0],
+                        [8.0, 8.0],
+                        [8.0, 0.0],
+                    ],
+                },
+            },
+        ],
+    }
+    merscope_annotation = tmp_path / "merscope.geojson"
+    xenium_annotation = tmp_path / "xenium.geojson"
+    merscope_annotation.write_text(json.dumps(annotation_payload))
+    xenium_annotation.write_text(json.dumps(annotation_payload))
     config = AlignmentConfig(
         pair_id="pair",
         merscope_zarr_path=tmp_path / "merscope.zarr",
         xenium_zarr_path=tmp_path / "xenium.zarr",
         output_dir=output_dir,
+        merscope_image=AlignmentImageConfig(tissue_annotation_path=merscope_annotation),
+        xenium_image=AlignmentImageConfig(tissue_annotation_path=xenium_annotation),
     )
     identity = np.eye(3, dtype=np.float64)
     bundle = ValisTransformBundle(
@@ -1084,20 +1152,11 @@ def test_register_pair_resumes_complete_parameter_compatible_bundle(
             }
         )
     )
-    (output_dir / "resume_manifest.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "backend": "valis",
-                "pair_id": "pair",
-                "merscope_zarr_path": str((tmp_path / "merscope.zarr").resolve()),
-                "xenium_zarr_path": str((tmp_path / "xenium.zarr").resolve()),
-                "fixed_platform": "XENIUM",
-                "moving_platform": "MERSCOPE",
-                "parameters": config.valis.model_dump(mode="json"),
-            }
-        )
-    )
+    write_valis_resume_manifest(config)
+    resume_manifest = json.loads((output_dir / "resume_manifest.json").read_text())
+    assert resume_manifest["version"] == 2
+    assert set(resume_manifest["tissue_annotations"]) == {"MERSCOPE", "XENIUM"}
+    assert len(resume_manifest["tissue_annotations"]["MERSCOPE"]["sha256"]) == 64
 
     result = register_pair(SimpleNamespace(), SimpleNamespace(), config)
     assert result.valis_transform is not None

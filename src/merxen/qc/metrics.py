@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import pickle
 from pathlib import Path
@@ -24,6 +25,10 @@ from merxen.qc.hybrid import (
     HYBRID_TABLE_KEY,
     compute_hybrid_qc,
     save_hybrid_qc,
+)
+from merxen.qc.registration import (
+    RegistrationStatus,
+    compute_segmentation_registration_qc,
 )
 
 logger = logging.getLogger(__name__)
@@ -185,8 +190,25 @@ def compute_dataset_qc(
     *,
     table_key: str | None = None,
     shape_key: str | None = None,
+    registration_check: bool = True,
+    registration_reference_shape_key: str | None = None,
 ) -> dict[str, Any]:
-    """Compute geometry and assignment QC metrics for a dataset output zarr."""
+    """Compute geometry and assignment QC metrics for a dataset output zarr.
+
+    Args:
+        latest_zarr_path: Enriched SpatialData zarr.
+        dataset_name: Dataset label used in logs and metric tables.
+        table_key: Optional AnnData table for transcript/gene counts per cell.
+        shape_key: Optional shape layer for geometry metrics.
+        registration_check: Whether to run the segmentation-to-transcript
+            registration check (:mod:`merxen.qc.registration`).
+        registration_reference_shape_key: The platform's own segmentation
+            shapes, used for the cross-correlation offset of the check.
+
+    Returns:
+        Dict with ``summary``, ``geometry_metrics``, ``cell_metrics``,
+        ``hybrid_qc`` and ``registration_qc`` entries.
+    """
     latest_zarr_path = Path(latest_zarr_path)
     logger.info("[%s] Loading latest output for QC: %s", dataset_name, latest_zarr_path)
     sdata = sd.read_zarr(latest_zarr_path)
@@ -291,6 +313,38 @@ def compute_dataset_qc(
         )
         summary.update(hybrid_qc["summary"])
 
+    registration_qc = None
+    if registration_check:
+        registration = compute_segmentation_registration_qc(
+            sdata,
+            shape_key=resolved_shape_key,
+            points_key=points_key,
+            reference_shape_key=registration_reference_shape_key,
+        )
+        registration_qc = registration.to_dict()
+        summary.update(
+            {
+                "registration_status": str(registration.status),
+                "registration_density_ratio": registration.density_ratio,
+                "registration_shift_um": registration.shift_um,
+            }
+        )
+        if registration.status == RegistrationStatus.WARN:
+            logger.warning(
+                "[%s] Segmentation %r may be misregistered against the transcripts: %s",
+                dataset_name,
+                resolved_shape_key,
+                "; ".join(registration.reasons),
+            )
+        else:
+            logger.info(
+                "[%s] Registration check %s (density ratio=%s, shift=%s um)",
+                dataset_name,
+                registration.status,
+                registration.density_ratio,
+                registration.shift_um,
+            )
+
     del sdata, gdf, shapes
     force_release(note=f"after QC {dataset_name}")
 
@@ -299,6 +353,7 @@ def compute_dataset_qc(
         "geometry_metrics": geom_df,
         "cell_metrics": cell_metrics,
         "hybrid_qc": hybrid_qc,
+        "registration_qc": registration_qc,
     }
 
 
@@ -337,6 +392,12 @@ def save_dataset_qc(
         "cell_csv": cell_path,
         "pickle": pickle_path,
     }
+    if qc_result.get("registration_qc") is not None:
+        registration_path = output_dir / f"{stem}_registration_qc.json"
+        registration_path.write_text(
+            json.dumps(qc_result["registration_qc"], indent=2) + "\n"
+        )
+        paths["registration_json"] = registration_path
     if qc_result.get("hybrid_qc") is not None:
         paths.update(
             save_hybrid_qc(

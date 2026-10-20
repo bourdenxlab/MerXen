@@ -155,12 +155,16 @@ def run_valis_registration(
         moving.processed_image,
         fixed.tissue_mask,
         moving.tissue_mask,
+        fixed_valid_mask=fixed.valid_mask,
+        moving_valid_mask=moving.valid_mask,
     )
     pre_metrics = compute_dapi_metrics(
         fixed.processed_image,
         moving_pre_image,
         fixed.tissue_mask,
         moving_pre_mask,
+        fixed_valid_mask=fixed.valid_mask,
+        moving_valid_mask=moving_pre_valid,
         moving_feature_xy=(
             None
             if pre_orientation.moving_inlier_xy is None
@@ -422,6 +426,8 @@ def run_valis_registration(
             "moving_dapi_edge_artifact_metrics": moving.edge_artifact_metrics,
             "fixed_dataset_to_image_matrix": (fixed.dataset_to_image_matrix.tolist()),
             "moving_dataset_to_image_matrix": (moving.dataset_to_image_matrix.tolist()),
+            "fixed_tissue_annotation": fixed.tissue_annotation_metadata,
+            "moving_tissue_annotation": moving.tissue_annotation_metadata,
         },
         "transform_chain_path": str(transform_outputs["transform_chain"]),
         "shared_tissue_mask_path": str(shared_tissue_path),
@@ -871,8 +877,12 @@ def _execute_valis(
         moving_features, fixed_features = _match_registered_features(
             fixed_frame.processed_image,
             global_image,
-            fixed_frame.tissue_mask,
-            global_mask,
+            fixed_frame.tissue_scoring_mask,
+            np.where(
+                (np.asarray(global_mask) > 0) & (np.asarray(moving_pre_valid) > 0),
+                255,
+                0,
+            ).astype(np.uint8),
             num_features=int(config.features.num_features),
             residual_threshold_px=float(config.features.ransac_threshold_px) * 2.0,
         )
@@ -881,6 +891,8 @@ def _execute_valis(
             global_image,
             fixed_frame.tissue_mask,
             global_mask,
+            fixed_valid_mask=fixed_frame.valid_mask,
+            moving_valid_mask=moving_pre_valid,
             moving_feature_xy=moving_features,
             fixed_feature_xy=fixed_features,
         )
@@ -958,6 +970,8 @@ def _execute_valis(
                 non_rigid_image,
                 fixed_frame.tissue_mask,
                 non_rigid_mask,
+                fixed_valid_mask=fixed_frame.valid_mask,
+                moving_valid_mask=non_rigid_valid,
             )
             _add_partial_overlap_metrics(
                 non_rigid_metrics,
