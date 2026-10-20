@@ -16,8 +16,8 @@ jobs:
         run: pip install uv
       - name: Install dependencies
         run: |
-          # The lock is the full pinned tree: install it as is, without re-resolving (see
-          # scripts/run_ci_checks.sh).
+          # The generated lock includes the full dependency tree. Do not
+          # re-resolve upstream unpinned Git URLs against its pinned commits.
           uv pip install --system --no-deps -r requirements/requirements.lock
           uv pip install --system -e . --no-deps
       - name: Lint

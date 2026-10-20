@@ -40,6 +40,10 @@ from merxen.segmentation.cellpose import (
     synchronize_cellpose_probability_logits,
 )
 from merxen.segmentation.mask_filter import filter_labeled_mask_by_area
+from merxen.segmentation.model_identity import (
+    ensure_model_identity,
+    model_identity_path,
+)
 from merxen.segmentation.proseg import run_proseg_refinement
 from merxen.segmentation.proseg_hybrid import (
     has_proseg_hybrid_refinement,
@@ -534,6 +538,11 @@ def run_cellpose_segmentation(
     _started_at = time.monotonic()
 
     def _stage_outputs() -> tuple[Path, Path, Path, Path, Path]:
+        ensure_model_identity(mask_path, stitching_stats_path)
+        identity_path = model_identity_path(mask_path)
+        staged_identity_path = model_identity_path(staged_mask_path)
+        if identity_path != staged_identity_path:
+            stage_existing_output(identity_path, staged_identity_path)
         if transcripts_csv != staged_transcripts_csv:
             stage_existing_output(transcripts_csv, staged_transcripts_csv)
         if mask_path != staged_mask_path:
@@ -805,6 +814,11 @@ def run_cellpose_nuclei_segmentation(
     started_at = time.monotonic()
 
     def _stage_outputs() -> tuple[Path, Path]:
+        ensure_model_identity(mask_path, stats_path)
+        identity_path = model_identity_path(mask_path)
+        staged_identity_path = model_identity_path(staged_mask_path)
+        if identity_path != staged_identity_path:
+            stage_existing_output(identity_path, staged_identity_path)
         if mask_path != staged_mask_path:
             stage_existing_output(mask_path, staged_mask_path)
         if stats_path.exists() and stats_path != staged_stats_path:
@@ -844,7 +858,10 @@ def run_cellpose_nuclei_segmentation(
     nuclei_config = config.model_copy(deep=True)
     nuclei_config.dataset.channels = ["DAPI"]
     nuclei_config.cellpose = config.cellpose.model_copy(
-        update={"model_type": config.nuclei_cellpose.model_type}
+        update={
+            "model_type": config.nuclei_cellpose.model_type,
+            "pretrained_model": config.nuclei_cellpose.pretrained_model,
+        }
     )
     nuclei_config.mask_filter = config.nuclei_mask_filter
 

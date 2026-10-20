@@ -58,7 +58,7 @@ cd MerXen
 conda env create -f envs/environment.yml
 conda activate merxen
 
-# 2. Environment variables
+# 2. Local configuration (required environment variables: see .env.example)
 cp .env.example .env
 
 # 3. Samplesheet — edit with your own dataset paths
@@ -82,7 +82,7 @@ Each stage is one Nextflow module and one `merxen` subcommand, sharing a Pydanti
 | [Segmentation](docs/stages/segmentation.md) | DAPI-only Cellpose nuclei → GPU Cellpose-SAM cells → ProSeg 3.2.0 refinement from Cellpose logits | always |
 | [Segmentation — hybrid](docs/stages/segmentation.md) | Transcript-supported local-convex branch with growth-only boundary smoothing | on (`proseg_hybrid_enabled`) |
 | [Enrichment](docs/stages/enrichment.md) | Shape layers and per-shape gene tables | always |
-| [Image registration](docs/stages/register-images.md) | Registers post-Xenium images (e.g. IF) onto the Xenium mask grid with Xenium Explorer matrices and a DAPI affine refinement | off (per-row `xenium_registered_images_csv`) |
+| [Image registration](docs/stages/register-images.md) | Registers post-Xenium images (e.g. IF) onto the Xenium mask grid with Xenium Explorer matrices, DAPI affine refinement, and optional guarded TV-L1 non-rigid refinement | off (per-row `xenium_registered_images_csv`) |
 | [Mask image quantification](docs/stages/mask-image-quantification.md) | Quantifies every SpatialData image channel over the final Cellpose masks | always |
 | [Cortical depth](docs/stages/cortical-depth.md) | Laplace / equal-area cortical-depth coordinates from boundary annotations | off (`--cortical_depth_enabled`) |
 | [QC](docs/stages/qc.md) | Per-dataset geometry and transcript-assignment metrics | always |
@@ -133,6 +133,16 @@ Most of these can also be set **per samplesheet row** — a non-empty cell overr
 
 Other hosts must supply their own executor capacity, concurrency limits, GPU handling, and reference paths. More in [Running the pipeline](docs/running-the-pipeline.md).
 
+## Local configuration
+
+Machine-specific locations and real sample names never enter the repository. They live in gitignored files with tracked templates (placeholders only):
+
+- `.env`: every location Python, scripts, tests and notebooks need (template [.env.example](.env.example), which also lists the required environment variables). Python reads it through `merxen.local_config`; an unset location is an error, never a built-in default.
+- `workflows/conf/site.config` and `workflows/conf/dwight.site.config`: the Nextflow site locations (templates `*.site.config.example`).
+- `.aliases.tsv`: maps the neutral sample aliases used in code and docs (HD1-HD4, HD1_IF, HD3_IF, HM1-HM4, MS1, MS2) to real names (template [.aliases.example.tsv](.aliases.example.tsv)).
+
+The privacy hooks refuse host paths and sample names in commits, commit messages, branch names and PR text. Details: [Local configuration and privacy](docs/local-configuration.md).
+
 ## Samplesheet
 
 Each row points at raw platform folders, with optional reusable SpatialData cache paths and per-platform channel, z-range, and voxel-layer settings. Row-level columns can override most run defaults for a single sample, and object-distance runs supply registered object GeoJSON paths per platform. In single-platform rows, only the selected platform's columns are required.
@@ -167,7 +177,7 @@ Every `.png` is also written as a same-stem `.pdf`. Nextflow's own `./work/` dir
 
 Full documentation lives in [docs/](docs/) — start at [docs/index.md](docs/index.md).
 
-- **Usage** — [Getting started](docs/getting-started.md) · [Samplesheet format](docs/samplesheet.md) · [Running the pipeline](docs/running-the-pipeline.md) · [Configuration](docs/configuration.md) · [Outputs](docs/outputs.md)
+- **Usage** — [Getting started](docs/getting-started.md) · [Samplesheet format](docs/samplesheet.md) · [Running the pipeline](docs/running-the-pipeline.md) · [Configuration](docs/configuration.md) · [Local configuration and privacy](docs/local-configuration.md) · [Outputs](docs/outputs.md)
 - **Developer reference** — [Pipeline architecture](docs/pipeline.md) · [Metro map](docs/metro-map.md) · [Python API](docs/python-api.md) · [CLI reference](docs/cli.md) · [Development workflow](docs/development.md)
 
 <details>
@@ -210,8 +220,7 @@ Stages with conflicting dependency stacks run in their own environments: `envs/e
 Project standards — layout, dependencies, naming, type hints, docstrings, git workflow, commit prefixes — are defined in [Agents.md](Agents.md) and apply to human and AI contributors alike. Do not commit to `main`; use a feature branch and open a PR.
 
 ```bash
-pre-commit install
-pre-commit install --hook-type pre-push
+pre-commit install                    # every hook type, privacy hooks included
 
 ruff check . --fix && ruff format .   # lint and format
 mypy src/                             # type check
@@ -221,6 +230,10 @@ scripts/run_ci_checks.sh              # the same lockfile-backed checks as CI
 ```
 
 Day-to-day mechanics — testing, hooks, CI, debugging, adding a new pipeline stage — are in [Development workflow](docs/development.md).
+
+The [Cellpose HITL testing guide](docs/hitl/testing-guide.md) covers runtime
+acceptance, a read-only comparison with one published tile, and the planned
+custom-model checks.
 
 ## Built on
 

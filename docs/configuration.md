@@ -67,6 +67,7 @@ profile. Override either kind with `--<name>` on the command line.
 | `enable_alignment` | `false` | Fallback row alignment switch. A non-empty samplesheet `enable_alignment` value overrides this per row; alignment only applies to paired rows. |
 | `analysis_segmentation` | `all` | Fallback downstream analysis branches after enrichment. Valid values: `all`, `both`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, `proseg_hybrid`; comma-separated combinations are accepted. `all` includes all four branches, while `both` restricts analysis to `reseg,original_seg`. A non-empty samplesheet value overrides this per row. |
 | `register_images_refine_affine` | `true` | Refine each Xenium Explorer matrix with a robust DAPI-to-DAPI affine fit before resampling registered images. The stage itself is enabled per row by `xenium_registered_images_csv`; see [stages/register-images.md](stages/register-images.md). |
+| `register_post_xenium_if_nonrigid` | `false` | Fallback switch for guarded post-Xenium IF DAPI TV-L1 refinement after the affine fit. A samplesheet value overrides this per row. |
 | `mask_image_quantification_enabled` | `true` | Insert the Cellpose-mask image quantification stage between enrichment and QC. A non-empty samplesheet `mask_image_quantification_enabled` value overrides this per row. |
 | `mecr_enabled` | species-dependent | Insert species-matched whole-brain mutually exclusive co-expression rate analysis after QC. Defaults to `true` for human and `false` for mouse; mouse may opt in to the complete WMB reference. |
 | `spatial_gene_analysis_enabled` | `true` | Insert spatial gene analysis between visualization and clustering. A non-empty samplesheet value overrides this per row; disabled rows proceed directly from visualization to clustering. |
@@ -110,17 +111,19 @@ only for rows whose effective `enable_alignment` value is `true`.
 
 ### Cellpose
 
-`segment_nuclei` uses DAPI only, the Cellpose `nuclei` model, and the same
-inference/tiling settings as cell Cellpose. Both masks use the default final
+`segment_nuclei` uses DAPI only, stock Cellpose-SAM v2 (`cpsam_v2`), and the same
+inference/tiling settings as cell Cellpose. Cellpose 4 ignores the former
+`model_type="nuclei"` and `model_type="cyto3"` settings; neither selected a
+different model. Both masks use the default final
 area filter of 5–400 µm². On Dwight,
 `cellpose_segment_max_forks = 1` and the shared GPU lock serialize both
 Cellpose process types.
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `cellpose_model_type` | `cyto3` | Cellpose model preset. |
+| `cellpose_model_type` | `cyto3` | Deprecated and ignored by Cellpose 4. Retained for legacy config JSON; both stages explicitly load `cpsam_v2`. |
 | `cellpose_gpu` | Dwight: `true` | Use GPU for inference. Other execution profiles choose their own hardware policy. |
-| `cellpose_diameter` | `null` | Cell diameter (px). `null` → Cellpose auto-estimates. |
+| `cellpose_diameter` | `null` | Rescale using this cell diameter (px). `null` preserves native scale with Cellpose-SAM. |
 | `cellpose_flow_threshold` | `0.7` | Cellpose flow threshold. |
 | `cellpose_cellprob` | `-5.0` | Cellpose cell probability threshold. |
 | `cellpose_tile_overlap` | `0.15` | Cellpose model's internal fractional tile overlap. |
@@ -140,6 +143,14 @@ Cellpose process types.
 | `cellpose_final_filter_chunk_mb` | `256` | Approximate row-chunk size for streaming the final mask filter. |
 | `cellpose_segment_max_forks` | Dwight: `1` | Maximum concurrent GPU Cellpose processes. |
 
+The Python `CellposeConfig.pretrained_model` defaults to `cpsam_v2` and
+`use_bfloat16` defaults to `False`, matching Nextflow. The existing Nextflow
+config JSON is unchanged: Python supplies the model default. Both inference
+stages require Cellpose 4.2.1.1 and PyTorch 2.14.x; the lock records 2.14.0,
+verified on Dwight with CUDA 13.0. Fresh inference checks the stock checkpoint's
+SHA-256 and records its model identity beside the mask. See
+[segmentation provenance](stages/segmentation.md#model-provenance).
+
 ### Mask image quantification
 
 | Param | Default | Description |
@@ -152,9 +163,20 @@ Cellpose process types.
 | Param | Default | Description |
 |-------|---------|-------------|
 | `register_images_refine_affine` | `true` | Apply the DAPI affine refinement on top of each Xenium Explorer matrix. |
+| `register_post_xenium_if_nonrigid` | `false` | Apply guarded TV-L1 optical flow after the affine refinement. A non-empty samplesheet value overrides this per row. |
+| `register_post_xenium_if_nonrigid_pixel_size_um` | `3.4` | Physical pixel size of the flow-estimation grid. This is fine enough for nucleus-scale shifts without fitting raw Xenium pixels. |
+| `register_post_xenium_if_nonrigid_attachment` | `10` | TV-L1 data-attachment weight; lower values favour a smoother field. |
+| `register_post_xenium_if_nonrigid_tightness` | `0.3` | TV-L1 tightness parameter. |
+| `register_post_xenium_if_nonrigid_num_warp` / `register_post_xenium_if_nonrigid_num_iter` | `5` / `10` | TV-L1 coarse-to-fine warps and fixed-point iterations. |
+| `register_post_xenium_if_nonrigid_smoothing_sigma_um` | `10` | Physical Gaussian smoothing scale for the confidence-weighted accepted field. |
+| `register_post_xenium_if_nonrigid_max_displacement_um` | `20` | Reject raw vectors above this displacement and cap the accepted field. |
+| `register_post_xenium_if_nonrigid_max_cycle_error_um` | `5` | Maximum forward/backward inconsistency for a raw vector to contribute. |
+| `register_post_xenium_if_nonrigid_min_local_correlation` | `0.2` | Minimum local post-warp DAPI correlation for a raw vector to contribute. |
+| `register_post_xenium_if_nonrigid_min_jacobian` / `register_post_xenium_if_nonrigid_max_jacobian` | `0.5` / `2` | Allowed local area change of the final mapping; the guarded field is attenuated until these bounds hold. |
+| `register_post_xenium_if_nonrigid_min_confident_fraction` | `0.1` | Reject the complete non-rigid pass when too little overlapping tissue supports it. |
 | `register_images_max_forks` | Dwight: `2` | Maximum concurrent registration processes. |
 
-`REGISTER_IMAGES` requests 8 CPUs and 32 GB (P7513 peaked at 8.5 GB with about five cores busy). The viewer pyramid of each
+`REGISTER_IMAGES` requests 8 CPUs and 32 GB (P7513 optical-flow validation peaked at 2.7 GB; full registration remains bounded by image resampling). The viewer pyramid of each
 registered image follows `viewer_cache_build_image_pyramid`.
 
 ### Viewer caches

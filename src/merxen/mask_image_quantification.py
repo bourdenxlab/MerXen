@@ -307,6 +307,13 @@ def join_cellpose_image_quantification_to_hybrid(
         ]
 
     updated = hybrid_table.copy()
+    previous_feature_obs_columns = [
+        column
+        for column in updated.obs.columns
+        if str(column).startswith(HYBRID_IMAGE_QUANTIFICATION_OBS_PREFIX)
+    ]
+    if previous_feature_obs_columns:
+        updated.obs.drop(columns=previous_feature_obs_columns, inplace=True)
     feature_names = image_table.var_names.astype(str).tolist()
     feature_obs_columns = _unique_spatialdata_obs_columns(
         [
@@ -434,18 +441,26 @@ def _hybrid_image_join_is_complete(
         return True
     if image_table_key not in sdata_obj.tables:
         return False
+    hybrid_table = sdata_obj.tables[PROSEG_HYBRID_TABLE_KEY]
     marker = dict(
-        sdata_obj.tables[PROSEG_HYBRID_TABLE_KEY].uns.get(
+        hybrid_table.uns.get(
             HYBRID_IMAGE_QUANTIFICATION_OBSM_KEY,
             {},
         )
     )
     expected_features = sdata_obj.tables[image_table_key].var_names.astype(str).tolist()
+    marker_obs_columns = marker.get("obs_columns")
+    current_obs_columns = [
+        str(column)
+        for column in hybrid_table.obs.columns
+        if str(column).startswith(HYBRID_IMAGE_QUANTIFICATION_OBS_PREFIX)
+    ]
     return (
         marker.get("source_table_key") == str(image_table_key)
         and marker.get("feature_names") == expected_features
-        and HYBRID_IMAGE_QUANTIFICATION_OBSM_KEY
-        in sdata_obj.tables[PROSEG_HYBRID_TABLE_KEY].obsm
+        and isinstance(marker_obs_columns, list)
+        and marker_obs_columns == current_obs_columns
+        and HYBRID_IMAGE_QUANTIFICATION_OBSM_KEY in hybrid_table.obsm
     )
 
 

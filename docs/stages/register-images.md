@@ -33,11 +33,27 @@ For each listed image:
    safety limits (≤ 50 µm displacement, ≤ 2° rotation, ≤ 2 % scale change)
    and only with at least 20 usable windows; otherwise the Explorer matrix is
    kept and the reason is recorded.
-5. **Resample** the image tile by tile (bilinear) onto the `morphology_focus`
+5. **Optionally refine non-rigidly.** A row with
+   `register_post_xenium_if_nonrigid=true` estimates bidirectional
+   [`optical_flow_tvl1`](https://scikit-image.org/docs/stable/api/skimage.registration.html#skimage.registration.optical_flow_tvl1)
+   between the affinely overlaid IF DAPI and `morphology_focus` DAPI at
+   3.4 µm/px. Forward/backward consistency, local DAPI correlation,
+   displacement limits, and Jacobian bounds exclude unsupported vectors.
+   Confidence-weighted smoothing at a 10 µm physical scale retains
+   nucleus-scale deformation while preventing raw pixel-scale overfit. Large
+   non-overlap, tears, and folds therefore fall back locally to the affine
+   mapping instead of pulling neighbouring tissue into the defect. If too
+   little tissue supports the field or global DAPI correlation does not
+   improve, the entire non-rigid pass is rejected.
+6. **Resample** every channel through the same final mapping, tile by tile
+   (bilinear), onto the `morphology_focus`
    level-0 grid, which is the Cellpose mask grid, and write it as a new image
-   element named by `image_key`. Pixels outside the image footprint are 0. A
-   viewer pyramid is built alongside it.
-6. **Record provenance** in `sdata.attrs["merxen_registered_images"]`. An image
+   element named by `image_key`. When non-rigid refinement is applied, no
+   affine-only image is retained. The shared DAPI-derived field is applied to
+   all other IF channels under the assumption that the source channels are
+   mutually registered. Pixels outside the image footprint are 0. A viewer
+   pyramid is built alongside it.
+7. **Record provenance** in `sdata.attrs["merxen_registered_images"]`. An image
    whose file, matrix, channel names, and settings are unchanged is skipped on
    rerun, also from a fresh Nextflow work directory: its stored summary is
    written out again (marked `"reused": true`) and its QC files are copied when
@@ -52,6 +68,11 @@ channels. Features are named `{image_key}__{channel}__{statistic}`, e.g.
 quantification table is recomputed rather than reused.
 
 ## Inputs
+
+Set the optional `register_post_xenium_if_nonrigid` samplesheet column to `true` for
+sections that should receive the guarded optical-flow pass. It defaults to
+`false`; the global `--register_post_xenium_if_nonrigid` parameter is only a fallback
+for rows where the column is empty.
 
 Set `xenium_registered_images_csv` on a samplesheet row to a CSV with one row
 per image:
@@ -105,6 +126,8 @@ exists only for rows that set the CSV.
 | `register_images_out/<dataset>_<image_key>_registration_summary.json` | Matrices (Explorer and final), scale check, refinement status and correction, residuals before/after, output shape. |
 | `register_images_out/<dataset>_<image_key>_registration_qc.png` (+ `.pdf`) | DAPI overlay (Xenium green, image magenta), residual-shift field after registration, and before/after residual histograms. |
 | `register_images_out/<dataset>_<image_key>_registration_local_shifts.csv` | Per-window residual shifts (µm) and correlation before and after refinement. |
+| `register_images_out/<dataset>_<image_key>_nonrigid_flow.npz` | Coarse fixed-grid pull field, confidence mask, and grid-to-reference matrix. Written whenever non-rigid refinement is attempted, including rejected attempts. |
+| `register_images_out/<dataset>_<image_key>_nonrigid_qc.png` (+ `.pdf`) | Affine/final DAPI overlays, applied displacement and confidence outline, and local DAPI correlation. |
 
 ### Reading the QC
 
@@ -115,10 +138,11 @@ when the shift-corrected correlation is ≥ 0.3. The shift estimator is biased b
 about 0.1 working pixel (~0.1 µm) towards zero, so sub-0.2 µm residuals are at
 the measurement floor.
 
-Residuals that remain after refinement are local, not global. A smooth field
+Residuals that remain after affine refinement are local, not global. A smooth field
 would point to tissue deformation; rectangular blocks with sharp edges point
-to tile-stitching differences between the two acquisitions. Neither can be
-removed by an affine.
+to tile-stitching differences between the two acquisitions. The optional
+non-rigid pass can correct supported local offsets, while its confidence and
+Jacobian guards preserve the affine result in defects and non-overlap.
 
 ### Worked example: P7513 post-Xenium IF
 
@@ -142,8 +166,14 @@ The tail matters for quantification. Per-cell mean DAPI over the real Cellpose
 masks, Xenium versus registered IF (log scale), correlates at r = 0.89 in a
 well-aligned 870 µm crop (3,555 cells, residual 0.15 µm) but only r = 0.34 in a
 crop of the left-edge tail (1,511 cells, residual 7.1 µm), where IF nuclei sit
-about one nucleus diameter away from their masks. A non-rigid second pass is
-not implemented; cells in tail regions should be treated with caution.
+about one nucleus diameter away from their masks.
+
+With the default guarded TV-L1 settings on the full P7513 overlap at
+3.4 µm/px, 77% of overlapping tissue supported confident vectors. Global
+high-pass DAPI correlation rose from 0.803 to 0.830. The final field had median,
+p90, p99, and maximum displacements of 0.14, 0.95, 2.22, and 6.20 µm; its
+Jacobian determinant remained between 0.500 and 1.506 with no folds. Estimation
+took 4.8 minutes and peaked at 2.7 GB RSS on Dwight.
 
 **Capture range.** Perturbing the Explorer matrix about the tissue centre and
 refining again (limits relaxed) recovered the unperturbed result to within
@@ -170,6 +200,14 @@ image occupies 4.9 GB in the zarr, plus 0.3 GB for its viewer pyramid.
 | `reference_pixel_size_um` | `0.2125` | Xenium morphology pixel size ([10x Genomics](https://kb.10xgenomics.com/hc/en-us/articles/35386990499853-How-can-I-convert-coordinates-between-H-E-image-and-Xenium-data)). |
 | `matrix_scale_tolerance` | `0.02` | Accepted relative deviation of the matrix scale. |
 | `refine_affine` | `true` | Fit and apply the DAPI affine correction. Nextflow: `--register_images_refine_affine`. |
+| `nonrigid_enabled` | `false` | Apply guarded bidirectional TV-L1 after the final affine. Nextflow fallback: `--register_post_xenium_if_nonrigid`; row override: `register_post_xenium_if_nonrigid`. |
+| `nonrigid_pixel_size_um` / `nonrigid_smoothing_sigma_um` | `3.4` / `10` | Flow grid resolution and physical smoothing scale. |
+| `nonrigid_attachment` / `nonrigid_tightness` | `10` / `0.3` | TV-L1 data/regularization balance. |
+| `nonrigid_num_warp` / `nonrigid_num_iter` | `5` / `10` | TV-L1 coarse-to-fine warp and fixed-point counts. |
+| `nonrigid_max_displacement_um` / `nonrigid_max_cycle_error_um` | `20` / `5` | Raw-vector displacement and forward/backward consistency limits. |
+| `nonrigid_min_local_correlation` | `0.2` | Minimum local DAPI correlation for a vector to contribute. |
+| `nonrigid_min_jacobian` / `nonrigid_max_jacobian` | `0.5` / `2` | Final local area-change bounds. |
+| `nonrigid_min_confident_fraction` | `0.1` | Minimum fraction of overlapping tissue that must support the field. |
 | `registration_pixel_size_um` | `0.85` | Working resolution for refinement and QC. |
 | `refinement_window_um` | `200` | Window size for local shift measurement. |
 | `min_refinement_windows` | `20` | Minimum usable windows to attempt refinement. |
@@ -185,4 +223,5 @@ image occupies 4.9 GB in the zarr, plus 0.3 GB for its viewer pyramid.
 | `run_image_registration` | [image_registration.py](../../src/merxen/image_registration.py) |
 | `load_alignment_matrix`, `check_matrix_scale` | [image_registration.py](../../src/merxen/image_registration.py) |
 | `measure_local_shifts`, `fit_affine_displacement` | [image_registration.py](../../src/merxen/image_registration.py) |
+| `estimate_nonrigid_flow`, `flow_jacobian_determinant` | [nonrigid_registration.py](../../src/merxen/nonrigid_registration.py) |
 | `read_ome_tiff_info`, `open_ome_tiff_level` | [io/ome_tiff.py](../../src/merxen/io/ome_tiff.py) |

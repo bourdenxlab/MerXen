@@ -37,6 +37,7 @@ from merxen.io.spatialdata_io import (
 )
 from merxen.io.spatialdata_schema import (
     INSTANCE_ID_COLUMN,
+    MERXEN_SCHEMA_ATTR,
     SOURCE_CELL_ID_COLUMN,
 )
 from merxen.masks import register_missing_mask_branches
@@ -44,6 +45,10 @@ from merxen.memory import force_release, log_status
 from merxen.path_utils import remove_path, stage_existing_output
 from merxen.segmentation.cellpose import build_cellpose_affine_to_microns
 from merxen.segmentation.mask_geometry import masks_to_labeled_polygons
+from merxen.segmentation.model_identity import (
+    find_model_identity_path,
+    read_model_identity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -751,6 +756,34 @@ def enrich_single_latest(
     return write_path
 
 
+def _record_mask_model_identities(dst: Any, config: EnrichmentConfig) -> bool:
+    """Copy mask provenance into the registry without changing writer_versions."""
+    schema = dst.attrs.setdefault(MERXEN_SCHEMA_ATTR, {})
+    # Cell tables are registered in the later assignment stage. Retain the
+    # identities at schema level so that registration can copy them then.
+    identities = schema.setdefault("model_identities", {})
+    registry = schema.get("segmentations", {})
+    changed = False
+    for branch, mask_path in (
+        ("cellpose", config.mask_path),
+        ("cellpose_nuclei", config.nuclei_mask_path),
+    ):
+        existing = registry.get(branch, {}).get(
+            "model_identity", identities.get(branch)
+        )
+        if find_model_identity_path(Path(mask_path)) is None and existing is not None:
+            identity = existing
+        else:
+            identity = read_model_identity(Path(mask_path)).model_dump(mode="json")
+        if identities.get(branch) != identity:
+            identities[branch] = identity
+            changed = True
+        if branch in registry and registry[branch].get("model_identity") != identity:
+            registry[branch]["model_identity"] = identity
+            changed = True
+    return changed
+
+
 def _enrich_store_in_place(
     config: EnrichmentConfig,
     *,
@@ -770,6 +803,8 @@ def _enrich_store_in_place(
 
     already_enriched = _is_already_enriched(dst, platform)
     if already_enriched and (not force_rerun):
+        if _record_mask_model_identities(dst, config):
+            write_spatialdata_metadata(dst, write_attrs=True)
         log_status(f"[{dataset_name}] Already enriched; skipping.")
         del dst
         force_release(note=f"after enrichment skip {dataset_name}")
@@ -805,6 +840,7 @@ def _enrich_store_in_place(
             overwrite=False,
         )
         register_missing_mask_branches(dst)
+        _record_mask_model_identities(dst, config)
         invalidate_alignment_materialization(
             dst,
             reason="incremental Cellpose nucleus shapes added",
@@ -1000,6 +1036,7 @@ def _enrich_store_in_place(
         raise ValueError(f"Unsupported platform: {config.platform}")
 
     register_missing_mask_branches(dst)
+    _record_mask_model_identities(dst, config)
     invalidate_alignment_materialization(
         dst,
         reason="native enrichment points, shapes, tables, or images replaced",

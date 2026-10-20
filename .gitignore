@@ -22,6 +22,7 @@ dag-*.dot
 run_logs/
 results*
 results/
+reports/
 /*results*
 
 # Scratch notebooks
@@ -245,3 +246,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Private local configuration: never commit (docs/local-configuration.md).
+# .env is already ignored above.
+/.aliases.tsv
+/workflows/conf/site.config
+/workflows/conf/*.site.config

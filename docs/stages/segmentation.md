@@ -1,6 +1,7 @@
 # Stage 2 — Segmentation
 
-Runs two image-based segmentations: a DAPI-only Cellpose `nuclei` model and a
+Runs two image-based segmentations using stock Cellpose-SAM v2 (`cpsam_v2`): a
+DAPI-only nuclei segmentation and a
 cell segmentation on DAPI/PolyT (MERSCOPE) or DAPI/18S (Xenium). The cell mask
 is then refined using the actual transcript positions with ProSeg. The nuclei
 mask remains independent of transcript assignment and is retained for
@@ -8,7 +9,7 @@ subcellular transcript analysis.
 
 ## What it does
 
-1. Run DAPI-only Cellpose with the `nuclei` model and write an independently
+1. Run DAPI-only Cellpose-SAM v2 and write an independently
    reusable nuclei mask.
 2. Load the SpatialData zarr from stage 1 and pick the cell channels.
 3. Tile the image, run Cellpose on each tile, merge masks back into a
@@ -35,7 +36,7 @@ The module has three independently scheduled processes per dataset:
 
 | Process | Tool | Process request | Dwight profile behavior |
 |---------|------|-----------------|-------------------------|
-| `CELLPOSE_NUCLEI_SEGMENT` | DAPI-only Cellpose `nuclei` model | 12 CPUs, 212 GB RAM | `cellpose_segment_max_forks = 1`; shared workstation GPU lock when `cellpose_gpu=true` |
+| `CELLPOSE_NUCLEI_SEGMENT` | DAPI-only Cellpose-SAM v2 | 12 CPUs, 212 GB RAM | `cellpose_segment_max_forks = 1`; shared workstation GPU lock when `cellpose_gpu=true` |
 | `CELLPOSE_SEGMENT` | Cellpose-SAM | 12 CPUs, 212 GB RAM | `cellpose_segment_max_forks = 1`; shared workstation GPU lock when `cellpose_gpu=true` |
 | `PROSEG_SEGMENT` | ProSeg | 32 CPUs, 220 GB RAM | `proseg_segment_max_forks = 2`; no GPU lock |
 
@@ -67,6 +68,8 @@ published nuclei mask and fails early if it is absent.
   - `segment_out/cellpose_cellprobs_tiled.npy` — aligned Cellpose probability
     logits (float32) supplied to ProSeg.
   - `segment_out/cellpose_nuclei_masks_tiled.npy` — DAPI-only nuclei labels.
+  - `segment_out/cellpose_model_identity.json` — cell-mask model provenance.
+  - `segment_out/cellpose_nuclei_model_identity.json` — nuclei-mask model provenance.
   - `segment_out/transcripts_for_proseg.csv` — transcripts with seeded cell ids.
   - `segment_out/cellpose_transforms.json` — affine metadata handed from
     Cellpose to ProSeg.
@@ -95,6 +98,34 @@ the record is then written. A mismatch fails the task: move the CSV, masks and
 probabilities aside so Cellpose re-runs and re-seeds. The check rejects the
 stored 2026-09-08 VZG2 CSV under the corrected transform (0% agreement) and
 accepts P1212, P5011, P7113 and P7513 on both platforms (100%).
+
+## Model provenance
+
+HITL-0 explicitly selects stock `cpsam_v2` for both platforms and the independent
+DAPI-only nuclei segmentation. Cellpose 4 ignored the former `cyto3` and
+`nuclei` model-type values. Fresh inference requires Cellpose 4.2.1.1 and
+PyTorch 2.14.x, uses float32 by default, and checks the stock checkpoint against
+SHA-256 `0f1cc3f7ecdd8a037a57c6c48d9d8921391be4cbce3fa9f13c3e3a2e1253c667`.
+Runtime and checkpoint validation happen before existing outputs are removed.
+
+On successful inference, each mask gets a model-identity JSON with the actual
+checkpoint checksum, effective Cellpose configuration, Cellpose version and
+loaded PyTorch version (including its CUDA build suffix). The same identity
+is included in stitching statistics, even when detailed statistics are disabled.
+Reusing outputs preserves the sidecar. A legacy mask without recorded identity
+gets `status: unverified`, unknown weights/configuration/versions, and a note to
+consult its original task log; it is never attributed to today's environment.
+
+Enrichment copies these records into `merxen_schema.model_identities` and the
+corresponding segmentation registry entries when they are registered. Later
+assignment or coordinate-variant registration retains the identity.
+`writer_versions` continues to describe the environment writing the zarr.
+
+Fine-tuning, annotation packages and opt-in per-platform custom models remain
+later milestones of the [HITL plan](../plans/cellpose-hitl-segmentation-plan.md).
+Rebuilding the conda environment after this dependency update changes its
+Nextflow cache hash and can restart resumed tasks; schedule that rebuild between
+pipeline runs. Published masks retain their existing provenance.
 
 ## Python entry points
 
@@ -128,8 +159,8 @@ SegmentationConfig
 │   ├── MERSCOPE: image_prefix, z_range, transform_path
 │   ├── Xenium: xenium_spec_path, min_qv
 │   └── proseg_overrides: dict      # per-platform voxel_layers
-├── cellpose: CellposeConfig         # model_type, gpu, diameter, thresholds
-├── nuclei_cellpose: CellposeConfig  # nuclei model; other inference defaults match
+├── cellpose: CellposeConfig         # pretrained_model, gpu, diameter, thresholds
+├── nuclei_cellpose: CellposeConfig  # stock cpsam_v2; other inference defaults match
 ├── mask_filter: MaskFilterConfig    # eccentricity, area percentile
 ├── nuclei_mask_filter: MaskFilterConfig
 ├── tiling: TilingConfig             # tile sizes, stitch overlap, duplicate policy

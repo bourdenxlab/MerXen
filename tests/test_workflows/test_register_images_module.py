@@ -53,10 +53,12 @@ def test_register_images_runs_between_enrich_and_viewer_cache() -> None:
         "REGISTER_IMAGES(register_images_inputs_ch)",
         "viewer_cache_inputs_ch = post_registration_zarrs_ch",
         "viewer_cache_passthrough_ch = post_registration_zarrs_ch",
-        'tuple("${pairId}|XENIUM", settings.registered_images_csv)',
+        "settings.registered_images_csv",
         "runRegisterImages ||",
         "appendRegisterImagesPreflightChecks(errors, settings)",
         'chooseField(row, ["xenium_registered_images_csv"])',
+        '"register_post_xenium_if_nonrigid for ${pairId}"',
+        "nonrigid_enabled: registerPostXeniumIfNonrigid",
     ]:
         assert expected in MAIN_TEXT
 
@@ -76,5 +78,7 @@ def test_register_images_defaults_and_resources() -> None:
     dwight_text = (REPO_ROOT / "workflows" / "conf" / "dwight.config").read_text()
 
     assert "register_images_refine_affine = true" in config_text
+    assert "register_post_xenium_if_nonrigid = false" in config_text
+    assert "register_post_xenium_if_nonrigid_pixel_size_um = 3.4" in config_text
     assert 'withName: "REGISTER_IMAGES"' in config_text
     assert "maxForks = params.register_images_max_forks" in dwight_text

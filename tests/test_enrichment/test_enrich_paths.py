@@ -187,6 +187,7 @@ def _stub_merscope_enrichment(
         coords={"c": ["DAPI"]},
     )
     dst = SimpleNamespace(
+        attrs={},
         shapes={"cell_boundaries": proseg_shape},
         images={},
         tables={},
@@ -311,6 +312,7 @@ def test_enrich_single_latest_adds_missing_nuclei_without_rebuilding_tables(
         "table_MOSAIK_proseg_clustering_squidpy": object(),
     }
     dst = SimpleNamespace(
+        attrs={},
         shapes={
             MOSAIK_PROSEG_SHAPE_NAME: proseg_shape,
             MOSAIK_CELLPOSE_SHAPE_NAME: object(),
@@ -414,6 +416,7 @@ def test_incomplete_enrichment_rebuilds_partial_elements(
         coords={"c": ["DAPI"]},
     )
     dst = SimpleNamespace(
+        attrs={},
         shapes={
             "cell_boundaries": proseg_shape,
             MOSAIK_PROSEG_SHAPE_NAME: object(),

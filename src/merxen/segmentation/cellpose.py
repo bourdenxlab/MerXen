@@ -22,6 +22,12 @@ from merxen.memory import (
     memory_snapshot_gb,
 )
 from merxen.segmentation.mask_filter import filter_cell_by_regionprops
+from merxen.segmentation.model_identity import (
+    identify_cellpose_model,
+    model_identity_path,
+    require_cellpose_runtime,
+    write_model_identity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +52,20 @@ def build_cellpose_model(config: CellposeConfig) -> Any:
             "Install the MerXen segmentation dependencies before running Cellpose."
         )
 
-    kwargs: dict[str, Any] = {"gpu": config.gpu}
-    if config.model_type is not None:
-        kwargs["model_type"] = config.model_type
-        kwargs["use_bfloat16"] = config.use_bfloat16
-    return cellpose_models.CellposeModel(**kwargs)
+    # hitl-hook:C2
+    require_cellpose_runtime()
+    if (
+        config.pretrained_model not in cellpose_models.MODEL_NAMES
+        and not Path(config.pretrained_model).is_file()
+    ):
+        raise FileNotFoundError(
+            f"Cellpose pretrained_model does not exist: {config.pretrained_model}"
+        )
+    return cellpose_models.CellposeModel(
+        gpu=config.gpu,
+        pretrained_model=config.pretrained_model,
+        use_bfloat16=config.use_bfloat16,
+    )
 
 
 def run_cellpose_model_eval(
@@ -507,7 +522,11 @@ def run_tiled_cellpose(
     Returns:
         Path to the written mask .npy file.
     """
+    # Validate the runtime and loaded weights before touching existing outputs.
+    model = build_cellpose_model(cellpose_config)
+    identity = identify_cellpose_model(model, cellpose_config)
     output_mask_path = Path(output_mask_path)
+    model_identity_path(output_mask_path).unlink(missing_ok=True)
     if output_mask_path.exists():
         output_mask_path.unlink()
     if output_stitching_stats_path is not None:
@@ -530,7 +549,6 @@ def run_tiled_cellpose(
             "No valid tile sizes in tile_size_candidates after min_tile_size filter"
         )
 
-    model = build_cellpose_model(cellpose_config)
     tile_size = choose_working_tile_size(
         fetch_tile_fn=fetch_tile_fn,
         height=height,
@@ -678,8 +696,15 @@ def run_tiled_cellpose(
     if cellprob_mem is not None:
         cellprob_mem.flush()
     stitch_stats["final_labels"] = int(next_label - 1)
-    if tiling_config.write_stitching_stats and output_stitching_stats_path is not None:
-        _write_stitching_stats(output_stitching_stats_path, stitch_stats)
+    if output_stitching_stats_path is not None:
+        recorded_stats: dict[str, Any] = (
+            stitch_stats
+            if tiling_config.write_stitching_stats
+            else {"write_stitching_stats": False}
+        )
+        recorded_stats["model_identity"] = identity.model_dump(mode="json")
+        _write_stitching_stats(output_stitching_stats_path, recorded_stats)
+    write_model_identity(output_mask_path, identity)
     del mask_mem, cellprob_mem, model
     clear_cuda_cache()
     force_release(note=f"after tiled Cellpose {dataset_name}")

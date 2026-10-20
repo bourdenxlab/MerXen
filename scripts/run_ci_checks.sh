@@ -31,9 +31,6 @@ fi
 
 case "${install_mode}" in
     locked)
-        # The lock is the full pinned tree (uv pip compile), so it is installed with --no-deps:
-        # re-resolving would follow cell_type_mapper's unpinned abc_atlas_access git URL to the
-        # upstream head, which conflicts with the lock's pinned commit whenever upstream moves.
         uv pip install --python "${venv_dir}/bin/python" --no-deps -r requirements/requirements.lock
         uv pip install --python "${venv_dir}/bin/python" -e . --no-deps
         ;;
