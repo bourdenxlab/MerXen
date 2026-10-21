@@ -286,7 +286,10 @@ light to structure. Its benefit is small and limited to bead rings off tissue.
 It costs about 4-8 % more CPU per chunk and about 1.7 GB more peak memory per
 worker. The fill is never used to judge whether a sample passes. The QC warns
 `fill_guard` when more than half of the fill's candidate pixels are skipped as a
-densely coated area. The cache guard treats the fill like the switch itself (see
+densely coated area. `summary.json["fill"]["counters"]` are pixel totals summed
+over the chunks; each counts the whole window of its chunk including the 256 px
+halo, so they exceed the pixels of the output by about 1.3 times (the
+`fill_guard` ratio is not affected). The cache guard treats the fill like the switch itself (see
 below).
 
 ### Caching and how to rebuild
@@ -467,18 +470,18 @@ once the GPU backend has been validated there.
 
 ### Limits
 
-- **Bright beads that fail the classifier stay uncorrected.** The classifier
+- **Bright beads that fail the classifier can stay uncorrected.** The classifier
   accepts a bead only if its plane-0 ring ratio passes a per-dataset limit
   (about 0.30). On data whose beads are at a slightly different focus, bright
-  beads fall below it and are not modelled. On one such validation dataset the
-  bead-centred mask counts stayed well above the acceptance bars (58 and 45
-  against 35 and 20), and the cluster-inclusive classifier recall was 0.56,
-  against 0.88-0.96 on every other dataset. The step warns `classifier_recall` when the
-  cluster-inclusive recall is below 0.75 with at least 50 reference beads. The
-  isolated held-out recall is reported and warns only when at least 20 beads
-  were measured and it is below 0.90. A classifier change that also accepts
-  ring-failing beads was evaluated and is not part of this version. Check the
-  QC before using such a sample.
+  beads fall below it. The [rescue](#the-bead-classifier-its-limits-and-the-rescue) accepts most of them, but not
+  all: on one such validation dataset the bead-centred mask counts fell with the
+  rescue from 58 and 45 to 29 and 16 (against the acceptance bars of 35 and 20),
+  while the cluster-inclusive classifier recall stayed at 0.57 (0.88-0.96 on
+  every other dataset). The step warns `classifier_recall` when the
+  cluster-inclusive recall is below 0.75 with at least 50 reference beads, so
+  that warning still fires on such a dataset. The isolated held-out recall is
+  reported and warns only when at least 20 beads were measured and it is below
+  0.90. Check the QC before using such a sample.
 - **The bead-centred mask count is conditional.** In the validation cores the
   number of Cellpose masks on beads fell from 190 (raw) to 19 (median of three
   independent calibrations: 19, 23 and 19; acceptance bar 15; about 10 by
