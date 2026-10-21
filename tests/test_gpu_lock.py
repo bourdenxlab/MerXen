@@ -254,6 +254,25 @@ def test_the_cuda_cache_is_cleared_before_the_lock_is_released(
     assert not _lock_is_held_elsewhere(lock)
 
 
+@pytest.mark.parametrize("initialised", [False, True])
+def test_the_cuda_cache_is_only_cleared_once_cuda_is_initialised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, initialised: bool
+) -> None:
+    """Clearing would create a CUDA context in a process that never used the GPU."""
+    torch = types.ModuleType("torch")
+    torch.cuda = types.SimpleNamespace(is_initialized=lambda: initialised)  # type: ignore[attr-defined]
+    events: list[str] = []
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setattr(
+        "merxen.memory.clear_cuda_cache", lambda: events.append("clear")
+    )
+
+    with gpu_process_lock(tmp_path / "gpu.lock"):
+        pass
+
+    assert events == (["clear"] if initialised else [])
+
+
 def test_a_failing_cache_clear_does_not_hide_the_outcome(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

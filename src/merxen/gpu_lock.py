@@ -65,16 +65,23 @@ def _held_paths() -> set[str]:
 def _release_cuda_cache() -> None:
     """Hand cached GPU memory back before the lock is released.
 
-    The cache is only cleared when torch is already loaded, so releasing the
-    lock never imports it. ``gc.collect`` runs first so that tensors that only
-    a reference cycle keeps alive are freed and ``empty_cache`` can return them.
+    The cache is only cleared when torch is already loaded and CUDA is already
+    initialised in this process, so releasing the lock never imports torch and
+    never creates a CUDA context (``torch.cuda.ipc_collect``, which
+    ``clear_cuda_cache`` calls, would). ``gc.collect`` runs first so that
+    tensors that only a reference cycle keeps alive are freed and
+    ``empty_cache`` can return them.
     """
-    if "torch" not in sys.modules:
+    torch = sys.modules.get("torch")
+    if torch is None:
         return
-    from merxen.memory import clear_cuda_cache
-
     # A failed cleanup must not replace the block's own outcome.
     try:
+        cuda = getattr(torch, "cuda", None)
+        if cuda is not None and not cuda.is_initialized():
+            return
+        from merxen.memory import clear_cuda_cache
+
         gc.collect()
         clear_cuda_cache()
     except Exception:
