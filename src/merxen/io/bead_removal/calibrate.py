@@ -1476,7 +1476,8 @@ def estimate_global_noise(
     tiles = [(int(y), int(x)) for y, x in tiles]
     if not tiles:
         raise BeadCalibrationError(
-            "no valid pixel in the reference plane 0: nothing to calibrate"
+            f"no {tile_px} px sample tile of the reference plane 0 has at least 90 % "
+            "valid pixels (the scan outline may be irregular): nothing to calibrate"
         )
     jobs = [dict(base, y0=y, x0=x, tile_px=tile_px, k_fit=k_fit) for y, x in tiles]
     res = _map(executor, _noise_job, jobs)

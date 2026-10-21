@@ -320,6 +320,17 @@ def test_t12_no_tissue_free_area(mosaic_tight: Path) -> None:
         calibrate_bead_model(rd, config=CFG, z_layers=ZL, n_workers=2)
 
 
+def test_no_sample_tile_is_not_reported_as_no_valid_pixel() -> None:
+    """A scan with valid pixels but no 90 % valid tile has its own message."""
+    with pytest.raises(BeadCalibrationError) as caught:
+        calibrate_module.estimate_global_noise(
+            None, "PolyT", 2, executor=None, base={}, tiles=[]
+        )
+    message = str(caught.value)
+    assert "no 1024 px sample tile" in message and "90 % valid" in message
+    assert "no valid pixel" not in message
+
+
 def test_z_layers_validation(tmp_path: Path) -> None:
     import tifffile
 
