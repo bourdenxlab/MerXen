@@ -36,12 +36,13 @@ logger = logging.getLogger(__name__)
 IMAGE_PREPROCESSING_ATTR = "merxen_image_preprocessing"
 IMAGE_PREPROCESSING_SCHEMA = 1
 RAW_TIFF_SOURCE = "raw_tiff"
-# Backend of this version of the method; the GPU backend records its own
-# device and library versions.
+# Default backend device. The backend record of a GPU run also holds the update
+# order and the torch, triton and CUDA versions.
 CPU_DEVICE = "cpu"
-# Config fields that do not change the output pixels (the switch itself, the
-# fill which has its own record, and the pool size).
-_NON_OUTPUT_CONFIG_FIELDS = frozenset({"enabled", "fill", "max_workers"})
+# Config fields that do not change the output pixels beyond the method's own
+# order sensitivity (the switch itself, the fill which has its own record, the
+# pool size, and the device, which has its own backend record).
+_NON_OUTPUT_CONFIG_FIELDS = frozenset({"enabled", "fill", "max_workers", "device"})
 _FILL_MODULE = "merxen.io.bead_removal.fill"
 
 
@@ -90,6 +91,7 @@ def bead_removal_identity(
     *,
     calibration_sha256: str | None = None,
     device: str = CPU_DEVICE,
+    backend: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Describe what a bead-removal request produces, for comparison.
 
@@ -97,7 +99,10 @@ def bead_removal_identity(
         cfg: Requested bead-removal configuration, or ``None`` when off.
         calibration_sha256: Content hash of the calibration, once it is known
             (a requested configuration does not know it yet).
-        device: Backend device that runs the correction.
+        device: Backend device that runs the correction. Ignored when
+            ``backend`` is given.
+        backend: Backend record (device, update order, library versions).
+            Entries that are not known before a run are left out of a request.
 
     Returns:
         A JSON-safe mapping. A disabled request is
@@ -115,7 +120,7 @@ def bead_removal_identity(
         "params_sha256": _config_sha256(cfg),
         "calibration_sha256": calibration_sha256,
         "fill": fill,
-        "backend": {"device": device},
+        "backend": dict(backend) if backend is not None else {"device": device},
     }
 
 
@@ -156,6 +161,7 @@ def build_image_preprocessing_record(
     calibration: Mapping[str, Any] | None = None,
     run: Mapping[str, Any] | None = None,
     device: str = CPU_DEVICE,
+    backend: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the ``merxen_image_preprocessing`` record of a raw-TIFF build.
 
@@ -172,7 +178,10 @@ def build_image_preprocessing_record(
             ``calibration_sha256``), when bead removal ran.
         run: Summary of the correction run (chunk and bead counts), when bead
             removal ran.
-        device: Backend device that ran the correction.
+        device: Backend device that ran the correction. Ignored when
+            ``backend`` is given.
+        backend: Backend record of the run: device, update order and, for the
+            GPU, the torch, triton and CUDA versions and the GPU name.
 
     Returns:
         A JSON-safe mapping.
@@ -183,7 +192,10 @@ def build_image_preprocessing_record(
         else None
     )
     bead_removal = bead_removal_identity(
-        bead_removal_cfg, calibration_sha256=calibration_sha, device=device
+        bead_removal_cfg,
+        calibration_sha256=calibration_sha,
+        device=device,
+        backend=backend,
     )
     if bead_removal_cfg is not None and bead_removal["enabled"]:
         bead_removal["corrected_stains"] = sorted(bead_removal_cfg.stains)
@@ -239,6 +251,7 @@ def check_bead_removal_reuse(
     source: Path | str | None = None,
     requested_z_layers: Sequence[int] | None = None,
     requested_device: str = CPU_DEVICE,
+    requested_backend: Mapping[str, Any] | None = None,
 ) -> None:
     """Refuse to reuse a cached SpatialData built with other bead-removal settings.
 
@@ -248,8 +261,9 @@ def check_bead_removal_reuse(
 
     Warnings only (the result is valid but not what a fresh build would give):
       * a different method version, parameter hash or fill parameter hash;
-      * a different backend device or library version (the backends agree to
-        far below one count);
+      * a different backend device, or a different torch, triton or CUDA
+        version (the backends agree to the method's own order sensitivity,
+        and library versions to 0.01 counts);
       * a different recorded z range.
 
     A cache is never deleted here.
@@ -262,12 +276,18 @@ def check_bead_removal_reuse(
         source: Cached store, for the message only.
         requested_z_layers: Requested z planes, when explicitly configured.
         requested_device: Backend device the request would run on.
+        requested_backend: Backend identity of the request (device and
+            library versions); replaces ``requested_device``. An entry that
+            is not known without running (an unresolved ``auto`` device) is
+            left out and not compared.
 
     Raises:
         ValueError: If bead removal or the fill differs between cache and
             request.
     """
-    requested_identity = bead_removal_identity(requested, device=requested_device)
+    requested_identity = bead_removal_identity(
+        requested, device=requested_device, backend=requested_backend
+    )
     recorded_identity = identity_from_record(recorded)
     location = f" at {source}" if source is not None else ""
 
@@ -329,8 +349,8 @@ SEGMENTATION_SIDECAR_SCHEMA = 1
 CELL_MASK_SIDECAR_NAME = "image_preprocessing.json"
 NUCLEI_MASK_SIDECAR_NAME = "nuclei_image_preprocessing.json"
 # Identity fields of a correction that decide whether two images are the same
-# for segmentation. Library versions are deliberately absent: the backends
-# agree to far below one count, so only the device is compared.
+# for segmentation. Library versions are deliberately absent: they change the
+# image by at most 0.01 counts, so only the device is compared.
 _SEGMENTATION_IDENTITY_KEYS = (
     "method",
     "version",
@@ -548,7 +568,8 @@ def _warn_on_differences(
         )
     recorded_backend = recorded.get("backend") or {}
     requested_backend = requested.get("backend") or {}
-    # Library versions only exist once a GPU backend records them.
+    # Device, update order and the library versions that a GPU run records. A
+    # version change is a warning only: the output differs by < 0.01 counts.
     for key in sorted(set(recorded_backend) | set(requested_backend)):
         pairs.append(
             (f"backend {key}", recorded_backend.get(key), requested_backend.get(key))

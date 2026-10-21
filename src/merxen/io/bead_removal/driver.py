@@ -44,6 +44,7 @@ from typing import Any
 import numpy as np
 
 from merxen.io.bead_removal.apply import SPECTRAL_STAIN, correct_window
+from merxen.io.bead_removal.backend import backend_record
 from merxen.io.bead_removal.calibrate import BeadCalibration
 from merxen.io.bead_removal.fill import FillParams, fill_params_sha256, support_px
 from merxen.io.bead_removal.model import beads_table
@@ -602,9 +603,10 @@ def describe_backend(device: str) -> dict[str, Any]:
         device: Resolved device.
 
     Returns:
-        The device and the order in which overlapping beads are updated.
+        The device and the order in which overlapping beads are updated; for
+        the GPU also the torch, triton and CUDA versions and the GPU name.
     """
-    return {"device": device, "update_order": "brightness"}
+    return backend_record(device)
 
 
 # ---------------------------------------------------------------------------

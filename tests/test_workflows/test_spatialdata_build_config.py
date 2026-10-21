@@ -106,3 +106,46 @@ def test_bead_removal_fill_logs_once_in_the_workflow_block() -> None:
 
     assert workflow_block.count("merscope_bead_removal_fill is on") == 1
     assert "params.merscope_bead_removal_fill" in workflow_block
+
+
+def test_bead_removal_device_param_defaults_to_cpu() -> None:
+    config_text = (_REPO_ROOT / "workflows" / "nextflow.config").read_text()
+
+    assert 'merscope_bead_removal_device = "cpu"' in config_text
+
+
+def test_bead_removal_device_key_is_set_only_when_not_cpu() -> None:
+    """CPU bead build JSONs (and task hashes) keep the form without a device."""
+    main_text = _main_text()
+    build_config = _function_text(main_text, "buildConfigForPlatform")
+    block_start = build_config.index("if (merscopeBeadRemovalRequested(")
+    block_end = build_config.index("return [", block_start)
+    bead_block = build_config[block_start:block_end]
+
+    assert build_config.count("beadRemoval.device") == 1
+    assert "beadRemoval.device = beadDevice" in bead_block
+    assert 'if (beadDevice != "cpu") {' in bead_block
+    assert "merscopeBeadRemovalDevice(params)" in bead_block
+    # The key sits behind the guard, not next to the unconditional keys.
+    guard = bead_block.index('if (beadDevice != "cpu") {')
+    assert guard < bead_block.index("beadRemoval.device = beadDevice")
+    assert bead_block.index("beadRemoval.device = beadDevice") < bead_block.index(
+        "merscopeOptions.bead_removal = beadRemoval"
+    )
+    assert "device" not in build_config[:block_start]
+
+
+def test_bead_removal_device_helper_defaults_to_cpu_and_normalises() -> None:
+    helper = _function_text(_main_text(), "merscopeBeadRemovalDevice")
+
+    assert "params.merscope_bead_removal_device" in helper
+    assert 'return "cpu"' in helper
+    assert ".toLowerCase()" in helper
+
+
+def test_bead_removal_preflight_checks_the_device_value() -> None:
+    preflight = _function_text(_main_text(), "appendMerscopeBeadRemovalPreflightChecks")
+
+    assert "merscopeBeadRemovalDevice(params)" in preflight
+    assert '["auto", "cpu", "cuda"]' in preflight
+    assert "merscope_bead_removal_device must be auto, cpu or cuda" in preflight

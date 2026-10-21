@@ -536,8 +536,102 @@ def test_bead_removal_fill_flag_reaches_the_driver_and_the_record(
     assert record["run"]["n_beads"] == 3
     assert "work_dir" not in record["run"]
     assert record["corrected_stains"] == ["DAPI", "PolyT"]
-    assert record["backend"] == {"device": "cpu"}
+    assert record["backend"] == {"device": "cpu", "update_order": "brightness"}
     json.dumps(written[0].attrs[IMAGE_PREPROCESSING_ATTR])
+
+
+def test_bead_removal_device_is_resolved_once_and_recorded_with_versions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The resolved device reaches the calibration and the driver and the record."""
+    from merxen.io.bead_removal.driver import BeadRemovalRunResult
+
+    from .bead_build_fixtures import real_calibration
+
+    written = _written_sdata(monkeypatch)
+    raw = _write_tiny_raw(tmp_path / "raw")
+    resolved: list[tuple[str, bool]] = []
+
+    def _resolve(requested: str, *, fill_enabled: bool = False) -> str:
+        resolved.append((requested, fill_enabled))
+        return "cuda"
+
+    monkeypatch.setattr("merxen.io.bead_removal.backend.resolve_device", _resolve)
+    calibration_backends: list[str] = []
+
+    def _calibrate(reader: Any, **kwargs: Any) -> Any:
+        calibration_backends.append(kwargs["backend"])
+        return real_calibration()
+
+    monkeypatch.setattr(
+        "merxen.io.bead_removal.calibrate.calibrate_bead_model", _calibrate
+    )
+    gpu_backend = {
+        "device": "cuda",
+        "update_order": "colour",
+        "torch": "2.14.0+cu130",
+        "triton": "3.8.0",
+        "cuda": "13.0",
+        "gpu_name": "Test GPU",
+    }
+    devices: list[str] = []
+
+    def _driver(**kwargs: Any) -> BeadRemovalRunResult:
+        devices.append(kwargs["device"])
+        result = _run_result(kwargs["work_dir"])
+        result.device = "cuda"
+        result.backend = dict(gpu_backend)
+        return result
+
+    monkeypatch.setattr("merxen.io.bead_removal.driver.run_bead_removal", _driver)
+
+    write_merscope_spatialdata(
+        input_path=raw,
+        output_path=tmp_path / "source.zarr",
+        build_config=MerscopeBuildConfig(
+            z_layers=[1, 2, 3],
+            bead_removal=MerscopeBeadRemovalConfig(
+                enabled=True, max_workers=1, device="auto"
+            ),
+        ),
+    )
+
+    assert resolved == [("auto", False)]
+    assert calibration_backends == ["cuda"]
+    assert devices == ["cuda"]
+    record = written[0].attrs[IMAGE_PREPROCESSING_ATTR]["bead_removal"]
+    assert record["backend"] == gpu_backend
+    assert record["run"]["backend"] == gpu_backend
+
+
+def test_bead_removal_cuda_without_a_gpu_fails_before_any_work(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """B7: an unusable GPU is reported at the start of the sample."""
+    from merxen.io.bead_removal import backend
+
+    _written_sdata(monkeypatch)
+    raw = _write_tiny_raw(tmp_path / "raw")
+    monkeypatch.setattr(
+        backend, "_cuda_unavailable_reason", lambda: "torch reports no CUDA device"
+    )
+    monkeypatch.setattr(
+        "merxen.io.bead_removal.calibrate.calibrate_bead_model",
+        lambda *a, **k: pytest.fail("the calibration must not run"),
+    )
+
+    with pytest.raises(backend.BeadRemovalBackendError, match="device to cpu"):
+        write_merscope_spatialdata(
+            input_path=raw,
+            output_path=tmp_path / "source.zarr",
+            build_config=MerscopeBuildConfig(
+                z_layers=[1, 2],
+                bead_removal=MerscopeBeadRemovalConfig(enabled=True, device="cuda"),
+            ),
+        )
+    assert list(tmp_path.glob("merscope_projection_*")) == []
 
 
 def test_bead_calibration_record_drops_the_per_tile_table() -> None:
@@ -795,6 +889,46 @@ def test_reuse_guard_reuses_a_matching_bead_cache(tmp_path: Path) -> None:
     out = build_spatialdata_artifact(cfg)
 
     assert out.resolve() == cached.resolve()
+
+
+def test_reuse_guard_warns_but_reuses_a_cache_built_on_another_device(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    """A cpu cache still serves a cuda request, with a warning naming the device."""
+    monkeypatch.setattr(
+        "merxen.io.bead_removal.backend.gpu_library_versions",
+        lambda: {"torch": "2.14.0", "triton": "3.8.0", "cuda": "13.0"},
+    )
+    cached = _cached_store(tmp_path / "cache" / "source.zarr", _on_record())
+    cfg = _guard_config(
+        tmp_path, cached, MerscopeBeadRemovalConfig(enabled=True, device="cuda")
+    )
+
+    with caplog.at_level("WARNING", logger="merxen.io.bead_removal.provenance"):
+        out = build_spatialdata_artifact(cfg)
+
+    assert out.resolve() == cached.resolve()
+    assert "backend device cpu" in caplog.text
+
+
+def test_reuse_guard_for_the_default_device_never_loads_torch(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "merxen.io.bead_removal.backend.gpu_library_versions",
+        lambda: pytest.fail("torch must not be consulted for the cpu device"),
+    )
+    cached = _cached_store(tmp_path / "cache" / "source.zarr", _on_record())
+    cfg = _guard_config(tmp_path, cached, MerscopeBeadRemovalConfig(enabled=True))
+
+    with caplog.at_level("WARNING", logger="merxen.io.bead_removal.provenance"):
+        build_spatialdata_artifact(cfg)
+
+    assert caplog.text == ""
 
 
 @pytest.mark.parametrize(

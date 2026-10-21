@@ -394,6 +394,12 @@ def buildConfigForPlatform(row, pairId, platform) {
             )) {
                 beadRemoval.fill = true
             }
+            // Only set off the default, so CPU bead build configs (and their
+            // task hashes) keep their form.
+            def beadDevice = merscopeBeadRemovalDevice(params)
+            if (beadDevice != "cpu") {
+                beadRemoval.device = beadDevice
+            }
             merscopeOptions.bead_removal = beadRemoval
         }
         return [
@@ -1676,6 +1682,13 @@ def appendMerscopeBeadRemovalPreflightChecks(errors, row, settings, params) {
     if (!merscopeBeadRemovalRequested(row, settings.pair_id, params)) {
         return
     }
+    def beadDevice = merscopeBeadRemovalDevice(params)
+    if (!(beadDevice in ["auto", "cpu", "cuda"])) {
+        errors << (
+            "merscope_bead_removal_device must be auto, cpu or cuda; " +
+            "got '${params.merscope_bead_removal_device}'."
+        )
+    }
     def zRange = parseRange(row.merscope_z_range, 0, 6)
     if (zRange[0] < 1) {
         errors << (
@@ -1817,6 +1830,14 @@ def merscopeBeadRemovalRequested(row, pairId, params) {
         false,
         "merscope_bead_removal for ${pairId}"
     )
+}
+
+def merscopeBeadRemovalDevice(params) {
+    def rawDevice = params.merscope_bead_removal_device
+    if (rawDevice == null || rawDevice.toString().trim().isEmpty()) {
+        return "cpu"
+    }
+    return rawDevice.toString().trim().toLowerCase()
 }
 
 def rowSampleSettings(row, params) {

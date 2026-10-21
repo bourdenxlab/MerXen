@@ -334,6 +334,106 @@ def test_guard_warns_on_a_different_backend_but_never_errors(
     assert "backend device cpu" in caplog.text
 
 
+_GPU_BACKEND = {
+    "device": "cuda",
+    "update_order": "colour",
+    "torch": "2.14.0+cu130",
+    "triton": "3.8.0",
+    "cuda": "13.0",
+    "gpu_name": "Test GPU",
+}
+
+
+def test_record_and_identity_carry_the_gpu_backend_versions() -> None:
+    record = _record(_cfg(), backend=_GPU_BACKEND)
+
+    assert record["bead_removal"]["backend"] == _GPU_BACKEND
+    assert identity_from_record(record)["backend"] == _GPU_BACKEND
+    assert bead_removal_identity(_cfg(), backend=_GPU_BACKEND)["backend"] == (
+        _GPU_BACKEND
+    )
+    json.dumps(record)
+
+
+def test_the_backend_record_replaces_the_device_argument() -> None:
+    record = _record(_cfg(), device="cpu", backend=_GPU_BACKEND)
+
+    assert record["bead_removal"]["backend"]["device"] == "cuda"
+
+
+def test_the_device_does_not_change_the_parameter_hash() -> None:
+    cpu = bead_removal_identity(_cfg(device="cpu"))
+    cuda = bead_removal_identity(_cfg(device="cuda"))
+    auto = bead_removal_identity(_cfg(device="auto"))
+
+    assert cpu["params_sha256"] == cuda["params_sha256"] == auto["params_sha256"]
+
+
+def test_guard_warns_once_per_changed_library_version_and_never_errors(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    recorded = _record(_cfg(), backend=_GPU_BACKEND)
+    requested = {**_GPU_BACKEND, "torch": "2.6.0+cu124", "cuda": "12.4"}
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        check_bead_removal_reuse(recorded, _cfg(), requested_backend=requested)
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2
+    assert any("backend torch 2.14.0+cu130" in text for text in warnings)
+    assert any("backend cuda 13.0" in text for text in warnings)
+    assert all("is reused as built" in text for text in warnings)
+
+
+def test_guard_is_silent_for_the_same_backend_versions(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    recorded = _record(_cfg(), backend=_GPU_BACKEND)
+    requested = {
+        key: _GPU_BACKEND[key] for key in ("device", "torch", "triton", "cuda")
+    }
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        check_bead_removal_reuse(recorded, _cfg(), requested_backend=requested)
+
+    assert caplog.text == ""
+
+
+def test_guard_warns_when_the_device_changes_from_cuda_to_cpu(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    recorded = _record(_cfg(), backend=_GPU_BACKEND)
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        check_bead_removal_reuse(recorded, _cfg(), requested_backend={"device": "cpu"})
+
+    assert "backend device cuda" in caplog.text
+
+
+def test_guard_does_not_compare_an_unresolved_auto_device(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    recorded = _record(_cfg(), backend=_GPU_BACKEND)
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        check_bead_removal_reuse(recorded, _cfg(device="auto"), requested_backend={})
+
+    assert caplog.text == ""
+
+
+def test_a_library_version_change_leaves_the_segmentation_identity_alone() -> None:
+    recorded = _record(
+        _cfg(), calibration={"calibration_sha256": "cal-1"}, backend=_GPU_BACKEND
+    )
+    newer = json.loads(json.dumps(recorded))
+    newer["bead_removal"]["backend"].update(torch="2.6.0", triton="3.2.0", cuda="12.4")
+
+    identity = segmentation_identity(recorded)
+    assert identity is not None
+    assert identity["device"] == "cuda"
+    assert segmentation_identity(newer) == identity
+
+
 def test_guard_warns_on_a_different_z_range_only(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

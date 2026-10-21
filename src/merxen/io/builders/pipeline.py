@@ -129,17 +129,27 @@ def _check_cached_bead_removal(
         return
     # Imported here so that other platforms and builds without a cache never
     # load the bead-removal package.
+    from merxen.io.bead_removal.backend import requested_backend_identity
     from merxen.io.bead_removal.provenance import (
         check_bead_removal_reuse,
         read_image_preprocessing_attr,
     )
 
+    bead_removal = config.merscope.bead_removal
+    # Only a GPU request looks at torch (for its versions); the default and the
+    # CPU device never import it.
+    requested_backend = (
+        requested_backend_identity(bead_removal.device, fill_enabled=bead_removal.fill)
+        if bead_removal is not None and bead_removal.enabled
+        else None
+    )
     check_bead_removal_reuse(
         read_image_preprocessing_attr(cached),
-        config.merscope.bead_removal,
+        bead_removal,
         force=force_rerun,
         source=cached,
         requested_z_layers=config.merscope.z_layers,
+        requested_backend=requested_backend,
     )
 
 

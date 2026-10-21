@@ -211,6 +211,7 @@ def write_merscope_spatialdata(
                 if projection.bead_removal is not None
                 else None
             ),
+            **_bead_backend_kwargs(projection.bead_removal),
         )
         write_spatialdata_zarr(sdata, output_path, overwrite=True)
         _copy_merscope_sidecars(
@@ -370,10 +371,14 @@ def _build_iterative_projection_store(
     bead_cfg = (
         bead_removal if bead_removal is not None and bead_removal.enabled else None
     )
+    bead_device: str = "cpu"
     if bead_cfg is not None:
         _check_bead_removal_inputs(
             bead_cfg, stainings, dtype=dtype, chunks=(int(chunk_y), int(chunk_x))
         )
+        # Resolved once, before any work, so an unusable GPU fails at the start
+        # of the sample and the device never changes mid-sample.
+        bead_device = _resolve_bead_removal_device(bead_cfg)
     store_chunks = (
         1,
         min(int(chunk_y), height),
@@ -404,6 +409,7 @@ def _build_iterative_projection_store(
                 z_layers=z_layers,
                 config=bead_cfg,
                 calibration_dir=temp_dir / _BEAD_CALIBRATION_DIRNAME,
+                device=bead_device,
             )
             corrected = set(bead_calibration.corrected_stains)
         for channel_index, stain in enumerate(stainings):
@@ -432,6 +438,7 @@ def _build_iterative_projection_store(
                 work_dir=temp_dir / _BEAD_WORK_DIRNAME,
                 projection_store=projection_store,
                 core_px=int(chunk_x),
+                device=bead_device,
             )
 
         projection_da = xarray.DataArray(
@@ -491,6 +498,21 @@ def _check_bead_removal_inputs(
         raise ValueError(f"bead removal needs square projection chunks, got {chunks}.")
 
 
+def _resolve_bead_removal_device(config: MerscopeBeadRemovalConfig) -> str:
+    """Resolve the configured bead-removal device for this sample.
+
+    Raises:
+        BeadRemovalBackendError: ``cuda`` was requested but is not usable.
+    """
+    from merxen.io.bead_removal.backend import resolve_device
+
+    device: str = resolve_device(config.device, fill_enabled=config.fill)
+    logger.info(
+        "[MERSCOPE] Bead removal device: %s (requested %s)", device, config.device
+    )
+    return device
+
+
 def _calibrate_bead_removal(
     *,
     images_dir: Path,
@@ -498,6 +520,7 @@ def _calibrate_bead_removal(
     z_layers: list[int],
     config: MerscopeBeadRemovalConfig,
     calibration_dir: Path,
+    device: str = "cpu",
 ) -> BeadCalibration:
     """Calibrate bead removal on the mosaic and save the calibration.
 
@@ -513,6 +536,7 @@ def _calibrate_bead_removal(
         config: Bead-removal configuration.
         calibration_dir: Folder the calibration is saved to (the driver's
             workers load it from there).
+        device: Resolved device; it only changes the runtime forecast.
 
     Returns:
         The calibration.
@@ -541,6 +565,7 @@ def _calibrate_bead_removal(
             config=config,
             z_layers=z_layers,
             n_workers=min(int(config.max_workers), available_cpu_count()),
+            backend="cuda" if device == "cuda" else "cpu",
         )
     finally:
         reader.close()
@@ -559,6 +584,7 @@ def _run_bead_removal_driver(
     work_dir: Path,
     projection_store: Any,
     core_px: int,
+    device: str = "cpu",
 ) -> BeadRemovalRunResult:
     """Write the bead-corrected channels of the projection store.
 
@@ -572,6 +598,7 @@ def _run_bead_removal_driver(
         work_dir: Folder for the driver's beads table and statistics.
         projection_store: The projection array [channel, y, x].
         core_px: Core edge, equal to the store chunk.
+        device: Resolved device that runs the window correction.
 
     Returns:
         The run summary.
@@ -593,6 +620,7 @@ def _run_bead_removal_driver(
         core_px=core_px,
         halo_px=int(config.halo_px),
         max_workers=int(config.max_workers),
+        device=device,
     )
 
 
@@ -691,6 +719,18 @@ def _bead_calibration_record(calibration: BeadCalibration) -> dict[str, Any]:
         "ell_default": calibration.ell_default,
         "decision": decision,
     }
+
+
+def _bead_backend_kwargs(run: BeadRemovalRunResult | None) -> dict[str, Any]:
+    """Return the backend arguments of the provenance record for a run.
+
+    A build without bead removal records the default (CPU) backend; with it,
+    the record names the device the correction ran on and, for the GPU, the
+    library versions.
+    """
+    if run is None:
+        return {}
+    return {"device": run.device, "backend": dict(run.backend)}
 
 
 def _bead_run_record(run: BeadRemovalRunResult) -> dict[str, Any]:

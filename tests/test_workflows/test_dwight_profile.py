@@ -101,16 +101,84 @@ def test_dwight_gpu_processes_use_one_fixed_host_lock(
         "GASTON_TRAIN",
     ):
         assert f'withName: "{process_name}"' in dwight_config_text
+    # Five tasks hold the lock for their whole run; BUILD_SPATIALDATA only
+    # exports the path (see the bead-removal test below).
     assert (
         dwight_config_text.count(
             'MERXEN_GPU_LOCK_FILE="${params.gpu_process_lock_file}"'
         )
-        == 5
+        == 6
     )
     assert dwight_config_text.count('exec 9<"\\${MERXEN_GPU_LOCK_FILE}"') == 5
     assert 'exec 9>"\\${MERXEN_GPU_LOCK_FILE}"' not in dwight_config_text
     assert dwight_config_text.count("set -o noclobber") == 5
     assert "${PWD}/.merxen_gpu.lock" not in combined_config_text
+
+
+def _process_block(config_text: str, process_name: str) -> str:
+    """Return the ``withName`` block of one process in the process scope."""
+    start = config_text.index(f'withName: "{process_name}"')
+    end = config_text.find("withName:", start + 1)
+    return config_text[start:end]
+
+
+def test_dwight_bead_removal_runs_on_the_cpu_until_the_gpu_is_validated(
+    dwight_config_text: str,
+) -> None:
+    """The workstation switches the bead device to cuda only after validation."""
+    assert 'merscope_bead_removal_device = "cpu"' in dwight_config_text
+    assert 'merscope_bead_removal_device = "cuda"' not in dwight_config_text
+    assert 'switches to "cuda"' in dwight_config_text
+
+
+def test_dwight_build_exports_the_gpu_lock_path_without_taking_the_lock(
+    dwight_config_text: str,
+) -> None:
+    """The build holds no lock; the Python GPU phase takes it around its loop."""
+    block = _process_block(dwight_config_text, "BUILD_SPATIALDATA")
+
+    assert "maxForks = params.build_spatialdata_max_forks" in block
+    assert "beforeScript" in block
+    assert '"${params.gpu_process_lock_enabled}" == "true"' in block
+    assert 'export MERXEN_GPU_LOCK_FILE="${params.gpu_process_lock_file}"' in block
+    assert "flock" not in block
+    assert "exec 9" not in block
+
+
+def test_gpu_profile_passes_the_gpu_into_the_build_container() -> None:
+    """Without --nv the cuda device fails inside the container (loudly)."""
+    repo_root = Path(__file__).resolve().parents[2]
+    text = (repo_root / "workflows" / "nextflow.config").read_text()
+    gpu_profile = text[text.index("    gpu {") :]
+    gpu_profile = gpu_profile[: gpu_profile.index("// compute profiles")]
+
+    for process_name in (
+        "CELLPOSE_SEGMENT",
+        "BUILD_SPATIALDATA|ALIGN",
+        "CLUSTERING_SQUIDPY_COMPUTE",
+    ):
+        block = _process_block(gpu_profile, process_name)
+        assert "--nv" in block.split("}")[0]
+
+
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
+def test_resolved_bead_removal_device_lock_export_and_gpu_container() -> None:
+    """Nextflow resolves the cpu device, the lock export and the --nv option."""
+    workflow_dir = Path(__file__).resolve().parents[2] / "workflows"
+    dwight = _resolved_config(workflow_dir, profile="dwight")
+    gpu = _resolved_config(workflow_dir, profile="gpu")
+
+    assert dwight["params"]["merscope_bead_removal_device"] == "cpu"
+    assert gpu["params"]["merscope_bead_removal_device"] == "cpu"
+    script = dwight["process"]["withName:BUILD_SPATIALDATA"]["beforeScript"]
+    assert (
+        f'export MERXEN_GPU_LOCK_FILE="{dwight["params"]["gpu_process_lock_file"]}"'
+        in script
+    )
+    assert "flock" not in script
+    # The build shares the alignment selector so no new host-bind line is needed.
+    options = gpu["process"]["withName:BUILD_SPATIALDATA|ALIGN"]["containerOptions"]
+    assert options.endswith("--nv")
 
 
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
