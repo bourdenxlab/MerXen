@@ -123,13 +123,13 @@ def _process_block(config_text: str, process_name: str) -> str:
     return config_text[start:end]
 
 
-def test_dwight_bead_removal_runs_on_the_cpu_until_the_gpu_is_validated(
+def test_dwight_bead_removal_runs_on_the_validated_gpu(
     dwight_config_text: str,
 ) -> None:
-    """The workstation switches the bead device to cuda only after validation."""
-    assert 'merscope_bead_removal_device = "cpu"' in dwight_config_text
-    assert 'merscope_bead_removal_device = "cuda"' not in dwight_config_text
-    assert 'switches to "cuda"' in dwight_config_text
+    """The workstation runs the bead correction on the GPU it was validated on."""
+    assert 'merscope_bead_removal_device = "cuda"' in dwight_config_text
+    assert 'merscope_bead_removal_device = "cpu"' not in dwight_config_text
+    assert "torch 2.14 / Triton 3.8" in dwight_config_text
 
 
 def test_dwight_build_exports_the_gpu_lock_path_without_taking_the_lock(
@@ -185,7 +185,7 @@ def test_resolved_bead_removal_device_lock_export_and_gpu_container() -> None:
     dwight = _resolved_config(workflow_dir, profile="dwight")
     gpu = _resolved_config(workflow_dir, profile="gpu")
 
-    assert dwight["params"]["merscope_bead_removal_device"] == "cpu"
+    assert dwight["params"]["merscope_bead_removal_device"] == "cuda"
     assert gpu["params"]["merscope_bead_removal_device"] == "cpu"
     script = dwight["process"]["withName:BUILD_SPATIALDATA"]["beforeScript"]
     assert (

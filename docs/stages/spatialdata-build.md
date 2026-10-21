@@ -477,8 +477,8 @@ device (or with other torch, Triton or CUDA versions) is reused with a warning
 **Speed.** About 5-6 s per 4096 px window on a primary-size mosaic and 11-14 s on
 a dense coating, so a 2.6 Gpx mosaic takes roughly 15-20 min including the
 calibration (about 1.5 h for the densest datasets) against 1.4-2 h on 5-8 CPU
-workers. The workstation profile still defaults to `cpu`; it switches to `cuda`
-once the GPU backend has been validated there.
+workers. The workstation profile runs on `cuda` (validated there with torch 2.14 and
+Triton 3.8); every other profile defaults to `cpu`.
 
 ### Limits
 
