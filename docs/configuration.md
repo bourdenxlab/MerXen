@@ -716,6 +716,15 @@ is reported in the build log and in `bead_removal_qc/summary.json`. With the
 variable unset, `cuda` runs unlocked with a warning and `auto` uses the CPU.
 With the default `cpu` device the build never touches the lock or the GPU.
 
+The lock is a feature of the shared workstation (the workstation profile exports
+the path in the task's `beforeScript`). On a scheduler the GPU belongs to the
+job: with `cuda` (and no fill) `BUILD_SPATIALDATA` requests the `gpu` queue and
+`--gpus-per-node=1`, and the `gpu` profile adds Apptainer `--nv` to its container
+whenever the device is not `cpu` (the build's other container options are not
+changed). With the default `cpu` device the build stays on the `htc` queue with no
+GPU request and no `--nv`. Without `MERXEN_GPU_LOCK_FILE` in the task
+environment `auto` uses the CPU and `cuda` runs unlocked with a warning.
+
 A future HPC profile should provide its own executor, capacity/concurrency,
 software paths, reference paths, worker counts, and GPU policy. The portable
 process requests and scientific defaults do not need to be duplicated.

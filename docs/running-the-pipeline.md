@@ -473,7 +473,10 @@ nextflow run workflows/main.nf -profile apptainer,gpu,azure_slurm_hpc \
 
 Both segmentation processes use the existing `envs/environment.yml` or main
 MerXen image. The `gpu` profile adds Apptainer `--nv` only to GPU processes
-(`BUILD_SPATIALDATA` is included, for the optional bead-removal GPU backend).
+(`BUILD_SPATIALDATA` only when `merscope_bead_removal_device` is not `cpu` and the
+fill is off, for the optional bead-removal GPU backend, with its other container
+options unchanged; it then also requests the `gpu` queue and one GPU when the
+device is `cuda`).
 `CELLPOSE_SEGMENT` requests the `gpu` queue and one GPU, while
 `PROSEG_SEGMENT` requests the `htc` queue without GPU flags. Override those
 site-specific queue names and provide the missing system settings in an HPC

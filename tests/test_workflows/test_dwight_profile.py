@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -154,11 +155,27 @@ def test_gpu_profile_passes_the_gpu_into_the_build_container() -> None:
 
     for process_name in (
         "CELLPOSE_SEGMENT",
-        "BUILD_SPATIALDATA|ALIGN",
+        "ALIGN",
         "CLUSTERING_SQUIDPY_COMPUTE",
     ):
         block = _process_block(gpu_profile, process_name)
         assert "--nv" in block.split("}")[0]
+
+
+def test_gpu_profile_adds_nv_to_the_build_only_for_the_gpu_device() -> None:
+    """The gpu profile keeps --nv off CPU-only containers, the default build too."""
+    repo_root = Path(__file__).resolve().parents[2]
+    text = (repo_root / "workflows" / "nextflow.config").read_text()
+    gpu_profile = text[text.index("    gpu {") :]
+    gpu_profile = gpu_profile[: gpu_profile.index("// compute profiles")]
+    block = _process_block(gpu_profile, "BUILD_SPATIALDATA")
+
+    assert "BUILD_SPATIALDATA|ALIGN" not in gpu_profile
+    assert "containerOptions = {" in block
+    assert "!= 'cpu'" in block and "!params.merscope_bead_removal_fill" in block
+    assert "? '--nv' : ''" in block
+    # Nothing else is added for the build: no clean environment, no new binds.
+    assert "-C" not in block and "--no-home" not in block
 
 
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
@@ -176,9 +193,83 @@ def test_resolved_bead_removal_device_lock_export_and_gpu_container() -> None:
         in script
     )
     assert "flock" not in script
-    # The build shares the alignment selector so no new host-bind line is needed.
-    options = gpu["process"]["withName:BUILD_SPATIALDATA|ALIGN"]["containerOptions"]
-    assert options.endswith("--nv")
+    assert gpu["process"]["withName:ALIGN"]["containerOptions"].endswith("--nv")
+    # The build gets --nv (and a GPU queue) only for the GPU device: closures.
+    build = gpu["process"]["withName:BUILD_SPATIALDATA"]
+    assert "'--nv'" in build["containerOptions"]
+    assert "'gpu' : 'htc'" in build["queue"]
+    assert "--gpus-per-node=1" in build["clusterOptions"]
+
+
+_DIRECTIVE_PROBE = """
+process BUILD_SPATIALDATA {
+    input:
+    val x
+    output:
+    stdout
+    script:
+    \"\"\"
+    echo "RESULT queue=${task.queue} cluster=[${task.clusterOptions}] nv=\\
+${task.containerOptions.contains('--nv')}"
+    \"\"\"
+}
+workflow { BUILD_SPATIALDATA(1) | view }
+"""
+
+
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
+@pytest.mark.parametrize(
+    ("extra_args", "expected"),
+    [
+        ([], "queue=htc cluster=[] nv=false"),
+        (["--merscope_bead_removal_device", "cpu"], "queue=htc cluster=[] nv=false"),
+        (
+            ["--merscope_bead_removal_device", "cuda"],
+            "queue=gpu cluster=[--gpus-per-node=1] nv=true",
+        ),
+        (["--merscope_bead_removal_device", "auto"], "queue=htc cluster=[] nv=true"),
+        (
+            [
+                "--merscope_bead_removal_device",
+                "cuda",
+                "--merscope_bead_removal_fill",
+                "true",
+            ],
+            "queue=htc cluster=[] nv=false",
+        ),
+    ],
+)
+def test_build_gets_a_gpu_queue_and_nv_only_for_the_gpu_device(
+    tmp_path: Path, extra_args: list[str], expected: str
+) -> None:
+    """The default build stays a CPU task in the gpu profile; cuda asks for a GPU."""
+    nextflow = shutil.which("nextflow")
+    assert nextflow is not None
+    config = Path(__file__).resolve().parents[2] / "workflows" / "nextflow.config"
+    probe = tmp_path / "probe.nf"
+    probe.write_text(_DIRECTIVE_PROBE)
+    completed = subprocess.run(
+        [
+            nextflow,
+            "run",
+            str(probe),
+            "-c",
+            str(config),
+            "-profile",
+            "gpu",
+            "--outdir",
+            str(tmp_path / "out"),
+            *extra_args,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=120,
+        env={**os.environ, "NXF_OFFLINE": "true"},
+    )
+
+    assert f"RESULT {expected}" in completed.stdout
 
 
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
