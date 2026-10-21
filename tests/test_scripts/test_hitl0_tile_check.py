@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -133,3 +134,100 @@ def test_main_refuses_baseline_output_before_reading_data(
                 "0",
             ]
         )
+
+
+def _tile_check_args(tmp_path: Path, source: Path) -> list[str]:
+    for name in ("config.json", "stats.json"):
+        (tmp_path / name).write_text("{}")
+    (tmp_path / "mask.npy").write_bytes(b"mask")
+    return [
+        "--config",
+        str(tmp_path / "config.json"),
+        "--source-zarr",
+        str(source),
+        "--baseline-mask",
+        str(tmp_path / "mask.npy"),
+        "--baseline-stats",
+        str(tmp_path / "stats.json"),
+        "--protected-root",
+        str(tmp_path / "published"),
+        "--output-dir",
+        str(tmp_path / "trial"),
+        "--image-key",
+        "native",
+        "--tile-index",
+        "0",
+    ]
+
+
+def _source_with_record(tmp_path: Path, enabled: bool) -> Path:
+    from merxen.config import MerscopeBeadRemovalConfig
+    from merxen.io.bead_removal.provenance import (
+        IMAGE_PREPROCESSING_ATTR,
+        build_image_preprocessing_record,
+    )
+
+    record = build_image_preprocessing_record(
+        z_layers=(1, 2, 3),
+        stainings=["PolyT", "DAPI"],
+        bead_removal_cfg=MerscopeBeadRemovalConfig(enabled=True) if enabled else None,
+        calibration={"calibration_sha256": "cal-1"} if enabled else None,
+    )
+    source = tmp_path / "source.zarr"
+    source.mkdir()
+    (source / "zarr.json").write_text(
+        json.dumps({"attributes": {IMAGE_PREPROCESSING_ATTR: record}})
+    )
+    return source
+
+
+def test_main_refuses_a_baseline_mask_of_another_image(
+    tile_check: ModuleType, tmp_path: Path
+) -> None:
+    """A bead-corrected source against an uncorrected published mask is refused."""
+    source = _source_with_record(tmp_path, enabled=True)
+    args = _tile_check_args(tmp_path, source)
+
+    with pytest.raises(ValueError, match="predates the correction"):
+        tile_check.main(args)
+
+
+def test_main_accepts_a_baseline_mask_of_the_same_image(
+    tile_check: ModuleType, tmp_path: Path
+) -> None:
+    """With a matching sidecar the check passes and the run goes on (config)."""
+    from merxen.io.bead_removal.provenance import (
+        read_image_preprocessing_attr,
+        write_segmentation_sidecar,
+    )
+
+    source = _source_with_record(tmp_path, enabled=True)
+    args = _tile_check_args(tmp_path, source)
+    write_segmentation_sidecar(
+        tmp_path / "mask.npy", read_image_preprocessing_attr(source)
+    )
+
+    # It gets past the sidecar check and stops at the (empty) configuration.
+    with pytest.raises(ValueError, match="validation error"):
+        tile_check.main(args)
+
+
+def test_main_follows_a_symlinked_baseline_mask_to_its_sidecar(
+    tile_check: ModuleType, tmp_path: Path
+) -> None:
+    from merxen.io.bead_removal.provenance import (
+        read_image_preprocessing_attr,
+        write_segmentation_sidecar,
+    )
+
+    source = _source_with_record(tmp_path, enabled=True)
+    args = _tile_check_args(tmp_path, source)
+    persistent = tmp_path / "persistent"
+    persistent.mkdir()
+    real = persistent / "mask.npy"
+    (tmp_path / "mask.npy").replace(real)
+    write_segmentation_sidecar(real, read_image_preprocessing_attr(source))
+    (tmp_path / "mask.npy").symlink_to(real)
+
+    with pytest.raises(ValueError, match="validation error"):
+        tile_check.main(args)

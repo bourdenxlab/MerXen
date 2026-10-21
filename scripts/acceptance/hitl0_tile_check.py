@@ -18,6 +18,10 @@ from pathlib import Path
 import numpy as np
 
 from merxen.config import SegmentationConfig
+from merxen.io.bead_removal.provenance import (
+    check_segmentation_sidecar,
+    read_image_preprocessing_attr,
+)
 from merxen.segmentation.cellpose import (
     build_cellpose_affine_to_microns,
     build_cellpose_model,
@@ -175,6 +179,15 @@ def main(argv: list[str] | None = None) -> int:
     ):
         if not input_path.exists():
             raise FileNotFoundError(input_path)
+    # The new tile is cut from --source-zarr and compared with the published
+    # mask: both must come from the same image (a bead-corrected tile against an
+    # uncorrected mask would give meaningless agreement). Read-only; the sidecar
+    # next to the real mask file is found through a symlink.
+    check_segmentation_sidecar(
+        args.baseline_mask.resolve(),
+        read_image_preprocessing_attr(args.source_zarr),
+        dataset_name="tile check",
+    )
     if args.margin_px < 0:
         raise ValueError("margin-px must be non-negative")
     if not 0 < args.minimum_agreement <= 1:
