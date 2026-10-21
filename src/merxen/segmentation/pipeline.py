@@ -740,8 +740,6 @@ def run_cellpose_segmentation(
             dataset.name,
         )
 
-    # A record of an earlier image must not outlive the masks it described.
-    remove_segmentation_sidecar(mask_path)
     sdata, fetch_tile_fn, height, width, matrix, points_obj = _load_dataset_sdata(
         config
     )
@@ -762,6 +760,9 @@ def run_cellpose_segmentation(
         memory_config=config.memory,
         output_stitching_stats_path=stitching_stats_path,
         progress_callback=_progress,
+        # A record of an earlier image must not outlive the masks it described,
+        # and must stay while a refused run leaves those masks in place.
+        before_overwrite=lambda: remove_segmentation_sidecar(mask_path),
     )
     _progress(
         "cellpose_done",
@@ -1004,7 +1005,6 @@ def run_cellpose_nuclei_segmentation(
         nuclei_config.dataset.image_key = "morphology_focus"
     nuclei_config.mask_filter = config.nuclei_mask_filter
 
-    remove_segmentation_sidecar(mask_path, nuclei=True)
     sdata, fetch_tile_fn, height, width, matrix, points_obj = _load_dataset_sdata(
         nuclei_config
     )
@@ -1023,6 +1023,7 @@ def run_cellpose_nuclei_segmentation(
         memory_config=nuclei_config.memory,
         output_stitching_stats_path=stats_path,
         progress_callback=_progress,
+        before_overwrite=lambda: remove_segmentation_sidecar(mask_path, nuclei=True),
     )
 
     x_transform, y_transform = build_cellpose_affine_to_microns(

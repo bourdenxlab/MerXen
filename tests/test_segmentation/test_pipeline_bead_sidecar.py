@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -96,9 +97,13 @@ def _fake_cellpose(
     output_mask_path: Path,
     output_cellprob_path: Path | None = None,
     output_stitching_stats_path: Path | None = None,
+    before_overwrite: Callable[[], None] | None = None,
     **kwargs: object,
 ) -> Path:
     del kwargs
+    # As in the real run: after every refusal check, before the old outputs go.
+    if before_overwrite is not None:
+        before_overwrite()
     mask = np.zeros((16, 16), dtype=np.uint32)
     mask[0:8, 0:8] = 1
     output_mask_path.parent.mkdir(parents=True, exist_ok=True)
@@ -263,7 +268,8 @@ class TestNucleiMasks:
             outputs["nuclei_mask_path"].resolve(), nuclei=True
         )
 
-        def _boom(**kwargs: object) -> Path:
+        def _boom(*, before_overwrite: Callable[[], None], **kwargs: object) -> Path:
+            before_overwrite()
             raise RuntimeError("interrupted")
 
         monkeypatch.setattr("merxen.segmentation.pipeline.run_tiled_cellpose", _boom)
@@ -271,6 +277,34 @@ class TestNucleiMasks:
             run_cellpose_nuclei_segmentation(cfg, force_rerun=True)
 
         assert not sidecar.exists()
+
+    def test_a_refused_run_keeps_the_masks_and_their_sidecar(
+        self,
+        tmp_path: Path,
+        fake_cellpose: list[int],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A refusal before the old mask is replaced must not strand the mask.
+
+        Without its sidecar the mask would be reused unchecked by a later run
+        whose source has no bead removal.
+        """
+        zarr_path = _source_zarr(tmp_path, _record(enabled=True))
+        cfg = _config(tmp_path, zarr_path)
+        outputs = run_cellpose_nuclei_segmentation(cfg)
+        mask = outputs["nuclei_mask_path"].resolve()
+        sidecar = segmentation_sidecar_path(mask, nuclei=True)
+        before = mask.read_bytes(), sidecar.read_bytes()
+
+        def _refuse(**kwargs: object) -> Path:
+            # run_tiled_cellpose's own refusals come before the hook.
+            raise ValueError("Loaded model identity differs from completed preflight")
+
+        monkeypatch.setattr("merxen.segmentation.pipeline.run_tiled_cellpose", _refuse)
+        with pytest.raises(ValueError, match="identity differs"):
+            run_cellpose_nuclei_segmentation(cfg, force_rerun=True)
+
+        assert (mask.read_bytes(), sidecar.read_bytes()) == before
 
 
 class TestCellMasks:
