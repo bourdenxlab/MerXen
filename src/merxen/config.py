@@ -243,6 +243,11 @@ class MerscopeBeadRemovalConfig(BaseModel):
     min_ring_prominence: float = 0.010
     # Optional inpainting of the residual bead footprint after subtraction.
     fill: bool = False
+    # Device of the window correction: "cpu" is the validated numpy path and the
+    # default; "cuda" needs a GPU with Triton; "auto" uses the GPU only when it
+    # is available and the host GPU lock is configured. The fill always runs on
+    # the CPU.
+    device: Literal["auto", "cpu", "cuda"] = "cpu"
 
     @field_validator("halo_px")
     @classmethod
