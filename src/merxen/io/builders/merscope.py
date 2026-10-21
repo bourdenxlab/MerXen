@@ -317,45 +317,17 @@ def _build_iterative_projection_store(
 
     try:
         for channel_index, stain in enumerate(stainings):
-            logger.info(
-                "[MERSCOPE] Iteratively max-projecting channel %s (%d/%d)",
-                stain,
-                channel_index + 1,
-                len(stainings),
-            )
-            current = _open_merscope_channel_plane_array(
+            _project_channel_iteratively(
                 images_dir=images_dir,
                 stain=stain,
-                z_layer=z_layers[0],
-                chunks=(int(chunk_y), int(chunk_x)),
-            )
-            _store_projection_channel(
-                current,
-                projection_store,
                 channel_index=channel_index,
+                n_channels=len(stainings),
+                z_layers=z_layers,
+                chunks=(int(chunk_y), int(chunk_x)),
+                projection_store=projection_store,
+                projection_path=projection_path,
                 shape=(height, width),
             )
-            del current
-
-            for z_layer in z_layers[1:]:
-                previous = da.from_zarr(projection_path)[channel_index, :, :]
-                plane = _open_merscope_channel_plane_array(
-                    images_dir=images_dir,
-                    stain=stain,
-                    z_layer=z_layer,
-                    chunks=(int(chunk_y), int(chunk_x)),
-                )
-                projected = da.maximum(previous, plane)
-                _store_projection_channel(
-                    projected,
-                    projection_store,
-                    channel_index=channel_index,
-                    shape=(height, width),
-                )
-                del previous, plane, projected
-                force_release(
-                    note=(f"[MERSCOPE] after projecting channel={stain} z={z_layer}")
-                )
 
         projection_da = xarray.DataArray(
             da.from_zarr(projection_path),
@@ -366,6 +338,63 @@ def _build_iterative_projection_store(
     except Exception:
         remove_path(temp_dir)
         raise
+
+
+def _project_channel_iteratively(
+    *,
+    images_dir: Path,
+    stain: str,
+    channel_index: int,
+    n_channels: int,
+    z_layers: list[int],
+    chunks: tuple[int, int],
+    projection_store: Any,
+    projection_path: Path,
+    shape: tuple[int, int],
+) -> None:
+    """Max-project the z planes of one stain into its channel of the store.
+
+    One plane is held at a time: the first plane is stored, then every further
+    plane is maximised against the stored result.
+    """
+    height, width = shape
+    logger.info(
+        "[MERSCOPE] Iteratively max-projecting channel %s (%d/%d)",
+        stain,
+        channel_index + 1,
+        n_channels,
+    )
+    current = _open_merscope_channel_plane_array(
+        images_dir=images_dir,
+        stain=stain,
+        z_layer=z_layers[0],
+        chunks=chunks,
+    )
+    _store_projection_channel(
+        current,
+        projection_store,
+        channel_index=channel_index,
+        shape=(height, width),
+    )
+    del current
+
+    for z_layer in z_layers[1:]:
+        previous = da.from_zarr(projection_path)[channel_index, :, :]
+        plane = _open_merscope_channel_plane_array(
+            images_dir=images_dir,
+            stain=stain,
+            z_layer=z_layer,
+            chunks=chunks,
+        )
+        projected = da.maximum(previous, plane)
+        _store_projection_channel(
+            projected,
+            projection_store,
+            channel_index=channel_index,
+            shape=(height, width),
+        )
+        del previous, plane, projected
+        force_release(note=(f"[MERSCOPE] after projecting channel={stain} z={z_layer}"))
 
 
 def _store_projection_channel(
