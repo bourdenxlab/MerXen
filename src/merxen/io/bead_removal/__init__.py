@@ -23,6 +23,7 @@ from merxen.io.bead_removal.params import (
     params_sha256,
 )
 from merxen.io.bead_removal.psf import PsfLibrary
+from merxen.io.bead_removal.qc import QC_DIRNAME, write_bead_removal_qc
 from merxen.io.bead_removal.reader import MosaicPlaneReader, list_mosaic_planes
 
 __all__ = [
@@ -35,10 +36,12 @@ __all__ = [
     "MosaicPlaneReader",
     "PsfLibrary",
     "PsfSubtractParams",
+    "QC_DIRNAME",
     "apply_bead_model",
     "calibrate_bead_model",
     "correct_window",
     "list_mosaic_planes",
     "params_sha256",
     "run_bead_removal",
+    "write_bead_removal_qc",
 ]

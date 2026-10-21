@@ -431,6 +431,7 @@ def test_one_and_two_workers_are_bit_identical(
     assert len(np.load(work / "beads.npy")) == run1.n_beads
     assert sorted(p.name for p in work.iterdir()) == [
         "beads.npy",
+        "change_overview.npz",
         "chunk_stats.jsonl",
         "run_summary.json",
     ]

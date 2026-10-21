@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 
     from merxen.io.bead_removal.calibrate import BeadCalibration
     from merxen.io.bead_removal.driver import BeadRemovalRunResult
+    from merxen.io.bead_removal.fill import FillParams
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +218,16 @@ def write_merscope_spatialdata(
             output_path=output_path,
             transform_path_override=transform_path_override,
         )
+        if bead_removal_enabled:
+            # After the write, while the temporary projection store still holds
+            # the corrected image the QC compares with the raw planes.
+            _write_bead_removal_qc(
+                images_dir=input_path / MerscopeKeys.IMAGES_DIR,
+                output_path=output_path,
+                projection=projection,
+                z_layers=z_layers,
+                config=bead_removal,
+            )
     finally:
         if projection.temp_path is not None:
             remove_path(projection.temp_path)
@@ -373,7 +384,7 @@ def _build_iterative_projection_store(
     if temp_parent is not None:
         temp_parent.mkdir(parents=True, exist_ok=True)
     temp_dir = Path(tempfile.mkdtemp(prefix="merscope_projection_", dir=temp_parent))
-    projection_path = temp_dir / "projection.zarr"
+    projection_path = temp_dir / _PROJECTION_STORE_NAME
     projection_store = zarr.open_array(
         projection_path,
         mode="w",
@@ -439,6 +450,8 @@ def _build_iterative_projection_store(
         raise
 
 
+# The temporary projection array inside the temporary projection folder.
+_PROJECTION_STORE_NAME = "projection.zarr"
 # Folders of the bead-removal state inside the temporary projection folder.
 _BEAD_CALIBRATION_DIRNAME = "bead_calibration"
 _BEAD_WORK_DIRNAME = "bead_removal"
@@ -564,17 +577,8 @@ def _run_bead_removal_driver(
         The run summary.
     """
     from merxen.io.bead_removal.driver import run_bead_removal
-    from merxen.io.bead_removal.fill import FillParams
 
-    fill = (
-        FillParams(
-            enabled=True,
-            stains=(config.reference_stain,),
-            reference_stain=config.reference_stain,
-        )
-        if config.fill
-        else None
-    )
+    fill = _bead_fill_params(config)
     corrected = list(calibration.corrected_stains)
     return run_bead_removal(
         images_dir=images_dir,
@@ -590,6 +594,78 @@ def _run_bead_removal_driver(
         halo_px=int(config.halo_px),
         max_workers=int(config.max_workers),
     )
+
+
+def _bead_fill_params(config: MerscopeBeadRemovalConfig) -> FillParams | None:
+    """Return the fill parameters the config asks for (``None``: no fill)."""
+    from merxen.io.bead_removal.fill import FillParams
+
+    if not config.fill:
+        return None
+    return FillParams(
+        enabled=True,
+        stains=(config.reference_stain,),
+        reference_stain=config.reference_stain,
+    )
+
+
+def _write_bead_removal_qc(
+    *,
+    images_dir: Path,
+    output_path: Path,
+    projection: ProjectionBuildResult,
+    z_layers: list[int],
+    config: MerscopeBeadRemovalConfig | None,
+) -> None:
+    """Write ``bead_removal_qc/`` into the built zarr.
+
+    The QC is a report: a failure in it is logged with its traceback and never
+    fails the build, which has already been written and took hours.
+
+    Args:
+        images_dir: Folder with the raw mosaic planes.
+        output_path: The built zarr.
+        projection: Projection build result holding the calibration, the run
+            record and the temporary store of the corrected projection.
+        z_layers: Projected planes.
+        config: Bead-removal configuration (the fill flag).
+    """
+    if (
+        config is None
+        or projection.bead_calibration is None
+        or projection.bead_removal is None
+        or projection.temp_path is None
+    ):
+        return
+    try:
+        from merxen.io.bead_removal.qc import QC_DIRNAME, write_bead_removal_qc
+
+        if not output_path.is_dir():
+            logger.warning(
+                "[MERSCOPE] Bead removal QC not written: %s does not exist.",
+                output_path,
+            )
+            return
+        qc_dir = output_path / QC_DIRNAME
+        if qc_dir.exists():
+            remove_path(qc_dir)
+        logger.info("[MERSCOPE] Writing the bead removal QC to %s", qc_dir)
+        write_bead_removal_qc(
+            qc_dir,
+            calibration=projection.bead_calibration,
+            run=projection.bead_removal,
+            images_dir=images_dir,
+            projection=zarr.open_array(
+                projection.temp_path / _PROJECTION_STORE_NAME, mode="r"
+            ),
+            stainings=list(projection.stainings or ()),
+            z_layers=z_layers,
+            fill=_bead_fill_params(config),
+        )
+    except Exception:  # noqa: BLE001 - the QC must never fail the build
+        logger.exception(
+            "[MERSCOPE] Bead removal QC failed; the built projection is unaffected."
+        )
 
 
 def _bead_calibration_record(calibration: BeadCalibration) -> dict[str, Any]:

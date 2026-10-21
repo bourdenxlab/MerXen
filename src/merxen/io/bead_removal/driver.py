@@ -54,6 +54,7 @@ from merxen.io.bead_removal.params import (
     PsfSubtractParams,
     params_sha256,
 )
+from merxen.io.bead_removal.qc import OVERVIEW_FACTOR, chunk_qc_probe
 from merxen.io.bead_removal.reader import MosaicPlaneReader
 
 logger = logging.getLogger(__name__)
@@ -122,6 +123,10 @@ class ChunkResult:
         stats: Counts, timings and per-plane change statistics (JSON-able).
         beads: float64 [n, 8] bead table (see ``model.beads_table``) restricted
             to the beads whose centre lies in the core.
+        qc: Arrays of the QC probe that are collected over the whole mosaic
+            (``"change"``: stain -> 1/16 block maximum of raw - corrected); the
+            sink consumes them. The probe's small statistics are in
+            ``stats["ring_score"]``.
     """
 
     index: int
@@ -129,6 +134,7 @@ class ChunkResult:
     projections: dict[str, np.ndarray]
     stats: dict[str, Any]
     beads: np.ndarray
+    qc: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -839,7 +845,6 @@ def process_chunk(
             core=(cy0 - wy0, cy1 - wy0, cx0 - wx0, cx1 - wx0),
         )
         t_correct = time.time() - t0
-        del stacks
         t0 = time.time()
         projections = {s: _to_uint16(a) for s, a in proj.items()}
         del proj
@@ -854,6 +859,23 @@ def process_chunk(
                 & (table[:, 1] < cx1)
             )
             beads = table[inside]
+        # The QC probe needs the raw planes (raw projection) next to the
+        # corrected one, so the stacks are released only after it.
+        t0 = time.time()
+        probe = chunk_qc_probe(
+            stacks=stacks,
+            window_origin=(wy0, wx0),
+            core=task.core,
+            z_layers=zs,
+            projections=projections,
+            beads=beads,
+            calibration=cal,
+            index=task.index,
+        )
+        del stacks
+        stats["ring_score"] = probe["ring"]
+        stats["t_qc_s"] = time.time() - t0
+        qc_arrays: dict[str, Any] = {"change": probe["change"]}
         stats["model"] = {
             k: window_stats[k] for k in _MODEL_STAT_KEYS if k in window_stats
         }
@@ -880,6 +902,7 @@ def process_chunk(
         projections=projections,
         stats=stats,
         beads=beads,
+        qc=qc_arrays,
     )
 
 
@@ -925,7 +948,11 @@ def _fmt_eta(seconds: float) -> str:
 
 
 class _ChunkSink:
-    """Write finished chunks into the store (in task order) and collect records."""
+    """Write finished chunks into the store (in task order) and collect records.
+
+    Besides the projections the sink assembles the 1/16 change overview of the
+    whole region (largest raw - corrected per block) from the chunks' QC probes.
+    """
 
     def __init__(
         self,
@@ -935,8 +962,17 @@ class _ChunkSink:
         n_total: int,
         t_run: float,
         progress_every: int,
+        region_shape: tuple[int, int] = (0, 0),
     ) -> None:
         self.store = store
+        factor = OVERVIEW_FACTOR
+        self.change: dict[str, np.ndarray] = {
+            stain: np.zeros(
+                (-(-region_shape[0] // factor), -(-region_shape[1] // factor)),
+                np.float32,
+            )
+            for stain in channels
+        }
         self.channels = dict(channels)
         self.ry, self.rx = origin_yx
         self.n_total = n_total
@@ -959,6 +995,14 @@ class _ChunkSink:
         dt = time.time() - t0
         self.t_write += dt
         result.stats["t_write_s"] = dt
+        factor = OVERVIEW_FACTOR
+        for stain, blocks in result.qc.get("change", {}).items():
+            by, bx = (y0 - self.ry) // factor, (x0 - self.rx) // factor
+            target = self.change[stain]
+            view = target[by : by + blocks.shape[0], bx : bx + blocks.shape[1]]
+            view[...] = blocks[: view.shape[0], : view.shape[1]]
+        # The arrays are not needed again; free them with the result.
+        result.qc = {}
         self.stats.append(result.stats)
         self.beads.append(result.beads)
         done = len(self.stats)
@@ -1285,7 +1329,13 @@ def run_bead_removal(
     )
 
     sink = _ChunkSink(
-        store, channels, (region[0], region[2]), len(tasks), t_run, progress_every
+        store,
+        channels,
+        (region[0], region[2]),
+        len(tasks),
+        t_run,
+        progress_every,
+        region_shape=(region[1] - region[0], region[3] - region[2]),
     )
     old_env = _set_single_thread_env()
     tree = _TreeSampler()
@@ -1310,6 +1360,7 @@ def run_bead_removal(
         work / "beads.npy",
         np.concatenate(bead_arrays) if bead_arrays else np.zeros((0, 8)),
     )
+    np.savez(work / "change_overview.npz", **sink.change)  # type: ignore[arg-type]
     all_stats = sink.stats
     (work / "chunk_stats.jsonl").write_text(
         "\n".join(json.dumps(s) for s in all_stats) + "\n"
