@@ -75,8 +75,10 @@ with Groovy.
 
 ### `io.bead_removal` — [bead_removal/](../src/merxen/io/bead_removal/)
 Optional removal of coverslip fiducial beads from MERSCOPE image planes before
-the max projection. Off by default; the default build never imports it, and the
-package imports no GPU code. Configured by `MerscopeBeadRemovalConfig`
+the max projection. Off by default. The package is lazy (its names load on first
+use): a default build, segmentation, enrichment or quantification run imports only
+the light `params` and `provenance` submodules for the image-preprocessing record,
+never the correction code, and the package imports no GPU code. Configured by `MerscopeBeadRemovalConfig`
 (`MerscopeBuildConfig.bead_removal`); see
 [stages/spatialdata-build.md](stages/spatialdata-build.md#merscope-bead-removal-optional).
 - `list_mosaic_planes(images_dir)` / `MosaicPlaneReader` — read raw

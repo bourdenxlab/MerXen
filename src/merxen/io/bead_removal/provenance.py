@@ -8,7 +8,9 @@ bead-removal setting is silently wrong for the request: the beads are in (or
 out of) every downstream mask and intensity.
 
 This module deliberately does not import the correction code, so the guard is
-cheap and has no GPU dependency.
+cheap and has no GPU dependency. The package ``__init__`` is lazy for the same
+reason: importing this module loads only ``params``, not the correction code of
+the other submodules (a test checks it).
 """
 
 from __future__ import annotations

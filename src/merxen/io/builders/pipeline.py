@@ -127,8 +127,8 @@ def _check_cached_bead_removal(
     """Refuse a cached MERSCOPE zarr that was built with other bead settings."""
     if cached is None or config.platform.upper() != "MERSCOPE":
         return
-    # Imported here so that other platforms and builds without a cache never
-    # load the bead-removal package.
+    # Imported here so that other platforms and builds without a cache do not
+    # load these submodules (the package itself is lazy and light).
     from merxen.io.bead_removal.backend import requested_backend_identity
     from merxen.io.bead_removal.provenance import (
         check_bead_removal_reuse,
