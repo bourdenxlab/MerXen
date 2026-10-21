@@ -242,7 +242,7 @@ Both paths pass the same `random_seed` to every step, but they do not produce
 the same partitions. On the stored GPU broad-round neighbour graphs of seven
 datasets, CPU `leidenalg` (RBConfiguration, 2 iterations, seeds 0 and 1) at
 resolution 0.2 agreed with the stored GPU partitions only at ARI 0.57-0.91, and
-the number of clusters can differ (P1212 MERSCOPE: 2 on GPU, 3-4 on CPU). That
+the number of clusters can differ (HD2 MERSCOPE: 2 on GPU, 3-4 on CPU). That
 comparison used `leidenalg`, not the pipeline's `scanpy-igraph` CPU path, which
 was not itself compared against the GPU path. Running the whole CPU path adds
 further differences from PCA and kNN.
@@ -298,7 +298,7 @@ import json
 
 import anndata as ad
 
-adata = ad.read_h5ad("P7513_MERSCOPE_clustered.h5ad")
+adata = ad.read_h5ad("HD1_MERSCOPE_clustered.h5ad")
 for round_key, record in adata.uns["merxen_leiden_provenance"].items():
     record = json.loads(record)
     print(round_key, record["engine"], record["n_iterations"], record["resolution"])
@@ -306,7 +306,7 @@ for round_key, record in adata.uns["merxen_leiden_provenance"].items():
 
 Outputs written before these fields existed still carry the engine's own
 record of each round in `uns["<round key>"]["params"]` (`n_iterations`,
-`random_state`, `resolution`; for example `leiden_broad` in P5011 MERSCOPE has
+`random_state`, `resolution`; for example `leiden_broad` in HD4 MERSCOPE has
 100, 0, 0.2), plus `gpu_used` in `uns["merxen_clustering_params_<key>"]`
 (`merxen_clustering_params` and `merxen_clustering_params_leiden` for one-shot
 runs). `uns["neighbors"]["params"]["method"]` is `"rapids"` for the GPU path

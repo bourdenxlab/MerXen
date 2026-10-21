@@ -117,8 +117,8 @@ boundaries: `edge_to_nearest_cell_median_um` (median distance from points
 every 25 µm along the tissue edge to the nearest cell) and
 `ribbon_bin_occupancy` (share of the 50 µm bins inside the ribbon mask that
 hold a cell, also `ribbon_bin_occupancy_by_piece`). In a matching frame the
-edge median is about 80-110 µm and the occupancy about 0.97-0.98 (P7513 /
-P1212, both platforms); native MERSCOPE boundaries on the aligned cells gave
+edge median is about 80-110 µm and the occupancy about 0.97-0.98 (HD1 /
+HD2, both platforms); native MERSCOPE boundaries on the aligned cells gave
 870-2370 µm and 0.54-0.71. An edge median above 300 µm sets
 `frame_mismatch_suspected` and adds the warning
 `frame_mismatch_suspected:<segmentation>`; the stage still completes. Without
