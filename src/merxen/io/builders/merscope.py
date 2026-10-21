@@ -27,6 +27,10 @@ from spatialdata.models import Image2DModel, PointsModel, ShapesModel, TableMode
 from spatialdata.transformations import Affine, BaseTransformation
 
 from merxen.config import MerscopeBuildConfig
+from merxen.io.bead_removal.provenance import (
+    IMAGE_PREPROCESSING_ATTR,
+    build_image_preprocessing_record,
+)
 from merxen.io.image_source import (
     MERSCOPE_ZPROJ_IMAGE_NAME,
     build_merscope_z_projection,
@@ -50,6 +54,8 @@ class ProjectionBuildResult:
 
     image: Any
     temp_path: Path | None = None
+    # Stain names of the projection, for the provenance record.
+    stainings: tuple[str, ...] | None = None
 
 
 class MerscopeKeys:
@@ -103,9 +109,17 @@ def write_merscope_spatialdata(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    from merxen.io.builders.vzg2 import resolve_vzg2_path, write_vzg2_spatialdata
+    from merxen.io.builders.vzg2 import (
+        refuse_bead_removal,
+        resolve_vzg2_path,
+        write_vzg2_spatialdata,
+    )
 
+    bead_removal = build_config.bead_removal
+    bead_removal_enabled = bead_removal is not None and bead_removal.enabled
     if resolve_vzg2_path(input_path) is not None:
+        # Refuse before any archive work: nothing below can honour the request.
+        refuse_bead_removal(build_config)
         return write_vzg2_spatialdata(
             input_path=input_path,
             output_path=output_path,
@@ -123,6 +137,8 @@ def write_merscope_spatialdata(
             "[MERSCOPE] No image z-layers found in"
             f" {input_path / MerscopeKeys.IMAGES_DIR}"
         )
+    if bead_removal_enabled:
+        _validate_bead_removal_z_layers(z_layers)
 
     try:
         from spatialdata_io import merscope as merscope_reader
@@ -157,6 +173,10 @@ def write_merscope_spatialdata(
 
     for key in list(sdata.images.keys()):
         del sdata.images[key]
+    if bead_removal_enabled:
+        raise NotImplementedError(
+            "bead removal projection is wired in a later work package"
+        )
     projection = _load_merscope_projection_from_raw(
         input_path=input_path,
         z_layers=z_layers,
@@ -165,6 +185,13 @@ def write_merscope_spatialdata(
     sdata.images[MERSCOPE_ZPROJ_IMAGE_NAME] = projection.image
     try:
         prepare_source_spatialdata_contract(sdata, platform="MERSCOPE")
+        # Written for every raw-TIFF build, also without bead removal, so that a
+        # later reuse can tell a build without it from a legacy store.
+        sdata.attrs[IMAGE_PREPROCESSING_ATTR] = build_image_preprocessing_record(
+            z_layers=z_layers,
+            stainings=projection.stainings or (),
+            bead_removal_cfg=bead_removal,
+        )
         write_spatialdata_zarr(sdata, output_path, overwrite=True)
         _copy_merscope_sidecars(
             input_path=input_path,
@@ -177,6 +204,28 @@ def write_merscope_spatialdata(
         del sdata, projection
         force_release(note="[MERSCOPE] after SpatialData build write")
     return output_path
+
+
+def _validate_bead_removal_z_layers(z_layers: list[int]) -> None:
+    """Refuse z ranges that bead removal cannot serve.
+
+    Plane 0 is the bead plane: it is read for detection only and is never part
+    of the projection. Planes above 7 have no template.
+
+    Raises:
+        ValueError: If ``z_layers`` contains plane 0 (or below) or a plane
+            above 7.
+    """
+    if min(z_layers) < 1:
+        raise ValueError(
+            "merscope_bead_removal needs z_layers to start at plane 1 or later "
+            "(plane 0 is the bead plane and is read for detection only); got "
+            f"{sorted(z_layers)}. Use for example z planes 1-6."
+        )
+    if max(z_layers) > 7:
+        raise ValueError(
+            f"merscope_bead_removal supports planes up to 7; got {sorted(z_layers)}."
+        )
 
 
 def _replace_merscope_images_with_projection(sdata: SpatialData) -> None:
@@ -218,7 +267,11 @@ def _load_merscope_projection_from_raw(
         rgb=None,
         **image_models_kwargs,
     )
-    return ProjectionBuildResult(image=image, temp_path=projection.temp_path)
+    return ProjectionBuildResult(
+        image=image,
+        temp_path=projection.temp_path,
+        stainings=tuple(stainings),
+    )
 
 
 def _build_iterative_projection_store(
