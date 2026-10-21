@@ -184,6 +184,7 @@ def test_merscope_writer_builds_projection_without_reader_mosaics(
         "z_layers": [0, 1],
         "region_name": None,
         "slide_name": None,
+        "cells_boundaries": False,
         "mosaic_images": False,
     }
     assert len(written) == 1

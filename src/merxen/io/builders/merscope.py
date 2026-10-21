@@ -17,6 +17,7 @@ import dask.dataframe as dd
 import geopandas
 import numpy as np
 import pandas as pd
+import shapely
 import xarray
 import zarr
 from dask import array as da
@@ -156,11 +157,14 @@ def write_merscope_spatialdata(
     sdata = None
     if merscope_reader is not None:
         try:
+            # spatialdata_io keeps only ZIndex 0 boundaries, which drops cells
+            # that older 3-D segmentations list on other planes only.
             sdata = merscope_reader(
                 input_path,
                 z_layers=z_layers,
                 region_name=build_config.region_name,
                 slide_name=build_config.slide_name,
+                cells_boundaries=False,
                 mosaic_images=False,
             )
         except Exception as exc:  # noqa: BLE001
@@ -168,6 +172,13 @@ def write_merscope_spatialdata(
                 "[MERSCOPE] spatialdata_io.merscope failed (%s)."
                 " Falling back to local reader.",
                 exc,
+            )
+        else:
+            _add_merscope_cell_polygons(
+                sdata,
+                path=input_path,
+                region_name=build_config.region_name,
+                slide_name=build_config.slide_name,
             )
 
     if sdata is None:
@@ -906,15 +917,8 @@ def read_merscope_spatialdata_local(
     obs_path = path / MerscopeKeys.CELL_METADATA_FILE
     boundaries_path = path / MerscopeKeys.BOUNDARIES_FILE
 
-    microns_to_pixels = Affine(
-        np.genfromtxt(images_dir / MerscopeKeys.TRANSFORMATION_FILE),
-        input_axes=("x", "y"),
-        output_axes=("x", "y"),
-    )
-    transform = {"global": microns_to_pixels}
-
-    vizgen_region = path.name if region_name is None else region_name
-    slide = path.parent.name if slide_name is None else slide_name
+    transform = _microns_to_pixels_transform(images_dir)
+    vizgen_region, slide = _region_and_slide_names(path, region_name, slide_name)
     dataset_id = f"{slide}_{vizgen_region}"
     region = f"{dataset_id}_polygons"
 
@@ -962,6 +966,46 @@ def read_merscope_spatialdata_local(
         )
 
     return SpatialData(shapes=shapes, points=points, images=images, tables=tables)
+
+
+def _add_merscope_cell_polygons(
+    sdata: SpatialData,
+    *,
+    path: Path,
+    region_name: str | None,
+    slide_name: str | None,
+) -> None:
+    """Attach all-plane cell outlines to a reader result read without them."""
+    path = Path(path).absolute()
+    boundaries_path = path / MerscopeKeys.BOUNDARIES_FILE
+    if not boundaries_path.exists():
+        return
+    vizgen_region, slide = _region_and_slide_names(path, region_name, slide_name)
+    transform = _microns_to_pixels_transform(path / MerscopeKeys.IMAGES_DIR)
+    sdata.shapes[f"{slide}_{vizgen_region}_polygons"] = _get_polygons(
+        boundaries_path, transform
+    )
+
+
+def _region_and_slide_names(
+    path: Path,
+    region_name: str | None,
+    slide_name: str | None,
+) -> tuple[str, str]:
+    """Return the region and slide names that MERSCOPE element keys use."""
+    vizgen_region = path.name if region_name is None else region_name
+    slide = path.parent.name if slide_name is None else slide_name
+    return vizgen_region, slide
+
+
+def _microns_to_pixels_transform(images_dir: Path) -> dict[str, BaseTransformation]:
+    """Read the vendor micron-to-mosaic transform as a global transformation."""
+    microns_to_pixels = Affine(
+        np.genfromtxt(images_dir / MerscopeKeys.TRANSFORMATION_FILE),
+        input_axes=("x", "y"),
+        output_axes=("x", "y"),
+    )
+    return {"global": microns_to_pixels}
 
 
 def _copy_merscope_sidecars(
@@ -1181,28 +1225,92 @@ def _get_polygons(
     boundaries_path: Path,
     transformations: dict[str, BaseTransformation],
 ) -> geopandas.GeoDataFrame:
-    """Read the cell boundary parquet file and parse it into shapes."""
+    """Read the cell boundary parquet file and parse one 2-D outline per cell.
+
+    The parquet holds one row per cell and z plane, for every plane of the
+    export regardless of which image planes the build projects. Newer exports
+    repeat one polygon on every plane. Older 3-D segmentations store a separate
+    cross-section per plane and list most cells on only some planes, so a
+    ZIndex 0 filter drops their outlines. Each cell's outline is therefore the
+    xy union of its per-plane polygons, which reproduces the vendor's
+    ``min/max_x/y`` cell bounds in ``cell_metadata.csv`` and contains every
+    transcript assigned to the cell.
+
+    Args:
+        boundaries_path: MERSCOPE ``cell_boundaries.parquet`` file.
+        transformations: Transformations to attach to the parsed shapes.
+
+    Returns:
+        Shapes indexed by the string ``EntityID``, one MultiPolygon per cell.
+    """
     geo_df = geopandas.read_parquet(boundaries_path)
     if geo_df.geometry.name != "geometry":
         geo_df = geo_df.rename_geometry("geometry")
-    geo_df = geo_df[geo_df[MerscopeKeys.Z_INDEX] == 0]
     invalid = ~geo_df.geometry.is_valid
     if bool(invalid.any()):
         logger.warning(
-            "[MERSCOPE] Repairing %d self-intersecting canonical cell polygons",
+            "[MERSCOPE] Repairing %d self-intersecting per-plane cell polygons",
             int(invalid.sum()),
         )
         geo_df.loc[invalid, "geometry"] = geo_df.loc[invalid, "geometry"].buffer(0)
     valid = geo_df.geometry.is_valid & ~geo_df.geometry.is_empty
     if not bool(valid.all()):
         logger.warning(
-            "[MERSCOPE] Dropping %d unrecoverable canonical cell polygons",
+            "[MERSCOPE] Dropping %d unrecoverable per-plane cell polygons",
             int((~valid).sum()),
         )
         geo_df = geo_df[valid]
+    geo_df = _collapse_cell_polygons_over_z(geo_df)
     geo_df.geometry = geo_df.geometry.map(_to_multi_polygon)
     geo_df.index = geo_df[MerscopeKeys.METADATA_CELL_KEY].astype(str)
     return ShapesModel.parse(geo_df, transformations=transformations)
+
+
+def _collapse_cell_polygons_over_z(
+    geo_df: geopandas.GeoDataFrame,
+) -> geopandas.GeoDataFrame:
+    """Reduce per-plane boundary rows to one row per cell.
+
+    Each cell keeps its lowest-plane row, in file order, with its geometry
+    replaced by the union over planes only when the planes differ. Exports
+    that give every cell an identical polygon on all planes, ZIndex 0
+    included, therefore keep exactly the ZIndex 0 rows they produced before.
+    """
+    rows = geo_df.reset_index(drop=True)
+    cell_ids = rows[MerscopeKeys.METADATA_CELL_KEY]
+    representative = rows.groupby(cell_ids, sort=False)[MerscopeKeys.Z_INDEX].idxmin()
+    row_representative = cell_ids.map(representative).to_numpy()
+    geometries = rows.geometry.to_numpy()
+    differs = ~shapely.equals_exact(
+        geometries,
+        geometries[row_representative],
+        tolerance=0.0,
+    )
+    merged_ids = pd.unique(cell_ids[differs])
+
+    collapsed = rows.loc[np.sort(representative.to_numpy())].copy()
+    if len(merged_ids) > 0:
+        to_merge = rows[cell_ids.isin(merged_ids)]
+        unions = to_merge.groupby(MerscopeKeys.METADATA_CELL_KEY, sort=False)[
+            "geometry"
+        ].agg(lambda planes: shapely.union_all(planes.to_numpy()))
+        collapsed_ids = collapsed[MerscopeKeys.METADATA_CELL_KEY]
+        is_merged = collapsed_ids.isin(unions.index)
+        collapsed.loc[is_merged, "geometry"] = (
+            collapsed_ids[is_merged].map(unions).to_numpy()
+        )
+
+    without_z0 = int((collapsed[MerscopeKeys.Z_INDEX] != 0).sum())
+    if len(merged_ids) > 0 or without_z0 > 0:
+        logger.info(
+            "[MERSCOPE] Cell boundaries vary across z planes: %d of %d cells"
+            " have no ZIndex 0 polygon and %d cells use the xy union of their"
+            " per-plane polygons",
+            without_z0,
+            len(collapsed),
+            len(merged_ids),
+        )
+    return collapsed
 
 
 def _to_multi_polygon(geometry: Polygon | MultiPolygon) -> MultiPolygon:
