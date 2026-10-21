@@ -1,14 +1,18 @@
 """Tests for the bead-removal device resolution (``backend.py``).
 
 No GPU is needed: CUDA, the GPU subpackage and its smoke test are replaced by
-stand-ins. The one test that touches real imports checks that the CPU path
-never loads torch or triton.
+stand-ins (the smoke test runs in this process instead of a child). The tests
+that touch real imports check that the CPU path never loads torch or triton and
+that the child-process mechanism works.
 """
 
 from __future__ import annotations
 
+import fcntl
+import functools
 import importlib
 import logging
+import os
 import subprocess
 import sys
 import tempfile
@@ -30,6 +34,7 @@ from merxen.io.bead_removal.backend import (
 )
 
 _LOGGER = "merxen.io.bead_removal.backend"
+_REAL_EXECUTE_SMOKE_TEST = backend._execute_smoke_test
 _SMOKE = {
     "torch": "2.14.0+cu130",
     "triton": "3.8.0",
@@ -50,22 +55,50 @@ class _FakeGpu:
 
     def __init__(self, error: Exception | None = None) -> None:
         self.calls = 0
+        self.lock_held: list[bool | None] = []
         self._error = error
 
     def triton_smoke_test(self) -> dict[str, Any]:
         self.calls += 1
+        lock = backend.gpu_lock_path_from_env()
+        self.lock_held.append(None if lock is None else _lock_is_held(lock))
         if self._error is not None:
             raise self._error
         return dict(_SMOKE)
 
 
+def _lock_is_held(path: Path) -> bool:
+    """Whether another open file description holds the lock (a try-lock)."""
+    if not path.exists():
+        return False
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(descriptor)
+
+
 @pytest.fixture(autouse=True)
 def _clean_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """No lock, no Triton cache, no remembered smoke test, tmp under tmp_path."""
+    """No lock, no Triton cache, no remembered smoke test, tmp under tmp_path.
+
+    The smoke test runs in this process: the stand-in GPU package is not
+    visible to a spawned child.
+    """
     monkeypatch.delenv("MERXEN_GPU_LOCK_FILE", raising=False)
     monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
     monkeypatch.setattr(backend, "_SMOKE_RECORD", None)
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(
+        backend,
+        "_execute_smoke_test",
+        lambda target=None: (target or backend._smoke_test_body)(),
+    )
 
 
 @pytest.fixture
@@ -263,10 +296,146 @@ def test_the_smoke_test_runs_once_per_process(
     assert fake_gpu.calls == 1
 
 
+def test_the_smoke_test_runs_only_while_the_host_lock_is_held(
+    fake_gpu: _FakeGpu, lock_env: Path
+) -> None:
+    """The smoke test compiles and launches GPU kernels: it needs the lock."""
+    assert not _lock_is_held(lock_env)
+
+    assert resolve_device("cuda") == "cuda"
+
+    assert fake_gpu.lock_held == [True]
+    assert not _lock_is_held(lock_env), "the lock must be released afterwards"
+
+
+def test_a_failing_smoke_test_releases_the_lock(
+    monkeypatch: pytest.MonkeyPatch, lock_env: Path
+) -> None:
+    gpu = _FakeGpu(error=_SmokeError("kernel did not compile"))
+    monkeypatch.setattr(backend, "_cuda_unavailable_reason", lambda: None)
+    monkeypatch.setattr(backend, "load_gpu_backend", lambda: gpu)
+
+    with pytest.raises(BeadRemovalBackendError):
+        resolve_device("cuda")
+
+    assert gpu.lock_held == [True]
+    assert not _lock_is_held(lock_env)
+
+
+def test_the_smoke_test_waits_for_another_holder_of_the_lock(
+    fake_gpu: _FakeGpu, lock_env: Path
+) -> None:
+    import threading
+    import time
+
+    lock_env.touch()
+    holder = os.open(lock_env, os.O_RDONLY)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    done = threading.Event()
+
+    def _resolve() -> None:
+        resolve_device("auto")
+        done.set()
+
+    thread = threading.Thread(target=_resolve)
+    thread.start()
+    try:
+        time.sleep(0.5)
+        assert not done.is_set() and fake_gpu.calls == 0
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        os.close(holder)
+        thread.join(timeout=30)
+    assert done.is_set() and fake_gpu.calls == 1
+
+
+def test_an_unusable_cuda_never_takes_the_lock(
+    monkeypatch: pytest.MonkeyPatch, lock_env: Path
+) -> None:
+    """The cheap checks come first: no CUDA means no lock and no smoke test."""
+    _no_cuda(monkeypatch, "torch reports no CUDA device")
+
+    assert resolve_device("auto") == "cpu"
+    with pytest.raises(BeadRemovalBackendError):
+        resolve_device("cuda")
+
+    assert not lock_env.exists()
+
+
+def test_the_smoke_test_runs_in_a_child_process() -> None:
+    assert _REAL_EXECUTE_SMOKE_TEST(target=os.getpid) != os.getpid()
+
+
+def test_an_error_of_the_smoke_test_child_is_raised_in_the_parent() -> None:
+    with pytest.raises(ValueError, match="invalid literal"):
+        _REAL_EXECUTE_SMOKE_TEST(target=functools.partial(int, "x"))
+
+
+# --- torch that cannot be loaded -----------------------------------------------
+
+
+@pytest.fixture
+def broken_torch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """``import torch`` raises OSError, as with a CUDA library that cannot load."""
+    package = tmp_path / "stub" / "torch"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(
+        "raise OSError('libcudart.so.13: cannot open shared object file')\n"
+    )
+    monkeypatch.delitem(sys.modules, "torch", raising=False)
+    monkeypatch.syspath_prepend(str(tmp_path / "stub"))
+    monkeypatch.setitem(sys.modules, "triton", None)
+
+
+def test_torch_that_raises_oserror_on_import_is_a_reason_not_a_crash(
+    broken_torch: None, lock_env: Path
+) -> None:
+    assert resolve_device("auto") == "cpu"
+    with pytest.raises(
+        BeadRemovalBackendError, match="cannot open shared object"
+    ) as caught:
+        resolve_device("cuda")
+    assert "merscope_bead_removal_device to cpu" in str(caught.value)
+
+
+def test_the_library_versions_survive_torch_that_cannot_be_loaded(
+    broken_torch: None,
+) -> None:
+    assert gpu_library_versions() == {"torch": None, "triton": None, "cuda": None}
+    assert requested_backend_identity("cuda") == {"device": "cuda"}
+
+
+def test_a_gpu_package_that_raises_oserror_is_a_backend_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _import(name: str) -> types.ModuleType:
+        raise OSError("libcudart.so.13: cannot open shared object file")
+
+    monkeypatch.setattr(importlib, "import_module", _import)
+
+    with pytest.raises(BeadRemovalBackendError, match="cannot be imported") as caught:
+        load_gpu_backend()
+
+    assert "merscope_bead_removal_device to cpu" in str(caught.value)
+
+
+def test_an_unexpected_error_of_the_smoke_test_is_a_backend_error(
+    monkeypatch: pytest.MonkeyPatch, lock_env: Path
+) -> None:
+    """A CUDA out-of-memory error is not the package's own smoke error."""
+    gpu = _FakeGpu(error=MemoryError("CUDA out of memory"))
+    monkeypatch.setattr(backend, "_cuda_unavailable_reason", lambda: None)
+    monkeypatch.setattr(backend, "load_gpu_backend", lambda: gpu)
+
+    with pytest.raises(BeadRemovalBackendError, match="out of memory"):
+        resolve_device("cuda")
+    assert resolve_device("auto") == "cpu"
+
+
 # --- the Triton cache ----------------------------------------------------------
 
 
-def test_the_triton_cache_goes_under_the_task_temporary_directory(
+def test_the_triton_cache_goes_under_the_temporary_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     seen: list[str | None] = []

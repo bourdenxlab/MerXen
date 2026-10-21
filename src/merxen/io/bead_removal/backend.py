@@ -11,20 +11,28 @@ module, resolving ``"cpu"`` and running the CPU path never import either.
 
 The device is resolved once per sample, before the first window, and is never
 changed mid-sample: there is no per-window mixing and no timeout fallback.
+
+Resolving the device creates no CUDA context in the calling process. The cheap
+checks (``torch`` imports, ``torch.cuda.is_available``) come first; the Triton
+smoke test, which compiles and launches kernels, runs in a short-lived child
+process while the host GPU lock is held, so a build that waits for the GPU or
+does other work holds neither the GPU nor a context of its own.
 """
 
 from __future__ import annotations
 
+import concurrent.futures as cf
 import importlib
 import logging
+import multiprocessing as mp
 import os
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Literal
 
-from merxen.gpu_lock import GPU_LOCK_ENV_VAR, gpu_lock_path_from_env
+from merxen.gpu_lock import GPU_LOCK_ENV_VAR, gpu_lock_path_from_env, gpu_process_lock
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +42,7 @@ TRITON_CACHE_ENV_VAR = "TRITON_CACHE_DIR"
 # Order in which overlapping beads are updated: the CPU algorithm fits one
 # source at a time in brightness order, the GPU fits colour classes in turn.
 UPDATE_ORDER = {"cpu": "brightness", "cuda": "colour"}
-_REMEDY = "Set merscope_bead_removal_device to cpu to use the CPU backend"
+DEVICE_REMEDY = "Set merscope_bead_removal_device to cpu to use the CPU backend"
 
 # Result of the Triton smoke test, kept for the process: the library versions
 # it reports are recorded in the provenance.
@@ -57,8 +65,9 @@ def resolve_device(
         ``"cpu"`` (a WARNING when something else was requested);
       * ``"cpu"`` is always ``"cpu"``;
       * ``"cuda"`` needs a CUDA device and a Triton kernel that compiles and
-        gives the right numbers (a 64 px smoke test), otherwise it raises;
-        without a configured GPU lock it runs unlocked, with a WARNING;
+        gives the right numbers (a 64 px smoke test, run in a child process
+        under the host GPU lock), otherwise it raises; without a configured GPU
+        lock it runs unlocked, with a WARNING;
       * ``"auto"`` is ``"cuda"`` only when CUDA is available, the smoke test
         passes and ``MERXEN_GPU_LOCK_FILE`` is set, so a GPU is never used
         outside the host's lock protocol by accident; otherwise ``"cpu"``.
@@ -126,7 +135,7 @@ def _resolve_cuda(lock_file: Path | None) -> Literal["cuda"]:
     reason = _cuda_unavailable_reason()
     if reason is not None:
         raise BeadRemovalBackendError(
-            f"merscope_bead_removal_device is cuda but {reason}. {_REMEDY}."
+            f"merscope_bead_removal_device is cuda but {reason}. {DEVICE_REMEDY}."
         )
     _run_smoke_test()
     if lock_file is None:
@@ -139,11 +148,14 @@ def _resolve_cuda(lock_file: Path | None) -> Literal["cuda"]:
 
 
 def _ensure_triton_cache_dir() -> None:
-    """Point the Triton JIT cache at the task's temporary directory.
+    """Point the Triton JIT cache at a per-user folder in the temporary directory.
 
-    Triton otherwise caches under the home directory, which is shared between
-    tasks and may be read-only inside a container. The kernels then compile
-    once per task (a few seconds).
+    Triton otherwise caches under the home directory, which may be read-only
+    inside a container. The folder is ``merxen_triton_cache_<uid>`` under
+    ``tempfile.gettempdir()``: it is shared by every process of the user that
+    sees the same temporary directory (on the workstation profile ``TMPDIR`` is
+    one persistent folder, so every task and run), so a kernel compiles once
+    (a few seconds) and is then reused from the cache.
     """
     if os.environ.get(TRITON_CACHE_ENV_VAR, "").strip():
         return
@@ -155,13 +167,17 @@ def _ensure_triton_cache_dir() -> None:
 def _cuda_unavailable_reason() -> str | None:
     """Explain why CUDA cannot be used, or ``None`` when it can.
 
-    Imports torch, so it is called only once a GPU has been requested.
+    Imports torch, so it is called only once a GPU has been requested. It
+    creates no CUDA context. Importing torch raises ``OSError`` when a CUDA
+    library cannot be loaded, so any exception is a reason, not a crash.
     """
     try:
         import torch
-    except ImportError as exc:
+
+        available = bool(torch.cuda.is_available())
+    except Exception as exc:
         return f"torch cannot be imported ({exc})"
-    if not torch.cuda.is_available():
+    if not available:
         return "torch reports no CUDA device"
     return None
 
@@ -175,23 +191,64 @@ def load_gpu_backend() -> ModuleType:
 
     Raises:
         BeadRemovalBackendError: The subpackage or one of its dependencies
-            cannot be imported.
+            cannot be imported (an ``ImportError``, or an ``OSError`` for a CUDA
+            library that cannot be loaded).
     """
     _ensure_triton_cache_dir()
     try:
         return importlib.import_module(GPU_BACKEND_MODULE)
-    except ImportError as exc:
+    except Exception as exc:
         raise BeadRemovalBackendError(
-            f"the GPU backend cannot be imported ({exc}). {_REMEDY}."
+            f"the GPU backend cannot be imported ({exc}). {DEVICE_REMEDY}."
         ) from exc
+
+
+def _smoke_test_body() -> dict[str, Any]:
+    """Load the GPU backend and run its smoke test in this process.
+
+    Creates a CUDA context, so :func:`_run_smoke_test` runs it in a child
+    process.
+
+    Raises:
+        BeadRemovalBackendError: The GPU backend cannot be loaded or the test
+            failed; the message carries the cause and the remedy.
+    """
+    gpu = load_gpu_backend()
+    smoke_error = gpu.GpuSmokeTestError
+    try:
+        return dict(gpu.triton_smoke_test())
+    except smoke_error as exc:
+        raise BeadRemovalBackendError(
+            f"the GPU backend failed its smoke test: {exc}. {DEVICE_REMEDY}."
+        ) from exc
+    except Exception as exc:
+        raise BeadRemovalBackendError(
+            f"the GPU backend failed its smoke test ({type(exc).__name__}: "
+            f"{exc}). {DEVICE_REMEDY}."
+        ) from exc
+
+
+def _execute_smoke_test(target: Callable[[], Any] | None = None) -> Any:
+    """Run the smoke test (or ``target``) in a fresh child process.
+
+    A spawned child keeps the CUDA context (a few hundred MiB) and the Triton
+    compiler out of the calling process, which holds neither when the child
+    exits. The child's exception is re-raised here.
+    """
+    with cf.ProcessPoolExecutor(
+        max_workers=1, mp_context=mp.get_context("spawn")
+    ) as executor:
+        return executor.submit(target or _smoke_test_body).result()
 
 
 def _run_smoke_test() -> dict[str, Any]:
     """Run the Triton smoke test once per process and keep its record.
 
-    The smoke test compiles the fused kernels for the 64 px specialisation
-    only: the first production window compiles its own and adds a few
-    seconds.
+    The test compiles the fused kernels for the 64 px specialisation only (the
+    first production window compiles its own and adds a few seconds) and takes
+    a few seconds. It uses the GPU, so it runs under the host GPU lock like
+    every other GPU use, and in a child process so that this process creates no
+    CUDA context before the window loop.
 
     Raises:
         BeadRemovalBackendError: The test failed (no CUDA, Triton or compiler
@@ -201,14 +258,9 @@ def _run_smoke_test() -> dict[str, Any]:
     global _SMOKE_RECORD
     if _SMOKE_RECORD is not None:
         return _SMOKE_RECORD
-    gpu = load_gpu_backend()
-    smoke_error = gpu.GpuSmokeTestError
-    try:
-        record = gpu.triton_smoke_test()
-    except smoke_error as exc:
-        raise BeadRemovalBackendError(
-            f"the GPU backend failed its smoke test: {exc}. {_REMEDY}."
-        ) from exc
+    _ensure_triton_cache_dir()
+    with gpu_process_lock(gpu_lock_path_from_env()):
+        record = _execute_smoke_test()
     _SMOKE_RECORD = dict(record)
     return _SMOKE_RECORD
 
@@ -218,7 +270,9 @@ def gpu_library_versions() -> dict[str, str | None]:
 
     Returns:
         ``torch``, ``triton`` and ``cuda`` version strings; an entry is
-        ``None`` when that library is not available. Imports torch.
+        ``None`` when that library is not available (an import that raises
+        any exception, such as the ``OSError`` of a missing CUDA library, counts
+        as not available). Imports torch.
     """
     versions: dict[str, str | None] = {"torch": None, "triton": None, "cuda": None}
     try:
@@ -227,13 +281,13 @@ def gpu_library_versions() -> dict[str, str | None]:
         versions["torch"] = str(torch.__version__)
         cuda = torch.version.cuda
         versions["cuda"] = None if cuda is None else str(cuda)
-    except ImportError:
+    except Exception:
         return versions
     try:
         import triton
 
         versions["triton"] = str(triton.__version__)
-    except ImportError:
+    except Exception:
         pass
     return versions
 
