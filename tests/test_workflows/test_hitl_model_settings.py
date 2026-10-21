@@ -122,7 +122,7 @@ def test_full_pipeline_preview_loads_model_library_without_scheduling(
     raw = tmp_path / "raw-xenium"
     raw.mkdir()
     samplesheet = tmp_path / "samplesheet.csv"
-    samplesheet.write_text(f"pair_id,xenium_dir\nP7513,{raw}\n")
+    samplesheet.write_text(f"pair_id,xenium_dir\nHD1,{raw}\n")
     output = tmp_path / "arm"
     result = subprocess.run(
         [
