@@ -16,6 +16,12 @@ from spatialdata_io import xenium as xenium_reader
 
 from merxen._typing import AffineComponent
 from merxen.config import SegmentationConfig
+from merxen.io.bead_removal.provenance import (
+    check_segmentation_sidecar,
+    read_image_preprocessing_attr,
+    remove_segmentation_sidecar,
+    write_segmentation_sidecar,
+)
 from merxen.io.image_source import (
     MERSCOPE_ZPROJ_IMAGE_NAME,
     build_image_source,
@@ -371,6 +377,22 @@ def _require_seeding_matches_transforms(
     )
 
 
+def _source_image_preprocessing(config: SegmentationConfig) -> dict[str, Any] | None:
+    """Read the preprocessing record of the dataset's source SpatialData zarr.
+
+    Args:
+        config: Segmentation configuration.
+
+    Returns:
+        The ``merxen_image_preprocessing`` root attribute, or ``None`` for a
+        legacy store, a raw (non-zarr) Xenium bundle or a missing path.
+    """
+    source = Path(config.dataset.data_path)
+    if not source.exists():
+        return None
+    return read_image_preprocessing_attr(source)
+
+
 def _load_dataset_sdata(
     config: SegmentationConfig,
 ) -> tuple[Any, Any, int, int, np.ndarray, Any]:
@@ -665,8 +687,17 @@ def run_cellpose_segmentation(
         and cellprob_path.exists()
         and not force_rerun
     )
+    source_preprocessing = _source_image_preprocessing(config)
     if reusable_outputs_exist:
         if _labeled_mask_has_foreground(mask_path):
+            # Masks made from a differently corrected image would be
+            # quantified against this one, so this is decided before anything
+            # else is trusted.
+            check_segmentation_sidecar(
+                mask_path,
+                source_preprocessing,
+                dataset_name=dataset.name,
+            )
             current_x_transform, current_y_transform = _derive_cellpose_transforms(
                 config
             )
@@ -707,6 +738,8 @@ def run_cellpose_segmentation(
             dataset.name,
         )
 
+    # A record of an earlier image must not outlive the masks it described.
+    remove_segmentation_sidecar(mask_path)
     sdata, fetch_tile_fn, height, width, matrix, points_obj = _load_dataset_sdata(
         config
     )
@@ -850,6 +883,8 @@ def run_cellpose_segmentation(
         stitching_stats_path.write_text(
             json.dumps({"write_stitching_stats": False}, indent=2) + "\n"
         )
+    # Last, so that masks without a sidecar are never complete outputs.
+    write_segmentation_sidecar(mask_path, source_preprocessing)
 
     del mask_mmap, points_obj, sdata
     force_release(note=f"after {dataset.name} Cellpose segmentation")
@@ -921,8 +956,15 @@ def run_cellpose_nuclei_segmentation(
             },
         )
 
+    source_preprocessing = _source_image_preprocessing(config)
     if mask_path.exists() and not force_rerun:
         if _labeled_mask_has_foreground(mask_path):
+            check_segmentation_sidecar(
+                mask_path,
+                source_preprocessing,
+                nuclei=True,
+                dataset_name=dataset.name,
+            )
             log_status(f"[{dataset.name}] Reusing existing DAPI-only nuclei mask")
             if not stats_path.exists():
                 stats_path.parent.mkdir(parents=True, exist_ok=True)
@@ -960,6 +1002,7 @@ def run_cellpose_nuclei_segmentation(
         nuclei_config.dataset.image_key = "morphology_focus"
     nuclei_config.mask_filter = config.nuclei_mask_filter
 
+    remove_segmentation_sidecar(mask_path, nuclei=True)
     sdata, fetch_tile_fn, height, width, matrix, points_obj = _load_dataset_sdata(
         nuclei_config
     )
@@ -1014,6 +1057,7 @@ def run_cellpose_nuclei_segmentation(
         stats_path.write_text(
             json.dumps({"write_stitching_stats": False}, indent=2) + "\n"
         )
+    write_segmentation_sidecar(mask_path, source_preprocessing, nuclei=True)
     del points_obj, sdata
     force_release(note=f"after {dataset.name} DAPI-only nuclei segmentation")
     _progress("done")
@@ -1253,6 +1297,20 @@ def run_segmentation_pipeline(
         and (hybrid_complete or staged_transforms_path.exists())
         and not force_rerun
     ):
+        # This shortcut reuses both masks without running either Cellpose
+        # step, so it needs the same image-identity guard as they have.
+        source_preprocessing = _source_image_preprocessing(config)
+        check_segmentation_sidecar(
+            reusable_mask,
+            source_preprocessing,
+            dataset_name=dataset.name,
+        )
+        check_segmentation_sidecar(
+            reusable_nuclei_mask,
+            source_preprocessing,
+            nuclei=True,
+            dataset_name=dataset.name,
+        )
         if not hybrid_complete:
             run_proseg_hybrid_refinement(
                 persistent_latest_output,

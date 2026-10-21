@@ -325,6 +325,205 @@ def check_bead_removal_reuse(
     _warn_on_differences(recorded_identity, requested_identity, location)
 
 
+SEGMENTATION_SIDECAR_SCHEMA = 1
+CELL_MASK_SIDECAR_NAME = "image_preprocessing.json"
+NUCLEI_MASK_SIDECAR_NAME = "nuclei_image_preprocessing.json"
+# Identity fields of a correction that decide whether two images are the same
+# for segmentation. Library versions are deliberately absent: the backends
+# agree to far below one count, so only the device is compared.
+_SEGMENTATION_IDENTITY_KEYS = (
+    "method",
+    "version",
+    "params_sha256",
+    "calibration_sha256",
+)
+
+
+def segmentation_identity(
+    recorded: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Reduce a preprocessing record to what Cellpose masks depend on.
+
+    Args:
+        recorded: The ``merxen_image_preprocessing`` attribute of the source
+            SpatialData, or ``None`` for a legacy store.
+
+    Returns:
+        ``None`` when no bead removal was applied (off or legacy, which are
+        the same image); otherwise the method, version, parameter and
+        calibration hashes, the fill identity and the backend device.
+    """
+    identity = identity_from_record(recorded)
+    if not identity["enabled"]:
+        return None
+    reduced: dict[str, Any] = {
+        key: identity.get(key) for key in _SEGMENTATION_IDENTITY_KEYS
+    }
+    reduced["fill"] = dict(identity["fill"])
+    reduced["device"] = dict(identity["backend"]).get("device")
+    safe: dict[str, Any] = _json_safe(reduced)
+    return safe
+
+
+def segmentation_sidecar_path(mask_path: Path | str, *, nuclei: bool = False) -> Path:
+    """Return the preprocessing sidecar that sits next to a Cellpose mask.
+
+    The cell and nuclei masks are produced by independent, independently
+    reusable steps, so each gets its own file even when both live in one
+    directory.
+
+    Args:
+        mask_path: The Cellpose label mask (``.npy``).
+        nuclei: True for the DAPI-only nuclei mask.
+
+    Returns:
+        Path of the sidecar file.
+    """
+    name = NUCLEI_MASK_SIDECAR_NAME if nuclei else CELL_MASK_SIDECAR_NAME
+    return Path(mask_path).with_name(name)
+
+
+def write_segmentation_sidecar(
+    mask_path: Path | str,
+    recorded: Mapping[str, Any] | None,
+    *,
+    nuclei: bool = False,
+) -> Path:
+    """Record which image a Cellpose mask was computed from.
+
+    Args:
+        mask_path: The Cellpose label mask the sidecar describes.
+        recorded: ``merxen_image_preprocessing`` of the source SpatialData, or
+            ``None`` for a legacy store.
+        nuclei: True for the DAPI-only nuclei mask.
+
+    Returns:
+        Path of the written sidecar.
+    """
+    path = segmentation_sidecar_path(mask_path, nuclei=nuclei)
+    payload = {
+        "schema": SEGMENTATION_SIDECAR_SCHEMA,
+        "bead_removal": segmentation_identity(recorded),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Written through a temporary name so a reader never sees half a file.
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    temporary.replace(path)
+    return path
+
+
+def remove_segmentation_sidecar(mask_path: Path | str, *, nuclei: bool = False) -> None:
+    """Delete the sidecar of a mask that is about to be regenerated.
+
+    A record of the earlier image must not outlive the mask it described.
+    """
+    segmentation_sidecar_path(mask_path, nuclei=nuclei).unlink(missing_ok=True)
+
+
+def check_segmentation_sidecar(
+    mask_path: Path | str,
+    recorded: Mapping[str, Any] | None,
+    *,
+    nuclei: bool = False,
+    dataset_name: str = "",
+) -> None:
+    """Refuse to reuse Cellpose masks computed from a differently corrected image.
+
+    Rules:
+      * sidecar present: its bead-removal identity must equal the source's;
+      * sidecar missing and the source had bead removal on: the masks predate
+        the correction, so they are refused;
+      * sidecar missing and the source had it off or is legacy: reused as
+        before (such masks cannot have come from a corrected image).
+
+    Args:
+        mask_path: The Cellpose label mask that would be reused.
+        recorded: ``merxen_image_preprocessing`` of the source SpatialData, or
+            ``None`` for a legacy store.
+        nuclei: True for the DAPI-only nuclei mask.
+        dataset_name: Dataset label for the message.
+
+    Raises:
+        ValueError: If the masks and the source disagree about bead removal,
+            or the sidecar cannot be read.
+    """
+    sidecar = segmentation_sidecar_path(mask_path, nuclei=nuclei)
+    source_identity = segmentation_identity(recorded)
+    prefix = f"[{dataset_name}] " if dataset_name else ""
+    remedy = (
+        "Move the segmentation outputs aside or use a new outdir (or run the "
+        "step with --force-rerun) so the masks are computed from the current "
+        "image."
+    )
+    if not sidecar.is_file():
+        if source_identity is None:
+            return
+        raise ValueError(
+            f"{prefix}the source SpatialData was built with bead removal on but "
+            f"{mask_path} has no {sidecar.name}, so it predates the correction "
+            f"and was computed from an uncorrected image. {remedy}"
+        )
+    try:
+        stored = json.loads(sidecar.read_text()).get("bead_removal")
+    except (OSError, ValueError, AttributeError) as exc:
+        raise ValueError(
+            f"{prefix}could not read {sidecar} ({exc}), so it cannot be verified "
+            f"that {mask_path} matches the source image. {remedy}"
+        ) from exc
+    if stored is not None and not isinstance(stored, dict):
+        raise ValueError(
+            f"{prefix}{sidecar} does not hold a bead-removal identity. {remedy}"
+        )
+    if stored == source_identity:
+        return
+    raise ValueError(
+        f"{prefix}{mask_path} was computed from an image with bead removal "
+        f"{_describe_identity(stored)} but the source SpatialData has "
+        f"{_describe_identity(source_identity)}. Reusing the masks would "
+        f"segment a different image than the one that is quantified. {remedy}"
+    )
+
+
+def _describe_identity(identity: Mapping[str, Any] | None) -> str:
+    """Summarise a segmentation identity for an error message."""
+    if identity is None:
+        return "off"
+    fill = "with fill" if (identity.get("fill") or {}).get("enabled") else "no fill"
+    return (
+        f"on (version {identity.get('version')}, {fill}, device "
+        f"{identity.get('device')}, params {str(identity.get('params_sha256'))[:12]}, "
+        f"calibration {str(identity.get('calibration_sha256'))[:12]})"
+    )
+
+
+def bead_removal_table_metadata(
+    recorded: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Describe the bead correction of a source for derived tables.
+
+    Args:
+        recorded: ``merxen_image_preprocessing`` of the source SpatialData, or
+            ``None`` for a legacy store.
+
+    Returns:
+        ``None`` when bead removal was off (tables stay as they were);
+        otherwise the corrected stains, the method version and the fill flag.
+    """
+    bead = _recorded_bead_removal(recorded)
+    if not bead.get("enabled"):
+        return None
+    fill = bead.get("fill")
+    metadata: dict[str, Any] = {
+        "bead_corrected_stains": sorted(
+            str(s) for s in bead.get("corrected_stains", [])
+        ),
+        "bead_removal_version": int(bead.get("version") or BEAD_REMOVAL_VERSION),
+        "bead_removal_fill": bool(isinstance(fill, Mapping) and fill.get("enabled")),
+    }
+    return metadata
+
+
 def _warn_on_differences(
     recorded: Mapping[str, Any],
     requested: Mapping[str, Any],

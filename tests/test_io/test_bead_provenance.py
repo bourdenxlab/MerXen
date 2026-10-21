@@ -16,10 +16,16 @@ from merxen.config import MerscopeBeadRemovalConfig
 from merxen.io.bead_removal.provenance import (
     IMAGE_PREPROCESSING_ATTR,
     bead_removal_identity,
+    bead_removal_table_metadata,
     build_image_preprocessing_record,
     check_bead_removal_reuse,
+    check_segmentation_sidecar,
     identity_from_record,
     read_image_preprocessing_attr,
+    remove_segmentation_sidecar,
+    segmentation_identity,
+    segmentation_sidecar_path,
+    write_segmentation_sidecar,
 )
 
 _LOGGER = "merxen.io.bead_removal.provenance"
@@ -349,3 +355,172 @@ def test_guard_is_silent_for_matching_z_range_and_legacy_store(
         check_bead_removal_reuse(None, None, requested_z_layers=[1, 2, 3])
 
     assert caplog.text == ""
+
+
+# ----------------------------------------------------------------------------
+# Segmentation sidecar and downstream table metadata (D6, WP8)
+# ----------------------------------------------------------------------------
+
+
+def _enabled_record(
+    *, calibration_sha256: str = "cal-1", device: str = "cpu", **cfg_kwargs: Any
+) -> dict[str, Any]:
+    return _record(
+        _cfg(**cfg_kwargs),
+        calibration={"calibration_sha256": calibration_sha256},
+        device=device,
+    )
+
+
+class TestSegmentationIdentity:
+    def test_off_and_legacy_are_the_same_image(self) -> None:
+        assert segmentation_identity(None) is None
+        assert segmentation_identity(_record(None)) is None
+
+    def test_enabled_keeps_what_the_image_depends_on(self) -> None:
+        identity = segmentation_identity(_enabled_record())
+        assert identity is not None
+        assert identity["version"] == 1
+        assert identity["calibration_sha256"] == "cal-1"
+        assert identity["device"] == "cpu"
+        assert identity["fill"] == {"enabled": False}
+        # Stain lists, z range and run statistics do not define the image.
+        assert set(identity) == {
+            "method",
+            "version",
+            "params_sha256",
+            "calibration_sha256",
+            "fill",
+            "device",
+        }
+
+    def test_device_and_calibration_distinguish_images(self) -> None:
+        base = segmentation_identity(_enabled_record())
+        assert segmentation_identity(_enabled_record(device="cuda")) != base
+        assert segmentation_identity(_enabled_record(calibration_sha256="x")) != base
+
+    def test_library_versions_are_not_compared(self) -> None:
+        record = _enabled_record()
+        other = json.loads(json.dumps(record))
+        other["bead_removal"]["backend"]["torch"] = "9.9"
+        other["writer_versions"] = {"merxen": "other"}
+        assert segmentation_identity(other) == segmentation_identity(record)
+
+    def test_fill_is_part_of_the_identity(self, fake_fill_module: object) -> None:
+        with_fill = segmentation_identity(_enabled_record(fill=True))
+        assert with_fill is not None
+        assert with_fill["fill"]["enabled"] is True
+        assert with_fill != segmentation_identity(_enabled_record())
+
+
+class TestSegmentationSidecar:
+    @pytest.mark.parametrize("nuclei", [False, True])
+    def test_path_sits_next_to_the_mask(self, tmp_path: Path, nuclei: bool) -> None:
+        mask = tmp_path / "masks.npy"
+        path = segmentation_sidecar_path(mask, nuclei=nuclei)
+        assert path.parent == tmp_path
+        assert path.name.endswith("image_preprocessing.json")
+        assert (path.name.startswith("nuclei_")) is nuclei
+
+    def test_cell_and_nuclei_sidecars_are_independent(self, tmp_path: Path) -> None:
+        mask = tmp_path / "masks.npy"
+        write_segmentation_sidecar(mask, _enabled_record())
+        # Nuclei masks in the same directory were never recorded.
+        with pytest.raises(ValueError, match="predates the correction"):
+            check_segmentation_sidecar(mask, _enabled_record(), nuclei=True)
+        check_segmentation_sidecar(mask, _enabled_record())
+
+    def test_roundtrip_matches(self, tmp_path: Path) -> None:
+        mask = tmp_path / "masks.npy"
+        record = _enabled_record()
+        path = write_segmentation_sidecar(mask, record)
+        assert json.loads(path.read_text())["bead_removal"] == (
+            segmentation_identity(record)
+        )
+        check_segmentation_sidecar(mask, record, dataset_name="D")
+
+    def test_write_leaves_no_temporary_file(self, tmp_path: Path) -> None:
+        write_segmentation_sidecar(tmp_path / "masks.npy", _enabled_record())
+        assert [p.name for p in tmp_path.iterdir()] == ["image_preprocessing.json"]
+
+    def test_off_sidecar_records_null(self, tmp_path: Path) -> None:
+        path = write_segmentation_sidecar(tmp_path / "masks.npy", None)
+        assert json.loads(path.read_text())["bead_removal"] is None
+        check_segmentation_sidecar(tmp_path / "masks.npy", _record(None))
+
+    @pytest.mark.parametrize(
+        ("stored", "source"),
+        [
+            (None, "enabled"),
+            ("enabled", None),
+            ("enabled", "device"),
+            ("enabled", "calibration"),
+        ],
+    )
+    def test_mismatch_raises_with_remedy(
+        self, tmp_path: Path, stored: str | None, source: str | None
+    ) -> None:
+        records: dict[str | None, dict[str, Any] | None] = {
+            None: None,
+            "enabled": _enabled_record(),
+            "device": _enabled_record(device="cuda"),
+            "calibration": _enabled_record(calibration_sha256="other"),
+        }
+        mask = tmp_path / "masks.npy"
+        write_segmentation_sidecar(mask, records[stored])
+        with pytest.raises(ValueError, match="new outdir") as err:
+            check_segmentation_sidecar(mask, records[source], dataset_name="D")
+        assert "[D]" in str(err.value)
+
+    def test_fill_mismatch_raises(
+        self, tmp_path: Path, fake_fill_module: object
+    ) -> None:
+        mask = tmp_path / "masks.npy"
+        write_segmentation_sidecar(mask, _enabled_record(fill=True))
+        with pytest.raises(ValueError, match="with fill"):
+            check_segmentation_sidecar(mask, _enabled_record())
+
+    def test_missing_sidecar_with_source_enabled_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="predates the correction"):
+            check_segmentation_sidecar(tmp_path / "masks.npy", _enabled_record())
+
+    @pytest.mark.parametrize("record", [None, "off"])
+    def test_missing_sidecar_with_source_off_or_legacy_reuses(
+        self, tmp_path: Path, record: str | None
+    ) -> None:
+        source = None if record is None else _record(None)
+        check_segmentation_sidecar(tmp_path / "masks.npy", source)
+        assert not segmentation_sidecar_path(tmp_path / "masks.npy").exists()
+
+    @pytest.mark.parametrize("content", ["{not json", "[1]", '{"bead_removal": 3}'])
+    def test_unreadable_sidecar_raises(self, tmp_path: Path, content: str) -> None:
+        mask = tmp_path / "masks.npy"
+        segmentation_sidecar_path(mask).write_text(content)
+        with pytest.raises(ValueError, match="new outdir"):
+            check_segmentation_sidecar(mask, None)
+
+    def test_remove_is_idempotent(self, tmp_path: Path) -> None:
+        mask = tmp_path / "masks.npy"
+        remove_segmentation_sidecar(mask)
+        write_segmentation_sidecar(mask, None)
+        remove_segmentation_sidecar(mask)
+        assert not segmentation_sidecar_path(mask).exists()
+
+
+class TestBeadRemovalTableMetadata:
+    def test_none_when_off_or_legacy(self) -> None:
+        assert bead_removal_table_metadata(None) is None
+        assert bead_removal_table_metadata(_record(None)) is None
+
+    def test_enabled_lists_corrected_stains(self) -> None:
+        metadata = bead_removal_table_metadata(_enabled_record())
+        assert metadata == {
+            "bead_corrected_stains": ["DAPI", "PolyT"],
+            "bead_removal_version": 1,
+            "bead_removal_fill": False,
+        }
+
+    def test_fill_flag(self, fake_fill_module: object) -> None:
+        metadata = bead_removal_table_metadata(_enabled_record(fill=True))
+        assert metadata is not None
+        assert metadata["bead_removal_fill"] is True
