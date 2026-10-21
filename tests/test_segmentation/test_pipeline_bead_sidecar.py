@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -13,13 +14,17 @@ import pytest
 from merxen.config import MerscopeBeadRemovalConfig, SegmentationConfig
 from merxen.io.bead_removal.provenance import (
     IMAGE_PREPROCESSING_ATTR,
+    STORE_SIDECAR_NAME,
     build_image_preprocessing_record,
     segmentation_identity,
     segmentation_sidecar_path,
+    write_store_segmentation_sidecar,
 )
+from merxen.io.spatialdata_io import _copy_non_spatialdata_sidecars
 from merxen.segmentation.pipeline import (
     run_cellpose_nuclei_segmentation,
     run_cellpose_segmentation,
+    run_proseg_segmentation,
     run_segmentation_pipeline,
 )
 
@@ -184,7 +189,7 @@ class TestNucleiMasks:
         run_cellpose_nuclei_segmentation(cfg)
         _source_zarr(tmp_path, _record(enabled=True, calibration="cal-2"))
 
-        with pytest.raises(ValueError, match="new outdir"):
+        with pytest.raises(ValueError, match="new --outdir"):
             run_cellpose_nuclei_segmentation(cfg)
         assert len(fake_cellpose) == 1
 
@@ -316,6 +321,8 @@ class TestCompleteOutputShortcut:
         cfg.proseg_hybrid.enabled = False
         latest = tmp_path / "results" / "segmentation" / "proseg_base_latest.zarr"
         latest.mkdir(parents=True)
+        # What a ProSeg run writes into its output.
+        write_store_segmentation_sidecar(latest, record)
         cfg.dataset.persistent_latest_zarr_path = latest
         run_cellpose_segmentation(cfg)
         run_cellpose_nuclei_segmentation(cfg)
@@ -355,3 +362,151 @@ class TestCompleteOutputShortcut:
         run_segmentation_pipeline(cfg)
 
         assert len(fake_cellpose) == 2
+
+    def test_a_stale_latest_is_refused_not_reused(
+        self, tmp_path: Path, fake_cellpose: list[int]
+    ) -> None:
+        cfg = self._prepare(tmp_path, _record(enabled=True))
+        latest = Path(str(cfg.dataset.persistent_latest_zarr_path))
+        (latest / STORE_SIDECAR_NAME).unlink()
+
+        with pytest.raises(ValueError, match="--force_proseg_rerun"):
+            run_segmentation_pipeline(cfg)
+        assert len(fake_cellpose) == 2
+
+
+class TestProsegLatestReuse:
+    """The ProSeg output is built from the masks, so its reuse is guarded too."""
+
+    @staticmethod
+    def _prepare(
+        tmp_path: Path, record: dict[str, Any] | None
+    ) -> tuple[SegmentationConfig, Path, dict[str, Any]]:
+        cfg = _config(tmp_path, _source_zarr(tmp_path, record))
+        cfg.proseg_hybrid.enabled = False
+        latest = tmp_path / "results" / "latest" / "latest_spatialdata.zarr"
+        latest.mkdir(parents=True)
+        cfg.dataset.persistent_latest_zarr_path = latest
+        outputs = run_cellpose_segmentation(cfg)
+        kwargs: dict[str, Any] = {
+            "transcripts_csv": outputs["transcripts_csv"],
+            "cellpose_mask_path": outputs["cellpose_mask_path"],
+            "cellpose_cellprob_path": outputs["cellpose_cellprob_path"],
+            "transforms_path": outputs["transforms_path"],
+        }
+        return cfg, latest, kwargs
+
+    def test_a_legacy_latest_is_refused_for_a_corrected_source(
+        self, tmp_path: Path, fake_cellpose: list[int]
+    ) -> None:
+        """Follow the old remedy (move the masks aside) without moving latest/."""
+        cfg, latest, kwargs = self._prepare(tmp_path, _record(enabled=True))
+
+        with pytest.raises(ValueError, match="predates the correction") as caught:
+            run_proseg_segmentation(cfg, **kwargs)
+
+        assert "latest/" in str(caught.value)
+        assert "--force_proseg_rerun" in str(caught.value)
+
+    def test_a_latest_of_the_same_image_is_reused(
+        self, tmp_path: Path, fake_cellpose: list[int]
+    ) -> None:
+        record = _record(enabled=True)
+        cfg, latest, kwargs = self._prepare(tmp_path, record)
+        write_store_segmentation_sidecar(latest, record)
+
+        outputs = run_proseg_segmentation(cfg, **kwargs)
+
+        assert outputs["latest_output"].resolve() == latest.resolve()
+
+    @pytest.mark.parametrize("stored", ["other_calibration", "uncorrected"])
+    def test_a_latest_of_another_image_is_refused(
+        self, tmp_path: Path, fake_cellpose: list[int], stored: str
+    ) -> None:
+        cfg, latest, kwargs = self._prepare(tmp_path, _record(enabled=True))
+        other = (
+            _record(enabled=True, calibration="cal-2")
+            if stored == "other_calibration"
+            else None
+        )
+        write_store_segmentation_sidecar(latest, other)
+
+        with pytest.raises(ValueError, match="--force_proseg_rerun"):
+            run_proseg_segmentation(cfg, **kwargs)
+
+    def test_a_latest_from_a_corrected_image_is_refused_when_the_source_is_off(
+        self, tmp_path: Path, fake_cellpose: list[int]
+    ) -> None:
+        cfg, latest, kwargs = self._prepare(tmp_path, None)
+        write_store_segmentation_sidecar(latest, _record(enabled=True))
+
+        with pytest.raises(ValueError, match="bead removal on"):
+            run_proseg_segmentation(cfg, **kwargs)
+
+    @pytest.mark.parametrize("source", ["legacy", "off"])
+    def test_a_legacy_latest_is_reused_as_before(
+        self, tmp_path: Path, fake_cellpose: list[int], source: str
+    ) -> None:
+        record = None if source == "legacy" else _record(enabled=False)
+        cfg, latest, kwargs = self._prepare(tmp_path, record)
+
+        outputs = run_proseg_segmentation(cfg, **kwargs)
+
+        assert outputs["latest_output"].resolve() == latest.resolve()
+        assert not (latest / STORE_SIDECAR_NAME).exists()
+
+    def test_force_rerun_skips_the_check_and_records_the_new_identity(
+        self,
+        tmp_path: Path,
+        fake_cellpose: list[int],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        record = _record(enabled=True)
+        cfg, latest, kwargs = self._prepare(tmp_path, record)
+        self._stub_proseg(monkeypatch)
+
+        run_proseg_segmentation(cfg, force_rerun=True, **kwargs)
+
+        stored = json.loads((latest / STORE_SIDECAR_NAME).read_text())
+        assert stored["bead_removal"] == segmentation_identity(record)
+
+    def test_a_resumed_raw_output_is_checked_and_converted(
+        self,
+        tmp_path: Path,
+        fake_cellpose: list[int],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        record = _record(enabled=True)
+        cfg, latest, kwargs = self._prepare(tmp_path, record)
+        self._stub_proseg(monkeypatch)
+        shutil.rmtree(latest)
+        raw = Path(cfg.dataset.output_dir) / "proseg_base_raw.zarr"
+        raw.mkdir(parents=True)
+
+        with pytest.raises(ValueError, match="predates the correction"):
+            run_proseg_segmentation(cfg, **kwargs)
+        assert not latest.exists()
+
+        write_store_segmentation_sidecar(raw, record)
+        run_proseg_segmentation(cfg, **kwargs)
+
+        assert (latest / STORE_SIDECAR_NAME).is_file()
+
+    @staticmethod
+    def _stub_proseg(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Replace ProSeg and the zarr conversion by directory stand-ins."""
+
+        def _run(*, output_path: Path, **kwargs: object) -> Path:
+            Path(output_path).mkdir(parents=True, exist_ok=True)
+            return Path(output_path)
+
+        def _convert(raw_path: Path, latest_path: Path, **kwargs: object) -> Path:
+            shutil.rmtree(latest_path, ignore_errors=True)
+            latest_path.mkdir(parents=True)
+            _copy_non_spatialdata_sidecars(raw_path, latest_path)
+            return latest_path
+
+        monkeypatch.setattr("merxen.segmentation.pipeline.run_proseg_refinement", _run)
+        monkeypatch.setattr(
+            "merxen.segmentation.pipeline.convert_to_latest_zarr", _convert
+        )

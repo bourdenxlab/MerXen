@@ -15,17 +15,20 @@ import pytest
 from merxen.config import MerscopeBeadRemovalConfig
 from merxen.io.bead_removal.provenance import (
     IMAGE_PREPROCESSING_ATTR,
+    STORE_SIDECAR_NAME,
     bead_removal_identity,
     bead_removal_table_metadata,
     build_image_preprocessing_record,
     check_bead_removal_reuse,
     check_segmentation_sidecar,
+    check_store_segmentation_sidecar,
     identity_from_record,
     read_image_preprocessing_attr,
     remove_segmentation_sidecar,
     segmentation_identity,
     segmentation_sidecar_path,
     write_segmentation_sidecar,
+    write_store_segmentation_sidecar,
 )
 
 _LOGGER = "merxen.io.bead_removal.provenance"
@@ -568,9 +571,15 @@ class TestSegmentationSidecar:
         }
         mask = tmp_path / "masks.npy"
         write_segmentation_sidecar(mask, records[stored])
-        with pytest.raises(ValueError, match="new outdir") as err:
+        with pytest.raises(ValueError, match="new --outdir") as err:
             check_segmentation_sidecar(mask, records[source], dataset_name="D")
-        assert "[D]" in str(err.value)
+        message = str(err.value)
+        assert "[D]" in message
+        # The remedy names every place that holds the stale image and both ways
+        # to recompute (there is no --force-rerun in Nextflow).
+        assert "segmentation/" in message and "latest/" in message
+        assert "--force_proseg_rerun" in message
+        assert "merxen cellpose-segment --force-rerun" in message
 
     def test_fill_mismatch_raises(
         self, tmp_path: Path, fake_fill_module: object
@@ -596,7 +605,7 @@ class TestSegmentationSidecar:
     def test_unreadable_sidecar_raises(self, tmp_path: Path, content: str) -> None:
         mask = tmp_path / "masks.npy"
         segmentation_sidecar_path(mask).write_text(content)
-        with pytest.raises(ValueError, match="new outdir"):
+        with pytest.raises(ValueError, match="new --outdir"):
             check_segmentation_sidecar(mask, None)
 
     def test_remove_is_idempotent(self, tmp_path: Path) -> None:
@@ -605,6 +614,84 @@ class TestSegmentationSidecar:
         write_segmentation_sidecar(mask, None)
         remove_segmentation_sidecar(mask)
         assert not segmentation_sidecar_path(mask).exists()
+
+
+class TestStoreSegmentationSidecar:
+    """The record inside a ProSeg store of the image its prior masks came from."""
+
+    def test_round_trip_and_no_temporary_file(self, tmp_path: Path) -> None:
+        store = tmp_path / "latest.zarr"
+        store.mkdir()
+        record = _enabled_record()
+
+        path = write_store_segmentation_sidecar(store, record)
+
+        assert path == store / STORE_SIDECAR_NAME
+        assert json.loads(path.read_text())["bead_removal"] == segmentation_identity(
+            record
+        )
+        assert [p.name for p in store.iterdir()] == [STORE_SIDECAR_NAME]
+        check_store_segmentation_sidecar(store, record, dataset_name="D")
+
+    def test_the_sidecar_survives_a_store_rewrite(self, tmp_path: Path) -> None:
+        """It is not an element, so the contract upgrade copies it along."""
+        from merxen.io.spatialdata_io import _copy_non_spatialdata_sidecars
+
+        store = tmp_path / "raw.zarr"
+        (store / "points").mkdir(parents=True)
+        write_store_segmentation_sidecar(store, _enabled_record())
+        rewritten = tmp_path / "latest.zarr"
+        rewritten.mkdir()
+
+        _copy_non_spatialdata_sidecars(store, rewritten)
+
+        check_store_segmentation_sidecar(rewritten, _enabled_record())
+        assert (rewritten / STORE_SIDECAR_NAME).is_file()
+        assert not (rewritten / "points").exists()
+
+    @pytest.mark.parametrize(
+        ("stored", "source"),
+        [
+            (None, "enabled"),
+            ("enabled", None),
+            ("enabled", "device"),
+            ("enabled", "calibration"),
+        ],
+    )
+    def test_mismatch_raises_with_the_remedy(
+        self, tmp_path: Path, stored: str | None, source: str | None
+    ) -> None:
+        records: dict[str | None, dict[str, Any] | None] = {
+            None: None,
+            "enabled": _enabled_record(),
+            "device": _enabled_record(device="cuda"),
+            "calibration": _enabled_record(calibration_sha256="other"),
+        }
+        write_store_segmentation_sidecar(tmp_path, records[stored])
+        with pytest.raises(ValueError, match="--force_proseg_rerun") as err:
+            check_store_segmentation_sidecar(
+                tmp_path, records[source], dataset_name="D"
+            )
+        assert "[D]" in str(err.value) and "latest/" in str(err.value)
+
+    def test_missing_sidecar_with_source_enabled_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="predates the correction"):
+            check_store_segmentation_sidecar(tmp_path, _enabled_record())
+
+    @pytest.mark.parametrize("record", [None, "off"])
+    def test_missing_sidecar_with_source_off_or_legacy_reuses(
+        self, tmp_path: Path, record: str | None
+    ) -> None:
+        check_store_segmentation_sidecar(
+            tmp_path, None if record is None else _record(None)
+        )
+        assert not (tmp_path / STORE_SIDECAR_NAME).exists()
+
+    @pytest.mark.parametrize("content", ["{not json", "[1]", '{"bead_removal": 3}'])
+    def test_unreadable_sidecar_raises(self, tmp_path: Path, content: str) -> None:
+        (tmp_path / STORE_SIDECAR_NAME).write_text(content)
+        with pytest.raises(ValueError, match="--force_proseg_rerun"):
+            check_store_segmentation_sidecar(tmp_path, None)
 
 
 class TestBeadRemovalTableMetadata:

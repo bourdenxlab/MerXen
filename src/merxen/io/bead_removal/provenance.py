@@ -350,6 +350,9 @@ def check_bead_removal_reuse(
 SEGMENTATION_SIDECAR_SCHEMA = 1
 CELL_MASK_SIDECAR_NAME = "image_preprocessing.json"
 NUCLEI_MASK_SIDECAR_NAME = "nuclei_image_preprocessing.json"
+# Inside a ProSeg store: the image its prior masks (and so its cells) came from.
+# A non-element file of the store root, which the store rewrites keep.
+STORE_SIDECAR_NAME = "segmentation_image_preprocessing.json"
 # Identity fields of a correction that decide whether two images are the same
 # for segmentation. Library versions are deliberately absent: they change the
 # image by at most 0.01 counts, so only the device is compared.
@@ -470,28 +473,129 @@ def check_segmentation_sidecar(
         ValueError: If the masks and the source disagree about bead removal,
             or the sidecar cannot be read.
     """
-    sidecar = segmentation_sidecar_path(mask_path, nuclei=nuclei)
+    command = "merxen cellpose-nuclei-segment" if nuclei else "merxen cellpose-segment"
+    remedy = (
+        "Move the segmentation outputs aside (the segmentation/ folder and the "
+        "latest/ ProSeg output that was built from these masks, or run with "
+        "--force_proseg_rerun true) and recompute the masks: "
+        f"`{command} --force-rerun` (CLI) or a new --outdir (Nextflow), so the "
+        "masks are computed from the current image."
+    )
+    _check_identity_sidecar(
+        segmentation_sidecar_path(mask_path, nuclei=nuclei),
+        mask_path,
+        recorded,
+        dataset_name=dataset_name,
+        remedy=remedy,
+        missing_reason=(
+            "so it predates the correction and was computed from an uncorrected image"
+        ),
+        consequence=(
+            "Reusing the masks would segment a different image than the one that "
+            "is quantified."
+        ),
+    )
+
+
+def write_store_segmentation_sidecar(
+    store_path: Path | str, recorded: Mapping[str, Any] | None
+) -> Path:
+    """Record in a ProSeg store which image its prior masks came from.
+
+    The file sits in the store root, so it follows the store when it is staged
+    (symlink), copied or rewritten by the SpatialData contract upgrade.
+
+    Args:
+        store_path: The ProSeg output zarr (raw or latest) the file describes.
+        recorded: ``merxen_image_preprocessing`` of the source SpatialData, or
+            ``None`` for a legacy store.
+
+    Returns:
+        Path of the written sidecar.
+    """
+    path = Path(store_path) / STORE_SIDECAR_NAME
+    payload = {
+        "schema": SEGMENTATION_SIDECAR_SCHEMA,
+        "bead_removal": segmentation_identity(recorded),
+    }
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    temporary.replace(path)
+    return path
+
+
+def check_store_segmentation_sidecar(
+    store_path: Path | str,
+    recorded: Mapping[str, Any] | None,
+    *,
+    dataset_name: str = "",
+) -> None:
+    """Refuse to reuse a ProSeg store whose masks came from another image.
+
+    The ProSeg output is built from the Cellpose masks as a prior, so its cells
+    come from the image of those masks. The rules are those of
+    :func:`check_segmentation_sidecar`: a stored identity must equal the
+    source's; a store without the file is reused only when the source has no
+    bead removal.
+
+    Args:
+        store_path: The ProSeg output zarr that would be reused or enriched.
+        recorded: ``merxen_image_preprocessing`` of the source SpatialData, or
+            ``None`` for a legacy store.
+        dataset_name: Dataset label for the message.
+
+    Raises:
+        ValueError: If the store and the source disagree about bead removal, or
+            the sidecar cannot be read.
+    """
+    remedy = (
+        "Move the latest/ ProSeg output aside or run with --force_proseg_rerun "
+        "true (Nextflow) or `merxen segment --force-rerun` (CLI), so that it is "
+        "rebuilt from the Cellpose masks of the current image."
+    )
+    _check_identity_sidecar(
+        Path(store_path) / STORE_SIDECAR_NAME,
+        store_path,
+        recorded,
+        dataset_name=dataset_name,
+        remedy=remedy,
+        missing_reason=(
+            "so it predates the correction and its cells were segmented from "
+            "masks of an uncorrected image"
+        ),
+        consequence=(
+            "Reusing it would pair cells segmented from a different image with "
+            "the image that is quantified."
+        ),
+    )
+
+
+def _check_identity_sidecar(
+    sidecar: Path,
+    subject_path: Path | str,
+    recorded: Mapping[str, Any] | None,
+    *,
+    dataset_name: str,
+    remedy: str,
+    missing_reason: str,
+    consequence: str,
+) -> None:
+    """Compare a stored bead-removal identity with the source's (shared rules)."""
     source_identity = segmentation_identity(recorded)
     prefix = f"[{dataset_name}] " if dataset_name else ""
-    remedy = (
-        "Move the segmentation outputs aside or use a new outdir (or run the "
-        "step with --force-rerun) so the masks are computed from the current "
-        "image."
-    )
     if not sidecar.is_file():
         if source_identity is None:
             return
         raise ValueError(
             f"{prefix}the source SpatialData was built with bead removal on but "
-            f"{mask_path} has no {sidecar.name}, so it predates the correction "
-            f"and was computed from an uncorrected image. {remedy}"
+            f"{subject_path} has no {sidecar.name}, {missing_reason}. {remedy}"
         )
     try:
         stored = json.loads(sidecar.read_text()).get("bead_removal")
     except (OSError, ValueError, AttributeError) as exc:
         raise ValueError(
             f"{prefix}could not read {sidecar} ({exc}), so it cannot be verified "
-            f"that {mask_path} matches the source image. {remedy}"
+            f"that {subject_path} matches the source image. {remedy}"
         ) from exc
     if stored is not None and not isinstance(stored, dict):
         raise ValueError(
@@ -500,10 +604,9 @@ def check_segmentation_sidecar(
     if stored == source_identity:
         return
     raise ValueError(
-        f"{prefix}{mask_path} was computed from an image with bead removal "
+        f"{prefix}{subject_path} was computed from an image with bead removal "
         f"{_describe_identity(stored)} but the source SpatialData has "
-        f"{_describe_identity(source_identity)}. Reusing the masks would "
-        f"segment a different image than the one that is quantified. {remedy}"
+        f"{_describe_identity(source_identity)}. {consequence} {remedy}"
     )
 
 

@@ -18,9 +18,11 @@ from merxen._typing import AffineComponent
 from merxen.config import SegmentationConfig
 from merxen.io.bead_removal.provenance import (
     check_segmentation_sidecar,
+    check_store_segmentation_sidecar,
     read_image_preprocessing_attr,
     remove_segmentation_sidecar,
     write_segmentation_sidecar,
+    write_store_segmentation_sidecar,
 )
 from merxen.io.image_source import (
     MERSCOPE_ZPROJ_IMAGE_NAME,
@@ -1151,12 +1153,21 @@ def run_proseg_segmentation(
         )
         _progress("proseg_hybrid_done", **summary)
 
+    # The ProSeg output is built from the Cellpose masks, so reusing it needs the
+    # same image-identity guard as reusing the masks themselves.
+    source_preprocessing = _source_image_preprocessing(config)
     if latest_output.exists() and not force_rerun:
+        check_store_segmentation_sidecar(
+            latest_output, source_preprocessing, dataset_name=dataset.name
+        )
         log_status(f"[{dataset.name}] Reusing existing latest output: {latest_output}")
         _ensure_hybrid()
         return {"latest_output": _stage_latest()}
 
     if raw_output.exists() and not force_rerun:
+        check_store_segmentation_sidecar(
+            raw_output, source_preprocessing, dataset_name=dataset.name
+        )
         latest_output.parent.mkdir(parents=True, exist_ok=True)
         convert_to_latest_zarr(
             raw_output,
@@ -1222,6 +1233,9 @@ def run_proseg_segmentation(
         proseg_samples=int(proseg_params["samples"]),
     )
 
+    # Written to the raw output first, so that an interrupted run that is resumed
+    # from it keeps the record (the conversion copies it to the latest zarr).
+    write_store_segmentation_sidecar(raw_out, source_preprocessing)
     latest_output.parent.mkdir(parents=True, exist_ok=True)
     latest_out = convert_to_latest_zarr(
         raw_out,
@@ -1231,6 +1245,7 @@ def run_proseg_segmentation(
         ),
         platform=dataset.platform,
     )
+    write_store_segmentation_sidecar(latest_out, source_preprocessing)
     remove_path(raw_out)
     _ensure_hybrid()
     staged_out = _stage_latest()
@@ -1309,6 +1324,11 @@ def run_segmentation_pipeline(
             reusable_nuclei_mask,
             source_preprocessing,
             nuclei=True,
+            dataset_name=dataset.name,
+        )
+        check_store_segmentation_sidecar(
+            persistent_latest_output,
+            source_preprocessing,
             dataset_name=dataset.name,
         )
         if not hybrid_complete:
