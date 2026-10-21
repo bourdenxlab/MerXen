@@ -41,6 +41,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -302,6 +303,21 @@ def planes_needed(
     )
     need[SPECTRAL_STAIN] = sorted(set(need.get(SPECTRAL_STAIN, [])) | {0, 1})
     return need
+
+
+def count_plane_stacks(calibration: BeadCalibration, z_layers: Sequence[int]) -> int:
+    """Count the float32 planes of a window that a worker holds at once.
+
+    Args:
+        calibration: The dataset calibration.
+        z_layers: Planes that are projected.
+
+    Returns:
+        The number of (stain, plane) pairs of ``planes_needed`` (14 for the
+        default z 1-6 with PolyT and DAPI; more with 7 planes or the rescue's
+        extra reference planes on a short z range).
+    """
+    return sum(len(planes) for planes in planes_needed(calibration, z_layers).values())
 
 
 def estimate_worker_rss_gb(
@@ -1117,8 +1133,9 @@ def _check_inputs(
     """Validate the run inputs and return (z layers, mosaic shape).
 
     Raises:
-        ValueError: Invalid ``z_layers`` or stains, a parameter-hash mismatch or
-            a non-uint16 mosaic.
+        ValueError: Invalid ``z_layers`` or stains, a parameter-hash mismatch, a
+            calibration without the noise level of a plane that is fitted, or a
+            non-uint16 mosaic.
         FileNotFoundError: A plane the ``z_layers`` need does not exist.
     """
     zs = [int(z) for z in z_layers]
@@ -1139,6 +1156,17 @@ def _check_inputs(
             "the calibration was made with different bead-removal parameters "
             "(params_sha256 mismatch); recalibrate or pass the parameters it was "
             "made with"
+        )
+    # The model fits the reference planes 0-2 and every plane of z_layers, and
+    # each needs the calibration's noise level; a plane it lacks would fail in a
+    # worker (a KeyError) after the pool has started.
+    noise_planes = sorted({0, 1, 2} | set(zs))
+    uncovered = [k for k in noise_planes if k not in calibration.noise]
+    if uncovered:
+        raise ValueError(
+            f"the calibration has no noise level for plane(s) {uncovered} (it "
+            f"covers planes {sorted(calibration.noise)}); recalibrate with these "
+            f"z_layers {zs}"
         )
     # The stains must be exactly the corrected ones: anything else is projected
     # by the builder's plain loop, and a corrected stain left out would be
@@ -1243,6 +1271,10 @@ def _run_pool(
         max_tasks_per_child=max_tasks_per_child,
     )
     try:
+        # All tasks are submitted at once. A result that finishes ahead of a slow
+        # earlier chunk waits in ``results`` (about 64 MB each) until the prefix is
+        # complete: a few hundred MB to about 1 GB with five workers and one chunk
+        # three times slower than the rest, inside the PARENT_RESERVE_GB share.
         futures = {executor.submit(process_chunk, t): t for t in tasks}
         for future in cf.as_completed(futures):
             task = futures[future]
@@ -1254,10 +1286,16 @@ def _run_pool(
                 )
                 for pending in futures:
                     pending.cancel()
+                # A worker killed by the kernel (out of memory) breaks the pool;
+                # any other error is the chunk's own and no hint applies.
+                hint = (
+                    " (fewer workers if this was out of memory)"
+                    if isinstance(exc, BrokenProcessPool)
+                    else ""
+                )
                 raise RuntimeError(
                     f"bead removal failed on chunk {task.index} (core "
-                    f"{task.core}): {exc!r} (fewer workers if this was out of "
-                    "memory)"
+                    f"{task.core}): {exc!r}{hint}"
                 ) from exc
             results[result.index] = result
             # Deterministic write order: write the finished prefix of the list.
@@ -1585,7 +1623,10 @@ def run_bead_removal(
         estimate = (
             rss_per_worker_gb
             if rss_per_worker_gb is not None
-            else estimate_worker_rss_gb((window, window))
+            else estimate_worker_rss_gb(
+                (window, window),
+                n_plane_stacks=count_plane_stacks(calibration, zs),
+            )
             + (FILL_EXTRA_RSS_GB if fill_on else 0.0)
         )
         memory = (

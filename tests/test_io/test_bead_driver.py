@@ -11,12 +11,14 @@ The real CUDA path is tested in ``test_bead_driver_gpu.py``.
 
 from __future__ import annotations
 
+import concurrent.futures
 import dataclasses
 import fcntl
 import json
 import os
 import threading
 import time
+import types
 from pathlib import Path
 from typing import Any
 
@@ -150,6 +152,13 @@ def test_worker_count_warns_when_memory_fits_no_worker(
     assert "less than one worker" in caplog.text
 
 
+def test_plane_stacks_follow_the_planes_a_window_reads() -> None:
+    cal = real_calibration()
+    assert driver.count_plane_stacks(cal, [1, 2, 3, 4, 5, 6]) == 14
+    assert driver.count_plane_stacks(cal, [1, 2, 3, 4, 5, 6, 7]) == 16
+    assert driver.count_plane_stacks(cal, [2, 4]) == 8
+
+
 def test_worker_memory_estimate() -> None:
     # 14 float32 planes held twice, plus a fixed overhead.
     expected = 14 * 4 * 1000 * 1000 * 2 / 1e9 + 3.5
@@ -259,6 +268,13 @@ def test_refusals(mosaic: MosaicFixture, tmp_path: Path) -> None:
     other = dataclasses.replace(DEFAULT_PARAMS, stretch_kmin=3)
     with pytest.raises(ValueError, match="params_sha256"):
         run(z_layers=ZS, params=other, **base)
+    # A calibration whose noise does not cover a fitted plane is refused up front,
+    # not with a KeyError inside a worker.
+    short = dataclasses.replace(
+        calibration, noise={k: v for k, v in calibration.noise.items() if k < 3}
+    )
+    with pytest.raises(ValueError, match=r"no noise level for plane\(s\) \[3\]"):
+        run(z_layers=ZS, **{**base, "calibration": short})
     # The fixture mosaic has planes 0-3 only.
     with pytest.raises(
         FileNotFoundError, match=r"planes found in the folder: \[0, 1, 2, 3\]"
@@ -390,14 +406,19 @@ def test_sink_writes_into_the_mapped_channels_in_task_order() -> None:
 def test_a_failing_worker_names_its_chunk(
     mosaic: MosaicFixture, tmp_path: Path
 ) -> None:
-    """A pool that cannot start (the calibration cannot be loaded) is reported."""
+    """A pool that cannot start (the calibration cannot be loaded) is reported.
+
+    A broken pool is how a worker killed for memory shows, so it carries the hint.
+    """
     folder, calibration, _, _ = mosaic
     empty = tmp_path / "no_calibration"
     empty.mkdir()
     store = open_projection_store(
         tmp_path / "p.zarr", n_channels=2, shape=SHAPE, chunk_px=1024
     )
-    with pytest.raises(RuntimeError, match=r"bead removal failed on chunk"):
+    with pytest.raises(
+        RuntimeError, match=r"bead removal failed on chunk .*fewer workers"
+    ):
         driver.run_bead_removal(
             images_dir=folder,
             stains=STAINS,
@@ -411,6 +432,35 @@ def test_a_failing_worker_names_its_chunk(
             rss_per_worker_gb=1.0,
             memory_available_gb=1000.0,
         )
+
+
+class _InProcessPool(concurrent.futures.ThreadPoolExecutor):
+    """Stands in for the process pool so that ``process_chunk`` can be replaced."""
+
+    def __init__(self, max_workers: int, **_: Any) -> None:
+        super().__init__(max_workers=max_workers)
+
+
+def test_a_chunk_error_gets_no_out_of_memory_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a broken pool (a killed worker) suggests fewer workers."""
+
+    def failing(task: Any) -> Any:
+        raise ValueError("deterministic failure")
+
+    monkeypatch.setattr(driver.cf, "ProcessPoolExecutor", _InProcessPool)
+    monkeypatch.setattr(driver, "process_chunk", failing)
+    tasks: Any = [types.SimpleNamespace(index=0, core=(0, 1, 0, 1))]
+    with pytest.raises(RuntimeError, match="deterministic failure") as caught:
+        driver._run_pool(
+            tasks,
+            None,  # type: ignore[arg-type]
+            n_workers=1,
+            calibration_dir=str(tmp_path),
+            max_tasks_per_child=None,
+        )
+    assert "fewer workers" not in str(caught.value)
 
 
 # ---------------------------------------------------------------------------
