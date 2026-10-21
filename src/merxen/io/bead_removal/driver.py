@@ -10,14 +10,17 @@ same time. The corrected stains are therefore projected chunk by chunk:
 * Only the bead-corrected stains go through the driver; every other stain keeps
   the builder's own plain max projection.
 * The window correction is a :class:`WindowCorrector` chosen by the resolved
-  device. Only the ``"cpu"`` corrector exists in this version: tasks run in a
-  :class:`concurrent.futures.ProcessPoolExecutor` with the ``"spawn"`` start
-  method and one numeric thread per worker, and workers return the uint16 core
-  arrays.
+  device. On ``"cpu"`` tasks run in a :class:`concurrent.futures.ProcessPoolExecutor`
+  with the ``"spawn"`` start method and one numeric thread per worker, and
+  workers return the uint16 core arrays. On ``"cuda"`` one consumer in the parent
+  process runs the windows one after the other on the GPU while a small thread
+  pool reads the next windows and one thread writes the finished ones; the host
+  GPU lock is held once, for the whole window loop.
 * Only the parent writes the store, in task order, so no two processes write
   the same store chunk.
-* The result does not depend on the number of workers or on the order in which
-  tasks finish (tested).
+* The result does not depend on the number of workers or reader threads, or on
+  the order in which tasks finish (tested). Window order, store layout, per-chunk
+  statistics and QC records are the same for both devices.
 
 Scripts that call :func:`run_bead_removal` must keep the call under
 ``if __name__ == "__main__":``: the ``"spawn"`` start method re-imports the
@@ -36,6 +39,7 @@ import os
 import re
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,8 +47,9 @@ from typing import Any
 
 import numpy as np
 
+from merxen.gpu_lock import gpu_lock_path_from_env, gpu_process_lock
 from merxen.io.bead_removal.apply import SPECTRAL_STAIN, correct_window
-from merxen.io.bead_removal.backend import backend_record
+from merxen.io.bead_removal.backend import backend_record, load_gpu_backend
 from merxen.io.bead_removal.calibrate import BeadCalibration
 from merxen.io.bead_removal.fill import FillParams, fill_params_sha256, support_px
 from merxen.io.bead_removal.model import beads_table
@@ -68,6 +73,13 @@ FILL_EXTRA_RSS_GB = 1.8
 # the parent process.
 MEMORY_USE_FRACTION = 0.8
 PARENT_RESERVE_GB = 8.0
+# GPU consumer: threads that read the next windows, the number of windows that
+# may be read or waiting ahead of the one on the GPU (about 1.2 GB of float32
+# planes each for a 4096 px core), and the finished chunks waiting for the
+# writer thread.
+GPU_READER_THREADS = 3
+GPU_QUEUE_WINDOWS = 2
+GPU_WRITE_QUEUE = 2
 _THREAD_ENV = (
     "OMP_NUM_THREADS",
     "MKL_NUM_THREADS",
@@ -162,7 +174,13 @@ class BeadRemovalRunResult:
         peak_worker_anon_gb: Peak anonymous memory of one worker.
         work_dir: Folder with the beads table, chunk statistics and summary.
         device: Backend device that ran the correction.
-        backend: Backend record (device and update order).
+        backend: Backend record (device and update order; for the GPU also the
+            library versions and the GPU name).
+        gpu: GPU run record, ``None`` on the CPU: ``lock_wait_s`` (time spent
+            waiting for the host GPU lock, 0 without a lock), ``locked`` (a lock
+            file was configured), ``held_s`` (time the lock was held), ``gpu_s``
+            (summed correction seconds), ``gpu_s_per_window`` (median, max),
+            ``reader_threads`` and ``queue_windows``.
         chunk_stats: Per-chunk statistics (not part of ``to_dict``).
     """
 
@@ -183,12 +201,18 @@ class BeadRemovalRunResult:
     work_dir: str
     device: str = "cpu"
     backend: dict[str, Any] = field(default_factory=dict)
+    gpu: dict[str, Any] | None = None
     chunk_stats: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the JSON-able summary without the per-chunk list."""
+        """Return the JSON-able summary without the per-chunk list.
+
+        The ``gpu`` entry is present only for a GPU run.
+        """
         summary = dataclasses.asdict(self)
         summary.pop("chunk_stats")
+        if summary["gpu"] is None:
+            summary.pop("gpu")
         return summary
 
 
@@ -533,7 +557,7 @@ class WindowCorrector:
     ``z_layers`` of the corrected planes on the core.
 
     Attributes:
-        device: Device name (``"cpu"``).
+        device: Device name (``"cpu"`` or ``"cuda"``).
         fn: The correction function.
     """
 
@@ -571,29 +595,82 @@ def _cpu_window_fn(
     return {s: out[s][:, y0:y1, x0:x1].max(axis=0) for s in out}, model, stats
 
 
+def _cuda_window_fn(
+    stacks: Mapping[str, Any],
+    *,
+    origin_yx: tuple[int, int],
+    calibration: BeadCalibration,
+    z_layers: Sequence[int],
+    params: PsfSubtractParams,
+    fill: FillParams | None,
+    core: Core,
+) -> tuple[dict[str, np.ndarray], Any, dict[str, Any]]:
+    """Run the GPU window correction and crop its max projection to the core.
+
+    The GPU function projects the whole window on the device (one transfer of
+    one plane per stain instead of one per z layer); the CPU function takes the
+    core only, so the core is cut out here.
+    """
+    if fill is not None and fill.enabled:
+        raise ValueError(
+            "the bead-removal fill has no GPU implementation; the device resolves "
+            "to cpu when the fill is on"
+        )
+    gpu = load_gpu_backend()
+    projections, model, stats = gpu.correct_window(
+        stacks,
+        origin_yx=origin_yx,
+        calibration=calibration,
+        z_layers=list(z_layers),
+        params=params,
+        core=core,
+        output="maxproj",
+    )
+    y0, y1, x0, x1 = core
+    return {s: a[y0:y1, x0:x1] for s, a in projections.items()}, model, stats
+
+
+def _make_cuda_corrector() -> WindowCorrector:
+    """Load the GPU backend and fix its numerics (no TF32, deterministic).
+
+    Raises:
+        BeadRemovalBackendError: The GPU backend cannot be imported.
+    """
+    gpu = load_gpu_backend()
+    gpu.ops.configure(True)
+    return WindowCorrector("cuda", _cuda_window_fn)
+
+
 CPU_CORRECTOR = WindowCorrector("cpu", _cpu_window_fn)
 _CORRECTORS: dict[str, WindowCorrector] = {"cpu": CPU_CORRECTOR}
+_VALID_DEVICES = ("cpu", "cuda")
 
 
 def get_window_corrector(device: str) -> WindowCorrector:
     """Return the window corrector of a resolved device.
 
+    The CUDA corrector is created on first use: it imports the GPU backend
+    (torch and triton), which the CPU path never does.
+
     Args:
-        device: Resolved device. Only ``"cpu"`` is available in this version.
+        device: Resolved device, ``"cpu"`` or ``"cuda"``.
 
     Returns:
         The corrector.
 
     Raises:
-        ValueError: The device has no corrector.
+        ValueError: The device is unknown.
+        BeadRemovalBackendError: ``"cuda"`` and the GPU backend cannot be
+            imported.
     """
-    try:
-        return _CORRECTORS[device]
-    except KeyError:
+    if device not in _VALID_DEVICES:
         raise ValueError(
             f"unknown bead-removal device {device!r}; expected one of "
-            f"{sorted(_CORRECTORS)}"
-        ) from None
+            f"{list(_VALID_DEVICES)}"
+        )
+    if device not in _CORRECTORS:
+        _CORRECTORS[device] = _make_cuda_corrector()
+    return _CORRECTORS[device]
 
 
 def describe_backend(device: str) -> dict[str, Any]:
@@ -796,7 +873,8 @@ def process_chunk(
 
     Args:
         task: The chunk to process.
-        corrector: Window correction to use (default: the numpy reference).
+        corrector: Window correction to use (default: the numpy reference). On
+            the CUDA corrector the chunk statistics gain ``gpu_s``.
         calibration: Calibration object (default: loaded once per process from
             ``task.calibration_dir``).
         stacks: Window planes that the caller already read, ``{stain: {z:
@@ -886,6 +964,10 @@ def process_chunk(
             stats["fill"] = window_stats["fill"]
         stats["n_beads_in_core"] = int(len(beads))
         stats.update(t_read_s=t_read, t_correct_s=t_correct, t_project_s=t_project)
+        if corrector.device == "cuda":
+            # The correction call returns host arrays, so its wall time is the
+            # time the GPU (and the transfers around it) were busy with this window.
+            stats["gpu_s"] = t_correct
     finally:
         # Drop the memmaps after every chunk: the file pages touched by earlier
         # chunks would otherwise stay mapped and grow the worker's RSS to tens of
@@ -1182,6 +1264,168 @@ def _run_pool(
         executor.shutdown(wait=True, cancel_futures=True)
 
 
+def _read_window_job(
+    task: ChunkTask, need: Mapping[str, Sequence[int]]
+) -> tuple[dict[str, dict[int, np.ndarray]], float]:
+    """Read the planes of one task's window (a reader thread).
+
+    The reader and its memory maps live only for this call: the arrays it
+    returns are copies, so the file pages are not kept resident.
+
+    Returns:
+        The float32 planes and the read time in seconds.
+    """
+    planes = sorted({z for zs in need.values() for z in zs})
+    reader = MosaicPlaneReader(task.images_dir, sorted(need), planes)
+    try:
+        t0 = time.time()
+        stacks = read_window_stacks(reader, need, window_of(task.core, task.halo_px))
+        return stacks, time.time() - t0
+    finally:
+        reader.close()
+
+
+def _run_gpu_consumer(
+    tasks: list[ChunkTask],
+    sink: _ChunkSink,
+    *,
+    corrector: WindowCorrector,
+    calibration: BeadCalibration,
+    lock_path: Path | None,
+) -> dict[str, Any]:
+    """Correct the windows on the GPU, one after the other, in task order.
+
+    The host GPU lock is taken once, here, for the whole window loop (and not
+    before: the calibration and the earlier part of the build do not hold the
+    GPU). Reader threads read up to ``GPU_QUEUE_WINDOWS`` windows ahead of the
+    one on the GPU, and one writer thread stores the finished chunks, so reading
+    and writing overlap the GPU work. The consumer takes the windows in task
+    order and the writer stores them in that order, so the result does not
+    depend on the number of reader threads.
+
+    Args:
+        tasks: The chunks, in task order.
+        sink: Receives the finished chunks (called from the writer thread only).
+        corrector: The CUDA window corrector.
+        calibration: The dataset calibration.
+        lock_path: Host GPU lock file, or ``None`` to run without a lock.
+
+    Returns:
+        The GPU run record (see ``BeadRemovalRunResult.gpu``).
+
+    Raises:
+        RuntimeError: A chunk failed to read, correct or write (the message
+            names it); the lock is released on the way out.
+    """
+    need = planes_needed(calibration, tasks[0].z_layers) if tasks else {}
+    read_ahead = max(1, int(GPU_QUEUE_WINDOWS))
+    threads = max(1, int(GPU_READER_THREADS))
+    t_wait = time.monotonic()
+    with gpu_process_lock(lock_path):
+        t_held = time.monotonic()
+        lock_wait_s = t_held - t_wait
+        readers = cf.ThreadPoolExecutor(
+            max_workers=threads, thread_name_prefix="bead-read"
+        )
+        writer = cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="bead-write")
+        reading: deque[tuple[ChunkTask, cf.Future[Any]]] = deque()
+        writing: deque[tuple[ChunkTask, cf.Future[None]]] = deque()
+        submitted = 0
+        gpu_seconds: list[float] = []
+
+        def _read_ahead() -> None:
+            nonlocal submitted
+            while submitted < len(tasks) and len(reading) < read_ahead:
+                ahead = tasks[submitted]
+                reading.append((ahead, readers.submit(_read_window_job, ahead, need)))
+                submitted += 1
+
+        def _fail(task: ChunkTask, step: str, exc: BaseException) -> RuntimeError:
+            logger.error(
+                "[BEADS] chunk %d (core %s) failed while %s: %r",
+                task.index,
+                task.core,
+                step,
+                exc,
+            )
+            return RuntimeError(
+                f"bead removal failed on chunk {task.index} (core {task.core}) "
+                f"while {step}: {exc!r}"
+            )
+
+        def _drain_writes(limit: int) -> None:
+            while len(writing) > limit:
+                done_task, done = writing.popleft()
+                try:
+                    done.result()
+                except Exception as exc:
+                    raise _fail(done_task, "writing the store", exc) from exc
+
+        try:
+            _read_ahead()
+            while reading:
+                task, pending = reading.popleft()
+                try:
+                    stacks, t_read = pending.result()
+                except Exception as exc:
+                    raise _fail(task, "reading its window", exc) from exc
+                del pending
+                # The next windows are read while this one is on the GPU.
+                _read_ahead()
+                try:
+                    result = process_chunk(
+                        task,
+                        corrector=corrector,
+                        calibration=calibration,
+                        stacks=stacks,
+                        t_read_s=t_read,
+                    )
+                except Exception as exc:
+                    raise _fail(task, "correcting it", exc) from exc
+                finally:
+                    del stacks
+                gpu_seconds.append(float(result.stats["gpu_s"]))
+                writing.append((task, writer.submit(sink.write, result)))
+                del result
+                _drain_writes(GPU_WRITE_QUEUE)
+            _drain_writes(0)
+        finally:
+            for _, pending_read in reading:
+                pending_read.cancel()
+            readers.shutdown(wait=True, cancel_futures=True)
+            writer.shutdown(wait=True, cancel_futures=True)
+        held_s = time.monotonic() - t_held
+    return _gpu_run_record(
+        locked=lock_path is not None,
+        lock_wait_s=lock_wait_s,
+        held_s=held_s,
+        gpu_seconds=gpu_seconds,
+    )
+
+
+def _gpu_run_record(
+    *,
+    locked: bool,
+    lock_wait_s: float,
+    held_s: float,
+    gpu_seconds: Sequence[float],
+) -> dict[str, Any]:
+    """Build the ``gpu`` entry of the run summary."""
+    per_window = np.asarray(gpu_seconds, float)
+    return {
+        "lock_wait_s": float(lock_wait_s),
+        "locked": bool(locked),
+        "held_s": float(held_s),
+        "gpu_s": float(per_window.sum()),
+        "gpu_s_per_window": {
+            "median": float(np.median(per_window)) if len(per_window) else 0.0,
+            "max": float(per_window.max()) if len(per_window) else 0.0,
+        },
+        "reader_threads": max(1, int(GPU_READER_THREADS)),
+        "queue_windows": max(1, int(GPU_QUEUE_WINDOWS)),
+    }
+
+
 def run_bead_removal(
     *,
     images_dir: str | Path,
@@ -1243,7 +1487,10 @@ def run_bead_removal(
         max_tasks_per_child: Recycle a worker after this many chunks (frees
             fragmented heap; default never).
         progress_every: Log progress with ETA every this many finished chunks.
-        device: Resolved backend. Only ``"cpu"`` exists in this version.
+        device: Resolved backend, ``"cpu"`` (process pool) or ``"cuda"`` (one GPU
+            consumer in this process under the host GPU lock named by
+            ``MERXEN_GPU_LOCK_FILE``; no fill; ``max_workers``, the memory
+            arguments and ``max_tasks_per_child`` do not apply).
 
     Returns:
         Run summary with wall time, CPU time, I/O share, peak memory and the
@@ -1251,19 +1498,26 @@ def run_bead_removal(
 
     Raises:
         ValueError: Invalid ``z_layers``, stains, device or dtype, a parameter-hash
-            mismatch, a fill that does not fit the halo, or a store shape that
-            does not match the region.
+            mismatch, a fill that does not fit the halo (or any fill on the GPU),
+            or a store shape that does not match the region.
+        BeadRemovalBackendError: ``device`` is ``"cuda"`` and the GPU backend
+            cannot be imported.
         FileNotFoundError: A mosaic plane that ``z_layers`` needs does not exist.
         RuntimeError: A chunk failed (the message names it); the store then holds
             only the chunks written so far.
     """
     t_run = time.time()
-    get_window_corrector(device)  # refuses an unknown device before any work
+    # Refuses an unknown device before any work (and loads the GPU backend).
+    corrector = get_window_corrector(device)
     if calibration_dir is None:
         raise ValueError(
             "calibration_dir is required (the workers load the saved calibration)"
         )
     fill_on = fill is not None and fill.enabled
+    if fill_on and device == "cuda":
+        raise ValueError(
+            "the bead-removal fill has no GPU implementation; run it with device cpu"
+        )
     check_fill_support(fill, halo_px)
     work = Path(work_dir)
     work.mkdir(parents=True, exist_ok=True)
@@ -1292,43 +1546,61 @@ def run_bead_removal(
         for i, core in enumerate(cores)
     ]
 
-    window = core_px + 2 * halo_px + ENVELOPE_BLOCK_PX
-    estimate = (
-        rss_per_worker_gb
-        if rss_per_worker_gb is not None
-        else estimate_worker_rss_gb((window, window))
-        + (FILL_EXTRA_RSS_GB if fill_on else 0.0)
-    )
-    memory = (
-        memory_available_gb
-        if memory_available_gb is not None
-        else read_mem_available_gb()
-    )
-    n_workers = resolve_worker_count(
-        max_workers,
-        memory_available_gb=memory,
-        rss_per_worker_gb=estimate,
-        n_tasks=len(tasks),
-    )
-    logger.info(
-        "[BEADS] %d chunks, core %d px, halo %d px, device %s, %d worker(s) "
-        "(requested %d, %.1f GB per worker, %.0f GB available, %d usable CPUs), "
-        "z_layers %s, stains %s, fill %s",
-        len(tasks),
-        core_px,
-        halo_px,
-        device,
-        n_workers,
-        max_workers,
-        estimate,
-        memory,
-        available_cpu_count(),
-        zs,
-        list(stains),
-        f"on ({fill_params_sha256(fill)[:8]})"
-        if fill is not None and fill.enabled
-        else "off",
-    )
+    use_gpu = device == "cuda"
+    if use_gpu:
+        # One consumer in this process; the memory of the readers is bounded by
+        # the read-ahead, not by a worker count.
+        n_workers = 1
+        estimate = memory = 0.0
+        logger.info(
+            "[BEADS] %d chunks, core %d px, halo %d px, device cuda, %d reader "
+            "thread(s), %d window(s) read ahead, z_layers %s, stains %s, fill off",
+            len(tasks),
+            core_px,
+            halo_px,
+            GPU_READER_THREADS,
+            GPU_QUEUE_WINDOWS,
+            zs,
+            list(stains),
+        )
+    else:
+        window = core_px + 2 * halo_px + ENVELOPE_BLOCK_PX
+        estimate = (
+            rss_per_worker_gb
+            if rss_per_worker_gb is not None
+            else estimate_worker_rss_gb((window, window))
+            + (FILL_EXTRA_RSS_GB if fill_on else 0.0)
+        )
+        memory = (
+            memory_available_gb
+            if memory_available_gb is not None
+            else read_mem_available_gb()
+        )
+        n_workers = resolve_worker_count(
+            max_workers,
+            memory_available_gb=memory,
+            rss_per_worker_gb=estimate,
+            n_tasks=len(tasks),
+        )
+        logger.info(
+            "[BEADS] %d chunks, core %d px, halo %d px, device %s, %d worker(s) "
+            "(requested %d, %.1f GB per worker, %.0f GB available, %d usable "
+            "CPUs), z_layers %s, stains %s, fill %s",
+            len(tasks),
+            core_px,
+            halo_px,
+            device,
+            n_workers,
+            max_workers,
+            estimate,
+            memory,
+            available_cpu_count(),
+            zs,
+            list(stains),
+            f"on ({fill_params_sha256(fill)[:8]})"
+            if fill is not None and fill.enabled
+            else "off",
+        )
 
     sink = _ChunkSink(
         store,
@@ -1339,17 +1611,31 @@ def run_bead_removal(
         progress_every,
         region_shape=(region[1] - region[0], region[3] - region[2]),
     )
-    old_env = _set_single_thread_env()
+    # The thread variables are for the pool's children; a GPU run has none.
+    old_env = {} if use_gpu else _set_single_thread_env()
     tree = _TreeSampler()
     tree.start()
+    gpu_record: dict[str, Any] | None = None
     try:
-        if tasks:
+        if tasks and use_gpu:
+            gpu_record = _run_gpu_consumer(
+                tasks,
+                sink,
+                corrector=corrector,
+                calibration=calibration,
+                lock_path=gpu_lock_path_from_env(),
+            )
+        elif tasks:
             _run_pool(
                 tasks,
                 sink,
                 n_workers=n_workers,
                 calibration_dir=cal_dir,
                 max_tasks_per_child=max_tasks_per_child,
+            )
+        elif use_gpu:
+            gpu_record = _gpu_run_record(
+                locked=False, lock_wait_s=0.0, held_s=0.0, gpu_seconds=[]
             )
     finally:
         tree.sample()
@@ -1385,6 +1671,7 @@ def run_bead_removal(
         work_dir=str(work),
         device=device,
         backend=describe_backend(device),
+        gpu=gpu_record,
         chunk_stats=all_stats,
     )
     (work / "run_summary.json").write_text(json.dumps(summary.to_dict(), indent=1))

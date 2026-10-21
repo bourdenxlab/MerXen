@@ -2,20 +2,27 @@
 
 Fast: chunk planning, worker count (affinity, cgroup, DASK_NUM_WORKERS), the
 cgroup readers on fake trees, refusals, the fill support check, the backend
-hook and the store sink. Slow: runs through the process pool (1 vs 2 workers
+hook, the store sink and the GPU consumer (reader threads, writer thread and
+host GPU lock, driven by a numpy stand-in for the GPU correction so that no GPU
+or torch is needed). Slow: runs through the process pool (1 vs 2 workers
 bit-identical, fill on 1 vs 2 workers, a 7-plane mosaic, the core-grid shift).
+The real CUDA path is tested in ``test_bead_driver_gpu.py``.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import fcntl
 import json
 import os
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pytest
+import zarr
 
 from merxen.io.bead_removal import driver
 from merxen.io.bead_removal.calibrate import BeadCalibration
@@ -245,7 +252,7 @@ def test_refusals(mosaic: MosaicFixture, tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="store shape"):
         run(z_layers=ZS, **{**base, "store": one_channel})
     with pytest.raises(ValueError, match="unknown bead-removal device"):
-        run(z_layers=ZS, device="cuda", **base)
+        run(z_layers=ZS, device="tpu", **base)
     with pytest.raises(ValueError, match="calibration_dir is required"):
         run(z_layers=ZS, **{**base, "calibration_dir": None})
     # A calibration made with other parameters is refused before any work.
@@ -404,6 +411,328 @@ def test_a_failing_worker_names_its_chunk(
             rss_per_worker_gb=1.0,
             memory_available_gb=1000.0,
         )
+
+
+# ---------------------------------------------------------------------------
+# the GPU consumer, driven by a numpy stand-in for the GPU correction
+class _StandIn:
+    """A "cuda" window corrector that returns the raw max projection.
+
+    It records its calls and the state of the host GPU lock at each call, and
+    can fail on a chosen chunk, so the consumer's reading, ordering, writing and
+    locking are tested without a GPU.
+    """
+
+    def __init__(
+        self, lock: Path | None = None, fail_on_call: int | None = None
+    ) -> None:
+        self.lock = lock
+        self.fail_on_call = fail_on_call
+        self.cores: list[tuple[int, int, int, int]] = []
+        self.lock_held: list[bool] = []
+        self.threads: set[str] = set()
+
+    def __call__(
+        self,
+        stacks: Any,
+        *,
+        origin_yx: tuple[int, int],
+        calibration: BeadCalibration,
+        z_layers: list[int],
+        params: Any,
+        fill: Any,
+        core: tuple[int, int, int, int],
+    ) -> tuple[dict[str, np.ndarray], BeadModel, dict[str, Any]]:
+        if self.fail_on_call is not None and len(self.cores) == self.fail_on_call:
+            raise ValueError("stand-in failure")
+        self.cores.append(core)
+        self.threads.add(threading.current_thread().name)
+        if self.lock is not None:
+            self.lock_held.append(_lock_is_held(self.lock))
+        y0, y1, x0, x1 = core
+        out = {
+            s: np.max([stacks[s][z][y0:y1, x0:x1] for z in z_layers], axis=0).astype(
+                np.float32
+            )
+            for s in STAINS
+        }
+        return out, BeadModel(empty_sources(), {}, {}, {}, {"status": "ok"}), {}
+
+    def corrector(self) -> driver.WindowCorrector:
+        return driver.WindowCorrector("cuda", self)
+
+
+def _lock_is_held(path: Path) -> bool:
+    """Tell whether another open of the lock file is blocked by a holder."""
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(descriptor)
+
+
+def _run_stand_in(
+    mosaic: MosaicFixture,
+    out: Path,
+    stand_in: _StandIn,
+    monkeypatch: pytest.MonkeyPatch,
+    **kw: Any,
+) -> tuple[np.ndarray, driver.BeadRemovalRunResult]:
+    monkeypatch.setitem(driver._CORRECTORS, "cuda", stand_in.corrector())
+    monkeypatch.setattr(
+        driver,
+        "describe_backend",
+        lambda device: {"device": device, "update_order": "colour"},
+    )
+    return _run(mosaic, out, device="cuda", **kw)
+
+
+def _consumer_threads() -> list[str]:
+    return [
+        t.name
+        for t in threading.enumerate()
+        if t.name.startswith(("bead-read", "bead-write"))
+    ]
+
+
+@pytest.mark.parametrize("reader_threads", [1, 3])
+def test_gpu_consumer_writes_the_projection_whatever_the_reader_threads(
+    mosaic: MosaicFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reader_threads: int,
+) -> None:
+    """Window read, core crop and store order: the stand-in gives the raw max."""
+    _, _, _, stack = mosaic
+    lock = tmp_path / "gpu.lock"
+    monkeypatch.setenv("MERXEN_GPU_LOCK_FILE", str(lock))
+    monkeypatch.setattr(driver, "GPU_READER_THREADS", reader_threads)
+    stand_in = _StandIn(lock)
+    out, run = _run_stand_in(mosaic, tmp_path / "w", stand_in, monkeypatch)
+    for i, stain in enumerate(STAINS):
+        assert np.array_equal(out[i], raw_max(stack, stain, ZS)), stain
+    # Identical window order and store layout: the cores come in task order, as
+    # (y0, y1, x0, x1) inside their windows.
+    expected = []
+    for core in driver.plan_chunks((0, SHAPE[0], 0, SHAPE[1]), core_px=1024):
+        wy0, _, wx0, _ = driver.window_of(core, driver.DEFAULT_HALO_PX)
+        expected.append((core[0] - wy0, core[1] - wy0, core[2] - wx0, core[3] - wx0))
+    assert stand_in.cores == expected
+    assert run.device == "cuda" and run.n_workers == 1 and run.n_chunks == 6
+    assert [s["index"] for s in run.chunk_stats] == list(range(6))
+    assert all(s["device"] == "cuda" and s["gpu_s"] >= 0 for s in run.chunk_stats)
+    assert all(stand_in.lock_held) and len(stand_in.lock_held) == 6
+    assert not _consumer_threads()
+    assert not _lock_is_held(lock)
+    gpu = run.gpu
+    assert gpu is not None
+    assert gpu["locked"] is True and gpu["lock_wait_s"] >= 0
+    assert gpu["reader_threads"] == reader_threads and gpu["queue_windows"] == 2
+    assert gpu["gpu_s"] == pytest.approx(sum(s["gpu_s"] for s in run.chunk_stats))
+    assert gpu["gpu_s_per_window"]["max"] >= gpu["gpu_s_per_window"]["median"] >= 0
+    assert gpu["held_s"] >= 0
+    summary = json.loads((tmp_path / "w" / "work" / "run_summary.json").read_text())
+    assert summary["gpu"]["reader_threads"] == reader_threads
+    assert summary["backend"] == {"device": "cuda", "update_order": "colour"}
+    assert (tmp_path / "w" / "work" / "beads.npy").exists()
+    assert sorted(p.name for p in (tmp_path / "w" / "work").iterdir()) == [
+        "beads.npy",
+        "change_overview.npz",
+        "chunk_stats.jsonl",
+        "run_summary.json",
+    ]
+
+
+def test_the_cpu_summary_has_no_gpu_entry(mosaic: MosaicFixture) -> None:
+    result = driver.BeadRemovalRunResult(
+        n_chunks=1,
+        n_workers=1,
+        wall_s=1.0,
+        worker_cpu_s=1.0,
+        worker_wall_s=1.0,
+        read_s=0.0,
+        correct_s=0.0,
+        project_s=0.0,
+        parent_write_s=0.0,
+        n_beads=0,
+        peak_tree_rss_gb=0.0,
+        peak_tree_anon_gb=0.0,
+        peak_worker_rss_gb=0.0,
+        peak_worker_anon_gb=0.0,
+        work_dir="w",
+    )
+    assert "gpu" not in result.to_dict() and result.gpu is None
+    with_gpu = dataclasses.replace(result, gpu={"lock_wait_s": 0.0})
+    assert with_gpu.to_dict()["gpu"] == {"lock_wait_s": 0.0}
+
+
+def test_gpu_consumer_takes_the_lock_once_for_the_whole_loop(
+    mosaic: MosaicFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock = tmp_path / "locks" / "gpu.lock"
+    monkeypatch.setenv("MERXEN_GPU_LOCK_FILE", str(lock))
+    events: list[str] = []
+    real_lock = driver.gpu_process_lock
+
+    class _Spy:
+        def __init__(self, path: Any) -> None:
+            self._inner = real_lock(path)
+
+        def __enter__(self) -> Any:
+            events.append("enter")
+            return self._inner.__enter__()
+
+        def __exit__(self, *exc: Any) -> Any:
+            events.append("exit")
+            return self._inner.__exit__(*exc)
+
+    monkeypatch.setattr(driver, "gpu_process_lock", _Spy)
+    stand_in = _StandIn(lock)
+    _run_stand_in(mosaic, tmp_path / "w", stand_in, monkeypatch)
+    assert events == ["enter", "exit"]
+    assert len(stand_in.cores) == 6 and all(stand_in.lock_held)
+
+
+def test_gpu_consumer_waits_for_the_host_lock_and_records_the_wait(
+    mosaic: MosaicFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock = tmp_path / "gpu.lock"
+    lock.write_text("")
+    monkeypatch.setenv("MERXEN_GPU_LOCK_FILE", str(lock))
+    holder = os.open(lock, os.O_RDONLY)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    stand_in = _StandIn()
+
+    def release_later() -> None:
+        time.sleep(0.6)
+        fcntl.flock(holder, fcntl.LOCK_UN)
+
+    thread = threading.Thread(target=release_later)
+    thread.start()
+    try:
+        _, run = _run_stand_in(mosaic, tmp_path / "w", stand_in, monkeypatch)
+    finally:
+        thread.join()
+        os.close(holder)
+    assert run.gpu is not None and run.gpu["lock_wait_s"] >= 0.5
+    # Nothing was read or corrected while the lock was not held.
+    assert len(stand_in.cores) == 6
+
+
+def test_gpu_consumer_runs_unlocked_without_a_lock_file(
+    mosaic: MosaicFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("MERXEN_GPU_LOCK_FILE", raising=False)
+    _, run = _run_stand_in(mosaic, tmp_path / "w", _StandIn(), monkeypatch)
+    assert run.gpu is not None
+    assert run.gpu["locked"] is False and run.gpu["lock_wait_s"] < 1.0
+
+
+def test_gpu_consumer_releases_the_lock_when_a_window_fails(
+    mosaic: MosaicFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock = tmp_path / "gpu.lock"
+    monkeypatch.setenv("MERXEN_GPU_LOCK_FILE", str(lock))
+    stand_in = _StandIn(lock, fail_on_call=2)
+    with pytest.raises(RuntimeError, match=r"failed on chunk 2 .*while correcting it"):
+        _run_stand_in(mosaic, tmp_path / "w", stand_in, monkeypatch)
+    assert len(stand_in.cores) == 2
+    assert not _lock_is_held(lock), "the lock must be released after an error"
+    assert not _consumer_threads(), "reader and writer threads must be joined"
+    # The chunks written before the failure are in the store.
+    store = np.asarray(zarr.open_array(str(tmp_path / "w" / "p.zarr"), mode="r")[:])
+    assert store[0, :1024, :1024].any() and not store[0, 1024:, 1024:].any()
+
+
+def test_gpu_consumer_names_a_chunk_that_cannot_be_read(
+    mosaic: MosaicFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock = tmp_path / "gpu.lock"
+    monkeypatch.setenv("MERXEN_GPU_LOCK_FILE", str(lock))
+    real = driver.read_window_stacks
+    calls = {"n": 0}
+
+    def flaky(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise OSError("disk went away")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(driver, "read_window_stacks", flaky)
+    stand_in = _StandIn(lock)
+    with pytest.raises(RuntimeError, match=r"chunk 2 .*while reading its window"):
+        _run_stand_in(mosaic, tmp_path / "w", stand_in, monkeypatch)
+    assert not _lock_is_held(lock) and not _consumer_threads()
+    assert len(stand_in.cores) == 2
+
+
+def test_gpu_consumer_names_a_chunk_that_cannot_be_written(
+    mosaic: MosaicFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock = tmp_path / "gpu.lock"
+    monkeypatch.setenv("MERXEN_GPU_LOCK_FILE", str(lock))
+    real = driver._ChunkSink.write
+    calls = {"n": 0}
+
+    def failing(self: Any, result: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("store is full")
+        real(self, result)
+
+    monkeypatch.setattr(driver._ChunkSink, "write", failing)
+    with pytest.raises(RuntimeError, match=r"chunk \d .*while writing the store"):
+        _run_stand_in(mosaic, tmp_path / "w", _StandIn(lock), monkeypatch)
+    assert not _lock_is_held(lock) and not _consumer_threads()
+
+
+def test_the_fill_is_refused_on_the_gpu(
+    mosaic: MosaicFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stand_in = _StandIn()
+    with pytest.raises(ValueError, match="no GPU implementation"):
+        _run_stand_in(
+            mosaic, tmp_path / "w", stand_in, monkeypatch, fill=FillParams(enabled=True)
+        )
+    assert not stand_in.cores
+    # The corrector itself refuses too, before it loads the GPU backend.
+    with pytest.raises(ValueError, match="no GPU implementation"):
+        driver._cuda_window_fn(
+            {},
+            origin_yx=(0, 0),
+            calibration=real_calibration(),
+            z_layers=[1],
+            params=DEFAULT_PARAMS,
+            fill=FillParams(enabled=True),
+            core=(0, 1, 0, 1),
+        )
+
+
+def test_get_window_corrector_loads_the_gpu_backend_only_for_cuda() -> None:
+    import subprocess
+    import sys
+
+    code = (
+        "import sys\n"
+        "from merxen.io.bead_removal import driver\n"
+        "assert driver.get_window_corrector('cpu') is driver.CPU_CORRECTOR\n"
+        "try:\n"
+        "    driver.get_window_corrector('tpu')\n"
+        "except ValueError:\n"
+        "    pass\n"
+        "assert 'torch' not in sys.modules and 'triton' not in sys.modules\n"
+        "print('ok')\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    assert done.stdout.strip() == "ok"
 
 
 # ---------------------------------------------------------------------------

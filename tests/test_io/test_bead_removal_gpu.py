@@ -9,7 +9,7 @@ window correction with it:
   statistically and never brightens;
 * G3 bitwise determinism, in one process and across two processes;
 * G6 the CUDA driver path writes identical stores whatever the number of reader
-  threads (needs the CUDA consumer of the driver);
+  threads;
 * the lower envelope with invalid pixels, the edge margin measured from invalid
   pixels only, the parameter-hash refusal, the removed Jacobi mode and the
   Triton smoke test.
@@ -325,10 +325,9 @@ def test_g6_identical_stores_for_one_and_two_reader_threads(
 ) -> None:
     from merxen.io.bead_removal import driver
 
-    try:
-        driver.get_window_corrector("cuda")
-    except ValueError:
-        pytest.skip("the driver has no CUDA consumer in this version")
+    # The outer flock of `pytest -m gpu` holds the host lock: run unlocked here
+    # (the lock itself is tested in test_bead_driver_gpu.py).
+    monkeypatch.delenv("MERXEN_GPU_LOCK_FILE", raising=False)
     shape = (1536, 2048)
     st = bs.make_stack(n_planes=4, size=shape, n_beads=70, seed=5, n_nuclei=10)
     images = tmp_path / "images"
@@ -337,15 +336,15 @@ def test_g6_identical_stores_for_one_and_two_reader_threads(
     cal_dir = tmp_path / "cal"
     calibration.save(cal_dir)
     stores = []
-    for n_threads in (1, 2):
-        monkeypatch.setattr(driver, "GPU_READER_THREADS", n_threads, raising=False)
+    for n_threads in (1, 2, 3):
+        monkeypatch.setattr(driver, "GPU_READER_THREADS", n_threads)
         store = open_projection_store(
             tmp_path / f"p{n_threads}.zarr",
             n_channels=2,
             shape=shape,
             chunk_px=1024,
         )
-        driver.run_bead_removal(
+        run = driver.run_bead_removal(
             images_dir=images,
             stains=list(STAINS),
             z_layers=Z,
@@ -356,8 +355,11 @@ def test_g6_identical_stores_for_one_and_two_reader_threads(
             core_px=1024,
             device="cuda",
         )
+        assert run.gpu is not None and run.gpu["reader_threads"] == n_threads
         stores.append(np.asarray(store[:]))
-    assert stores[0].any() and np.array_equal(stores[0], stores[1])
+    assert stores[0].any()
+    assert np.array_equal(stores[0], stores[1])
+    assert np.array_equal(stores[0], stores[2])
 
 
 # ---------------------------------------------------------------------------

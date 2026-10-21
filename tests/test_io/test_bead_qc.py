@@ -407,6 +407,44 @@ def test_beads_chunk_index_and_chunk_rows() -> None:
     assert rows[1]["core_x0"] == 100 and "ring_n" not in rows[1]
 
 
+def test_chunk_rows_gain_the_gpu_seconds_only_for_gpu_runs() -> None:
+    cpu = {"index": 0, "core": [0, 1, 0, 1], "model": {}, "wall_s": 3.0}
+    gpu = {**cpu, "index": 1, "gpu_s": 5.5, "device": "cuda"}
+    assert "gpu_s" not in qc.chunk_rows([cpu], [1])[0]
+    rows = qc.chunk_rows([gpu, gpu], [1])
+    assert [r["gpu_s"] for r in rows] == [5.5, 5.5]
+
+
+def test_the_qc_log_reports_the_gpu_lock_wait_and_seconds(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    summary: dict[str, Any] = {
+        "status": "pass",
+        "warnings": [],
+        "n_chunks": 2,
+        "n_beads_modelled": 10,
+        "beads_per_mm2_a0_400": 1.0,
+        "calibration": {},
+        "residual_ring": {},
+        "gpu": {
+            "lock_wait_s": 12.5,
+            "locked": True,
+            "gpu_s": 11.0,
+            "gpu_s_per_window": {"median": 5.5, "max": 6.0},
+        },
+    }
+    with caplog.at_level(logging.INFO, logger=qc.logger.name):
+        qc._log_summary(summary)
+    text = caplog.text
+    assert "waited 12.5 s for the GPU lock (lock file set)" in text
+    assert "11.0 s of GPU work, 5.5 s per window (median), 6.0 s (max)" in text
+    caplog.clear()
+    del summary["gpu"]
+    with caplog.at_level(logging.INFO, logger=qc.logger.name):
+        qc._log_summary(summary)
+    assert "GPU backend" not in caplog.text
+
+
 def test_beads_table_is_gzipped_and_capped(tmp_path: Path) -> None:
     beads = _table([_row(10.04, 20.06, 1500), _row(30, 40, 100, pruned=1.0)])
     info = qc.write_beads_table(tmp_path / "b.csv.gz", beads, np.array([0, 1]))
@@ -622,6 +660,7 @@ def test_summary_reports_identity_runtime_and_calibration(
     assert summary["runtime_s"]["calibration"] == 12.0
     assert summary["runtime_s"]["chunks"] == pytest.approx(run.wall_s)
     assert summary["n_workers"] == 1 and summary["backend"]["device"] == "cpu"
+    assert "gpu" not in summary, "the GPU record belongs to GPU runs only"
     assert summary["peak_rss_gb"]["worker"] == pytest.approx(run.peak_worker_rss_gb)
     assert summary["beads_per_mm2_a0_400"] >= summary["beads_per_mm2_a0_1600"] > 0
     assert summary["status"] == ("warn" if summary["warnings"] else "pass")

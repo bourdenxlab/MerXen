@@ -661,6 +661,8 @@ def chunk_rows(
             "peak_rss_gb": s.get("peak_rss_gb"),
             "polyt_px_saturated": model.get("n_saturated_px"),
         }
+        if "gpu_s" in s:  # GPU runs only: seconds the window kept the GPU busy
+            row["gpu_s"] = s["gpu_s"]
         for stain, per in s.get("per_stain", {}).items():
             for i, z in enumerate(z_layers):
                 for key in ("frac_gt10", "frac_gt100", "removed_sum", "removed_p99"):
@@ -1665,6 +1667,7 @@ def _summary_record(
         "n_workers": int(run.n_workers),
         "device": run.device,
         "backend": dict(run.backend),
+        **({"gpu": dict(run.gpu)} if run.gpu is not None else {}),
         "peak_rss_gb": {
             "process_tree": float(run.peak_tree_rss_gb),
             "process_tree_anon": float(run.peak_tree_anon_gb),
@@ -1775,6 +1778,17 @@ def _log_summary(summary: Mapping[str, Any]) -> None:
             rescue["rescue_sd1_max"],
             _fmt_frac(rescue.get("sd1_rel_p98_raw")),
             int(rescue["rescue_zprof_zmax"]),
+        )
+    gpu = summary.get("gpu")
+    if gpu:
+        logger.info(
+            "[BEADS] QC GPU backend: waited %.1f s for the GPU lock (%s), %.1f s of "
+            "GPU work, %.1f s per window (median), %.1f s (max)",
+            gpu["lock_wait_s"],
+            "lock file set" if gpu["locked"] else "no lock file",
+            gpu["gpu_s"],
+            gpu["gpu_s_per_window"]["median"],
+            gpu["gpu_s_per_window"]["max"],
         )
     for warning in summary["warnings"]:
         logger.warning(
