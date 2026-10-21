@@ -96,8 +96,8 @@ records that affine; for an older CSV without it, the first 200,000 rows must
 reproduce their stored label from the mask (at least 90% of seeded rows), and
 the record is then written. A mismatch fails the task: move the CSV, masks and
 probabilities aside so Cellpose re-runs and re-seeds. The check rejects the
-stored 2026-09-08 VZG2 CSV under the corrected transform (0% agreement) and
-accepts P1212, P5011, P7113 and P7513 on both platforms (100%).
+stored 2026-09-08 MS2 CSV under the corrected transform (0% agreement) and
+accepts HD2, HD4, HD3 and HD1 on both platforms (100%).
 
 ## Model provenance
 
@@ -318,11 +318,11 @@ not rewritten. Measured on the current source SpatialData (read-only,
 
 | Dataset | Transcripts | Old filter removes | New filter removes |
 |---------|------------:|-------------------:|-------------------:|
-| P7513 Xenium | 18,054,865 | 69,168 (0.38%) | 69,168 (0.38%) |
-| P7513 MERSCOPE | 24,923,743 | 0 | 205,966 (0.83%, 50 `Blank-*`) |
-| VZG2 MERSCOPE (mouse) | 214,805,552 | 0 | 1,114,243 (0.52%, 85 `Blank-*`) |
+| HD1 Xenium | 18,054,865 | 69,168 (0.38%) | 69,168 (0.38%) |
+| HD1 MERSCOPE | 24,923,743 | 0 | 205,966 (0.83%, 50 `Blank-*`) |
+| MS2 MERSCOPE (mouse) | 214,805,552 | 0 | 1,114,243 (0.52%, 85 `Blank-*`) |
 
-On the four human Xenium sections (P7513, P7113, P1212, P5011) the new
+On the four human Xenium sections (HD1, HD3, HD2, HD4) the new
 filter removes exactly the old filter's transcripts: their only control
 types are negative control probes and codewords and unassigned codewords,
 and no feature typed as a gene matches a control-name rule. The change

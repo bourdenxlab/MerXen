@@ -5,6 +5,8 @@ into `main`. This validates optional model selection and the shared production
 tile function. The candidate fixture contains stock weights; it does not
 evaluate a trained model or biological segmentation accuracy.
 
+*Names and paths (2026-10-21).* Under the privacy rule of 2026-10-14 (CLAUDE.md), this record names the sample by its alias (`docs/local-configuration.md`) and host locations by `.env` variables (`$MERXEN_...`); a path that contains the alias names a directory that carries the original name. No number, checksum or verdict changed.
+
 ## Production-context GPU check: passed
 
 The documented fixture helper wrapped Dwight's verified stock `cpsam_v2`
@@ -16,7 +18,7 @@ results. The production Conda environment was reused without modification.
 
 | Setting | Recorded value |
 |---|---|
-| Sample and native image | P7513 Xenium, `morphology_focus` |
+| Sample and native image | HD1 Xenium, `morphology_focus` |
 | Input channels | DAPI, then 18S |
 | Native pixel size | 0.2125 µm on both axes |
 | Model selection | Explicit candidate bundle path, verified stock weights |
@@ -56,7 +58,7 @@ The full report, prediction, identity sidecar, fixture metadata/configuration an
 task logs are preserved on Dwight under:
 
 ```text
-/srv/storage/MerXen/annotation_dev/hitl_acceptance/2026-10-19/hitl1-P7513-t44.BO4r5m/
+$MERXEN_ANNOTATION_DEV_DIR/hitl_acceptance/2026-10-19/hitl1-HD1-t44.BO4r5m/
 ```
 
 The fixture's metadata labels it for plumbing tests only. A tile report is not a
@@ -71,7 +73,7 @@ cover default config equivalence, optional overrides, bundle validation,
 protected paths, complete/interrupted caches and downstream saved-mask identity
 verification.
 
-A separate main-workflow preview used the real P7513 source on Dwight with
+A separate main-workflow preview used the real HD1 source on Dwight with
 `-profile dwight,conda`, no model/override options, and `--stop_stage segment`.
 It exited successfully without creating source zarrs or prediction arrays in
 the isolated arm. The preview log and samplesheet are preserved beside the

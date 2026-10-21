@@ -25,20 +25,20 @@ For the branch-specific shape/table pair selected by Nextflow:
 
 `segmentation_registration_check`
 ([qc/registration.py](../../src/merxen/qc/registration.py)) catches a
-segmentation written to the wrong coordinates, such as the 2026-09-08 VZG2
+segmentation written to the wrong coordinates, such as the 2026-09-08 MS2
 run whose Cellpose / ProSeg cells were offset by (+21.9, +111.8) µm. It runs
 for every branch and uses no labels:
 
 1. Eight 400 µm windows are centred on random cells of the branch.
 2. **Density:** mean transcripts within 4 µm of each centroid, divided by
    the same count at 1000 uniform random points per window. On the stored
-   P1212 and P7513 (both platforms) and VZG2 `original_seg` layers it is
-   1.7–3.1; the misregistered VZG2 branches score 1.04–1.28.
+   HD2 and HD1 (both platforms) and MS2 `original_seg` layers it is
+   1.7–3.1; the misregistered MS2 branches score 1.04–1.28.
 3. **Offset:** the centroid density map is cross-correlated with that of the
    platform's own cells (`merscope_cell_boundaries` / `xenium_cell_boundaries`;
    skipped for `original_seg` itself). The reported shift is platform minus
    branch, median over windows with a clear peak (z ≥ 4), on a 2 µm grid.
-   It is 0 for every registered layer above and (-22, -112) µm for the VZG2
+   It is 0 for every registered layer above and (-22, -112) µm for the MS2
    branches.
 
 The status is `warn` when the density ratio is below 1.5 or the shift is
@@ -139,7 +139,7 @@ Hybrid-only files are emitted only for the `proseg_hybrid` branch.
 | `median_eccentricity` | Close to 1 → cells look elongated/fragmented; usually a segmentation artefact. |
 | `median_area` | Wildly different between platforms → mosaic/pixel transform or `voxel_size` mismatch. |
 | `median_transcripts_per_cell` | Sudden drops between runs → transcript QV filter or panel mismatch. |
-| `registration_status` | `warn` → cells are not on their transcripts; check the mask-to-micron transform (`merscope_transform_path`, VZG2 manifest origin) before using the branch. |
+| `registration_status` | `warn` → cells are not on their transcripts; check the mask-to-micron transform (`merscope_transform_path`, `.vzg2` manifest origin) before using the branch. |
 | `registration_density_ratio` | Near 1 → centroids sit on random tissue rather than cell bodies. |
 | `registration_shift_um` | Above 5 µm → systematic offset against the platform's cells; the per-window `shift_x_um` / `shift_y_um` give its direction. |
 

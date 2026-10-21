@@ -3,6 +3,8 @@
 Production code: `c2ad456`, based on `a9625a9`. This records a stock-model drift
 check; it does not evaluate biological segmentation accuracy or a fine-tune.
 
+*Names and paths (2026-10-21).* Under the privacy rule of 2026-10-14 (CLAUDE.md), this record names the sample by its alias (`docs/local-configuration.md`) and host locations by `.env` variables (`$MERXEN_...`); a path that contains the alias names a directory that carries the original name. No number, checksum or verdict changed.
+
 ## GPU tile check: passed
 
 The optional `workflows/acceptance/hitl0_tile_check.nf` harness ran on Dwight,
@@ -13,7 +15,7 @@ prediction, identity sidecar and report to a separate acceptance directory.
 
 | Setting | Recorded value |
 |---|---|
-| Sample | P7513 Xenium |
+| Sample | HD1 Xenium |
 | Native image | `morphology_focus`, DAPI then 18S |
 | Source | Surviving source zarr used by the published run |
 | Tile | Index 44 of the recorded global grid |
@@ -43,9 +45,9 @@ The published stitching-statistics checksum was also unchanged:
 `bac2a39ebdbd2e374a0db5026f9c1ac51b50c6d27e129cf9475f79f1545666b4`.
 
 The full report and prediction were preserved on Dwight under
-`/srv/storage/MerXen/annotation_dev/hitl_acceptance/2026-10-19/hitl0-P7513-t44-rs5osM/`.
+`$MERXEN_ANNOTATION_DEV_DIR/hitl_acceptance/2026-10-19/hitl0-HD1-t44-rs5osM/`.
 The Nextflow task work directory is
-`/srv/storage/MerXen/tmp/hitl0-acceptance.rs5osM/work/15/529b75*/`.
+`$MERXEN_TASK_TMP_DIR/hitl0-acceptance.rs5osM/work/15/529b75*/`.
 The task work directory is temporary; the numerical record above remains in the
 repository. Reproduction commands are in the
 [testing guide](../hitl/testing-guide.md).
@@ -77,7 +79,7 @@ future container check must validate a refreshed image through Apptainer.
 - Preserve reuse of older stock outputs marked `unverified`; do not require
   their regeneration.
 - Require matching verified provenance for custom-model reuse.
-- Protect `/srv/storage/MerXen/results/` and its symlink aliases from custom-model
+- Protect `$MERXEN_RESULTS_ROOT/` and its symlink aliases from custom-model
   writes; custom arms use separate output directories.
 - Use the passed Conda GPU check for HITL-0 acceptance; defer container
   validation. Complete PR CI and merge before implementing HITL-1 from `main`.
