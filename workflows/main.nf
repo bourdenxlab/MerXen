@@ -383,6 +383,19 @@ def buildConfigForPlatform(row, pairId, platform) {
         )) {
             merscopeOptions.allow_transform_override_mismatch = true
         }
+        // Only set when requested, so default build configs (and their task
+        // hashes) are unchanged.
+        if (merscopeBeadRemovalRequested(row, pairId, params)) {
+            def beadRemoval = [enabled: true]
+            if (boolOrDefault(
+                params.merscope_bead_removal_fill,
+                false,
+                "merscope_bead_removal_fill"
+            )) {
+                beadRemoval.fill = true
+            }
+            merscopeOptions.bead_removal = beadRemoval
+        }
         return [
             dataset_name: "${pairId}_MERSCOPE",
             platform: "MERSCOPE",
@@ -1655,6 +1668,40 @@ def appendRegisterImagesPreflightChecks(errors, settings) {
     }
 }
 
+def appendMerscopeBeadRemovalPreflightChecks(errors, row, settings, params) {
+    // Rows without a MERSCOPE input or build never use the bead config.
+    if (!settings.run_build || !("MERSCOPE" in settings.active_platforms)) {
+        return
+    }
+    if (!merscopeBeadRemovalRequested(row, settings.pair_id, params)) {
+        return
+    }
+    def zRange = parseRange(row.merscope_z_range, 0, 6)
+    if (zRange[0] < 1) {
+        errors << (
+            "merscope_bead_removal needs merscope_z_range to start at plane 1 " +
+            "or later (plane 0 is the bead plane and is read for detection " +
+            "only); got ${zRange[0]}-${zRange[1]}. Use for example 1-6."
+        )
+    }
+    // Plane 7 is allowed here only if the dataset has it. That is checked
+    // against the planes present by the calibration and the projection driver.
+    if (zRange[1] > 7) {
+        errors << (
+            "merscope_bead_removal supports planes up to 7; " +
+            "got ${zRange[0]}-${zRange[1]}."
+        )
+    }
+    def merscopeDir = chooseField(row, ["merscope_dir"])
+    if (merscopeDir && !normalizedPath(merscopeDir).toFile().isDirectory()) {
+        errors << (
+            "merscope_bead_removal needs a raw MERSCOPE input folder with " +
+            "z-plane TIFFs (images/mosaic_<stain>_z<N>.tif); merscope_dir " +
+            "is not a directory: ${merscopeDir}"
+        )
+    }
+}
+
 def appendGastonPreflightChecks(errors, settings, params) {
     if (!(settings.run_gaston && settings.gaston_published_output_mode)) {
         return
@@ -1718,6 +1765,7 @@ def runPreflightChecks(row, settings, params) {
     appendCorticalDepthPreflightChecks(errors, row, settings, params)
     appendSpatialGeneTranscriptPreflightChecks(errors, row, settings, params)
     appendDistanceFromObjectPreflightChecks(errors, row, settings, params)
+    appendMerscopeBeadRemovalPreflightChecks(errors, row, settings, params)
     appendMecrPreflightChecks(errors, settings, params)
     appendMenderPreflightChecks(errors, settings, params)
     appendGastonPreflightChecks(errors, settings, params)
@@ -1760,6 +1808,14 @@ def boolOrDefault(rawValue, defaultValue, label) {
     throw new IllegalArgumentException(
         "Unknown boolean value for ${label}: '${rawValue}'. " +
         "Use true or false."
+    )
+}
+
+def merscopeBeadRemovalRequested(row, pairId, params) {
+    return boolOrDefault(
+        rowFieldOrDefault(row, "merscope_bead_removal", params.merscope_bead_removal),
+        false,
+        "merscope_bead_removal for ${pairId}"
     )
 }
 
@@ -2469,6 +2525,19 @@ def validateMenderParams(params) {
 workflow {
     if (!params.samplesheet) {
         error "Missing required parameter: --samplesheet"
+    }
+
+    // The fill is a global switch and only acts on samples that have bead
+    // removal on, so say once that it is active.
+    if (boolOrDefault(
+        params.merscope_bead_removal_fill,
+        false,
+        "merscope_bead_removal_fill"
+    )) {
+        log.info(
+            "merscope_bead_removal_fill is on: samples with bead removal also " +
+            "get the residual-footprint fill"
+        )
     }
 
     samplesheet_ch = channel

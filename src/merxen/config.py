@@ -10,7 +10,7 @@ import warnings
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -218,6 +218,73 @@ class MemoryConfig(BaseModel):
     transcript_status_every_chunks: int = 5
 
 
+class MerscopeBeadRemovalConfig(BaseModel):
+    """Optional removal of coverslip fiducial beads before the MERSCOPE projection.
+
+    The bead plane (plane 0) is read for detection only; the stains listed in
+    ``stains`` are corrected plane by plane before the max projection. Disabled
+    by default so existing builds are unchanged.
+    """
+
+    # Unknown keys must fail loudly: a misspelt option would otherwise be
+    # silently ignored and the beads would stay in the projection.
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    method: Literal["psf_subtract"] = "psf_subtract"
+    stains: list[str] = Field(default_factory=lambda: ["PolyT", "DAPI"])
+    reference_stain: str = "PolyT"
+    detection_plane: int = 0
+    halo_px: int = 256
+    max_workers: int = 5
+    calibration_tiles: int = 6
+    calibration_tile_px: int = 2048
+    min_offtissue_distance_px: int = 500
+    min_ring_prominence: float = 0.010
+    # Optional inpainting of the residual bead footprint after subtraction.
+    fill: bool = False
+
+    @field_validator("halo_px")
+    @classmethod
+    def _halo_px_is_tile_aligned(cls, value: int) -> int:
+        # The window must contain the whole neighbourhood of every kept pixel,
+        # so a smaller halo makes results depend on chunk boundaries. The 16 px
+        # multiple keeps window origins on the absolute grid the correction
+        # decisions are made on.
+        if value < 256 or value % 16 != 0:
+            raise ValueError(
+                f"halo_px must be >= 256 and a multiple of 16, got {value}."
+            )
+        return value
+
+    @field_validator("max_workers")
+    @classmethod
+    def _max_workers_is_positive(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError(f"max_workers must be >= 1, got {value}.")
+        return value
+
+    @model_validator(mode="after")
+    def _check_consistency(self) -> MerscopeBeadRemovalConfig:
+        if self.reference_stain not in self.stains:
+            raise ValueError(
+                f"reference_stain {self.reference_stain!r} must be one of "
+                f"stains {self.stains}."
+            )
+        # Version 1 detects beads on the bead plane only; other planes are not
+        # validated for detection.
+        if self.detection_plane != 0:
+            raise ValueError(
+                f"detection_plane must be 0 in this version, got "
+                f"{self.detection_plane}."
+            )
+        # The fill is a refinement of the subtraction, so it has nothing to
+        # act on when removal itself is off.
+        if self.fill and not self.enabled:
+            raise ValueError("fill requires enabled=True.")
+        return self
+
+
 class MerscopeBuildConfig(BaseModel):
     """Options for constructing a MERSCOPE SpatialData object."""
 
@@ -227,6 +294,8 @@ class MerscopeBuildConfig(BaseModel):
     # VZG2 only: accept a merscope_transform_path that places the mosaic more
     # than 1 um away from the archive manifest (e.g. a padded bbox_microns).
     allow_transform_override_mismatch: bool = False
+    # None (the default) leaves the build path untouched.
+    bead_removal: MerscopeBeadRemovalConfig | None = None
 
 
 class XeniumBuildConfig(BaseModel):

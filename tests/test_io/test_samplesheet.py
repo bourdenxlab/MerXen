@@ -211,6 +211,41 @@ def test_required_platforms_for_mode_rejects_unknown_mode() -> None:
         required_platforms_for_mode("other")
 
 
+def test_parse_samplesheet_reads_merscope_bead_removal_column(tmp_path: Path) -> None:
+    """The bead-removal column parses true, false and blank (inherit) values."""
+    csv_path = tmp_path / "beads.csv"
+    csv_path.write_text(
+        "pair_id,merscope_bead_removal\nP1,true\nP2,false\nP3,\nP4,Yes\nP5,0\n"
+    )
+
+    pairs = parse_samplesheet(csv_path)
+
+    assert [pair.merscope_bead_removal for pair in pairs] == [
+        True,
+        False,
+        None,
+        True,
+        False,
+    ]
+
+
+def test_parse_samplesheet_defaults_bead_removal_to_none_without_column(
+    tmp_path: Path,
+) -> None:
+    csv_path = tmp_path / "no_beads.csv"
+    csv_path.write_text("pair_id\nP1\n")
+
+    assert parse_samplesheet(csv_path)[0].merscope_bead_removal is None
+
+
+def test_parse_samplesheet_rejects_invalid_bead_removal_value(tmp_path: Path) -> None:
+    csv_path = tmp_path / "bad_beads.csv"
+    csv_path.write_text("pair_id,merscope_bead_removal\nP1,maybe\n")
+
+    with pytest.raises(ValueError, match="Invalid boolean"):
+        parse_samplesheet(csv_path)
+
+
 def test_parse_samplesheet_supports_gaston_row_overrides(tmp_path: Path) -> None:
     """Every GASTON control can be supplied at samplesheet row scope."""
     csv_path = tmp_path / "gaston.csv"
