@@ -23,6 +23,9 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import subprocess
+import sys
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -259,6 +262,59 @@ def test_the_second_lock_holder_waits_for_the_first(
         thread.join()
         os.close(holder)
     assert run.gpu is not None and run.gpu["lock_wait_s"] >= 0.9
+
+
+def _blocked_flock_requests(lock: Path) -> int:
+    """Count the blocked ``flock`` requests on the lock file (``/proc/locks``)."""
+    inode = str(lock.stat().st_ino)
+    count = 0
+    for line in Path("/proc/locks").read_text().splitlines():
+        fields = line.split()
+        if len(fields) >= 7 and fields[1] == "->" and fields[2] == "FLOCK":
+            count += fields[6].rsplit(":", 1)[-1] == inode
+    return count
+
+
+def test_device_auto_runs_its_smoke_test_under_the_lock_without_a_context(
+    cuda: None, lock_file: Path
+) -> None:
+    """Real device resolution: the lock is awaited, the process keeps no context.
+
+    The check runs in a fresh process (this one already has CUDA initialised by
+    the other tests). While another holder keeps the lock, the child must wait
+    inside ``resolve_device`` and neither it nor its smoke-test child may use the
+    GPU; once released it resolves to cuda and has no CUDA context of its own.
+    """
+    code = (
+        "import torch\n"
+        "from merxen.io.bead_removal.backend import resolve_device\n"
+        "device = resolve_device('auto')\n"
+        "print(device, torch.cuda.is_initialized(), flush=True)\n"
+    )
+    lock_file.write_text("")
+    holder = os.open(lock_file, os.O_RDONLY)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    child = subprocess.Popen(
+        [sys.executable, "-c", code],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 120
+        while _blocked_flock_requests(lock_file) == 0:
+            assert child.poll() is None, "it finished without waiting for the lock"
+            assert time.monotonic() < deadline, "it never waited for the lock"
+            time.sleep(0.2)
+        # Waiting: the smoke test has not started, so nothing was printed yet.
+        assert child.poll() is None
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        os.close(holder)
+    stdout, stderr = child.communicate(timeout=300)
+    assert child.returncode == 0, stderr[-2000:]
+    assert stdout.split() == ["cuda", "False"]
+    assert not _lock_is_held(lock_file)
 
 
 def test_b7_builder_runs_the_gpu_path_end_to_end(

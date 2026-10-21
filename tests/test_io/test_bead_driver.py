@@ -620,8 +620,45 @@ def test_gpu_consumer_waits_for_the_host_lock_and_records_the_wait(
         thread.join()
         os.close(holder)
     assert run.gpu is not None and run.gpu["lock_wait_s"] >= 0.5
-    # Nothing was read or corrected while the lock was not held.
     assert len(stand_in.cores) == 6
+
+
+def test_gpu_consumer_reads_ahead_while_it_waits_for_the_lock(
+    mosaic: MosaicFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first windows are read before the lock is granted; nothing is corrected."""
+    lock = tmp_path / "gpu.lock"
+    lock.write_text("")
+    monkeypatch.setenv("MERXEN_GPU_LOCK_FILE", str(lock))
+    reads: list[float] = []
+    real = driver.read_window_stacks
+
+    def recording(*args: Any, **kwargs: Any) -> Any:
+        reads.append(time.monotonic())
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(driver, "read_window_stacks", recording)
+    holder = os.open(lock, os.O_RDONLY)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    stand_in = _StandIn(lock)
+    seen: dict[str, int] = {}
+
+    def release_later() -> None:
+        time.sleep(1.5)
+        seen["reads"] = len(reads)
+        seen["corrected"] = len(stand_in.cores)
+        fcntl.flock(holder, fcntl.LOCK_UN)
+
+    thread = threading.Thread(target=release_later)
+    thread.start()
+    try:
+        _run_stand_in(mosaic, tmp_path / "w", stand_in, monkeypatch)
+    finally:
+        thread.join()
+        os.close(holder)
+    assert seen["reads"] == driver.GPU_QUEUE_WINDOWS
+    assert seen["corrected"] == 0
+    assert len(stand_in.cores) == 6 and all(stand_in.lock_held)
 
 
 def test_gpu_consumer_runs_unlocked_without_a_lock_file(
@@ -639,8 +676,14 @@ def test_gpu_consumer_releases_the_lock_when_a_window_fails(
     lock = tmp_path / "gpu.lock"
     monkeypatch.setenv("MERXEN_GPU_LOCK_FILE", str(lock))
     stand_in = _StandIn(lock, fail_on_call=2)
-    with pytest.raises(RuntimeError, match=r"failed on chunk 2 .*while correcting it"):
+    with pytest.raises(
+        RuntimeError, match=r"failed on chunk 2 .*while correcting it"
+    ) as caught:
         _run_stand_in(mosaic, tmp_path / "w", stand_in, monkeypatch)
+    assert "merscope_bead_removal_device to cpu" in str(caught.value)
+    # The failing window's frames (and GPU tensors) must not outlive the lock.
+    cause = caught.value.__cause__
+    assert isinstance(cause, ValueError) and cause.__traceback__ is None
     assert len(stand_in.cores) == 2
     assert not _lock_is_held(lock), "the lock must be released after an error"
     assert not _consumer_threads(), "reader and writer threads must be joined"
@@ -665,8 +708,11 @@ def test_gpu_consumer_names_a_chunk_that_cannot_be_read(
 
     monkeypatch.setattr(driver, "read_window_stacks", flaky)
     stand_in = _StandIn(lock)
-    with pytest.raises(RuntimeError, match=r"chunk 2 .*while reading its window"):
+    with pytest.raises(
+        RuntimeError, match=r"chunk 2 .*while reading its window"
+    ) as caught:
         _run_stand_in(mosaic, tmp_path / "w", stand_in, monkeypatch)
+    assert "merscope_bead_removal_device" not in str(caught.value)
     assert not _lock_is_held(lock) and not _consumer_threads()
     assert len(stand_in.cores) == 2
 

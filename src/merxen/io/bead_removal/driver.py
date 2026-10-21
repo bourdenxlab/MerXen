@@ -49,7 +49,11 @@ import numpy as np
 
 from merxen.gpu_lock import gpu_lock_path_from_env, gpu_process_lock
 from merxen.io.bead_removal.apply import SPECTRAL_STAIN, correct_window
-from merxen.io.bead_removal.backend import backend_record, load_gpu_backend
+from merxen.io.bead_removal.backend import (
+    DEVICE_REMEDY,
+    backend_record,
+    load_gpu_backend,
+)
 from merxen.io.bead_removal.calibrate import BeadCalibration
 from merxen.io.bead_removal.fill import FillParams, fill_params_sha256, support_px
 from merxen.io.bead_removal.model import beads_table
@@ -1298,10 +1302,11 @@ def _run_gpu_consumer(
     The host GPU lock is taken once, here, for the whole window loop (and not
     before: the calibration and the earlier part of the build do not hold the
     GPU). Reader threads read up to ``GPU_QUEUE_WINDOWS`` windows ahead of the
-    one on the GPU, and one writer thread stores the finished chunks, so reading
-    and writing overlap the GPU work. The consumer takes the windows in task
-    order and the writer stores them in that order, so the result does not
-    depend on the number of reader threads.
+    one on the GPU, starting before the lock is awaited so that the GPU does not
+    idle during the first read, and one writer thread stores the finished
+    chunks, so reading and writing overlap the GPU work. The consumer takes the
+    windows in task order and the writer stores them in that order, so the
+    result does not depend on the number of reader threads.
 
     Args:
         tasks: The chunks, in task order.
@@ -1321,48 +1326,60 @@ def _run_gpu_consumer(
     read_ahead = max(1, int(GPU_QUEUE_WINDOWS))
     threads = max(1, int(GPU_READER_THREADS))
     t_wait = time.monotonic()
-    with gpu_process_lock(lock_path):
-        t_held = time.monotonic()
-        lock_wait_s = t_held - t_wait
-        readers = cf.ThreadPoolExecutor(
-            max_workers=threads, thread_name_prefix="bead-read"
+    readers = cf.ThreadPoolExecutor(max_workers=threads, thread_name_prefix="bead-read")
+    writer = cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="bead-write")
+    reading: deque[tuple[ChunkTask, cf.Future[Any]]] = deque()
+    writing: deque[tuple[ChunkTask, cf.Future[None]]] = deque()
+    submitted = 0
+    gpu_seconds: list[float] = []
+    lock_wait_s = held_s = 0.0
+
+    def _read_ahead() -> None:
+        nonlocal submitted
+        while submitted < len(tasks) and len(reading) < read_ahead:
+            ahead = tasks[submitted]
+            reading.append((ahead, readers.submit(_read_window_job, ahead, need)))
+            submitted += 1
+
+    def _fail(task: ChunkTask, step: str, exc: BaseException) -> RuntimeError:
+        logger.error(
+            "[BEADS] chunk %d (core %s) failed while %s: %r",
+            task.index,
+            task.core,
+            step,
+            exc,
+            exc_info=exc,
         )
-        writer = cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="bead-write")
-        reading: deque[tuple[ChunkTask, cf.Future[Any]]] = deque()
-        writing: deque[tuple[ChunkTask, cf.Future[None]]] = deque()
-        submitted = 0
-        gpu_seconds: list[float] = []
+        # The traceback keeps the failing window's frames, and with them its GPU
+        # tensors, alive until the process ends: drop it (it is logged above) so
+        # the lock release can hand the GPU memory back before the next holder.
+        exc.__traceback__ = None
+        hint = (
+            f" {DEVICE_REMEDY} if the GPU ran out of memory or a kernel failed."
+            if step == "correcting it"
+            else ""
+        )
+        return RuntimeError(
+            f"bead removal failed on chunk {task.index} (core {task.core}) "
+            f"while {step}: {exc!r}.{hint}"
+        )
 
-        def _read_ahead() -> None:
-            nonlocal submitted
-            while submitted < len(tasks) and len(reading) < read_ahead:
-                ahead = tasks[submitted]
-                reading.append((ahead, readers.submit(_read_window_job, ahead, need)))
-                submitted += 1
+    def _drain_writes(limit: int) -> None:
+        while len(writing) > limit:
+            done_task, done = writing.popleft()
+            try:
+                done.result()
+            except Exception as exc:
+                raise _fail(done_task, "writing the store", exc) from exc
 
-        def _fail(task: ChunkTask, step: str, exc: BaseException) -> RuntimeError:
-            logger.error(
-                "[BEADS] chunk %d (core %s) failed while %s: %r",
-                task.index,
-                task.core,
-                step,
-                exc,
-            )
-            return RuntimeError(
-                f"bead removal failed on chunk {task.index} (core {task.core}) "
-                f"while {step}: {exc!r}"
-            )
-
-        def _drain_writes(limit: int) -> None:
-            while len(writing) > limit:
-                done_task, done = writing.popleft()
-                try:
-                    done.result()
-                except Exception as exc:
-                    raise _fail(done_task, "writing the store", exc) from exc
-
-        try:
-            _read_ahead()
+    try:
+        # The first windows are read while the lock is awaited, so the GPU does
+        # not sit idle during the first read once the lock is granted. The
+        # host memory bound is the same as in the loop (GPU_QUEUE_WINDOWS).
+        _read_ahead()
+        with gpu_process_lock(lock_path):
+            t_held = time.monotonic()
+            lock_wait_s = t_held - t_wait
             while reading:
                 task, pending = reading.popleft()
                 try:
@@ -1389,12 +1406,12 @@ def _run_gpu_consumer(
                 del result
                 _drain_writes(GPU_WRITE_QUEUE)
             _drain_writes(0)
-        finally:
-            for _, pending_read in reading:
-                pending_read.cancel()
-            readers.shutdown(wait=True, cancel_futures=True)
-            writer.shutdown(wait=True, cancel_futures=True)
-        held_s = time.monotonic() - t_held
+            held_s = time.monotonic() - t_held
+    finally:
+        for _, pending_read in reading:
+            pending_read.cancel()
+        readers.shutdown(wait=True, cancel_futures=True)
+        writer.shutdown(wait=True, cancel_futures=True)
     return _gpu_run_record(
         locked=lock_path is not None,
         lock_wait_s=lock_wait_s,
