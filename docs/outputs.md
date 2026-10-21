@@ -106,9 +106,11 @@ When bead removal is on (`merscope_bead_removal`), the zarr also contains
 | `bead_removal_qc/beads.csv.gz`, `chunks.csv` | Per-bead and per-chunk tables. |
 
 Reading guide: [stages/spatialdata-build.md](stages/spatialdata-build.md#the-qc-folder).
-With bead removal on, segmentation also publishes `image_preprocessing.json`
-(cell masks) and `nuclei_image_preprocessing.json` (nuclei masks) next to the
-masks it writes, recording which image they were computed from.
+Segmentation also writes `image_preprocessing.json` (cell masks) and
+`nuclei_image_preprocessing.json` (nuclei masks) next to the persistent masks on
+every run (the recorded identity is `null` with bead removal off), recording
+which image the masks were computed from. They are not published through
+`publishDir`; see [Segmentation](#segmentation).
 
 ### Latest SpatialData
 
@@ -116,7 +118,7 @@ Path: `${outdir}/<pair_id>/<platform>/latest/`
 
 | File | Contents |
 |------|----------|
-| `latest_spatialdata.zarr` | Durable current SpatialData artifact. Segmentation writes the refined ProSeg result here, then enrichment updates it in place with additive shapes, images, and tables. This is the primary downstream input. |
+| `latest_spatialdata.zarr` | Durable current SpatialData artifact. Segmentation writes the refined ProSeg result here, then enrichment updates it in place with additive shapes, images, and tables. This is the primary downstream input. Its root also holds `segmentation_image_preprocessing.json`, the bead-removal identity of the image its prior masks (and so its cells) came from; it is checked before the store is reused or enriched. |
 
 #### SpatialData identifier contract
 

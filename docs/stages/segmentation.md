@@ -108,9 +108,22 @@ mask has a sidecar next to it, `image_preprocessing.json` for cell masks and
 Masks are reused only when the sidecar matches the source's record, in the
 Cellpose and nuclei tasks and in the one-process `merxen segment` shortcut that
 reuses every output at once. A mismatch, an unreadable sidecar, or masks without
-a sidecar next to a corrected source stops the run; move the outputs aside or
-use a new `--outdir`. Without bead removal nothing changes: masks without a
-sidecar are reused as before. The check runs after the model-identity check of
+a sidecar next to a corrected source stops the run; move the outputs aside
+(`segmentation/` and `latest/`, see below) and recompute the masks with
+`merxen cellpose-segment --force-rerun` (CLI) or a new `--outdir` (Nextflow, which
+has no per-step force flag). Without bead removal nothing changes: masks without
+a sidecar are reused as before.
+
+The ProSeg output is built from the masks as a prior, so it carries the same
+record: ProSeg writes `segmentation_image_preprocessing.json` into the root of
+the raw and the latest zarr (it follows the store through staging and contract
+upgrades). A persistent latest zarr (or a resumed raw output) is reused, and
+enrichment runs on it, only when that record equals the source's. A latest zarr
+without the file next to a corrected source (built before the correction, or
+before this record existed) stops the run too, with the remedy: move `latest/`
+aside, or run with `--force_proseg_rerun true` (`merxen segment --force-rerun`
+on the CLI) so that it is rebuilt from the current masks. Moving only the masks
+aside is not enough. The check runs after the model-identity check of
 [Model provenance](#model-provenance), so custom-model arms keep their own
 guard and gain this one.
 
@@ -392,7 +405,7 @@ output tree):
 | `cellpose_nuclei_masks_tiled.npy` | Cleaned DAPI-only nuclei labels, consumed by enrichment and transcript spatial analysis. |
 | `cellpose_stitching_stats.json` | Tile stitching diagnostics: accepted labels, duplicates, conflicts, edge-touching labels, and thresholds. |
 | `cellpose_nuclei_stitching_stats.json` | Equivalent tile-stitching diagnostics for nuclei. |
-| `image_preprocessing.json`, `nuclei_image_preprocessing.json` | Bead-removal identity of the image the cell and nuclei masks were computed from (with bead removal on, or `null`). Checked before the masks are reused. |
+| `image_preprocessing.json`, `nuclei_image_preprocessing.json` | Bead-removal identity of the image the cell and nuclei masks were computed from (`null` with bead removal off). Written next to the persistent masks on every run (not a declared task output) and checked before the masks are reused. |
 | `transcripts_for_proseg.csv` | The transcript CSV fed into ProSeg. Retained for debugging. |
 | `transcripts_for_proseg.transforms.json` | Pixel-to-micron affine that seeded the CSV; checked before the CSV is reused. |
 | `cellpose_transforms.json` | Pixel-to-micron affine terms used by the ProSeg process. |

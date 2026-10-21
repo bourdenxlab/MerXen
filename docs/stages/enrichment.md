@@ -118,5 +118,11 @@ enrichment so all tables share a column order.
 - **`No points found`** — the transcripts table is missing from the
   SpatialData zarr; this can happen if the stage-1 build excluded
   transcripts.
+- **`... was computed from an image with bead removal ...` or `... predates the
+  correction`.** The latest zarr's `segmentation_image_preprocessing.json` does
+  not match the source SpatialData's bead-removal record (or is missing next to
+  a bead-corrected source), so its cells came from another image. Move
+  `latest/` aside or run segmentation with `--force_proseg_rerun true`; see
+  [segmentation](segmentation.md).
 - **Conflicts on re-runs.** When re-running with edits, rely on
   `--force-rerun` so additive layers can be replaced element by element.

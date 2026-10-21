@@ -270,8 +270,10 @@ fully clean.
   stops with an error instead of reusing it; rebuild with this flag (and
   `merscope_dir`) to change the setting. The rebuild deletes the old zarr first,
   so a failed bead build (for example, no beads found) leaves no cache. Cellpose
-  masks computed from the other image are also refused: move them aside or use
-  a new `--outdir`. See
+  masks computed from the other image, and the ProSeg latest zarr built from
+  them, are also refused: move `segmentation/` and `latest/` aside, or use a new
+  `--outdir` (Nextflow has no per-step force flag), and add
+  `--force_proseg_rerun true` to rebuild the ProSeg base. See
   [bead removal caching](stages/spatialdata-build.md#caching-and-how-to-rebuild).
 - `--force_proseg_rerun true` — ignore persistent ProSeg latest zarrs and
   rebuild them from the current Cellpose masks and transcript exports. With

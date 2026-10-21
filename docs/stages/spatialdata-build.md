@@ -324,12 +324,16 @@ To change the setting of a sample that has a cached zarr:
    identity of the image they came from. A mask is reused only when its sidecar
    equals the source zarr's record. A mismatch, an unreadable sidecar, or masks
    without a sidecar next to a bead-corrected source stops the run with an
-   error. Move the segmentation outputs aside or use a new `--outdir`, or run
-   the step with `--force-rerun`, so the masks are recomputed. Persistent
-   ProSeg bases are rebuilt from the new masks with
-   `--force_proseg_rerun true` ([segmentation.md](segmentation.md)).
-4. Enrichment copies `merxen_image_preprocessing` onto the latest zarr, and
-   mask image quantification records it in its table (see
+   error. Move the segmentation outputs aside (the `segmentation/` and the
+   `latest/` folders) and recompute the masks with `merxen cellpose-segment
+   --force-rerun` (CLI) or a new `--outdir` (Nextflow has no per-step force
+   flag). The persistent ProSeg latest zarr is checked the same way (its root
+   holds `segmentation_image_preprocessing.json`): it is not reused for masks of
+   another image, and `--force_proseg_rerun true` rebuilds it from the new
+   masks ([segmentation.md](segmentation.md)).
+4. Enrichment refuses a latest zarr whose record differs from the source's, then
+   copies `merxen_image_preprocessing` onto it (also when the store is already
+   enriched), and mask image quantification records it in its table (see
    [Downstream](#downstream-and-what-not-to-pool)).
 
 ### The QC folder

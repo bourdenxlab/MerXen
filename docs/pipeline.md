@@ -210,7 +210,8 @@ Two independent reuse paths and one Nextflow cache:
   (root attribute `merxen_image_preprocessing`); a cache that disagrees with the
   requested `merscope_bead_removal` or `merscope_bead_removal_fill` setting is
   refused with an error rather than reused, and Cellpose masks computed from
-  the other image are refused through a sidecar next to the masks. See
+  the other image, and the ProSeg latest zarr built from them, are refused through
+  sidecars next to the masks and in the latest zarr root. See
   [bead removal caching](stages/spatialdata-build.md#caching-and-how-to-rebuild).
 - **Published-output stage starts.** `--start_stage`, `--stop_stage`, and
   `--only_stage` select a contiguous process range without invoking earlier
