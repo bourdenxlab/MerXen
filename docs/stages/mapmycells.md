@@ -28,7 +28,7 @@ For each platform in a pair:
    their paths and SHA-256 digests (`extended_json_sha256`, `log_sha256`,
    `stdout_log_sha256`, `stderr_log_sha256`) and keeps only the short command
    JSON as `command_json_text`. Annotated H5ADs written before this change
-   still embed these files as `*_text` entries. For the P7513 MERSCOPE
+   still embed these files as `*_text` entries. For the HD1 MERSCOPE
    section, the embedded extended JSON was about 258 MB of a 652 MB file.
 
 Set `--mapmycells_plots_only true` to regenerate the annotated H5AD and plots
@@ -75,7 +75,7 @@ MERSCOPE panel genes LIF, LIFR, SQSTM1 and H2AX, whose IDs are blank in the
 MERSCOPE `var`, map to `ENSG00000128342`, `ENSG00000113594`,
 `ENSG00000161011` and `ENSG00000188486`. The last is the ID Xenium carries for
 H2AFX (the previous symbol of H2AX), so the pair shares 297 panel IDs instead
-of 296 (checked on P7513 `proseg_hybrid`). Set
+of 296 (checked on HD1 `proseg_hybrid`). Set
 `--annotation_gene_id_fallback_csv null` to disable it.
 
 Every prepared query writes `<sample_id>_mapmycells_query_gene_ids.json`,
@@ -91,7 +91,7 @@ whether the fallback table was used. Unresolved features are also logged as a
 warning. The pair manifest repeats these per sample under
 `gene_id_resolution`. Its `recovered_gene_ids_in_other_samples` field lists,
 for every recovered gene, the other samples that carry the same ID and the
-symbol they use for it (for example `{"H2AX": {"P7513_XENIUM": "H2AFX"}}`);
+symbol they use for it (for example `{"H2AX": {"HD1_XENIUM": "H2AFX"}}`);
 an empty mapping means the gene is specific to that platform's panel.
 
 The default `mapmycells_bootstrap_factor` is `0.9` because these data are
