@@ -365,7 +365,7 @@ def test_enrich_single_latest_adds_missing_nuclei_without_rebuilding_tables(
     )
 
     cfg = EnrichmentConfig(
-        dataset_name="P7513_IF_MERSCOPE",
+        dataset_name="HD1_IF_MERSCOPE",
         platform="MERSCOPE",
         latest_zarr_path=latest,
         mask_path=mask,

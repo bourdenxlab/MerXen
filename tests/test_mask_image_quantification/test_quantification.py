@@ -153,7 +153,7 @@ def test_private_viewer_pyramids_are_excluded_from_quantification() -> None:
         }
     )
 
-    result = build_mask_image_quantification_table(sdata, mask, "P7113_XENIUM")
+    result = build_mask_image_quantification_table(sdata, mask, "HD3_XENIUM")
 
     assert result.table.n_vars == len(IMAGE_QUANTIFICATION_STATS)
     assert result.table.var["image_key"].unique().tolist() == ["morphology_focus"]

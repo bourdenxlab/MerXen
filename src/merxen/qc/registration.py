@@ -72,7 +72,7 @@ class RegistrationCheckParams:
         min_centroids: Minimum number of centroids inside the windows.
         exclude_control_features: Drop blank / negative-control probes before
             counting. Off by default: they are under 1% of transcripts and
-            spread evenly, so they do not move the ratio (VZG2: identical to
+            spread evenly, so they do not move the ratio (MS2: identical to
             two decimals), while reading every feature name slows the points
             pass by about 1.7x.
         seed: Seed for window and random-point sampling.

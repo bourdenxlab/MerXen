@@ -419,7 +419,7 @@ class ImageRegistrationConfig(BaseModel):
     registration_pixel_size_um: float = Field(default=0.85, gt=0.0)
     refinement_window_um: float = Field(default=200.0, gt=0.0)
     min_refinement_windows: int = Field(default=20, ge=3)
-    # P7513 sweep: shifts up to 80 um were measured to within 0.2 um, so 50 um
+    # HD1 sweep: shifts up to 80 um were measured to within 0.2 um, so 50 um
     # leaves headroom while rejecting fits beyond a quarter of the window.
     max_refinement_shift_um: float = Field(default=50.0, gt=0.0)
     max_refinement_rotation_deg: float = Field(default=2.0, gt=0.0)
