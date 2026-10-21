@@ -643,6 +643,7 @@ def _bead_fill_params(config: MerscopeBeadRemovalConfig) -> FillParams | None:
         return None
     return FillParams(
         enabled=True,
+        mode=config.fill_mode,
         stains=(config.reference_stain,),
         reference_stain=config.reference_stain,
     )

@@ -1655,7 +1655,7 @@ def run_bead_removal(
             available_cpu_count(),
             zs,
             list(stains),
-            f"on ({fill_params_sha256(fill)[:8]})"
+            f"on, {fill.mode} mode ({fill_params_sha256(fill)[:8]})"
             if fill is not None and fill.enabled
             else "off",
         )

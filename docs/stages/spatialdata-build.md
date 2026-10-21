@@ -270,6 +270,7 @@ settings for Python callers and tests. Unknown keys are rejected.
 | `min_offtissue_distance_px` | `500` | Minimum distance of a calibration tile from tissue. |
 | `min_ring_prominence` | `0.010` | Gate on the plane-1 ring that decides whether a tile has beads. |
 | `fill` | `false` | The experimental fill below. Requires `enabled`. |
+| `fill_mode` | `flat` | `flat` or `hybrid` (see [hybrid mode](#hybrid-fill-mode-merscope_bead_removal_fill_mode)). Requires `fill`. |
 | `device` | `cpu` | `cpu`, `cuda` or `auto`: the device that runs the correction ([GPU backend](#gpu-backend-optional)). The fill forces `cpu`. The device is not part of the parameter hash. |
 
 ### Experimental fill (`merscope_bead_removal_fill`)
@@ -292,6 +293,23 @@ halo, so they exceed the pixels of the output by about 1.3 times (the
 `fill_guard` ratio is not affected). The cache guard treats the fill like the switch itself (see
 below).
 
+#### Hybrid fill mode (`merscope_bead_removal_fill_mode`)
+
+`--merscope_bead_removal_fill_mode hybrid` (default `flat`; only used with
+`--merscope_bead_removal_fill true`) switches the fill to the original, more
+aggressive behaviour: it fills wherever the bead model's own uncertainty
+(`eps` x the subtracted model light) exceeds the local texture sd of the
+corrected plane, **also in tissue**, so it can dim tissue puncta close to a
+bead. There is no flatness gate, no noise deadband, no bright-source restriction
+and no dense-coating skip. The bound is the same as in `flat` mode: the result is
+never brighter than the subtraction and never more than `eps` (0.3) x the model
+light lower. The texture sd is the robust sd of the high-passed plane in 32 px
+blocks aligned to the absolute mosaic grid, so it does not depend on the chunk
+cut. Like the flat fill it runs on the CPU only. The mode is recorded in the
+`mode` key of the fill block of the provenance record (absent means `flat`), is
+part of the fill parameter hash, and changing it makes a cached zarr unusable
+(see below).
+
 ### Caching and how to rebuild
 
 Every raw-TIFF MERSCOPE build records what was done in the root attribute
@@ -308,6 +326,7 @@ A cached zarr is **never** reused for a request that disagrees with its record:
 | bead removal on | bead removal off | `ValueError`, no reuse |
 | bead removal off or built before the record | bead removal on | `ValueError`, no reuse |
 | bead removal on, fill on | fill off (or the reverse) | `ValueError`, no reuse |
+| bead removal on, fill on, mode `flat` | fill mode `hybrid` (or the reverse) | `ValueError`, no reuse |
 | same switch and fill, but another z range, version, parameter hash or device | same | reused with a `WARNING` that names the difference |
 
 The same rules apply when the build stage is skipped (`--start_stage` or
@@ -315,7 +334,7 @@ The same rules apply when the build stage is skipped (`--start_stage` or
 `source_spatialdata.zarr`, and the preflight compares its record with the
 requested `merscope_bead_removal` and `merscope_bead_removal_fill` in Groovy
 before any task starts. A mismatch (the zarr has bead removal on and off is
-requested, the reverse, or the fills differ) stops the run with the remedy
+requested, the reverse, or the fills or fill modes differ) stops the run with the remedy
 below; a row is never run silently on the other image.
 
 To change the setting of a sample that has a cached zarr:

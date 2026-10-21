@@ -41,6 +41,17 @@ Guarantees (all covered by tests):
 The interpolation is a normalised-convolution cascade from coarse to fine levels
 with fixed Gaussian supports; a hole that is larger than the coarsest support is
 left unchanged (never invented).
+
+Hybrid mode (``FillParams.mode == "hybrid"``) is the original, more aggressive
+behaviour of the method, offered as an option. It fills wherever the model's own
+uncertainty ``eps x light`` exceeds ``gate x`` the local texture sd of the
+corrected plane (robust sd of the high-passed plane in blocks aligned to the
+absolute mosaic grid), also in tissue. There is no flatness gate, no noise
+deadband (hard one-sided clip), no bright-source restriction and no dense-coating
+skip, so tissue puncta next to a bead can be dimmed. The bound is unchanged: the
+result is never brighter than the subtraction result and never lower than
+``corrected - eps x model light`` (max-filtered over the mask dilation). The
+texture map adds to the support (see :func:`support_px`).
 """
 
 from __future__ import annotations
@@ -51,7 +62,7 @@ import json
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from scipy import ndimage as ndi
@@ -76,6 +87,14 @@ COVER_BLOCKS = 33
 # A block takes part in the flatness test if at least this fraction of its
 # pixels is known.
 MIN_KNOWN_BLOCK = 0.25
+# FillParams fields that only the hybrid mode reads (not hashed in flat mode).
+_HYBRID_ONLY_FIELDS = (
+    "mode",
+    "texture_block",
+    "texture_hp_sigma",
+    "texture_smooth",
+    "texture_radius_blocks",
+)
 _SQUARE = ndi.generate_binary_structure(2, 2)
 _CROSS = ndi.generate_binary_structure(2, 1)
 
@@ -148,6 +167,31 @@ class FillParams:
         tau: Known-weight fraction at which a level is trusted completely.
         smooth: Gaussian sigma (px) of the final smoothing inside the mask
             (0 = off).
+        mode: ``"flat"`` (default) acts on flat background only, as described
+            above. ``"hybrid"`` is the original behaviour: it fills where
+            ``eps x light > gate x max(texture sd, noise floor)`` in tissue as
+            well, and may dim tissue puncta close to a bead. In hybrid mode
+            ``flat_max``, ``deadband``, ``peak_snr``, ``bright_reach_px`` and
+            ``max_cover`` are ignored; the effective values are no flatness gate,
+            a hard one-sided clip (deadband 0), no bright-source restriction
+            (peak_snr 0) and no dense-coating skip (max_cover 1.0). The fill
+            cascade, the dilation and the bound ``removal <= eps x light`` are
+            the same.
+        texture_block: Hybrid only. Side (px) of the blocks of the texture map;
+            the blocks are aligned to the absolute mosaic grid, so the result does
+            not depend on how the mosaic is cut into windows.
+        texture_hp_sigma: Hybrid only. Gaussian sigma (px) of the high-pass
+            (``plane - gaussian(plane)``, computed over valid pixels only) whose
+            robust (MAD) sd per block is the texture sd.
+        texture_smooth: Hybrid only. Gaussian sigma (in blocks) with which the
+            per-block sd is smoothed.
+        texture_radius_blocks: Hybrid only. Radius (blocks) at which the
+            smoothing kernel is truncated. The original smoothing (sigma 1 block,
+            scipy's default truncation at 4 sigma) reaches 4 blocks = 128 px; with
+            the 24 px high-pass and the 144 px coarse path the total support
+            would be 328 px, over ``MAX_SUPPORT_PX``. Truncated at 1 block (kernel
+            0.27, 0.45, 0.27) the total is 232 px, so this is the default. A
+            larger radius is refused when the support no longer fits.
 
     Raises:
         ValueError: A field is out of range, ``stains`` is not
@@ -172,6 +216,11 @@ class FillParams:
     coarse_sigmas: tuple[float, ...] = (1.0, 2.0, 4.0)
     tau: float = 0.5
     smooth: float = 1.5
+    mode: Literal["flat", "hybrid"] = "flat"
+    texture_block: int = 32
+    texture_hp_sigma: float = 6.0
+    texture_smooth: float = 1.0
+    texture_radius_blocks: int = 1
 
     def __post_init__(self) -> None:
         """Validate the settings (see the class docstring for the rules)."""
@@ -201,6 +250,18 @@ class FillParams:
                 f"bright_reach_px must be in [1, {MAX_REACH_PX}]; "
                 f"got {self.bright_reach_px}"
             )
+        if self.mode not in ("flat", "hybrid"):
+            raise ValueError(f"mode must be 'flat' or 'hybrid'; got {self.mode!r}")
+        if (
+            self.texture_block < 1
+            or self.texture_hp_sigma <= 0
+            or self.texture_smooth <= 0
+            or self.texture_radius_blocks < 0
+        ):
+            raise ValueError(
+                "texture_block must be >= 1, texture_hp_sigma and texture_smooth "
+                "> 0 and texture_radius_blocks >= 0"
+            )
         total = support_px(self)["total"]
         if total > MAX_SUPPORT_PX:
             # Chunk invariance needs support <= halo - 2; refuse the setting
@@ -218,15 +279,61 @@ def fill_params_sha256(params: FillParams) -> str:
         params: The fill parameters.
 
     Returns:
-        Hex SHA-256 of the sorted-key JSON dump of the dataclass.
+        Hex SHA-256 of the sorted-key JSON dump of the dataclass. The fields that
+        only hybrid mode reads (``_HYBRID_ONLY_FIELDS``) are left out in flat
+        mode, so the hash of a flat configuration is the one it had before the
+        hybrid mode existed.
     """
-    payload = json.dumps(dataclasses.asdict(params), sort_keys=True)
+    fields = dataclasses.asdict(params)
+    if params.mode == "flat":
+        for name in _HYBRID_ONLY_FIELDS:
+            del fields[name]
+    payload = json.dumps(fields, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def _gauss_radius(sigma: float) -> int:
     """Radius (px) of a Gaussian filter with scipy's default truncation."""
     return int(4.0 * sigma + 0.5)
+
+
+def _effective_gates(params: FillParams) -> tuple[float, float, float]:
+    """Return the (peak_snr, max_cover, deadband) in force for the mode.
+
+    Hybrid mode switches the bright-source restriction, the dense-coating skip and
+    the noise deadband off whatever the fields say; flat mode uses the fields.
+    """
+    if params.mode == "hybrid":
+        return 0.0, 1.0, 0.0
+    return params.peak_snr, params.max_cover, params.deadband
+
+
+def _effective_params(params: FillParams) -> FillParams:
+    """Return ``params`` with the mode's effective gates (see ``_effective_gates``).
+
+    Flat mode returns the object itself, so its processing is untouched.
+    """
+    if params.mode == "flat":
+        return params
+    peak_snr, max_cover, deadband = _effective_gates(params)
+    return dataclasses.replace(
+        params, peak_snr=peak_snr, max_cover=max_cover, deadband=deadband
+    )
+
+
+def _texture_reach_px(params: FillParams) -> int:
+    """Reach (px) of the candidate set of hybrid mode through the texture map.
+
+    A pixel's texture sd is the smoothed sd of the blocks within
+    ``texture_radius_blocks`` blocks of its own block (at most ``texture_block - 1``
+    px away from the pixel at the block edge), and each block sd reads the
+    high-passed plane over the block, which reads the plane one high-pass radius
+    further.
+    """
+    return (
+        _gauss_radius(params.texture_hp_sigma)
+        + (params.texture_radius_blocks + 1) * params.texture_block
+    )
 
 
 def support_px(params: FillParams) -> dict[str, int]:
@@ -240,18 +347,25 @@ def support_px(params: FillParams) -> dict[str, int]:
     Returns:
         Dict with the support (px) of the fine path ("fine": mask dilation, fine
         fill levels, final smoothing), of the candidate-coverage test ("cover",
-        added to "fine"), of the bright-source restriction ("reach", added to
-        both paths: the candidate set, which the coverage test, the flatness test
-        and the coarse hole are computed from, depends on pixels that far away),
-        of the coarse path ("coarse": coarse fill field and flatness test) and the
-        overall maximum ("total"). The defaults give 32, 136, 64, 144 and 232.
+        added to "fine"), of the candidate set ("reach", added to both paths: the
+        candidate set, which the coverage test, the flatness test and the coarse
+        hole are computed from, depends on pixels that far away), of the coarse
+        path ("coarse": coarse fill field and flatness test) and the overall
+        maximum ("total"). "reach" is the bright-source reach in flat mode and the
+        reach of the texture map in hybrid mode (high-pass radius plus the blocks
+        of the sd smoothing, see ``texture_radius_blocks``). The flat defaults
+        give 32, 136, 64, 144 and 232, the hybrid defaults 32, 0, 88, 144 and 232.
     """
+    peak_snr, max_cover, _deadband = _effective_gates(params)
     smooth = _gauss_radius(params.smooth) if params.smooth else 0
     fine = _gauss_radius(max(params.fine_sigmas)) + params.dilation + smooth
     # The coverage test is window-level, outside the crops.
-    cover = (COVER_BLOCKS // 2 + 1) * BLOCK if params.max_cover < 1.0 else 0
+    cover = (COVER_BLOCKS // 2 + 1) * BLOCK if max_cover < 1.0 else 0
     coarse = (_gauss_radius(max(params.coarse_sigmas)) + 1 + 1) * BLOCK
-    reach = params.bright_reach_px if params.peak_snr > 0 else 0
+    if params.mode == "hybrid":
+        reach = _texture_reach_px(params)
+    else:
+        reach = params.bright_reach_px if peak_snr > 0 else 0
     return {
         "fine": fine,
         "cover": cover,
@@ -315,7 +429,12 @@ def _block_sums(a: np.ndarray, hb: int, wb: int) -> np.ndarray:
 
 
 def _coarse_fields(
-    c: np.ndarray, valid: np.ndarray, cand: np.ndarray, floor: float, p: FillParams
+    c: np.ndarray,
+    valid: np.ndarray,
+    cand: np.ndarray,
+    floor: float,
+    p: FillParams,
+    with_flatness: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Whole-plane coarse fields on the 8 px block grid, from pixels off the hole.
 
@@ -328,6 +447,8 @@ def _coarse_fields(
         cand: Candidate pixels.
         floor: Noise floor (counts).
         p: Fill parameters.
+        with_flatness: Compute the flatness test (flat mode). Without it every
+            block with data counts as flat (hybrid mode has no flatness gate).
 
     Returns:
         (fill field, have, flat): the coarse interpolation of the known pixels,
@@ -349,6 +470,8 @@ def _coarse_fields(
     ).astype(np.float32)
     sigmas = sorted(p.coarse_sigmas, reverse=True)
     fc, have = _cascade(kv, kn, sigmas, p.tau, None, None)
+    if not with_flatness:
+        return fc, have, np.ones(have.shape, bool)
     # Flatness: weighted mean and mean square of the known block means (float64:
     # the means are ~1e3-1e4, the sd ~1e1).
     sm = np.where(
@@ -421,6 +544,108 @@ def _upsample_coarse(
     return np.where(okc, fu / np.maximum(hu, 1e-6), 0.0).astype(np.float32), okc
 
 
+def _block_mad_sd(blocks: np.ndarray) -> np.ndarray:
+    """Robust (MAD) sd of each row of ``blocks``, ignoring NaN.
+
+    Rows without a NaN take the plain-median path (partition based, much faster
+    than ``nanmedian``); every row has at least one finite value.
+
+    Args:
+        blocks: Array [n, pixels_per_block] of high-passed values (NaN = invalid).
+
+    Returns:
+        float32 vector [n] of ``1.4826 x MAD``.
+    """
+    sd = np.empty(len(blocks), np.float32)
+    complete = np.isfinite(blocks).all(axis=1)
+    for rows, median in ((complete, np.median), (~complete, np.nanmedian)):
+        if not rows.any():
+            continue
+        sub = blocks[rows]
+        centre = median(sub, axis=1)
+        sd[rows] = 1.4826 * median(np.abs(sub - centre[:, None]), axis=1)
+    return sd
+
+
+def _texture_sd_map(
+    c: np.ndarray,
+    valid: np.ndarray,
+    wanted: np.ndarray,
+    origin_yx: tuple[int, int],
+    p: FillParams,
+) -> np.ndarray:
+    """Local texture sd of a plane, on blocks aligned to the absolute mosaic grid.
+
+    Robust (MAD) sd of the high-passed plane per ``texture_block`` px block,
+    smoothed over the neighbouring blocks, upsampled to pixels. It is the sd map
+    of the original hybrid method with two changes that make it chunk invariant:
+    the blocks sit on the absolute grid (``origin_yx`` is the absolute coordinate
+    of pixel (0, 0)), and invalid pixels take no part (the high-pass and the
+    smoothing are normalised convolutions over valid pixels, a block needs at least
+    ``MIN_KNOWN_BLOCK`` valid pixels), so the zeros outside the mosaic do not
+    create texture at the mosaic edge. Only the blocks that the smoothing of a
+    ``wanted`` pixel reads are computed.
+
+    Args:
+        c: Plane after the subtraction.
+        valid: Valid pixels.
+        wanted: Pixels whose sd is needed (the other pixels get sd 0).
+        origin_yx: Absolute mosaic coordinate of pixel (0, 0).
+        p: Fill parameters (texture fields).
+
+    Returns:
+        float32 array of the plane's shape: texture sd in counts, 0 where there is
+        no valid block within reach.
+    """
+    h, w = c.shape
+    size = p.texture_block
+    radius = p.texture_radius_blocks
+    weight = valid.astype(np.float32)
+    low_pass = gaussian_filter(
+        np.where(valid, c, 0.0).astype(np.float32), p.texture_hp_sigma, mode="constant"
+    ) / np.maximum(gaussian_filter(weight, p.texture_hp_sigma, mode="constant"), 1e-6)
+    # Pad to whole blocks of the absolute grid; NaN marks "no pixel".
+    oy, ox = origin_yx[0] % size, origin_yx[1] % size
+    hb, wb = -(-(h + oy) // size), -(-(w + ox) // size)
+    high_pass = np.full((hb * size, wb * size), np.nan, np.float32)
+    high_pass[oy : oy + h, ox : ox + w] = np.where(valid, c - low_pass, np.nan)
+    wanted_px = np.zeros((hb * size, wb * size), bool)
+    wanted_px[oy : oy + h, ox : ox + w] = wanted
+    wanted_b = np.asarray(wanted_px.reshape(hb, size, wb, size).any(axis=(1, 3)))
+    need = (
+        ndi.binary_dilation(wanted_b, structure=_SQUARE, iterations=radius)
+        if radius
+        else wanted_b
+    )
+    rows, cols = np.nonzero(need)
+    blocks = (
+        high_pass.reshape(hb, size, wb, size)
+        .transpose(0, 2, 1, 3)[rows, cols]
+        .reshape(len(rows), -1)
+    )
+    ok = np.isfinite(blocks).sum(axis=1) >= MIN_KNOWN_BLOCK * size * size
+    block_sd = np.zeros((hb, wb), np.float32)
+    block_ok = np.zeros((hb, wb), np.float32)
+    if ok.any():
+        block_sd[rows[ok], cols[ok]] = _block_mad_sd(blocks[ok])
+        block_ok[rows[ok], cols[ok]] = 1.0
+    if radius:
+        # Truncated Gaussian over the neighbouring blocks, normalised by the blocks
+        # that have an sd (the original used mode="nearest" at the array edge).
+        truncate = (radius + 0.25) / p.texture_smooth
+        num = gaussian_filter(
+            block_sd, p.texture_smooth, mode="constant", truncate=truncate
+        )
+        den = gaussian_filter(
+            block_ok, p.texture_smooth, mode="constant", truncate=truncate
+        )
+        block_sd = np.where(den > 1e-3, num / np.maximum(den, 1e-6), 0.0).astype(
+            np.float32
+        )
+    full = np.repeat(np.repeat(block_sd, size, axis=0), size, axis=1)
+    return np.ascontiguousarray(full[oy : oy + h, ox : ox + w])
+
+
 def _fill_crop(
     c: np.ndarray,
     u: np.ndarray,
@@ -491,6 +716,7 @@ def _fill_plane(
     noise: float,
     p: FillParams,
     ctr: dict[str, float],
+    origin_yx: tuple[int, int] = (0, 0),
 ) -> np.ndarray:
     """Fill one plane (see the module docstring).
 
@@ -500,8 +726,10 @@ def _fill_plane(
         raw: Input plane (0 = invalid pixel).
         eps: Share of the model light the fill may remove at most.
         noise: Dataset-global pixel noise of the plane.
-        p: Fill parameters.
+        p: Fill parameters, with the mode's effective gates (``_effective_params``).
         ctr: Counters of the plane (filled in place).
+        origin_yx: Absolute mosaic coordinate of pixel (0, 0); used by the texture
+            map of hybrid mode.
 
     Returns:
         The new plane, same shape as ``c``.
@@ -515,6 +743,15 @@ def _fill_plane(
     u = (eps * light).astype(np.float32)
     floor = max(p.floor_frac * noise, 1.0)
     cand = (u > p.gate * floor) & valid
+    if p.mode == "hybrid" and cand.any():
+        # Texture gate: the model's uncertainty must exceed the local texture sd of
+        # the corrected plane, not only the global noise floor.
+        sd = _texture_sd_map(c, valid, cand, origin_yx, p)
+        textured = cand & (u > p.gate * np.maximum(sd, floor))
+        ctr["texture_dropped_px"] = ctr.get("texture_dropped_px", 0.0) + float(
+            (cand & ~textured).sum()
+        )
+        cand = textured
     if p.peak_snr > 0 and cand.any():
         # Bounded bright-source restriction: keep a candidate pixel only if a
         # bright candidate pixel lies within `bright_reach_px` (square window). A
@@ -535,7 +772,9 @@ def _fill_plane(
     ctr["cand_px"] = ctr.get("cand_px", 0.0) + float(cand.sum())
     # The hole of the coarse fields is every candidate, also the ones skipped
     # below.
-    fc, havec, flat_b = _coarse_fields(c, valid, cand, floor, p)
+    fc, havec, flat_b = _coarse_fields(
+        c, valid, cand, floor, p, with_flatness=p.mode == "flat"
+    )
     keep = cand
     if p.max_cover < 1.0:
         frac_b = cand.reshape(h // BLOCK, BLOCK, w // BLOCK, BLOCK).mean(
@@ -549,9 +788,12 @@ def _fill_plane(
             (keep & dense).sum()
         )
         keep = keep & ~dense
-    flat = np.repeat(np.repeat(flat_b, BLOCK, axis=0), BLOCK, axis=1)
-    ctr["not_flat_px"] = ctr.get("not_flat_px", 0.0) + float((keep & ~flat).sum())
-    cand = keep & flat
+    if p.mode == "flat":
+        flat = np.repeat(np.repeat(flat_b, BLOCK, axis=0), BLOCK, axis=1)
+        ctr["not_flat_px"] = ctr.get("not_flat_px", 0.0) + float((keep & ~flat).sum())
+        cand = keep & flat
+    else:
+        cand = keep  # hybrid has no flatness gate
     if not cand.any():
         return c[:h0, :w0]
     # Regions: candidate blocks merged over a few blocks, one crop per region.
@@ -607,10 +849,13 @@ def apply_bounded_fill(
     stain: str,
     noise: Mapping[int, float] | None = None,
     stats: dict[str, Any] | None = None,
+    origin_yx: tuple[int, int] = (0, 0),
 ) -> np.ndarray:
-    """Remove residual bead light left by the subtraction, on flat background only.
+    """Remove residual bead light left by the subtraction.
 
-    Bounded, one-sided inpainting: see the module docstring for the guarantees.
+    Bounded, one-sided inpainting: on flat background only in flat mode, wherever
+    the model uncertainty exceeds the local texture in hybrid mode. See the module
+    docstring for the guarantees.
 
     Args:
         corrected: Subtraction result [n_z, Y, X] float32 (planes in ``z_layers``
@@ -630,7 +875,14 @@ def apply_bounded_fill(
             restriction), ``reach_dropped_px`` (dropped by it),
             ``dense_skipped_px`` (premise guard), ``not_flat_px`` (surroundings
             not flat: tissue, texture), ``unfilled_px`` (no known pixel within
-            reach), ``changed_px`` and ``removed_sum``.
+            reach), ``changed_px`` and ``removed_sum``. Hybrid mode adds
+            ``texture_dropped_px`` (candidates below the local texture sd) and
+            reports no ``reach_dropped_px``, ``dense_skipped_px`` or
+            ``not_flat_px``.
+        origin_yx: Absolute mosaic coordinate of pixel (0, 0). Hybrid mode aligns
+            its texture blocks to the absolute grid with it, and requires a
+            multiple of ``BLOCK`` (``correct_window`` passes a multiple of 16).
+            Flat mode does not read it.
 
     Returns:
         float32 array [n_z, Y, X], never brighter than ``corrected``, never lower
@@ -639,10 +891,17 @@ def apply_bounded_fill(
 
     Raises:
         ValueError: ``noise`` is missing or lacks a processed plane while the fill
-            is enabled for ``stain``.
+            is enabled for ``stain``; ``origin_yx`` is not a multiple of ``BLOCK``
+            in hybrid mode.
     """
     if not config.enabled or stain not in config.stains:
         return corrected
+    if config.mode == "hybrid" and (origin_yx[0] % BLOCK or origin_yx[1] % BLOCK):
+        raise ValueError(
+            f"origin_yx must be a multiple of {BLOCK} px in hybrid mode; "
+            f"got {origin_yx}"
+        )
+    config = _effective_params(config)
     if noise is None:
         raise ValueError(
             "fill needs the dataset-global per-plane noise (calibration); it is "
@@ -669,6 +928,7 @@ def apply_bounded_fill(
             float(noise[k]),
             config,
             ctr,
+            origin_yx,
         )
         ctr["changed_px"] = float((out[i] < corrected[i]).sum())
         ctr["removed_sum"] = float((corrected[i] - out[i]).sum())

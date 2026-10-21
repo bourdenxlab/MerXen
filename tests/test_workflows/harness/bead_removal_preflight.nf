@@ -35,6 +35,7 @@ workflow {
     zarr.mkdirs()
     def on = [enabled: true, fill: [enabled: false]]
     def onFill = [enabled: true, fill: [enabled: true]]
+    def onHybrid = [enabled: true, fill: [enabled: true, mode: "hybrid"]]
     def yes = [merscope_bead_removal: "true"]
     def no = [merscope_bead_removal: "false"]
     def withDir = yes + [merscope_dir: root.toString()]
@@ -56,6 +57,8 @@ workflow {
         withDir + [merscope_z_range: "1-6"],
         mkSettings([run_build: true])
     )
+    writeRecord(zarr, beadAttributes(onHybrid))
+    check("fill_hybrid", yes, mkSettings([:]))
     new File(zarr, "zarr.json").delete()
     new File(zarr, ".zattrs").text = groovy.json.JsonOutput.toJson(beadAttributes(on))
     check("zattrs_on_off", no, mkSettings([:]))

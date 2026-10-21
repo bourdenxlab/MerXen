@@ -243,6 +243,10 @@ class MerscopeBeadRemovalConfig(BaseModel):
     min_ring_prominence: float = 0.010
     # Optional inpainting of the residual bead footprint after subtraction.
     fill: bool = False
+    # Mode of the fill: "flat" acts on flat background only (inert in tissue);
+    # "hybrid" is the original, more aggressive fill that also acts in tissue and
+    # may dim puncta close to a bead. Needs fill=True when not "flat".
+    fill_mode: Literal["flat", "hybrid"] = "flat"
     # Device of the window correction: "cpu" is the validated numpy path and the
     # default; "cuda" needs a GPU with Triton; "auto" uses the GPU only when it
     # is available and the host GPU lock is configured. The fill always runs on
@@ -287,6 +291,11 @@ class MerscopeBeadRemovalConfig(BaseModel):
         # act on when removal itself is off.
         if self.fill and not self.enabled:
             raise ValueError("fill requires enabled=True.")
+        if self.fill_mode != "flat" and not self.fill:
+            raise ValueError(
+                f"fill_mode {self.fill_mode!r} requires fill=True (the mode only "
+                "applies to the fill)."
+            )
         return self
 
 

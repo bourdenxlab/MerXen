@@ -1716,6 +1716,11 @@ def _summary_record(
         },
         "fill": {
             "enabled": bool(fill is not None and fill.enabled),
+            "mode": (
+                str(getattr(fill, "mode", "flat"))
+                if fill is not None and fill.enabled
+                else None
+            ),
             "counters": fill_totals,
         },
         "residual_ring": dict(pooled_ring),

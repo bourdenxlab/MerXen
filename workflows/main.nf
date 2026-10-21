@@ -394,6 +394,12 @@ def buildConfigForPlatform(row, pairId, platform) {
             )
             if (beadFill) {
                 beadRemoval.fill = true
+                // Only set off the default, so flat-fill build configs (and
+                // their task hashes) keep their form.
+                def beadFillMode = merscopeBeadRemovalFillMode(params)
+                if (beadFillMode != "flat") {
+                    beadRemoval.fill_mode = beadFillMode
+                }
             }
             // Only set off the default, so CPU bead build configs (and their
             // task hashes) keep their form. The fill has no GPU implementation
@@ -1697,6 +1703,22 @@ def appendMerscopeBeadRemovalPreflightChecks(errors, row, settings, params) {
             "got '${params.merscope_bead_removal_device}'."
         )
     }
+    def beadFillMode = merscopeBeadRemovalFillMode(params)
+    if (!(beadFillMode in ["flat", "hybrid"])) {
+        errors << (
+            "merscope_bead_removal_fill_mode must be flat or hybrid; " +
+            "got '${params.merscope_bead_removal_fill_mode}'."
+        )
+    } else if (beadFillMode != "flat" && !boolOrDefault(
+        params.merscope_bead_removal_fill,
+        false,
+        "merscope_bead_removal_fill"
+    )) {
+        errors << (
+            "merscope_bead_removal_fill_mode ${beadFillMode} only applies to the " +
+            "fill: set merscope_bead_removal_fill to true or use flat."
+        )
+    }
     def merscopeDir = chooseField(row, ["merscope_dir"])
     // Without a raw folder nothing is projected (a cached zarr is reused), so
     // the z range and the raw folder only matter when merscope_dir is set.
@@ -1755,6 +1777,8 @@ def publishedBeadRemovalState(zarrPath) {
     return [
         enabled: (bead instanceof Map) && bead.get("enabled") == true,
         fill: (fill instanceof Map) && fill.get("enabled") == true,
+        // A fill block without a mode is a flat fill.
+        fillMode: ((fill instanceof Map) ? fill.get("mode") : null) ?: "flat",
     ]
 }
 
@@ -1784,11 +1808,13 @@ def appendPublishedBeadRemovalChecks(errors, row, settings, params) {
         false,
         "merscope_bead_removal_fill"
     )
+    def requestedFillMode = merscopeBeadRemovalFillMode(params)
     def recorded = publishedBeadRemovalState(sourceZarr)
     def remedy = (
         "Run from the build stage with --force_spatialdata_build true (needs " +
         "merscope_dir) or change merscope_bead_removal / " +
-        "merscope_bead_removal_fill to match the published zarr."
+        "merscope_bead_removal_fill / merscope_bead_removal_fill_mode to match " +
+        "the published zarr."
     )
     if (recorded.enabled != requested) {
         errors << (
@@ -1801,6 +1827,12 @@ def appendPublishedBeadRemovalChecks(errors, row, settings, params) {
             "The published MERSCOPE source zarr ${sourceZarr} was built with " +
             "the bead-removal fill ${onOffText(recorded.fill)} but " +
             "${onOffText(requestedFill)} is requested. ${remedy}"
+        )
+    } else if (requestedFill && recorded.fillMode != requestedFillMode) {
+        errors << (
+            "The published MERSCOPE source zarr ${sourceZarr} was built with " +
+            "the bead-removal fill mode ${recorded.fillMode} but " +
+            "${requestedFillMode} is requested. ${remedy}"
         )
     }
 }
@@ -1928,6 +1960,14 @@ def merscopeBeadRemovalDevice(params) {
         return "cpu"
     }
     return rawDevice.toString().trim().toLowerCase()
+}
+
+def merscopeBeadRemovalFillMode(params) {
+    def rawMode = params.merscope_bead_removal_fill_mode
+    if (rawMode == null || rawMode.toString().trim().isEmpty()) {
+        return "flat"
+    }
+    return rawMode.toString().trim().toLowerCase()
 }
 
 def rowSampleSettings(row, params) {
@@ -2683,8 +2723,9 @@ workflow {
                 "merscope_bead_removal_fill"
             )) {
                 log.info(
-                    "merscope_bead_removal_fill is on: samples with bead removal " +
-                    "also get the residual-footprint fill"
+                    "merscope_bead_removal_fill is on (mode " +
+                    "${merscopeBeadRemovalFillMode(params)}): samples with bead " +
+                    "removal also get the residual-footprint fill"
                 )
             }
             true

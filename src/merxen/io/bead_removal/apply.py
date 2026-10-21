@@ -332,7 +332,9 @@ def correct_window(
             and model.fits
             and rho > 0
         ):
-            arr = _apply_fill(arr, model, stack_s, zs, rho, fill, stain, stats)
+            arr = _apply_fill(
+                arr, model, stack_s, zs, rho, fill, stain, stats, origin_aligned
+            )
         sy = slice(pad_tl[0] + y0, pad_tl[0] + y1)
         sx = slice(pad_tl[1] + x0, pad_tl[1] + x1)
         raw_core = np.stack([stack_s[k][sy, sx] for k in zs])
@@ -372,6 +374,7 @@ def _apply_fill(
     fill: FillSettings,
     stain: str,
     stats: dict[str, Any],
+    origin_yx: tuple[int, int],
 ) -> np.ndarray:
     """Run the bounded fill on one stain after the subtraction.
 
@@ -389,6 +392,8 @@ def _apply_fill(
         stain: Stain name.
         stats: Window statistics; the fill's counters are stored in
             ``stats["fill"][stain]``.
+        origin_yx: Absolute mosaic coordinate of pixel (0, 0) of the (padded)
+            arrays, a multiple of 16.
 
     Returns:
         float32 array [len(zs), Y, X].
@@ -401,6 +406,11 @@ def _apply_fill(
     )
     raw_planes = np.stack([stack[k] for k in zs])
     fill_stats: dict[str, Any] = {}
+    # Flat mode does not depend on the absolute position (the arrays start on the
+    # 16 px grid); only the hybrid mode aligns its texture blocks to the mosaic.
+    extra: dict[str, Any] = (
+        {"origin_yx": origin_yx} if getattr(fill, "mode", "flat") != "flat" else {}
+    )
     filled = fill_module.apply_bounded_fill(
         corrected,
         light,
@@ -410,6 +420,7 @@ def _apply_fill(
         stain=stain,
         noise=dict(model.noise.items()),
         stats=fill_stats,
+        **extra,
     )
     stats.setdefault("fill", {})[stain] = fill_stats
     result: np.ndarray = np.where(

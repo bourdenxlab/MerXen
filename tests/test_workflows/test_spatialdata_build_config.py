@@ -164,6 +164,59 @@ def test_bead_removal_device_key_is_not_written_with_the_fill() -> None:
     assert 'if (beadDevice != "cpu" && !beadFill) {' in build_config
 
 
+def test_bead_removal_fill_mode_param_defaults_to_flat() -> None:
+    config_text = (_REPO_ROOT / "workflows" / "nextflow.config").read_text()
+
+    assert 'merscope_bead_removal_fill_mode = "flat"' in config_text
+    # The comment above the param says what the modes are.
+    line = config_text.index('merscope_bead_removal_fill_mode = "flat"')
+    assert "hybrid" in config_text[line - 400 : line]
+
+
+def test_bead_removal_fill_mode_key_only_in_the_fill_branch_off_default() -> None:
+    """Flat-fill build JSONs (and task hashes) must keep their form."""
+    build_config = _function_text(_main_text(), "buildConfigForPlatform")
+    block_start = build_config.index("if (merscopeBeadRemovalRequested(")
+    block_end = build_config.index("return [", block_start)
+    bead_block = build_config[block_start:block_end]
+
+    assert build_config.count("beadRemoval.fill_mode") == 1
+    assert "fill_mode" not in build_config[:block_start]
+    assert "fill_mode" not in build_config[block_end:]
+    fill_branch = bead_block.index("if (beadFill) {")
+    guard = bead_block.index('if (beadFillMode != "flat") {')
+    key = bead_block.index("beadRemoval.fill_mode = beadFillMode")
+    after_fill_branch = bead_block.index("def beadDevice")
+    # The key sits behind the fill branch and the non-default guard.
+    assert fill_branch < bead_block.index("beadRemoval.fill = true") < guard < key
+    assert key < after_fill_branch
+
+
+def test_bead_removal_fill_mode_helper_defaults_to_flat_and_normalises() -> None:
+    helper = _function_text(_main_text(), "merscopeBeadRemovalFillMode")
+
+    assert "params.merscope_bead_removal_fill_mode" in helper
+    assert 'return "flat"' in helper
+    assert ".toLowerCase()" in helper
+
+
+def test_bead_removal_preflight_checks_the_fill_mode_value() -> None:
+    preflight = _function_text(_main_text(), "appendMerscopeBeadRemovalPreflightChecks")
+
+    assert "merscopeBeadRemovalFillMode(params)" in preflight
+    assert '["flat", "hybrid"]' in preflight
+    assert "merscope_bead_removal_fill_mode must be flat or hybrid" in preflight
+    assert "only applies to the " in preflight
+
+
+def test_published_source_zarr_fill_mode_is_compared() -> None:
+    published = _function_text(_main_text(), "appendPublishedBeadRemovalChecks")
+    state = _function_text(_main_text(), "publishedBeadRemovalState")
+
+    assert "recorded.fillMode != requestedFillMode" in published
+    assert 'fill.get("mode")' in state and '"flat"' in state
+
+
 def test_bead_removal_z_range_is_only_checked_with_a_raw_folder() -> None:
     """A zarr-only reuse row projects nothing, so its blank z range is fine."""
     preflight = _function_text(_main_text(), "appendMerscopeBeadRemovalPreflightChecks")
@@ -208,6 +261,7 @@ _BEAD_HARNESS_FUNCTIONS = (
     "publishedDatasetPath",
     "merscopeBeadRemovalRequested",
     "merscopeBeadRemovalDevice",
+    "merscopeBeadRemovalFillMode",
     "appendMerscopeBeadRemovalPreflightChecks",
     "onOffText",
     "publishedBeadRemovalState",
@@ -307,3 +361,51 @@ def test_the_fill_request_is_compared_and_replaces_the_device_key(
     assert results["on_on"] == "ERROR"  # the zarr has no fill, the request does
     assert results["fill_on"] == "OK"
     assert json.loads(results["config"]) == {"enabled": True, "fill": True}
+
+
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
+def test_the_hybrid_fill_mode_is_compared_and_added_to_the_build_json(
+    tmp_path: Path,
+) -> None:
+    results = _run_bead_harness(
+        tmp_path,
+        "--merscope_bead_removal_fill",
+        "true",
+        "--merscope_bead_removal_fill_mode",
+        "Hybrid",
+    )
+
+    # A zarr with a flat fill (no mode recorded) does not match a hybrid request.
+    assert results["fill_on"] == "ERROR"
+    assert results["fill_hybrid"] == "OK"
+    assert results["z_1_6_with_dir"] == "OK"
+    assert json.loads(results["config"]) == {
+        "enabled": True,
+        "fill": True,
+        "fill_mode": "hybrid",
+    }
+
+
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
+@pytest.mark.parametrize(
+    ("fill", "mode", "expected"),
+    [
+        ("false", "hybrid", "ERROR"),  # the mode needs the fill
+        ("true", "bogus", "ERROR"),  # not flat or hybrid
+        ("true", "hybrid", "OK"),
+        ("false", "flat", "OK"),
+    ],
+)
+def test_the_fill_mode_value_is_checked_before_a_build(
+    tmp_path: Path, fill: str, mode: str, expected: str
+) -> None:
+    results = _run_bead_harness(
+        tmp_path,
+        "--merscope_bead_removal_fill",
+        fill,
+        "--merscope_bead_removal_fill_mode",
+        mode,
+    )
+
+    # run_build is on in this case, so the preflight checks the request itself.
+    assert results["blank_z_zarr_only"] == expected

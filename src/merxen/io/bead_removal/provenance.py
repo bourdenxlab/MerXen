@@ -42,9 +42,11 @@ RAW_TIFF_SOURCE = "raw_tiff"
 # order and the torch, triton and CUDA versions.
 CPU_DEVICE = "cpu"
 # Config fields that do not change the output pixels beyond the method's own
-# order sensitivity (the switch itself, the fill which has its own record, the
-# pool size, and the device, which has its own backend record).
-_NON_OUTPUT_CONFIG_FIELDS = frozenset({"enabled", "fill", "max_workers", "device"})
+# order sensitivity (the switch itself, the fill and its mode which have their own
+# record, the pool size, and the device, which has its own backend record).
+_NON_OUTPUT_CONFIG_FIELDS = frozenset(
+    {"enabled", "fill", "fill_mode", "max_workers", "device"}
+)
 _FILL_MODULE = "merxen.io.bead_removal.fill"
 
 
@@ -53,16 +55,20 @@ def _bead_off() -> dict[str, Any]:
     return {"enabled": False, "fill": {"enabled": False}}
 
 
-def _fill_params_identity() -> dict[str, Any]:
+def _fill_params_identity(mode: str = "flat") -> dict[str, Any]:
     """Hash the fixed fill parameters and report their spatial support.
 
     The fill module is imported lazily so that the guard and the record work
     without it; its parameters are fixed in code, so the hash is a property of
     the installed version.
 
+    Args:
+        mode: Fill mode (``"flat"`` or ``"hybrid"``).
+
     Returns:
         ``params_sha256`` and ``support_px`` of the fill, or ``None`` for both
-        when the fill module is not part of this installation.
+        when the fill module is not part of this installation. The hash depends on
+        the mode.
     """
     try:
         fill = importlib.import_module(_FILL_MODULE)
@@ -70,7 +76,10 @@ def _fill_params_identity() -> dict[str, Any]:
         if exc.name != _FILL_MODULE:
             raise
         return {"params_sha256": None, "support_px": None}
-    params = fill.FillParams(enabled=True)
+    if mode == "flat":
+        params = fill.FillParams(enabled=True)
+    else:
+        params = fill.FillParams(enabled=True, mode=mode)
     return {
         "params_sha256": str(fill.fill_params_sha256(params)),
         "support_px": int(fill.support_px(params)["total"]),
@@ -114,7 +123,11 @@ def bead_removal_identity(
         return _bead_off()
     fill: dict[str, Any] = {"enabled": bool(cfg.fill)}
     if cfg.fill:
-        fill.update(_fill_params_identity())
+        fill.update(_fill_params_identity(cfg.fill_mode))
+        # A fill block without ``mode`` is a flat fill (the only mode before the
+        # hybrid existed), so the identity of a flat fill stays what it was.
+        if cfg.fill_mode != "flat":
+            fill["mode"] = cfg.fill_mode
     return {
         "enabled": True,
         "method": cfg.method,
@@ -259,7 +272,8 @@ def check_bead_removal_reuse(
 
     Hard errors (the cached projection does not match the request):
       * bead removal on versus off, a missing record reading as off;
-      * the fill on versus off, when bead removal is on in both.
+      * the fill on versus off, when bead removal is on in both;
+      * a different fill mode (flat versus hybrid), when the fill is on in both.
 
     Warnings only (the result is valid but not what a fresh build would give):
       * a different method version, parameter hash or fill parameter hash;
@@ -284,8 +298,8 @@ def check_bead_removal_reuse(
             left out and not compared.
 
     Raises:
-        ValueError: If bead removal or the fill differs between cache and
-            request.
+        ValueError: If bead removal, the fill or the fill mode differs between
+            cache and request.
     """
     requested_identity = bead_removal_identity(
         requested, device=requested_device, backend=requested_backend
@@ -344,7 +358,31 @@ def check_bead_removal_reuse(
             "merscope_dir) or change merscope_bead_removal_fill"
         )
 
+    recorded_mode = _fill_mode(recorded_identity)
+    requested_mode = _fill_mode(requested_identity)
+    if requested_fill and recorded_mode != requested_mode:
+        if force:
+            logger.info(
+                "Rebuilding the cached SpatialData%s: the bead-removal fill mode "
+                "was %s, %s requested.",
+                location,
+                recorded_mode,
+                requested_mode,
+            )
+            return
+        raise ValueError(
+            f"the cached SpatialData{location} was built with the bead-removal "
+            f"fill mode {recorded_mode} but {requested_mode} was requested; "
+            "rebuild with --force_spatialdata_build true (needs merscope_dir) or "
+            "change merscope_bead_removal_fill_mode"
+        )
+
     _warn_on_differences(recorded_identity, requested_identity, location)
+
+
+def _fill_mode(identity: Mapping[str, Any]) -> str:
+    """Return the fill mode of an identity (a block without ``mode`` is flat)."""
+    return str(dict(identity.get("fill") or {}).get("mode") or "flat")
 
 
 SEGMENTATION_SIDECAR_SCHEMA = 1
@@ -614,7 +652,10 @@ def _describe_identity(identity: Mapping[str, Any] | None) -> str:
     """Summarise a segmentation identity for an error message."""
     if identity is None:
         return "off"
-    fill = "with fill" if (identity.get("fill") or {}).get("enabled") else "no fill"
+    fill_block = identity.get("fill") or {}
+    fill = "with fill" if fill_block.get("enabled") else "no fill"
+    if fill_block.get("enabled") and _fill_mode(identity) != "flat":
+        fill = f"with {_fill_mode(identity)} fill"
     return (
         f"on (version {identity.get('version')}, {fill}, device "
         f"{identity.get('device')}, params {str(identity.get('params_sha256'))[:12]}, "
