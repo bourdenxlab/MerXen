@@ -711,3 +711,80 @@ class TestBeadRemovalTableMetadata:
         metadata = bead_removal_table_metadata(_enabled_record(fill=True))
         assert metadata is not None
         assert metadata["bead_removal_fill"] is True
+
+
+# --- hybrid fill mode ------------------------------------------------------
+def test_flat_fill_identity_is_unchanged_and_hybrid_records_its_mode() -> None:
+    flat = bead_removal_identity(_cfg(fill=True))
+    hybrid = bead_removal_identity(_cfg(fill=True, fill_mode="hybrid"))
+
+    # A flat fill block has no mode key (as before the hybrid mode existed).
+    assert "mode" not in flat["fill"]
+    assert hybrid["fill"]["mode"] == "hybrid"
+    assert hybrid["fill"]["enabled"] is True
+    assert hybrid["fill"]["params_sha256"] != flat["fill"]["params_sha256"]
+    assert hybrid["fill"]["support_px"] <= 254
+    # The mode belongs to the fill record, not to the algorithm parameter hash.
+    assert hybrid["params_sha256"] == flat["params_sha256"]
+    # It survives the record and is read back.
+    record = _record(_cfg(fill=True, fill_mode="hybrid"))
+    assert record["bead_removal"]["fill"]["mode"] == "hybrid"
+    assert identity_from_record(record)["fill"]["mode"] == "hybrid"
+    json.dumps(record)
+
+
+def test_hybrid_mode_is_recorded_without_the_fill_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "merxen.io.bead_removal.fill", None)
+
+    fill = _record(_cfg(fill=True, fill_mode="hybrid"))["bead_removal"]["fill"]
+
+    assert fill == {
+        "enabled": True,
+        "params_sha256": None,
+        "support_px": None,
+        "mode": "hybrid",
+    }
+
+
+@pytest.mark.parametrize(
+    ("recorded_mode", "requested_mode"), [("flat", "hybrid"), ("hybrid", "flat")]
+)
+def test_guard_refuses_another_fill_mode(
+    recorded_mode: str, requested_mode: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    recorded = _record(_cfg(fill=True, fill_mode=recorded_mode))
+    requested = _cfg(fill=True, fill_mode=requested_mode)
+
+    with pytest.raises(ValueError, match="merscope_bead_removal_fill_mode") as caught:
+        check_bead_removal_reuse(recorded, requested, source=Path("cache/s.zarr"))
+    assert f"fill mode {recorded_mode} but {requested_mode}" in str(caught.value)
+    # A rebuild is allowed to replace it.
+    with caplog.at_level(logging.INFO, logger=_LOGGER):
+        check_bead_removal_reuse(recorded, requested, force=True)
+    assert "fill mode was" in caplog.text
+
+
+def test_guard_accepts_the_same_hybrid_mode_and_a_legacy_flat_record(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    hybrid = _cfg(fill=True, fill_mode="hybrid")
+    legacy_flat = _record(_cfg(fill=True))
+    # A record written before the mode existed has no mode key at all.
+    assert "mode" not in legacy_flat["bead_removal"]["fill"]
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER):
+        check_bead_removal_reuse(_record(hybrid), hybrid)
+        check_bead_removal_reuse(legacy_flat, _cfg(fill=True))
+
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_segmentation_identity_tells_the_fill_modes_apart() -> None:
+    flat = segmentation_identity(_record(_cfg(fill=True)))
+    hybrid = segmentation_identity(_record(_cfg(fill=True, fill_mode="hybrid")))
+
+    assert flat is not None and hybrid is not None
+    assert flat != hybrid
+    assert hybrid["fill"]["mode"] == "hybrid"

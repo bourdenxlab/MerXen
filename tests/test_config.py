@@ -103,6 +103,28 @@ def test_bead_removal_fill_is_accepted_when_enabled() -> None:
     assert config.fill is True
 
 
+def test_bead_removal_fill_mode_defaults_to_flat() -> None:
+    assert MerscopeBeadRemovalConfig().fill_mode == "flat"
+    assert MerscopeBeadRemovalConfig(enabled=True, fill=True).fill_mode == "flat"
+
+
+def test_bead_removal_hybrid_fill_mode_requires_the_fill() -> None:
+    with pytest.raises(ValidationError, match="fill_mode 'hybrid' requires fill"):
+        MerscopeBeadRemovalConfig(enabled=True, fill=False, fill_mode="hybrid")
+    config = MerscopeBeadRemovalConfig(enabled=True, fill=True, fill_mode="hybrid")
+
+    assert config.fill_mode == "hybrid"
+
+
+def test_bead_removal_rejects_an_unknown_fill_mode() -> None:
+    with pytest.raises(ValidationError, match="fill_mode"):
+        MerscopeBeadRemovalConfig(
+            enabled=True,
+            fill=True,
+            fill_mode="aggressive",  # type: ignore[arg-type]
+        )
+
+
 def test_spatialdata_build_config_loads_bead_removal_from_json(
     tmp_path: Path,
 ) -> None:
@@ -123,3 +145,24 @@ def test_spatialdata_build_config_loads_bead_removal_from_json(
     assert config.merscope.z_layers == [1, 2, 3]
     assert config.merscope.bead_removal is not None
     assert config.merscope.bead_removal.fill is True
+
+
+def test_spatialdata_build_config_loads_the_hybrid_fill_mode_from_json(
+    tmp_path: Path,
+) -> None:
+    """The key the workflow adds only for the hybrid mode must be accepted."""
+    raw = {
+        "dataset_name": "synthetic_MERSCOPE",
+        "platform": "MERSCOPE",
+        "input_path": str(tmp_path / "raw"),
+        "output_path": "spatialdata_out/source_spatialdata.zarr",
+        "merscope": {
+            "z_layers": [1, 2, 3],
+            "bead_removal": {"enabled": True, "fill": True, "fill_mode": "hybrid"},
+        },
+    }
+
+    config = SpatialDataBuildConfig.model_validate(raw)
+
+    assert config.merscope.bead_removal is not None
+    assert config.merscope.bead_removal.fill_mode == "hybrid"

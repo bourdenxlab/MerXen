@@ -997,3 +997,17 @@ def test_reuse_guard_ignores_other_platforms(tmp_path: Path) -> None:
     out = build_spatialdata_artifact(cfg)
 
     assert out.resolve() == cached.resolve()
+
+
+@pytest.mark.parametrize("mode", ["flat", "hybrid"])
+def test_bead_fill_params_carry_the_fill_mode(mode: str) -> None:
+    from merxen.io.builders.merscope import _bead_fill_params
+
+    off = MerscopeBeadRemovalConfig(enabled=True, fill=False)
+    on = MerscopeBeadRemovalConfig(enabled=True, fill=True, fill_mode=mode)  # type: ignore[arg-type]
+
+    assert _bead_fill_params(off) is None
+    params = _bead_fill_params(on)
+    assert params is not None
+    assert params.enabled and params.mode == mode
+    assert params.stains == ("PolyT",)

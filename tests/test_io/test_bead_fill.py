@@ -11,6 +11,13 @@ Tissue damage: N1 null test on tissue (a perfect subtraction must not be changed
 N2 null test on flat background (no more than the noise deadband), N3 tissue is
 left alone while the same ring on flat background is filled.
 
+Hybrid mode: H1 fills residual ring light on textured background where flat mode
+does nothing, H2 never brighter and bounded by eps x light, H3 the gate follows the
+local texture sd, H4 chunk invariance across window origins that are not on the
+32 px texture grid, H5 the flat hash and support are unchanged and the hybrid
+support fits, H6 the mode's effective gates ignore the flat fields, H7 invalid
+pixels, H8 the origin check, H9 ``correct_window`` passes the absolute origin.
+
 Chunk invariance: B1 a faint candidate bridge to a bright source outside the
 window (0.00 difference at margin 256 and at ``support_px + 2``), B2 the support of
 the default configuration is at most 254 px and larger settings are refused, R2
@@ -20,6 +27,8 @@ candidates beyond the reach of a bright source are dropped.
 from __future__ import annotations
 
 import dataclasses
+import sys
+import types
 from typing import Any
 
 import numpy as np
@@ -543,3 +552,303 @@ def test_f14_dense_coating_is_not_filled() -> None:
     assert stats["dense_skipped_px"] > 0
     off = _fill(corr, light, raw, FillParams(enabled=True, peak_snr=0.0, max_cover=1.0))
     assert (off <= corr).all()
+
+
+# ---------------------------------------------------------------------------
+# Hybrid mode
+# ---------------------------------------------------------------------------
+HYBRID = FillParams(enabled=True, mode="hybrid")
+# Hash of the flat defaults before the hybrid mode existed (a recorded cache
+# identity must not change).
+FLAT_DEFAULT_SHA256 = "89cee507dacf718f6e34c035602e4f743b84598bbf8048c6308174bdbb71c82a"
+FLAT_ENABLED_SHA256 = "aa80d327de2cfcf92db1fffc4e7f70ceb845054f0da404d6920d63f10e60ae69"
+
+
+def make_textured_planes(
+    size: tuple[int, int] = (512, 512),
+    seed: int = 0,
+    texture_amp: float = 800.0,
+    beads: tuple[tuple[float, ...], ...] = ((256, 256, 30.0, 6.0, 1500.0),),
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Bead ring residual (0.4 x light) on a textured, tissue-like background.
+
+    Returns:
+        (corrected, light, raw).
+    """
+    rng = np.random.default_rng(seed)
+    light = make_light(size, beads)
+    tex = np.stack(
+        [
+            ndi.gaussian_filter(rng.normal(0, 1, size).astype(np.float32), 3)
+            * texture_amp
+            for _ in range(light.shape[0])
+        ]
+    )
+    corr = (1000 + tex + rng.normal(0, 30, light.shape) + 0.4 * light).astype(
+        np.float32
+    )
+    return corr, light, (corr + light).astype(np.float32)
+
+
+@pytest.fixture(scope="module")
+def hybrid_textured() -> tuple[Any, ...]:
+    corr, light, raw = make_textured_planes()
+    stats: dict[str, Any] = {}
+    out = _fill(corr, light, raw, HYBRID, stats=stats)
+    return corr, light, raw, out, stats
+
+
+def test_h1_hybrid_fills_textured_background_where_flat_mode_does_nothing(
+    hybrid_textured: tuple[Any, ...],
+) -> None:
+    corr, light, raw, out, stats = hybrid_textured
+    flat_stats: dict[str, Any] = {}
+    flat = _fill(corr, light, raw, FillParams(enabled=True), stats=flat_stats)
+    # The flat fill is inert here: every candidate sits on non-flat surroundings.
+    assert np.array_equal(flat, corr)
+    assert flat_stats["not_flat_px"] > 0
+    # The hybrid fill removes a sizeable part of the residual on the ring.
+    assert (out < corr).sum() > 1000
+    ring = light[0] > 600
+    assert (corr[0] - out[0])[ring].mean() > 0.3 * 0.4 * light[0][ring].mean()
+    # No flatness gate, premise guard or bright-source restriction in the counters.
+    assert stats["cand_px"] > 0
+    assert not {"not_flat_px", "dense_skipped_px", "reach_dropped_px"} & set(stats)
+    assert "texture_dropped_px" in stats
+
+
+def test_h2_hybrid_is_one_sided_and_bounded_by_eps_times_the_model(
+    hybrid_textured: tuple[Any, ...],
+) -> None:
+    corr, light, _raw, out, _stats = hybrid_textured
+    assert out.dtype == np.float32
+    assert (out <= corr).all()
+    for i, k in enumerate(Z):
+        udil = ndi.grey_dilation(HYBRID.eps[k] * light[i], size=2 * HYBRID.dilation + 1)
+        assert (out[i] >= corr[i] - udil - 1e-3).all()
+
+
+def test_h3_the_hybrid_gate_is_the_local_texture_sd_not_the_global_noise() -> None:
+    """On white noise of sd 100 only pixels near eps x light > ~100 are filled."""
+    rng = np.random.default_rng(7)
+    light = make_light((512, 512))
+    corr = (1800 + rng.normal(0, 100, light.shape) + 0.4 * light).astype(np.float32)
+    out = _fill(corr, light, corr + light, HYBRID)
+    n_changed = 0
+    for i, k in enumerate(Z):
+        u = HYBRID.eps[k] * light[i]
+        changed = out[i] < corr[i]
+        n_changed += int(changed.sum())
+        # A candidate has u above the local sd (about 100, well above the global
+        # floor of 37); the mask is dilated by 2 px. With the floor as the gate,
+        # the hard clip would also change pixels with u between 37 and 60.
+        assert (ndi.grey_dilation(u, size=5)[changed] > 60.0).all()
+    assert n_changed > 500
+
+
+def test_h3b_a_textured_plane_is_filled_less_than_a_quiet_one() -> None:
+    quiet = make_textured_planes(texture_amp=0.0)
+    busy = make_textured_planes(texture_amp=3000.0)
+    n_quiet = (_fill(*quiet, HYBRID) < quiet[0]).sum()
+    n_busy = (_fill(*busy, HYBRID) < busy[0]).sum()
+    assert n_busy < n_quiet
+
+
+def test_h4_hybrid_chunk_invariance_for_origins_off_the_texture_grid() -> None:
+    """Windows whose origin is on the 16 px grid but not on the 32 px texture grid.
+
+    The texture blocks sit on the absolute grid, so a window that starts 16 px past
+    a block edge must give the same pixels as the full mosaic.
+    """
+    size = (704, 1024)
+    beads = (
+        (200, 250, 30.0, 6.0, 2500.0),
+        (480, 560, 30.0, 6.0, 1800.0),
+        (300, 880, 30.0, 6.0, 3000.0),
+    )
+    corr, light, raw = make_textured_planes(size=size, seed=3, beads=beads)
+    # Part of the mosaic is outside the data (invalid), as at a real mosaic edge.
+    corr[:, :, :40] = 0
+    raw[:, :, :40] = 0
+    full = _fill(corr, light, raw, HYBRID, origin_yx=(0, 0))
+    assert (full < corr).sum() > 1000
+    margin = support_px(HYBRID)["total"] + 2
+    for y0, y1, x0, x1 in [(16, 704, 48, 1024), (32, 688, 16, 976), (0, 704, 80, 1008)]:
+        sub = _fill(
+            corr[:, y0:y1, x0:x1],
+            light[:, y0:y1, x0:x1],
+            raw[:, y0:y1, x0:x1],
+            HYBRID,
+            origin_yx=(y0, x0),
+        )
+        ya, yb = (margin if y0 > 0 else 0), (y1 - y0 - (margin if y1 < size[0] else 0))
+        xa, xb = (margin if x0 > 0 else 0), (x1 - x0 - (margin if x1 < size[1] else 0))
+        a = sub[:, ya:yb, xa:xb]
+        b = full[:, y0 + ya : y0 + yb, x0 + xa : x0 + xb]
+        assert np.abs(a - b).max() == 0.0, (y0, y1, x0, x1)
+    # The origin is what aligns the blocks: a wrong origin changes the result.
+    window = (slice(None), slice(16, None), slice(48, None))
+    wrong = _fill(corr[window], light[window], raw[window], HYBRID, origin_yx=(0, 0))
+    right = _fill(corr[window], light[window], raw[window], HYBRID, origin_yx=(16, 48))
+    assert not np.array_equal(wrong, right)
+
+
+def test_h5_flat_hash_is_unchanged_and_the_hybrid_support_fits() -> None:
+    assert fill_params_sha256(FillParams()) == FLAT_DEFAULT_SHA256
+    assert fill_params_sha256(FillParams(enabled=True)) == FLAT_ENABLED_SHA256
+    # The texture fields do not matter in flat mode (and are not hashed there).
+    assert fill_params_sha256(FillParams(texture_block=64)) == FLAT_DEFAULT_SHA256
+    assert support_px(FillParams()) == {
+        "fine": 32,
+        "cover": 136,
+        "reach": 64,
+        "coarse": 144,
+        "total": 232,
+    }
+    # Hybrid has its own hash, which follows its texture fields.
+    assert fill_params_sha256(HYBRID) != FLAT_ENABLED_SHA256
+    assert fill_params_sha256(HYBRID) != fill_params_sha256(
+        dataclasses.replace(HYBRID, texture_hp_sigma=5.0)
+    )
+    # High-pass radius 24 + (1 + 1) blocks of 32 px behind the 144 px coarse path.
+    assert support_px(HYBRID) == {
+        "fine": 32,
+        "cover": 0,
+        "reach": 88,
+        "coarse": 144,
+        "total": 232,
+    }
+    assert support_px(HYBRID)["total"] <= MAX_SUPPORT_PX
+    # The original smoothing (4 blocks, 128 px) would not fit: it is refused.
+    for radius in (2, 4):
+        with pytest.raises(ValueError, match="support"):
+            FillParams(mode="hybrid", texture_radius_blocks=radius)
+    assert (
+        support_px(dataclasses.replace(HYBRID, texture_radius_blocks=0))["total"] < 232
+    )
+    # In flat mode the texture fields are not read, so they do not count.
+    assert FillParams(texture_radius_blocks=4).mode == "flat"
+
+
+def test_h6_hybrid_uses_its_own_effective_gates() -> None:
+    """The flat fields are ignored in hybrid mode and keep their flat defaults."""
+    flat = FillParams()
+    assert (flat.flat_max, flat.deadband, flat.peak_snr, flat.max_cover) == (
+        1.0,
+        2.0,
+        3.0,
+        0.6,
+    )
+    assert flat.mode == "flat"
+    corr, light, raw = make_textured_planes()
+    base = _fill(corr, light, raw, HYBRID)
+    other = FillParams(
+        enabled=True,
+        mode="hybrid",
+        flat_max=1e-6,
+        deadband=5.0,
+        peak_snr=10.0,
+        bright_reach_px=8,
+        max_cover=0.05,
+    )
+    assert np.array_equal(base, _fill(corr, light, raw, other))
+    # Hard one-sided clip: noise on a flat background is clipped, unlike flat mode.
+    rng = np.random.default_rng(4)
+    flat_light = make_light((512, 512))
+    obs = (1800 + rng.normal(0, 37, flat_light.shape)).astype(np.float32)
+    hard = _fill(obs, flat_light, obs + flat_light, HYBRID)
+    soft = _fill(obs, flat_light, obs + flat_light)
+    assert (obs - hard).sum() > 5 * (obs - soft).sum()
+
+
+def test_h7_hybrid_leaves_invalid_pixels_and_stains_alone() -> None:
+    corr, light, raw = make_textured_planes()
+    corr[:, 200:320, 200:260] = 0
+    raw[:, 200:320, 200:260] = 0
+    out = _fill(corr, light, raw, HYBRID)
+    assert (out[:, 200:320, 200:260] == 0).all()
+    assert (out <= corr).all()
+    assert (out < corr).sum() > 1000
+    # A stain the fill is not configured for is returned as is.
+    other = apply_bounded_fill(
+        corr, light, raw=raw, z_layers=Z, config=HYBRID, stain="DAPI", noise=NOISE
+    )
+    assert other is corr
+    # Disabled stays bit-identical in hybrid mode too.
+    off = dataclasses.replace(HYBRID, enabled=False)
+    assert _fill(corr, light, raw, off) is corr
+
+
+def test_h8_hybrid_origin_and_mode_validation() -> None:
+    corr, light, raw = make_textured_planes()
+    with pytest.raises(ValueError, match="origin_yx"):
+        _fill(corr, light, raw, HYBRID, origin_yx=(4, 0))
+    # Flat mode does not read the origin.
+    assert np.array_equal(
+        _fill(corr, light, raw, origin_yx=(4, 0)), _fill(corr, light, raw)
+    )
+    with pytest.raises(ValueError, match="mode"):
+        FillParams(mode="other")  # type: ignore[arg-type]
+    for bad in (
+        {"texture_block": 0},
+        {"texture_hp_sigma": 0.0},
+        {"texture_smooth": 0.0},
+        {"texture_radius_blocks": -1},
+    ):
+        with pytest.raises(ValueError, match="texture"):
+            FillParams(mode="hybrid", **bad)
+
+
+def test_h9_correct_window_passes_the_absolute_origin_to_the_hybrid_fill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a mode with absolute blocks gets the origin; flat settings never do."""
+    calls: list[dict[str, Any]] = []
+
+    def fake(corrected: np.ndarray, model_light: np.ndarray, **kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return corrected
+
+    module = types.ModuleType("merxen.io.bead_removal.fill")
+    module.apply_bounded_fill = fake  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "merxen.io.bead_removal.fill", module)
+    cal = bs.make_calibration()
+    st = bs.make_stack(seed=1, n_beads=15, size=512)
+    stacks = {k: st[k] for k in ("PolyT", "DAPI")}
+    for settings, expected in (
+        (types.SimpleNamespace(enabled=True, stains=("PolyT",)), None),
+        (types.SimpleNamespace(enabled=True, stains=("PolyT",), mode="flat"), None),
+        (
+            types.SimpleNamespace(enabled=True, stains=("PolyT",), mode="hybrid"),
+            (16, 32),
+        ),
+    ):
+        calls.clear()
+        correct_window(
+            stacks,
+            origin_yx=(21, 37),  # padded down to the 16 px grid: (16, 32)
+            calibration=cal,
+            z_layers=Z,
+            fill=settings,
+        )
+        assert len(calls) == 1
+        assert calls[0].get("origin_yx") == expected
+
+
+def test_h10_hybrid_correct_window_is_never_brighter_than_the_subtraction() -> None:
+    cal = bs.make_calibration()
+    st = bs.make_stack(seed=1, n_beads=15, size=512)
+    stacks = {k: st[k] for k in ("PolyT", "DAPI")}
+
+    def run(**kwargs: Any) -> tuple[dict[str, np.ndarray], Any, dict[str, Any]]:
+        return correct_window(
+            stacks, origin_yx=(16, 48), calibration=cal, z_layers=Z, **kwargs
+        )
+
+    base, _, _ = run()
+    hybrid, _, stats = run(fill=HYBRID)
+    for stain in base:
+        assert (hybrid[stain] <= base[stain]).all()
+    assert set(stats["fill"]) == {"PolyT"}
+    assert stats["fill"]["PolyT"]["cand_px"] > 0
+    assert (hybrid["PolyT"] < base["PolyT"]).any()
