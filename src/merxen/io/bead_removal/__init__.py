@@ -9,6 +9,11 @@ The public names are re-exported here as the pieces land; import the submodules
 """
 
 from merxen.io.bead_removal.apply import apply_bead_model, correct_window
+from merxen.io.bead_removal.calibrate import (
+    BeadCalibration,
+    BeadCalibrationError,
+    calibrate_bead_model,
+)
 from merxen.io.bead_removal.detect import ClassifierThresholds
 from merxen.io.bead_removal.params import (
     BEAD_REMOVAL_VERSION,
@@ -22,11 +27,14 @@ from merxen.io.bead_removal.reader import MosaicPlaneReader, list_mosaic_planes
 __all__ = [
     "BEAD_REMOVAL_VERSION",
     "DEFAULT_PARAMS",
+    "BeadCalibration",
+    "BeadCalibrationError",
     "ClassifierThresholds",
     "MosaicPlaneReader",
     "PsfLibrary",
     "PsfSubtractParams",
     "apply_bead_model",
+    "calibrate_bead_model",
     "correct_window",
     "list_mosaic_planes",
     "params_sha256",
