@@ -48,7 +48,7 @@ def test_fixture_is_candidate_and_drops_persistent_baseline_paths(
         json.dumps(
             {
                 "dataset": {
-                    "name": "P7513_XENIUM",
+                    "name": "HD1_XENIUM",
                     "platform": "XENIUM",
                     "channels": ["DAPI", "18S"],
                     "data_path": str(source),
