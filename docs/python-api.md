@@ -51,7 +51,7 @@ configs against these.
   `ClusteringSquidpyConfig`, `GastonConfig`.
 - Sub-models: `CellposeConfig`, `TilingConfig`, `MaskFilterConfig`,
   `ProsegConfig`, `ProsegHybridConfig`, `MemoryConfig`, `DatasetConfig`,
-  `MerscopeBuildConfig`, `XeniumBuildConfig`.
+  `MerscopeBuildConfig`, `MerscopeBeadRemovalConfig`, `XeniumBuildConfig`.
 - `PipelineConfig(BaseSettings)` — loads `MERXEN_*` env vars.
 - `load_config_from_json(path, cls)` — helper every CLI uses.
 
@@ -72,6 +72,36 @@ with Groovy.
 ### `io.builders` — [builders/](../src/merxen/io/builders/)
 - `build_spatialdata_artifact(config, *, force_rerun)` — orchestrator.
 - `write_merscope_spatialdata(...)` / `write_xenium_spatialdata(...)`.
+
+### `io.bead_removal` — [bead_removal/](../src/merxen/io/bead_removal/)
+Optional removal of coverslip fiducial beads from MERSCOPE image planes before
+the max projection. Off by default; the default build never imports it, and the
+package imports no GPU code. Configured by `MerscopeBeadRemovalConfig`
+(`MerscopeBuildConfig.bead_removal`); see
+[stages/spatialdata-build.md](stages/spatialdata-build.md#merscope-bead-removal-optional).
+- `list_mosaic_planes(images_dir)` / `MosaicPlaneReader` — read raw
+  `mosaic_<stain>_z<N>.tif` planes by window.
+- `calibrate_bead_model(reader, *, config, z_layers, params, n_workers)` —
+  per-dataset calibration: tissue mask, calibration tiles, bead-presence
+  decision, PSF library, stain responses and classifier thresholds. Returns a
+  `BeadCalibration` (`save` / `load`, `calibration_sha256()`); raises
+  `BeadCalibrationError` with a per-tile table when the data cannot be
+  corrected (no beads, ambiguous, beads not focused at plane 0, no tissue-free
+  area).
+- `correct_window(stacks, *, origin_yx, calibration, z_layers, params, fill, core)` —
+  correct one window of plane stacks; `apply_bead_model` subtracts a fitted
+  model. Results depend only on the window's own pixels.
+- `run_bead_removal(...)` — chunk-major driver (process pool, parent-only
+  writes) used by the MERSCOPE builder; returns a `BeadRemovalRunResult`.
+- `write_bead_removal_qc(...)` — writes the `bead_removal_qc/` folder
+  (`QC_DIRNAME`).
+- `PsfSubtractParams` / `DEFAULT_PARAMS` / `params_sha256` and
+  `BEAD_REMOVAL_VERSION` — the fixed algorithm parameters and their identity.
+- `provenance` — `build_image_preprocessing_record`,
+  `check_bead_removal_reuse` (the cache guard), and the segmentation sidecar
+  helpers.
+- `fill` — the experimental bounded fill (`FillParams`, `apply_bounded_fill`),
+  reached through the config's `fill` flag.
 
 ### `io.spatialdata_io` — [spatialdata_io.py](../src/merxen/io/spatialdata_io.py)
 - `write_spatialdata_zarr(sdata, path, ...)`.

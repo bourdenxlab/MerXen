@@ -206,6 +206,12 @@ Two independent reuse paths and one Nextflow cache:
   `xenium_spatialdata_path` at an existing built zarr. `build_spatialdata`
   short-circuits to that artifact unless `--force_spatialdata_build true` is
   passed. Implemented in [src/merxen/io/builders/pipeline.py:14](../src/merxen/io/builders/pipeline.py#L14).
+  A cached MERSCOPE zarr records whether MERSCOPE bead removal was applied
+  (root attribute `merxen_image_preprocessing`); a cache that disagrees with the
+  requested `merscope_bead_removal` or `merscope_bead_removal_fill` setting is
+  refused with an error rather than reused, and Cellpose masks computed from
+  the other image are refused through a sidecar next to the masks. See
+  [bead removal caching](stages/spatialdata-build.md#caching-and-how-to-rebuild).
 - **Published-output stage starts.** `--start_stage`, `--stop_stage`, and
   `--only_stage` select a contiguous process range without invoking earlier
   stages. When an upstream stage is skipped, the workflow reads the expected

@@ -19,6 +19,12 @@ required. A template lives at
 > DAPI or PolyT projection intensities. This setting is MERSCOPE-specific;
 > Xenium morphology images are supplied pre-projected and do not use
 > `merscope_z_range`.
+>
+> Data from older, bead-coated coverslips can instead have the beads
+> subtracted from PolyT and DAPI before the projection with the optional
+> `merscope_bead_removal` column; see
+> [MERSCOPE bead removal](stages/spatialdata-build.md#merscope-bead-removal-optional).
+> That also requires a range starting at `1` or later.
 
 ## Columns
 
@@ -64,7 +70,8 @@ required. A template lives at
 | `merscope_dir` | required for MERSCOPE modes if no cache | Path to the raw MERSCOPE region export folder, a direct `.vzg2` archive, or a folder containing exactly one `.vzg2`. Canonical raw folders retain transcript points. A VZG2-only build recovers the Vizualizer image, original cell polygons, centroids, volumes, and cell-by-gene table, but not packed transcript coordinates. |
 | `merscope_spatialdata_path` | required for MERSCOPE modes if no raw dir | Path to an existing (or desired) reusable MERSCOPE SpatialData zarr. If it exists, the build step is **skipped** unless `--force_spatialdata_build true` is passed to Nextflow. For a downstream-only restart, an explicit path overrides `${outdir}/${pair_id}/merscope/latest/latest_spatialdata.zarr` and must point to the durable enriched latest zarr required by that stage. |
 | `merscope_image_prefix` | no | Prefix used to match z-plane image keys when more than one run is present. |
-| `merscope_z_range` | no | Inclusive raw-image z-layer range as `start-end`. Set it explicitly and normally start at `1` (for example, `1-7`) to exclude the MERSCOPE plane-0 fiducial beads. The historical fallback is `0-6`; do not rely on it for standard MERSCOPE exports. Xenium is pre-projected and ignores this field. |
+| `merscope_z_range` | no | Inclusive raw-image z-layer range as `start-end`. Set it explicitly and normally start at `1` (for example, `1-7`) to exclude the MERSCOPE plane-0 fiducial beads. The historical fallback is `0-6`; do not rely on it for standard MERSCOPE exports. With `merscope_bead_removal` on, it must start at `1` or later. Xenium is pre-projected and ignores this field. |
+| `merscope_bead_removal` | no | Row-level switch for removing coverslip fiducial beads from the PolyT and DAPI planes before the max projection: `true` or `false` (also `yes`/`no`, `1`/`0`). Blank inherits `--merscope_bead_removal`, which defaults to `false`. When on, `merscope_z_range` must start at plane `1` or later (plane `0` is read for detection only), may not end above `7`, and the row needs a raw MERSCOPE input folder with z-plane TIFFs (`merscope_dir` must be a directory; a `.vzg2` archive is refused). A cached `merscope_spatialdata_path` zarr built with another setting is refused, not reused; see [the cache guard](stages/spatialdata-build.md#caching-and-how-to-rebuild). Ignored in Xenium-only rows. |
 | `merscope_transform_path` | no | Override path to the `micron_to_mosaic_pixel_transform.csv`. If not set, MerXen looks inside `merscope_dir`. |
 | `merscope_channels` | no | Comma-separated channel names for Cellpose. Defaults to `DAPI,PolyT`. |
 | `merscope_voxel_layers` | no | ProSeg voxel layer count for MERSCOPE. Defaults to `7` (from `nextflow.config`). |
@@ -180,6 +187,14 @@ The row-level `analysis_mode` is enough to run this alongside paired or
 MERSCOPE-only rows in the same file. MERSCOPE-only rows are analogous: provide
 `merscope_dir` or `merscope_spatialdata_path` and set `analysis_mode=merscope`.
 
+MERSCOPE-only row on a beaded coverslip, with bead removal on for this row
+only (planes `1`-`6`, raw TIFFs):
+
+```csv
+pair_id,analysis_mode,merscope_dir,merscope_z_range,merscope_bead_removal
+EXAMPLE05,merscope,/path/to/merscope/EXAMPLE05,1-6,true
+```
+
 Cortical-depth example for a Xenium-only row:
 
 ```csv
@@ -236,5 +251,8 @@ visualization stage, reading prior outputs from `--outdir`.
   `detected_transcripts.csv` or `detected_transcripts.parquet` can run the full
   pipeline even when the mosaic TIFFs are absent. MerXen reads the image from
   VZG2 and the canonical transcript coordinates from the external table.
+- Turn `merscope_bead_removal` on only for beaded coverslips: the build fails
+  on a dataset in which it finds no beads. Do not pool corrected and
+  uncorrected samples for PolyT/DAPI intensity features.
 - Keep one samplesheet per batch. Nextflow runs all rows in parallel up to the
   executor limit.

@@ -246,6 +246,12 @@ def test_parse_samplesheet_rejects_invalid_bead_removal_value(tmp_path: Path) ->
         parse_samplesheet(csv_path)
 
 
+def test_samplesheet_docs_describe_the_bead_removal_column() -> None:
+    docs = Path(__file__).resolve().parents[2] / "docs" / "samplesheet.md"
+
+    assert "`merscope_bead_removal`" in docs.read_text()
+
+
 def test_parse_samplesheet_supports_gaston_row_overrides(tmp_path: Path) -> None:
     """Every GASTON control can be supplied at samplesheet row scope."""
     csv_path = tmp_path / "gaston.csv"

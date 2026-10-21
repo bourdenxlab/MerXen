@@ -150,7 +150,10 @@ Each row points at raw platform folders, with optional reusable SpatialData cach
 For raw MERSCOPE data, set `merscope_z_range` explicitly from plane `1`
 (for example, `1-7`): plane `0` is the fiducial-bead layer and will contaminate
 the max projection. Xenium morphology images are already projected and are not
-affected by this setting.
+affected by this setting. Beaded older MERSCOPE coverslips can optionally have
+the beads subtracted from PolyT and DAPI before the projection
+(`merscope_bead_removal`, off by default; see
+[SpatialData build](docs/stages/spatialdata-build.md#merscope-bead-removal-optional)).
 
 A template lives at [workflows/samplesheet.example.csv](workflows/samplesheet.example.csv). The full schema, validation rules, and worked examples are in [Samplesheet format](docs/samplesheet.md).
 

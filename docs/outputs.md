@@ -89,6 +89,27 @@ Published with `mode: "symlink"` — the target of the symlink is the Nextflow
 work directory or the cached path. See
 [Caching and reuse](pipeline.md#caching-and-reuse).
 
+Every raw-TIFF MERSCOPE build also writes the root attribute
+`merxen_image_preprocessing` (z planes, stains, and the bead-removal identity,
+including its calibration summary). Enrichment copies it onto the latest zarr.
+
+When bead removal is on (`merscope_bead_removal`), the zarr also contains
+`bead_removal_qc/`, the report of the correction:
+
+| File | Contents |
+|------|----------|
+| `bead_removal_qc/summary.json` | Status (`pass` or `warn`), warnings, bead density, runtimes, classifier recall, the classifier rescue and PSF library spread. |
+| `bead_removal_qc/calibration.json`, `psf_library.npz`, `psf_montage.png` | Calibration decision, thresholds, stain responses and the measured PSF library. |
+| `bead_removal_qc/overview.png`, `bead_density.png`, `stretch_field.png`, `change_overview.png` | Overview maps: tiles and tissue, bead density, PSF stretch, and removed light. |
+| `bead_removal_qc/before_after*.png`, `before_after_crops.npz` | Raw and corrected crops at six locations. |
+| `bead_removal_qc/residual_profiles.json`, `.png` | Residual bead profile at planes `1`-`4`, on and off tissue. |
+| `bead_removal_qc/beads.csv.gz`, `chunks.csv` | Per-bead and per-chunk tables. |
+
+Reading guide: [stages/spatialdata-build.md](stages/spatialdata-build.md#the-qc-folder).
+With bead removal on, segmentation also publishes `image_preprocessing.json`
+(cell masks) and `nuclei_image_preprocessing.json` (nuclei masks) next to the
+masks it writes, recording which image they were computed from.
+
 ### Latest SpatialData
 
 Path: `${outdir}/<pair_id>/<platform>/latest/`
