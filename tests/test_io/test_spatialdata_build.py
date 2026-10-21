@@ -7,6 +7,7 @@ import sys
 import types
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import dask.array as da
 import numpy as np
@@ -21,6 +22,7 @@ from merxen.io.bead_removal.provenance import (
     IMAGE_PREPROCESSING_ATTR,
     build_image_preprocessing_record,
 )
+from merxen.io.builders import merscope as merscope_module
 from merxen.io.builders.merscope import (
     ProjectionBuildResult,
     _build_iterative_projection_store,
@@ -328,26 +330,350 @@ def test_bead_removal_z_layer_refusal_is_not_applied_when_disabled(
     assert len(written) == 1
 
 
-def test_bead_removal_projection_is_not_wired_yet(
+def _write_tiny_raw(
+    folder: Path,
+    *,
+    stains: tuple[str, ...] = ("PolyT", "DAPI", "Anti-X"),
+    n_planes: int = 4,
+    size: int = 64,
+) -> Path:
+    """Write a raw MERSCOPE folder with featureless uint16 planes; return it."""
+    import tifffile
+
+    images = folder / "images"
+    images.mkdir(parents=True)
+    rng = np.random.default_rng(0)
+    for stain in stains:
+        for z in range(n_planes):
+            plane = rng.integers(100, 2000, (size, size)).astype(np.uint16)
+            tifffile.imwrite(images / f"mosaic_{stain}_z{z}.tif", plane)
+    return folder
+
+
+def _written_sdata(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Capture what the writer receives instead of writing a zarr."""
+    _fake_spatialdata_io(monkeypatch)
+    written: list[Any] = []
+    monkeypatch.setattr(
+        "merxen.io.builders.merscope.write_spatialdata_zarr",
+        lambda sdata, path, overwrite=None: written.append(sdata),
+    )
+    return written
+
+
+def test_default_build_does_not_pass_bead_removal_to_the_projection(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """An accepted request must not silently fall back to the plain projection."""
-    _fake_spatialdata_io(monkeypatch)
+    """B1: the default call of the projection is exactly as before."""
+    written = _written_sdata(monkeypatch)
+    seen: list[dict[str, object]] = []
+
+    def _projection(**kwargs: object) -> ProjectionBuildResult:
+        seen.append(kwargs)
+        return ProjectionBuildResult(object(), None, stainings=("PolyT",))
+
     monkeypatch.setattr(
-        "merxen.io.builders.merscope._load_merscope_projection_from_raw",
-        lambda **kwargs: pytest.fail("the plain projection must not be built"),
+        "merxen.io.builders.merscope._load_merscope_projection_from_raw", _projection
     )
 
-    with pytest.raises(NotImplementedError, match="later work package"):
+    for bead_removal in (None, MerscopeBeadRemovalConfig()):
         write_merscope_spatialdata(
             input_path=tmp_path,
             output_path=tmp_path / "source.zarr",
             build_config=MerscopeBuildConfig(
-                z_layers=[1, 2, 3],
-                bead_removal=MerscopeBeadRemovalConfig(enabled=True),
+                z_layers=[1, 2], bead_removal=bead_removal
             ),
         )
+
+    assert len(written) == 2
+    assert [sorted(kwargs) for kwargs in seen] == [
+        ["input_path", "temp_root", "z_layers"]
+    ] * 2
+
+
+def test_bead_removal_calibrates_before_projecting_and_maps_the_channels(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The calibration runs first; the loop projects only uncorrected stains."""
+    from merxen.io.bead_removal.driver import BeadRemovalRunResult
+
+    from .bead_build_fixtures import real_calibration
+
+    raw = _write_tiny_raw(tmp_path / "raw")
+    events: list[tuple[str, object]] = []
+    real_open = merscope_module._open_merscope_channel_plane_array
+
+    def _open(**kwargs: Any) -> Any:
+        events.append(("open", (kwargs["stain"], kwargs["z_layer"])))
+        return real_open(**kwargs)
+
+    monkeypatch.setattr(
+        "merxen.io.builders.merscope._open_merscope_channel_plane_array", _open
+    )
+
+    def _calibrate(reader: Any, **kwargs: Any) -> Any:
+        events.append(("calibrate", (list(reader.planes), kwargs["z_layers"])))
+        return real_calibration()
+
+    monkeypatch.setattr(
+        "merxen.io.bead_removal.calibrate.calibrate_bead_model", _calibrate
+    )
+    run_kwargs: list[dict[str, Any]] = []
+
+    def _driver(**kwargs: Any) -> BeadRemovalRunResult:
+        events.append(("driver", None))
+        run_kwargs.append(kwargs)
+        return _run_result(kwargs["work_dir"])
+
+    monkeypatch.setattr("merxen.io.bead_removal.driver.run_bead_removal", _driver)
+
+    result = _build_iterative_projection_store(
+        images_dir=raw / "images",
+        stainings=["Anti-X", "DAPI", "PolyT"],
+        z_layers=[1, 2, 3],
+        image_models_kwargs={"chunks": (1, 64, 64), "scale_factors": [2]},
+        temp_root=tmp_path,
+        bead_removal=MerscopeBeadRemovalConfig(enabled=True, max_workers=1),
+    )
+
+    try:
+        names = [name for name, _ in events]
+        # The probe plane is opened first; then the calibration, before any
+        # projection work; then the loop; then the driver.
+        assert names[0] == "open"
+        assert names[1] == "calibrate"
+        assert events[1][1] == ([0, 1, 2, 3], [1, 2, 3])
+        assert names[-1] == "driver"
+        looped = [payload for name, payload in events[2:-1] if name == "open"]
+        assert looped == [("Anti-X", 1), ("Anti-X", 2), ("Anti-X", 3)]
+        kwargs = run_kwargs[0]
+        assert kwargs["stains"] == ["PolyT", "DAPI"]
+        # The store has one channel per dataset stain, in dataset order.
+        assert kwargs["store_channels"] == {"PolyT": 2, "DAPI": 1}
+        assert kwargs["halo_px"] == 256 and kwargs["core_px"] == 64
+        assert kwargs["fill"] is None
+        assert (Path(kwargs["calibration_dir"]) / "calibration.json").exists()
+        assert result.bead_calibration is not None
+        assert result.bead_removal is not None
+    finally:
+        assert result.temp_path is not None
+        remove_path(result.temp_path)
+
+
+def _run_result(work_dir: Path) -> Any:
+    from merxen.io.bead_removal.driver import BeadRemovalRunResult
+
+    return BeadRemovalRunResult(
+        n_chunks=1,
+        n_workers=1,
+        wall_s=1.0,
+        worker_cpu_s=1.0,
+        worker_wall_s=1.0,
+        read_s=0.1,
+        correct_s=0.8,
+        project_s=0.1,
+        parent_write_s=0.0,
+        n_beads=3,
+        peak_tree_rss_gb=1.0,
+        peak_tree_anon_gb=0.5,
+        peak_worker_rss_gb=1.0,
+        peak_worker_anon_gb=0.5,
+        work_dir=str(work_dir),
+        backend={"device": "cpu", "update_order": "brightness"},
+    )
+
+
+@pytest.mark.parametrize("fill", [False, True])
+def test_bead_removal_fill_flag_reaches_the_driver_and_the_record(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fill: bool,
+) -> None:
+    """B6: the fill flag of the config drives the fill and its provenance."""
+    from .bead_build_fixtures import real_calibration
+
+    written = _written_sdata(monkeypatch)
+    raw = _write_tiny_raw(tmp_path / "raw")
+    calibration = real_calibration()
+    monkeypatch.setattr(
+        "merxen.io.bead_removal.calibrate.calibrate_bead_model",
+        lambda reader, **kwargs: calibration,
+    )
+    fills: list[Any] = []
+
+    def _driver(**kwargs: Any) -> Any:
+        fills.append(kwargs["fill"])
+        return _run_result(kwargs["work_dir"])
+
+    monkeypatch.setattr("merxen.io.bead_removal.driver.run_bead_removal", _driver)
+
+    write_merscope_spatialdata(
+        input_path=raw,
+        output_path=tmp_path / "source.zarr",
+        build_config=MerscopeBuildConfig(
+            z_layers=[1, 2, 3],
+            bead_removal=MerscopeBeadRemovalConfig(
+                enabled=True, fill=fill, max_workers=1
+            ),
+        ),
+    )
+
+    record = written[0].attrs[IMAGE_PREPROCESSING_ATTR]["bead_removal"]
+    assert record["enabled"] is True
+    assert record["fill"]["enabled"] is fill
+    if fill:
+        assert fills[0].enabled and fills[0].stains == ("PolyT",)
+        assert record["fill"]["params_sha256"]
+    else:
+        assert fills[0] is None
+    # The record carries the calibration and run summaries, not temp paths.
+    assert record["calibration"]["calibration_sha256"] == (
+        calibration.calibration_sha256()
+    )
+    assert record["calibration"]["thresholds"]["ring_min"] > 0
+    assert record["run"]["n_beads"] == 3
+    assert "work_dir" not in record["run"]
+    assert record["corrected_stains"] == ["DAPI", "PolyT"]
+    assert record["backend"] == {"device": "cpu"}
+    json.dumps(written[0].attrs[IMAGE_PREPROCESSING_ATTR])
+
+
+def test_bead_calibration_record_drops_the_per_tile_table() -> None:
+    from .bead_build_fixtures import real_calibration
+
+    calibration = real_calibration()
+    calibration.decision = {
+        "status": "ok",
+        "classifier": {"recall": 0.95, "tiles": [{"index": 0}] * 100},
+    }
+
+    record = merscope_module._bead_calibration_record(calibration)
+
+    assert record["decision"]["classifier"] == {"recall": 0.95}
+    assert calibration.decision["classifier"]["tiles"], "the input is not changed"
+    assert record["calibration_sha256"] == calibration.calibration_sha256()
+    json.dumps(record)
+
+
+@pytest.mark.parametrize(
+    ("stains", "match"),
+    [
+        (["PolyT", "DAPI", "Missing"], "not among the MERSCOPE stains"),
+        (["PolyT"], "needs DAPI"),
+    ],
+)
+def test_bead_removal_refuses_unservable_stains_before_any_work(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stains: list[str],
+    match: str,
+) -> None:
+    _written_sdata(monkeypatch)
+    raw = _write_tiny_raw(tmp_path / "raw")
+    monkeypatch.setattr(
+        "merxen.io.bead_removal.calibrate.calibrate_bead_model",
+        lambda *a, **k: pytest.fail("the calibration must not run"),
+    )
+
+    with pytest.raises(ValueError, match=match):
+        write_merscope_spatialdata(
+            input_path=raw,
+            output_path=tmp_path / "source.zarr",
+            build_config=MerscopeBuildConfig(
+                z_layers=[1, 2],
+                bead_removal=MerscopeBeadRemovalConfig(enabled=True, stains=stains),
+            ),
+        )
+    assert list(tmp_path.glob("merscope_projection_*")) == []
+
+
+def test_bead_removal_refuses_a_seven_plane_dataset_with_z_range_to_seven(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """C11: z 1-7 on a dataset with planes 0-6 fails at the calibration."""
+    from merxen.io.bead_removal.calibrate import BeadCalibrationError
+
+    _written_sdata(monkeypatch)
+    raw = _write_tiny_raw(tmp_path / "raw", n_planes=7)
+
+    with pytest.raises(BeadCalibrationError, match=r"planes \[7\] are missing"):
+        write_merscope_spatialdata(
+            input_path=raw,
+            output_path=tmp_path / "source.zarr",
+            build_config=MerscopeBuildConfig(
+                z_layers=[1, 2, 3, 4, 5, 6, 7],
+                bead_removal=MerscopeBeadRemovalConfig(enabled=True, max_workers=1),
+            ),
+        )
+    # Nothing is left behind: the temporary projection folder is removed.
+    assert list(tmp_path.glob("merscope_projection_*")) == []
+
+
+def test_bead_removal_builds_a_corrected_projection_end_to_end(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """B2: tiny raw folder, calibration from the synthetic library.
+
+    The antibody stain is the plain max projection, PolyT and DAPI are corrected
+    (never above the plain max), plane 0 is read although z_layers start at 1,
+    and the root attribute records the correction.
+    """
+    from . import bead_synth as bs
+    from .bead_build_fixtures import raw_max, real_calibration, write_mosaic
+
+    stack = bs.make_stack(n_planes=4, size=1024, n_beads=30, seed=3, n_nuclei=6)
+    raw = tmp_path / "raw"
+    write_mosaic(raw / "images", stack, 4, stains=("PolyT", "DAPI", "Anti-X"))
+    calibrations: list[Any] = []
+
+    def _calibrate(reader: Any, **kwargs: Any) -> Any:
+        calibrations.append((list(reader.stains), list(reader.planes)))
+        return real_calibration()
+
+    monkeypatch.setattr(
+        "merxen.io.bead_removal.calibrate.calibrate_bead_model", _calibrate
+    )
+    _fake_spatialdata_io(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def _write(sdata: Any, path: Path, overwrite: bool | None = None) -> None:
+        image = sdata.images[MERSCOPE_ZPROJ_IMAGE_NAME]
+        data = image["scale0"]["image"]
+        captured["channels"] = [str(c) for c in data.coords["c"].values]
+        captured["array"] = np.asarray(data.values)
+        captured["attrs"] = dict(sdata.attrs)
+
+    monkeypatch.setattr("merxen.io.builders.merscope.write_spatialdata_zarr", _write)
+
+    write_merscope_spatialdata(
+        input_path=raw,
+        output_path=tmp_path / "source.zarr",
+        build_config=MerscopeBuildConfig(
+            z_layers=[1, 2, 3],
+            bead_removal=MerscopeBeadRemovalConfig(enabled=True, max_workers=1),
+        ),
+    )
+
+    stains, planes = calibrations[0]
+    assert sorted(stains) == ["Anti-X", "DAPI", "PolyT"]
+    assert planes == [0, 1, 2, 3], "plane 0 is read for the detection"
+    channels = captured["channels"]
+    array = captured["array"]
+    zs = [1, 2, 3]
+    antix = array[channels.index("Anti-X")]
+    np.testing.assert_array_equal(antix, raw_max(stack, "Anti-X", zs))
+    for stain in ("PolyT", "DAPI"):
+        corrected = array[channels.index(stain)]
+        assert (corrected <= raw_max(stack, stain, zs)).all()
+    assert (array[channels.index("PolyT")] < raw_max(stack, "PolyT", zs)).any()
+    record = captured["attrs"][IMAGE_PREPROCESSING_ATTR]
+    assert record["bead_removal"]["enabled"] is True
+    assert record["bead_removal"]["run"]["n_chunks"] == 1
+    assert record["bead_removal"]["run"]["n_beads"] > 0
 
 
 def test_merscope_build_writes_the_preprocessing_record(

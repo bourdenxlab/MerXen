@@ -26,7 +26,7 @@ from spatialdata import SpatialData
 from spatialdata.models import Image2DModel, PointsModel, ShapesModel, TableModel
 from spatialdata.transformations import Affine, BaseTransformation
 
-from merxen.config import MerscopeBuildConfig
+from merxen.config import MerscopeBeadRemovalConfig, MerscopeBuildConfig
 from merxen.io.bead_removal.provenance import (
     IMAGE_PREPROCESSING_ATTR,
     build_image_preprocessing_record,
@@ -45,6 +45,9 @@ from merxen.path_utils import remove_path
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
+    from merxen.io.bead_removal.calibrate import BeadCalibration
+    from merxen.io.bead_removal.driver import BeadRemovalRunResult
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,6 +59,10 @@ class ProjectionBuildResult:
     temp_path: Path | None = None
     # Stain names of the projection, for the provenance record.
     stainings: tuple[str, ...] | None = None
+    # Set only when bead removal ran: the calibration and the run summary, for
+    # the provenance record and the QC report.
+    bead_calibration: BeadCalibration | None = None
+    bead_removal: BeadRemovalRunResult | None = None
 
 
 class MerscopeKeys:
@@ -173,14 +180,16 @@ def write_merscope_spatialdata(
 
     for key in list(sdata.images.keys()):
         del sdata.images[key]
-    if bead_removal_enabled:
-        raise NotImplementedError(
-            "bead removal projection is wired in a later work package"
-        )
+    # The bead-removal argument is passed only when it is on, so that the
+    # default build calls the projection exactly as before.
+    projection_kwargs: dict[str, Any] = (
+        {"bead_removal": bead_removal} if bead_removal_enabled else {}
+    )
     projection = _load_merscope_projection_from_raw(
         input_path=input_path,
         z_layers=z_layers,
         temp_root=output_path.parent,
+        **projection_kwargs,
     )
     sdata.images[MERSCOPE_ZPROJ_IMAGE_NAME] = projection.image
     try:
@@ -191,6 +200,16 @@ def write_merscope_spatialdata(
             z_layers=z_layers,
             stainings=projection.stainings or (),
             bead_removal_cfg=bead_removal,
+            calibration=(
+                _bead_calibration_record(projection.bead_calibration)
+                if projection.bead_calibration is not None
+                else None
+            ),
+            run=(
+                _bead_run_record(projection.bead_removal)
+                if projection.bead_removal is not None
+                else None
+            ),
         )
         write_spatialdata_zarr(sdata, output_path, overwrite=True)
         _copy_merscope_sidecars(
@@ -243,8 +262,21 @@ def _load_merscope_projection_from_raw(
     input_path: Path,
     z_layers: list[int],
     temp_root: Path | None = None,
+    bead_removal: MerscopeBeadRemovalConfig | None = None,
 ) -> ProjectionBuildResult:
-    """Build the final MERSCOPE projection image without storing z planes."""
+    """Build the final MERSCOPE projection image without storing z planes.
+
+    Args:
+        input_path: MERSCOPE folder with the ``images/`` directory.
+        z_layers: Planes to max-project.
+        temp_root: Folder for the temporary projection store.
+        bead_removal: Bead-removal request; ``None`` or disabled keeps the plain
+            projection.
+
+    Returns:
+        The projection image, its temporary store and, when bead removal ran, its
+        calibration and run summary.
+    """
     images_dir = Path(input_path) / MerscopeKeys.IMAGES_DIR
     stainings = _get_channel_names(images_dir)
     if not stainings:
@@ -260,6 +292,7 @@ def _load_merscope_projection_from_raw(
         z_layers=z_layers,
         image_models_kwargs=image_models_kwargs,
         temp_root=temp_root,
+        bead_removal=bead_removal,
     )
     image = Image2DModel.parse(
         projection.image,
@@ -271,6 +304,8 @@ def _load_merscope_projection_from_raw(
         image=image,
         temp_path=projection.temp_path,
         stainings=tuple(stainings),
+        bead_calibration=projection.bead_calibration,
+        bead_removal=projection.bead_removal,
     )
 
 
@@ -281,8 +316,33 @@ def _build_iterative_projection_store(
     z_layers: list[int],
     image_models_kwargs: Mapping[str, Any],
     temp_root: Path | None,
+    bead_removal: MerscopeBeadRemovalConfig | None = None,
 ) -> ProjectionBuildResult:
-    """Max-project raw MERSCOPE planes into a temporary zarr store."""
+    """Max-project raw MERSCOPE planes into a temporary zarr store.
+
+    Without bead removal (the default) every stain is projected plane by plane.
+    With it, the bead calibration runs first (before any projection work, so
+    that its failures are early), the stains that are not corrected are
+    projected as above, and the corrected stains are written chunk by chunk by
+    the bead-removal driver into the same store.
+
+    Args:
+        images_dir: Folder with the ``mosaic_<stain>_z<N>.tif`` planes.
+        stainings: Stains of the projection (channel order).
+        z_layers: Planes to max-project.
+        image_models_kwargs: Image model options; ``chunks`` sets the store chunks.
+        temp_root: Folder for the temporary store.
+        bead_removal: Bead-removal request; ``None`` or disabled keeps the plain
+            projection.
+
+    Returns:
+        The projection and its temporary store; with bead removal also the
+        calibration and the run summary.
+
+    Raises:
+        ValueError: ``z_layers`` is empty, or a bead-removal setting cannot be
+            served (stains, store chunks, pixel type).
+    """
     if len(z_layers) == 0:
         raise ValueError("z_layers is empty")
 
@@ -296,6 +356,13 @@ def _build_iterative_projection_store(
     height, width = (int(first_plane.shape[0]), int(first_plane.shape[1]))
     dtype = np.dtype(first_plane.dtype)
     del first_plane
+    bead_cfg = (
+        bead_removal if bead_removal is not None and bead_removal.enabled else None
+    )
+    if bead_cfg is not None:
+        _check_bead_removal_inputs(
+            bead_cfg, stainings, dtype=dtype, chunks=(int(chunk_y), int(chunk_x))
+        )
     store_chunks = (
         1,
         min(int(chunk_y), height),
@@ -315,8 +382,22 @@ def _build_iterative_projection_store(
         dtype=dtype,
     )
 
+    bead_calibration: BeadCalibration | None = None
+    bead_run: BeadRemovalRunResult | None = None
     try:
+        corrected: set[str] = set()
+        if bead_cfg is not None:
+            bead_calibration = _calibrate_bead_removal(
+                images_dir=images_dir,
+                stainings=stainings,
+                z_layers=z_layers,
+                config=bead_cfg,
+                calibration_dir=temp_dir / _BEAD_CALIBRATION_DIRNAME,
+            )
+            corrected = set(bead_calibration.corrected_stains)
         for channel_index, stain in enumerate(stainings):
+            if stain in corrected:
+                continue
             _project_channel_iteratively(
                 images_dir=images_dir,
                 stain=stain,
@@ -329,15 +410,218 @@ def _build_iterative_projection_store(
                 shape=(height, width),
             )
 
+        if bead_cfg is not None and bead_calibration is not None:
+            bead_run = _run_bead_removal_driver(
+                images_dir=images_dir,
+                stainings=stainings,
+                z_layers=z_layers,
+                config=bead_cfg,
+                calibration=bead_calibration,
+                calibration_dir=temp_dir / _BEAD_CALIBRATION_DIRNAME,
+                work_dir=temp_dir / _BEAD_WORK_DIRNAME,
+                projection_store=projection_store,
+                core_px=int(chunk_x),
+            )
+
         projection_da = xarray.DataArray(
             da.from_zarr(projection_path),
             dims=("c", "y", "x"),
             coords={"c": stainings},
         )
-        return ProjectionBuildResult(image=projection_da, temp_path=temp_dir)
+        return ProjectionBuildResult(
+            image=projection_da,
+            temp_path=temp_dir,
+            bead_calibration=bead_calibration,
+            bead_removal=bead_run,
+        )
     except Exception:
         remove_path(temp_dir)
         raise
+
+
+# Folders of the bead-removal state inside the temporary projection folder.
+_BEAD_CALIBRATION_DIRNAME = "bead_calibration"
+_BEAD_WORK_DIRNAME = "bead_removal"
+
+
+def _check_bead_removal_inputs(
+    config: MerscopeBeadRemovalConfig,
+    stainings: list[str],
+    *,
+    dtype: np.dtype[Any],
+    chunks: tuple[int, int],
+) -> None:
+    """Refuse bead-removal settings that this dataset cannot serve.
+
+    Raises:
+        ValueError: A corrected stain is not in the dataset, DAPI (the spectral
+            test of the bead classifier) is not corrected, the planes are not
+            uint16, or the store chunks are not square (one task is one store
+            chunk).
+    """
+    from merxen.io.bead_removal.apply import SPECTRAL_STAIN
+
+    missing = [s for s in config.stains if s not in stainings]
+    if missing:
+        raise ValueError(
+            f"bead removal stains {missing} are not among the MERSCOPE stains "
+            f"{stainings}."
+        )
+    if SPECTRAL_STAIN not in config.stains:
+        raise ValueError(
+            f"bead removal needs {SPECTRAL_STAIN} among its stains {config.stains}: "
+            "its bead response is part of the bead classifier."
+        )
+    if dtype != np.uint16:
+        raise ValueError(f"bead removal needs uint16 mosaic planes, got {dtype}.")
+    if chunks[0] != chunks[1]:
+        raise ValueError(f"bead removal needs square projection chunks, got {chunks}.")
+
+
+def _calibrate_bead_removal(
+    *,
+    images_dir: Path,
+    stainings: list[str],
+    z_layers: list[int],
+    config: MerscopeBeadRemovalConfig,
+    calibration_dir: Path,
+) -> BeadCalibration:
+    """Calibrate bead removal on the mosaic and save the calibration.
+
+    The reader offers the planes that every stain has (plane 0 is the bead plane
+    and is not part of ``z_layers``); a plane the ``z_layers`` need but the
+    dataset lacks is therefore reported by the calibration, before any
+    projection work.
+
+    Args:
+        images_dir: Folder with the mosaic planes.
+        stainings: Stains of the projection.
+        z_layers: Planes that are projected.
+        config: Bead-removal configuration.
+        calibration_dir: Folder the calibration is saved to (the driver's
+            workers load it from there).
+
+    Returns:
+        The calibration.
+
+    Raises:
+        BeadCalibrationError: The dataset cannot be corrected (no beads, beads
+            not in focus at plane 0, no tissue-free area, missing planes).
+    """
+    from merxen.io.bead_removal.calibrate import calibrate_bead_model
+    from merxen.io.bead_removal.driver import available_cpu_count
+    from merxen.io.bead_removal.params import NZ_MAX
+    from merxen.io.bead_removal.reader import MosaicPlaneReader, list_mosaic_planes
+
+    found = list_mosaic_planes(images_dir)
+    common = set.intersection(*(set(found.get(s, [])) for s in stainings))
+    planes = sorted(z for z in common if z < NZ_MAX)
+    logger.info(
+        "[MERSCOPE] Bead removal: calibrating on planes %s of stains %s",
+        planes,
+        stainings,
+    )
+    reader = MosaicPlaneReader(images_dir, stainings, planes)
+    try:
+        calibration = calibrate_bead_model(
+            reader,
+            config=config,
+            z_layers=z_layers,
+            n_workers=min(int(config.max_workers), available_cpu_count()),
+        )
+    finally:
+        reader.close()
+    calibration.save(calibration_dir)
+    return calibration
+
+
+def _run_bead_removal_driver(
+    *,
+    images_dir: Path,
+    stainings: list[str],
+    z_layers: list[int],
+    config: MerscopeBeadRemovalConfig,
+    calibration: BeadCalibration,
+    calibration_dir: Path,
+    work_dir: Path,
+    projection_store: Any,
+    core_px: int,
+) -> BeadRemovalRunResult:
+    """Write the bead-corrected channels of the projection store.
+
+    Args:
+        images_dir: Folder with the mosaic planes.
+        stainings: Stains of the projection (channel order of the store).
+        z_layers: Planes that are projected.
+        config: Bead-removal configuration.
+        calibration: The dataset calibration.
+        calibration_dir: Folder with the saved calibration.
+        work_dir: Folder for the driver's beads table and statistics.
+        projection_store: The projection array [channel, y, x].
+        core_px: Core edge, equal to the store chunk.
+
+    Returns:
+        The run summary.
+    """
+    from merxen.io.bead_removal.driver import run_bead_removal
+    from merxen.io.bead_removal.fill import FillParams
+
+    fill = (
+        FillParams(
+            enabled=True,
+            stains=(config.reference_stain,),
+            reference_stain=config.reference_stain,
+        )
+        if config.fill
+        else None
+    )
+    corrected = list(calibration.corrected_stains)
+    return run_bead_removal(
+        images_dir=images_dir,
+        stains=corrected,
+        z_layers=z_layers,
+        store=projection_store,
+        calibration=calibration,
+        calibration_dir=calibration_dir,
+        work_dir=work_dir,
+        fill=fill,
+        store_channels={s: stainings.index(s) for s in corrected},
+        core_px=core_px,
+        halo_px=int(config.halo_px),
+        max_workers=int(config.max_workers),
+    )
+
+
+def _bead_calibration_record(calibration: BeadCalibration) -> dict[str, Any]:
+    """Summarise a calibration for the provenance record.
+
+    The library arrays and the per-tile recall table (the bulk of the decision
+    record) stay in the QC report and the saved calibration.
+    """
+    decision = dict(calibration.decision)
+    classifier = decision.get("classifier")
+    if isinstance(classifier, dict):
+        decision["classifier"] = {k: v for k, v in classifier.items() if k != "tiles"}
+    return {
+        "calibration_sha256": calibration.calibration_sha256(),
+        "version": calibration.version,
+        "params_sha256": calibration.params_sha256,
+        "corrected_stains": list(calibration.corrected_stains),
+        "reference_stain": calibration.reference_stain,
+        "thresholds": calibration.thresholds.to_dict(),
+        "rho": {k: [v[0], v[1]] for k, v in calibration.rho.items()},
+        "a0_sel": list(calibration.a0_sel),
+        "a0_median": calibration.a0_median,
+        "ell_default": calibration.ell_default,
+        "decision": decision,
+    }
+
+
+def _bead_run_record(run: BeadRemovalRunResult) -> dict[str, Any]:
+    """Summarise a driver run for the provenance record (no temporary paths)."""
+    summary = run.to_dict()
+    summary.pop("work_dir", None)
+    return summary
 
 
 def _project_channel_iteratively(

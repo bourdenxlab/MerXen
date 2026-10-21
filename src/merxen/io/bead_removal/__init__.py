@@ -15,6 +15,7 @@ from merxen.io.bead_removal.calibrate import (
     calibrate_bead_model,
 )
 from merxen.io.bead_removal.detect import ClassifierThresholds
+from merxen.io.bead_removal.driver import BeadRemovalRunResult, run_bead_removal
 from merxen.io.bead_removal.params import (
     BEAD_REMOVAL_VERSION,
     DEFAULT_PARAMS,
@@ -29,6 +30,7 @@ __all__ = [
     "DEFAULT_PARAMS",
     "BeadCalibration",
     "BeadCalibrationError",
+    "BeadRemovalRunResult",
     "ClassifierThresholds",
     "MosaicPlaneReader",
     "PsfLibrary",
@@ -38,4 +40,5 @@ __all__ = [
     "correct_window",
     "list_mosaic_planes",
     "params_sha256",
+    "run_bead_removal",
 ]
