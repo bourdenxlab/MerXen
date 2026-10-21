@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import gc
 import logging
 import os
 import sys
@@ -62,10 +63,11 @@ def _held_paths() -> set[str]:
 
 
 def _release_cuda_cache() -> None:
-    """Hand cached GPU memory back after the lock is released.
+    """Hand cached GPU memory back before the lock is released.
 
     The cache is only cleared when torch is already loaded, so releasing the
-    lock never imports it.
+    lock never imports it. ``gc.collect`` runs first so that tensors that only
+    a reference cycle keeps alive are freed and ``empty_cache`` can return them.
     """
     if "torch" not in sys.modules:
         return
@@ -73,6 +75,7 @@ def _release_cuda_cache() -> None:
 
     # A failed cleanup must not replace the block's own outcome.
     try:
+        gc.collect()
         clear_cuda_cache()
     except Exception:
         logger.warning("Could not clear the CUDA cache after the GPU lock.")
@@ -85,8 +88,9 @@ def gpu_process_lock(path: Path | str | None) -> Iterator[Path | None]:
     The lock file is created when it does not exist (mode 0o644, like the
     shell side), opened read-only and locked with ``flock(LOCK_EX)``. The call
     blocks until every other holder, shell or Python, has released it. It is
-    released in a ``finally`` and the CUDA cache is cleared afterwards when
-    torch is loaded.
+    released in a ``finally``; when torch is loaded the CUDA cache is cleared
+    first, so the next holder does not start while this process still keeps its
+    reserved GPU memory.
 
     The lock is not re-entrant: a second open of the file conflicts with the
     first even within one process, so a nested acquisition would wait forever
@@ -137,6 +141,8 @@ def gpu_process_lock(path: Path | str | None) -> Iterator[Path | None]:
             yield lock_path
         finally:
             held.discard(key)
+            # Before the unlock: the next holder must find the memory free.
+            _release_cuda_cache()
             fcntl.flock(descriptor, fcntl.LOCK_UN)
             logger.info(
                 "Released MerXen GPU process lock: %s (held %.1f s)",
@@ -145,4 +151,3 @@ def gpu_process_lock(path: Path | str | None) -> Iterator[Path | None]:
             )
     finally:
         os.close(descriptor)
-        _release_cuda_cache()

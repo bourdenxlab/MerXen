@@ -7,6 +7,7 @@ a GPU: no test here imports torch.
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import multiprocessing
 import os
@@ -213,6 +214,44 @@ def test_the_cuda_cache_is_cleared_after_release_when_torch_is_loaded(
     events.append("after")
 
     assert events == ["held", "clear", "after"]
+
+
+def _lock_is_held_elsewhere(path: Path) -> bool:
+    """Whether another open file description holds the lock (a try-lock)."""
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_the_cuda_cache_is_cleared_before_the_lock_is_released(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fails: bool
+) -> None:
+    """The next holder must not start while this process keeps its pool."""
+    lock = tmp_path / "gpu.lock"
+    held_during_clear: list[bool] = []
+    monkeypatch.setitem(sys.modules, "torch", types.ModuleType("torch"))
+    monkeypatch.setattr(
+        "merxen.memory.clear_cuda_cache",
+        lambda: held_during_clear.append(_lock_is_held_elsewhere(lock)),
+    )
+
+    if fails:
+        with pytest.raises(ValueError, match="boom"), gpu_process_lock(lock):
+            raise ValueError("boom")
+    else:
+        with gpu_process_lock(lock):
+            pass
+
+    assert held_during_clear == [True]
+    assert not _lock_is_held_elsewhere(lock)
 
 
 def test_a_failing_cache_clear_does_not_hide_the_outcome(
