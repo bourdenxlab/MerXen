@@ -310,6 +310,14 @@ A cached zarr is **never** reused for a request that disagrees with its record:
 | bead removal on, fill on | fill off (or the reverse) | `ValueError`, no reuse |
 | same switch and fill, but another z range, version, parameter hash or device | same | reused with a `WARNING` that names the difference |
 
+The same rules apply when the build stage is skipped (`--start_stage` or
+`--only_stage` past `build`): the workflow then reads the published
+`source_spatialdata.zarr`, and the preflight compares its record with the
+requested `merscope_bead_removal` and `merscope_bead_removal_fill` in Groovy
+before any task starts. A mismatch (the zarr has bead removal on and off is
+requested, the reverse, or the fills differ) stops the run with the remedy
+below; a row is never run silently on the other image.
+
 To change the setting of a sample that has a cached zarr:
 
 1. Set `merscope_dir` in the samplesheet (the build needs the raw folder) and

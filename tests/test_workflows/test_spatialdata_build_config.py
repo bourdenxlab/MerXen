@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -124,10 +130,10 @@ def test_bead_removal_device_key_is_set_only_when_not_cpu() -> None:
 
     assert build_config.count("beadRemoval.device") == 1
     assert "beadRemoval.device = beadDevice" in bead_block
-    assert 'if (beadDevice != "cpu") {' in bead_block
+    assert 'if (beadDevice != "cpu" && !beadFill) {' in bead_block
     assert "merscopeBeadRemovalDevice(params)" in bead_block
     # The key sits behind the guard, not next to the unconditional keys.
-    guard = bead_block.index('if (beadDevice != "cpu") {')
+    guard = bead_block.index('if (beadDevice != "cpu" && !beadFill) {')
     assert guard < bead_block.index("beadRemoval.device = beadDevice")
     assert bead_block.index("beadRemoval.device = beadDevice") < bead_block.index(
         "merscopeOptions.bead_removal = beadRemoval"
@@ -149,3 +155,155 @@ def test_bead_removal_preflight_checks_the_device_value() -> None:
     assert "merscopeBeadRemovalDevice(params)" in preflight
     assert '["auto", "cpu", "cuda"]' in preflight
     assert "merscope_bead_removal_device must be auto, cpu or cuda" in preflight
+
+
+def test_bead_removal_device_key_is_not_written_with_the_fill() -> None:
+    """The fill forces the CPU, so the device would only change the task hash."""
+    build_config = _function_text(_main_text(), "buildConfigForPlatform")
+
+    assert 'if (beadDevice != "cpu" && !beadFill) {' in build_config
+
+
+def test_bead_removal_z_range_is_only_checked_with_a_raw_folder() -> None:
+    """A zarr-only reuse row projects nothing, so its blank z range is fine."""
+    preflight = _function_text(_main_text(), "appendMerscopeBeadRemovalPreflightChecks")
+
+    assert preflight.index("if (!merscopeDir) {") < preflight.index("zRange[0] < 1")
+
+
+def test_bead_removal_fill_log_waits_for_a_row_that_requests_bead_removal() -> None:
+    main_text = _main_text()
+    workflow_block = main_text[main_text.index("\nworkflow {") :]
+
+    assert "beadRequested.any" in workflow_block
+    assert workflow_block.index("beadRequested.any") < workflow_block.index(
+        "merscope_bead_removal_fill is on"
+    )
+
+
+def test_published_source_zarr_is_checked_when_the_build_is_skipped() -> None:
+    main_text = _main_text()
+    preflight = _function_text(main_text, "appendMerscopeBeadRemovalPreflightChecks")
+    published = _function_text(main_text, "appendPublishedBeadRemovalChecks")
+
+    assert (
+        "appendPublishedBeadRemovalChecks(errors, row, settings, params)" in preflight
+    )
+    assert preflight.index("!settings.run_build") < preflight.index(
+        "appendPublishedBeadRemovalChecks("
+    )
+    assert "settings.need_build_results" in published
+    assert "spatialdata/spatialdata_out/source_spatialdata.zarr" in published
+    assert "recorded.enabled != requested" in published
+    assert "recorded.fill != requestedFill" in published
+
+
+_BEAD_HARNESS_FUNCTIONS = (
+    "boolOrDefault",
+    "rowFieldOrDefault",
+    "chooseField",
+    "parseRange",
+    "isBlankPath",
+    "normalizedPath",
+    "publishedDatasetPath",
+    "merscopeBeadRemovalRequested",
+    "merscopeBeadRemovalDevice",
+    "appendMerscopeBeadRemovalPreflightChecks",
+    "onOffText",
+    "publishedBeadRemovalState",
+    "appendPublishedBeadRemovalChecks",
+    "buildConfigForPlatform",
+    "requirePlatformInput",
+)
+
+_BEAD_HARNESS = Path(__file__).parent / "harness" / "bead_removal_preflight.nf"
+
+
+def _run_bead_harness(tmp_path: Path, *params: str) -> dict[str, str]:
+    nextflow = shutil.which("nextflow")
+    assert nextflow is not None
+    main_text = _main_text()
+    functions = "\n".join(
+        _function_text(main_text, name) for name in _BEAD_HARNESS_FUNCTIONS
+    )
+    script = tmp_path / "harness.nf"
+    script.write_text(functions + "\n" + _BEAD_HARNESS.read_text())
+    root = tmp_path / "published"
+    completed = subprocess.run(
+        [
+            nextflow,
+            "run",
+            str(script),
+            "--root",
+            str(root),
+            "--outdir",
+            str(root),
+            *params,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=120,
+        env={**os.environ, "NXF_OFFLINE": "true"},
+    )
+    assert completed.returncode == 0, (
+        completed.stdout[-3000:] + completed.stderr[-2000:]
+    )
+    results = {
+        line.split(":")[0].removeprefix("CASE "): line.split(": ", 1)[1]
+        for line in completed.stdout.splitlines()
+        if line.startswith("CASE ")
+    }
+    config = next(
+        line for line in completed.stdout.splitlines() if line.startswith("CONFIG ")
+    )
+    results["config"] = config.removeprefix("CONFIG ")
+    return results
+
+
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
+def test_a_published_source_zarr_must_match_the_requested_bead_removal(
+    tmp_path: Path,
+) -> None:
+    """The skipped-build path refuses a mismatch instead of running uncorrected."""
+    results = _run_bead_harness(
+        tmp_path,
+        "--merscope_bead_removal_fill",
+        "false",
+        "--merscope_bead_removal_device",
+        "cuda",
+    )
+
+    assert results["legacy_off"] == "OK"
+    assert results["legacy_on"] == "ERROR"
+    assert results["on_on"] == "OK"
+    assert results["on_off"] == "ERROR"
+    assert results["zattrs_on_off"] == "ERROR"
+    # The fill of the zarr differs from the (off) request.
+    assert results["fill_on"] == "ERROR"
+    # Not needed, or not MERSCOPE: no check.
+    assert results["on_on_not_needed"] == "OK"
+    assert results["on_on_xenium_only"] == "OK"
+    # The z range matters only when a raw folder is projected.
+    assert results["blank_z_zarr_only"] == "OK"
+    assert results["blank_z_with_dir"] == "ERROR"
+    assert results["z_1_6_with_dir"] == "OK"
+    assert json.loads(results["config"]) == {"enabled": True, "device": "cuda"}
+
+
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
+def test_the_fill_request_is_compared_and_replaces_the_device_key(
+    tmp_path: Path,
+) -> None:
+    results = _run_bead_harness(
+        tmp_path,
+        "--merscope_bead_removal_fill",
+        "true",
+        "--merscope_bead_removal_device",
+        "cuda",
+    )
+
+    assert results["on_on"] == "ERROR"  # the zarr has no fill, the request does
+    assert results["fill_on"] == "OK"
+    assert json.loads(results["config"]) == {"enabled": True, "fill": True}
