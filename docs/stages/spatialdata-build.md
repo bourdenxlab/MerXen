@@ -405,9 +405,15 @@ hosts without a GPU. The backend is chosen with `merscope_bead_removal_device`
   right numbers, and a C compiler at run time. The build checks this with a
   64 px smoke test at the start of the sample, before the calibration, and fails
   there with the remedy (`set merscope_bead_removal_device to cpu`) if it
-  cannot. The smoke test compiles only the 64 px kernel specialisation: the
-  first production window compiles its own and adds about 5 s (the Triton cache
-  lives in the task's temporary directory, so each task compiles once).
+  cannot. The smoke test uses the GPU, so it runs under the host GPU lock
+  (`MERXEN_GPU_LOCK_FILE`, when it is set) for a few seconds, in a short-lived
+  child process: the build process itself creates no CUDA context and holds
+  neither the lock nor GPU memory until the window loop. The smoke test compiles
+  only the 64 px kernel specialisation: the first production window compiles its
+  own and adds about 5 s. The Triton cache is the folder
+  `merxen_triton_cache_<uid>` in the temporary directory (or `TRITON_CACHE_DIR`
+  when that is set), shared by every process of the user that sees the same
+  temporary directory, so a kernel compiles once and later tasks reuse it.
 - `auto` uses the GPU only when CUDA works and `MERXEN_GPU_LOCK_FILE` is set,
   otherwise the CPU. A smoke test failure under `auto` logs a warning and falls
   back to the CPU.
@@ -426,7 +432,9 @@ host-wide GPU lock (`MERXEN_GPU_LOCK_FILE`, the same lock the Cellpose, alignmen
 and clustering tasks hold) **once, for the whole window loop**, not for the whole
 build, and releases it after the last window or when a window fails. Three
 reader threads read the next windows (at most two ahead of the one on the GPU,
-about 1.2 GB of float32 planes per 4096 px window) and one writer thread writes
+about 1.2 GB of float32 planes per 4096 px window; the first two are read while
+the lock is awaited, so the GPU does not idle during the first read) and one
+writer thread writes
 the finished chunks, so reading and writing overlap the GPU work. Window order,
 store layout, per-chunk statistics and QC records are identical to the CPU path,
 and the result does not depend on the number of reader threads. A build that
@@ -434,7 +442,9 @@ waits for the lock holds its `BUILD_SPATIALDATA` slot while it waits; the wait i
 logged (`Waiting for MerXen GPU process lock`, `Acquired ... (waited N s)`) and
 recorded as `lock_wait_s` in the QC `summary.json`. Without a lock file the run
 goes ahead unlocked, with a warning, and may collide with other GPU work. A
-process holds about 5 GB of GPU memory (budget 6 GB).
+process peaks at 5 to 6 GB of allocated GPU memory, and up to about 8.5 GB as
+`nvidia-smi` shows it on a bright coating (the allocator's reserve and a context
+of about 0.25 GB); the cache is emptied before the lock is released.
 
 **Agreement with the CPU backend.** The GPU updates overlapping beads in colour
 classes where the CPU updates them one at a time in brightness order. With the
