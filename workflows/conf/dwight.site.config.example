@@ -1,0 +1,62 @@
+/*
+ * Template of the private Dwight site config. Copy it to
+ * workflows/conf/dwight.site.config (gitignored: never commit the real one)
+ * and replace the placeholders with this host's locations.
+ *
+ * conf/dwight.config includes it (so the standard, dwight and local profiles
+ * read it), after its params block. It is found at
+ * $MERXEN_DWIGHT_SITE_CONFIG, else at conf/dwight.site.config beside this
+ * template; an unset or empty variable means "look beside it", and 'none' (or
+ * /dev/null) means "no Dwight site config on purpose" (docs/local-configuration.md).
+ * A variable naming a file that does not exist makes Nextflow fail to parse
+ * the config. Without the file and without 'none', main.nf stops a standard,
+ * dwight or local launch: several of these params fall back silently when
+ * they are null (the reference caches fall back to <outdir> and the reference
+ * downloads default to on; task temporary files go to the root disk).
+ *
+ * It may only set params that nextflow.config declares (a test checks), and
+ * the container and bind-mount params belong in conf/site.config instead (the
+ * two files share no param). Values that also live in .env
+ * (MERXEN_TASK_TMP_DIR, MERXEN_MAPMYCELLS_CACHE_DIR, ...) must equal them (a
+ * test checks, on a host that has both files).
+ */
+
+params {
+    // Legacy MapMyCells / WHB assets, on the failing legacy disk (SSD1).
+    mecr_whb_neurons_h5ad_path = "/path/to/legacy-disk/MerXen/mapmycells/abc_whb/expression_matrices/WHB-10Xv3/20240330/WHB-10Xv3-Neurons-raw.h5ad"
+    mecr_whb_nonneurons_h5ad_path = "/path/to/legacy-disk/MerXen/mapmycells/abc_whb/expression_matrices/WHB-10Xv3/20240330/WHB-10Xv3-Nonneurons-raw.h5ad"
+    mecr_whb_cell_metadata_path = "/path/to/legacy-disk/MerXen/mapmycells/abc_whb/metadata/WHB-10Xv3/20241115/cell_metadata.csv"
+    mecr_whb_taxonomy_metadata_path = "/path/to/legacy-disk/MerXen/mapmycells/abc_whb/metadata/WHB-taxonomy/20240330/cluster_annotation_term.csv"
+    mecr_whb_cluster_membership_path = "/path/to/legacy-disk/MerXen/mapmycells/abc_whb/metadata/WHB-taxonomy/20240330/cluster_to_cluster_annotation_membership.csv"
+    mecr_reference_cache_dir = "/path/to/legacy-disk/MerXen/mapmycells"
+    clustering_squidpy_whb_marker_lookup_path = "/path/to/legacy-disk/MerXen/mapmycells/query_markers.n10.20240221800.json"
+    clustering_squidpy_whb_taxonomy_metadata_path = "/path/to/legacy-disk/MerXen/mapmycells/abc_whb/metadata/WHB-taxonomy/20240330/cluster_annotation_term.csv"
+    clustering_squidpy_whb_cluster_membership_path = "/path/to/legacy-disk/MerXen/mapmycells/abc_whb/metadata/WHB-taxonomy/20240330/cluster_to_cluster_annotation_membership.csv"
+    clustering_squidpy_broad_reference_cache_dir = "/path/to/legacy-disk/MerXen/mapmycells"
+    mapmycells_whb_marker_lookup_path = "/path/to/legacy-disk/MerXen/mapmycells/query_markers.n10.20240221800.json"
+    mapmycells_whb_precomputed_stats_path = "/path/to/legacy-disk/MerXen/mapmycells/precomputed_stats.siletti.training.h5"
+    mapmycells_region_cache_dir = "/path/to/legacy-disk/MerXen/mapmycells"
+    // No WHB gene.csv is cached there; the WHB raw matrix var holds the same
+    // gene_identifier / gene_symbol table (59,357 human genes).
+    annotation_gene_id_fallback_csv = "/path/to/legacy-disk/MerXen/mapmycells/abc_whb/expression_matrices/WHB-10Xv3/20240330/WHB-10Xv3-Nonneurons-raw.h5ad"
+
+    // Temporary files of every task go to the storage RAID, not to /tmp on the
+    // small root disk (it filled up and failed two ProSeg tasks on 2026-09-30).
+    // The directory must exist: mkdir -p it once per host. Exported to the
+    // tasks as TMPDIR (env block below).
+    task_tmp_dir = "/path/to/storage/MerXen/tmp"
+
+    // Cellpose model registry (an exported MERXEN_CELLPOSE_MODEL_STORE still
+    // wins) and the published-results roots that experimental segmentation
+    // arms may not write into (docs/stages/cellpose-hitl.md).
+    cellpose_model_store = System.getenv('MERXEN_CELLPOSE_MODEL_STORE') ?: '/path/to/storage/MerXen/cellpose_models'
+    cellpose_protected_output_roots = ['/path/to/storage/MerXen/results']
+}
+
+env {
+    TMPDIR = params.task_tmp_dir
+    // The alias table (docs/local-configuration.md), exported to the tasks so
+    // that code translating aliases inside a task finds the same table as the
+    // hooks. 'none' disables the table on purpose.
+    MERXEN_ALIAS_FILE = "/path/to/private_config/aliases.tsv"
+}

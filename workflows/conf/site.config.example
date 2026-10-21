@@ -1,0 +1,30 @@
+/*
+ * Template of the private site config (every profile). Copy it to
+ * workflows/conf/site.config (gitignored: never commit the real one) and
+ * replace the placeholders with this site's locations.
+ *
+ * nextflow.config includes it after its params block. It is found at
+ * $MERXEN_SITE_CONFIG, else at conf/site.config beside this template; an
+ * unset or empty variable means "look beside it", and 'none' (or /dev/null)
+ * means "no site config on purpose" (docs/local-configuration.md). A variable
+ * naming a file that does not exist makes Nextflow fail to parse the config.
+ *
+ * It may only set params that nextflow.config declares (a test checks), and
+ * the Dwight params belong in conf/dwight.site.config instead (the two files
+ * share no param).
+ *
+ * With 'none' or no file these params stay null. A launch with the apptainer
+ * profile and no apptainer_container is then stopped by main.nf (its tasks
+ * would run without a container), unless MERXEN_SITE_CONFIG is 'none'.
+ */
+
+params {
+    // Dedicated RAPIDS image of CLUSTERING_SQUIDPY_COMPUTE (Apptainer).
+    clustering_squidpy_gpu_container = "file:///path/to/apptainer/merxen_gpu.sif"
+    // CPU image of MENDER_COMPUTE (Apptainer).
+    mender_container = "file:///path/to/apptainer/merxen_mender.sif"
+    // Global image of the apptainer profile, and the host directories it mounts
+    // (comma-separated; each is passed to Apptainer as -B <paths>).
+    apptainer_container = "file:///path/to/apptainer/merxen_gpu.sif"
+    apptainer_bind_paths = "/path/to/data,/path/to/shared"
+}

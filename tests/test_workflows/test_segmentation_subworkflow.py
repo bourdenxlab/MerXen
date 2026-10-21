@@ -60,8 +60,12 @@ def test_model_sidecars_publish_separately_from_segmentation_tuples() -> None:
     config_text = (repo_root / "workflows" / "nextflow.config").read_text()
     gpu_config = config_text.split("gpu {", 1)[1]
     for process_name in ("CELLPOSE_SEGMENT", "CELLPOSE_NUCLEI_SEGMENT"):
-        block = gpu_config.split(f'withName: "{process_name}"', 1)[1].split("}", 1)[0]
-        assert "--nv" in block
+        # The options interpolate the site config's bind paths, so the block
+        # holds "}" before its end: read its containerOptions line instead.
+        block = gpu_config.split(f'withName: "{process_name}"', 1)[1]
+        options = re.search(r"containerOptions\s*=\s*(.*)", block)
+        assert options is not None
+        assert "--nv" in options.group(1)
 
 
 @pytest.mark.parametrize(

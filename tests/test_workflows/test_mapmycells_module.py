@@ -6,6 +6,8 @@ import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+WORKFLOWS_DIR = REPO_ROOT / "workflows"
+DWIGHT_SITE_CONFIG_EXAMPLE = WORKFLOWS_DIR / "conf" / "dwight.site.config.example"
 
 
 def test_gene_id_fallback_param_reaches_the_mapmycells_config() -> None:
@@ -21,17 +23,21 @@ def test_gene_id_fallback_param_reaches_the_mapmycells_config() -> None:
     assert "MAPMYCELLS gene-ID fallback table" in main_text
 
 
-def test_dwight_gene_id_fallback_points_at_a_local_whb_table(
-    dwight_config_text: str,
-) -> None:
-    """Dwight should use a local WHB gene table on SSD1, never a download URL."""
+def test_dwight_gene_id_fallback_points_at_a_local_whb_table() -> None:
+    """Dwight should use a local WHB gene table on SSD1, never a download URL.
+
+    The value is a host location, so the Dwight site config sets it; the
+    template (placeholders mirroring the real layout) is what is tracked.
+    """
+    dwight = (WORKFLOWS_DIR / "conf" / "dwight.config").read_text()
+    assert "annotation_gene_id_fallback_csv" not in dwight
     match = re.search(
         r'^\s*annotation_gene_id_fallback_csv = "([^"]+)"$',
-        dwight_config_text,
+        DWIGHT_SITE_CONFIG_EXAMPLE.read_text(),
         re.M,
     )
     assert match is not None
     path = match.group(1)
-    assert path.startswith("/media/mathieubo/SSD1/MerXen/mapmycells/abc_whb/")
+    assert path.startswith("/path/to/legacy-disk/MerXen/mapmycells/abc_whb/")
     assert "WHB-10Xv3" in path
     assert "://" not in path
