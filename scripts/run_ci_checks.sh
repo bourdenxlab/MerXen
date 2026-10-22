@@ -5,6 +5,25 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 venv_dir="${MERXEN_CI_VENV:-${repo_root}/.ci-venv}"
 install_mode="${MERXEN_CI_INSTALL_MODE:-auto}"
 run_tests="${MERXEN_CI_RUN_TESTS:-auto}"
+test_tier="${MERXEN_CI_TEST_TIER:-fast}"
+
+# Test tiers. 'fast', the pre-push default, leaves out the tests marked
+# nextflow, store_lock and integration (pyproject.toml), which take seconds
+# each. 'full' is what CI runs: everything except the slow tests, which need
+# GPUs, site images or extra environments.
+case "${test_tier}" in
+    fast)
+        tier_markers="not slow and not nextflow and not store_lock and not integration"
+        ;;
+    full)
+        tier_markers="not slow"
+        ;;
+    *)
+        echo "Unknown MERXEN_CI_TEST_TIER=${test_tier}" >&2
+        echo "Expected one of: fast, full" >&2
+        exit 2
+        ;;
+esac
 
 # Git exports repository-local variables while running hooks. Nested Git
 # operations (for example uv installing a Git dependency) must discover their
@@ -84,7 +103,12 @@ case "${run_tests}" in
                 "${MERXEN_CI_PYTEST_ARGS}")"
             eval "pytest_args+=(${quoted_args})"
         else
-            pytest_args+=(-m "not slow")
+            pytest_args+=(-m "${tier_markers}")
+            echo "pytest: ${test_tier} tier (-m \"${tier_markers}\")."
+            if [[ "${test_tier}" == "fast" ]]; then
+                echo "CI also runs the nextflow, store_lock and integration tests;" \
+                    "MERXEN_CI_TEST_TIER=full runs them here."
+            fi
         fi
         "${venv_dir}/bin/pytest" "${pytest_args[@]}"
         ;;

@@ -34,6 +34,15 @@ Shared fixtures live in [tests/conftest.py](../tests/conftest.py). Mark
 anything that needs a large dataset or a real Cellpose model with
 `@pytest.mark.slow`.
 
+Three more markers name tests that take seconds each. The pre-push hook
+leaves them out by default and CI runs them (see [Test tiers](#test-tiers)):
+
+| Marker | Use it for |
+|--------|------------|
+| `nextflow` | a test that launches Nextflow |
+| `store_lock` | a test where two processes contend for a store's write lock; tests that use the `store_lock_contention` fixture get it automatically |
+| `integration` | a test that runs a stage end to end on a real on-disk SpatialData store |
+
 ## Linting, formatting, typing
 
 ```bash
@@ -63,7 +72,7 @@ From [.pre-commit-config.yaml](../.pre-commit-config.yaml):
 - **On merge and on the commit message** — the privacy check.
 - **On push** — the privacy check of the branch name and every pushed commit,
   then the lockfile-backed local CI checks: lint, format, type check, and
-  tests.
+  the fast test tier.
 
 The privacy hooks keep host paths and sample names out of the repository
 ([Local configuration and privacy](local-configuration.md)).
@@ -112,12 +121,34 @@ runs pytest for locked installs and skips pytest for local macOS installs. This
 keeps local Mac pushes from being blocked by CUDA lockfile packages or
 platform-specific scientific wheel crashes while preserving Linux/server parity.
 Set `MERXEN_CI_RUN_TESTS=true` to force pytest, or use
-`MERXEN_CI_PYTEST_ARGS` to run a smaller target.
+`MERXEN_CI_PYTEST_ARGS` to run a smaller target. It replaces the tier's marker
+selection and is split with shell quoting rules, so
+`MERXEN_CI_PYTEST_ARGS='-m "not slow and not nextflow" tests/test_io'` passes
+the marker expression as one argument.
 
 Pytest runs on `MERXEN_CI_PYTEST_WORKERS` parallel pytest-xdist workers
 (default 4; `0` runs every test in one process). Each worker is limited to 2
 BLAS, OpenMP and numba threads unless `OMP_NUM_THREADS`, `MKL_NUM_THREADS`,
 `OPENBLAS_NUM_THREADS` or `NUMBA_NUM_THREADS` is already set.
+
+### Test tiers
+
+`MERXEN_CI_TEST_TIER` picks the tests the script runs:
+
+| Tier | Selection | Used by |
+|------|-----------|---------|
+| `fast` | `-m "not slow and not nextflow and not store_lock and not integration"` | the pre-push hook (default) |
+| `full` | `-m "not slow"` | CI on every PR and every push to `main` |
+
+The fast tier misses Nextflow, cross-process lock and end-to-end store
+regressions until CI. Run the full tier locally when a change touches the
+workflows, store locking or a stage's store writes, or before asking for a
+review:
+
+```bash
+MERXEN_CI_TEST_TIER=full git push
+MERXEN_CI_TEST_TIER=full scripts/run_ci_checks.sh
+```
 
 For example, to push from a Mac while skipping lockfile CUDA packages:
 
