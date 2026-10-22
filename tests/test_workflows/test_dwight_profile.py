@@ -23,6 +23,7 @@ def _resolved_config(
     workflow_dir: Path,
     *,
     profile: str | None,
+    cwd: Path,
 ) -> dict[str, Any]:
     nextflow = shutil.which("nextflow")
     if nextflow is None:
@@ -31,8 +32,11 @@ def _resolved_config(
     if profile is not None:
         command.extend(["-profile", profile])
     command.append(str(workflow_dir))
+    # Nextflow writes .nextflow/ into its working directory: keep it out of the
+    # checkout, and apart from other Nextflow launches running in parallel.
     completed = subprocess.run(
         command,
+        cwd=cwd,
         check=True,
         capture_output=True,
         text=True,
@@ -121,12 +125,14 @@ def test_dwight_gpu_processes_use_one_fixed_host_lock(
 
 
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
-def test_default_standard_and_dwight_profiles_resolve_equivalently() -> None:
+def test_default_standard_and_dwight_profiles_resolve_equivalently(
+    tmp_path: Path,
+) -> None:
     """Nextflow should resolve the same Dwight resources through all entry points."""
     repo_root = Path(__file__).resolve().parents[2]
     workflow_dir = repo_root / "workflows"
     resolved = {
-        name: _resolved_config(workflow_dir, profile=profile)
+        name: _resolved_config(workflow_dir, profile=profile, cwd=tmp_path)
         for name, profile in (
             ("default", None),
             ("standard", "standard"),
@@ -187,11 +193,11 @@ def test_dwight_sends_task_temporary_files_to_the_site_config_directory() -> Non
 
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
 def test_dwight_resolves_task_tmpdir_from_the_site_config(
-    example_site_env: dict[str, str],
+    example_site_env: dict[str, str], tmp_path: Path
 ) -> None:
     """The resolved dwight profile should export the site config's TMPDIR to tasks."""
     repo_root = Path(__file__).resolve().parents[2]
-    resolved = _resolved_config(repo_root / "workflows", profile="dwight")
+    resolved = _resolved_config(repo_root / "workflows", profile="dwight", cwd=tmp_path)
     assert resolved["env"]["TMPDIR"] == "/path/to/storage/MerXen/tmp"
     assert resolved["params"]["task_tmp_dir"] == "/path/to/storage/MerXen/tmp"
 
@@ -218,12 +224,14 @@ def test_dwight_cellpose_locations_come_from_the_site_config() -> None:
 
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
 def test_dwight_resolves_the_cellpose_locations_from_the_site_config(
-    example_site_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+    example_site_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """The resolved dwight profile reads the Cellpose locations from the site config."""
     monkeypatch.delenv("MERXEN_CELLPOSE_MODEL_STORE", raising=False)
     repo_root = Path(__file__).resolve().parents[2]
-    resolved = _resolved_config(repo_root / "workflows", profile="dwight")
+    resolved = _resolved_config(repo_root / "workflows", profile="dwight", cwd=tmp_path)
     assert resolved["params"]["cellpose_model_store"] == (
         "/path/to/storage/MerXen/cellpose_models"
     )

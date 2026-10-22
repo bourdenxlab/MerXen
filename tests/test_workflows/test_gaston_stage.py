@@ -136,64 +136,50 @@ def test_gaston_environment_is_pinned_and_separate() -> None:
     assert "gaston" not in base_environment.lower()
 
 
-@pytest.mark.parametrize(
-    ("selector", "expected_segmentations"),
-    [
-        (None, ["proseg_hybrid"]),
-        ("reseg,proseg_mask", ["reseg", "proseg_mask"]),
-        (
-            "all",
-            ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"],
-        ),
-    ],
-)
+# Each row is its own pair with only its selected artifacts present. One
+# preview covers all of them: a preview costs several seconds, and it compiles
+# the workflow without evaluating the rows (it passes without a samplesheet).
+_GASTON_SELECTOR_CASES = {
+    "GASTON_DEFAULT": (None, ["proseg_hybrid"]),
+    "GASTON_SUBSET": ("reseg,proseg_mask", ["reseg", "proseg_mask"]),
+    "GASTON_ALL": ("all", ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"]),
+}
+
+_GASTON_TABLE_NAMES = {
+    "reseg": "table_MOSAIK_proseg_clustering_squidpy",
+    "original_seg": "table_original_clustering_squidpy",
+    "proseg_mask": "table_MOSAIK_cellpose_clustering_squidpy",
+    "proseg_hybrid": "table_MOSAIK_proseg_hybrid_clustering_squidpy",
+}
+
+
 def test_gaston_only_stage_preview_normalizes_segmentations_and_row_overrides(
     tmp_path: Path,
-    selector: str | None,
-    expected_segmentations: list[str],
 ) -> None:
     """Compile published-output mode with only the selected artifacts present."""
     if shutil.which("nextflow") is None:
         pytest.skip("nextflow is not installed")
     outdir = tmp_path / "results"
-    pair_id = "GASTON_PREVIEW"
-    latest_zarr = outdir / pair_id / "xenium" / "latest" / "latest_spatialdata.zarr"
-    table_names = {
-        "reseg": "table_MOSAIK_proseg_clustering_squidpy",
-        "original_seg": "table_original_clustering_squidpy",
-        "proseg_mask": "table_MOSAIK_cellpose_clustering_squidpy",
-        "proseg_hybrid": "table_MOSAIK_proseg_hybrid_clustering_squidpy",
-    }
-    for segmentation in expected_segmentations:
-        h5ad = (
-            outdir
-            / pair_id
-            / segmentation
-            / "clustering_squidpy"
-            / "clustering_squidpy_out"
-            / "xenium"
-            / f"{pair_id}_XENIUM_clustered.h5ad"
-        )
-        h5ad.parent.mkdir(parents=True, exist_ok=True)
-        h5ad.touch()
-        (latest_zarr / "tables" / table_names[segmentation]).mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-    samplesheet = tmp_path / "samplesheet.csv"
-    fieldnames = [
-        "pair_id",
-        "analysis_mode",
-        "only_stage",
-        "gaston_enabled",
-        "gaston_segmentations",
-        "xenium_spatialdata_path",
-    ]
-    with samplesheet.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerow(
+    rows = []
+    for pair_id, (selector, expected_segmentations) in _GASTON_SELECTOR_CASES.items():
+        latest_zarr = outdir / pair_id / "xenium" / "latest" / "latest_spatialdata.zarr"
+        for segmentation in expected_segmentations:
+            h5ad = (
+                outdir
+                / pair_id
+                / segmentation
+                / "clustering_squidpy"
+                / "clustering_squidpy_out"
+                / "xenium"
+                / f"{pair_id}_XENIUM_clustered.h5ad"
+            )
+            h5ad.parent.mkdir(parents=True, exist_ok=True)
+            h5ad.touch()
+            (latest_zarr / "tables" / _GASTON_TABLE_NAMES[segmentation]).mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+        rows.append(
             {
                 "pair_id": pair_id,
                 "analysis_mode": "xenium",
@@ -203,6 +189,12 @@ def test_gaston_only_stage_preview_normalizes_segmentations_and_row_overrides(
                 "xenium_spatialdata_path": str(latest_zarr),
             }
         )
+
+    samplesheet = tmp_path / "samplesheet.csv"
+    with samplesheet.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
     result = subprocess.run(
         [
             "nextflow",
@@ -220,7 +212,7 @@ def test_gaston_only_stage_preview_normalizes_segmentations_and_row_overrides(
             "--gaston_enabled",
             "false",
         ],
-        cwd=REPO_ROOT,
+        cwd=tmp_path,
         capture_output=True,
         text=True,
         check=False,
