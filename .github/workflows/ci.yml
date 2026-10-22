@@ -4,7 +4,61 @@ on:
     branches: [main]
   pull_request:
 
+# A new push to a PR cancels that PR's run in progress. Runs for pushes to
+# main always finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # Lint, format and type checks run beside the tests, not before them.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: pip install uv
+      # The test job saves this cache; restoring it skips rebuilding the Git
+      # dependencies.
+      - name: Restore uv cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('requirements/requirements.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
+      - name: Install dependencies
+        run: |
+          # The generated lock includes the full dependency tree. Do not
+          # re-resolve upstream unpinned Git URLs against its pinned commits.
+          uv pip install --system --no-deps -r requirements/requirements.lock
+          uv pip install --system -e . --no-deps
+      - name: Lint
+        run: ruff check .
+      - name: Format check
+        run: ruff format --check .
+      # mypy starts from the cache of the latest push to main and rechecks
+      # only what changed since.
+      - name: Restore mypy cache
+        uses: actions/cache/restore@v6
+        with:
+          path: .mypy_cache
+          key: mypy-${{ runner.os }}-${{ hashFiles('requirements/requirements.lock') }}-${{ github.sha }}
+          restore-keys: |
+            mypy-${{ runner.os }}-${{ hashFiles('requirements/requirements.lock') }}-
+            mypy-${{ runner.os }}-
+      - name: Type check
+        run: mypy src/
+      - name: Save mypy cache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@v6
+        with:
+          path: .mypy_cache
+          key: mypy-${{ runner.os }}-${{ hashFiles('requirements/requirements.lock') }}-${{ github.sha }}
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -14,20 +68,25 @@ jobs:
           python-version: "3.12"
       - name: Install uv
         run: pip install uv
+      - name: Cache uv
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('requirements/requirements.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
       - name: Install dependencies
         run: |
           # The generated lock includes the full dependency tree. Do not
           # re-resolve upstream unpinned Git URLs against its pinned commits.
           uv pip install --system --no-deps -r requirements/requirements.lock
           uv pip install --system -e . --no-deps
+          # Cache only the wheels built from source (the Git dependencies).
+          # Downloading the prebuilt ones, several GB of CUDA wheels among
+          # them, is as fast as restoring them.
+          uv cache prune --ci
       - name: Verify locked Cellpose runtime
         run: python -c 'from merxen.segmentation.model_identity import require_cellpose_runtime; print(require_cellpose_runtime())'
-      - name: Lint
-        run: ruff check .
-      - name: Format check
-        run: ruff format --check .
-      - name: Type check
-        run: mypy src/
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -42,5 +101,28 @@ jobs:
           "$HOME/.local/bin/nextflow" -version
           echo "NXF_VER=${NXF_VER}" >> "$GITHUB_ENV"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # The full test tier (docs/development.md): every test except the slow
+      # ones, which need GPUs, site images or extra environments.
       - name: Tests
-        run: pytest -m "not slow"
+        shell: bash
+        env:
+          # One BLAS, OpenMP and numba thread per pytest-xdist worker: the
+          # runner has 4 vCPUs and runs 4 workers.
+          OMP_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
+          OPENBLAS_NUM_THREADS: "1"
+          NUMBA_NUM_THREADS: "1"
+        run: |
+          set -o pipefail
+          pytest -n 4 --dist load -m "not slow" --durations=20 | tee pytest.log
+      - name: List the slowest tests in the job summary
+        if: always()
+        shell: bash
+        run: |
+          [[ -f pytest.log ]] || exit 0
+          {
+            echo "### Slowest tests"
+            echo '```'
+            sed -n '/slowest 20 durations/,/^=====/p' pytest.log | sed '1d;$d'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

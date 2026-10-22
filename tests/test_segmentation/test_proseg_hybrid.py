@@ -315,6 +315,7 @@ def _write_hybrid_inputs(
     return zarr_path, mask_path, transforms_path
 
 
+@pytest.mark.integration
 def test_hybrid_refinement_roundtrips_spatialdata(
     tmp_path: Path,
 ) -> None:
@@ -383,6 +384,7 @@ def test_hybrid_refinement_serializes_with_another_store_writer(
     assert has_proseg_hybrid_refinement(zarr_path, config)
 
 
+@pytest.mark.integration
 def test_hybrid_shapes_take_the_transcripts_transformations(
     tmp_path: Path,
 ) -> None:
@@ -446,6 +448,7 @@ def test_hybrid_shapes_refuse_a_transcript_transformation_that_mixes_in_z(
         )
 
 
+@pytest.mark.integration
 def test_hybrid_refinement_writes_temporary_parts_in_the_working_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

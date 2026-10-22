@@ -21,6 +21,10 @@ pytest
 # Run tests excluding slow markers
 pytest -m "not slow"
 
+# Pre-push checks (fast test tier) and everything CI runs (full tier)
+scripts/run_ci_checks.sh
+MERXEN_CI_TEST_TIER=full scripts/run_ci_checks.sh
+
 # Lint (auto-fix) and format
 ruff check . --fix
 ruff format .

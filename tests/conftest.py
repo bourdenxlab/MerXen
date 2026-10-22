@@ -149,18 +149,24 @@ def real_env_file() -> Path:
 
 _WriterResult = TypeVar("_WriterResult")
 
-# A holder or writer may import SpatialData from scratch, so every wait that
-# covers a start-up or a whole writer run is generous.
+# A writer may import SpatialData from scratch, so every wait that covers a
+# start-up or a whole writer run is generous.
 _STORE_LOCK_TIMEOUT_SECONDS = 180.0
 _STORE_LOCK_POLL_SECONDS = 0.05
 
-# Holds the store write lock through the path in argv[1] until stdin closes or
-# a line arrives, in its own process (as a second Nextflow task would).
+# Holds the lock file in argv[1] until stdin closes or a line arrives, in its
+# own process (as a second Nextflow task would). It takes the same exclusive
+# flock as spatialdata_write_lock but imports only the standard library:
+# importing SpatialData would cost about 2 s per test. The lock file is derived
+# by spatialdata_write_lock_path from the holder's own staging, and
+# tests/test_io/test_spatialdata_write_lock.py covers two real
+# spatialdata_write_lock holders in separate processes.
 _STORE_LOCK_HOLDER = """
+import fcntl
 import sys
-from merxen.io.spatialdata_io import spatialdata_write_lock
 
-with spatialdata_write_lock(sys.argv[1]):
+with open(sys.argv[1], "a", encoding="utf-8") as handle:
+    fcntl.flock(handle, fcntl.LOCK_EX)
     print("held", flush=True)
     sys.stdin.readline()
 """
@@ -242,12 +248,12 @@ class StoreLockContention:
                 lambda label: persists_seen.append((label, _lock_is_held(holder_path))),
             )
 
+        holder_lock = spatialdata_write_lock_path(holder_path)
         holder = subprocess.Popen(
-            [sys.executable, "-c", _STORE_LOCK_HOLDER, str(holder_path)],
+            [sys.executable, "-I", "-c", _STORE_LOCK_HOLDER, str(holder_lock)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,
-            env={**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, sys.path))},
         )
         outcome: dict[str, Any] = {}
         writer = threading.Thread(
@@ -257,7 +263,7 @@ class StoreLockContention:
         )
         try:
             _wait_for_holder(holder)
-            lock_inode = spatialdata_write_lock_path(holder_path).stat().st_ino
+            lock_inode = holder_lock.stat().st_ino
             writer.start()
             _wait_until_blocked_on(lock_inode, writer, outcome)
             assert reads_seen == [], "the writer read the store before the lock"
@@ -289,8 +295,19 @@ class StoreLockContention:
 def store_lock_contention(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> StoreLockContention:
-    """Check that a writer serializes with another process on the store lock."""
+    """Check that a writer serializes with another process on the store lock.
+
+    Every test that uses it is marked ``store_lock``
+    (:func:`_mark_store_lock_tests`).
+    """
     return StoreLockContention(monkeypatch, tmp_path)
+
+
+def _mark_store_lock_tests(items: list[pytest.Item]) -> None:
+    """Mark every test that uses :func:`store_lock_contention` ``store_lock``."""
+    for item in items:
+        if "store_lock_contention" in getattr(item, "fixturenames", ()):
+            item.add_marker(pytest.mark.store_lock)
 
 
 def _record_outcome(
@@ -377,14 +394,17 @@ _GPU_SELECTED = re.compile(r"(?<!not )\bgpu\b")
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Register the ``gpu`` marker (pyproject.toml lists only ``slow``)."""
+    """Register the ``gpu`` marker (pyproject.toml does not list it)."""
     config.addinivalue_line("markers", _GPU_MARKER_DOC)
 
 
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
-    """Skip ``gpu`` tests unless they were asked for.
+    """Mark store-lock tests; skip ``gpu`` tests unless they were asked for.
+
+    It runs before ``-m`` selects tests, so the selection sees ``store_lock``.
 
     The GPU of the workstation is shared and guarded by a process lock, so a
     plain ``pytest`` (the pre-push hook, CI) must not start CUDA work. Select
@@ -392,6 +412,7 @@ def pytest_collection_modifyitems(
     but finds no CUDA device skips itself (see the ``cuda`` fixture of
     ``tests/test_io/test_bead_removal_gpu.py``).
     """
+    _mark_store_lock_tests(items)
     expression = config.getoption("markexpr", default="") or ""
     if (
         _GPU_SELECTED.search(expression)

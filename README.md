@@ -230,7 +230,8 @@ ruff check . --fix && ruff format .   # lint and format
 mypy src/                             # type check
 pytest                                # fast tests (excludes slow)
 pytest --run-slow                     # include slow integration tests
-scripts/run_ci_checks.sh              # the same lockfile-backed checks as CI
+scripts/run_ci_checks.sh              # lockfile-backed checks, fast test tier
+MERXEN_CI_TEST_TIER=full scripts/run_ci_checks.sh  # every test CI runs
 ```
 
 Day-to-day mechanics — testing, hooks, CI, debugging, adding a new pipeline stage — are in [Development workflow](docs/development.md).

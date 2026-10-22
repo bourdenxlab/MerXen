@@ -322,6 +322,7 @@ def test_fit_affine_displacement_ignores_outlier_windows() -> None:
 
 
 @pytest.mark.usefixtures("small_viewer_pyramids")
+@pytest.mark.integration
 def test_registration_with_exact_matrix_places_marker_on_grid(
     registration_inputs: dict[str, Path],
 ) -> None:
@@ -359,6 +360,7 @@ def test_registration_with_exact_matrix_places_marker_on_grid(
     assert Path(summary["outputs"]["local_shifts"]).exists()
 
 
+@pytest.mark.integration
 def test_nonrigid_registration_warps_every_channel_into_one_final_image(
     tmp_path: Path,
 ) -> None:
@@ -496,6 +498,7 @@ def test_registration_serializes_with_another_store_writer(
     assert registry["post_if"]["status"] == "complete"
 
 
+@pytest.mark.integration
 def test_refinement_recovers_the_true_matrix(
     registration_inputs: dict[str, Path],
 ) -> None:
@@ -516,6 +519,7 @@ def test_refinement_recovers_the_true_matrix(
     assert summary["residuals_after"]["median_um"] < 0.5
 
 
+@pytest.mark.integration
 def test_refinement_beyond_limits_keeps_the_explorer_matrix(
     registration_inputs: dict[str, Path],
 ) -> None:
@@ -531,6 +535,7 @@ def test_refinement_beyond_limits_keeps_the_explorer_matrix(
     np.testing.assert_allclose(summary["final_matrix"], explorer)
 
 
+@pytest.mark.integration
 def test_unchanged_registration_is_skipped_on_rerun(
     registration_inputs: dict[str, Path],
     monkeypatch: pytest.MonkeyPatch,
@@ -550,6 +555,7 @@ def test_unchanged_registration_is_skipped_on_rerun(
 
 
 @pytest.mark.usefixtures("small_viewer_pyramids")
+@pytest.mark.integration
 def test_images_dropped_from_config_are_removed(
     registration_inputs: dict[str, Path],
 ) -> None:
@@ -712,6 +718,7 @@ def test_partial_coverage_registers_inside_and_zero_fills_outside(
     assert 0.05 < summary["output"]["nonzero_fraction"] < 0.3
 
 
+@pytest.mark.integration
 def test_reflected_matrix_is_registered_and_refined(
     registration_inputs: dict[str, Path],
     tmp_path: Path,
@@ -777,6 +784,7 @@ def test_rgb_image_without_registration_channel_skips_refinement(
     assert list(image.coords["c"].values) == ["c0", "c1", "c2"]
 
 
+@pytest.mark.integration
 def test_plain_tiff_without_pixel_size_skips_scale_check(
     registration_inputs: dict[str, Path],
     tmp_path: Path,
@@ -835,6 +843,7 @@ def test_channel_name_count_must_match_the_image(
         run_image_registration(config.model_copy(update={"images": [spec]}))
 
 
+@pytest.mark.integration
 def test_rerun_in_a_fresh_output_dir_reuses_the_stored_registration(
     registration_inputs: dict[str, Path],
     monkeypatch: pytest.MonkeyPatch,

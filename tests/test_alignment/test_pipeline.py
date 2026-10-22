@@ -9,6 +9,7 @@ import dask.dataframe as dd
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import pytest
 import spatialdata as sd
 from scipy import sparse
 from shapely.geometry import box
@@ -38,6 +39,7 @@ from merxen.io.spatialdata_schema import (
 )
 
 
+@pytest.mark.integration
 def test_write_moving_aligned_zarr_adds_transforms_and_nonrigid_elements(
     tmp_path: Path,
 ) -> None:

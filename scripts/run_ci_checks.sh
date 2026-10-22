@@ -5,6 +5,25 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 venv_dir="${MERXEN_CI_VENV:-${repo_root}/.ci-venv}"
 install_mode="${MERXEN_CI_INSTALL_MODE:-auto}"
 run_tests="${MERXEN_CI_RUN_TESTS:-auto}"
+test_tier="${MERXEN_CI_TEST_TIER:-fast}"
+
+# Test tiers. 'fast', the pre-push default, leaves out the tests marked
+# nextflow, store_lock and integration (pyproject.toml), which take seconds
+# each. 'full' is what CI runs: everything except the slow tests, which need
+# GPUs, site images or extra environments.
+case "${test_tier}" in
+    fast)
+        tier_markers="not slow and not nextflow and not store_lock and not integration"
+        ;;
+    full)
+        tier_markers="not slow"
+        ;;
+    *)
+        echo "Unknown MERXEN_CI_TEST_TIER=${test_tier}" >&2
+        echo "Expected one of: fast, full" >&2
+        exit 2
+        ;;
+esac
 
 # Git exports repository-local variables while running hooks. Nested Git
 # operations (for example uv installing a Git dependency) must discover their
@@ -67,11 +86,29 @@ fi
 
 case "${run_tests}" in
     true | 1 | yes)
+        # Tests run on parallel pytest-xdist workers (0 runs them in this
+        # process). Each worker gets a few BLAS, OpenMP and numba threads, or
+        # every worker would start one per core. Values already set win.
+        export OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}"
+        export MKL_NUM_THREADS="${MKL_NUM_THREADS:-2}"
+        export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-2}"
+        export NUMBA_NUM_THREADS="${NUMBA_NUM_THREADS:-2}"
+        pytest_args=(-n "${MERXEN_CI_PYTEST_WORKERS:-4}" --dist load)
         if [[ -n "${MERXEN_CI_PYTEST_ARGS:-}" ]]; then
-            # shellcheck disable=SC2206
-            pytest_args=(${MERXEN_CI_PYTEST_ARGS})
+            # Split the way a shell would, so a quoted marker expression such
+            # as -m "not slow and not nextflow" stays one argument. Python
+            # re-quotes each argument; nothing in the value is expanded.
+            quoted_args="$("${venv_dir}/bin/python" -c \
+                'import shlex, sys; print(shlex.join(shlex.split(sys.argv[1])))' \
+                "${MERXEN_CI_PYTEST_ARGS}")"
+            eval "pytest_args+=(${quoted_args})"
         else
-            pytest_args=(-m "not slow")
+            pytest_args+=(-m "${tier_markers}")
+            echo "pytest: ${test_tier} tier (-m \"${tier_markers}\")."
+            if [[ "${test_tier}" == "fast" ]]; then
+                echo "CI also runs the nextflow, store_lock and integration tests;" \
+                    "MERXEN_CI_TEST_TIER=full runs them here."
+            fi
         fi
         "${venv_dir}/bin/pytest" "${pytest_args[@]}"
         ;;

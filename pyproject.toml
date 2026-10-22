@@ -48,6 +48,8 @@ dependencies = [
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
+    # Runs the suite in parallel (scripts/run_ci_checks.sh, CI)
+    "pytest-xdist>=3.5",
     # Pinned exactly, not floored. These two gate CI
     "ruff==0.15.10",
     "mypy==1.20.1",
@@ -139,7 +141,15 @@ known-first-party = ["merxen"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
-markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
+# nextflow, store_lock and integration tests take seconds each. The local
+# pre-push hook leaves them out by default; CI runs them
+# (scripts/run_ci_checks.sh, docs/development.md).
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "nextflow: launches Nextflow",
+    "store_lock: two processes contend for a SpatialData store's write lock",
+    "integration: runs a stage end to end on a real on-disk SpatialData store",
+]
 filterwarnings = [
     "ignore:Call to deprecated class Scaler.*:DeprecationWarning:ome_zarr\\.writer",
 ]

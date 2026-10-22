@@ -13,9 +13,12 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-pytestmark = pytest.mark.skipif(
-    shutil.which("nextflow") is None, reason="Nextflow is not installed"
-)
+pytestmark = [
+    pytest.mark.nextflow,
+    pytest.mark.skipif(
+        shutil.which("nextflow") is None, reason="Nextflow is not installed"
+    ),
+]
 
 
 def test_terminal_settings_and_all_branch_consumers_receive_their_release(
