@@ -1,0 +1,801 @@
+"""Provenance record and cache-reuse guard for optional MERSCOPE bead removal.
+
+Every raw-TIFF MERSCOPE build writes the root attribute
+``merxen_image_preprocessing`` (metadata only, also when bead removal is off).
+A later run that reuses a cached SpatialData zarr compares that record with the
+requested configuration, because a cached projection built with a different
+bead-removal setting is silently wrong for the request: the beads are in (or
+out of) every downstream mask and intensity.
+
+This module deliberately does not import the correction code, so the guard is
+cheap and has no GPU dependency. The package ``__init__`` is lazy for the same
+reason: importing this module loads only ``params``, not the correction code of
+the other submodules (a test checks it).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import importlib
+import json
+import logging
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from merxen.config import MerscopeBeadRemovalConfig
+from merxen.io.bead_removal.params import (
+    BEAD_REMOVAL_VERSION,
+    DEFAULT_PARAMS,
+    params_sha256,
+)
+from merxen.io.spatialdata_schema import package_versions
+
+logger = logging.getLogger(__name__)
+
+IMAGE_PREPROCESSING_ATTR = "merxen_image_preprocessing"
+IMAGE_PREPROCESSING_SCHEMA = 1
+RAW_TIFF_SOURCE = "raw_tiff"
+# Default backend device. The backend record of a GPU run also holds the update
+# order and the torch, triton and CUDA versions.
+CPU_DEVICE = "cpu"
+# Config fields that do not change the output pixels beyond the method's own
+# order sensitivity (the switch itself, the fill and its mode which have their own
+# record, the pool size, and the device, which has its own backend record).
+_NON_OUTPUT_CONFIG_FIELDS = frozenset(
+    {"enabled", "fill", "fill_mode", "max_workers", "device"}
+)
+_FILL_MODULE = "merxen.io.bead_removal.fill"
+
+
+def _bead_off() -> dict[str, Any]:
+    """Return the identity of a build without bead removal."""
+    return {"enabled": False, "fill": {"enabled": False}}
+
+
+def _fill_params_identity(mode: str = "flat") -> dict[str, Any]:
+    """Hash the fixed fill parameters and report their spatial support.
+
+    The fill module is imported lazily so that the guard and the record work
+    without it; its parameters are fixed in code, so the hash is a property of
+    the installed version.
+
+    Args:
+        mode: Fill mode (``"flat"`` or ``"hybrid"``).
+
+    Returns:
+        ``params_sha256`` and ``support_px`` of the fill, or ``None`` for both
+        when the fill module is not part of this installation. The hash depends on
+        the mode.
+    """
+    try:
+        fill = importlib.import_module(_FILL_MODULE)
+    except ModuleNotFoundError as exc:
+        if exc.name != _FILL_MODULE:
+            raise
+        return {"params_sha256": None, "support_px": None}
+    if mode == "flat":
+        params = fill.FillParams(enabled=True)
+    else:
+        params = fill.FillParams(enabled=True, mode=mode)
+    return {
+        "params_sha256": str(fill.fill_params_sha256(params)),
+        "support_px": int(fill.support_px(params)["total"]),
+    }
+
+
+def _config_sha256(cfg: MerscopeBeadRemovalConfig) -> str:
+    """Hash the algorithm parameters together with the output-relevant config."""
+    config = {
+        key: sorted(value) if key == "stains" else value
+        for key, value in cfg.model_dump().items()
+        if key not in _NON_OUTPUT_CONFIG_FIELDS
+    }
+    payload = {"params": params_sha256(DEFAULT_PARAMS), "config": config}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def bead_removal_identity(
+    cfg: MerscopeBeadRemovalConfig | None,
+    *,
+    calibration_sha256: str | None = None,
+    device: str = CPU_DEVICE,
+    backend: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Describe what a bead-removal request produces, for comparison.
+
+    Args:
+        cfg: Requested bead-removal configuration, or ``None`` when off.
+        calibration_sha256: Content hash of the calibration, once it is known
+            (a requested configuration does not know it yet).
+        device: Backend device that runs the correction. Ignored when
+            ``backend`` is given.
+        backend: Backend record (device, update order, library versions).
+            Entries that are not known before a run are left out of a request.
+
+    Returns:
+        A JSON-safe mapping. A disabled request is
+        ``{"enabled": False, "fill": {"enabled": False}}``.
+    """
+    if cfg is None or not cfg.enabled:
+        return _bead_off()
+    fill: dict[str, Any] = {"enabled": bool(cfg.fill)}
+    if cfg.fill:
+        fill.update(_fill_params_identity(cfg.fill_mode))
+        # A fill block without ``mode`` is a flat fill (the only mode before the
+        # hybrid existed), so the identity of a flat fill stays what it was.
+        if cfg.fill_mode != "flat":
+            fill["mode"] = cfg.fill_mode
+    return {
+        "enabled": True,
+        "method": cfg.method,
+        "version": BEAD_REMOVAL_VERSION,
+        "params_sha256": _config_sha256(cfg),
+        "calibration_sha256": calibration_sha256,
+        "fill": fill,
+        "backend": dict(backend) if backend is not None else {"device": device},
+    }
+
+
+def identity_from_record(recorded: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Extract the bead-removal identity from a recorded preprocessing attr.
+
+    Args:
+        recorded: The ``merxen_image_preprocessing`` attribute, or ``None`` for
+            a legacy store that predates it.
+
+    Returns:
+        The recorded identity; a legacy store reads as "bead removal off".
+    """
+    bead = _recorded_bead_removal(recorded)
+    if not bead.get("enabled"):
+        return _bead_off()
+    identity = {
+        key: bead.get(key)
+        for key in (
+            "method",
+            "version",
+            "params_sha256",
+            "calibration_sha256",
+            "fill",
+            "backend",
+        )
+    }
+    identity["fill"] = dict(bead.get("fill") or {"enabled": False})
+    identity["backend"] = dict(bead.get("backend") or {"device": CPU_DEVICE})
+    return {"enabled": True, **identity}
+
+
+def build_image_preprocessing_record(
+    *,
+    z_layers: Sequence[int],
+    stainings: Sequence[str],
+    bead_removal_cfg: MerscopeBeadRemovalConfig | None,
+    calibration: Mapping[str, Any] | None = None,
+    run: Mapping[str, Any] | None = None,
+    device: str = CPU_DEVICE,
+    backend: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the ``merxen_image_preprocessing`` record of a raw-TIFF build.
+
+    The record holds metadata only. It is written for every raw-TIFF build so
+    that a later reuse can tell "built without bead removal" from "built before
+    this record existed" only through its absence (legacy), never by guessing.
+
+    Args:
+        z_layers: Planes that were max-projected.
+        stainings: Stain names of the projection (stored sorted: the storage
+            order is not deterministic).
+        bead_removal_cfg: Requested bead-removal configuration, or ``None``.
+        calibration: Summary of the calibration (thresholds, per-stain rho,
+            ``calibration_sha256``), when bead removal ran.
+        run: Summary of the correction run (chunk and bead counts), when bead
+            removal ran.
+        device: Backend device that ran the correction. Ignored when
+            ``backend`` is given.
+        backend: Backend record of the run: device, update order and, for the
+            GPU, the torch, triton and CUDA versions and the GPU name.
+
+    Returns:
+        A JSON-safe mapping.
+    """
+    calibration_sha = (
+        str(calibration["calibration_sha256"])
+        if calibration is not None and "calibration_sha256" in calibration
+        else None
+    )
+    bead_removal = bead_removal_identity(
+        bead_removal_cfg,
+        calibration_sha256=calibration_sha,
+        device=device,
+        backend=backend,
+    )
+    if bead_removal_cfg is not None and bead_removal["enabled"]:
+        bead_removal["corrected_stains"] = sorted(bead_removal_cfg.stains)
+        bead_removal["calibration"] = _json_safe(calibration)
+        bead_removal["run"] = _json_safe(run)
+    record = {
+        "schema": IMAGE_PREPROCESSING_SCHEMA,
+        "source": RAW_TIFF_SOURCE,
+        "z_layers": [int(z) for z in z_layers],
+        "stains": sorted(str(stain) for stain in stainings),
+        "bead_removal": bead_removal,
+        "writer_versions": package_versions(),
+    }
+    safe: dict[str, Any] = _json_safe(record)
+    return safe
+
+
+def read_image_preprocessing_attr(source: Path) -> dict[str, Any] | None:
+    """Read the preprocessing record from a SpatialData zarr root.
+
+    Only the root group metadata is read; the SpatialData object is not loaded.
+
+    Args:
+        source: Path of the zarr store (symlinks are resolved).
+
+    Returns:
+        The recorded attribute, or ``None`` for a legacy store (no record) or a
+        store whose root metadata cannot be read.
+    """
+    root = Path(source).resolve()
+    for name, key in (("zarr.json", "attributes"), (".zattrs", None)):
+        metadata_path = root / name
+        if not metadata_path.is_file():
+            continue
+        try:
+            metadata = json.loads(metadata_path.read_text())
+        except (OSError, ValueError) as exc:
+            logger.warning("Could not read zarr metadata %s: %s", metadata_path, exc)
+            return None
+        attrs = metadata.get(key) if key is not None else metadata
+        if not isinstance(attrs, dict):
+            return None
+        record = attrs.get(IMAGE_PREPROCESSING_ATTR)
+        return dict(record) if isinstance(record, dict) else None
+    return None
+
+
+def check_bead_removal_reuse(
+    recorded: Mapping[str, Any] | None,
+    requested: MerscopeBeadRemovalConfig | None,
+    *,
+    force: bool = False,
+    source: Path | str | None = None,
+    requested_z_layers: Sequence[int] | None = None,
+    requested_device: str = CPU_DEVICE,
+    requested_backend: Mapping[str, Any] | None = None,
+) -> None:
+    """Refuse to reuse a cached SpatialData built with other bead-removal settings.
+
+    Hard errors (the cached projection does not match the request):
+      * bead removal on versus off, a missing record reading as off;
+      * the fill on versus off, when bead removal is on in both;
+      * a different fill mode (flat versus hybrid), when the fill is on in both.
+
+    Warnings only (the result is valid but not what a fresh build would give):
+      * a different method version, parameter hash or fill parameter hash;
+      * a different backend device, or a different torch, triton or CUDA
+        version (the backends agree to the method's own order sensitivity,
+        and library versions to 0.01 counts);
+      * a different recorded z range.
+
+    A cache is never deleted here.
+
+    Args:
+        recorded: ``merxen_image_preprocessing`` of the cached zarr, or ``None``
+            for a legacy store.
+        requested: Requested bead-removal configuration, or ``None`` when off.
+        force: When True a rebuild is happening anyway, so nothing is checked.
+        source: Cached store, for the message only.
+        requested_z_layers: Requested z planes, when explicitly configured.
+        requested_device: Backend device the request would run on.
+        requested_backend: Backend identity of the request (device and
+            library versions); replaces ``requested_device``. An entry that
+            is not known without running (an unresolved ``auto`` device) is
+            left out and not compared.
+
+    Raises:
+        ValueError: If bead removal, the fill or the fill mode differs between
+            cache and request.
+    """
+    requested_identity = bead_removal_identity(
+        requested, device=requested_device, backend=requested_backend
+    )
+    recorded_identity = identity_from_record(recorded)
+    location = f" at {source}" if source is not None else ""
+
+    if bool(recorded_identity["enabled"]) != bool(requested_identity["enabled"]):
+        if force:
+            logger.info(
+                "Rebuilding the cached SpatialData%s: bead removal was %s, %s "
+                "requested.",
+                location,
+                _on_off(recorded_identity["enabled"]),
+                _on_off(requested_identity["enabled"]),
+            )
+            return
+        raise ValueError(
+            f"the cached SpatialData{location} was built with bead removal "
+            f"{_on_off(recorded_identity['enabled'])} but "
+            f"{_on_off(requested_identity['enabled'])} was requested; rebuild "
+            "with --force_spatialdata_build true (needs merscope_dir) or change "
+            "merscope_bead_removal"
+        )
+
+    if requested_z_layers is not None and recorded is not None:
+        recorded_z = recorded.get("z_layers")
+        if recorded_z is not None and sorted(recorded_z) != sorted(requested_z_layers):
+            logger.warning(
+                "The cached SpatialData%s was projected from z planes %s but %s "
+                "were requested; it is reused as built.",
+                location,
+                sorted(recorded_z),
+                sorted(requested_z_layers),
+            )
+
+    if not requested_identity["enabled"]:
+        return
+
+    recorded_fill = bool(recorded_identity["fill"].get("enabled"))
+    requested_fill = bool(requested_identity["fill"].get("enabled"))
+    if recorded_fill != requested_fill:
+        if force:
+            logger.info(
+                "Rebuilding the cached SpatialData%s: the bead-removal fill was "
+                "%s, %s requested.",
+                location,
+                _on_off(recorded_fill),
+                _on_off(requested_fill),
+            )
+            return
+        raise ValueError(
+            f"the cached SpatialData{location} was built with the bead-removal "
+            f"fill {_on_off(recorded_fill)} but {_on_off(requested_fill)} was "
+            "requested; rebuild with --force_spatialdata_build true (needs "
+            "merscope_dir) or change merscope_bead_removal_fill"
+        )
+
+    recorded_mode = _fill_mode(recorded_identity)
+    requested_mode = _fill_mode(requested_identity)
+    if requested_fill and recorded_mode != requested_mode:
+        if force:
+            logger.info(
+                "Rebuilding the cached SpatialData%s: the bead-removal fill mode "
+                "was %s, %s requested.",
+                location,
+                recorded_mode,
+                requested_mode,
+            )
+            return
+        raise ValueError(
+            f"the cached SpatialData{location} was built with the bead-removal "
+            f"fill mode {recorded_mode} but {requested_mode} was requested; "
+            "rebuild with --force_spatialdata_build true (needs merscope_dir) or "
+            "change merscope_bead_removal_fill_mode"
+        )
+
+    _warn_on_differences(recorded_identity, requested_identity, location)
+
+
+def _fill_mode(identity: Mapping[str, Any]) -> str:
+    """Return the fill mode of an identity (a block without ``mode`` is flat)."""
+    return str(dict(identity.get("fill") or {}).get("mode") or "flat")
+
+
+SEGMENTATION_SIDECAR_SCHEMA = 1
+CELL_MASK_SIDECAR_NAME = "image_preprocessing.json"
+NUCLEI_MASK_SIDECAR_NAME = "nuclei_image_preprocessing.json"
+# Inside a ProSeg store: the image its prior masks (and so its cells) came from.
+# A non-element file of the store root, which the store rewrites keep.
+STORE_SIDECAR_NAME = "segmentation_image_preprocessing.json"
+# Identity fields of a correction that decide whether two images are the same
+# for segmentation. Library versions are deliberately absent: they change the
+# image by at most 0.01 counts, so only the device is compared.
+_SEGMENTATION_IDENTITY_KEYS = (
+    "method",
+    "version",
+    "params_sha256",
+    "calibration_sha256",
+)
+
+
+def segmentation_identity(
+    recorded: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Reduce a preprocessing record to what Cellpose masks depend on.
+
+    Args:
+        recorded: The ``merxen_image_preprocessing`` attribute of the source
+            SpatialData, or ``None`` for a legacy store.
+
+    Returns:
+        ``None`` when no bead removal was applied (off or legacy, which are
+        the same image); otherwise the method, version, parameter and
+        calibration hashes, the fill identity and the backend device.
+    """
+    identity = identity_from_record(recorded)
+    if not identity["enabled"]:
+        return None
+    reduced: dict[str, Any] = {
+        key: identity.get(key) for key in _SEGMENTATION_IDENTITY_KEYS
+    }
+    reduced["fill"] = dict(identity["fill"])
+    reduced["device"] = dict(identity["backend"]).get("device")
+    safe: dict[str, Any] = _json_safe(reduced)
+    return safe
+
+
+def segmentation_sidecar_path(mask_path: Path | str, *, nuclei: bool = False) -> Path:
+    """Return the preprocessing sidecar that sits next to a Cellpose mask.
+
+    The cell and nuclei masks are produced by independent, independently
+    reusable steps, so each gets its own file even when both live in one
+    directory.
+
+    Args:
+        mask_path: The Cellpose label mask (``.npy``).
+        nuclei: True for the DAPI-only nuclei mask.
+
+    Returns:
+        Path of the sidecar file.
+    """
+    name = NUCLEI_MASK_SIDECAR_NAME if nuclei else CELL_MASK_SIDECAR_NAME
+    return Path(mask_path).with_name(name)
+
+
+def write_segmentation_sidecar(
+    mask_path: Path | str,
+    recorded: Mapping[str, Any] | None,
+    *,
+    nuclei: bool = False,
+    bead_mask_veto: Mapping[str, Any] | None = None,
+) -> Path:
+    """Record which image a Cellpose mask was computed from.
+
+    Args:
+        mask_path: The Cellpose label mask the sidecar describes.
+        recorded: ``merxen_image_preprocessing`` of the source SpatialData, or
+            ``None`` for a legacy store.
+        nuclei: True for the DAPI-only nuclei mask.
+        bead_mask_veto: Parameters of the bead-mask veto that was applied to the
+            cell masks (``bead_mask_veto_identity``), or ``None`` when none was.
+            Written under the key ``bead_mask_veto``, and only when given, so the
+            sidecar of a run without the veto is what it always was.
+
+    Returns:
+        Path of the written sidecar.
+    """
+    path = segmentation_sidecar_path(mask_path, nuclei=nuclei)
+    payload: dict[str, Any] = {
+        "schema": SEGMENTATION_SIDECAR_SCHEMA,
+        "bead_removal": segmentation_identity(recorded),
+    }
+    if bead_mask_veto is not None:
+        payload["bead_mask_veto"] = _json_safe(dict(bead_mask_veto))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Written through a temporary name so a reader never sees half a file.
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    temporary.replace(path)
+    return path
+
+
+def remove_segmentation_sidecar(mask_path: Path | str, *, nuclei: bool = False) -> None:
+    """Delete the sidecar of a mask that is about to be regenerated.
+
+    A record of the earlier image must not outlive the mask it described.
+    """
+    segmentation_sidecar_path(mask_path, nuclei=nuclei).unlink(missing_ok=True)
+
+
+def check_segmentation_sidecar(
+    mask_path: Path | str,
+    recorded: Mapping[str, Any] | None,
+    *,
+    nuclei: bool = False,
+    dataset_name: str = "",
+    bead_mask_veto: Mapping[str, Any] | None = None,
+) -> None:
+    """Refuse to reuse Cellpose masks computed from a differently corrected image.
+
+    Rules:
+      * sidecar present: its bead-removal identity must equal the source's, and
+        the bead-mask veto it records (absent: none) must equal the one the run
+        would apply;
+      * sidecar missing and the source had bead removal on: the masks predate
+        the correction, so they are refused;
+      * sidecar missing and the source had it off or is legacy: reused as
+        before (such masks cannot have come from a corrected image).
+
+    Args:
+        mask_path: The Cellpose label mask that would be reused.
+        recorded: ``merxen_image_preprocessing`` of the source SpatialData, or
+            ``None`` for a legacy store.
+        nuclei: True for the DAPI-only nuclei mask.
+        dataset_name: Dataset label for the message.
+        bead_mask_veto: Parameters of the bead-mask veto the run would apply to
+            the cell masks (``bead_mask_veto_identity``), or ``None`` when it
+            would apply none. Masks computed before the veto existed record none.
+
+    Raises:
+        ValueError: If the masks and the source disagree about bead removal,
+            or the sidecar cannot be read.
+    """
+    command = "merxen cellpose-nuclei-segment" if nuclei else "merxen cellpose-segment"
+    remedy = (
+        "Move the segmentation outputs aside (the segmentation/ folder and the "
+        "latest/ ProSeg output that was built from these masks, or run with "
+        "--force_proseg_rerun true) and recompute the masks: "
+        f"`{command} --force-rerun` (CLI) or a new --outdir (Nextflow), so the "
+        "masks are computed from the current image."
+    )
+    _check_identity_sidecar(
+        segmentation_sidecar_path(mask_path, nuclei=nuclei),
+        mask_path,
+        recorded,
+        dataset_name=dataset_name,
+        remedy=remedy,
+        missing_reason=(
+            "so it predates the correction and was computed from an uncorrected image"
+        ),
+        consequence=(
+            "Reusing the masks would segment a different image than the one that "
+            "is quantified."
+        ),
+        veto_consequence=(
+            "Reusing the masks would keep masks on modelled beads that the request "
+            "drops, or drop masks the request keeps."
+        ),
+        bead_mask_veto=bead_mask_veto,
+    )
+
+
+def write_store_segmentation_sidecar(
+    store_path: Path | str, recorded: Mapping[str, Any] | None
+) -> Path:
+    """Record in a ProSeg store which image its prior masks came from.
+
+    The file sits in the store root, so it follows the store when it is staged
+    (symlink), copied or rewritten by the SpatialData contract upgrade.
+
+    Args:
+        store_path: The ProSeg output zarr (raw or latest) the file describes.
+        recorded: ``merxen_image_preprocessing`` of the source SpatialData, or
+            ``None`` for a legacy store.
+
+    Returns:
+        Path of the written sidecar.
+    """
+    path = Path(store_path) / STORE_SIDECAR_NAME
+    payload = {
+        "schema": SEGMENTATION_SIDECAR_SCHEMA,
+        "bead_removal": segmentation_identity(recorded),
+    }
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    temporary.replace(path)
+    return path
+
+
+def check_store_segmentation_sidecar(
+    store_path: Path | str,
+    recorded: Mapping[str, Any] | None,
+    *,
+    dataset_name: str = "",
+) -> None:
+    """Refuse to reuse a ProSeg store whose masks came from another image.
+
+    The ProSeg output is built from the Cellpose masks as a prior, so its cells
+    come from the image of those masks. The rules are those of
+    :func:`check_segmentation_sidecar`: a stored identity must equal the
+    source's; a store without the file is reused only when the source has no
+    bead removal.
+
+    Args:
+        store_path: The ProSeg output zarr that would be reused or enriched.
+        recorded: ``merxen_image_preprocessing`` of the source SpatialData, or
+            ``None`` for a legacy store.
+        dataset_name: Dataset label for the message.
+
+    Raises:
+        ValueError: If the store and the source disagree about bead removal, or
+            the sidecar cannot be read.
+    """
+    remedy = (
+        "Move the latest/ ProSeg output aside or run with --force_proseg_rerun "
+        "true (Nextflow) or `merxen segment --force-rerun` (CLI), so that it is "
+        "rebuilt from the Cellpose masks of the current image."
+    )
+    _check_identity_sidecar(
+        Path(store_path) / STORE_SIDECAR_NAME,
+        store_path,
+        recorded,
+        dataset_name=dataset_name,
+        remedy=remedy,
+        missing_reason=(
+            "so it predates the correction and its cells were segmented from "
+            "masks of an uncorrected image"
+        ),
+        consequence=(
+            "Reusing it would pair cells segmented from a different image with "
+            "the image that is quantified."
+        ),
+    )
+
+
+def _check_identity_sidecar(
+    sidecar: Path,
+    subject_path: Path | str,
+    recorded: Mapping[str, Any] | None,
+    *,
+    dataset_name: str,
+    remedy: str,
+    missing_reason: str,
+    consequence: str,
+    veto_consequence: str = "",
+    bead_mask_veto: Mapping[str, Any] | None = None,
+) -> None:
+    """Compare a stored bead-removal identity with the source's (shared rules).
+
+    The bead-mask veto recorded next to it (absent: none) is compared with
+    ``bead_mask_veto``, the one the run would apply; the ProSeg store sidecar
+    records none and is compared with none.
+    """
+    source_identity = segmentation_identity(recorded)
+    prefix = f"[{dataset_name}] " if dataset_name else ""
+    if not sidecar.is_file():
+        if source_identity is None:
+            return
+        raise ValueError(
+            f"{prefix}the source SpatialData was built with bead removal on but "
+            f"{subject_path} has no {sidecar.name}, {missing_reason}. {remedy}"
+        )
+    try:
+        payload = json.loads(sidecar.read_text())
+        stored = payload.get("bead_removal")
+    except (OSError, ValueError, AttributeError) as exc:
+        raise ValueError(
+            f"{prefix}could not read {sidecar} ({exc}), so it cannot be verified "
+            f"that {subject_path} matches the source image. {remedy}"
+        ) from exc
+    if stored is not None and not isinstance(stored, dict):
+        raise ValueError(
+            f"{prefix}{sidecar} does not hold a bead-removal identity. {remedy}"
+        )
+    if stored != source_identity:
+        raise ValueError(
+            f"{prefix}{subject_path} was computed from an image with bead removal "
+            f"{_describe_identity(stored)} but the source SpatialData has "
+            f"{_describe_identity(source_identity)}. {consequence} {remedy}"
+        )
+    stored_veto = payload.get("bead_mask_veto")
+    expected_veto = None if bead_mask_veto is None else _json_safe(dict(bead_mask_veto))
+    if stored_veto != expected_veto:
+        raise ValueError(
+            f"{prefix}{subject_path} was computed {_describe_veto(stored_veto)} but "
+            f"this run applies {_describe_veto(expected_veto)}. {veto_consequence} "
+            f"{remedy}"
+        )
+
+
+def _describe_veto(veto: object) -> str:
+    """Summarise a recorded bead-mask veto for an error message."""
+    if not isinstance(veto, Mapping):
+        return "without the bead-mask veto"
+    return (
+        f"with the bead-mask veto (version {veto.get('version')}, "
+        f"A0 >= {veto.get('a0_min')})"
+    )
+
+
+def _describe_identity(identity: Mapping[str, Any] | None) -> str:
+    """Summarise a segmentation identity for an error message."""
+    if identity is None:
+        return "off"
+    fill_block = identity.get("fill") or {}
+    fill = "with fill" if fill_block.get("enabled") else "no fill"
+    if fill_block.get("enabled") and _fill_mode(identity) != "flat":
+        fill = f"with {_fill_mode(identity)} fill"
+    return (
+        f"on (version {identity.get('version')}, {fill}, device "
+        f"{identity.get('device')}, params {str(identity.get('params_sha256'))[:12]}, "
+        f"calibration {str(identity.get('calibration_sha256'))[:12]})"
+    )
+
+
+def bead_removal_table_metadata(
+    recorded: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Describe the bead correction of a source for derived tables.
+
+    Args:
+        recorded: ``merxen_image_preprocessing`` of the source SpatialData, or
+            ``None`` for a legacy store.
+
+    Returns:
+        ``None`` when bead removal was off (tables stay as they were);
+        otherwise the corrected stains, the method version and the fill flag.
+    """
+    bead = _recorded_bead_removal(recorded)
+    if not bead.get("enabled"):
+        return None
+    fill = bead.get("fill")
+    metadata: dict[str, Any] = {
+        "bead_corrected_stains": sorted(
+            str(s) for s in bead.get("corrected_stains", [])
+        ),
+        "bead_removal_version": int(bead.get("version") or BEAD_REMOVAL_VERSION),
+        "bead_removal_fill": bool(isinstance(fill, Mapping) and fill.get("enabled")),
+    }
+    return metadata
+
+
+def _warn_on_differences(
+    recorded: Mapping[str, Any],
+    requested: Mapping[str, Any],
+    location: str,
+) -> None:
+    """Log each difference that does not invalidate the cache."""
+    pairs: list[tuple[str, Any, Any]] = [
+        ("method version", recorded.get("version"), requested.get("version")),
+        (
+            "parameter hash",
+            recorded.get("params_sha256"),
+            requested.get("params_sha256"),
+        ),
+    ]
+    if requested["fill"].get("enabled"):
+        pairs.append(
+            (
+                "fill parameter hash",
+                recorded["fill"].get("params_sha256"),
+                requested["fill"].get("params_sha256"),
+            )
+        )
+    recorded_backend = recorded.get("backend") or {}
+    requested_backend = requested.get("backend") or {}
+    # Device, update order and the library versions that a GPU run records. A
+    # version change is a warning only: the output differs by < 0.01 counts.
+    for key in sorted(set(recorded_backend) | set(requested_backend)):
+        pairs.append(
+            (f"backend {key}", recorded_backend.get(key), requested_backend.get(key))
+        )
+    for label, was, now in pairs:
+        # A requested value of None means "not known before the build".
+        if now is not None and was != now:
+            logger.warning(
+                "The cached SpatialData%s was built with bead-removal %s %s but "
+                "this run would use %s; it is reused as built.",
+                location,
+                label,
+                was,
+                now,
+            )
+
+
+def _recorded_bead_removal(recorded: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    """Return the ``bead_removal`` mapping of a record (empty for legacy)."""
+    if not isinstance(recorded, Mapping):
+        return {}
+    bead = recorded.get("bead_removal")
+    return bead if isinstance(bead, Mapping) else {}
+
+
+def _on_off(flag: object) -> str:
+    return "on" if flag else "off"
+
+
+def _json_safe(value: Any) -> Any:
+    """Round-trip through JSON so numpy scalars and tuples become plain types."""
+    return json.loads(json.dumps(value, default=_to_builtin))
+
+
+def _to_builtin(value: Any) -> Any:
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    raise TypeError(f"{type(value).__name__} is not JSON serializable")

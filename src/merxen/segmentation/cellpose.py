@@ -569,6 +569,7 @@ def run_tiled_cellpose(
     output_cellprob_path: Path | None = None,
     progress_callback: Any = None,
     expected_model_identity: CellposeModelIdentity | None = None,
+    before_overwrite: Callable[[], None] | None = None,
 ) -> Path:
     """Run tiled Cellpose segmentation across a full image.
 
@@ -588,6 +589,10 @@ def run_tiled_cellpose(
         output_stitching_stats_path: Optional path for stitching diagnostics JSON.
         output_cellprob_path: Optional path for stitched Cellpose probability logits.
         expected_model_identity: Completed preflight contract for a custom model.
+        before_overwrite: Optional callable invoked once, after every check that
+            can refuse the run and immediately before the existing outputs are
+            deleted. The caller uses it to drop records that describe those
+            outputs (a refused run must leave them, and their records, intact).
 
     Returns:
         Path to the written mask .npy file.
@@ -638,6 +643,8 @@ def run_tiled_cellpose(
         dataset_name=dataset_name,
     )
 
+    if before_overwrite is not None:
+        before_overwrite()
     model_identity_path(output_mask_path).unlink(missing_ok=True)
     if output_mask_path.exists():
         output_mask_path.unlink()

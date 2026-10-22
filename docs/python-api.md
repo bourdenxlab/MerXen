@@ -51,7 +51,7 @@ configs against these.
   `ClusteringSquidpyConfig`, `GastonConfig`.
 - Sub-models: `CellposeConfig`, `TilingConfig`, `MaskFilterConfig`,
   `ProsegConfig`, `ProsegHybridConfig`, `MemoryConfig`, `DatasetConfig`,
-  `MerscopeBuildConfig`, `XeniumBuildConfig`.
+  `MerscopeBuildConfig`, `MerscopeBeadRemovalConfig`, `XeniumBuildConfig`.
 - `PipelineConfig(BaseSettings)` — loads `MERXEN_*` env vars.
 - `load_config_from_json(path, cls)` — helper every CLI uses.
 
@@ -72,6 +72,42 @@ with Groovy.
 ### `io.builders` — [builders/](../src/merxen/io/builders/)
 - `build_spatialdata_artifact(config, *, force_rerun)` — orchestrator.
 - `write_merscope_spatialdata(...)` / `write_xenium_spatialdata(...)`.
+
+### `io.bead_removal` — [bead_removal/](../src/merxen/io/bead_removal/)
+Optional removal of coverslip fiducial beads from MERSCOPE image planes before
+the max projection. Off by default. The package is lazy (its names load on first
+use): a default build, segmentation, enrichment or quantification run imports only
+the light `params` and `provenance` submodules for the image-preprocessing record,
+never the correction code, and the package imports no GPU code. Configured by `MerscopeBeadRemovalConfig`
+(`MerscopeBuildConfig.bead_removal`); see
+[stages/spatialdata-build.md](stages/spatialdata-build.md#merscope-bead-removal-optional).
+- `list_mosaic_planes(images_dir)` / `MosaicPlaneReader` — read raw
+  `mosaic_<stain>_z<N>.tif` planes by window.
+- `calibrate_bead_model(reader, *, config, z_layers, params, n_workers)` —
+  per-dataset calibration: tissue mask, calibration tiles, bead-presence
+  decision, PSF library, stain responses and classifier thresholds. Returns a
+  `BeadCalibration` (`save` / `load`, `calibration_sha256()`); raises
+  `BeadCalibrationError` with a per-tile table when the data cannot be
+  corrected (no beads, ambiguous, beads not focused at plane 0, no tissue-free
+  area).
+- `correct_window(stacks, *, origin_yx, calibration, z_layers, params, fill, core)` —
+  correct one window of plane stacks; `apply_bead_model` subtracts a fitted
+  model. Results depend only on the window's own pixels.
+- `run_bead_removal(...)` — chunk-major driver (process pool, parent-only
+  writes) used by the MERSCOPE builder; returns a `BeadRemovalRunResult`.
+- `write_bead_removal_qc(...)` — writes the `bead_removal_qc/` folder
+  (`QC_DIRNAME`).
+- `PsfSubtractParams` / `DEFAULT_PARAMS` / `params_sha256` and
+  `BEAD_REMOVAL_VERSION` — the fixed algorithm parameters and their identity.
+- `provenance` — `build_image_preprocessing_record`,
+  `check_bead_removal_reuse` (the cache guard), and the segmentation sidecar
+  helpers.
+- `fill` — the bounded fill (`FillParams`, `apply_bounded_fill`), in hybrid (the
+  config default: `eps` 1.0, dilation 3, no texture gate) or flat mode (`eps` 0.3,
+  dilation 2), reached through the config's `fill` and `fill_mode`. `eps` and
+  `dilation` default per mode, and `texture_gate=True` restores the earlier
+  texture-gated hybrid behaviour. The hybrid mode has a device port in
+  `gpu/fill.py`, called by the GPU `correct_window`.
 
 ### `io.spatialdata_io` — [spatialdata_io.py](../src/merxen/io/spatialdata_io.py)
 - `write_spatialdata_zarr(sdata, path, ...)`.
@@ -124,6 +160,14 @@ with Groovy.
 - `run_segmentation_pipeline(config, *, force_rerun)` — full stage entry point.
 - `run_cellpose_nuclei_segmentation(config, *, force_rerun)` — reusable
   DAPI-only nuclei entry point.
+
+### `segmentation.bead_mask_veto` — [bead_mask_veto.py](../src/merxen/segmentation/bead_mask_veto.py)
+- `prepare_bead_mask_veto(config, *, source, recorded, sdata, shape)` — resolve
+  the bead table and the DAPI reader, or `None` when the veto does nothing.
+- `apply_bead_mask_veto(mask_path, veto, ...)` — drop the cell masks that sit on a
+  modelled bead and have no DAPI nucleus, and write `bead_mask_veto.json`.
+- `bead_mask_veto_identity(config, source, recorded)` — the parameters recorded in
+  the mask sidecar and compared on reuse.
 
 ### `segmentation.cellpose` — [cellpose.py](../src/merxen/segmentation/cellpose.py)
 - `build_cellpose_model(config)`.

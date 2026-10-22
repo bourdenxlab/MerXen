@@ -128,6 +128,11 @@ to `none` or `/dev/null` on purpose:
 | `gaston_enabled` | `false` | Run GASTON as an opt-in terminal stage. A non-empty samplesheet value overrides this per row. |
 | `gaston_segmentations` | `proseg_hybrid` | Independent GASTON branch selector: any segmentation, a comma-separated subset, or `all`. This does not change `analysis_segmentation`. |
 | `force_spatialdata_build` | `false` | Rebuild SpatialData zarrs even if cached. |
+| `merscope_bead_removal` | `false` | Subtract coverslip fiducial beads from the MERSCOPE PolyT and DAPI planes before the max projection. Fallback for the samplesheet column `merscope_bead_removal`; a non-empty row value overrides it. Only for raw-TIFF MERSCOPE rows on beaded coverslips, with `merscope_z_range` starting at plane `1` or later; the build fails when it finds no beads. Corrected and uncorrected samples must not be pooled for PolyT/DAPI intensity features. See [stages/spatialdata-build.md](stages/spatialdata-build.md#merscope-bead-removal-optional). |
+| `merscope_bead_removal_fill` | `true` | Also fill the residual of bead light after the subtraction (bounded, one-sided: never brighter than the subtraction, at most `eps` x the model light lower: 1.0 in hybrid mode, 0.3 in flat mode). On by default, in the hybrid mode below; `false` switches it off. Applies only to samples that have bead removal on, has no samplesheet column, and changes the cache identity: a zarr built with the other setting is refused, not reused (a zarr built before this default, without the fill, needs `false` or a rebuild). |
+| `merscope_bead_removal_fill_mode` | `hybrid` | Mode of the fill: `hybrid` (strong: it removes up to the whole model light wherever that exceeds the noise floor, with a 3 px mask dilation and no texture gate, also in tissue, so it may dim puncta near beads; it favours clean masks over faithful pixel values; runs on the CPU or the GPU) or `flat` (flat background only, inert in tissue; CPU only, a `cuda`/`auto` device request falls back to the CPU with a warning). Ignored when `merscope_bead_removal_fill` is `false`. No samplesheet column. Changes the cache identity like the fill itself. See [stages/spatialdata-build.md](stages/spatialdata-build.md#fill-modes-merscope_bead_removal_fill_mode). |
+| `merscope_bead_mask_veto` | `true` | Drop the Cellpose cell masks that are centred on a modelled bead (fitted amplitude A0 >= 400) and have no DAPI nucleus, before the masks are saved and ProSeg is seeded. On by default; `false` switches it off. It is written into the segmentation config of samples with bead removal on only (other samples keep their config and task hashes) and does nothing for a source without a bead table. Masks computed with another veto setting, or before the veto existed, are refused on reuse. No samplesheet column. See [stages/segmentation.md](stages/segmentation.md#bead-mask-veto). |
+| `merscope_bead_removal_device` | `cpu` | Device of the bead-removal correction: `cpu` (the validated numpy path, the default), `cuda` (optional GPU backend; fails at the start of the sample when there is no CUDA device or the Triton kernels do not compile) or `auto` (GPU only when CUDA is available and the host GPU lock `MERXEN_GPU_LOCK_FILE` is set, else CPU). The hybrid fill (the default) runs on either device, the flat fill on the CPU only. No samplesheet column. Changing the device re-runs the build; a cached zarr built on the other device is reused with a warning. The GPU path needs torch 2.6-2.14 and Triton 3.2-3.8 in the build environment (CUDA 12.4-13.0) and a C compiler; the first window adds about 5 s of kernel compilation. It takes the host GPU lock once around the window loop only (see [GPU lock](#bead-removal-gpu-lock)), so a build that has to wait holds its `BUILD_SPATIALDATA` slot. On container profiles the `gpu` profile passes the GPU into the build. The Dwight profile sets `cuda` (validated on the workstation with torch 2.14 and Triton 3.8). See [stages/spatialdata-build.md](stages/spatialdata-build.md#gpu-backend-optional). |
 | `merscope_allow_transform_override_mismatch` | `false` | `.vzg2` builds fail when `merscope_transform_path` places the mosaic more than 1 µm away from the archive manifest. `true` keeps the override with a warning, for archives whose `bbox_microns` is known to be wrong. See [stages/spatialdata-build.md](stages/spatialdata-build.md). |
 | `force_proseg_rerun` | `false` | Rebuild ProSeg bases from the current Cellpose/transcript inputs instead of reusing a persistent `latest_spatialdata.zarr`. Useful with `-resume` after upstream inputs were rebuilt. |
 | `qc_registration_strict` | `false` | Fail the QC task (instead of only warning in its outputs) when the segmentation registration check flags cells that do not sit on their transcripts. See [stages/qc.md](stages/qc.md#registration-check). |
@@ -750,6 +755,28 @@ then released automatically when the task exits. The file is created as a
 world-readable empty file and opened read-only before calling `flock`, so a
 lock created by one workstation user remains usable by other users.
 
+<a id="bead-removal-gpu-lock"></a>
+`BUILD_SPATIALDATA` is different: its `beforeScript` only exports
+`MERXEN_GPU_LOCK_FILE` (when `gpu_process_lock_enabled` is true) and does not
+take the lock, because a build runs for hours and needs the GPU for only part of
+that time. With `merscope_bead_removal_device` set to `cuda` (or `auto` with a
+working GPU) the bead-removal code takes the same lock itself, once, around its
+GPU window loop and releases it after the last window or on an error. It
+therefore queues with the Cellpose, alignment and clustering tasks.
+A build waiting for the lock keeps its `BUILD_SPATIALDATA` fork slot, and the wait
+is reported in the build log and in `bead_removal_qc/summary.json`. With the
+variable unset, `cuda` runs unlocked with a warning and `auto` uses the CPU.
+With the default `cpu` device the build never touches the lock or the GPU.
+
+The lock is a feature of the shared workstation (the workstation profile exports
+the path in the task's `beforeScript`). On a scheduler the GPU belongs to the
+job: with `cuda` (and not the flat fill) `BUILD_SPATIALDATA` requests the `gpu` queue and
+`--gpus-per-node=1`, and the `gpu` profile adds Apptainer `--nv` to its container
+whenever the device is not `cpu` (the build's other container options are not
+changed). With the default `cpu` device the build stays on the `htc` queue with no
+GPU request and no `--nv`. Without `MERXEN_GPU_LOCK_FILE` in the task
+environment `auto` uses the CPU and `cuda` runs unlocked with a warning.
+
 A future HPC profile should provide its own executor, capacity/concurrency,
 software paths, reference paths, worker counts, and GPU policy. The portable
 process requests and scientific defaults do not need to be duplicated.
@@ -784,12 +811,17 @@ models is the ground truth for how stages are configured.
 Nested sub-models:
 
 - `CellposeConfig`, `TilingConfig`, `MaskFilterConfig` — Cellpose behaviour.
+- `BeadMaskVetoConfig` — the bead-mask veto of the Cellpose cell masks, nested as
+  `SegmentationConfig.bead_mask_veto` (the workflow sets `enabled` only).
 - `ProsegConfig` — ProSeg parameters, including `binary_path`.
 - `MemoryConfig` — memory limits and chunk sizes.
 - `DatasetConfig` — one dataset (one half of a pair) within a `SegmentationConfig`.
 - `MecrSampleConfig` — one SpatialData cell-count table scored by MECR.
 - `MerscopeBuildConfig` / `XeniumBuildConfig` — platform-specific build options
   nested under `SpatialDataBuildConfig`.
+- `MerscopeBeadRemovalConfig` — optional bead removal, nested as
+  `MerscopeBuildConfig.bead_removal` (`None` means off). Fields are listed in
+  [stages/spatialdata-build.md](stages/spatialdata-build.md#configuration).
 - `PipelineConfig(BaseSettings)` — top-level, loaded from `MERXEN_*` env vars.
 
 `load_config_from_json(path, cls)` in

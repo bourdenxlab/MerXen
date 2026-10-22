@@ -10,7 +10,7 @@ import warnings
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -94,6 +94,60 @@ class MaskFilterConfig(BaseModel):
             and self.final_min_area_um2 > self.final_max_area_um2
         ):
             raise ValueError("final_min_area_um2 must be <= final_max_area_um2")
+        return self
+
+
+class BeadMaskVetoConfig(BaseModel):
+    """Parameters of the bead-mask veto of the MERSCOPE Cellpose segmentation.
+
+    After the Cellpose cell masks are stitched and filtered, a mask whose centroid
+    lies on a modelled coverslip bead and that has no DAPI-positive nucleus is
+    dropped before the masks are saved and the transcripts are seeded. The step
+    reads the bead table ``bead_removal_qc/beads.csv.gz`` of the source SpatialData
+    zarr and does nothing (bit-identical masks, no new file) when the source was
+    built without bead removal or has no bead table. Only ``enabled`` is set by the
+    workflow; the other fields are the method's parameters and are recorded in the
+    mask sidecar, so masks computed with other values are not silently reused.
+
+    Attributes:
+        enabled: Run the veto (default True). It acts only on a source with bead
+            removal and a bead table, whatever this says.
+        a0_min: Beads with a fitted amplitude A0 below this (counts) are ignored.
+        min_distance_px: A mask is near a bead when the distance of its centroid to
+            the bead is at most ``max(min_distance_px, radius_fraction x r)`` with
+            ``r = sqrt(area / pi)`` the equivalent radius of the mask.
+        radius_fraction: See ``min_distance_px``.
+        ring_inner_px: Inner distance (px) from the mask of the DAPI background
+            ring.
+        ring_outer_px: Outer distance (px) from the mask of the DAPI background
+            ring.
+        dapi_percentile: Percentile of the DAPI inside the mask that is compared
+            with the ring.
+        dapi_noise_multiple: A mask has a DAPI-positive nucleus when its DAPI
+            percentile exceeds the ring median plus this many robust noise units
+            (1.4826 x the median absolute deviation of the ring).
+        min_ring_px: Fewest ring pixels with which the DAPI background can be
+            estimated; a mask with fewer is kept (never vetoed on a guess).
+        chunk_mb: Memory (MB) of one row chunk of the mask passes.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    a0_min: float = Field(default=400.0, gt=0.0)
+    min_distance_px: float = Field(default=8.0, ge=0.0)
+    radius_fraction: float = Field(default=0.35, ge=0.0)
+    ring_inner_px: float = Field(default=10.0, ge=0.0)
+    ring_outer_px: float = Field(default=25.0, gt=0.0)
+    dapi_percentile: float = Field(default=90.0, gt=0.0, lt=100.0)
+    dapi_noise_multiple: float = Field(default=3.0, ge=0.0)
+    min_ring_px: int = Field(default=200, ge=1)
+    chunk_mb: int = Field(default=64, gt=0)
+
+    @model_validator(mode="after")
+    def _check_ring(self) -> BeadMaskVetoConfig:
+        if self.ring_outer_px <= self.ring_inner_px:
+            raise ValueError("ring_outer_px must be larger than ring_inner_px.")
         return self
 
 
@@ -218,6 +272,95 @@ class MemoryConfig(BaseModel):
     transcript_status_every_chunks: int = 5
 
 
+class MerscopeBeadRemovalConfig(BaseModel):
+    """Optional removal of coverslip fiducial beads before the MERSCOPE projection.
+
+    The bead plane (plane 0) is read for detection only; the stains listed in
+    ``stains`` are corrected plane by plane before the max projection. Disabled
+    by default so existing builds are unchanged.
+    """
+
+    # Unknown keys must fail loudly: a misspelt option would otherwise be
+    # silently ignored and the beads would stay in the projection.
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    method: Literal["psf_subtract"] = "psf_subtract"
+    stains: list[str] = Field(default_factory=lambda: ["PolyT", "DAPI"])
+    reference_stain: str = "PolyT"
+    detection_plane: int = 0
+    halo_px: int = 256
+    max_workers: int = 5
+    calibration_tiles: int = 6
+    calibration_tile_px: int = 2048
+    min_offtissue_distance_px: int = 500
+    min_ring_prominence: float = 0.010
+    # Bounded one-sided fill of the residual bead footprint after the subtraction.
+    # On by default (it only acts when removal is enabled); fill=False switches it
+    # off.
+    fill: bool = True
+    # Mode of the fill: "hybrid" (default) fills wherever the bead model's
+    # uncertainty exceeds the local texture, also in tissue, and may dim puncta
+    # close to a bead; "flat" acts on flat background only (inert in tissue) and
+    # runs on the CPU only. Only read with fill=True; giving it explicitly with
+    # fill=False is refused.
+    fill_mode: Literal["flat", "hybrid"] = "hybrid"
+    # Device of the window correction: "cpu" is the validated numpy path and the
+    # default; "cuda" needs a GPU with Triton; "auto" uses the GPU only when it
+    # is available and the host GPU lock is configured. The hybrid fill runs on
+    # either device; the flat fill runs on the CPU only.
+    device: Literal["auto", "cpu", "cuda"] = "cpu"
+
+    @field_validator("halo_px")
+    @classmethod
+    def _halo_px_is_tile_aligned(cls, value: int) -> int:
+        # The window must contain the whole neighbourhood of every kept pixel,
+        # so a smaller halo makes results depend on chunk boundaries. The 16 px
+        # multiple keeps window origins on the absolute grid the correction
+        # decisions are made on.
+        if value < 256 or value % 16 != 0:
+            raise ValueError(
+                f"halo_px must be >= 256 and a multiple of 16, got {value}."
+            )
+        return value
+
+    @field_validator("max_workers")
+    @classmethod
+    def _max_workers_is_positive(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError(f"max_workers must be >= 1, got {value}.")
+        return value
+
+    @model_validator(mode="after")
+    def _check_consistency(self) -> MerscopeBeadRemovalConfig:
+        if self.reference_stain not in self.stains:
+            raise ValueError(
+                f"reference_stain {self.reference_stain!r} must be one of "
+                f"stains {self.stains}."
+            )
+        # Version 1 detects beads on the bead plane only; other planes are not
+        # validated for detection.
+        if self.detection_plane != 0:
+            raise ValueError(
+                f"detection_plane must be 0 in this version, got "
+                f"{self.detection_plane}."
+            )
+        # The fill is a refinement of the subtraction, so it has nothing to
+        # act on when removal itself is off. It is on by default, so only an
+        # explicit fill=True next to enabled=False is a contradiction.
+        if self.fill and not self.enabled and "fill" in self.model_fields_set:
+            raise ValueError("fill requires enabled=True.")
+        # The mode only applies to the fill; with the fill off the default mode is
+        # ignored and an explicit one is refused (a silent no-op would hide a typo
+        # in the intent).
+        if not self.fill and "fill_mode" in self.model_fields_set:
+            raise ValueError(
+                f"fill_mode {self.fill_mode!r} requires fill=True (the mode only "
+                "applies to the fill)."
+            )
+        return self
+
+
 class MerscopeBuildConfig(BaseModel):
     """Options for constructing a MERSCOPE SpatialData object."""
 
@@ -227,6 +370,8 @@ class MerscopeBuildConfig(BaseModel):
     # VZG2 only: accept a merscope_transform_path that places the mosaic more
     # than 1 um away from the archive manifest (e.g. a padded bbox_microns).
     allow_transform_override_mismatch: bool = False
+    # None (the default) leaves the build path untouched.
+    bead_removal: MerscopeBeadRemovalConfig | None = None
 
 
 class XeniumBuildConfig(BaseModel):
@@ -304,6 +449,9 @@ class SegmentationConfig(BaseModel):
     cellpose_model_policy: CellposeModelPolicy = CellposeModelPolicy()
     mask_filter: MaskFilterConfig = MaskFilterConfig()
     nuclei_mask_filter: MaskFilterConfig = MaskFilterConfig()
+    # Drops Cellpose cell masks that sit on a modelled bead and have no DAPI
+    # nucleus. Acts only on a source with bead removal and a bead table.
+    bead_mask_veto: BeadMaskVetoConfig = BeadMaskVetoConfig()
     tiling: TilingConfig = TilingConfig()
     proseg: ProsegConfig = ProsegConfig()
     proseg_hybrid: ProsegHybridConfig = ProsegHybridConfig()

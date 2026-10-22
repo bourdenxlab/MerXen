@@ -16,6 +16,14 @@ from spatialdata_io import xenium as xenium_reader
 
 from merxen._typing import AffineComponent
 from merxen.config import SegmentationConfig
+from merxen.io.bead_removal.provenance import (
+    check_segmentation_sidecar,
+    check_store_segmentation_sidecar,
+    read_image_preprocessing_attr,
+    remove_segmentation_sidecar,
+    write_segmentation_sidecar,
+    write_store_segmentation_sidecar,
+)
 from merxen.io.image_source import (
     MERSCOPE_ZPROJ_IMAGE_NAME,
     build_image_source,
@@ -32,6 +40,12 @@ from merxen.io.spatialdata_schema import choose_primary_points_key
 from merxen.io.transcript_io import resolve_col, write_proseg_csv_from_points
 from merxen.memory import force_release, log_status
 from merxen.path_utils import remove_path, stage_existing_output
+from merxen.segmentation.bead_mask_veto import (
+    apply_bead_mask_veto,
+    bead_mask_veto_identity,
+    prepare_bead_mask_veto,
+    remove_veto_sidecar,
+)
 from merxen.segmentation.cellpose import (
     assign_labels_from_masks,
     build_cellpose_affine_to_microns,
@@ -371,6 +385,22 @@ def _require_seeding_matches_transforms(
     )
 
 
+def _source_image_preprocessing(config: SegmentationConfig) -> dict[str, Any] | None:
+    """Read the preprocessing record of the dataset's source SpatialData zarr.
+
+    Args:
+        config: Segmentation configuration.
+
+    Returns:
+        The ``merxen_image_preprocessing`` root attribute, or ``None`` for a
+        legacy store, a raw (non-zarr) Xenium bundle or a missing path.
+    """
+    source = Path(config.dataset.data_path)
+    if not source.exists():
+        return None
+    return read_image_preprocessing_attr(source)
+
+
 def _load_dataset_sdata(
     config: SegmentationConfig,
 ) -> tuple[Any, Any, int, int, np.ndarray, Any]:
@@ -665,8 +695,22 @@ def run_cellpose_segmentation(
         and cellprob_path.exists()
         and not force_rerun
     )
+    source_preprocessing = _source_image_preprocessing(config)
     if reusable_outputs_exist:
         if _labeled_mask_has_foreground(mask_path):
+            # Masks made from a differently corrected image would be
+            # quantified against this one, so this is decided before anything
+            # else is trusted.
+            check_segmentation_sidecar(
+                mask_path,
+                source_preprocessing,
+                dataset_name=dataset.name,
+                bead_mask_veto=bead_mask_veto_identity(
+                    config.bead_mask_veto,
+                    dataset.data_path,
+                    source_preprocessing,
+                ),
+            )
             current_x_transform, current_y_transform = _derive_cellpose_transforms(
                 config
             )
@@ -711,6 +755,23 @@ def run_cellpose_segmentation(
         config
     )
 
+    # Resolved before Cellpose runs, so that a missing DAPI projection or an
+    # unreadable bead table fails now and not after hours of segmentation. None
+    # (a no-op) unless the source has bead removal and a bead table.
+    bead_veto = prepare_bead_mask_veto(
+        config.bead_mask_veto,
+        source=dataset.data_path,
+        recorded=source_preprocessing,
+        sdata=sdata,
+        shape=(height, width),
+    )
+
+    def _discard_stale_sidecars() -> None:
+        # Records of an earlier image or veto must not outlive the masks they
+        # described, and must stay while a refused run leaves those masks in place.
+        remove_segmentation_sidecar(mask_path)
+        remove_veto_sidecar(mask_path)
+
     _progress("cellpose_starting")
     mask_path.parent.mkdir(parents=True, exist_ok=True)
     mask_path = run_tiled_cellpose(
@@ -727,6 +788,7 @@ def run_cellpose_segmentation(
         memory_config=config.memory,
         output_stitching_stats_path=stitching_stats_path,
         progress_callback=_progress,
+        before_overwrite=_discard_stale_sidecars,
     )
     _progress(
         "cellpose_done",
@@ -773,6 +835,19 @@ def run_cellpose_segmentation(
         )
         _progress("cellpose_area_filtered", **filter_stats)
         force_release(note=f"after {dataset.name} Cellpose area filtering")
+
+    # After the final filters and before the logits are synchronized with the masks
+    # and the transcripts are seeded from them (so that a vetoed mask seeds none).
+    if bead_veto is not None:
+        _progress("cellpose_bead_mask_veto")
+        veto_result = apply_bead_mask_veto(
+            mask_path,
+            bead_veto,
+            dataset_name=dataset.name,
+            show_progress=config.mask_filter.show_progress,
+        )
+        _progress("cellpose_bead_mask_vetoed", **veto_result.counts())
+        force_release(note=f"after {dataset.name} bead mask veto")
 
     synchronize_cellpose_probability_logits(mask_path, cellprob_path)
 
@@ -850,6 +925,12 @@ def run_cellpose_segmentation(
         stitching_stats_path.write_text(
             json.dumps({"write_stitching_stats": False}, indent=2) + "\n"
         )
+    # Last, so that masks without a sidecar are never complete outputs.
+    write_segmentation_sidecar(
+        mask_path,
+        source_preprocessing,
+        bead_mask_veto=None if bead_veto is None else bead_veto.identity,
+    )
 
     del mask_mmap, points_obj, sdata
     force_release(note=f"after {dataset.name} Cellpose segmentation")
@@ -921,8 +1002,15 @@ def run_cellpose_nuclei_segmentation(
             },
         )
 
+    source_preprocessing = _source_image_preprocessing(config)
     if mask_path.exists() and not force_rerun:
         if _labeled_mask_has_foreground(mask_path):
+            check_segmentation_sidecar(
+                mask_path,
+                source_preprocessing,
+                nuclei=True,
+                dataset_name=dataset.name,
+            )
             log_status(f"[{dataset.name}] Reusing existing DAPI-only nuclei mask")
             if not stats_path.exists():
                 stats_path.parent.mkdir(parents=True, exist_ok=True)
@@ -978,6 +1066,7 @@ def run_cellpose_nuclei_segmentation(
         memory_config=nuclei_config.memory,
         output_stitching_stats_path=stats_path,
         progress_callback=_progress,
+        before_overwrite=lambda: remove_segmentation_sidecar(mask_path, nuclei=True),
     )
 
     x_transform, y_transform = build_cellpose_affine_to_microns(
@@ -1014,6 +1103,7 @@ def run_cellpose_nuclei_segmentation(
         stats_path.write_text(
             json.dumps({"write_stitching_stats": False}, indent=2) + "\n"
         )
+    write_segmentation_sidecar(mask_path, source_preprocessing, nuclei=True)
     del points_obj, sdata
     force_release(note=f"after {dataset.name} DAPI-only nuclei segmentation")
     _progress("done")
@@ -1107,12 +1197,21 @@ def run_proseg_segmentation(
         )
         _progress("proseg_hybrid_done", **summary)
 
+    # The ProSeg output is built from the Cellpose masks, so reusing it needs the
+    # same image-identity guard as reusing the masks themselves.
+    source_preprocessing = _source_image_preprocessing(config)
     if latest_output.exists() and not force_rerun:
+        check_store_segmentation_sidecar(
+            latest_output, source_preprocessing, dataset_name=dataset.name
+        )
         log_status(f"[{dataset.name}] Reusing existing latest output: {latest_output}")
         _ensure_hybrid()
         return {"latest_output": _stage_latest()}
 
     if raw_output.exists() and not force_rerun:
+        check_store_segmentation_sidecar(
+            raw_output, source_preprocessing, dataset_name=dataset.name
+        )
         latest_output.parent.mkdir(parents=True, exist_ok=True)
         convert_to_latest_zarr(
             raw_output,
@@ -1178,6 +1277,9 @@ def run_proseg_segmentation(
         proseg_samples=int(proseg_params["samples"]),
     )
 
+    # Written to the raw output first, so that an interrupted run that is resumed
+    # from it keeps the record (the conversion copies it to the latest zarr).
+    write_store_segmentation_sidecar(raw_out, source_preprocessing)
     latest_output.parent.mkdir(parents=True, exist_ok=True)
     latest_out = convert_to_latest_zarr(
         raw_out,
@@ -1187,6 +1289,7 @@ def run_proseg_segmentation(
         ),
         platform=dataset.platform,
     )
+    write_store_segmentation_sidecar(latest_out, source_preprocessing)
     remove_path(raw_out)
     _ensure_hybrid()
     staged_out = _stage_latest()
@@ -1253,6 +1356,30 @@ def run_segmentation_pipeline(
         and (hybrid_complete or staged_transforms_path.exists())
         and not force_rerun
     ):
+        # This shortcut reuses both masks without running either Cellpose
+        # step, so it needs the same image-identity guard as they have.
+        source_preprocessing = _source_image_preprocessing(config)
+        check_segmentation_sidecar(
+            reusable_mask,
+            source_preprocessing,
+            dataset_name=dataset.name,
+            bead_mask_veto=bead_mask_veto_identity(
+                config.bead_mask_veto,
+                dataset.data_path,
+                source_preprocessing,
+            ),
+        )
+        check_segmentation_sidecar(
+            reusable_nuclei_mask,
+            source_preprocessing,
+            nuclei=True,
+            dataset_name=dataset.name,
+        )
+        check_store_segmentation_sidecar(
+            persistent_latest_output,
+            source_preprocessing,
+            dataset_name=dataset.name,
+        )
         if not hybrid_complete:
             run_proseg_hybrid_refinement(
                 persistent_latest_output,

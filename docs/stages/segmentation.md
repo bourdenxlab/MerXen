@@ -99,6 +99,78 @@ probabilities aside so Cellpose re-runs and re-seeds. The check rejects the
 stored 2026-09-08 MS2 CSV under the corrected transform (0% agreement) and
 accepts HD2, HD4, HD3 and HD1 on both platforms (100%).
 
+Reuse of the cell and nuclei masks also checks which image they were computed
+from. When the source SpatialData was built with MERSCOPE bead removal
+(`merscope_bead_removal`, see
+[SpatialData build](spatialdata-build.md#merscope-bead-removal-optional)), each
+mask has a sidecar next to it, `image_preprocessing.json` for cell masks and
+`nuclei_image_preprocessing.json` for nuclei masks, recording that correction.
+Masks are reused only when the sidecar matches the source's record, in the
+Cellpose and nuclei tasks and in the one-process `merxen segment` shortcut that
+reuses every output at once. A mismatch, an unreadable sidecar, or masks without
+a sidecar next to a corrected source stops the run; move the outputs aside
+(`segmentation/` and `latest/`, see below) and recompute the masks with
+`merxen cellpose-segment --force-rerun` (CLI) or a new `--outdir` (Nextflow, which
+has no per-step force flag). Without bead removal nothing changes: masks without
+a sidecar are reused as before.
+
+The ProSeg output is built from the masks as a prior, so it carries the same
+record: ProSeg writes `segmentation_image_preprocessing.json` into the root of
+the raw and the latest zarr (it follows the store through staging and contract
+upgrades). A persistent latest zarr (or a resumed raw output) is reused, and
+enrichment runs on it, only when that record equals the source's. A latest zarr
+without the file next to a corrected source (built before the correction, or
+before this record existed) stops the run too, with the remedy: move `latest/`
+aside, or run with `--force_proseg_rerun true` (`merxen segment --force-rerun`
+on the CLI) so that it is rebuilt from the current masks. Moving only the masks
+aside is not enough. The check runs after the model-identity check of
+[Model provenance](#model-provenance), so custom-model arms keep their own
+guard and gain this one.
+
+<a id="bead-mask-veto"></a>
+### Bead-mask veto
+
+Bead removal subtracts a model of every fiducial bead, but what it leaves behind
+can still be segmented by Cellpose as a "cell": a ring or disc centred on the
+bead, with no nucleus. After the stitched, area-filtered Cellpose cell masks
+exist, and before they are saved for ProSeg and the transcripts are seeded
+(`run_cellpose_segmentation`, [segmentation/pipeline.py](../../src/merxen/segmentation/pipeline.py);
+the work is in [segmentation/bead_mask_veto.py](../../src/merxen/segmentation/bead_mask_veto.py)),
+every cell mask is dropped that
+
+- has its centroid within `max(8 px, 0.35 x sqrt(area / pi))` of a modelled bead
+  with fitted amplitude `A0 >= 400` (the beads of
+  `bead_removal_qc/beads.csv.gz` in the source zarr, in mosaic pixels, the pixel
+  grid of the masks; pruned and blob beads included), **and**
+- has no DAPI-positive nucleus: the 90th percentile of the DAPI inside the mask
+  does not exceed the median of the DAPI in a 10 to 25 px ring around the mask
+  plus 3 robust noise units (1.4826 x the median absolute deviation of that ring).
+  The DAPI is the DAPI channel of the same projection Cellpose segmented; the
+  nuclei segmentation (a separate task that misses nuclei) is not used. A mask
+  whose ring has fewer than 200 usable pixels is kept.
+
+The kept labels are relabeled densely (as the area filter does), so the probability
+logits and the transcript seeding follow the vetoed masks. The veto does nothing,
+and the masks stay bit-identical with no new file, when the source zarr has no
+bead-removal record (bead removal off, a legacy zarr, Xenium) or no bead table.
+It logs one INFO line with the counts and writes `bead_mask_veto.json` next to the
+masks (parameters, beads used, masks near a bead, vetoed, kept with a nucleus).
+
+It is on by default: `--merscope_bead_mask_veto false` switches it off, and the
+key is written into the segmentation config of samples with bead removal on only,
+so other samples keep their config and task hashes. The parameters are the fields
+of `BeadMaskVetoConfig` (`a0_min`, `min_distance_px`, `radius_fraction`,
+`ring_inner_px`, `ring_outer_px`, `dapi_percentile`, `dapi_noise_multiple`,
+`min_ring_px`); only the switch is a pipeline param. The veto is resolved before
+Cellpose starts, so a source without the `MERSCOPE_z_projection` image or its DAPI
+channel fails at the start and not after the segmentation.
+
+The parameters are recorded in the cell-mask sidecar (`bead_mask_veto` in
+`image_preprocessing.json`). Masks are reused only when that record equals the
+veto the run would apply, so masks from before the veto existed, or computed with
+another setting, are refused with the same remedy as for another image (move the
+outputs aside and recompute the masks); the veto never runs on reused masks.
+
 ## Model provenance
 
 HITL-0 explicitly selects stock `cpsam_v2` for both platforms and the independent
@@ -139,6 +211,8 @@ pipeline runs. Published masks retain their existing provenance.
 | Tiled Cellpose `run_tiled_cellpose` | [segmentation/cellpose.py](../../src/merxen/segmentation/cellpose.py) |
 | Mask filter `filter_cell_by_regionprops` | [segmentation/mask_filter.py:78](../../src/merxen/segmentation/mask_filter.py#L78) |
 | Final area filter `filter_labeled_mask_by_area` | [segmentation/mask_filter.py](../../src/merxen/segmentation/mask_filter.py) |
+| Bead-mask veto `apply_bead_mask_veto` (called by `run_cellpose_segmentation`) | [segmentation/bead_mask_veto.py](../../src/merxen/segmentation/bead_mask_veto.py) |
+| Drop labels from a mask `drop_labels_from_mask` | [segmentation/mask_filter.py](../../src/merxen/segmentation/mask_filter.py) |
 | Masks → polygons `masks_to_polygons` | [segmentation/mask_geometry.py:84](../../src/merxen/segmentation/mask_geometry.py#L84) |
 | ProSeg subprocess `run_proseg_refinement` | [segmentation/proseg.py:99](../../src/merxen/segmentation/proseg.py#L99) |
 | Hybrid refinement `run_proseg_hybrid_refinement` | [segmentation/proseg_hybrid.py](../../src/merxen/segmentation/proseg_hybrid.py) |
@@ -163,6 +237,7 @@ SegmentationConfig
 ├── nuclei_cellpose: CellposeConfig  # stock cpsam_v2; other inference defaults match
 ├── mask_filter: MaskFilterConfig    # eccentricity, area percentile
 ├── nuclei_mask_filter: MaskFilterConfig
+├── bead_mask_veto: BeadMaskVetoConfig # drops cell masks on modelled beads
 ├── tiling: TilingConfig             # tile sizes, stitch overlap, duplicate policy
 ├── proseg: ProsegConfig             # binary path, MCMC params
 ├── proseg_hybrid: ProsegHybridConfig # optional separate hybrid branch
@@ -222,6 +297,10 @@ MERSCOPE preset does not exclude (see step 5).
    `cellpose_final_min_area_um2` / `cellpose_final_max_area_um2` are removed in
    row chunks. The cleaned `cellpose_masks_tiled.npy` is the only mask used by
    the transcript seeding and ProSeg steps.
+   **4b. Bead-mask veto (MERSCOPE with bead removal).** After the final area
+   filter and before the masks are saved for ProSeg, the Cellpose cell masks that
+   sit on a modelled coverslip bead and have no nucleus are dropped; see
+   [Bead-mask veto](#bead-mask-veto). It does nothing for any other source.
 5. **Seed transcripts.** `write_proseg_csv_from_points` streams the
    transcripts points object in chunks of
    `memory.transcript_chunk_rows`, looks each transcript's pixel location
@@ -377,6 +456,8 @@ output tree):
 | `cellpose_nuclei_masks_tiled.npy` | Cleaned DAPI-only nuclei labels, consumed by enrichment and transcript spatial analysis. |
 | `cellpose_stitching_stats.json` | Tile stitching diagnostics: accepted labels, duplicates, conflicts, edge-touching labels, and thresholds. |
 | `cellpose_nuclei_stitching_stats.json` | Equivalent tile-stitching diagnostics for nuclei. |
+| `image_preprocessing.json`, `nuclei_image_preprocessing.json` | Bead-removal identity of the image the cell and nuclei masks were computed from (`null` with bead removal off). The cell-mask file also holds `bead_mask_veto`, the parameters of the veto applied to the masks, only when one was. Written next to the persistent masks on every run (not a declared task output) and checked before the masks are reused. |
+| `bead_mask_veto.json` | Parameters and counts of the bead-mask veto of the cell masks (masks, beads used, masks near a bead, vetoed, kept). Written next to the persistent cell masks only when the veto ran. |
 | `transcripts_for_proseg.csv` | The transcript CSV fed into ProSeg. Retained for debugging. |
 | `transcripts_for_proseg.transforms.json` | Pixel-to-micron affine that seeded the CSV; checked before the CSV is reused. |
 | `cellpose_transforms.json` | Pixel-to-micron affine terms used by the ProSeg process. |
