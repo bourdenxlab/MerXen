@@ -4,7 +4,8 @@
 ``workflows/conf/dwight.annotation.config`` (included by the Dwight profile)
 hold only annotation params. A param defined there and in ``nextflow.config``
 or ``conf/dwight.config`` would let the include silently override a base or
-profile value, so no param may be defined in both.
+profile value, so no param may be defined in both. The private site configs'
+templates are checked against these files in ``test_site_config.py``.
 """
 
 from __future__ import annotations
@@ -200,6 +201,7 @@ def _resolved_params(profile: str | None) -> dict[str, Any]:
     return json.loads(completed.stdout)["params"]
 
 
+@pytest.mark.nextflow
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
 def test_resolved_params_follow_the_include_order(
     workflow_config_params: dict[str, dict[str, str]],
@@ -223,74 +225,3 @@ def test_resolved_params_follow_the_include_order(
         "/path/to/storage/MerXen/annotation_references"
     )
     assert dwight["annotation_prep_max_forks"] == 1
-
-
-# The private site configs (docs/local-configuration.md), by their templates.
-SITE_TEMPLATES = ("conf/site.config.example", "conf/dwight.site.config.example")
-
-
-def test_site_templates_set_only_params_a_tracked_config_declares(
-    workflow_config_params: dict[str, dict[str, str]],
-) -> None:
-    """A typo in a site config would set a param nothing reads; the template
-    cannot carry one."""
-    declared = _names(workflow_config_params, "nextflow.config", ANNOTATION)
-
-    for relative in SITE_TEMPLATES:
-        assert not set(workflow_config_params[relative]) - declared, relative
-
-
-def test_the_two_site_templates_share_no_param(
-    workflow_config_params: dict[str, dict[str, str]],
-) -> None:
-    """Each param has one site file: the later include would shadow the other."""
-    base_site, dwight_site = (workflow_config_params[name] for name in SITE_TEMPLATES)
-
-    assert not set(base_site) & set(dwight_site)
-
-
-def test_site_templates_do_not_repeat_a_tracked_profile_param(
-    workflow_config_params: dict[str, dict[str, str]],
-) -> None:
-    """A param is either a tracked default or a site location, never both."""
-    dwight_site = set(workflow_config_params["conf/dwight.site.config.example"])
-    dwight_tracked = _names(
-        workflow_config_params, "conf/dwight.config", DWIGHT_ANNOTATION
-    )
-    base_site = set(workflow_config_params["conf/site.config.example"])
-
-    assert not dwight_site & dwight_tracked
-    assert not base_site & dwight_tracked
-
-
-def test_site_configs_are_included_after_the_params_they_override() -> None:
-    """Each include is one expression with the same none / empty / discovery rules.
-
-    The Nextflow config text is the only place the rule can live (Nextflow 26.04
-    parses and lints this form; ``tests/test_workflows/test_site_config.py``
-    resolves it). nextflow.config includes its site config once, after the
-    annotation defaults and before the profiles; dwight.config includes its
-    own once, after the Dwight annotation file.
-    """
-    base_text = (WORKFLOWS / "nextflow.config").read_text()
-    dwight_text = (WORKFLOWS / "conf" / "dwight.config").read_text()
-    for text, variable, file_name in (
-        (base_text, "MERXEN_SITE_CONFIG", "site.config"),
-        (dwight_text, "MERXEN_DWIGHT_SITE_CONFIG", "dwight.site.config"),
-    ):
-        expression = (
-            f"includeConfig (System.getenv('{variable}') in ['none', '/dev/null'] ? "
-            f"'/dev/null' : (System.getenv('{variable}') ?: "
-            f'(new File("${{projectDir}}/conf/{file_name}").exists() ? '
-            f"\"${{projectDir}}/conf/{file_name}\" : '/dev/null')))"
-        )
-        assert text.count(expression) == 1, variable
-    assert base_text.index("includeConfig 'conf/annotation.config'") < base_text.index(
-        "includeConfig (System.getenv('MERXEN_SITE_CONFIG')"
-    )
-    assert base_text.index("includeConfig (System.getenv('MERXEN_SITE_CONFIG')") < (
-        base_text.index("\nprofiles {")
-    )
-    assert dwight_text.index(
-        "includeConfig 'dwight.annotation.config'"
-    ) < dwight_text.index("includeConfig (System.getenv('MERXEN_DWIGHT_SITE_CONFIG')")

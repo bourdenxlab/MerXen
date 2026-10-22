@@ -4,22 +4,24 @@
  * and replace the placeholders with this host's locations.
  *
  * conf/dwight.config includes it (so the standard, dwight and local profiles
- * read it), after conf/dwight.annotation.config. It is found at
- * $MERXEN_DWIGHT_SITE_CONFIG, else at conf/dwight.site.config beside this
- * template; an unset or empty variable means "look beside it", and 'none' (or
- * /dev/null) means "no Dwight site config on purpose" (docs/local-configuration.md).
- * A variable naming a file that does not exist makes Nextflow fail to parse
- * the config. Without the file and without 'none', main.nf stops a standard,
- * dwight or local launch: several of these params fall back silently when
- * they are null (the reference store becomes <outdir>/annotation_references and
- * every bundle is rebuilt; the reference downloads switch on; task temporary
- * files go to the root disk).
+ * read it), after its params block and conf/dwight.annotation.config. It is
+ * found at $MERXEN_DWIGHT_SITE_CONFIG, else at conf/dwight.site.config beside
+ * this template; an unset or empty variable means "look beside it", and 'none'
+ * (or /dev/null) means "no Dwight site config on purpose"
+ * (docs/local-configuration.md). A variable naming a file that does not exist
+ * makes Nextflow fail to parse the config. Without the file and without
+ * 'none', main.nf stops a standard, dwight or local launch: several of these
+ * params fall back silently when they are null (the reference store becomes
+ * <outdir>/annotation_references and every bundle is rebuilt; the reference
+ * caches fall back to <outdir> and the reference downloads switch on; task
+ * temporary files go to the root disk).
  *
  * It may only set params that nextflow.config or conf/annotation.config
  * declares (a test checks), and the container and bind-mount params belong in
  * conf/site.config instead (the two files share no param). Values that also
- * live in .env (MERXEN_REFERENCE_STORE, MERXEN_TASK_TMP_DIR, ...) must equal
- * them (a test checks, on a host that has both files).
+ * live in .env (MERXEN_REFERENCE_STORE, MERXEN_TASK_TMP_DIR,
+ * MERXEN_MAPMYCELLS_CACHE_DIR, ...) must equal them (a test checks, on a host
+ * that has both files).
  *
  * The strings below that feed a reference bundle (the sources and the stores)
  * must stay byte-identical from one run to the next: build_hash covers the
@@ -51,6 +53,12 @@ params {
     // The directory must exist: mkdir -p it once per host. Exported to the
     // tasks as TMPDIR (env block below).
     task_tmp_dir = "/path/to/storage/MerXen/tmp"
+
+    // Cellpose model registry (an exported MERXEN_CELLPOSE_MODEL_STORE still
+    // wins) and the published-results roots that experimental segmentation
+    // arms may not write into (docs/stages/cellpose-hitl.md).
+    cellpose_model_store = System.getenv('MERXEN_CELLPOSE_MODEL_STORE') ?: '/path/to/storage/MerXen/cellpose_models'
+    cellpose_protected_output_roots = ['/path/to/storage/MerXen/results']
 
     // Reference stores (OD-D10, OD-E6), both on the storage RAID: panels <= 1,000
     // genes in annotation_references, larger ones (e.g. Xenium 5K, with their
@@ -94,9 +102,10 @@ params {
 
 env {
     TMPDIR = params.task_tmp_dir
-    // Lets pipeline tasks translate aliases: the alias table is needed by the
-    // wmb_panel build hash (docs/local-configuration.md). Point it at the
-    // canonical table; a table that cannot be read stops the task. 'none'
-    // disables the table on purpose, which gives new bundles alias-form hashes.
+    // The alias table (docs/local-configuration.md), exported to the tasks so
+    // that code translating aliases inside a task finds the same table as the
+    // hooks; the wmb_panel build hash needs it too. Point it at the canonical
+    // table; a table that cannot be read stops the task. 'none' disables the
+    // table on purpose, which gives new bundles alias-form hashes.
     MERXEN_ALIAS_FILE = "/path/to/private_config/aliases.tsv"
 }

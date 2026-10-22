@@ -800,6 +800,7 @@ EXPECTED_BRANCHES = {
 # Channel logic (stub runs)
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_map_runs_once_per_released_branch(harness: dict[str, Any]) -> None:
     rows = _rows(harness["trace"], MAP)
@@ -811,6 +812,7 @@ def test_map_runs_once_per_released_branch(harness: dict[str, Any]) -> None:
     assert released == EXPECTED_BRANCHES
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_map_waits_for_every_bundle_its_branch_requires(
     harness: dict[str, Any],
@@ -825,6 +827,7 @@ def test_map_waits_for_every_bundle_its_branch_requires(
             assert int(row["submit"]) >= int(preps[tag]["complete"]), (branch, tag)
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_map_never_waits_for_another_branch_bundles(harness: dict[str, Any]) -> None:
     """F3's slow Xenium-panel PREP holds back F3 only (no global barrier)."""
@@ -850,6 +853,7 @@ def test_map_never_waits_for_another_branch_bundles(harness: dict[str, Any]) -> 
     assert late == []
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_map_receives_exactly_its_bundle_refs(harness: dict[str, Any]) -> None:
     maps = {(row["pair_id"], row["segmentation"]): row for row in harness["maps"]}
@@ -873,6 +877,7 @@ def test_map_receives_exactly_its_bundle_refs(harness: dict[str, Any]) -> None:
     assert len(maps[("PSAME", "proseg_hybrid")]["refs"]) == 2
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_a_refused_panel_is_mapped_at_once_without_bundles(
     harness: dict[str, Any],
@@ -895,6 +900,7 @@ def test_a_refused_panel_is_mapped_at_once_without_bundles(
     )
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_a_failed_prep_drops_only_the_branches_that_need_it(
     harness: dict[str, Any],
@@ -907,6 +913,7 @@ def test_a_failed_prep_drops_only_the_branches_that_need_it(
     assert ("F1", "proseg_hybrid") in released
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_map_resources_follow_the_panel_size(harness: dict[str, Any]) -> None:
     """MAP: 6 CPUs, mouse 4 (gate M, §25.1); 24 GB, 48 GB above 1,000 genes.
@@ -925,6 +932,7 @@ def test_map_resources_follow_the_panel_size(harness: dict[str, Any]) -> None:
         assert int(row["memory"]) == expected * gib, branch
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_map_publishes_under_the_pair_and_segmentation(harness: dict[str, Any]) -> None:
     for pair_id, segmentation in EXPECTED_BRANCHES:
@@ -939,6 +947,7 @@ def test_map_publishes_under_the_pair_and_segmentation(harness: dict[str, Any]) 
         assert published.is_file(), published
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_resume_reruns_prep_but_keeps_map_cached(harness: dict[str, Any]) -> None:
     """PREP never caches; its byte-identical refs keep MAP cached (deep)."""
@@ -966,6 +975,7 @@ def _branch(key: str) -> tuple[str, str]:
     return pair_id, segmentation
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_resolve_runs_once_per_branch_after_its_own_map(
     harness: dict[str, Any],
@@ -994,6 +1004,7 @@ def test_resolve_runs_once_per_branch_after_its_own_map(
     assert released == EXPECTED_BRANCHES
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_resolve_reads_its_own_map_output_and_bundle_refs(
     harness: dict[str, Any],
@@ -1050,6 +1061,7 @@ def test_resolve_reads_its_own_map_output_and_bundle_refs(
         assert config.allow_single_method is False
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_resolve_resources_follow_the_panel_size(harness: dict[str, Any]) -> None:
     rows = {
@@ -1062,6 +1074,7 @@ def test_resolve_resources_follow_the_panel_size(harness: dict[str, Any]) -> Non
         assert int(row["memory"]) == expected * gib, branch
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_resolve_publishes_under_the_pair_and_segmentation(
     harness: dict[str, Any],
@@ -1079,6 +1092,7 @@ def test_resolve_publishes_under_the_pair_and_segmentation(
         assert (output / "annotation_config.json").is_file()
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_resume_keeps_resolve_cached(harness: dict[str, Any]) -> None:
     trace = harness["resume_trace"]
@@ -1098,6 +1112,7 @@ def test_resume_keeps_resolve_cached(harness: dict[str, Any]) -> None:
     assert first == again
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_a_resolve_only_change_reruns_resolve_alone(harness: dict[str, Any]) -> None:
     """A threshold-like RESOLVE setting re-runs RESOLVE, never MAP (plan §3.1)."""
@@ -1123,6 +1138,7 @@ def test_a_resolve_only_change_reruns_resolve_alone(harness: dict[str, Any]) -> 
         )
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_panel_stages_the_pairs_align_files(harness: dict[str, Any]) -> None:
     """ANNOTATE_PANEL gets the ALIGN files from the channel, never a lookup."""
@@ -1150,6 +1166,7 @@ def test_panel_stages_the_pairs_align_files(harness: dict[str, Any]) -> None:
 COMPUTE = "CLUSTERING_SQUIDPY_COMPUTE_CPU"
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_compute_runs_once_per_branch_after_its_own_resolve(
     harness: dict[str, Any],
@@ -1166,6 +1183,7 @@ def test_compute_runs_once_per_branch_after_its_own_resolve(
         assert int(row["submit"]) >= int(resolves[branch]["complete"]), branch
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_compute_emits_finalize_input_and_reads_its_own_labels(
     harness: dict[str, Any],
@@ -1196,6 +1214,7 @@ def test_compute_emits_finalize_input_and_reads_its_own_labels(
         assert f"{branch[0]}_resolve_summary.json" in listing
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_compute_resources_and_no_gpu(harness: dict[str, Any]) -> None:
     gib = 1024**3
@@ -1207,6 +1226,7 @@ def test_compute_resources_and_no_gpu(harness: dict[str, Any]) -> None:
         assert "--gpus" not in command
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_resume_keeps_compute_cached(harness: dict[str, Any]) -> None:
     computes = _rows(harness["resume_trace"], COMPUTE)
@@ -1223,6 +1243,7 @@ def test_resume_keeps_compute_cached(harness: dict[str, Any]) -> None:
     assert first == again
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_compute_reruns_when_its_labels_change(harness: dict[str, Any]) -> None:
     """A RESOLVE-only change rewrote annotation_resolve_out: COMPUTE_CPU re-runs."""
@@ -1240,6 +1261,7 @@ def _tree(root: Path) -> dict[str, bytes]:
     }
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_compute_stays_cached_when_resolve_reruns_with_the_same_labels(
     harness: dict[str, Any],
@@ -1271,6 +1293,7 @@ def test_compute_stays_cached_when_resolve_reruns_with_the_same_labels(
     }
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_end_of_run_summary_lists_the_failed_pair_and_refused_panels(
     harness: dict[str, Any],
@@ -1654,6 +1677,7 @@ def test_the_published_registration_checks_follow_the_qc_publish_dir() -> None:
     assert 'static final String QC_OUTPUT_DIR = "qc_out"' in references
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_map_first_registration_gives_one_tuple_per_branch(tmp_path: Path) -> None:
     """Hook H5's registration checks (M13 C15): main.nf's own block.
@@ -1734,6 +1758,7 @@ def test_map_first_registration_gives_one_tuple_per_branch(tmp_path: Path) -> No
     ]
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_map_first_registration_falls_back_to_the_published_checks(
     tmp_path: Path,
@@ -1930,6 +1955,7 @@ def test_map_first_registration_falls_back_to_the_published_checks(
 
 
 @pytest.mark.slow
+@pytest.mark.nextflow
 @needs_nextflow
 def test_map_runs_the_real_script_with_the_pipeline_arguments(tmp_path: Path) -> None:
     """Without -stub-run: ctm check, env, arguments, reuse and a real refusal.

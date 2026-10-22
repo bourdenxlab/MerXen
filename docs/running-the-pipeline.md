@@ -54,6 +54,11 @@ Common optional parameters:
 | `--analysis_mode` | `paired` (default), `merscope`, or `xenium`. Controls which platform columns are required and which stages are active. |
 | `--analysis_segmentation` | `all` (default), `both`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, or `proseg_hybrid`. `all` expands to `reseg,original_seg,proseg_mask,proseg_hybrid`; `both` restricts the run to `reseg,original_seg`. |
 | `--force_spatialdata_build` | Force rebuilding the SpatialData zarr even when a cached one exists. Defaults to `false`. |
+| `--merscope_bead_removal` | Remove coverslip fiducial beads from MERSCOPE PolyT/DAPI before the max projection, for rows whose `merscope_bead_removal` column is blank. Defaults to `false`. Needs raw TIFFs and `merscope_z_range` from plane `1`; see [bead removal](stages/spatialdata-build.md#merscope-bead-removal-optional). |
+| `--merscope_bead_removal_fill` | Residual-footprint fill for samples with bead removal on. On by default (hybrid mode); `--merscope_bead_removal_fill false` switches it off. See [configuration](configuration.md). |
+| `--merscope_bead_mask_veto` | Drop the Cellpose cell masks centred on a modelled bead that have no DAPI nucleus, for samples with bead removal on. On by default; `--merscope_bead_mask_veto false` switches it off. See [segmentation](stages/segmentation.md#bead-mask-veto). |
+| `--merscope_bead_removal_fill_mode` | `hybrid` (default; strong: removes up to the whole model light, also in tissue, and may dim puncta near beads; runs on the CPU or the GPU) or `flat` (flat background only; CPU only). Ignored with `--merscope_bead_removal_fill false`. See [configuration](configuration.md). |
+| `--merscope_bead_removal_device` | Device of the bead-removal correction: `cpu` (default), `cuda` or `auto`. See [configuration](configuration.md). |
 | `--force_proseg_rerun` | Force rebuilding ProSeg bases from the current Cellpose/transcript inputs rather than reusing persistent latest zarrs. Defaults to `false`. |
 | `--enable_alignment` | Run optional DAPI-only VALIS alignment and alignment QC before comparison. Paired mode only. Defaults to `false`. |
 | `--alignment_backend` | Alignment implementation: `valis` (default) or explicit `legacy_spateo`. |
@@ -63,6 +68,8 @@ Common optional parameters:
 | `--distance_from_object_segmentations` | Object-distance branches; defaults to `proseg,original,cellpose`. The former names remain accepted aliases. |
 | `--mender_enabled` | Run independent CPU-only MENDER spatial-domain analysis. Defaults to `false`. |
 | `--mender_segmentations` | MENDER segmentation subset or `all`; defaults to `proseg_hybrid`. |
+| `--gaston_enabled` | Run terminal GASTON spatial-domain analysis. Defaults to `false`. |
+| `--gaston_segmentations` | Independent GASTON branches; defaults to `proseg_hybrid`, accepts comma-separated subsets or `all`. |
 | `--start_stage` / `--stop_stage` | Run a contiguous stage range. Defaults to the full pipeline. |
 | `--only_stage` | Convenience alias for setting `start_stage` and `stop_stage` to the same stage. |
 
@@ -71,6 +78,7 @@ The samplesheet may also include `analysis_mode`, `enable_alignment`,
 `mecr_enabled`,
 `distance_from_object_enabled`, `distance_from_object_segmentations`,
 `mender_enabled`, `mender_segmentations`,
+`gaston_enabled`, `gaston_segmentations`, and the other `gaston_*` controls,
 `start_stage`, `stop_stage`, and `only_stage` columns.
 Non-empty row values override these command-line settings for that row only;
 blank cells inherit the command-line/config value. Every other parameter has a
@@ -91,7 +99,8 @@ GPU-heavy `CELLPOSE_SEGMENT` and `ALIGN` default to one task at a time. CPU-only
 `PROSEG_SEGMENT` runs independently on a normal CPU node after each Cellpose
 task. RAPIDS-backed `CLUSTERING_SQUIDPY` allows up to four queued local tasks,
 but GPU execution is serialized by the shared workstation GPU lock when it is
-enabled.
+enabled. `GASTON_TRAIN` uses the same host-wide lock on Dwight, scatters one
+task per restart, and has `maxForks=1`; GLM-PCA and postprocessing are CPU-only.
 
 MENDER defaults to `hierarchical_cluster`, native centroids, a 20 µm radius,
 five scales, central-cell exclusion, and fixed Leiden resolution 0.8. Enabling
@@ -116,6 +125,9 @@ pieces.
 When `distance_from_object` is selected, preflight checks the registered object
 GeoJSON for every active platform. The stage itself verifies that every chosen
 table already has `cortical_depth_annotation`.
+For `--only_stage gaston`, preflight instead requires the exact previously
+published clustered H5AD and latest zarr clustered table for every selected
+platform/segmentation. It never silently reruns clustering.
 Missing references stop the run immediately with the selected stages and paths
 that need attention.
 
@@ -184,7 +196,9 @@ alone against a zarr annotated by an earlier invocation.
 Visualization writes single-dataset alternatives for
 paired plots, including gene-abundance, one-platform transcript overview, and
 one-platform sanity crop outputs. `mapmycells` remains available after
-clustering. Alignment and comparison are rejected for single-platform rows
+clustering. When enabled, `gaston` is the last active stage and can request
+additional clustering-only segmentations through its independent selector.
+Alignment and comparison are rejected for single-platform rows
 because they require both datasets.
 
 ## Analysis segmentation
@@ -264,6 +278,16 @@ fully clean.
 - `--force_spatialdata_build true` — ignore cached SpatialData zarrs and
   rebuild from raw exports. Requires raw-dir columns for the active
   platform(s) to be set in the samplesheet.
+  If a cached MERSCOPE zarr disagrees with the requested
+  `merscope_bead_removal` or `merscope_bead_removal_fill` setting, the build
+  stops with an error instead of reusing it; rebuild with this flag (and
+  `merscope_dir`) to change the setting. The rebuild deletes the old zarr first,
+  so a failed bead build (for example, no beads found) leaves no cache. Cellpose
+  masks computed from the other image, and the ProSeg latest zarr built from
+  them, are also refused: move `segmentation/` and `latest/` aside, or use a new
+  `--outdir` (Nextflow has no per-step force flag), and add
+  `--force_proseg_rerun true` to rebuild the ProSeg base. See
+  [bead removal caching](stages/spatialdata-build.md#caching-and-how-to-rebuild).
 - `--force_proseg_rerun true` — ignore persistent ProSeg latest zarrs and
   rebuild them from the current Cellpose masks and transcript exports. With
   `-resume`, completed upstream Nextflow tasks can remain cached. It does not
@@ -476,7 +500,11 @@ nextflow run workflows/main.nf -profile apptainer,gpu,azure_slurm_hpc \
 ```
 
 Both segmentation processes use the existing `envs/environment.yml` or main
-MerXen image. The `gpu` profile adds Apptainer `--nv` only to GPU processes.
+MerXen image. The `gpu` profile adds Apptainer `--nv` only to GPU processes
+(`BUILD_SPATIALDATA` only when `merscope_bead_removal_device` is not `cpu` and the
+fill is off, for the optional bead-removal GPU backend, with its other container
+options unchanged; it then also requests the `gpu` queue and one GPU when the
+device is `cuda`).
 `CELLPOSE_SEGMENT` requests the `gpu` queue and one GPU, while
 `PROSEG_SEGMENT` requests the `htc` queue without GPU flags. Override those
 site-specific queue names and provide the missing system settings in an HPC

@@ -27,6 +27,7 @@ WORKFLOWS = REPO_ROOT / "workflows"
 NEXTFLOW = shutil.which("nextflow")
 
 
+@pytest.mark.nextflow
 @pytest.mark.skipif(NEXTFLOW is None, reason="nextflow is unavailable")
 def test_nextflow_lint_reports_no_errors(tmp_path: Path) -> None:
     """Lint ``workflows/`` with its project dir, as the CI script does."""

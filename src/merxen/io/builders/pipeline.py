@@ -31,7 +31,9 @@ def build_spatialdata_artifact(
         FileNotFoundError: If neither a reusable SpatialData artifact nor a raw
             input folder exists.
         ValueError: If a force rebuild is requested but only an existing zarr
-            was provided and no raw input folder is available.
+            was provided and no raw input folder is available, or if the
+            cached MERSCOPE zarr was built with other bead-removal settings
+            than requested.
     """
     output_path = Path(config.output_path)
     persistent_output_path = (
@@ -45,6 +47,12 @@ def build_spatialdata_artifact(
         input_path=input_path,
         persistent_output_path=persistent_output_path,
     )
+    # Whichever cached artifact would be reused below must match the requested
+    # bead-removal settings; a mismatch is a hard error, never a silent reuse.
+    cached = reusable_source
+    if cached is None and output_path.exists():
+        cached = output_path
+    _check_cached_bead_removal(config, cached, force_rerun=force_rerun)
     if reusable_source is not None and not force_rerun:
         logger.info(
             "[%s] Reusing existing SpatialData artifact: %s",
@@ -108,6 +116,45 @@ def build_spatialdata_artifact(
         stage_existing_output(target_path, output_path)
         return output_path
     return target_path
+
+
+def _check_cached_bead_removal(
+    config: SpatialDataBuildConfig,
+    cached: Path | None,
+    *,
+    force_rerun: bool,
+) -> None:
+    """Refuse a cached MERSCOPE zarr that was built with other bead settings."""
+    if cached is None or config.platform.upper() != "MERSCOPE":
+        return
+    # Imported here so that other platforms and builds without a cache do not
+    # load these submodules (the package itself is lazy and light).
+    from merxen.io.bead_removal.backend import requested_backend_identity
+    from merxen.io.bead_removal.provenance import (
+        check_bead_removal_reuse,
+        read_image_preprocessing_attr,
+    )
+
+    bead_removal = config.merscope.bead_removal
+    # Only a GPU request looks at torch (for its versions); the default and the
+    # CPU device never import it.
+    requested_backend = (
+        requested_backend_identity(
+            bead_removal.device,
+            fill_enabled=bead_removal.fill,
+            fill_mode=bead_removal.fill_mode,
+        )
+        if bead_removal is not None and bead_removal.enabled
+        else None
+    )
+    check_bead_removal_reuse(
+        read_image_preprocessing_attr(cached),
+        bead_removal,
+        force=force_rerun,
+        source=cached,
+        requested_z_layers=config.merscope.z_layers,
+        requested_backend=requested_backend,
+    )
 
 
 def _find_reusable_source(

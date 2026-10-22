@@ -379,6 +379,7 @@ def _case(results: dict[str, Any], name: str) -> dict[str, Any]:
     return value
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_map_first_never_waits_for_mapmycells(main_nf_results: dict[str, Any]) -> None:
     """runMapMyCells is false in map_first, so the MENDER barrier counts clustering."""
@@ -404,46 +405,40 @@ def test_map_first_never_waits_for_mapmycells(main_nf_results: dict[str, Any]) -
     assert depth["count"] == 2
 
 
-# The MENDER barrier of legacy runs, as on main (its channels and DAG stay
-# unchanged; the join defect of legacy runs is left for a fix on main).
-LEGACY_BARRIER = """\
-        pair_terminal_grouped_ch = pair_terminal_events_ch
-            .join(pair_terminal_specs_ch)
-            .filter { _pairId, eventStage, _done, expectedStage, _expectedCount ->
-                eventStage == expectedStage
-            }
-            .map { pairId, _eventStage, _done, _expectedStage, expectedCount ->
-                tuple(groupKey(pairId, expectedCount as int), true)
-            }
-            .groupTuple()
-            .map { pairKey, _doneFlags -> tuple(pairKey.getGroupTarget(), true) }
+# The terminal barrier of MENDER and GASTON, one for legacy and map_first
+# runs alike: combine keeps the pair's one spec for every terminal event (the
+# map_first fix of M5, which main now applies to legacy runs as well).
+BARRIER = """\
+    pair_terminal_grouped_ch = pair_terminal_events_ch
+        .combine(pair_terminal_specs_ch, by: 0)
+        .filter { _pairId, eventStage, _done, expectedStage, _expectedCount ->
+            eventStage == expectedStage
+        }
+        .map { pairId, _eventStage, _done, _expectedStage, expectedCount ->
+            tuple(groupKey(pairId, expectedCount as int), true)
+        }
+        .groupTuple()
+        .map { pairKey, _doneFlags -> tuple(pairKey.getGroupTarget(), true) }
 """
+GROUPED_START = "    pair_terminal_grouped_ch = pair_terminal_events_ch\n"
 
 
-def test_barrier_keeps_the_legacy_join_and_one_spec_per_pair() -> None:
-    """map_first combines each event with the one spec; legacy keeps its join."""
+def test_barrier_combines_every_event_with_the_one_spec_per_pair() -> None:
+    """Every run combines each terminal event with the pair's one spec."""
     main_text = (REPO_ROOT / "workflows" / "main.nf").read_text()
     specs = _main_nf_block(
         main_text, "    pair_terminal_specs_ch = ", "    pair_terminal_immediate_ch = "
     )
-    grouped = _main_nf_block(
-        main_text,
-        "    if (AnnotationSettings.isMapFirstRun(params)) { // rca-site:H3",
-        "    pair_terminal_token_ch = ",
-    )
-    map_first, legacy = grouped.split("    } else {\n")
+    grouped = _main_nf_block(main_text, GROUPED_START, "    pair_terminal_token_ch = ")
     assert "AnnotationSettings" not in specs
     assert "[tuple(" in specs and ")] *" not in specs
-    assert legacy == LEGACY_BARRIER + "    }\n\n"
-    assert ".combine(pair_terminal_specs_ch, by: 0)" in map_first
-    assert ".join(" not in map_first
-    # Both branches filter, key and group the events alike.
-    assert (
-        map_first.split(".combine(pair_terminal_specs_ch, by: 0)\n")[1]
-        == (LEGACY_BARRIER.split(".join(pair_terminal_specs_ch)\n")[1])
-    )
+    assert main_text.count(GROUPED_START) == 1
+    assert grouped == BARRIER + "\n"
+    assert "AnnotationSettings" not in grouped
+    assert ".join(" not in grouped
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_mouse_rows_follow_the_mouse_flip(main_nf_results: dict[str, Any]) -> None:
     """A default mouse row runs map_first like a human one (M9, §25).
@@ -471,6 +466,7 @@ def test_mouse_rows_follow_the_mouse_flip(main_nf_results: dict[str, Any]) -> No
     assert legacy["annotation_keys"] == []
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_map_first_runs_legacy_mapmycells_only_when_asked(
     main_nf_results: dict[str, Any],
@@ -487,6 +483,7 @@ def test_map_first_runs_legacy_mapmycells_only_when_asked(
     )
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_legacy_rows_get_no_annotation_settings(
     main_nf_results: dict[str, Any],
@@ -506,6 +503,7 @@ def test_legacy_rows_get_no_annotation_settings(
     )
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_preflight_gates_the_legacy_checks_on_the_mode(
     main_nf_results: dict[str, Any],
@@ -525,6 +523,7 @@ def test_preflight_gates_the_legacy_checks_on_the_mode(
     assert "not available yet" not in map_first
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_cortical_depth_tables_carry_the_suffix_of_map_first_rows(
     main_nf_results: dict[str, Any],
@@ -588,19 +587,19 @@ def _main_nf_block(main_text: str, start: str, end: str) -> str:
     return main_text[begin : main_text.index(end, begin)]
 
 
+@pytest.mark.nextflow
 @needs_nextflow
-@pytest.mark.parametrize(("mode", "released"), [("map_first", "P1"), ("legacy", "")])
+@pytest.mark.parametrize(("mode", "released"), [("map_first", "P1"), ("legacy", "P1")])
 def test_barrier_releases_map_first_pairs_after_other_terminal_events(
     tmp_path: Path, mode: str, released: str
 ) -> None:
     """main.nf's own barrier text on events in real-run order (M5 exit run).
 
-    The pair's clustering event arrives first. map_first combines every
+    The pair's clustering event arrives first. Every run combines each
     event with the pair's one spec, so the two cortical-depth events release
-    MENDER. Legacy keeps the join: the clustering event consumes the single
-    spec and the MAPMYCELLS event it waits for finds none, so the pair is
-    not released (the pre-existing barrier defect of legacy runs, reported
-    for a fix on main; legacy channels stay unchanged).
+    MENDER in map_first and the MAPMYCELLS event releases it in legacy. (A
+    join let the clustering event consume the single spec, so a legacy pair
+    was never released; main fixed that defect with the same combine.)
     """
     assert NEXTFLOW is not None
     main_nf = REPO_ROOT / "workflows" / "main.nf"
@@ -608,11 +607,7 @@ def test_barrier_releases_map_first_pairs_after_other_terminal_events(
     specs = _main_nf_block(
         main_text, "    pair_terminal_specs_ch = ", "    pair_terminal_immediate_ch = "
     )
-    grouped = _main_nf_block(
-        main_text,
-        "    if (AnnotationSettings.isMapFirstRun(params)) { // rca-site:H3",
-        "    pair_terminal_token_ch = ",
-    )
+    grouped = _main_nf_block(main_text, GROUPED_START, "    pair_terminal_token_ch = ")
     (tmp_path / "lib").mkdir()
     for source in (REPO_ROOT / "workflows" / "lib").glob("*.groovy"):
         shutil.copy(source, tmp_path / "lib" / source.name)
@@ -667,6 +662,7 @@ __ALIGNMENT__
 """
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_map_first_alignment_gives_one_tuple_per_pair(tmp_path: Path) -> None:
     """Hook H5's ALIGN files: [mask, summary] for an aligned pair, [] otherwise.
@@ -737,6 +733,7 @@ __COMPLETION__
 """
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 @pytest.mark.parametrize(
     ("mode", "listed"),

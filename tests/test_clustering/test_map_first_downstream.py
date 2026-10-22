@@ -163,6 +163,7 @@ class _NamingMender:
 
 # The legacy "state" policy is slow here (about 90 s) and covered by
 # test_mender.py; the default run keeps the map_first default.
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "policy", [pytest.param("state", marks=pytest.mark.slow), "exclude_from_features"]
 )
@@ -417,6 +418,7 @@ def _boundaries(path: Path) -> Path:
     return path
 
 
+@pytest.mark.integration
 def test_cortical_depth_qc_summary_records_the_map_first_annotation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

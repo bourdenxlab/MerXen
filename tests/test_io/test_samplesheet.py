@@ -13,6 +13,21 @@ from merxen.io.samplesheet import (
 )
 
 
+def test_parse_samplesheet_preserves_optional_model_selectors(tmp_path: Path) -> None:
+    """Keep registry hashes as strings and blank platform settings unset."""
+    csv_path = tmp_path / "samplesheet.csv"
+    csv_path.write_text(
+        "pair_id,xenium_cellpose_model,merscope_cellpose_model\n"
+        f"P1,{'a' * 64},\n"
+        "P2,/path/to/model-bundle,/path/to/merscope-model\n"
+    )
+    first, second = parse_samplesheet(csv_path)
+    assert first.xenium_cellpose_model == "a" * 64
+    assert first.merscope_cellpose_model is None
+    assert second.xenium_cellpose_model == "/path/to/model-bundle"
+    assert second.merscope_cellpose_model == "/path/to/merscope-model"
+
+
 def test_parse_samplesheet_supports_raw_dirs_and_cached_spatialdata(
     tmp_path: Path,
 ) -> None:
@@ -239,3 +254,86 @@ def test_parse_samplesheet_rejects_invalid_annotation_columns(tmp_path: Path) ->
 
     with pytest.raises(ValueError, match=r"\[P2\] samplesheet row 3: unknown mouse"):
         parse_samplesheet(csv_path)
+
+
+def test_parse_samplesheet_reads_merscope_bead_removal_column(tmp_path: Path) -> None:
+    """The bead-removal column parses true, false and blank (inherit) values."""
+    csv_path = tmp_path / "beads.csv"
+    csv_path.write_text(
+        "pair_id,merscope_bead_removal\nP1,true\nP2,false\nP3,\nP4,Yes\nP5,0\n"
+    )
+
+    pairs = parse_samplesheet(csv_path)
+
+    assert [pair.merscope_bead_removal for pair in pairs] == [
+        True,
+        False,
+        None,
+        True,
+        False,
+    ]
+
+
+def test_parse_samplesheet_defaults_bead_removal_to_none_without_column(
+    tmp_path: Path,
+) -> None:
+    csv_path = tmp_path / "no_beads.csv"
+    csv_path.write_text("pair_id\nP1\n")
+
+    assert parse_samplesheet(csv_path)[0].merscope_bead_removal is None
+
+
+def test_parse_samplesheet_rejects_invalid_bead_removal_value(tmp_path: Path) -> None:
+    csv_path = tmp_path / "bad_beads.csv"
+    csv_path.write_text("pair_id,merscope_bead_removal\nP1,maybe\n")
+
+    with pytest.raises(ValueError, match="Invalid boolean"):
+        parse_samplesheet(csv_path)
+
+
+def test_samplesheet_docs_describe_the_bead_removal_column() -> None:
+    docs = Path(__file__).resolve().parents[2] / "docs" / "samplesheet.md"
+
+    assert "`merscope_bead_removal`" in docs.read_text()
+
+
+def test_parse_samplesheet_supports_gaston_row_overrides(tmp_path: Path) -> None:
+    """Every GASTON control can be supplied at samplesheet row scope."""
+    csv_path = tmp_path / "gaston.csv"
+    csv_path.write_text(
+        "pair_id,gaston_enabled,gaston_segmentations,gaston_use_gpu,"
+        "gaston_n_restarts,gaston_epochs,gaston_checkpoint_interval,"
+        "gaston_hidden_spatial,gaston_hidden_expression,gaston_optimizer,"
+        "gaston_glmpca_dimensions,gaston_glmpca_penalty,"
+        "gaston_glmpca_iterations,gaston_domain_mode,gaston_num_domains,"
+        "gaston_min_domains,gaston_max_domains,gaston_domain_buckets,"
+        "gaston_auto_k_fallback,gaston_write_spatialdata_table,"
+        "gaston_keep_seed_models,gaston_keep_checkpoints,gaston_max_genes\n"
+        'P1,true,"reseg,proseg_hybrid",false,2,20,5,"8,4","9,3",adam,'
+        "3,2.5,12,fixed,4,2,6,100,3,true,true,all,500\n"
+    )
+
+    pair = parse_samplesheet(csv_path)[0]
+
+    assert pair.gaston_enabled is True
+    assert pair.gaston_segmentations == "reseg,proseg_hybrid"
+    assert pair.gaston_use_gpu is False
+    assert pair.gaston_n_restarts == 2
+    assert pair.gaston_epochs == 20
+    assert pair.gaston_checkpoint_interval == 5
+    assert pair.gaston_hidden_spatial == [8, 4]
+    assert pair.gaston_hidden_expression == [9, 3]
+    assert pair.gaston_optimizer == "adam"
+    assert pair.gaston_glmpca_dimensions == 3
+    assert pair.gaston_glmpca_penalty == 2.5
+    assert pair.gaston_glmpca_iterations == 12
+    assert pair.gaston_domain_mode == "fixed"
+    assert pair.gaston_num_domains == 4
+    assert pair.gaston_min_domains == 2
+    assert pair.gaston_max_domains == 6
+    assert pair.gaston_domain_buckets == 100
+    assert pair.gaston_auto_k_fallback == 3
+    assert pair.gaston_write_spatialdata_table is True
+    assert pair.gaston_keep_seed_models is True
+    assert pair.gaston_keep_checkpoints == "all"
+    assert pair.gaston_max_genes == 500

@@ -89,13 +89,38 @@ Published with `mode: "symlink"` — the target of the symlink is the Nextflow
 work directory or the cached path. See
 [Caching and reuse](pipeline.md#caching-and-reuse).
 
+Every raw-TIFF MERSCOPE build also writes the root attribute
+`merxen_image_preprocessing` (z planes, stains, and the bead-removal identity,
+including its calibration summary). Enrichment copies it onto the latest zarr.
+
+When bead removal is on (`merscope_bead_removal`), the zarr also contains
+`bead_removal_qc/`, the report of the correction:
+
+| File | Contents |
+|------|----------|
+| `bead_removal_qc/summary.json` | Status (`pass` or `warn`), warnings, bead density, runtimes, classifier recall, the classifier rescue and PSF library spread. |
+| `bead_removal_qc/calibration.json`, `psf_library.npz`, `psf_montage.png` | Calibration decision, thresholds, stain responses and the measured PSF library. |
+| `bead_removal_qc/overview.png`, `bead_density.png`, `stretch_field.png`, `change_overview.png` | Overview maps: tiles and tissue, bead density, PSF stretch, and removed light. |
+| `bead_removal_qc/before_after*.png`, `before_after_crops.npz` | Raw and corrected crops at six locations. |
+| `bead_removal_qc/residual_profiles.json`, `.png` | Residual bead profile at planes `1`-`4`, on and off tissue. |
+| `bead_removal_qc/beads.csv.gz`, `chunks.csv` | Per-bead and per-chunk tables. |
+
+Reading guide: [stages/spatialdata-build.md](stages/spatialdata-build.md#the-qc-folder).
+Segmentation also writes `image_preprocessing.json` (cell masks) and
+`nuclei_image_preprocessing.json` (nuclei masks) next to the persistent masks on
+every run (the recorded identity is `null` with bead removal off), recording
+which image the masks were computed from; the cell-mask file also records the
+bead-mask veto that was applied (`bead_mask_veto`), and `bead_mask_veto.json`
+holds its parameters and counts. They are not published through `publishDir`; see
+[Segmentation](#segmentation).
+
 ### Latest SpatialData
 
 Path: `${outdir}/<pair_id>/<platform>/latest/`
 
 | File | Contents |
 |------|----------|
-| `latest_spatialdata.zarr` | Durable current SpatialData artifact. Segmentation writes the refined ProSeg result here, then enrichment updates it in place with additive shapes, images, and tables. This is the primary downstream input. |
+| `latest_spatialdata.zarr` | Durable current SpatialData artifact. Segmentation writes the refined ProSeg result here, then enrichment updates it in place with additive shapes, images, and tables. This is the primary downstream input. Its root also holds `segmentation_image_preprocessing.json`, the bead-removal identity of the image its prior masks (and so its cells) came from; it is checked before the store is reused or enriched. |
 
 #### SpatialData identifier contract
 
@@ -169,6 +194,8 @@ Path: `${outdir}/<pair_id>/xenium/register_images/` (only for rows that set
 | `register_images_out/*_<image_key>_registration_summary.json` | Explorer and final matrices, scale check, refinement status, residuals before/after. |
 | `register_images_out/*_<image_key>_registration_qc.png` / `.pdf` | DAPI overlay, residual-shift field, and residual histograms. |
 | `register_images_out/*_<image_key>_registration_local_shifts.csv` | Per-window residual shifts before and after refinement. |
+| `register_images_out/*_<image_key>_nonrigid_flow.npz` | Accepted coarse pull field, confidence mask, and its pixel-to-reference affine when non-rigid refinement was attempted. |
+| `register_images_out/*_<image_key>_nonrigid_qc.png` / `.pdf` | Affine and final DAPI overlays, applied displacement, confidence boundary, and local DAPI correlation. |
 
 See [Image registration](stages/register-images.md#reading-the-qc).
 
@@ -512,6 +539,37 @@ Path: `${outdir}/<pair_id>/<analysis_segmentation>/mapmycells/`
 | `mapmycells_out/<platform>/<pair_id>_<platform>_mapmycells_annotated.h5ad` | Clustered AnnData with assignment columns added to `obs` using the `mapmycells_` prefix and mapper metadata in `uns["merxen_mapmycells"]`; plot paths are recorded, but plot images are separate PNGs. |
 | `mapmycells_out/region_<region_name>/<platform>/<pair_id>_<platform>_mapmycells_*` | Region-specific MapMyCells outputs when `mapmycells_reference_mode` includes `region`; annotated H5AD columns use `mapmycells_region_<region_name>_`. |
 | `mapmycells_out/<pair_id>_mapmycells_manifest.json` | Per-pair manifest summarizing selected reference mode, whole-brain and region references, ROI labels, filtering counts, bootstrap settings, output paths, the gene-ID fallback table used (`gene_id_fallback_csv`, or `gene_id_fallback_ignored` when it has no IDs of the query species), and the per-sample `gene_id_resolution` summaries. |
+
+### GASTON spatial domains
+
+Path:
+`${outdir}/<pair_id>/<segmentation>/gaston/gaston_out/<platform>/`
+
+| File | Contents |
+|------|----------|
+| `<sample_id>_gaston_annotated.h5ad` | Clustered H5AD with `gaston_domain`, raw `gaston_isodepth`, selected seed, selected K, and provenance. |
+| `<sample_id>_gaston_cells.parquet` | Portable per-cell annotations keyed by immutable cell ID. |
+| `input/counts.npz` | Sparse raw count matrix after eligible control-feature removal. |
+| `input/coordinates.npy` | Native-shape centroids in clustered H5AD order. |
+| `input/cell_ids.tsv` | Ordered cell IDs. |
+| `input/gene_names.tsv` | Ordered retained genes. |
+| `input/input_manifest.json` | Native-coordinate declaration, shape/table/instance keys, dimensions, checksums, and connectivity diagnostic. |
+| `model/best_model.pt` | Finite minimum-loss restart. |
+| `model/model_selection.json` | Selected seed and K, configuration, and unanchored-isodepth notice. |
+| `model/seed_losses.tsv` | Ranked restart losses and status. |
+| `model/domain_likelihoods.tsv` | Likelihood curve over the configured K range. |
+| `model/gpu_vram/seed_<n>/` | Per-restart task and total-device VRAM samples/summary when monitoring is enabled; retained independently of model/checkpoint policy. |
+| `plots/isodepth.png`, `plots/isodepth.pdf` | Raw isodepth plot; direction is explicitly unanchored and arbitrary. |
+| `plots/domains.png`, `plots/domains.pdf` | Selected spatial domain labels. |
+| `plots/domain_likelihood.png`, `plots/domain_likelihood.pdf` | Automatic K diagnostic and selected K. |
+| `plots/training_losses.png`, `plots/training_losses.pdf` | Restart training losses. |
+| `spatialdata_import_manifest.json` | Locked clustered-table import result and owned columns. |
+
+When import is enabled, the corresponding existing clustered table receives
+the same four GASTON annotations. Native shapes and original segmentation
+tables are unchanged. Preparation, model selection, plots, and the portable
+cell table remain standalone artifacts even if the final SpatialData import
+fails.
 
 ### Annotation reference bundles (in development)
 

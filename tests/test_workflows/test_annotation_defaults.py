@@ -1224,6 +1224,7 @@ def _python_mode(
     )
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 @pytest.mark.parametrize(("species", "flipped", "source", "mode"), MODE_MATRIX)
 def test_groovy_mode_and_suffix_in_all_mode_flip_combinations(
@@ -1305,6 +1306,7 @@ def test_python_mode_parsing(label: str, expected: str | None) -> None:
         assert result == {"value": expected}
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_groovy_mode_parsing(groovy_results: dict[str, dict[str, Any]]) -> None:
     """Modes are case-insensitive; blanks fall through; unknown values fail."""
@@ -1323,6 +1325,7 @@ def test_groovy_mode_parsing(groovy_results: dict[str, dict[str, Any]]) -> None:
             assert groovy == python, label
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 @pytest.mark.parametrize("species", SPECIES)
 def test_groovy_config_defaults_follow_the_species_defaults(
@@ -1347,6 +1350,7 @@ def test_groovy_config_defaults_follow_the_species_defaults(
         assert row["annotation_mode_mapmycells_stage"] == "skip"
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 @pytest.mark.parametrize("species", SPECIES)
 def test_groovy_for_species_runs_to_species_defaults(
@@ -1356,6 +1360,7 @@ def test_groovy_for_species_runs_to_species_defaults(
     assert _value(groovy_results, f"forSpecies|{species}") == species_defaults(species)  # type: ignore[arg-type]
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_groovy_for_row_in_map_first(groovy_results: dict[str, dict[str, Any]]) -> None:
     """map_first rows get every settings key, with row columns overriding."""
@@ -1407,6 +1412,7 @@ def test_groovy_for_row_in_map_first(groovy_results: dict[str, dict[str, Any]]) 
     )
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 @pytest.mark.parametrize("species", SPECIES)
 def test_groovy_mixed_samplesheet_rows_resolve_alike_for_both_species(
@@ -1440,6 +1446,7 @@ def test_groovy_mixed_samplesheet_rows_resolve_alike_for_both_species(
     ]
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_groovy_row_mode_summary_lists_each_rows_mode(
     groovy_results: dict[str, dict[str, Any]],
@@ -1483,6 +1490,7 @@ def test_main_nf_logs_the_row_modes_and_the_legacy_deprecation() -> None:
     assert "usesDeprecatedHumanLegacy" not in main_text
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_groovy_settings_accessors(groovy_results: dict[str, dict[str, Any]]) -> None:
     """Rows without annotation keys read as legacy with no suffix."""
@@ -1500,6 +1508,7 @@ def test_groovy_settings_accessors(groovy_results: dict[str, dict[str, Any]]) ->
     }
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_groovy_run_mapmycells_rule(groovy_results: dict[str, dict[str, Any]]) -> None:
     """Legacy keeps the stage selection; map_first runs MMC only when asked."""
@@ -1515,6 +1524,7 @@ def test_groovy_run_mapmycells_rule(groovy_results: dict[str, dict[str, Any]]) -
         assert _value(groovy_results, f"runMapMyCells|{label}") is value, label
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_groovy_completion_summary(groovy_results: dict[str, dict[str, Any]]) -> None:
     """Legacy runs print nothing; map_first runs list failed annotations."""
@@ -1540,6 +1550,7 @@ def test_groovy_completion_summary(groovy_results: dict[str, dict[str, Any]]) ->
     assert "not wired" not in summary
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_groovy_preflight(groovy_results: dict[str, dict[str, Any]]) -> None:
     """Preflight ignores legacy rows; map_first runs when explicitly selected (M5).
@@ -1591,6 +1602,7 @@ def test_groovy_preflight(groovy_results: dict[str, dict[str, Any]]) -> None:
     assert "Unknown mouse_section_regions 'Isocortex;Cortex'" in regions[0]
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_groovy_map_first_run_follows_the_resolved_mode(
     groovy_results: dict[str, dict[str, Any]],
@@ -1613,6 +1625,7 @@ def test_groovy_map_first_run_follows_the_resolved_mode(
     assert _value(groovy_results, "isMapFirstRun|rows|bad-row-mode") is False
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_groovy_warns_for_legacy_rows_of_a_flipped_species(
     groovy_results: dict[str, dict[str, Any]],
@@ -1657,6 +1670,7 @@ def test_groovy_warns_for_legacy_rows_of_a_flipped_species(
     assert _value(groovy_results, "isMapFirstRun|bad-mode") is False
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_groovy_samples_json_carries_the_rows_annotation_column(
     groovy_results: dict[str, dict[str, Any]],
@@ -1694,6 +1708,7 @@ def test_groovy_samples_json_carries_the_rows_annotation_column(
     assert [item.mouse_section_regions for item in parsed[2:]] == ["Isocortex;HPF"] * 2
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_groovy_cortical_depth_tables_name_the_runs_suffix(
     groovy_results: dict[str, dict[str, Any]],
@@ -1711,6 +1726,7 @@ def test_groovy_cortical_depth_tables_name_the_runs_suffix(
     }
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_groovy_run_record_lists_stopped_branches_and_panels(
     groovy_results: dict[str, dict[str, Any]],
@@ -1752,6 +1768,7 @@ def test_groovy_run_record_lists_stopped_branches_and_panels(
     ]
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_groovy_published_clustering_dir_follows_the_row_suffix(
     groovy_results: dict[str, dict[str, Any]],

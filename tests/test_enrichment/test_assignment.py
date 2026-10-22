@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import anndata as ad
 import geopandas as gpd
@@ -13,6 +14,7 @@ import pytest
 from shapely.geometry import box
 from spatialdata.models import TableModel
 
+import merxen.enrichment.assignment as assignment_module
 from merxen.enrichment.assignment import (
     clone_table_for_region,
     compute_table_from_points_for_shape,
@@ -209,3 +211,55 @@ def test_hybrid_assignment_table_is_preserved_during_forced_reassignment(
 
     assert summaries == []
     assert sdata.tables["table_MOSAIK_proseg_hybrid"] is hybrid_table
+
+
+class _RecordingStore(SimpleNamespace):
+    """In-memory store whose element and metadata writes are recorded."""
+
+    def write_element(self, key: str, overwrite: bool = False) -> None:
+        del overwrite
+        self.written.append(key)
+
+    def write_metadata(self, write_attrs: bool = True) -> None:
+        del write_attrs
+        self.written.append("metadata")
+
+
+def test_per_shape_assignment_serializes_with_another_store_writer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    store_lock_contention: Any,
+) -> None:
+    """Assignment waits for a writer holding the store lock through another
+    staged symlink, and keeps the lock from its read until the last write."""
+    latest = tmp_path / "latest.zarr"
+    latest.mkdir()
+    sdata = _RecordingStore(
+        points={
+            "transcripts": pd.DataFrame({"x": [0.5], "y": [0.5], "gene": ["GeneA"]})
+        },
+        shapes={
+            "MOSAIK_proseg": gpd.GeoDataFrame(
+                {"cell": ["cell_a", "cell_b"]},
+                geometry=[box(0, 0, 1, 1), box(2, 0, 3, 1)],
+            )
+        },
+        tables={"table": _source_table()},
+        attrs={},
+        written=[],
+    )
+    monkeypatch.setattr(assignment_module.sd, "read_zarr", lambda path: sdata)
+
+    summaries = store_lock_contention.run(
+        lambda staged: run_per_shape_assignment_for_dataset("P1_MERSCOPE", staged),
+        latest,
+        reads=[(assignment_module.sd, "read_zarr")],
+        persists=[
+            (assignment_module, "write_or_replace_element"),
+            (assignment_module, "_write_table_element"),
+            (assignment_module, "write_spatialdata_metadata"),
+        ],
+    )
+
+    assert [summary["table_key"] for summary in summaries] == ["table_MOSAIK_proseg"]
+    assert sdata.written[-1] == "metadata"

@@ -7,7 +7,8 @@ process CELLPOSE_SEGMENT {
     tuple val(key), val(pair_id), val(platform), val(seg_config_json)
 
     output:
-    tuple val(key), val(pair_id), val(platform), val(seg_config_json), path("segment_out/cellpose_masks_tiled.npy"), path("segment_out/cellpose_cellprobs_tiled.npy"), path("segment_out/transcripts_for_proseg.csv"), path("segment_out/cellpose_transforms.json"), path("segment_out/cellpose_stitching_stats.json")
+    tuple val(key), val(pair_id), val(platform), val(seg_config_json), path("segment_out/cellpose_masks_tiled.npy"), path("segment_out/cellpose_cellprobs_tiled.npy"), path("segment_out/transcripts_for_proseg.csv"), path("segment_out/cellpose_transforms.json"), path("segment_out/cellpose_stitching_stats.json"), emit: segmentation
+    path("segment_out/cellpose_model_identity.json"), emit: model_identity
 
     script:
     """
@@ -36,7 +37,8 @@ process CELLPOSE_NUCLEI_SEGMENT {
     tuple val(key), val(pair_id), val(platform), val(seg_config_json)
 
     output:
-    tuple val(key), val(pair_id), val(platform), val(seg_config_json), path("segment_out/cellpose_nuclei_masks_tiled.npy"), path("segment_out/cellpose_nuclei_stitching_stats.json")
+    tuple val(key), val(pair_id), val(platform), val(seg_config_json), path("segment_out/cellpose_nuclei_masks_tiled.npy"), path("segment_out/cellpose_nuclei_stitching_stats.json"), emit: segmentation
+    path("segment_out/cellpose_nuclei_model_identity.json"), emit: model_identity
 
     script:
     """
@@ -105,7 +107,7 @@ workflow SEGMENT {
     proseg_path
 
     main:
-    cellpose_results = CELLPOSE_SEGMENT(segment_inputs)
+    cellpose_results = CELLPOSE_SEGMENT(segment_inputs).segmentation
     combined_cellpose_results = cellpose_results
         .join(nuclei_results)
         .map {

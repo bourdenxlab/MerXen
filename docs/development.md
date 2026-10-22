@@ -45,6 +45,15 @@ and skip when they are unset (the annotation ones are also in
 | `MERXEN_MENDER_CONTAINER` | MENDER container smoke test |
 | `MERXEN_WHB_TAXONOMY_DIR`, `MERXEN_SEAAD_TERM_CSV`, `MERXEN_WMB_TAXONOMY_DIR` | the committed annotation vocab tables match the real Allen taxonomy CSVs (`build_vocab_tables.py --check`) |
 
+Three more markers name tests that take seconds each. The pre-push hook
+leaves them out by default and CI runs them (see [Test tiers](#test-tiers)):
+
+| Marker | Use it for |
+|--------|------------|
+| `nextflow` | a test that launches Nextflow |
+| `store_lock` | a test where two processes contend for a store's write lock; tests that use the `store_lock_contention` fixture get it automatically |
+| `integration` | a test that runs a stage end to end on a real on-disk SpatialData store |
+
 ## Linting, formatting, typing
 
 ```bash
@@ -74,7 +83,7 @@ From [.pre-commit-config.yaml](../.pre-commit-config.yaml):
 - **On merge and on the commit message** — the privacy check.
 - **On push** — the privacy check of the branch name and every pushed commit,
   then the lockfile-backed local CI checks: lint, format, type check, and
-  tests.
+  the fast test tier.
 
 The privacy hooks keep host paths and sample names out of the repository
 ([Local configuration and privacy](local-configuration.md)).
@@ -87,14 +96,19 @@ and intend to fix it before the PR is reviewed.
 
 [.github/workflows/ci.yml](../.github/workflows/ci.yml) runs on every push
 to `main` and to the integration branch `feature/robust-celltype-annotation`
-([plan §2.2](plans/robust-celltype-annotation-plan.md)), and on every PR:
+([plan §2.2](plans/robust-celltype-annotation-plan.md)), and on every PR, as
+two jobs in parallel. Each installs from `requirements/requirements.lock` with
+`uv`, then `pip install -e . --no-deps`; the uv cache keeps the wheels built
+from Git sources between runs.
 
-1. Install from `requirements/requirements.lock` with `uv`, then `pip install -e . --no-deps`.
-2. `ruff check .`
-3. `ruff format --check .`
-4. `mypy src/`
-5. `nf-metro validate assets/metro_map.mmd`
-6. `pytest -m "not slow"`
+- **lint**: `ruff check .`, `ruff format --check .`,
+  `nf-metro validate assets/metro_map.mmd` and `mypy src/`. mypy starts from
+  the cache saved by the latest push to the base branch (`main` or the
+  integration branch).
+- **test**: checks the locked Cellpose runtime, installs Nextflow, then runs
+  the full test tier, `pytest -n 4 --dist load -m "not slow"` (four
+  pytest-xdist workers, one BLAS/OpenMP/numba thread each). The job summary
+  lists the 20 slowest tests.
 
 To lint the Nextflow code, point the linter at the pipeline's project
 directory so it loads the Groovy classes in `workflows/lib/`:
@@ -108,10 +122,16 @@ Without `-project-dir`, run from the repository root, the linter looks for
 `main.nf` uses (`AnnotationSettings`, `AnnotationPreflight`) as "not defined".
 Those are not real errors. [tests/test_workflows/test_nextflow_lint.py](../tests/test_workflows/test_nextflow_lint.py)
 runs the command above and fails on any error (warnings pass); it is skipped
-when `nextflow` is not installed. `scripts/run_ci_checks.sh` runs it too when
-Nextflow is on the `PATH`.
+when `nextflow` is not installed, so CI's test job, which installs Nextflow,
+runs it. `scripts/run_ci_checks.sh` runs the lint too when Nextflow is on the
+`PATH`.
 
-Run the same gate locally before pushing:
+A new push to a PR cancels that PR's run in progress. The separate
+[Privacy](../.github/workflows/privacy.yml) workflow checks the branch name,
+PR text and commit messages.
+
+Run the same checks locally before pushing (the fast test tier unless you ask
+for the full one; see [Test tiers](#test-tiers)):
 
 ```bash
 scripts/run_ci_checks.sh
@@ -139,7 +159,15 @@ runs pytest for locked installs and skips pytest for local macOS installs. This
 keeps local Mac pushes from being blocked by CUDA lockfile packages or
 platform-specific scientific wheel crashes while preserving Linux/server parity.
 Set `MERXEN_CI_RUN_TESTS=true` to force pytest, or use
-`MERXEN_CI_PYTEST_ARGS` to run a smaller target.
+`MERXEN_CI_PYTEST_ARGS` to run a smaller target. It replaces the tier's marker
+selection and is split with shell quoting rules, so
+`MERXEN_CI_PYTEST_ARGS='-m "not slow and not nextflow" tests/test_io'` passes
+the marker expression as one argument.
+
+Pytest runs on `MERXEN_CI_PYTEST_WORKERS` parallel pytest-xdist workers
+(default 4; `0` runs every test in one process). Each worker is limited to 2
+BLAS, OpenMP and numba threads unless `OMP_NUM_THREADS`, `MKL_NUM_THREADS`,
+`OPENBLAS_NUM_THREADS` or `NUMBA_NUM_THREADS` is already set.
 
 For example, to push from a Mac while skipping lockfile CUDA packages:
 
@@ -162,7 +190,27 @@ MERXEN_CI_PYTEST_ARGS="tests/test_cortical_depth -q" \
 scripts/run_ci_checks.sh
 ```
 
-Branch protection on `main` should require this workflow to pass.
+Branch protection on `main` should require both CI jobs, `lint` and `test`, to
+pass.
+
+### Test tiers
+
+`MERXEN_CI_TEST_TIER` picks the tests the script runs:
+
+| Tier | Selection | Used by |
+|------|-----------|---------|
+| `fast` | `-m "not slow and not nextflow and not store_lock and not integration"` | the pre-push hook (default) |
+| `full` | `-m "not slow"` | CI on every PR and every push to `main` or the integration branch |
+
+The fast tier misses Nextflow, cross-process lock and end-to-end store
+regressions until CI. Run the full tier locally when a change touches the
+workflows, store locking or a stage's store writes, or before asking for a
+review:
+
+```bash
+MERXEN_CI_TEST_TIER=full git push
+MERXEN_CI_TEST_TIER=full scripts/run_ci_checks.sh
+```
 
 ## Version bumps
 

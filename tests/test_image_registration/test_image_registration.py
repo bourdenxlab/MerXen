@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+from typing import Any
 
 import anndata as ad
 import cv2
@@ -16,6 +17,7 @@ import xarray as xr
 from scipy.ndimage import gaussian_filter, shift
 from spatialdata.models import Image2DModel, TableModel
 
+import merxen.image_registration as registration_module
 from merxen.config import ImageRegistrationConfig, RegisteredImageSpec
 from merxen.image_registration import (
     _read_working_channel,
@@ -320,6 +322,7 @@ def test_fit_affine_displacement_ignores_outlier_windows() -> None:
 
 
 @pytest.mark.usefixtures("small_viewer_pyramids")
+@pytest.mark.integration
 def test_registration_with_exact_matrix_places_marker_on_grid(
     registration_inputs: dict[str, Path],
 ) -> None:
@@ -357,6 +360,145 @@ def test_registration_with_exact_matrix_places_marker_on_grid(
     assert Path(summary["outputs"]["local_shifts"]).exists()
 
 
+@pytest.mark.integration
+def test_nonrigid_registration_warps_every_channel_into_one_final_image(
+    tmp_path: Path,
+) -> None:
+    """The DAPI flow is applied identically to all co-registered IF channels."""
+    size = 256
+    rng = np.random.default_rng(29)
+    reference_dapi = np.zeros((size, size), dtype=np.float32)
+    reference_dapi[12:-12, 12:-12] = 60.0
+    seeds = np.zeros_like(reference_dapi)
+    ys = rng.integers(18, size - 18, 700)
+    xs = rng.integers(18, size - 18, 700)
+    seeds[ys, xs] = rng.uniform(600.0, 1400.0, len(ys))
+    reference_dapi += gaussian_filter(seeds, 1.8)
+    reference_marker = np.zeros_like(reference_dapi)
+    reference_marker[55:90, 65:110] = 1000.0
+    reference_marker[155:205, 145:195] = 600.0
+
+    rows, columns = np.meshgrid(
+        np.arange(size, dtype=np.float32),
+        np.arange(size, dtype=np.float32),
+        indexing="ij",
+    )
+    displacement_x = 4.0 * np.sin(2.0 * np.pi * rows / 170.0)
+
+    def deform(channel: np.ndarray) -> np.ndarray:
+        return cv2.remap(
+            channel,
+            columns - displacement_x,
+            rows,
+            interpolation=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+
+    moving_dapi = deform(reference_dapi)
+    moving_marker = deform(reference_marker)
+    sdata = sd.SpatialData(
+        images={
+            "morphology_focus": Image2DModel.parse(
+                np.stack([reference_dapi, reference_dapi * 0.5]).astype(np.uint16),
+                dims=("c", "y", "x"),
+                c_coords=["DAPI", "18S"],
+                scale_factors=[2, 2],
+            )
+        }
+    )
+    zarr_path = tmp_path / "latest_spatialdata.zarr"
+    sdata.write(zarr_path)
+    image_path = tmp_path / "post_if.ome.tif"
+    tifffile.imwrite(
+        image_path,
+        np.stack([moving_dapi, moving_marker]).astype(np.uint16),
+        tile=(64, 64),
+        metadata={
+            "axes": "CYX",
+            "Channel": {"Name": ["DAPI", "AF568"]},
+            "PhysicalSizeX": 1.0,
+            "PhysicalSizeY": 1.0,
+        },
+    )
+    matrix_path = _write_matrix(tmp_path / "identity.csv", np.eye(3))
+    config = ImageRegistrationConfig(
+        dataset_name="P1_XENIUM",
+        platform="XENIUM",
+        latest_zarr_path=zarr_path,
+        output_dir=tmp_path / "register_images_out",
+        images=[
+            RegisteredImageSpec(
+                image_key="post_if",
+                image_path=image_path,
+                alignment_matrix_path=matrix_path,
+                channel_names=["DAPI", "p62"],
+            )
+        ],
+        reference_pixel_size_um=1.0,
+        refine_affine=False,
+        nonrigid_enabled=True,
+        nonrigid_pixel_size_um=1.0,
+        nonrigid_smoothing_sigma_um=5.0,
+        nonrigid_max_displacement_um=12.0,
+        nonrigid_max_cycle_error_um=3.0,
+        tile_size=128,
+        chunk_size=128,
+        build_viewer_pyramid=False,
+    )
+
+    outputs = run_image_registration(config)
+
+    updated = sd.read_zarr(zarr_path, selection=("images",))
+    assert set(map(str, updated.images)) == {"morphology_focus", "post_if"}
+    registered = updated.images["post_if"]
+    registered_dapi = registered.sel(c="DAPI").values.astype(float)
+    registered_marker = registered.sel(c="p62").values.astype(float)
+    valid = reference_dapi > 0
+    before_dapi = np.corrcoef(reference_dapi[valid], moving_dapi[valid])[0, 1]
+    after_dapi = np.corrcoef(reference_dapi[valid], registered_dapi[valid])[0, 1]
+    before_marker = np.corrcoef(reference_marker[valid], moving_marker[valid])[0, 1]
+    after_marker = np.corrcoef(reference_marker[valid], registered_marker[valid])[0, 1]
+    assert after_dapi > before_dapi + 0.05
+    assert after_marker > before_marker + 0.02
+    assert after_marker > 0.99
+    summary = json.loads(outputs["post_if_summary"].read_text())
+    assert summary["nonrigid"]["status"] == "applied"
+    assert Path(summary["outputs"]["nonrigid_flow"]).exists()
+    assert Path(summary["outputs"]["nonrigid_qc_plot"]).exists()
+
+
+@pytest.mark.usefixtures("small_viewer_pyramids")
+def test_registration_serializes_with_another_store_writer(
+    registration_inputs: dict[str, Path],
+    store_lock_contention: Any,
+) -> None:
+    """Registration waits for a writer holding the store lock through another
+    staged symlink, and keeps the lock from its read until the registry is
+    written."""
+    store_lock_contention.run(
+        lambda staged: run_image_registration(
+            _config(
+                registration_inputs,
+                matrix="true_matrix",
+                refine_affine=False,
+                latest_zarr_path=staged,
+            )
+        ),
+        registration_inputs["zarr"],
+        reads=[(sd, "read_zarr")],
+        persists=[
+            (registration_module, "materialize_warped_image"),
+            (registration_module, "build_image_pyramid"),
+            (registration_module, "write_spatialdata_metadata"),
+        ],
+    )
+
+    registry = sd.read_zarr(registration_inputs["zarr"]).attrs[REGISTERED_IMAGES_ATTR]
+    assert registry["post_if"]["status"] == "complete"
+
+
+@pytest.mark.integration
 def test_refinement_recovers_the_true_matrix(
     registration_inputs: dict[str, Path],
 ) -> None:
@@ -377,6 +519,7 @@ def test_refinement_recovers_the_true_matrix(
     assert summary["residuals_after"]["median_um"] < 0.5
 
 
+@pytest.mark.integration
 def test_refinement_beyond_limits_keeps_the_explorer_matrix(
     registration_inputs: dict[str, Path],
 ) -> None:
@@ -392,6 +535,7 @@ def test_refinement_beyond_limits_keeps_the_explorer_matrix(
     np.testing.assert_allclose(summary["final_matrix"], explorer)
 
 
+@pytest.mark.integration
 def test_unchanged_registration_is_skipped_on_rerun(
     registration_inputs: dict[str, Path],
     monkeypatch: pytest.MonkeyPatch,
@@ -411,6 +555,7 @@ def test_unchanged_registration_is_skipped_on_rerun(
 
 
 @pytest.mark.usefixtures("small_viewer_pyramids")
+@pytest.mark.integration
 def test_images_dropped_from_config_are_removed(
     registration_inputs: dict[str, Path],
 ) -> None:
@@ -573,6 +718,7 @@ def test_partial_coverage_registers_inside_and_zero_fills_outside(
     assert 0.05 < summary["output"]["nonzero_fraction"] < 0.3
 
 
+@pytest.mark.integration
 def test_reflected_matrix_is_registered_and_refined(
     registration_inputs: dict[str, Path],
     tmp_path: Path,
@@ -638,6 +784,7 @@ def test_rgb_image_without_registration_channel_skips_refinement(
     assert list(image.coords["c"].values) == ["c0", "c1", "c2"]
 
 
+@pytest.mark.integration
 def test_plain_tiff_without_pixel_size_skips_scale_check(
     registration_inputs: dict[str, Path],
     tmp_path: Path,
@@ -696,6 +843,7 @@ def test_channel_name_count_must_match_the_image(
         run_image_registration(config.model_copy(update={"images": [spec]}))
 
 
+@pytest.mark.integration
 def test_rerun_in_a_fresh_output_dir_reuses_the_stored_registration(
     registration_inputs: dict[str, Path],
     monkeypatch: pytest.MonkeyPatch,

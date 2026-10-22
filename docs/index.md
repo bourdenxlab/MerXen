@@ -41,6 +41,7 @@ converge at alignment; dashed stations are governed by a parameter. See
 ### Pipeline stages
 - [SpatialData build](stages/spatialdata-build.md)
 - [Segmentation](stages/segmentation.md) (Cellpose-SAM + ProSeg)
+- [Cellpose HITL model selection](stages/cellpose-hitl.md) (optional model plumbing)
 - [Enrichment](stages/enrichment.md)
 - [Image registration](stages/register-images.md) (post-Xenium IF onto the mask grid)
 - [Mask image quantification](stages/mask-image-quantification.md)
@@ -54,6 +55,7 @@ converge at alignment; dashed stations are governed by a parameter. See
 - [Squidpy clustering](stages/clustering-squidpy.md)
 - [Distance from object](stages/distance-from-object.md)
 - [MapMyCells](stages/mapmycells.md)
+- [GASTON spatial domains](stages/gaston.md)
 - [Reference-based annotation](stages/annotation.md) (in development); start
   with the [annotation overview and method](annotation-overview.md) for what
   the annotation does and how each cell type is defined.
@@ -64,6 +66,8 @@ converge at alignment; dashed stations are governed by a parameter. See
 - [Python API overview](python-api.md) — subpackage map with key functions.
 - [CLI reference](cli.md) — every `merxen` subcommand.
 - [Development workflow](development.md) — testing, linting, contributing.
+- [Cellpose HITL testing guide](hitl/testing-guide.md) — runtime acceptance and
+  the planned custom-model checks.
 
 ## Project files at a glance
 
@@ -82,6 +86,8 @@ converge at alignment; dashed stations are governed by a parameter. See
 | [envs/environment.clustering-gpu.yml](../envs/environment.clustering-gpu.yml) | RAPIDS env used only by clustering compute |
 | [envs/environment.mender.yml](../envs/environment.mender.yml) | Pinned CPU environment used only by MENDER compute |
 | [containers/](../containers/) | Dockerfiles for the base, clustering-GPU and MENDER images |
+| [envs/environment.gaston.yml](../envs/environment.gaston.yml) | Pinned GASTON runtime |
+| [containers/Dockerfile.gaston](../containers/Dockerfile.gaston) | CUDA-enabled GASTON image |
 | [pyproject.toml](../pyproject.toml) | Dependencies, `merxen` entry point, tool config |
 | [.env.example](../.env.example) | Required environment variables |
 

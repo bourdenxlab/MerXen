@@ -171,6 +171,7 @@ def _spatialdata_zarr(section: Section, path: Path) -> None:
 
 
 # The mouse zarr round trip is slow (about 30 s); the default run keeps human.
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "species", ["human", pytest.param("mouse", marks=pytest.mark.slow)]
 )
@@ -218,6 +219,7 @@ def _tree_digest(path: Path) -> dict[str, str]:
     }
 
 
+@pytest.mark.integration
 def test_map_first_table_never_overwrites_the_legacy_table(tmp_path: Path) -> None:
     """The suffixed key keeps the legacy clustered table byte-identical (R3)."""
     import spatialdata as sd

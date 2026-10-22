@@ -12,20 +12,14 @@ may overlap and neither consumes the other's output.
 
 The token comes from matching the pair's terminal events (clustering,
 mapmycells, distance-from-object and cortical-depth results) with the pair's
-one barrier spec, keeping the events of the terminal stage. Legacy runs
-match them with a `join`, which pairs items one to one, so the spec is
-consumed by the pair's first event even when that event belongs to an
-earlier stage; the terminal stage's own events then find no spec and MENDER
-is silently skipped (for example `stop_stage=mender` with cortical depth
-enabled: FINALIZE's clustering event arrives first). `map_first` runs
-therefore `combine` every event with the spec, which keeps it, so no count
-of the events is needed. Legacy runs keep the `join` (their channels and
-DAG stay unchanged), so a launch whose rows are all legacy and whose pair emits more than one
-terminal event (clustering plus another terminal stage, or several
-clustering segmentations) skips MENDER; run MENDER on such legacy results
-with `--only_stage mender` (below) until the barrier is fixed on `main`.
-A run with any `map_first` row (pre-registration §20 D15) uses the `combine`
-for all its rows, so its legacy rows do run MENDER in that case.
+one barrier spec, keeping the events of the terminal stage. Every run,
+legacy or `map_first`, `combine`s each event with the spec, which keeps it,
+so no count of the events is needed. A `join` would pair items one to one:
+the pair's first event would consume the spec even when it belongs to an
+earlier stage, the terminal stage's own events would then find none, and
+MENDER and GASTON would be silently skipped (for example `stop_stage=mender`
+with cortical depth enabled, where FINALIZE's clustering event arrives
+first).
 
 Enable the default ProSeg-hybrid analysis with:
 

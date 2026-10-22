@@ -1824,11 +1824,10 @@ PREPARE -> ANNOTATE_PANEL -> ANNOTATE_REFERENCE_PREP (per unique bundle)
   cell-id checks alone cannot tell them apart. A table whose states are all
   unassigned (a refused panel, a failed gate) is not an error: MENDER
   records `status: skipped_no_assigned_state`, writes its manifests without
-  domains and imports nothing. The MENDER barrier of a run with any
-  `map_first` row pairs every terminal event of a pair with the pair's one
-  barrier spec (`combine`, also for that run's legacy rows; a run whose rows
-  are all legacy keeps its `join`, which pairs items one to one, so a pair's
-  earlier FINALIZE event would consume the spec, [MENDER](mender.md)).
+  domains and imports nothing. The MENDER and GASTON barrier pairs every
+  terminal event of a pair with the pair's one barrier spec (`combine`, in
+  legacy and `map_first` runs alike; a `join` pairs items one to one, so a
+  pair's earlier FINALIZE event would consume the spec, [MENDER](mender.md)).
   `map_first` runs never run the legacy MAPMYCELLS stage unless
   `annotation_mode_mapmycells_stage` is `legacy` and the run stops at
   `mapmycells`, so the barrier never waits for it.
@@ -1972,7 +1971,7 @@ Three more things the M5 exit run showed:
   ran again.
 - **MENDER needs the barrier fix.** With the legacy `join`, a `map_first`
   row with cortical depth enabled never ran MENDER: FINALIZE's event consumed
-  the pair's one spec. `map_first` runs now `combine` every event with it
+  the pair's one spec. Every run now `combine`s every event with it
   ([MENDER](mender.md)).
 - **Writer lock (fixed).** At the exit run FINALIZE took
   `<zarr>.merxen-write.lock` beside the path it was given, which is

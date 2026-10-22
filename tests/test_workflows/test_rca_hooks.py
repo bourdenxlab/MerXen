@@ -49,10 +49,10 @@ EXPECTED_SITES: dict[tuple[str, str], int] = {
     # The MENDER preflight and MENDER input key lookups, the MENDER input
     # closure parameter they need (renamed from ``_settings``), the
     # cortical-depth table fields (M5) and the two published clustered-H5AD
-    # lookups of MENDER-only restarts (M5 review).
-    (MAIN_NF, "H2"): 6,
-    # The MENDER barrier of map_first runs: combine instead of join (M5).
-    (MAIN_NF, "H3"): 1,
+    # lookups of MENDER-only restarts (M5 review); GASTON's config and
+    # preflight key lookups and its two published clustered-H5AD lookups
+    # (merge of main's GASTON stage).
+    (MAIN_NF, "H2"): 10,
     # The subscription that records skipped MENDER runs (M5 review).
     (MAIN_NF, "H6"): 1,
     # The samplesheet's row modes, read before the DAG is built (§20 D15).
@@ -283,10 +283,10 @@ H2_CORTICAL_DEPTH_FIELDS = "] + AnnotationSettings.clusteredTableFields(row, par
 def test_h2_sites_pass_the_row_suffix() -> None:
     """Each H2 site passes the row suffix to the key function or binds it.
 
-    MENDER's two key lookups and its two published clustered-H5AD lookups
-    pass the row suffix, its input closure binds the row settings, and
-    cortical depth's table configs carry the suffix of a map_first row (M5;
-    nothing for a legacy row).
+    MENDER's and GASTON's two key lookups each and their two published
+    clustered-H5AD lookups each pass the row suffix, MENDER's input closure
+    binds the row settings, and cortical depth's table configs carry the
+    suffix of a map_first row (M5; nothing for a legacy row).
     """
     main_text = (REPO_ROOT / MAIN_NF).read_text()
     lines = main_text.splitlines()
@@ -295,7 +295,7 @@ def test_h2_sites_pass_the_row_suffix() -> None:
     suffix_lines = [line for line in site_lines if H2_SUFFIX_ARGUMENT in line]
     binding_lines = [line for line in site_lines if H2_CLOSURE_BINDING.match(line)]
     depth_lines = [line for line in site_lines if H2_CORTICAL_DEPTH_FIELDS in line]
-    assert len(suffix_lines) == 4
+    assert len(suffix_lines) == 8
     assert len(binding_lines) == 1
     assert len(depth_lines) == 1
     assert len(site_lines) == len(suffix_lines) + len(binding_lines) + len(depth_lines)

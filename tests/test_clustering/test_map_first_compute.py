@@ -232,6 +232,7 @@ def test_both_sections_record_the_pair_cross_platform_scope(
         assert CROSS_PLATFORM_FIELD not in manifest
 
 
+@pytest.mark.integration
 def test_finalize_writes_the_recorded_suffix_and_leaves_the_legacy_table(
     computed: dict[str, Any], tmp_path: Path
 ) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +43,7 @@ from merxen.distance_from_object.pseudobulk import (
     retain_complete_pairs,
     run_paired_differential_expression,
 )
-from merxen.io.spatialdata_io import write_or_replace_element
+from merxen.io.spatialdata_io import spatialdata_write_lock, write_or_replace_element
 from merxen.memory import force_release, log_status
 
 
@@ -67,22 +68,31 @@ def run_distance_from_object(config: DistanceFromObjectConfig) -> dict[str, Path
     }
     summaries: dict[str, Any] = {}
 
-    log_status(f"[{config.dataset_name}] Loading SpatialData for object distances")
-    sdata_obj = sd.read_zarr(latest_path)
-    try:
-        for table_config in config.tables:
-            table_paths, summary = _annotate_table(
-                sdata_obj=sdata_obj,
-                table_config=table_config,
-                config=config,
-                annotations=annotations,
-                output_dir=output_dir,
-            )
-            paths.update(table_paths)
-            summaries[table_config.segmentation] = summary
-    finally:
-        del sdata_obj
-        force_release(note=f"after {config.dataset_name} distance from object")
+    # A write-back replaces whole tables, so hold the store lock from the read
+    # until the last table is persisted; otherwise a concurrent writer's
+    # columns are dropped. A run that only reads takes no lock.
+    store_lock: AbstractContextManager[object] = (
+        spatialdata_write_lock(latest_path)
+        if config.write_spatialdata_table
+        else nullcontext()
+    )
+    with store_lock:
+        log_status(f"[{config.dataset_name}] Loading SpatialData for object distances")
+        sdata_obj = sd.read_zarr(latest_path)
+        try:
+            for table_config in config.tables:
+                table_paths, summary = _annotate_table(
+                    sdata_obj=sdata_obj,
+                    table_config=table_config,
+                    config=config,
+                    annotations=annotations,
+                    output_dir=output_dir,
+                )
+                paths.update(table_paths)
+                summaries[table_config.segmentation] = summary
+        finally:
+            del sdata_obj
+            force_release(note=f"after {config.dataset_name} distance from object")
 
     summary_path = output_dir / "distance_from_object_summary.json"
     summary_path.write_text(

@@ -9,6 +9,7 @@ import dask.dataframe as dd
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import pytest
 import spatialdata as sd
 from scipy import sparse
 from shapely.geometry import box
@@ -38,6 +39,7 @@ from merxen.io.spatialdata_schema import (
 )
 
 
+@pytest.mark.integration
 def test_write_moving_aligned_zarr_adds_transforms_and_nonrigid_elements(
     tmp_path: Path,
 ) -> None:
@@ -158,6 +160,20 @@ def test_write_moving_aligned_zarr_adds_transforms_and_nonrigid_elements(
         affine,
     )
     assert isinstance(nonrigid, Identity)
+    # Aligned copies live only in the alignment frame. The native 'global'
+    # entry is not carried over: it would draw them, unwarped, on the native data.
+    for aligned_element in (
+        aligned.shapes["cells_aligned_nonrigid"],
+        aligned.points["transcripts_aligned_nonrigid"],
+    ):
+        assert set(get_transformation(aligned_element, get_all=True)) == {
+            "merxen_xenium"
+        }
+    for native_element in (aligned.shapes["cells"], aligned.points["transcripts"]):
+        assert isinstance(
+            get_transformation(native_element, to_coordinate_system="global"),
+            Identity,
+        )
 
     # The native transcripts must carry the same rigid affine as the native
     # shapes; only their non-rigid copy is already in the alignment frame.

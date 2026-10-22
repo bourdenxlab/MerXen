@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
@@ -138,6 +139,17 @@ def register_segmentation_branch(
     }
     if coordinate_variant_of is not None:
         entry["coordinate_variant_of"] = str(coordinate_variant_of)
+    # Refreshing assignments must retain the model that produced the geometry.
+    previous = schema["segmentations"].get(str(branch), {})
+    source = schema["segmentations"].get(coordinate_variant_of, {})
+    model_identity = previous.get(
+        "model_identity",
+        source.get(
+            "model_identity", schema.get("model_identities", {}).get(str(branch))
+        ),
+    )
+    if model_identity is not None:
+        entry["model_identity"] = deepcopy(model_identity)
     schema["segmentations"][str(branch)] = entry
     sdata_obj.attrs[MERXEN_SCHEMA_ATTR] = schema
 

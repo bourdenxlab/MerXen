@@ -82,7 +82,7 @@ Each stage is one Nextflow module and one `merxen` subcommand, sharing a Pydanti
 | [Segmentation](docs/stages/segmentation.md) | DAPI-only Cellpose nuclei → GPU Cellpose-SAM cells → ProSeg 3.2.0 refinement from Cellpose logits | always |
 | [Segmentation — hybrid](docs/stages/segmentation.md) | Transcript-supported local-convex branch with growth-only boundary smoothing | on (`proseg_hybrid_enabled`) |
 | [Enrichment](docs/stages/enrichment.md) | Shape layers and per-shape gene tables | always |
-| [Image registration](docs/stages/register-images.md) | Registers post-Xenium images (e.g. IF) onto the Xenium mask grid with Xenium Explorer matrices and a DAPI affine refinement | off (per-row `xenium_registered_images_csv`) |
+| [Image registration](docs/stages/register-images.md) | Registers post-Xenium images (e.g. IF) onto the Xenium mask grid with Xenium Explorer matrices, DAPI affine refinement, and optional guarded TV-L1 non-rigid refinement | off (per-row `xenium_registered_images_csv`) |
 | [Mask image quantification](docs/stages/mask-image-quantification.md) | Quantifies every SpatialData image channel over the final Cellpose masks | always |
 | [Cortical depth](docs/stages/cortical-depth.md) | Laplace / equal-area cortical-depth coordinates from boundary annotations | off (`--cortical_depth_enabled`) |
 | [QC](docs/stages/qc.md) | Per-dataset geometry and transcript-assignment metrics | always |
@@ -150,7 +150,10 @@ Each row points at raw platform folders, with optional reusable SpatialData cach
 For raw MERSCOPE data, set `merscope_z_range` explicitly from plane `1`
 (for example, `1-7`): plane `0` is the fiducial-bead layer and will contaminate
 the max projection. Xenium morphology images are already projected and are not
-affected by this setting.
+affected by this setting. Beaded older MERSCOPE coverslips can optionally have
+the beads subtracted from PolyT and DAPI before the projection
+(`merscope_bead_removal`, off by default; see
+[SpatialData build](docs/stages/spatialdata-build.md#merscope-bead-removal-optional)).
 
 A template lives at [workflows/samplesheet.example.csv](workflows/samplesheet.example.csv). The full schema, validation rules, and worked examples are in [Samplesheet format](docs/samplesheet.md).
 
@@ -179,6 +182,7 @@ Full documentation lives in [docs/](docs/) — start at [docs/index.md](docs/ind
 
 - **Usage** — [Getting started](docs/getting-started.md) · [Samplesheet format](docs/samplesheet.md) · [Running the pipeline](docs/running-the-pipeline.md) · [Configuration](docs/configuration.md) · [Local configuration and privacy](docs/local-configuration.md) · [Outputs](docs/outputs.md)
 - **Developer reference** — [Pipeline architecture](docs/pipeline.md) · [Metro map](docs/metro-map.md) · [Python API](docs/python-api.md) · [CLI reference](docs/cli.md) · [Development workflow](docs/development.md)
+- **GASTON** — [Spatial domains](docs/stages/gaston.md)
 
 <details>
 <summary><b>Repository layout</b></summary>
@@ -226,10 +230,15 @@ ruff check . --fix && ruff format .   # lint and format
 mypy src/                             # type check
 pytest                                # fast tests (excludes slow)
 pytest --run-slow                     # include slow integration tests
-scripts/run_ci_checks.sh              # the same lockfile-backed checks as CI
+scripts/run_ci_checks.sh              # lockfile-backed checks, fast test tier
+MERXEN_CI_TEST_TIER=full scripts/run_ci_checks.sh  # every test CI runs
 ```
 
 Day-to-day mechanics — testing, hooks, CI, debugging, adding a new pipeline stage — are in [Development workflow](docs/development.md).
+
+The [Cellpose HITL testing guide](docs/hitl/testing-guide.md) covers runtime
+acceptance, a read-only comparison with one published tile, and the planned
+custom-model checks.
 
 ## Built on
 
@@ -257,3 +266,6 @@ MerXen orchestrates the work of a lot of other people. If you use this pipeline,
 MIT — see [LICENSE](LICENSE). © 2025 Mathieu Bourdenx.
 
 Developed in collaboration with the [Bourdenx Lab](https://github.com/bourdenxlab).
+
+The optional [GASTON stage](docs/stages/gaston.md) uses separately licensed
+software; see [third-party notices](THIRD_PARTY_NOTICES.md).

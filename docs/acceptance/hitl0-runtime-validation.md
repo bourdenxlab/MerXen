@@ -1,0 +1,85 @@
+# HITL-0 runtime validation — 2026-10-19
+
+Production code: `c2ad456`, based on `a9625a9`. This records a stock-model drift
+check; it does not evaluate biological segmentation accuracy or a fine-tune.
+
+*Names and paths (2026-10-21).* Under the privacy rule of 2026-10-14 (CLAUDE.md), this record names the sample by its alias (`docs/local-configuration.md`) and host locations by `.env` variables (`$MERXEN_...`); a path that contains the alias names a directory that carries the original name. No number, checksum or verdict changed.
+
+## GPU tile check: passed
+
+The optional `workflows/acceptance/hitl0_tile_check.nf` harness ran on Dwight,
+under the existing `/tmp/merxen-dwight-gpu.lock`, using the existing production
+environment. No active compute job was present at launch; desktop graphics
+remained running. The task used read-only published inputs and wrote its
+prediction, identity sidecar and report to a separate acceptance directory.
+
+| Setting | Recorded value |
+|---|---|
+| Sample | HD1 Xenium |
+| Native image | `morphology_focus`, DAPI then 18S |
+| Source | Surviving source zarr used by the published run |
+| Tile | Index 44 of the recorded global grid |
+| Halo bbox, y0/y1/x0/x1 | 22272 / 28416 / 22272 / 28416 px |
+| Grid tile size / overlap | 6144 / 256 px |
+| Scoring bbox, y0/y1/x0/x1 | 23184 / 27504 / 23184 / 27504 px |
+| Scoring rule | 656 px margin inside the tile core; exclude cut border labels |
+| Model | `cpsam_v2`, float32 |
+| Cellpose / torch | 4.2.1.1 / 2.14.0+cu130 |
+| Flow / cellprob thresholds | 0.7 / -5.0 |
+| Per-tile / final filters | Production settings; final area 5–400 µm² |
+| Baseline cells / recomputed cells scored | 3745 / 3745 |
+| TP / FP / FN at IoU 0.5 | 3745 / 0 / 0 |
+| AP at IoU 0.5 | 1.000000 |
+| Mean matched IoU | 0.9999953134 |
+| Foreground IoU | 0.9999950559 |
+| Acceptance requirement | AP and mean matched IoU both ≥ 0.99 |
+| Peak torch GPU allocation | 6.374 GiB |
+| Total task time, including input checksums | 173.5 seconds |
+
+Checkpoint SHA-256:
+`0f1cc3f7ecdd8a037a57c6c48d9d8921391be4cbce3fa9f13c3e3a2e1253c667`.
+
+Published cell-mask SHA-256 was identical before and after:
+`0a3e8b79ed2e8da1df6731c8fcd4be10a56e0cce241c89ae47f42cd193497b41`.
+The published stitching-statistics checksum was also unchanged:
+`bac2a39ebdbd2e374a0db5026f9c1ac51b50c6d27e129cf9475f79f1545666b4`.
+
+The full report and prediction were preserved on Dwight under
+`$MERXEN_ANNOTATION_DEV_DIR/hitl_acceptance/2026-10-19/hitl0-HD1-t44-rs5osM/`.
+The Nextflow task work directory is
+`$MERXEN_TASK_TMP_DIR/hitl0-acceptance.rs5osM/work/15/529b75*/`.
+The task work directory is temporary; the numerical record above remains in the
+repository. Reproduction commands are in the
+[testing guide](../hitl/testing-guide.md).
+
+## Code checks: passed
+
+The full Linux suite in Dwight's existing CI environment passed 761 tests, with
+3 slow tests deselected. The final acceptance harness passed all 12 focused tests,
+including actual Nextflow previews and output-path protection through symlinks.
+Ruff lint/format checks and mypy passed. The full-suite environment was reused;
+installation from the updated dependency lock remains covered by PR CI.
+Container validation is deferred as recorded below.
+
+## Refreshed container: deferred
+
+The user confirmed that HITL-0 acceptance uses Dwight's existing Conda path and
+that container validation is deferred. The repository's container profile runs
+Apptainer SIF images; Docker daemon access is not a pipeline requirement. The
+previous request for a user-run Docker build and smoke test was withdrawn.
+
+Neither Apptainer nor Singularity is on Dwight's current PATH. No Docker access,
+group membership, socket permissions or container runtime installation was
+changed. The updated CUDA 13.0 Dockerfile remains an unvalidated build recipe;
+the site's existing CUDA 12.6 SIF has not been refreshed for the new pins. A
+future container check must validate a refreshed image through Apptainer.
+
+## Confirmed HITL-1 behavior
+
+- Preserve reuse of older stock outputs marked `unverified`; do not require
+  their regeneration.
+- Require matching verified provenance for custom-model reuse.
+- Protect `$MERXEN_RESULTS_ROOT/` and its symlink aliases from custom-model
+  writes; custom arms use separate output directories.
+- Use the passed Conda GPU check for HITL-0 acceptance; defer container
+  validation. Complete PR CI and merge before implementing HITL-1 from `main`.

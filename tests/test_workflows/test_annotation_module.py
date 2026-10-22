@@ -301,6 +301,7 @@ def test_no_gpu_lock_or_gpu_queue_on_the_annotation_processes() -> None:
         "CELLPOSE_NUCLEI_SEGMENT",
         "ALIGN",
         "CLUSTERING_SQUIDPY_COMPUTE",
+        "GASTON_TRAIN",
     }
     for path in (ANNOTATION_CONFIG, DWIGHT_ANNOTATION_CONFIG):
         text = path.read_text()
@@ -1722,6 +1723,7 @@ def _refs(paths: list[str]) -> list[tuple[str, str | None]]:
 # Channel logic
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_prep_runs_once_per_unique_species_reference_and_panel(
     harness: dict[str, Any],
@@ -1746,6 +1748,7 @@ def test_prep_runs_once_per_unique_species_reference_and_panel(
     assert failed == [f"failing_reference:{_hash('b')[:12]}"]
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_each_branch_is_released_with_exactly_its_required_bundles(
     harness: dict[str, Any],
@@ -1775,6 +1778,7 @@ def test_each_branch_is_released_with_exactly_its_required_bundles(
     assert released[("F4", "proseg_hybrid")]["refs"] == []
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_a_failed_prep_drops_only_the_branches_that_need_it(
     harness: dict[str, Any],
@@ -1785,6 +1789,7 @@ def test_a_failed_prep_drops_only_the_branches_that_need_it(
     assert ("F1", "proseg_hybrid") in released and ("F2", "proseg_hybrid") in released
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_prep_resources_follow_the_panel_size(harness: dict[str, Any]) -> None:
     rows = {row["tag"]: row for row in _prep_rows(harness, "FIXTURE_BUNDLES")}
@@ -1796,6 +1801,7 @@ def test_prep_resources_follow_the_panel_size(harness: dict[str, Any]) -> None:
     assert region["memory"] == "64 GB" and region["time"] == "8h"
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_prepared_references_emit_map_inputs_after_their_bundles(
     harness: dict[str, Any],
@@ -1853,6 +1859,7 @@ def test_prepared_references_emit_map_inputs_after_their_bundles(
     assert len(rows) == 6
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_prep_stub_writes_a_valid_bundle_ref(harness: dict[str, Any]) -> None:
     from merxen.annotation.store import BundleRef
@@ -1871,6 +1878,7 @@ def test_prep_stub_writes_a_valid_bundle_ref(harness: dict[str, Any]) -> None:
 # Groovy helpers
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 @pytest.mark.parametrize("species", ["human", "mouse"])
 def test_annotation_config_json_validates_in_python(
@@ -1894,6 +1902,7 @@ def test_annotation_config_json_validates_in_python(
         assert config.panel.gene_tables == {}
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_annotation_config_json_follows_the_params(harness: dict[str, Any]) -> None:
     config = AnnotationConfig.model_validate(_value(harness, "config_human_custom"))
@@ -1909,6 +1918,7 @@ def test_annotation_config_json_follows_the_params(harness: dict[str, Any]) -> N
     assert config.resolvability.enabled is False
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_panel_arguments(harness: dict[str, Any]) -> None:
     assert _value(harness, "panel_args_gene_list") == (
@@ -1932,6 +1942,7 @@ def test_panel_arguments(harness: dict[str, Any]) -> None:
     assert "Unknown annotation panel source" in _error(harness, "panel_args_unknown")
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_prep_arguments(harness: dict[str, Any]) -> None:
     args = _value(harness, "prep_args_panel").split()
@@ -1956,6 +1967,7 @@ def test_prep_arguments(harness: dict[str, Any]) -> None:
     assert "--panel-genes" not in region and "--source" not in region
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_map_spec_reads_species_status_and_panel_size(harness: dict[str, Any]) -> None:
     assert _value(harness, "map_spec_per_platform") == {
@@ -1973,6 +1985,7 @@ def test_map_spec_reads_species_status_and_panel_size(harness: dict[str, Any]) -
     assert refused["n_required"] == 0 and refused["n_panel_genes"] == 0
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_map_arguments(harness: dict[str, Any]) -> None:
     """MAP maps exactly PREP's refs, on the clustering run's table cells."""
@@ -2006,6 +2019,7 @@ def test_map_arguments(harness: dict[str, Any]) -> None:
     assert "--bundle-ref" not in refused and "--allow-refused-panel" in refused
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_resolve_only_settings_never_reach_the_map_config(
     harness: dict[str, Any],
@@ -2029,6 +2043,7 @@ def test_resolve_only_settings_never_reach_the_map_config(
         assert config.allow_single_method is expected
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_resolve_spec_carries_the_config_and_the_rules_fingerprint(
     harness: dict[str, Any],
@@ -2041,6 +2056,7 @@ def test_resolve_spec_carries_the_config_and_the_rules_fingerprint(
     assert spec["rules_fingerprint"] == _value(harness, "fingerprint_base")
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_resolve_arguments(harness: dict[str, Any]) -> None:
     """RESOLVE reads the staged inputs and exactly the refs MAP mapped with."""
@@ -2109,6 +2125,7 @@ def _python_rules_fingerprint(root: Path) -> str:
     return digest.hexdigest()
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_resolve_rules_fingerprint_follows_the_rule_sources(
     harness: dict[str, Any],
@@ -2155,6 +2172,7 @@ def _python_sources_fingerprint(root: Path, sources: list[str]) -> str:
     return digest.hexdigest()
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_compute_spec_carries_suffix_policy_and_hierarchy_fingerprint(
     harness: dict[str, Any],
@@ -2179,6 +2197,7 @@ def test_compute_spec_carries_suffix_policy_and_hierarchy_fingerprint(
     assert _value(harness, "compute_spec_mouse_empty_suffix")["table_key_suffix"] == ""
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_compute_arguments_select_map_first_on_the_staged_labels(
     harness: dict[str, Any],
@@ -2195,6 +2214,7 @@ def test_compute_arguments_select_map_first_on_the_staged_labels(
     ]
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_compute_stages_the_resolve_outputs_as_files(harness: dict[str, Any]) -> None:
     """Label tables, manifests and the pair summary; never the directory."""
@@ -2208,6 +2228,7 @@ def test_compute_stages_the_resolve_outputs_as_files(harness: dict[str, Any]) ->
     ]
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_registration_qc_files_are_the_top_level_checks(
     harness: dict[str, Any],
@@ -2225,6 +2246,7 @@ def test_registration_qc_files_are_the_top_level_checks(
     assert _value(harness, "registration_qc_files_none") == []
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_alignment_files_need_both_align_outputs(harness: dict[str, Any]) -> None:
     files = [Path(path).name for path in _value(harness, "alignment_files")]
@@ -2232,6 +2254,7 @@ def test_alignment_files_need_both_align_outputs(harness: dict[str, Any]) -> Non
     assert _value(harness, "alignment_files_half") == []
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_map_reuse_dir_is_the_published_map_output(harness: dict[str, Any]) -> None:
     reuse = Path(_value(harness, "map_reuse_dir"))
@@ -2246,6 +2269,7 @@ def test_map_reuse_dir_is_the_published_map_output(harness: dict[str, Any]) -> N
     assert _value(harness, "map_reuse_dir_off") is None
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_reference_store_defaults_under_outdir(harness: dict[str, Any]) -> None:
     store = Path(_value(harness, "store_default"))
@@ -2255,6 +2279,7 @@ def test_reference_store_defaults_under_outdir(harness: dict[str, Any]) -> None:
     )
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_prepare_only_preflight(harness: dict[str, Any]) -> None:
     assert _value(harness, "preflight_ready") == []
@@ -2286,6 +2311,7 @@ def test_prepare_only_preflight(harness: dict[str, Any]) -> None:
     assert "hippocampus" in region and "OD-C7" in region
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_prep_requests_depend_only_on_the_bundle_key(harness: dict[str, Any]) -> None:
     """PREP's val input is fixed by its key, whichever pair asks first."""
@@ -2304,6 +2330,7 @@ def test_prep_requests_depend_only_on_the_bundle_key(harness: dict[str, Any]) ->
     assert region["bundle"]["panel_hash"] is None and region["files"] == []
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_bundle_bookkeeping_helpers(harness: dict[str, Any]) -> None:
     assert _value(harness, "ordered") == ["a.json", "b.json"]
@@ -2349,6 +2376,7 @@ def _host_free_config(tmp_path: Path, **params: str) -> Path:
 
 
 @pytest.mark.slow
+@pytest.mark.nextflow
 @needs_nextflow
 def test_prepare_only_stub_run_builds_bundles_and_runs_no_stage(tmp_path: Path) -> None:
     """Two paired rows x two segmentations: 4 panels, 2 bundles, nothing else."""
@@ -2486,6 +2514,7 @@ BundleRef(
 
 
 @pytest.mark.slow
+@pytest.mark.nextflow
 @needs_nextflow
 def test_prepare_only_runs_the_real_prep_script(tmp_path: Path) -> None:
     """Without -stub-run: the PREP script checks ctm and passes its arguments.
@@ -2603,6 +2632,7 @@ def test_prepare_only_runs_the_real_prep_script(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
+@pytest.mark.nextflow
 @needs_nextflow
 def test_prepare_only_refuses_a_run_without_a_gene_list(tmp_path: Path) -> None:
     assert NEXTFLOW is not None

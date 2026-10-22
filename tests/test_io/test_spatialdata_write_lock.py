@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import fcntl
 import multiprocessing
+import threading
 from multiprocessing.synchronize import Event
 from pathlib import Path
 
@@ -94,6 +95,7 @@ def _stage_like_nextflow(store: Path, work_dir: Path) -> Path:
     return staged
 
 
+@pytest.mark.store_lock
 def test_writers_through_two_staged_symlinks_serialize(tmp_path: Path) -> None:
     store = tmp_path / "results" / "P1" / "merscope" / "latest" / "latest.zarr"
     store.mkdir(parents=True)
@@ -103,6 +105,7 @@ def test_writers_through_two_staged_symlinks_serialize(tmp_path: Path) -> None:
     _assert_writers_serialize(first, second)
 
 
+@pytest.mark.store_lock
 def test_writers_through_symlinked_parent_serialize(tmp_path: Path) -> None:
     real_results = tmp_path / "storage" / "results"
     store = real_results / "P1" / "merscope" / "latest" / "latest.zarr"
@@ -173,3 +176,43 @@ def test_store_not_yet_written_gets_the_lock_it_will_keep(tmp_path: Path) -> Non
     )
     assert spatialdata_write_lock_path(dangling) == before
     assert before == future_store.resolve().parent / "latest.zarr.merxen-write.lock"
+
+
+def test_nested_acquisition_raises_instead_of_deadlocking(tmp_path: Path) -> None:
+    # The flock is taken on a file opened per call, and a second open of that
+    # file conflicts with the first even in one process: a nested acquisition by
+    # the holding thread would wait for itself forever.
+    # The nesting runs in a daemon thread so that, if the guard ever regresses,
+    # the test fails after a bounded wait instead of hanging the whole run.
+    store = tmp_path / "results" / "latest.zarr"
+    store.mkdir(parents=True)
+    staged = _stage_like_nextflow(store, tmp_path / "work" / "aa")
+    outcome: dict[str, BaseException | Path] = {}
+
+    def nest() -> None:
+        try:
+            with spatialdata_write_lock(store) as lock_path:
+                with (
+                    pytest.raises(RuntimeError, match="already holds"),
+                    spatialdata_write_lock(staged),
+                ):
+                    pass
+                # The refused nested call must not have released the outer lock.
+                with (
+                    lock_path.open("a", encoding="utf-8") as probe,
+                    pytest.raises(BlockingIOError),
+                ):
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            outcome["lock_path"] = lock_path
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the test thread
+            outcome["error"] = exc
+
+    nesting = threading.Thread(target=nest, daemon=True)
+    nesting.start()
+    nesting.join(timeout=_STARTUP_TIMEOUT_SECONDS)
+    assert not nesting.is_alive(), "the nested acquisition deadlocked"
+    if "error" in outcome:
+        raise outcome["error"]
+
+    with spatialdata_write_lock(staged) as reacquired:
+        assert reacquired == outcome["lock_path"]

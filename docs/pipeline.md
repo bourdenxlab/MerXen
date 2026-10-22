@@ -98,11 +98,17 @@ for the full list of simplifications. The graph below is the precise version.
            │ MAPMYCELLS        │  local reference-based
            │                   │  cell type assignment
            └───────────────────┘
+                  │
+                  ▼
+           ┌───────────────────┐
+           │ GASTON            │  optional native-coordinate
+           │                   │  domains and raw isodepth
+           └───────────────────┘
 ```
 
 Rows inherit `analysis_mode`, `enable_alignment`, `analysis_segmentation`,
 `mecr_enabled`,
-object-distance settings, `start_stage`, `stop_stage`, and `only_stage` from
+object-distance settings, GASTON settings, `start_stage`, `stop_stage`, and `only_stage` from
 Nextflow params unless those
 columns are set in the samplesheet. For rows with `analysis_mode=paired`, both
 platforms traverse `BUILD_SPATIALDATA → SEGMENT → ENRICH →
@@ -132,6 +138,14 @@ paired-only `ALIGN`, `MATERIALIZE_ALIGNMENT`, `ALIGN_QC`, and `COMPARE` are
 inactive for that row.
 `MAPMYCELLS` consumes the AnnData files written by
 `CLUSTERING_SQUIDPY` and is opt-in because it requires local reference files.
+GASTON independently joins the reusable terminal token for each pair, which is
+completed only after every expected platform/segmentation branch reaches that
+pair's last active existing stage. The token never waits for unrelated pairs
+or the distance cohort summary. GASTON adds any requested segmentation missing
+from the normal analysis selection to clustering only; visualization,
+spatial-gene analysis, MapMyCells, and other branches do not fan out to it.
+Published-output mode bypasses this token and validates the clustered H5AD and
+latest SpatialData table directly.
 
 ## Channel keys and joins
 
@@ -171,6 +185,11 @@ For a samplesheet row with `pair_id=EXAMPLE01`:
 | 13b | `DISTANCE_FROM_OBJECT_COHORT` × platform | `merxen distance-from-object-cohort` | all pair-level platform pseudobulks | paired PyDESeq2 results for each segmentation branch |
 | 14 | `MAPMYCELLS` × 1 | `merxen mapmycells` | clustered `.h5ad` files from `clustering_squidpy_out/` | `mapmycells_out/` (query `.h5ad`, CSV/JSON assignments, annotated `.h5ad`) |
 | 15 | `MENDER_PREPARE` → `MENDER_COMPUTE` → `MENDER_FINALIZE` → `MENDER_IMPORT` × platform/segmentation | internal isolated entry points | clustered H5AD + clustered SpatialData table + explicit native shape | standalone context/domain artifacts plus `mender_domain` in the clustered table, when enabled |
+| 16a | `GASTON_PREPARE` × platform/segmentation | `python -m merxen.gaston_stages prepare` | clustered H5AD raw counts + native shape in latest zarr | checksummed sparse input bundle and native-coordinate QC |
+| 16b | `GASTON_GLM_PCA` × platform/segmentation | `python -m merxen.gaston_stages glmpca` | portable count bundle | GLM-PCA features and convergence metadata |
+| 16c | `GASTON_TRAIN` × restart | `python -m merxen.gaston_stages train` | GLM-PCA features + native coordinates | independently resumable model, loss history, and seed manifest |
+| 16d | `GASTON_POSTPROCESS` × platform/segmentation | `python -m merxen.gaston_stages postprocess` | all restart results | selected model/K, per-cell domains/isodepth, diagnostics, and plots |
+| 16e | `GASTON_IMPORT` × platform/segmentation | `python -m merxen.gaston_stages import` | standalone annotations + clustered H5AD/zarr | annotated H5AD and locked clustered-table merge |
 
 In single-platform mode, platform-local steps run once per row, paired-only
 alignment and comparison are skipped, and visualization/spatial-gene/clustering
@@ -187,6 +206,13 @@ Two independent reuse paths and one Nextflow cache:
   `xenium_spatialdata_path` at an existing built zarr. `build_spatialdata`
   short-circuits to that artifact unless `--force_spatialdata_build true` is
   passed. Implemented in [src/merxen/io/builders/pipeline.py:14](../src/merxen/io/builders/pipeline.py#L14).
+  A cached MERSCOPE zarr records whether MERSCOPE bead removal was applied
+  (root attribute `merxen_image_preprocessing`); a cache that disagrees with the
+  requested `merscope_bead_removal` or `merscope_bead_removal_fill` setting is
+  refused with an error rather than reused, and Cellpose masks computed from
+  the other image, and the ProSeg latest zarr built from them, are refused through
+  sidecars next to the masks and in the latest zarr root. See
+  [bead removal caching](stages/spatialdata-build.md#caching-and-how-to-rebuild).
 - **Published-output stage starts.** `--start_stage`, `--stop_stage`, and
   `--only_stage` select a contiguous process range without invoking earlier
   stages. When an upstream stage is skipped, the workflow reads the expected

@@ -21,6 +21,7 @@ from spatialdata.models import ShapesModel, TableModel
 from merxen.alignment import manifest as alignment_manifest
 from merxen.config import CorticalDepthConfig, CorticalDepthTableConfig
 from merxen.cortical_depth import frames
+from merxen.cortical_depth import pipeline as depth_pipeline
 from merxen.cortical_depth.frames import (
     ALIGNED_ELEMENT,
     DEPTH_PROVENANCE_UNS_KEY,
@@ -310,6 +311,7 @@ def test_config_boundary_frame_defaults_to_native_and_rejects_unknown(
         )
 
 
+@pytest.mark.integration
 def test_mirrored_aligned_frame_does_not_leak_into_native_depth(
     tmp_path: Path,
 ) -> None:
@@ -341,6 +343,7 @@ def test_mirrored_aligned_frame_does_not_leak_into_native_depth(
     assert summary["boundary_frame"] == "native"
 
 
+@pytest.mark.integration
 def test_aligned_boundaries_read_the_aligned_cells_and_give_the_same_depth(
     tmp_path: Path,
 ) -> None:
@@ -397,6 +400,7 @@ def test_aligned_boundaries_without_an_aligned_element_are_refused(
         )
 
 
+@pytest.mark.integration
 def test_xenium_table_coordinates_and_region_are_unchanged(tmp_path: Path) -> None:
     """Xenium keeps obsm['spatial'] and its native region on write-back."""
     zarr_path = _write_store(
@@ -433,6 +437,7 @@ def test_xenium_table_coordinates_and_region_are_unchanged(tmp_path: Path) -> No
     }
 
 
+@pytest.mark.integration
 def test_merscope_write_back_keeps_the_native_region_and_records_the_frame(
     tmp_path: Path,
 ) -> None:
@@ -472,6 +477,34 @@ def test_merscope_write_back_keeps_the_native_region_and_records_the_frame(
     assert ALIGNED in store.shapes
 
 
+def test_depth_write_back_serializes_with_another_store_writer(
+    tmp_path: Path,
+    store_lock_contention: Any,
+) -> None:
+    """The write-back waits for a writer holding the store lock through another
+    staged symlink, and keeps the lock from its read until the table is written,
+    so neither writer's table columns are lost."""
+    zarr_path = _write_store(tmp_path, platform="MERSCOPE", attrs=MOVING_MANIFEST)
+    boundaries = _write_boundaries(tmp_path / "native.geojson", mirrored=False)
+
+    store_lock_contention.run(
+        lambda staged: run_cortical_depth(
+            _config(
+                tmp_path / "out",
+                boundaries,
+                zarr_path=staged,
+                write_spatialdata_table=True,
+            )
+        ),
+        zarr_path,
+        reads=[(sd, "read_zarr")],
+        persists=[(depth_pipeline, "write_or_replace_element")],
+    )
+
+    assert "laplace_depth" in sd.read_zarr(zarr_path).tables[TABLE].obs.columns
+
+
+@pytest.mark.integration
 def test_frame_check_flags_a_wrong_boundary_frame_declaration(
     tmp_path: Path,
 ) -> None:

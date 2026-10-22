@@ -21,7 +21,13 @@ import tifffile
 from scipy import ndimage
 from shapely.geometry import MultiPolygon, Polygon
 
-from merxen.config import DatasetConfig, MerscopeBuildConfig, SegmentationConfig
+from merxen.config import (
+    DatasetConfig,
+    MerscopeBeadRemovalConfig,
+    MerscopeBuildConfig,
+    SegmentationConfig,
+)
+from merxen.io.bead_removal.provenance import read_image_preprocessing_attr
 from merxen.io.builders.merscope import write_merscope_spatialdata
 from merxen.io.builders.vzg2 import (
     Vzg2Archive,
@@ -576,6 +582,90 @@ def test_canonical_merscope_export_keeps_zero_offset(
     assert (x_transform[2], y_transform[2]) == (0.0, 0.0)
     assert len(centroids_um) == len(centres)
     assert np.abs(_nearest_offsets(centroids_um, centres)).max() < 0.5
+
+
+def test_raw_tiff_build_records_the_image_preprocessing_in_the_zarr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The written zarr root carries the record, readable without loading it."""
+    monkeypatch.setitem(
+        sys.modules, "spatialdata_io", types.ModuleType("spatialdata_io")
+    )
+    raw_dir = tmp_path / "region_R1"
+    images_dir = raw_dir / "images"
+    images_dir.mkdir(parents=True)
+    for stain in ("PolyT", "DAPI"):
+        tifffile.imwrite(
+            images_dir / f"mosaic_{stain}_z0.tif",
+            np.full((_MOSAIC_PX, _MOSAIC_PX), 500, dtype=np.uint16),
+        )
+    (images_dir / "micron_to_mosaic_pixel_transform.csv").write_text(
+        "2.0 0.0 0.0\n0.0 2.0 0.0\n0.0 0.0 1.0\n"
+    )
+    _write_transcripts(raw_dir, _CELL_CENTRES_UM + np.array([15.0, 20.0]))
+    zarr_path = tmp_path / "source.zarr"
+
+    write_merscope_spatialdata(
+        input_path=raw_dir,
+        output_path=zarr_path,
+        build_config=MerscopeBuildConfig(z_layers=[0]),
+    )
+
+    record = read_image_preprocessing_attr(zarr_path)
+    assert record is not None
+    assert record["source"] == "raw_tiff"
+    assert record["z_layers"] == [0]
+    assert record["stains"] == ["DAPI", "PolyT"]
+    assert record["bead_removal"] == {"enabled": False, "fill": {"enabled": False}}
+
+
+def test_bead_removal_is_refused_for_a_vzg2_archive(tmp_path: Path) -> None:
+    """A VZG2 archive has no bead plane and no z stack to correct."""
+    archive = _write_synthetic_vzg2(tmp_path / "source.vzg2")
+    output_path = tmp_path / "source.zarr"
+
+    with pytest.raises(ValueError, match="raw z-plane TIFFs"):
+        write_merscope_spatialdata(
+            input_path=archive,
+            output_path=output_path,
+            build_config=MerscopeBuildConfig(
+                bead_removal=MerscopeBeadRemovalConfig(enabled=True)
+            ),
+        )
+
+    assert not output_path.exists()
+
+
+def test_bead_removal_is_refused_by_the_vzg2_writer_itself(tmp_path: Path) -> None:
+    """Callers of the VZG2 writer directly get the same refusal."""
+    archive = _write_synthetic_vzg2(tmp_path / "source.vzg2")
+
+    with pytest.raises(ValueError, match="raw z-plane TIFFs"):
+        write_vzg2_spatialdata(
+            input_path=archive,
+            output_path=tmp_path / "source.zarr",
+            build_config=MerscopeBuildConfig(
+                bead_removal=MerscopeBeadRemovalConfig(enabled=True)
+            ),
+        )
+
+
+def test_disabled_bead_removal_still_builds_from_a_vzg2_archive(
+    tmp_path: Path,
+) -> None:
+    """A disabled request is no different from none for VZG2."""
+    archive = _write_synthetic_vzg2(tmp_path / "source.vzg2")
+    output_path = tmp_path / "source.zarr"
+
+    write_merscope_spatialdata(
+        input_path=archive,
+        output_path=output_path,
+        build_config=MerscopeBuildConfig(bead_removal=MerscopeBeadRemovalConfig()),
+    )
+
+    assert output_path.exists()
+    assert read_image_preprocessing_attr(output_path) is None
 
 
 def _write_synthetic_vzg2(

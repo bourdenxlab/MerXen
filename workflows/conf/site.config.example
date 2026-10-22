@@ -3,11 +3,12 @@
  * workflows/conf/site.config (gitignored: never commit the real one) and
  * replace the placeholders with this site's locations.
  *
- * nextflow.config includes it after conf/annotation.config. It is found at
- * $MERXEN_SITE_CONFIG, else at conf/site.config beside this template; an
- * unset or empty variable means "look beside it", and 'none' (or /dev/null)
- * means "no site config on purpose" (docs/local-configuration.md). A variable
- * naming a file that does not exist makes Nextflow fail to parse the config.
+ * nextflow.config includes it after its params block and conf/annotation.config.
+ * It is found at $MERXEN_SITE_CONFIG, else at conf/site.config beside this
+ * template; an unset or empty variable means "look beside it", and 'none' (or
+ * /dev/null) means "no site config on purpose" (docs/local-configuration.md). A
+ * variable naming a file that does not exist makes Nextflow fail to parse the
+ * config.
  *
  * It may only set params that nextflow.config declares (a test checks), and
  * the Dwight params belong in conf/dwight.site.config instead (the two files

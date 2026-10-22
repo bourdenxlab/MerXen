@@ -513,6 +513,7 @@ def _real_environment() -> dict[str, str]:
     }
 
 
+@pytest.mark.nextflow
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
 def test_guard_passes_a_mouse_launch_on_the_dwight_profile(
     example_site_env: dict[str, str],
@@ -539,6 +540,7 @@ def test_guard_passes_a_mouse_launch_on_the_dwight_profile(
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.nextflow
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
 def test_guard_names_only_the_known_ssd1_defaults_of_dwight(
     example_site_env: dict[str, str],
@@ -565,6 +567,7 @@ def test_guard_names_only_the_known_ssd1_defaults_of_dwight(
     }
 
 
+@pytest.mark.nextflow
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
 def test_guard_still_refuses_the_ssd1_human_sources_of_dwight(
     example_site_env: dict[str, str],
@@ -818,6 +821,7 @@ def test_guard_stops_on_a_site_variable_naming_a_missing_file(
     assert not (stub_nextflow.parent / "args.txt").exists()
 
 
+@pytest.mark.nextflow
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
 def test_guard_checks_what_the_launch_resolves_with_its_site_configs(
     example_site_env: dict[str, str],

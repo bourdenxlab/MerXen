@@ -3,7 +3,7 @@
 The samplesheet is a CSV with one row per biological sample or adjacent-section
 pair. By default, rows inherit `--analysis_mode`, `--enable_alignment`,
 `--analysis_segmentation`, `--mecr_enabled`, spatial-gene-analysis settings,
-object-distance settings, MENDER enablement/segmentations, `--start_stage`,
+object-distance settings, MENDER and GASTON settings, `--start_stage`,
 `--stop_stage`, and `--only_stage`
 from the Nextflow command or config, but each row can override those settings
 with optional columns. In the default `analysis_mode=paired`, a row must contain
@@ -19,6 +19,12 @@ required. A template lives at
 > DAPI or PolyT projection intensities. This setting is MERSCOPE-specific;
 > Xenium morphology images are supplied pre-projected and do not use
 > `merscope_z_range`.
+>
+> Data from older, bead-coated coverslips can instead have the beads
+> subtracted from PolyT and DAPI before the projection with the optional
+> `merscope_bead_removal` column; see
+> [MERSCOPE bead removal](stages/spatialdata-build.md#merscope-bead-removal-optional).
+> That also requires a range starting at `1` or later.
 
 ## Columns
 
@@ -37,6 +43,28 @@ required. A template lives at
 | `cortical_depth_enabled` | no | Row-level cortical-depth switch. Blank inherits `--cortical_depth_enabled`. |
 | `distance_from_object_enabled` | no | Row-level polygon-distance switch. Blank inherits `--distance_from_object_enabled`. |
 | `distance_from_object_segmentations` | no | Comma-separated object-distance branches: `proseg`, `original`, and/or `cellpose`; optional `proseg_geometry_assignment` and `proseg_hybrid` are also accepted when present. Legacy names remain aliases. Blank uses the three defaults. |
+| `gaston_enabled` | no | Row-level GASTON switch. Blank inherits `--gaston_enabled`, which defaults to `false`. |
+| `gaston_segmentations` | no | Independent GASTON branch set: `reseg`, `original_seg`, `proseg_mask`, `proseg_hybrid`, a comma-separated subset, or `all`. Blank inherits the default `proseg_hybrid`; it never changes `analysis_segmentation`. |
+| `gaston_use_gpu` | no | Train GASTON on CUDA. Blank inherits the profile setting (true on Dwight). |
+| `gaston_n_restarts` | no | Restart count; seeds are `0..n-1`. |
+| `gaston_epochs` | no | Epochs per restart. |
+| `gaston_checkpoint_interval` | no | Training checkpoint interval. |
+| `gaston_hidden_spatial` | no | Comma-separated positive spatial-network hidden widths, for example `"20,20"`. |
+| `gaston_hidden_expression` | no | Comma-separated positive expression-network hidden widths. |
+| `gaston_optimizer` | no | Optimizer passed to GASTON; defaults to `adam`. |
+| `gaston_glmpca_dimensions` | no | GLM-PCA feature count. |
+| `gaston_glmpca_penalty` | no | GLM-PCA penalty. |
+| `gaston_glmpca_iterations` | no | Initial GLM-PCA iteration budget; whole acquisitions may continue to the 1,000-iteration convergence ceiling. |
+| `gaston_domain_mode` | no | `auto` or `fixed`. |
+| `gaston_num_domains` | no | Direct K override; required for fixed mode. |
+| `gaston_min_domains` | no | Automatic K search lower bound. |
+| `gaston_max_domains` | no | Automatic K search upper bound. |
+| `gaston_domain_buckets` | no | Bucket count for likelihood calculation. |
+| `gaston_auto_k_fallback` | no | Optional K used only when automatic knee detection returns no knee. |
+| `gaston_write_spatialdata_table` | no | Import owned GASTON columns into the clustered SpatialData table. |
+| `gaston_keep_seed_models` | no | Retain every seed model in published output. |
+| `gaston_keep_checkpoints` | no | Checkpoint publication policy: `none`, `best`, or `all`. |
+| `gaston_max_genes` | no | Maximum eligible non-control panel genes; defaults to `10000`. |
 | `mender_enabled` | no | Row-level MENDER switch. Blank inherits `--mender_enabled`, which defaults to `false`. |
 | `mender_segmentations` | no | One MENDER branch, a comma-separated subset, or `all`. Blank inherits `--mender_segmentations`, which defaults to `proseg_hybrid`. |
 | `clustering_squidpy_mode` | no | This row's clustering mode: `legacy` or `map_first`. Blank follows the run (`--clustering_squidpy_mode`, else `--clustering_squidpy_mode_human` / `_mouse`; both default to `map_first`, human since M8 and mouse since M9). Lets one run opt single datasets in or out of map-first annotation; a `legacy` row of either species logs a deprecation warning. The launch log lists every row's resolved mode. See [Map-first clustering runs](stages/annotation.md#map-first-clustering-runs-m5). |
@@ -44,7 +72,8 @@ required. A template lives at
 | `merscope_dir` | required for MERSCOPE modes if no cache | Path to the raw MERSCOPE region export folder, a direct `.vzg2` archive, or a folder containing exactly one `.vzg2`. Canonical raw folders retain transcript points. A VZG2-only build recovers the Vizualizer image, original cell polygons, centroids, volumes, and cell-by-gene table, but not packed transcript coordinates. |
 | `merscope_spatialdata_path` | required for MERSCOPE modes if no raw dir | Path to an existing (or desired) reusable MERSCOPE SpatialData zarr. If it exists, the build step is **skipped** unless `--force_spatialdata_build true` is passed to Nextflow. For a downstream-only restart, an explicit path overrides `${outdir}/${pair_id}/merscope/latest/latest_spatialdata.zarr` and must point to the durable enriched latest zarr required by that stage. |
 | `merscope_image_prefix` | no | Prefix used to match z-plane image keys when more than one run is present. |
-| `merscope_z_range` | no | Inclusive raw-image z-layer range as `start-end`. Set it explicitly and normally start at `1` (for example, `1-7`) to exclude the MERSCOPE plane-0 fiducial beads. The historical fallback is `0-6`; do not rely on it for standard MERSCOPE exports. Xenium is pre-projected and ignores this field. |
+| `merscope_z_range` | no | Inclusive raw-image z-layer range as `start-end`. Set it explicitly and normally start at `1` (for example, `1-7`) to exclude the MERSCOPE plane-0 fiducial beads. The historical fallback is `0-6`; do not rely on it for standard MERSCOPE exports. With `merscope_bead_removal` on, it must start at `1` or later. Xenium is pre-projected and ignores this field. |
+| `merscope_bead_removal` | no | Row-level switch for removing coverslip fiducial beads from the PolyT and DAPI planes before the max projection: `true` or `false` (also `yes`/`no`, `1`/`0`). Blank inherits `--merscope_bead_removal`, which defaults to `false`. When on, a row that projects raw TIFFs (`merscope_dir` set) needs `merscope_z_range` to start at plane `1` or later (plane `0` is read for detection only) and not end above `7`, and `merscope_dir` must be a directory with z-plane TIFFs (a `.vzg2` archive is refused); a row that only reuses a cached zarr projects nothing, so its z range is not checked. A cached `merscope_spatialdata_path` zarr built with another setting is refused, not reused, and so is the published source zarr when a later `start_stage` skips the build; see [the cache guard](stages/spatialdata-build.md#caching-and-how-to-rebuild). Ignored in Xenium-only rows. |
 | `merscope_transform_path` | no | Override path to the `micron_to_mosaic_pixel_transform.csv`. If not set, MerXen looks inside `merscope_dir`. |
 | `merscope_channels` | no | Comma-separated channel names for Cellpose. Defaults to `DAPI,PolyT`. |
 | `merscope_voxel_layers` | no | ProSeg voxel layer count for MERSCOPE. Defaults to `7` (from `nextflow.config`). |
@@ -160,6 +189,14 @@ The row-level `analysis_mode` is enough to run this alongside paired or
 MERSCOPE-only rows in the same file. MERSCOPE-only rows are analogous: provide
 `merscope_dir` or `merscope_spatialdata_path` and set `analysis_mode=merscope`.
 
+MERSCOPE-only row on a beaded coverslip, with bead removal on for this row
+only (planes `1`-`6`, raw TIFFs):
+
+```csv
+pair_id,analysis_mode,merscope_dir,merscope_z_range,merscope_bead_removal
+EXAMPLE05,merscope,/path/to/merscope/EXAMPLE05,1-6,true
+```
+
 Cortical-depth example for a Xenium-only row:
 
 ```csv
@@ -177,6 +214,16 @@ BLOCK_01,xenium,true,"proseg,original,cellpose",distance_from_object,/path/to/BL
 For paired cohorts, `pair_id` must be the tissue-block identifier used for the
 near/far blocking factor. Give each block its own row and platform-specific
 object GeoJSON.
+
+GASTON-only example using previously published clustering outputs:
+
+```csv
+pair_id,analysis_mode,only_stage,gaston_enabled,gaston_segmentations,gaston_domain_mode,gaston_num_domains,xenium_spatialdata_path
+BLOCK_02,xenium,gaston,true,proseg_hybrid,fixed,6,/path/to/BLOCK_02_xenium.zarr
+```
+
+The workflow resolves the expected clustered H5AD from `--outdir` and verifies
+the clustered table in the latest zarr before launching any GASTON tasks.
 
 ## Full example
 
@@ -206,5 +253,8 @@ visualization stage, reading prior outputs from `--outdir`.
   `detected_transcripts.csv` or `detected_transcripts.parquet` can run the full
   pipeline even when the mosaic TIFFs are absent. MerXen reads the image from
   VZG2 and the canonical transcript coordinates from the external table.
+- Turn `merscope_bead_removal` on only for beaded coverslips: the build fails
+  on a dataset in which it finds no beads. Do not pool corrected and
+  uncorrected samples for PolyT/DAPI intensity features.
 - Keep one samplesheet per batch. Nextflow runs all rows in parallel up to the
   executor limit.

@@ -25,7 +25,8 @@ def example_site_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     """Point both site-config variables at the tracked templates.
 
     The variables are set in ``os.environ`` for the test, so the subprocesses it
-    starts (``nextflow config``, the launch guard) inherit them.
+    starts (``nextflow config``, ``nextflow run``, the launch guard) inherit
+    them.
 
     Returns:
         Variable name to template path.
@@ -114,8 +115,7 @@ def parse_params() -> Callable[[str], dict[str, str]]:
 @pytest.fixture(scope="session")
 def workflow_config_params() -> dict[str, dict[str, str]]:
     """Return the params of each workflow config file (``PARAM_CONFIG_FILES``)."""
-    workflows = Path(__file__).resolve().parents[2] / "workflows"
     return {
-        relative: parse_config_params((workflows / relative).read_text())
+        relative: parse_config_params((WORKFLOWS_DIR / relative).read_text())
         for relative in PARAM_CONFIG_FILES
     }

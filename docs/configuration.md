@@ -11,10 +11,10 @@ MerXen configuration lives in four places:
 3. **Execution profiles** — host capacity, local software paths, hardware
    choices, concurrency, and GPU locking. The default Dwight settings live in
    [workflows/conf/dwight.config](../workflows/conf/dwight.config). The data
-   locations of a host (reference sources and stores, the task temporary
-   directory, container images and bind mounts) are in no tracked file: two
-   private, gitignored site configs hold them
-   ([Site configs](#site-configs-private-host-locations)).
+   locations of a host (reference sources, caches and stores, the Cellpose
+   model store, the task temporary directory, container images and bind
+   mounts) are in no tracked file: two private, gitignored site configs hold
+   them ([Site configs](#site-configs-private-host-locations)).
 4. **Pydantic models** — [src/merxen/config.py](../src/merxen/config.py) — the
    authoritative schema every CLI command validates its JSON config against.
 
@@ -38,9 +38,10 @@ The `MERXEN_` prefix is wired up via `model_config = {"env_prefix": "MERXEN_"}`
 in [config.py:202](../src/merxen/config.py#L202).
 
 `.env.example` also lists the location variables of this host (storage roots,
-reference stores, the evidence archive, ...), all commented out. Code reads
-them through `merxen.local_config`; a variable that is not set is an error that
-names it, never a built-in default. Docs write them as `$MERXEN_...`.
+reference stores and caches, the results root, the evidence archive, ...), all
+commented out. Code reads them through `merxen.local_config`; a variable that is
+not set is an error that names it, never a built-in default. Docs write them as
+`$MERXEN_...`.
 
 ## Nextflow parameters
 
@@ -59,7 +60,7 @@ the values):
 | File | Template | Included by | Sets |
 |------|----------|-------------|------|
 | `workflows/conf/site.config` | `site.config.example` | `nextflow.config`, so every profile | `apptainer_container`, `apptainer_bind_paths`, `clustering_squidpy_gpu_container`, `mender_container` |
-| `workflows/conf/dwight.site.config` | `dwight.site.config.example` | `conf/dwight.config`, so the `standard`, `dwight` and `local` profiles | the legacy MapMyCells / WHB sources, the annotation reference stores and sources, `task_tmp_dir`, and the task environment (`TMPDIR`, `MERXEN_ALIAS_FILE`) |
+| `workflows/conf/dwight.site.config` | `dwight.site.config.example` | `conf/dwight.config`, so the `standard`, `dwight` and `local` profiles | the legacy MapMyCells / WHB sources and caches, `annotation_gene_id_fallback_csv`, the annotation reference stores and sources, `cellpose_model_store`, `cellpose_protected_output_roots`, `task_tmp_dir`, and the task environment (`TMPDIR`, `MERXEN_ALIAS_FILE`) |
 
 Each file is found at the path in `MERXEN_SITE_CONFIG` /
 `MERXEN_DWIGHT_SITE_CONFIG`, else beside its template in `workflows/conf/`. An
@@ -75,13 +76,13 @@ checks both). In the tables below, a Dwight value written `$MERXEN_...` is the
 value of that `.env` variable, which `dwight.site.config` also holds.
 
 Without a site config several params stay `null`, and a `null` here does not
-fail by itself: `annotation_reference_store` falls back to
-`<outdir>/annotation_references` (every reference bundle is rebuilt, about 40
-minutes and 48-57 GB each, instead of reusing the store), the reference
-downloads default to on, task temporary files land on the small root disk, and
-the `apptainer` profile runs its tasks without a container. `main.nf` therefore
-stops a launch with an error in two cases, unless the variable is set to `none`
-or `/dev/null` on purpose:
+always fail by itself: the reference caches fall back to `<outdir>`,
+`annotation_reference_store` falls back to `<outdir>/annotation_references`
+(every reference bundle is rebuilt, about 40 minutes and 48-57 GB each, instead
+of reusing the store), the reference downloads default to on, task temporary
+files land on the small root disk, and the `apptainer` profile runs its tasks
+without a container. `main.nf` therefore stops a launch with an error in two
+cases, unless the variable is set to `none` or `/dev/null` on purpose:
 
 - a `standard`, `dwight` or `local` launch with no `task_tmp_dir` (no Dwight
   site config): "no Dwight site config ... set `MERXEN_DWIGHT_SITE_CONFIG`,
@@ -118,6 +119,7 @@ or `/dev/null` on purpose:
 | `enable_alignment` | `false` | Fallback row alignment switch. A non-empty samplesheet `enable_alignment` value overrides this per row; alignment only applies to paired rows. |
 | `analysis_segmentation` | `all` | Fallback downstream analysis branches after enrichment. Valid values: `all`, `both`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, `proseg_hybrid`; comma-separated combinations are accepted. `all` includes all four branches, while `both` restricts analysis to `reseg,original_seg`. A non-empty samplesheet value overrides this per row. |
 | `register_images_refine_affine` | `true` | Refine each Xenium Explorer matrix with a robust DAPI-to-DAPI affine fit before resampling registered images. The stage itself is enabled per row by `xenium_registered_images_csv`; see [stages/register-images.md](stages/register-images.md). |
+| `register_post_xenium_if_nonrigid` | `false` | Fallback switch for guarded post-Xenium IF DAPI TV-L1 refinement after the affine fit. A samplesheet value overrides this per row. |
 | `mask_image_quantification_enabled` | `true` | Insert the Cellpose-mask image quantification stage between enrichment and QC. A non-empty samplesheet `mask_image_quantification_enabled` value overrides this per row. |
 | `mecr_enabled` | species-dependent | Insert species-matched whole-brain mutually exclusive co-expression rate analysis after QC. Defaults to `true` for human and `false` for mouse; mouse may opt in to the complete WMB reference. |
 | `spatial_gene_analysis_enabled` | `true` | Insert spatial gene analysis between visualization and clustering. A non-empty samplesheet value overrides this per row; disabled rows proceed directly from visualization to clustering. |
@@ -127,7 +129,14 @@ or `/dev/null` on purpose:
 | `distance_from_object_segmentations` | `proseg, original, cellpose` | Cell-table branches for object distance. Legacy `reseg`, `original_seg`, and `proseg_mask` values remain accepted aliases. A samplesheet value may override this per row. |
 | `mender_enabled` | `false` | Enable independent per-platform/per-segmentation MENDER spatial-domain analysis. A non-empty samplesheet value may override this per row. |
 | `mender_segmentations` | `proseg_hybrid` | MENDER branches: any comma-separated subset of `reseg`, `original_seg`, `proseg_mask`, and `proseg_hybrid`, or `all`. A non-empty samplesheet value may override this per row. |
+| `gaston_enabled` | `false` | Run GASTON as an opt-in terminal stage. A non-empty samplesheet value overrides this per row. |
+| `gaston_segmentations` | `proseg_hybrid` | Independent GASTON branch selector: any segmentation, a comma-separated subset, or `all`. This does not change `analysis_segmentation`. |
 | `force_spatialdata_build` | `false` | Rebuild SpatialData zarrs even if cached. |
+| `merscope_bead_removal` | `false` | Subtract coverslip fiducial beads from the MERSCOPE PolyT and DAPI planes before the max projection. Fallback for the samplesheet column `merscope_bead_removal`; a non-empty row value overrides it. Only for raw-TIFF MERSCOPE rows on beaded coverslips, with `merscope_z_range` starting at plane `1` or later; the build fails when it finds no beads. Corrected and uncorrected samples must not be pooled for PolyT/DAPI intensity features. See [stages/spatialdata-build.md](stages/spatialdata-build.md#merscope-bead-removal-optional). |
+| `merscope_bead_removal_fill` | `true` | Also fill the residual of bead light after the subtraction (bounded, one-sided: never brighter than the subtraction, at most `eps` x the model light lower: 1.0 in hybrid mode, 0.3 in flat mode). On by default, in the hybrid mode below; `false` switches it off. Applies only to samples that have bead removal on, has no samplesheet column, and changes the cache identity: a zarr built with the other setting is refused, not reused (a zarr built before this default, without the fill, needs `false` or a rebuild). |
+| `merscope_bead_removal_fill_mode` | `hybrid` | Mode of the fill: `hybrid` (strong: it removes up to the whole model light wherever that exceeds the noise floor, with a 3 px mask dilation and no texture gate, also in tissue, so it may dim puncta near beads; it favours clean masks over faithful pixel values; runs on the CPU or the GPU) or `flat` (flat background only, inert in tissue; CPU only, a `cuda`/`auto` device request falls back to the CPU with a warning). Ignored when `merscope_bead_removal_fill` is `false`. No samplesheet column. Changes the cache identity like the fill itself. See [stages/spatialdata-build.md](stages/spatialdata-build.md#fill-modes-merscope_bead_removal_fill_mode). |
+| `merscope_bead_mask_veto` | `true` | Drop the Cellpose cell masks that are centred on a modelled bead (fitted amplitude A0 >= 400) and have no DAPI nucleus (masks at tissue DAPI level are always kept), before the masks are saved and ProSeg is seeded. On by default; `false` switches it off. It is written into the segmentation config of samples with bead removal on only (other samples keep their config and task hashes) and does nothing for a source without a bead table. Masks computed with another veto setting, or before the veto existed, are refused on reuse. No samplesheet column. See [stages/segmentation.md](stages/segmentation.md#bead-mask-veto). |
+| `merscope_bead_removal_device` | `cpu` | Device of the bead-removal correction: `cpu` (the validated numpy path, the default), `cuda` (optional GPU backend; fails at the start of the sample when there is no CUDA device or the Triton kernels do not compile) or `auto` (GPU only when CUDA is available and the host GPU lock `MERXEN_GPU_LOCK_FILE` is set, else CPU). The hybrid fill (the default) runs on either device, the flat fill on the CPU only. No samplesheet column. Changing the device re-runs the build; a cached zarr built on the other device is reused with a warning. The GPU path needs torch 2.6-2.14 and Triton 3.2-3.8 in the build environment (CUDA 12.4-13.0) and a C compiler; the first window adds about 5 s of kernel compilation. It takes the host GPU lock once around the window loop only (see [GPU lock](#bead-removal-gpu-lock)), so a build that has to wait holds its `BUILD_SPATIALDATA` slot. On container profiles the `gpu` profile passes the GPU into the build. The Dwight profile sets `cuda` (validated on the workstation with torch 2.14 and Triton 3.8). See [stages/spatialdata-build.md](stages/spatialdata-build.md#gpu-backend-optional). |
 | `merscope_allow_transform_override_mismatch` | `false` | `.vzg2` builds fail when `merscope_transform_path` places the mosaic more than 1 µm away from the archive manifest. `true` keeps the override with a warning, for archives whose `bbox_microns` is known to be wrong. See [stages/spatialdata-build.md](stages/spatialdata-build.md). |
 | `force_proseg_rerun` | `false` | Rebuild ProSeg bases from the current Cellpose/transcript inputs instead of reusing a persistent `latest_spatialdata.zarr`. Useful with `-resume` after upstream inputs were rebuilt. |
 | `qc_registration_strict` | `false` | Fail the QC task (instead of only warning in its outputs) when the segmentation registration check flags cells that do not sit on their transcripts. See [stages/qc.md](stages/qc.md#registration-check). |
@@ -144,7 +153,7 @@ Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
 `build_spatialdata`, `segment_nuclei`, `segment`, `enrich`, `register_images`,
 `mask_image_quantification`, `qc`, `mecr`, `align`, `align_qc`, `compare`,
 `visualize`, `spatial_gene_analysis`, `clustering_squidpy`,
-`compute_cortical_depth`, `distance_from_object`, `mender`, and `mapmycells`.
+`compute_cortical_depth`, `distance_from_object`, `mender`, `mapmycells`, and `gaston`.
 `register_images` is available only for rows that set
 `xenium_registered_images_csv` and process Xenium.
 `mask_image_quantification` is
@@ -158,22 +167,28 @@ only for rows whose effective `enable_alignment` value is `true`.
 `distance_from_object` is available only when the effective
 `distance_from_object_enabled` value is `true`.
 `mender` is available only when the effective `mender_enabled` value is `true`.
+`gaston` is available only when the effective `gaston_enabled` value is
+`true`. Enabling it extends the historical default stop from clustering to
+GASTON. Explicit `only_stage` selections and non-default stop stages stay exact.
 `align`, `align_qc`, and `compare` are available only when
 `analysis_mode = paired`.
 
 ### Cellpose
 
-`segment_nuclei` uses DAPI only, the Cellpose `nuclei` model, and the same
-inference/tiling settings as cell Cellpose. Both masks use the default final
+`segment_nuclei` uses DAPI only, stock Cellpose-SAM v2 (`cpsam_v2`), and the global
+inference/tiling settings. Optional per-platform cell overrides leave nuclei
+settings unchanged. Cellpose 4 ignores the former
+`model_type="nuclei"` and `model_type="cyto3"` settings; neither selected a
+different model. Both masks use the default final
 area filter of 5–400 µm². On Dwight,
 `cellpose_segment_max_forks = 1` and the shared GPU lock serialize both
 Cellpose process types.
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `cellpose_model_type` | `cyto3` | Cellpose model preset. |
+| `cellpose_model_type` | `cyto3` | Deprecated and ignored by Cellpose 4. Retained for legacy config JSON; both stages explicitly load `cpsam_v2`. |
 | `cellpose_gpu` | Dwight: `true` | Use GPU for inference. Other execution profiles choose their own hardware policy. |
-| `cellpose_diameter` | `null` | Cell diameter (px). `null` → Cellpose auto-estimates. |
+| `cellpose_diameter` | `null` | Rescale using this cell diameter (px). `null` preserves native scale with Cellpose-SAM. |
 | `cellpose_flow_threshold` | `0.7` | Cellpose flow threshold. |
 | `cellpose_cellprob` | `-5.0` | Cellpose cell probability threshold. |
 | `cellpose_tile_overlap` | `0.15` | Cellpose model's internal fractional tile overlap. |
@@ -193,6 +208,19 @@ Cellpose process types.
 | `cellpose_final_filter_chunk_mb` | `256` | Approximate row-chunk size for streaming the final mask filter. |
 | `cellpose_segment_max_forks` | Dwight: `1` | Maximum concurrent GPU Cellpose processes. |
 
+The Python `CellposeConfig.pretrained_model` defaults to `cpsam_v2` and
+`use_bfloat16` defaults to `False`, matching Nextflow. The existing Nextflow
+config JSON is unchanged: Python supplies the model default. Both inference
+stages require Cellpose 4.2.1.1 and PyTorch 2.14.x; the lock records 2.14.0,
+verified on Dwight with CUDA 13.0. Fresh inference checks the stock checkpoint's
+SHA-256 and records its model identity beside the mask. See
+[segmentation provenance](stages/segmentation.md#model-provenance).
+
+Optional `<platform>_cellpose_model` selectors and per-platform threshold/filter
+overrides are documented in [Cellpose HITL model selection](stages/cellpose-hitl.md).
+They add configuration keys only when set and require separate, protected custom
+arms with verified provenance for reuse.
+
 ### Mask image quantification
 
 | Param | Default | Description |
@@ -205,9 +233,20 @@ Cellpose process types.
 | Param | Default | Description |
 |-------|---------|-------------|
 | `register_images_refine_affine` | `true` | Apply the DAPI affine refinement on top of each Xenium Explorer matrix. |
+| `register_post_xenium_if_nonrigid` | `false` | Apply guarded TV-L1 optical flow after the affine refinement. A non-empty samplesheet value overrides this per row. |
+| `register_post_xenium_if_nonrigid_pixel_size_um` | `3.4` | Physical pixel size of the flow-estimation grid. This is fine enough for nucleus-scale shifts without fitting raw Xenium pixels. |
+| `register_post_xenium_if_nonrigid_attachment` | `10` | TV-L1 data-attachment weight; lower values favour a smoother field. |
+| `register_post_xenium_if_nonrigid_tightness` | `0.3` | TV-L1 tightness parameter. |
+| `register_post_xenium_if_nonrigid_num_warp` / `register_post_xenium_if_nonrigid_num_iter` | `5` / `10` | TV-L1 coarse-to-fine warps and fixed-point iterations. |
+| `register_post_xenium_if_nonrigid_smoothing_sigma_um` | `10` | Physical Gaussian smoothing scale for the confidence-weighted accepted field. |
+| `register_post_xenium_if_nonrigid_max_displacement_um` | `20` | Reject raw vectors above this displacement and cap the accepted field. |
+| `register_post_xenium_if_nonrigid_max_cycle_error_um` | `5` | Maximum forward/backward inconsistency for a raw vector to contribute. |
+| `register_post_xenium_if_nonrigid_min_local_correlation` | `0.2` | Minimum local post-warp DAPI correlation for a raw vector to contribute. |
+| `register_post_xenium_if_nonrigid_min_jacobian` / `register_post_xenium_if_nonrigid_max_jacobian` | `0.5` / `2` | Allowed local area change of the final mapping; the guarded field is attenuated until these bounds hold. |
+| `register_post_xenium_if_nonrigid_min_confident_fraction` | `0.1` | Reject the complete non-rigid pass when too little overlapping tissue supports it. |
 | `register_images_max_forks` | Dwight: `2` | Maximum concurrent registration processes. |
 
-`REGISTER_IMAGES` requests 8 CPUs and 32 GB (HD1 peaked at 8.5 GB with about five cores busy). The viewer pyramid of each
+`REGISTER_IMAGES` requests 8 CPUs and 32 GB (HD1 optical-flow validation peaked at 2.7 GB; full registration remains bounded by image resampling). The viewer pyramid of each
 registered image follows `viewer_cache_build_image_pyramid`.
 
 ### Viewer caches
@@ -532,6 +571,49 @@ The following settings are read only when
 
 See [MENDER spatial domains](stages/mender.md) for the data contract, restart
 mode, output layout, and CPU container instructions.
+
+### GASTON spatial domains
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `gaston_enabled` | `false` | Enable the terminal GASTON stage. |
+| `gaston_segmentations` | `proseg_hybrid` | Independent segmentation list or `all`; row-overridable. |
+| `gaston_use_gpu` | Dwight: `true` | Train on CUDA. GLM-PCA and postprocessing remain CPU-only. |
+| `gaston_n_restarts` | `30` | Independent seeds, numbered `0..n-1`. |
+| `gaston_epochs` | `10000` | Neural-network epochs per restart. |
+| `gaston_checkpoint_interval` | `500` | Training checkpoint interval. |
+| `gaston_hidden_spatial` | `[20,20]` | Hidden widths for the spatial network. |
+| `gaston_hidden_expression` | `[20,20]` | Hidden widths for the expression network. |
+| `gaston_optimizer` | `adam` | GASTON optimizer. |
+| `gaston_glmpca_dimensions` | `20` | GLM-PCA feature count. |
+| `gaston_glmpca_penalty` | `1.0` | GLM-PCA penalty. |
+| `gaston_glmpca_iterations` | `30` | Initial GLM-PCA iteration budget. Whole-acquisition fits may continue to the library's 1,000-iteration convergence ceiling; failure at that ceiling is explicit. |
+| `gaston_domain_mode` | `auto` | Domain count selection mode: `auto` or `fixed`. |
+| `gaston_num_domains` | `null` | Direct K override; required when mode is `fixed`. |
+| `gaston_min_domains` | `2` | Automatic search lower bound. |
+| `gaston_max_domains` | `10` | Automatic search upper bound. |
+| `gaston_domain_buckets` | `150` | Buckets used for domain likelihood calculation. |
+| `gaston_auto_k_fallback` | `null` | Optional K used only when automatic knee detection finds no knee. Without it, the stage emits diagnostics and fails. |
+| `gaston_write_spatialdata_table` | `true` | Merge owned GASTON columns into the existing clustered SpatialData table. |
+| `gaston_keep_seed_models` | `false` | Publish every seed model instead of only the selected model. |
+| `gaston_keep_checkpoints` | `best` | Published checkpoint policy: `none`, `best`, or `all`. |
+| `gaston_max_genes` | `10000` | Maximum eligible non-control panel genes exported from raw counts. |
+| `gaston_conda` | `envs/environment.gaston.yml` | Pinned GASTON/GLM-PCA environment used outside the base MerXen environment. |
+| `gaston_container` | `$MERXEN_GASTON_CONTAINER` or unset | CUDA-enabled Apptainer image built from `containers/Dockerfile.gaston`; override for another site. |
+
+The Conda environment pins CUDA 11.8 and MKL 2024.0.0 for PyTorch 2.0.1
+binary compatibility. Training tasks validate the shared Torch/GASTON runtime
+before entering the per-seed failure handler, preventing a broken environment
+from being cached as a completed restart.
+
+Domain-selection settings are hashed only by postprocessing. With `-resume`,
+changing `gaston_domain_mode` or `gaston_num_domains` reuses completed input
+preparation, GLM-PCA, and neural-network restarts.
+
+GASTON runs on whole acquisitions and uses native shape centroids rather than
+aligned coordinates or the clustered H5AD's spatial embedding. See
+[GASTON spatial domains](stages/gaston.md) for input and model-selection
+contracts.
 
 ### Spatial gene analysis
 
@@ -913,13 +995,41 @@ for every task. Portable per-process CPU/memory requests remain in
 | `CLUSTERING_SQUIDPY` | 8 | 32 GB | `clustering_squidpy_max_forks` = 4 |
 | `CLUSTERING_SQUIDPY_COMPUTE_CPU` (`map_first`) | 8 | 32 GB | `clustering_squidpy_max_forks` = 4; CPU only, no GPU lock |
 | `MAPMYCELLS` | 8 | 160 GB | unbounded |
+| `GASTON_PREPARE` | 4 | 64 GB | 2 |
+| `GASTON_GLM_PCA` | 16 | 160 GB | 2 |
+| `GASTON_TRAIN` | 4 | 48 GB | 1 |
+| `GASTON_POSTPROCESS` | 8 | 64 GB | 2 |
+| `GASTON_IMPORT` | 4 | 48 GB | 1 |
 
 On Dwight, `CELLPOSE_SEGMENT`, `ALIGN` when `alignment_device != "cpu"`, and
-`CLUSTERING_SQUIDPY` when `clustering_squidpy_use_gpu=true` also share the
+`CLUSTERING_SQUIDPY` when `clustering_squidpy_use_gpu=true`, and
+`GASTON_TRAIN` when `gaston_use_gpu=true` also share the
 host-wide `gpu_process_lock_file`. The lock is held for the full process shell,
 then released automatically when the task exits. The file is created as a
 world-readable empty file and opened read-only before calling `flock`, so a
 lock created by one workstation user remains usable by other users.
+
+<a id="bead-removal-gpu-lock"></a>
+`BUILD_SPATIALDATA` is different: its `beforeScript` only exports
+`MERXEN_GPU_LOCK_FILE` (when `gpu_process_lock_enabled` is true) and does not
+take the lock, because a build runs for hours and needs the GPU for only part of
+that time. With `merscope_bead_removal_device` set to `cuda` (or `auto` with a
+working GPU) the bead-removal code takes the same lock itself, once, around its
+GPU window loop and releases it after the last window or on an error. It
+therefore queues with the Cellpose, alignment and clustering tasks.
+A build waiting for the lock keeps its `BUILD_SPATIALDATA` fork slot, and the wait
+is reported in the build log and in `bead_removal_qc/summary.json`. With the
+variable unset, `cuda` runs unlocked with a warning and `auto` uses the CPU.
+With the default `cpu` device the build never touches the lock or the GPU.
+
+The lock is a feature of the shared workstation (the workstation profile exports
+the path in the task's `beforeScript`). On a scheduler the GPU belongs to the
+job: with `cuda` (and not the flat fill) `BUILD_SPATIALDATA` requests the `gpu` queue and
+`--gpus-per-node=1`, and the `gpu` profile adds Apptainer `--nv` to its container
+whenever the device is not `cpu` (the build's other container options are not
+changed). With the default `cpu` device the build stays on the `htc` queue with no
+GPU request and no `--nv`. Without `MERXEN_GPU_LOCK_FILE` in the task
+environment `auto` uses the CPU and `cuda` runs unlocked with a warning.
 
 A future HPC profile should provide its own executor, capacity/concurrency,
 software paths, reference paths, worker counts, and GPU policy. The portable
@@ -950,16 +1060,22 @@ models is the ground truth for how stages are configured.
 | `MecrConfig` | `mecr` | [config.py](../src/merxen/config.py) |
 | `ClusteringSquidpyConfig` | `clustering-squidpy` | [config.py](../src/merxen/config.py) |
 | `MapMyCellsConfig` | `mapmycells` | [config.py](../src/merxen/config.py) |
+| `GastonConfig` | `gaston` | [config.py](../src/merxen/config.py) |
 
 Nested sub-models:
 
 - `CellposeConfig`, `TilingConfig`, `MaskFilterConfig` — Cellpose behaviour.
+- `BeadMaskVetoConfig` — the bead-mask veto of the Cellpose cell masks, nested as
+  `SegmentationConfig.bead_mask_veto` (the workflow sets `enabled` only).
 - `ProsegConfig` — ProSeg parameters, including `binary_path`.
 - `MemoryConfig` — memory limits and chunk sizes.
 - `DatasetConfig` — one dataset (one half of a pair) within a `SegmentationConfig`.
 - `MecrSampleConfig` — one SpatialData cell-count table scored by MECR.
 - `MerscopeBuildConfig` / `XeniumBuildConfig` — platform-specific build options
   nested under `SpatialDataBuildConfig`.
+- `MerscopeBeadRemovalConfig` — optional bead removal, nested as
+  `MerscopeBuildConfig.bead_removal` (`None` means off). Fields are listed in
+  [stages/spatialdata-build.md](stages/spatialdata-build.md#configuration).
 - `PipelineConfig(BaseSettings)` — top-level, loaded from `MERXEN_*` env vars.
 
 `load_config_from_json(path, cls)` in

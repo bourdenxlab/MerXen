@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
-from contextlib import suppress
+from contextlib import AbstractContextManager, nullcontext, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +22,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from merxen.enrichment.enrich import _prune_zarr_consolidated_metadata  # noqa: E402
+from merxen.io.spatialdata_io import spatialdata_write_lock  # noqa: E402
 from merxen.path_utils import remove_path  # noqa: E402
 
 DERIVED_TABLE_PREFIX = "table_"
@@ -142,6 +143,16 @@ def remove_derived_tables(zarr_path: Path, *, apply: bool) -> None:
         print(f"SKIP missing latest zarr: {zarr_path}")
         return
 
+    # Deleting tables and pruning the consolidated metadata must not interleave
+    # with a pipeline writer's read-modify-write; a dry run only reads.
+    store_lock: AbstractContextManager[object] = (
+        spatialdata_write_lock(zarr_path) if apply else nullcontext()
+    )
+    with store_lock:
+        _remove_derived_tables(zarr_path, apply=apply)
+
+
+def _remove_derived_tables(zarr_path: Path, *, apply: bool) -> None:
     sdata = sd.read_zarr(zarr_path)
     table_keys = sorted(
         str(table_key)

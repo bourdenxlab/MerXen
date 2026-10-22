@@ -27,7 +27,7 @@ import numpy as np
 import pandas as pd
 import spatialdata as sd
 import xarray as xr
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, map_coordinates
 from skimage.filters import threshold_otsu
 from skimage.registration import phase_cross_correlation
 from spatialdata.transformations import get_transformation, set_transformation
@@ -42,6 +42,7 @@ from merxen.io.spatialdata_io import (
     write_spatialdata_metadata,
 )
 from merxen.memory import force_release, log_status
+from merxen.nonrigid_registration import NonrigidFlowResult, estimate_nonrigid_flow
 from merxen.plotting import prepare_plot_output, save_figure
 from merxen.viewer_cache.build import ViewerCacheParams, build_image_pyramid
 from merxen.viewer_cache.format import derived_image_pyramid_cache_key
@@ -49,6 +50,7 @@ from merxen.viewer_cache.format import derived_image_pyramid_cache_key
 logger = logging.getLogger(__name__)
 
 REGISTRATION_ALGORITHM = "explorer_affine_dapi_refine_v1"
+NONRIGID_REGISTRATION_ALGORITHM = "guarded_tvl1_v1"
 # OpenCV remapping indexes pixels with signed 16-bit integers.
 _MAX_CV2_DIMENSION = 32767
 _HIGHPASS_SIGMA_PX = 8.0
@@ -113,6 +115,17 @@ class _Refinement:
     working_pixel_size_um: float | None = None
     working_to_reference: np.ndarray | None = None
     reference_pixels: np.ndarray | None = None
+
+
+@dataclass
+class _NonrigidRefinement:
+    status: str
+    reason: str | None = None
+    result: NonrigidFlowResult | None = None
+    working_to_reference: np.ndarray | None = None
+    reference_pixels: np.ndarray | None = None
+    affine_warped_pixels: np.ndarray | None = None
+    valid: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -501,15 +514,34 @@ def _register_image(
         config=config,
     )
     _write_qc_outputs(refinement, paths, config.dataset_name, key)
+    nonrigid = _refine_nonrigid_registration(
+        reference=reference,
+        info=info,
+        spec=spec,
+        channel_names=channel_names,
+        matrix=refinement.matrix,
+        image_pixel_size_um=image_pixel_size_um,
+        config=config,
+    )
+    _write_nonrigid_outputs(nonrigid, paths, config.dataset_name, key)
 
     source = open_ome_tiff_level(info, 0, channel_names=channel_names)
+    pull_mapping = _affine_function(np.linalg.inv(refinement.matrix))
+    if nonrigid.status == "applied":
+        assert nonrigid.result is not None
+        assert nonrigid.working_to_reference is not None
+        pull_mapping = _nonrigid_pull_function(
+            refinement.matrix,
+            nonrigid.result.flow_yx,
+            nonrigid.working_to_reference,
+        )
     warp = materialize_warped_image(
         sdata_obj=sdata_obj,
         zarr_path=zarr_path,
         source_image=source,
         output_key=key,
         output_shape_rc=reference.shape_yx,
-        fixed_to_source_image_xy=_affine_function(np.linalg.inv(refinement.matrix)),
+        fixed_to_source_image_xy=pull_mapping,
         transform=reference.transformations[reference.coordinate_system],
         coordinate_system=reference.coordinate_system,
         tile_size=config.tile_size,
@@ -563,6 +595,13 @@ def _register_image(
             "reason": refinement.reason,
             **refinement.correction,
         },
+        "nonrigid": {
+            "enabled": config.nonrigid_enabled,
+            "algorithm": NONRIGID_REGISTRATION_ALGORITHM,
+            "status": nonrigid.status,
+            "reason": nonrigid.reason,
+            **(nonrigid.result.stats if nonrigid.result is not None else {}),
+        },
         "residuals_before": _overlay_stats(refinement.before, refinement),
         "residuals_after": _overlay_stats(refinement.after, refinement),
         "output": {
@@ -586,6 +625,7 @@ def _register_image(
         "provenance": provenance,
         "final_matrix": refinement.matrix.tolist(),
         "refinement_status": refinement.status,
+        "nonrigid_status": nonrigid.status,
         "channel_names": channel_names,
         # Kept in the zarr so a rerun in a fresh output directory (a new
         # Nextflow work dir) can skip the warp and still report its result.
@@ -594,7 +634,8 @@ def _register_image(
     _write_registry(sdata_obj, registry)
     log_status(
         f"[{config.dataset_name}] Registered {key}: refinement={refinement.status}, "
-        f"residual median {summary['residuals_after'].get('median_um')} um"
+        f"nonrigid={nonrigid.status}, residual median "
+        f"{summary['residuals_after'].get('median_um')} um"
     )
     return summary
 
@@ -727,14 +768,98 @@ def _refine_registration(
     return result
 
 
-def _measure_overlay(
+def _refine_nonrigid_registration(
+    *,
+    reference: _ReferenceGrid,
+    info: OmeTiffInfo,
+    spec: RegisteredImageSpec,
+    channel_names: list[str],
+    matrix: np.ndarray,
+    image_pixel_size_um: float,
+    config: ImageRegistrationConfig,
+) -> _NonrigidRefinement:
+    if not config.nonrigid_enabled:
+        return _NonrigidRefinement(status="disabled")
+    if spec.registration_channel is None:
+        return _NonrigidRefinement(
+            status="skipped_no_registration_channel",
+            reason="non-rigid refinement requires a registration channel",
+        )
+
+    reference_channel = _channel_index(
+        _channel_names(reference.levels[0]),
+        config.reference_channel,
+        label=f"reference image {reference.key!r}",
+    )
+    moving_channel = _channel_index(
+        channel_names,
+        spec.registration_channel,
+        label=f"image {spec.image_key!r}",
+    )
+    reference_work = _read_working_channel(
+        open_level=lambda level: reference.levels[level],
+        level_shapes_yx=[
+            (int(level.sizes["y"]), int(level.sizes["x"])) for level in reference.levels
+        ],
+        channel_index=reference_channel,
+        target_factor=config.nonrigid_pixel_size_um / config.reference_pixel_size_um,
+    )
+    moving_work = _read_working_channel(
+        open_level=lambda level: open_ome_tiff_level(info, level),
+        level_shapes_yx=[(shape[1], shape[2]) for shape in info.level_shapes_cyx],
+        channel_index=moving_channel,
+        target_factor=config.nonrigid_pixel_size_um / image_pixel_size_um,
+    )
+    working_pixel_size_um = config.reference_pixel_size_um * float(
+        np.mean(np.diag(reference_work.to_level0)[:2])
+    )
+    affine_warped, footprint = _warp_working_image_to_reference(
+        reference_work,
+        moving_work,
+        matrix,
+    )
+    valid = (
+        _tissue_mask(reference_work.pixels) & _tissue_mask(affine_warped) & footprint
+    )
+    result = estimate_nonrigid_flow(
+        reference_work.pixels,
+        affine_warped,
+        valid,
+        pixel_size_um=working_pixel_size_um,
+        attachment=config.nonrigid_attachment,
+        tightness=config.nonrigid_tightness,
+        num_warp=config.nonrigid_num_warp,
+        num_iter=config.nonrigid_num_iter,
+        smoothing_sigma_um=config.nonrigid_smoothing_sigma_um,
+        max_displacement_um=config.nonrigid_max_displacement_um,
+        max_cycle_error_um=config.nonrigid_max_cycle_error_um,
+        min_local_correlation=config.nonrigid_min_local_correlation,
+        min_jacobian=config.nonrigid_min_jacobian,
+        max_jacobian=config.nonrigid_max_jacobian,
+        min_confident_fraction=config.nonrigid_min_confident_fraction,
+    )
+    if result.status != "applied":
+        logger.warning(
+            "%s: non-rigid refinement rejected, keeping the affine registration (%s)",
+            spec.image_key,
+            result.reason,
+        )
+    return _NonrigidRefinement(
+        status=result.status,
+        reason=result.reason,
+        result=result,
+        working_to_reference=reference_work.to_level0,
+        reference_pixels=reference_work.pixels,
+        affine_warped_pixels=affine_warped,
+        valid=valid,
+    )
+
+
+def _warp_working_image_to_reference(
     reference: _WorkingImage,
-    reference_hp: np.ndarray,
-    tissue: np.ndarray,
     moving: _WorkingImage,
     matrix: np.ndarray,
-    window_px: int,
-) -> _Overlay:
+) -> tuple[np.ndarray, np.ndarray]:
     height, width = reference.pixels.shape
     moving_to_reference = np.linalg.inv(reference.to_level0) @ matrix @ moving.to_level0
     warped = cv2.warpAffine(
@@ -753,6 +878,18 @@ def _measure_overlay(
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=0,
     ).astype(bool)
+    return warped, footprint
+
+
+def _measure_overlay(
+    reference: _WorkingImage,
+    reference_hp: np.ndarray,
+    tissue: np.ndarray,
+    moving: _WorkingImage,
+    matrix: np.ndarray,
+    window_px: int,
+) -> _Overlay:
+    warped, footprint = _warp_working_image_to_reference(reference, moving, matrix)
     valid = tissue & footprint
     shifts = measure_local_shifts(
         reference_hp,
@@ -879,6 +1016,45 @@ def _affine_function(matrix: np.ndarray) -> Callable[[np.ndarray], np.ndarray]:
     return apply
 
 
+def _nonrigid_pull_function(
+    image_to_reference_matrix: np.ndarray,
+    flow_yx: np.ndarray,
+    working_to_reference: np.ndarray,
+) -> Callable[[np.ndarray], np.ndarray]:
+    """Compose a coarse fixed-grid pull flow with the inverse image affine."""
+    flow = np.asarray(flow_yx, dtype=np.float32)
+    reference_to_working = np.linalg.inv(working_to_reference)
+    working_to_source = np.linalg.inv(image_to_reference_matrix) @ working_to_reference
+    to_working = _affine_function(reference_to_working)
+    to_source = _affine_function(working_to_source)
+
+    def apply(reference_xy: np.ndarray) -> np.ndarray:
+        working_xy = to_working(reference_xy)
+        coordinates = [working_xy[:, 1], working_xy[:, 0]]
+        displacement_y = map_coordinates(
+            flow[0],
+            coordinates,
+            order=1,
+            mode="constant",
+            cval=0.0,
+            prefilter=False,
+        )
+        displacement_x = map_coordinates(
+            flow[1],
+            coordinates,
+            order=1,
+            mode="constant",
+            cval=0.0,
+            prefilter=False,
+        )
+        displaced = working_xy.copy()
+        displaced[:, 0] += displacement_x
+        displaced[:, 1] += displacement_y
+        return to_source(displaced)
+
+    return apply
+
+
 def _channel_names(image_cyx: xr.DataArray) -> list[str]:
     if "c" in image_cyx.coords:
         return [str(name) for name in image_cyx.coords["c"].values]
@@ -973,9 +1149,19 @@ def _provenance(
             "build_viewer_pyramid",
         },
     )
+    if not config.nonrigid_enabled:
+        settings = {
+            key: value
+            for key, value in settings.items()
+            if not str(key).startswith("nonrigid_")
+        }
     provenance: dict[str, Any] = _jsonable(
         {
-            "algorithm": REGISTRATION_ALGORITHM,
+            "algorithm": (
+                f"{REGISTRATION_ALGORITHM}+{NONRIGID_REGISTRATION_ALGORITHM}"
+                if config.nonrigid_enabled
+                else REGISTRATION_ALGORITHM
+            ),
             "image_path": str(image_path),
             "image_size_bytes": int(stat.st_size),
             "image_mtime_ns": int(stat.st_mtime_ns),
@@ -1069,6 +1255,99 @@ def _write_qc_outputs(
     _plot_registration_qc(refinement, paths["qc_plot"], f"{dataset_name} {image_key}")
 
 
+def _write_nonrigid_outputs(
+    refinement: _NonrigidRefinement,
+    paths: dict[str, Path],
+    dataset_name: str,
+    image_key: str,
+) -> None:
+    if refinement.result is None or refinement.working_to_reference is None:
+        return
+    result = refinement.result
+    np.savez_compressed(
+        paths["nonrigid_flow"],
+        flow_yx=result.flow_yx.astype(np.float32, copy=False),
+        confidence=result.confidence.astype(np.uint8, copy=False),
+        working_to_reference=np.asarray(
+            refinement.working_to_reference,
+            dtype=np.float64,
+        ),
+        algorithm=np.asarray(NONRIGID_REGISTRATION_ALGORITHM),
+    )
+    _plot_nonrigid_qc(
+        refinement,
+        paths["nonrigid_qc_plot"],
+        f"{dataset_name} {image_key}",
+    )
+
+
+def _plot_nonrigid_qc(
+    refinement: _NonrigidRefinement,
+    path: Path,
+    title: str,
+) -> None:
+    result = refinement.result
+    reference = refinement.reference_pixels
+    affine_warped = refinement.affine_warped_pixels
+    valid = refinement.valid
+    assert result is not None
+    assert reference is not None
+    assert affine_warped is not None
+    assert valid is not None
+    prepare_plot_output(path)
+    stride = max(1, math.ceil(max(reference.shape) / _MAX_QC_DISPLAY_PX))
+    reference_display = _normalize_for_display(reference, valid)
+    affine_display = _normalize_for_display(affine_warped, valid)
+    warped_display = _normalize_for_display(result.warped, valid)
+    before_rgb = np.dstack([affine_display, reference_display, affine_display])[
+        ::stride, ::stride
+    ]
+    after_rgb = np.dstack([warped_display, reference_display, warped_display])[
+        ::stride, ::stride
+    ]
+    pixel_size_um = float(result.stats.get("pixel_size_um", 1.0))
+    magnitude_um = np.linalg.norm(result.flow_yx, axis=0) * pixel_size_um
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 14))
+    axes[0, 0].imshow(before_rgb, interpolation="nearest")
+    axes[0, 0].set_title("Affine: Xenium DAPI (green) / IF DAPI (magenta)")
+    axes[0, 0].set_axis_off()
+    axes[0, 1].imshow(after_rgb, interpolation="nearest")
+    axes[0, 1].set_title(f"Non-rigid result ({result.status})")
+    axes[0, 1].set_axis_off()
+
+    magnitude_plot = axes[1, 0].imshow(
+        magnitude_um[::stride, ::stride],
+        cmap="viridis",
+        interpolation="nearest",
+    )
+    axes[1, 0].contour(
+        result.confidence[::stride, ::stride],
+        levels=[0.5],
+        colors="white",
+        linewidths=0.4,
+    )
+    axes[1, 0].set_title("Applied displacement; white = confident raw flow")
+    axes[1, 0].set_axis_off()
+    fig.colorbar(magnitude_plot, ax=axes[1, 0], label="displacement (um)")
+
+    correlation_plot = axes[1, 1].imshow(
+        result.local_correlation[::stride, ::stride],
+        cmap="coolwarm",
+        vmin=-1.0,
+        vmax=1.0,
+        interpolation="nearest",
+    )
+    axes[1, 1].set_title("Local DAPI correlation after raw TV-L1 flow")
+    axes[1, 1].set_axis_off()
+    fig.colorbar(correlation_plot, ax=axes[1, 1], label="local correlation")
+    reason = f"; {result.reason}" if result.reason else ""
+    fig.suptitle(f"{title}: {result.status}{reason}")
+    fig.tight_layout()
+    save_figure(fig, path, dpi=110)
+    plt.close(fig)
+
+
 def _plot_registration_qc(refinement: _Refinement, path: Path, title: str) -> None:
     after = refinement.after or refinement.before
     before = refinement.before
@@ -1143,6 +1422,8 @@ def _output_paths(
         "summary": output_dir / f"{prefix}_registration_summary.json",
         "qc_plot": output_dir / f"{prefix}_registration_qc.png",
         "local_shifts": output_dir / f"{prefix}_registration_local_shifts.csv",
+        "nonrigid_flow": output_dir / f"{prefix}_nonrigid_flow.npz",
+        "nonrigid_qc_plot": output_dir / f"{prefix}_nonrigid_qc.png",
     }
 
 

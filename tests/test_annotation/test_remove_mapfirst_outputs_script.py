@@ -202,6 +202,7 @@ def test_name_rules(remover: ModuleType) -> None:
     assert not remover.is_suffixed_backup(f".{BASE}.merxen-backup-abc", "mapfirst")
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("suffix", ["", " ", "a/b"])
 def test_refuses_an_empty_or_nested_suffix(
     remover: ModuleType, results: dict[str, object], suffix: str
@@ -211,6 +212,7 @@ def test_refuses_an_empty_or_nested_suffix(
         remover.main(_args(results, "--suffix", suffix))
 
 
+@pytest.mark.integration
 def test_dry_run_changes_nothing(
     remover: ModuleType, results: dict[str, object], capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -226,6 +228,7 @@ def test_dry_run_changes_nothing(
     assert not Path(str(results["quarantine"])).exists()
 
 
+@pytest.mark.integration
 def test_apply_removes_only_map_first_content(
     remover: ModuleType, results: dict[str, object]
 ) -> None:
@@ -281,6 +284,7 @@ def test_apply_removes_only_map_first_content(
     assert remover.main(_args(results)) == 0  # a second plan is empty
 
 
+@pytest.mark.integration
 def test_annotation_dirs_stay_without_the_opt_in(
     remover: ModuleType, results: dict[str, object], capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -297,6 +301,7 @@ def test_annotation_dirs_stay_without_the_opt_in(
         remover.main(_args(results, "--include-annotation-dirs"))
 
 
+@pytest.mark.integration
 def test_a_pre_existing_annotation_map_and_table_survive(
     remover: ModuleType, results: dict[str, object], capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -333,6 +338,7 @@ def test_a_pre_existing_annotation_map_and_table_survive(
     assert f"{MAPFIRST} (not created by the run)" in printed
 
 
+@pytest.mark.integration
 def test_existing_quarantine_target_is_refused_before_any_move(
     remover: ModuleType, results: dict[str, object]
 ) -> None:
@@ -366,6 +372,7 @@ def test_existing_quarantine_target_is_refused_before_any_move(
     ]
 
 
+@pytest.mark.integration
 def test_each_store_changes_under_its_writer_lock(
     remover: ModuleType, results: dict[str, object], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1,13 +1,14 @@
 /*
  * Start-up check of the private site configs (docs/local-configuration.md).
  *
- * The host's locations (reference stores and sources, the task temporary
- * directory, the container image and bind mounts) live in two gitignored site
- * configs that nextflow.config and conf/dwight.config include. When one is
- * missing, several params stay null and the run does NOT fail on them: it
- * falls back silently. A null annotation_reference_store becomes
- * <outdir>/annotation_references, so PREP rebuilds every reference bundle
- * (about 40 min and 48-57 GB each) instead of reusing the store; the
+ * The host's locations (reference stores, sources and caches, the Cellpose
+ * model store, the task temporary directory, the container image and bind
+ * mounts) live in two gitignored site configs that nextflow.config and
+ * conf/dwight.config include. When one is missing, several params stay null
+ * and the run does NOT fail on them: it falls back silently. A null
+ * annotation_reference_store becomes <outdir>/annotation_references, so PREP
+ * rebuilds every reference bundle (about 40 min and 48-57 GB each) instead of
+ * reusing the store; the reference caches fall back to <outdir> and the
  * reference downloads default to on, so null cache directories mean
  * downloads; with no TMPDIR the tasks fill the small root disk; and a null
  * apptainer image runs the tasks without a container. This check turns each

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -57,7 +58,7 @@ from merxen.cortical_depth.streamlines import (
     streamlines_to_geojson,
     trace_streamlines,
 )
-from merxen.io.spatialdata_io import write_or_replace_element
+from merxen.io.spatialdata_io import spatialdata_write_lock, write_or_replace_element
 from merxen.memory import force_release, log_status
 from merxen.table_keys import clustered_table_key
 
@@ -118,24 +119,33 @@ def run_cortical_depth(config: CorticalDepthConfig) -> dict[str, Path]:
         contour_levels=config.contour_levels,
     )
 
-    sdata_obj = sd.read_zarr(latest_path)
+    # A write-back replaces whole tables, so hold the store lock from the read
+    # until the last table is persisted; otherwise a concurrent writer's
+    # columns are dropped. A run that only reads takes no lock.
+    store_lock: AbstractContextManager[object] = (
+        spatialdata_write_lock(latest_path)
+        if config.write_spatialdata_table
+        else nullcontext()
+    )
     table_summaries: dict[str, Any] = {}
-    try:
-        for table_config in config.tables:
-            table_paths, summary = _annotate_table(
-                sdata_obj=sdata_obj,
-                table_config=table_config,
-                config=config,
-                output_dir=output_dir,
-                annotations=annotations,
-                piece_results=piece_results,
-                primary_depth_result=primary_depth_result,
-            )
-            paths.update(table_paths)
-            table_summaries[table_config.segmentation] = summary
-    finally:
-        del sdata_obj
-        force_release(note=f"after {config.dataset_name} cortical depth")
+    with store_lock:
+        sdata_obj = sd.read_zarr(latest_path)
+        try:
+            for table_config in config.tables:
+                table_paths, summary = _annotate_table(
+                    sdata_obj=sdata_obj,
+                    table_config=table_config,
+                    config=config,
+                    output_dir=output_dir,
+                    annotations=annotations,
+                    piece_results=piece_results,
+                    primary_depth_result=primary_depth_result,
+                )
+                paths.update(table_paths)
+                table_summaries[table_config.segmentation] = summary
+        finally:
+            del sdata_obj
+            force_release(note=f"after {config.dataset_name} cortical depth")
 
     summary_path = output_dir / "cortical_depth_qc_summary.json"
     summary = _build_qc_summary(

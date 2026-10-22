@@ -293,6 +293,7 @@ def _write_qc_config(tmp_path: Path, zarr_path: Path, *, strict: bool) -> Path:
     return config_path
 
 
+@pytest.mark.integration
 def test_qc_cli_warns_by_default_and_fails_when_strict(tmp_path: Path) -> None:
     zarr_path = tmp_path / "latest.zarr"
     _xenium_like_sdata(MS2_OFFSET).write(zarr_path)

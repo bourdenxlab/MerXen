@@ -30,6 +30,13 @@ include {
     MENDER_FINALIZE;
     MENDER_IMPORT
 } from "./modules/mender"
+include {
+    GASTON_PREPARE;
+    GASTON_GLM_PCA;
+    GASTON_TRAIN;
+    GASTON_POSTPROCESS;
+    GASTON_IMPORT
+} from "./modules/gaston"
 // rca-hook:H1: reference-based annotation (plan §2.4); nothing runs in legacy mode.
 include { ANNOTATION_PREPARE_ONLY } from "./subworkflows/annotation_references"
 include { CLUSTERING_MAP_FIRST } from "./subworkflows/clustering_map_first"
@@ -261,6 +268,78 @@ def normalizeMenderSegmentations(rawValue) {
     return selected
 }
 
+def normalizeGastonSegmentations(rawValue) {
+    def raw = rawValue == null ? "proseg_hybrid" : rawValue.toString().trim()
+    if (!raw) {
+        raw = "proseg_hybrid"
+    }
+    def aliases = [
+        "all": ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"],
+        "reseg": ["reseg"],
+        "resegmented": ["reseg"],
+        "proseg": ["reseg"],
+        "mosaik": ["reseg"],
+        "original": ["original_seg"],
+        "original_seg": ["original_seg"],
+        "original_segmentation": ["original_seg"],
+        "instrument": ["original_seg"],
+        "proseg_mask": ["proseg_mask"],
+        "cellpose": ["proseg_mask"],
+        "cellpose_mask": ["proseg_mask"],
+        "mask": ["proseg_mask"],
+        "hybrid": ["proseg_hybrid"],
+        "proseg_hybrid": ["proseg_hybrid"],
+        "hybrid_seg": ["proseg_hybrid"],
+    ]
+    def selected = []
+    raw.split(",")
+        .collect { value -> value.trim() }
+        .findAll { value -> value.length() > 0 }
+        .each { value ->
+            def key = value
+                .toLowerCase()
+                .replaceAll(/[^a-z0-9]+/, "_")
+                .replaceAll(/^_+|_+$/, "")
+            if (!aliases.containsKey(key)) {
+                throw new IllegalArgumentException(
+                    "Unknown gaston_segmentations '${value}'. Valid values: " +
+                    "all, reseg, original_seg, proseg_mask, proseg_hybrid"
+                )
+            }
+            aliases[key].each { segmentation ->
+                if (!selected.contains(segmentation)) {
+                    selected << segmentation
+                }
+            }
+        }
+    return selected ?: ["proseg_hybrid"]
+}
+
+def positiveIntegerListOrDefault(rawValue, defaultValue, label) {
+    def values = rawValue instanceof Collection
+        ? rawValue
+        : rawValue.toString().replaceAll(/^\[|\]$/, "").split(",")
+    def parsed = values
+        .collect { value -> value.toString().trim() }
+        .findAll { value -> value.length() > 0 }
+        .collect { value -> value as int }
+    if (!parsed) {
+        parsed = defaultValue.collect { value -> value as int }
+    }
+    if (parsed.any { value -> value <= 0 }) {
+        throw new IllegalArgumentException("${label} values must be positive")
+    }
+    return parsed
+}
+
+def nullableIntOrDefault(rawValue, defaultValue) {
+    if (rawValue == null || rawValue.toString().trim().isEmpty()) {
+        return defaultValue == null ? null : defaultValue as int
+    }
+    def raw = rawValue.toString().trim()
+    return raw.toLowerCase() == "null" ? null : raw as int
+}
+
 def requirePlatformInput(row, pairId, platform) {
     if (platform == "MERSCOPE") {
         def merscopeDir = chooseField(row, ["merscope_dir"])
@@ -308,6 +387,34 @@ def buildConfigForPlatform(row, pairId, platform) {
         )) {
             merscopeOptions.allow_transform_override_mismatch = true
         }
+        // Only set when requested, so default build configs (and their task
+        // hashes) are unchanged.
+        if (merscopeBeadRemovalRequested(row, pairId, params)) {
+            def beadRemoval = [enabled: true]
+            // The fill settings are written as they resolve (the fill is on in
+            // hybrid mode by default), so the build JSON does not depend on the
+            // defaults of the Python config. They sit inside the bead block, so
+            // builds without bead removal keep their JSON and task hashes.
+            def beadFill = merscopeBeadRemovalFillRequested(params)
+            beadRemoval.fill = beadFill
+            if (beadFill) {
+                // The mode is only read with the fill, and the config refuses it
+                // without.
+                beadRemoval.fill_mode = merscopeBeadRemovalFillMode(params)
+            }
+            // Only set off the default, so CPU bead build configs (and their
+            // task hashes) keep their form. The flat fill has no GPU
+            // implementation and forces the CPU, so with it the device is not
+            // written (it would change the hash for nothing).
+            def beadDevice = merscopeBeadRemovalDevice(params)
+            def beadForcesCpu = (
+                beadFill && merscopeBeadRemovalFillMode(params) == "flat"
+            )
+            if (beadDevice != "cpu" && !beadForcesCpu) {
+                beadRemoval.device = beadDevice
+            }
+            merscopeOptions.bead_removal = beadRemoval
+        }
         return [
             dataset_name: "${pairId}_MERSCOPE",
             platform: "MERSCOPE",
@@ -337,8 +444,10 @@ def buildConfigForPlatform(row, pairId, platform) {
 }
 
 def segmentMetaForPlatform(row, platform, params) {
+    def modelSettings = CellposeSettings.settings(row, platform, params)
+    def extra = modelSettings ? [cellpose_settings: modelSettings] : [:]
     if (platform == "MERSCOPE") {
-        return [
+        def merscopeMeta = extra + [
             channels: parseChannels(row.merscope_channels, ["DAPI", "PolyT"]),
             image_prefix: chooseField(row, ["merscope_image_prefix"]) ?: null,
             z_range: parseRange(row.merscope_z_range, 0, 6),
@@ -350,10 +459,16 @@ def segmentMetaForPlatform(row, platform, params) {
                 params.default_merscope_voxel_layers
             ),
         ]
+        // Only for rows with bead removal on, so the segmentation config (and its
+        // task hash) of every other row is unchanged.
+        if (merscopeBeadRemovalRequested(row, row.pair_id?.toString()?.trim(), params)) {
+            merscopeMeta.bead_mask_veto = [enabled: merscopeBeadMaskVetoRequested(params)]
+        }
+        return merscopeMeta
     }
 
     if (platform == "XENIUM") {
-        return [
+        return extra + [
             channels: parseChannels(row.xenium_channels, ["DAPI", "18S"]),
             image_prefix: null,
             z_range: null,
@@ -432,6 +547,81 @@ def clusteredSpatialdataTableKey(sourceTableKey, segmentation, suffix = "") {
         return "table_original_clustering_squidpy${suffixFragment}"
     }
     return "${sourceTableKey}_clustering_squidpy${suffixFragment}"
+}
+
+def gastonConfigJson(
+    pairId,
+    segmentation,
+    platform,
+    latestZarr,
+    settings
+) {
+    def layerKeys = analysisLayerKeys(platform, segmentation)
+    def gaston = settings.gaston
+    def config = [
+        pair_id: pairId,
+        sample_id: "${pairId}_${platform}",
+        platform: platform,
+        segmentation: segmentation,
+        clustered_h5ad_path: "clustered_input.h5ad",
+        latest_zarr_path: latestZarr.toString(),
+        source_table_key: layerKeys.table_key,
+        clustered_table_key: clusteredSpatialdataTableKey(
+            layerKeys.table_key,
+            segmentation,
+            settings.clustering_squidpy_table_key_suffix, // rca-site:H2
+        ),
+        shape_key: layerKeys.shape_key,
+        output_dir: "gaston_out",
+        use_gpu: gaston.use_gpu,
+        n_restarts: gaston.n_restarts,
+        epochs: gaston.epochs,
+        checkpoint_interval: gaston.checkpoint_interval,
+        hidden_spatial: gaston.hidden_spatial,
+        hidden_expression: gaston.hidden_expression,
+        optimizer: gaston.optimizer,
+        glmpca_dimensions: gaston.glmpca_dimensions,
+        glmpca_penalty: gaston.glmpca_penalty,
+        glmpca_iterations: gaston.glmpca_iterations,
+        domain_mode: gaston.domain_mode,
+        num_domains: gaston.num_domains,
+        min_domains: gaston.min_domains,
+        max_domains: gaston.max_domains,
+        domain_buckets: gaston.domain_buckets,
+        auto_k_fallback: gaston.auto_k_fallback,
+        write_spatialdata_table: gaston.write_spatialdata_table,
+        keep_seed_models: gaston.keep_seed_models,
+        keep_checkpoints: gaston.keep_checkpoints,
+        max_genes: gaston.max_genes,
+        figure_dpi: gaston.figure_dpi,
+    ]
+    return groovy.json.JsonOutput.prettyPrint(
+        groovy.json.JsonOutput.toJson(config)
+    )
+}
+
+def gastonTrainingConfigJson(
+    pairId,
+    segmentation,
+    platform,
+    latestZarr,
+    settings
+) {
+    // Domain selection is postprocessing-only. Keep these values stable in the
+    // configuration hashed by PREPARE, GLM-PCA, and TRAIN so changing K can
+    // reuse every completed restart.
+    def trainingSettings = new LinkedHashMap(settings)
+    def trainingGaston = new LinkedHashMap(settings.gaston)
+    trainingGaston.domain_mode = "auto"
+    trainingGaston.num_domains = null
+    trainingSettings.gaston = trainingGaston
+    return gastonConfigJson(
+        pairId,
+        segmentation,
+        platform,
+        latestZarr,
+        trainingSettings,
+    )
 }
 
 def normalizeDistanceFromObjectSegmentations(rawValue) {
@@ -729,6 +919,9 @@ def normalizeStage(rawValue, paramName) {
         "mapmycells": "mapmycells",
         "mender": "mender",
         "spatial_domains": "mender",
+        "gaston": "gaston",
+        "topography": "gaston",
+        "topographic_domains": "gaston",
     ]
     if (!aliases.containsKey(key)) {
         throw new IllegalArgumentException(
@@ -737,7 +930,7 @@ def normalizeStage(rawValue, paramName) {
             "build_viewer_caches, mask_image_quantification, " +
             "compute_cortical_depth, distance_from_object, qc, align, align_qc, " +
             "compare, visualize, spatial_gene_analysis, mecr, " +
-            "clustering_squidpy, mender, mapmycells"
+            "clustering_squidpy, mender, mapmycells, gaston"
         )
     }
     return aliases[key]
@@ -753,7 +946,8 @@ def activeStageOrder(
     viewerCacheEnabled,
     mecrEnabled,
     menderEnabled,
-    registerImagesEnabled
+    registerImagesEnabled,
+    gastonEnabled = false
 ) {
     def stages = ["build_spatialdata", "segment_nuclei", "segment", "enrich"]
     // Registered images join the zarr before the viewer cache and quantification
@@ -795,6 +989,9 @@ def activeStageOrder(
     if (menderEnabled) {
         stages += ["mender"]
     }
+    if (gastonEnabled) {
+        stages += ["gaston"]
+    }
     return stages
 }
 
@@ -829,6 +1026,9 @@ def validateStage(
         if (stage == "register_images") {
             hint = " Set xenium_registered_images_csv for this Xenium row to register images."
         }
+        if (stage == "gaston") {
+            hint = " Pass --gaston_enabled true to use GASTON."
+        }
         throw new IllegalArgumentException(
             "${paramName} '${stage}' is not active for this run.${hint} " +
             "Active stages: ${stages.join(', ')}"
@@ -845,7 +1045,7 @@ def stageInRange(stage, startStage, stopStage, stages) {
 }
 
 def currentPairTerminalStage(settings) {
-    if (settings.mender_bypass_terminal_gate) {
+    if (settings.gaston_bypass_terminal_gate || settings.mender_bypass_terminal_gate) {
         return null
     }
     if (settings.run_mapmycells) {
@@ -1509,7 +1709,210 @@ def appendRegisterImagesPreflightChecks(errors, settings) {
     }
 }
 
+def appendMerscopeBeadRemovalPreflightChecks(errors, row, settings, params) {
+    // Rows without a MERSCOPE input never use the bead config.
+    if (!("MERSCOPE" in settings.active_platforms)) {
+        return
+    }
+    if (!settings.run_build) {
+        // The build is skipped: the published source zarr is used as it is.
+        appendPublishedBeadRemovalChecks(errors, row, settings, params)
+        return
+    }
+    if (!merscopeBeadRemovalRequested(row, settings.pair_id, params)) {
+        return
+    }
+    def beadDevice = merscopeBeadRemovalDevice(params)
+    if (!(beadDevice in ["auto", "cpu", "cuda"])) {
+        errors << (
+            "merscope_bead_removal_device must be auto, cpu or cuda; " +
+            "got '${params.merscope_bead_removal_device}'."
+        )
+    }
+    // The mode is read only with the fill (it is ignored when the fill is off),
+    // but a misspelt value is refused in any case.
+    def beadFillMode = merscopeBeadRemovalFillMode(params)
+    if (!(beadFillMode in ["flat", "hybrid"])) {
+        errors << (
+            "merscope_bead_removal_fill_mode must be flat or hybrid; " +
+            "got '${params.merscope_bead_removal_fill_mode}'."
+        )
+    }
+    def merscopeDir = chooseField(row, ["merscope_dir"])
+    // Without a raw folder nothing is projected (a cached zarr is reused), so
+    // the z range and the raw folder only matter when merscope_dir is set.
+    if (!merscopeDir) {
+        return
+    }
+    def zRange = parseRange(row.merscope_z_range, 0, 6)
+    if (zRange[0] < 1) {
+        errors << (
+            "merscope_bead_removal needs merscope_z_range to start at plane 1 " +
+            "or later (plane 0 is the bead plane and is read for detection " +
+            "only); got ${zRange[0]}-${zRange[1]}. Use for example 1-6."
+        )
+    }
+    // Plane 7 is allowed here only if the dataset has it. That is checked
+    // against the planes present by the calibration and the projection driver.
+    if (zRange[1] > 7) {
+        errors << (
+            "merscope_bead_removal supports planes up to 7; " +
+            "got ${zRange[0]}-${zRange[1]}."
+        )
+    }
+    if (!normalizedPath(merscopeDir).toFile().isDirectory()) {
+        errors << (
+            "merscope_bead_removal needs a raw MERSCOPE input folder with " +
+            "z-plane TIFFs (images/mosaic_<stain>_z<N>.tif); merscope_dir " +
+            "is not a directory: ${merscopeDir}"
+        )
+    }
+}
+
+def onOffText(flag) {
+    return flag ? "on" : "off"
+}
+
+def publishedBeadRemovalState(zarrPath) {
+    // Bead removal and fill switches recorded in the root attribute
+    // merxen_image_preprocessing of a built source zarr. A legacy zarr (no
+    // record) or unreadable metadata reads as "off", like in the Python guard.
+    def root = zarrPath.toFile()
+    def attrs = null
+    try {
+        def v3 = new File(root, "zarr.json")
+        def v2 = new File(root, ".zattrs")
+        if (v3.isFile()) {
+            attrs = new groovy.json.JsonSlurper().parseText(v3.text)?.attributes
+        } else if (v2.isFile()) {
+            attrs = new groovy.json.JsonSlurper().parseText(v2.text)
+        }
+    } catch (Exception ignored) {
+        attrs = null
+    }
+    def record = (attrs instanceof Map) ? attrs.get("merxen_image_preprocessing") : null
+    def bead = (record instanceof Map) ? record.get("bead_removal") : null
+    def fill = (bead instanceof Map) ? bead.get("fill") : null
+    return [
+        enabled: (bead instanceof Map) && bead.get("enabled") == true,
+        fill: (fill instanceof Map) && fill.get("enabled") == true,
+        // A fill block without a mode is a flat fill.
+        fillMode: ((fill instanceof Map) ? fill.get("mode") : null) ?: "flat",
+    ]
+}
+
+def appendPublishedBeadRemovalChecks(errors, row, settings, params) {
+    // With the build stage skipped (start/only stage past BUILD_SPATIALDATA) the
+    // published source zarr feeds the later stages without passing the Python
+    // reuse guard, so a mismatch with the requested bead removal is refused here:
+    // it must never run silently on the other image.
+    if (!settings.need_build_results) {
+        return
+    }
+    def sourceZarr = normalizedPath(
+        publishedDatasetPath(
+            params.outdir,
+            settings.pair_id,
+            "MERSCOPE",
+            "spatialdata/spatialdata_out/source_spatialdata.zarr",
+        )
+    )
+    if (!sourceZarr.toFile().isDirectory()) {
+        // Reported when the path is required (requireExistingPath).
+        return
+    }
+    def requested = merscopeBeadRemovalRequested(row, settings.pair_id, params)
+    def requestedFill = requested && merscopeBeadRemovalFillRequested(params)
+    def requestedFillMode = merscopeBeadRemovalFillMode(params)
+    def recorded = publishedBeadRemovalState(sourceZarr)
+    def remedy = (
+        "Run from the build stage with --force_spatialdata_build true (needs " +
+        "merscope_dir) or change merscope_bead_removal / " +
+        "merscope_bead_removal_fill / merscope_bead_removal_fill_mode to match " +
+        "the published zarr."
+    )
+    if (recorded.enabled != requested) {
+        errors << (
+            "The published MERSCOPE source zarr ${sourceZarr} was built with " +
+            "bead removal ${onOffText(recorded.enabled)} but ${onOffText(requested)} " +
+            "is requested. ${remedy}"
+        )
+    } else if (requested && recorded.fill != requestedFill) {
+        errors << (
+            "The published MERSCOPE source zarr ${sourceZarr} was built with " +
+            "the bead-removal fill ${onOffText(recorded.fill)} but " +
+            "${onOffText(requestedFill)} is requested. ${remedy}"
+        )
+    } else if (requestedFill && recorded.fillMode != requestedFillMode) {
+        errors << (
+            "The published MERSCOPE source zarr ${sourceZarr} was built with " +
+            "the bead-removal fill mode ${recorded.fillMode} but " +
+            "${requestedFillMode} is requested. ${remedy}"
+        )
+    }
+}
+
+def appendGastonPreflightChecks(errors, settings, params) {
+    if (!(settings.run_gaston && settings.gaston_published_output_mode)) {
+        return
+    }
+    settings.gaston_segmentations.each { segmentation ->
+        settings.active_platforms.each { platform ->
+            def sampleId = "${settings.pair_id}_${platform}"
+            def clusteredH5ad = normalizedPath(
+                publishedPairPath(
+                    params.outdir,
+                    settings.pair_id,
+                    "${segmentation}/" +
+                    AnnotationSettings.publishedClusteringDir(
+                        params.outdir, settings.pair_id, segmentation, platform, sampleId,
+                        settings.clustering_squidpy_table_key_suffix, // rca-site:H2
+                    ) +
+                    "/clustering_squidpy_out/${platform.toLowerCase()}/" +
+                    "${sampleId}_clustered.h5ad",
+                )
+            )
+            if (!clusteredH5ad.toFile().isFile()) {
+                errors << (
+                    "Missing GASTON clustered H5AD for " +
+                    "${settings.pair_id}:${platform}:${segmentation}: ${clusteredH5ad}"
+                )
+            }
+            def latestZarr = normalizedPath(
+                publishedDatasetPath(
+                    params.outdir,
+                    settings.pair_id,
+                    platform,
+                    "latest/latest_spatialdata.zarr",
+                )
+            )
+            if (!latestZarr.toFile().isDirectory()) {
+                errors << (
+                    "Missing GASTON latest SpatialData Zarr for " +
+                    "${settings.pair_id}:${platform}:${segmentation}: ${latestZarr}"
+                )
+            } else {
+                def layerKeys = analysisLayerKeys(platform, segmentation)
+                def tableKey = clusteredSpatialdataTableKey(
+                    layerKeys.table_key,
+                    segmentation,
+                    settings.clustering_squidpy_table_key_suffix, // rca-site:H2
+                )
+                def tablePath = latestZarr.resolve("tables").resolve(tableKey)
+                if (!tablePath.toFile().exists()) {
+                    errors << (
+                        "Missing GASTON clustered SpatialData table '${tableKey}' " +
+                        "for ${settings.pair_id}:${platform}:${segmentation}: " +
+                        "${tablePath}"
+                    )
+                }
+            }
+        }
+    }
+}
+
 def runPreflightChecks(row, settings, params) {
+    CellposeSettings.preflight(row, settings, params)
     def errors = []
     appendRegisterImagesPreflightChecks(errors, settings)
     appendClusteringSquidpyPreflightChecks(errors, settings, params)
@@ -1518,8 +1921,10 @@ def runPreflightChecks(row, settings, params) {
     appendCorticalDepthPreflightChecks(errors, row, settings, params)
     appendSpatialGeneTranscriptPreflightChecks(errors, row, settings, params)
     appendDistanceFromObjectPreflightChecks(errors, row, settings, params)
+    appendMerscopeBeadRemovalPreflightChecks(errors, row, settings, params)
     appendMecrPreflightChecks(errors, settings, params)
     appendMenderPreflightChecks(errors, settings, params)
+    appendGastonPreflightChecks(errors, settings, params)
     if (errors) {
         throw new IllegalArgumentException(
             "Preflight checks failed for sample ${settings.pair_id} " +
@@ -1560,6 +1965,50 @@ def boolOrDefault(rawValue, defaultValue, label) {
         "Unknown boolean value for ${label}: '${rawValue}'. " +
         "Use true or false."
     )
+}
+
+def merscopeBeadRemovalRequested(row, pairId, params) {
+    return boolOrDefault(
+        rowFieldOrDefault(row, "merscope_bead_removal", params.merscope_bead_removal),
+        false,
+        "merscope_bead_removal for ${pairId}"
+    )
+}
+
+def merscopeBeadRemovalDevice(params) {
+    def rawDevice = params.merscope_bead_removal_device
+    if (rawDevice == null || rawDevice.toString().trim().isEmpty()) {
+        return "cpu"
+    }
+    return rawDevice.toString().trim().toLowerCase()
+}
+
+// The residual-footprint fill is on by default (hybrid mode); false switches it
+// off for every sample that has bead removal on.
+def merscopeBeadRemovalFillRequested(params) {
+    return boolOrDefault(
+        params.merscope_bead_removal_fill,
+        true,
+        "merscope_bead_removal_fill"
+    )
+}
+
+// The veto of Cellpose cell masks on modelled beads is on by default; false
+// switches it off. It only reaches the config of samples with bead removal on.
+def merscopeBeadMaskVetoRequested(params) {
+    return boolOrDefault(
+        params.merscope_bead_mask_veto,
+        true,
+        "merscope_bead_mask_veto"
+    )
+}
+
+def merscopeBeadRemovalFillMode(params) {
+    def rawMode = params.merscope_bead_removal_fill_mode
+    if (rawMode == null || rawMode.toString().trim().isEmpty()) {
+        return "hybrid"
+    }
+    return rawMode.toString().trim().toLowerCase()
 }
 
 def rowSampleSettings(row, params) {
@@ -1606,6 +2055,15 @@ def rowSampleSettings(row, params) {
     )
     def registerImagesEnabled = (
         activePlatforms.contains("XENIUM") && registeredImagesCsv != null
+    )
+    def registerPostXeniumIfNonrigid = boolOrDefault(
+        rowFieldOrDefault(
+            row,
+            "register_post_xenium_if_nonrigid",
+            params.register_post_xenium_if_nonrigid,
+        ),
+        false,
+        "register_post_xenium_if_nonrigid for ${pairId}",
     )
     def spatialGeneAnalysisEnabled = boolOrDefault(
         rowFieldOrDefault(
@@ -1656,6 +2114,186 @@ def rowSampleSettings(row, params) {
     def menderSegmentations = normalizeMenderSegmentations(
         rowFieldOrDefault(row, "mender_segmentations", params.mender_segmentations)
     )
+    def gastonEnabled = boolOrDefault(
+        rowFieldOrDefault(row, "gaston_enabled", params.gaston_enabled),
+        false,
+        "gaston_enabled for ${pairId}",
+    )
+    def gastonSegmentations = normalizeGastonSegmentations(
+        rowFieldOrDefault(
+            row,
+            "gaston_segmentations",
+            params.gaston_segmentations,
+        )
+    )
+    def gastonDomainMode = rowFieldOrDefault(
+        row,
+        "gaston_domain_mode",
+        params.gaston_domain_mode,
+    ).toString().trim().toLowerCase()
+    if (!(gastonDomainMode in ["auto", "fixed"])) {
+        throw new IllegalArgumentException(
+            "Unknown gaston_domain_mode for ${pairId}: '${gastonDomainMode}'. " +
+            "Use auto or fixed."
+        )
+    }
+    def gastonKeepCheckpoints = rowFieldOrDefault(
+        row,
+        "gaston_keep_checkpoints",
+        params.gaston_keep_checkpoints,
+    ).toString().trim().toLowerCase()
+    if (!(gastonKeepCheckpoints in ["none", "best", "all"])) {
+        throw new IllegalArgumentException(
+            "Unknown gaston_keep_checkpoints for ${pairId}: " +
+            "'${gastonKeepCheckpoints}'. Use none, best, or all."
+        )
+    }
+    def gastonSettings = [
+        use_gpu: boolOrDefault(
+            rowFieldOrDefault(row, "gaston_use_gpu", params.gaston_use_gpu),
+            params.gaston_use_gpu,
+            "gaston_use_gpu for ${pairId}",
+        ),
+        n_restarts: intOrDefault(
+            rowFieldOrDefault(row, "gaston_n_restarts", params.gaston_n_restarts),
+            params.gaston_n_restarts,
+        ),
+        epochs: intOrDefault(
+            rowFieldOrDefault(row, "gaston_epochs", params.gaston_epochs),
+            params.gaston_epochs,
+        ),
+        checkpoint_interval: intOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_checkpoint_interval",
+                params.gaston_checkpoint_interval,
+            ),
+            params.gaston_checkpoint_interval,
+        ),
+        hidden_spatial: positiveIntegerListOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_hidden_spatial",
+                params.gaston_hidden_spatial,
+            ),
+            [20, 20],
+            "gaston_hidden_spatial for ${pairId}",
+        ),
+        hidden_expression: positiveIntegerListOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_hidden_expression",
+                params.gaston_hidden_expression,
+            ),
+            [20, 20],
+            "gaston_hidden_expression for ${pairId}",
+        ),
+        optimizer: rowFieldOrDefault(
+            row,
+            "gaston_optimizer",
+            params.gaston_optimizer,
+        ).toString().trim().toLowerCase(),
+        glmpca_dimensions: intOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_glmpca_dimensions",
+                params.gaston_glmpca_dimensions,
+            ),
+            params.gaston_glmpca_dimensions,
+        ),
+        glmpca_penalty: floatOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_glmpca_penalty",
+                params.gaston_glmpca_penalty,
+            ),
+            params.gaston_glmpca_penalty,
+        ),
+        glmpca_iterations: intOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_glmpca_iterations",
+                params.gaston_glmpca_iterations,
+            ),
+            params.gaston_glmpca_iterations,
+        ),
+        domain_mode: gastonDomainMode,
+        num_domains: nullableIntOrDefault(
+            chooseField(row, ["gaston_num_domains"]),
+            params.gaston_num_domains,
+        ),
+        min_domains: intOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_min_domains",
+                params.gaston_min_domains,
+            ),
+            params.gaston_min_domains,
+        ),
+        max_domains: intOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_max_domains",
+                params.gaston_max_domains,
+            ),
+            params.gaston_max_domains,
+        ),
+        domain_buckets: intOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_domain_buckets",
+                params.gaston_domain_buckets,
+            ),
+            params.gaston_domain_buckets,
+        ),
+        auto_k_fallback: nullableIntOrDefault(
+            chooseField(row, ["gaston_auto_k_fallback"]),
+            params.gaston_auto_k_fallback,
+        ),
+        write_spatialdata_table: boolOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_write_spatialdata_table",
+                params.gaston_write_spatialdata_table,
+            ),
+            params.gaston_write_spatialdata_table,
+            "gaston_write_spatialdata_table for ${pairId}",
+        ),
+        keep_seed_models: boolOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_keep_seed_models",
+                params.gaston_keep_seed_models,
+            ),
+            params.gaston_keep_seed_models,
+            "gaston_keep_seed_models for ${pairId}",
+        ),
+        keep_checkpoints: gastonKeepCheckpoints,
+        max_genes: intOrDefault(
+            rowFieldOrDefault(row, "gaston_max_genes", params.gaston_max_genes),
+            params.gaston_max_genes,
+        ),
+        figure_dpi: intOrDefault(
+            rowFieldOrDefault(
+                row,
+                "gaston_figure_dpi",
+                params.gaston_figure_dpi,
+            ),
+            params.gaston_figure_dpi,
+        ),
+    ]
+    if (!(gastonSettings.optimizer in ["adam", "sgd", "adagrad"])) {
+        throw new IllegalArgumentException(
+            "Unknown gaston_optimizer for ${pairId}: " +
+            "'${gastonSettings.optimizer}'. Use adam, sgd, or adagrad."
+        )
+    }
+    if (gastonDomainMode == "fixed" && gastonSettings.num_domains == null) {
+        throw new IllegalArgumentException(
+            "gaston_num_domains is required for ${pairId} when " +
+            "gaston_domain_mode=fixed"
+        )
+    }
     def distanceFromObjectSegmentations = normalizeDistanceFromObjectSegmentations(
         rowFieldOrDefault(
             row,
@@ -1699,6 +2337,7 @@ def rowSampleSettings(row, params) {
         mecrEnabled,
         menderEnabled,
         registerImagesEnabled,
+        gastonEnabled,
     )
     def startStage = normalizeStage(startStageRaw, startParamName)
     def stopStage = normalizeStage(stopStageRaw, stopParamName)
@@ -1721,8 +2360,12 @@ def rowSampleSettings(row, params) {
     // Opt-in terminal analyses extend the historical clustering stop default.
     // Explicit only_stage selections and non-default stop stages remain exact.
     def autoExtendedToMender = false
+    def autoExtendedToGaston = false
     if (!onlyStageRaw && stopStage == "clustering_squidpy") {
-        if (menderEnabled && stageOrder.contains("mender")) {
+        if (gastonEnabled && stageOrder.contains("gaston")) {
+            stopStage = "gaston"
+            autoExtendedToGaston = true
+        } else if (menderEnabled && stageOrder.contains("mender")) {
             stopStage = "mender"
             autoExtendedToMender = true
         } else if (distanceFromObjectEnabled && stageOrder.contains("distance_from_object")) {
@@ -1798,12 +2441,14 @@ def rowSampleSettings(row, params) {
     def runMapMyCells = stageInRange("mapmycells", startStage, stopStage, stageOrder)
     // Extending the historical clustering stop for MENDER must not implicitly
     // activate MapMyCells, which otherwise lies between clustering and MENDER.
-    if (autoExtendedToMender) {
+    if (autoExtendedToMender || autoExtendedToGaston) {
         runMapMyCells = false
     }
+    def runGaston = stageInRange("gaston", startStage, stopStage, stageOrder)
     def runMender = stageInRange("mender", startStage, stopStage, stageOrder)
     def requiredClusteringSegmentations = (
-        analysisSegmentations + (runMender ? menderSegmentations : [])
+        analysisSegmentations + (runMender ? menderSegmentations : []) +
+        (runGaston ? gastonSegmentations : [])
     ).unique()
     def analysisInputSegmentations = runClusteringSquidpy
         ? requiredClusteringSegmentations
@@ -1859,6 +2504,8 @@ def rowSampleSettings(row, params) {
         analysis_input_segmentations: analysisInputSegmentations,
         required_clustering_segmentations: requiredClusteringSegmentations,
         mender_segmentations: menderSegmentations,
+        gaston_segmentations: gastonSegmentations,
+        gaston: gastonSettings,
         distance_from_object_segmentations: distanceFromObjectSegmentations,
         alignment_annotation_paths: [
             MERSCOPE: optionalNormalizedPathString(
@@ -1877,7 +2524,7 @@ def rowSampleSettings(row, params) {
         stop_stage: stopStage,
         selected_stages: stageOrder.findAll { stage ->
             stageInRange(stage, startStage, stopStage, stageOrder) &&
-                !(autoExtendedToMender && stage == "mapmycells")
+                !((autoExtendedToMender || autoExtendedToGaston) && stage == "mapmycells")
         },
         run_build: runBuild,
         run_segment_nuclei: runSegmentNuclei,
@@ -1885,6 +2532,7 @@ def rowSampleSettings(row, params) {
         run_enrich: runEnrich,
         run_register_images: runRegisterImages,
         registered_images_csv: registeredImagesCsv,
+        register_post_xenium_if_nonrigid: registerPostXeniumIfNonrigid,
         run_build_viewer_caches: runBuildViewerCaches,
         run_mask_image_quantification: runMaskImageQuantification,
         run_compute_cortical_depth: runComputeCorticalDepth,
@@ -1904,6 +2552,19 @@ def rowSampleSettings(row, params) {
             runMender &&
             (
                 (onlyStageRaw && startStage == "mender") ||
+                (!runMapMyCells &&
+                 !runDistanceFromObject &&
+                 !runComputeCorticalDepth &&
+                 !runClusteringSquidpy)
+            )
+        ),
+        run_terminal_analyses: runMender || runGaston,
+        run_gaston: runGaston,
+        gaston_published_output_mode: runGaston && !runClusteringSquidpy,
+        gaston_bypass_terminal_gate: (
+            runGaston &&
+            (
+                (onlyStageRaw && startStage == "gaston") ||
                 (!runMapMyCells &&
                  !runDistanceFromObject &&
                  !runComputeCorticalDepth &&
@@ -2126,6 +2787,7 @@ workflow {
             "mender segmentations=${settings.mender_segmentations.join(', ')}; " +
             "required clustering segmentations=" +
             "${settings.required_clustering_segmentations.join(', ')}; " +
+            "GASTON segmentations=${settings.gaston_segmentations.join(', ')}; " +
             "selected stages=${settings.selected_stages.join(' -> ')}"
         )
         tuple(settings.pair_id, row, settings)
@@ -2141,10 +2803,26 @@ workflow {
     preflight_done_ch = sample_rows_raw_ch
         .map { _pairId, row, settings ->
             runPreflightChecks(row, settings, params)
-            true
+            ("MERSCOPE" in settings.active_platforms) &&
+                merscopeBeadRemovalRequested(row, settings.pair_id, params)
         }
         .collect()
-        .map { true }
+        .map { beadRequested ->
+            // The fill is a global switch and only acts on samples that have
+            // bead removal on, so say once that it is active, and only when
+            // some sample asks for bead removal.
+            if (
+                beadRequested.any { requested -> requested } &&
+                merscopeBeadRemovalFillRequested(params)
+            ) {
+                log.info(
+                    "merscope_bead_removal_fill is on (mode " +
+                    "${merscopeBeadRemovalFillMode(params)}): samples with bead " +
+                    "removal also get the residual-footprint fill"
+                )
+            }
+            true
+        }
 
     sample_rows_ch = sample_rows_raw_ch
         .combine(preflight_done_ch)
@@ -2361,6 +3039,20 @@ workflow {
                 ],
             ]
 
+            // hitl-hook:C4
+            if (meta.cellpose_settings) {
+                baseConfig.cellpose.putAll(meta.cellpose_settings.cellpose)
+                baseConfig.mask_filter.putAll(meta.cellpose_settings.mask_filter)
+                if (meta.cellpose_settings.cellpose_model_policy) {
+                    baseConfig.cellpose_model_policy = meta.cellpose_settings.cellpose_model_policy
+                }
+            }
+
+            // Only present for rows with bead removal on (see segmentMetaForPlatform).
+            if (meta.bead_mask_veto) {
+                baseConfig.bead_mask_veto = meta.bead_mask_veto
+            }
+
             def segmentConfig = baseConfig + [
                 dataset: [
                     name: "${pairId}_${platform}",
@@ -2418,7 +3110,7 @@ workflow {
                 tuple(key, pairId, platform, segmentConfigJson)
         }
 
-    nuclei_task_results_ch = CELLPOSE_NUCLEI_SEGMENT(nuclei_segment_inputs_ch)
+    nuclei_task_results_ch = CELLPOSE_NUCLEI_SEGMENT(nuclei_segment_inputs_ch).segmentation
 
     nuclei_published_results_ch = segmentation_config_inputs_ch
         .filter {
@@ -2640,11 +3332,19 @@ workflow {
         .join(
             sample_rows_ch.flatMap { pairId, _row, settings ->
                 settings.run_register_images
-                    ? [tuple("${pairId}|XENIUM", settings.registered_images_csv)]
+                    ? [
+                        tuple(
+                            "${pairId}|XENIUM",
+                            settings.registered_images_csv,
+                            settings.register_post_xenium_if_nonrigid,
+                        )
+                    ]
                     : []
             }
         )
-        .map { key, pairId, platform, enrichedLatestZarr, registeredImagesCsv ->
+        .map {
+            key, pairId, platform, enrichedLatestZarr, registeredImagesCsv,
+            registerPostXeniumIfNonrigid ->
             def registerImagesConfig = [
                 dataset_name: "${pairId}_${platform}",
                 platform: platform,
@@ -2652,6 +3352,19 @@ workflow {
                 output_dir: "register_images_out",
                 images: registeredImageSpecs(registeredImagesCsv),
                 refine_affine: params.register_images_refine_affine,
+                nonrigid_enabled: registerPostXeniumIfNonrigid,
+                nonrigid_pixel_size_um: params.register_post_xenium_if_nonrigid_pixel_size_um,
+                nonrigid_attachment: params.register_post_xenium_if_nonrigid_attachment,
+                nonrigid_tightness: params.register_post_xenium_if_nonrigid_tightness,
+                nonrigid_num_warp: params.register_post_xenium_if_nonrigid_num_warp,
+                nonrigid_num_iter: params.register_post_xenium_if_nonrigid_num_iter,
+                nonrigid_smoothing_sigma_um: params.register_post_xenium_if_nonrigid_smoothing_sigma_um,
+                nonrigid_max_displacement_um: params.register_post_xenium_if_nonrigid_max_displacement_um,
+                nonrigid_max_cycle_error_um: params.register_post_xenium_if_nonrigid_max_cycle_error_um,
+                nonrigid_min_local_correlation: params.register_post_xenium_if_nonrigid_min_local_correlation,
+                nonrigid_min_jacobian: params.register_post_xenium_if_nonrigid_min_jacobian,
+                nonrigid_max_jacobian: params.register_post_xenium_if_nonrigid_max_jacobian,
+                nonrigid_min_confident_fraction: params.register_post_xenium_if_nonrigid_min_confident_fraction,
                 build_viewer_pyramid: params.viewer_cache_build_image_pyramid,
             ]
 
@@ -3794,12 +4507,27 @@ workflow {
     // subcluster_label annotations exist and its depth violin plots can be
     // produced. The distance-from-object branch consumes its tissue-region
     // annotation when both opt-in stages run in the same invocation.
+    clustering_completion_expectations_ch = sample_rows_ch.flatMap {
+        pairId, _row, settings ->
+            if (!(settings.run_clustering_squidpy &&
+                  (settings.run_compute_cortical_depth ||
+                   settings.run_distance_from_object))) {
+                []
+            } else {
+                [tuple(pairId, settings.required_clustering_segmentations.size())]
+            }
+    }
+
     clustering_done_per_pair_ch = clustering_results_ch
-        .map { pairId, segmentation, _samplesJson, _clusteringOutDir ->
-            tuple(pairId, segmentation)
+        .map { pairId, _segmentation, _samplesJson, _clusteringOutDir ->
+            tuple(pairId, true)
+        }
+        .join(clustering_completion_expectations_ch)
+        .map { pairId, _done, expectedCount ->
+            tuple(groupKey(pairId, expectedCount as int), true)
         }
         .groupTuple()
-        .map { pairId, _segmentations -> tuple(pairId, true) }
+        .map { pairKey, _doneFlags -> tuple(pairKey.getGroupTarget(), true) }
 
     compute_cortical_depth_after_clustering_gate_ch =
         sample_rows_ch.flatMap { pairId, row, settings ->
@@ -4115,7 +4843,7 @@ workflow {
     // another pair. Cohort summaries are intentionally outside the barrier.
     // MENDER consumes this token without depending on other terminal analyses.
     pair_terminal_specs_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
-        if (!settings.run_mender) {
+        if (!settings.run_terminal_analyses) {
             []
         } else {
             def terminalStage = currentPairTerminalStage(settings)
@@ -4133,7 +4861,7 @@ workflow {
 
     pair_terminal_immediate_ch = sample_rows_ch.flatMap {
         pairId, _row, settings ->
-            if (settings.run_mender && currentPairTerminalStage(settings) == null) {
+            if (settings.run_terminal_analyses && currentPairTerminalStage(settings) == null) {
                 [tuple(pairId, true)]
             } else {
                 []
@@ -4157,9 +4885,9 @@ workflow {
         pairId, _segmentation, _samplesJson, _clusteringOutDir ->
             tuple(pairId, "clustering_squidpy", true)
     }
-    mender_extra_clustering_gate_ch = sample_rows_ch.flatMap {
+    terminal_extra_clustering_gate_ch = sample_rows_ch.flatMap {
         pairId, _row, settings ->
-            if (!(settings.run_mender &&
+            if (!(settings.run_terminal_analyses &&
                   settings.run_mapmycells &&
                   settings.run_clustering_squidpy)) {
                 []
@@ -4173,11 +4901,11 @@ workflow {
                     }
             }
     }
-    mender_extra_clustering_terminal_events_ch = clustering_results_ch
+    terminal_extra_clustering_terminal_events_ch = clustering_results_ch
         .map { pairId, segmentation, _samplesJson, _clusteringOutDir ->
             tuple("${pairId}|${segmentation}", pairId)
         }
-        .join(mender_extra_clustering_gate_ch)
+        .join(terminal_extra_clustering_gate_ch)
         .map { _branchKey, pairId, _expectedPairId ->
             tuple(pairId, "mapmycells", true)
         }
@@ -4185,36 +4913,22 @@ workflow {
         .mix(distance_terminal_events_ch)
         .mix(cortical_terminal_events_ch)
         .mix(clustering_terminal_events_ch)
-        .mix(mender_extra_clustering_terminal_events_ch)
+        .mix(terminal_extra_clustering_terminal_events_ch)
 
-    // map_first runs pair every terminal event with the pair's one spec:
-    // combine keeps the spec, whereas join pairs items one to one, so the
-    // pair's first terminal event (FINALIZE's) would consume it and the
-    // events MENDER waits for would be dropped (M5 exit run). Legacy runs
-    // keep the join, so their channels and DAG are unchanged.
-    if (AnnotationSettings.isMapFirstRun(params)) { // rca-site:H3
-        pair_terminal_grouped_ch = pair_terminal_events_ch
-            .combine(pair_terminal_specs_ch, by: 0)
-            .filter { _pairId, eventStage, _done, expectedStage, _expectedCount ->
-                eventStage == expectedStage
-            }
-            .map { pairId, _eventStage, _done, _expectedStage, expectedCount ->
-                tuple(groupKey(pairId, expectedCount as int), true)
-            }
-            .groupTuple()
-            .map { pairKey, _doneFlags -> tuple(pairKey.getGroupTarget(), true) }
-    } else {
-        pair_terminal_grouped_ch = pair_terminal_events_ch
-            .join(pair_terminal_specs_ch)
-            .filter { _pairId, eventStage, _done, expectedStage, _expectedCount ->
-                eventStage == expectedStage
-            }
-            .map { pairId, _eventStage, _done, _expectedStage, expectedCount ->
-                tuple(groupKey(pairId, expectedCount as int), true)
-            }
-            .groupTuple()
-            .map { pairKey, _doneFlags -> tuple(pairKey.getGroupTarget(), true) }
-    }
+    // Pair every terminal event with the pair's one spec: combine keeps the
+    // spec, whereas join pairs items one to one, so the pair's first terminal
+    // event (often FINALIZE's) would consume it and the events the terminal
+    // consumers wait for would be dropped. Legacy and map_first runs alike.
+    pair_terminal_grouped_ch = pair_terminal_events_ch
+        .combine(pair_terminal_specs_ch, by: 0)
+        .filter { _pairId, eventStage, _done, expectedStage, _expectedCount ->
+            eventStage == expectedStage
+        }
+        .map { pairId, _eventStage, _done, _expectedStage, expectedCount ->
+            tuple(groupKey(pairId, expectedCount as int), true)
+        }
+        .groupTuple()
+        .map { pairKey, _doneFlags -> tuple(pairKey.getGroupTarget(), true) }
 
     pair_terminal_token_ch = pair_terminal_immediate_ch.mix(
         pair_terminal_grouped_ch
@@ -4442,6 +5156,302 @@ workflow {
             AnnotationRunRecord.menderImported(pairId, segmentation, platform, importManifest)
         }
     }
+
+    gaston_current_clustering_gate_ch = sample_rows_ch.flatMap {
+        pairId, _row, settings ->
+            if (!(settings.run_gaston && settings.run_clustering_squidpy)) {
+                []
+            } else {
+                settings.gaston_segmentations.collect { segmentation ->
+                    tuple("${pairId}|${segmentation}", settings)
+                }
+            }
+    }
+
+    gaston_current_artifacts_ch = clustering_results_ch
+        .map { pairId, segmentation, samplesJson, clusteringOutDir ->
+            tuple(
+                "${pairId}|${segmentation}",
+                pairId,
+                segmentation,
+                samplesJson,
+                clusteringOutDir,
+            )
+        }
+        .join(gaston_current_clustering_gate_ch)
+        .flatMap {
+            _segmentationKey,
+            pairId,
+            segmentation,
+            samplesJson,
+            clusteringOutDir,
+            settings ->
+                def samples = new groovy.json.JsonSlurper().parseText(
+                    samplesJson.toString()
+                )
+                samples.collect { sample ->
+                    def platform = sample.platform.toString()
+                    def sampleId = sample.sample_id.toString()
+                    def h5adPath = java.nio.file.Paths.get(
+                        clusteringOutDir.toString()
+                    ).resolve(platform.toLowerCase()).resolve(
+                        "${sampleId}_clustered.h5ad"
+                    )
+                    tuple(
+                        pairId,
+                        "${pairId}|${platform}|${segmentation}",
+                        segmentation,
+                        platform,
+                        sampleId,
+                        h5adPath,
+                        java.nio.file.Paths.get(
+                            sample.zarr_path.toString()
+                        ).toRealPath().toString(),
+                        settings,
+                    )
+                }
+        }
+
+    gaston_published_artifacts_ch = sample_rows_ch.flatMap {
+        pairId, _row, settings ->
+            if (!(settings.run_gaston && settings.gaston_published_output_mode)) {
+                []
+            } else {
+                settings.gaston_segmentations.collectMany { segmentation ->
+                    settings.active_platforms.collect { platform ->
+                        def sampleId = "${pairId}_${platform}"
+                        def h5adPath = normalizedPath(
+                            publishedPairPath(
+                                params.outdir,
+                                pairId,
+                                "${segmentation}/" +
+                                AnnotationSettings.publishedClusteringDir(
+                                    params.outdir, pairId, segmentation, platform, sampleId,
+                                    settings.clustering_squidpy_table_key_suffix, // rca-site:H2
+                                ) +
+                                "/clustering_squidpy_out/" +
+                                "${platform.toLowerCase()}/" +
+                                "${sampleId}_clustered.h5ad",
+                            )
+                        )
+                        def latestZarr = normalizedPath(
+                            publishedDatasetPath(
+                                params.outdir,
+                                pairId,
+                                platform,
+                                "latest/latest_spatialdata.zarr",
+                            )
+                        ).toRealPath().toString()
+                        tuple(
+                            pairId,
+                            "${pairId}|${platform}|${segmentation}",
+                            segmentation,
+                            platform,
+                            sampleId,
+                            h5adPath,
+                            latestZarr,
+                            settings,
+                        )
+                    }
+                }
+            }
+    }
+
+    gaston_artifacts_ch = gaston_current_artifacts_ch.mix(
+        gaston_published_artifacts_ch
+    )
+
+    gaston_postprocess_config_ch = gaston_artifacts_ch.map {
+        pairId,
+        branchKey,
+        segmentation,
+        platform,
+        _sampleId,
+        _clusteredH5ad,
+        latestZarr,
+        settings ->
+            tuple(
+                branchKey,
+                gastonConfigJson(
+                    pairId,
+                    segmentation,
+                    platform,
+                    latestZarr,
+                    settings,
+                ),
+            )
+    }
+
+    gaston_inputs_ch = gaston_artifacts_ch
+        .combine(pair_terminal_token_ch, by: 0)
+        .map {
+            pairId,
+            branchKey,
+            segmentation,
+            platform,
+            sampleId,
+            clusteredH5ad,
+            latestZarr,
+            settings,
+            terminalToken ->
+                tuple(
+                    branchKey,
+                    pairId,
+                    segmentation,
+                    platform,
+                    sampleId,
+                    gastonTrainingConfigJson(
+                        pairId,
+                        segmentation,
+                        platform,
+                        latestZarr,
+                        settings,
+                    ),
+                    clusteredH5ad,
+                    latestZarr,
+                    settings.gaston.n_restarts,
+                    settings.gaston.use_gpu,
+                    terminalToken,
+                )
+        }
+
+    gaston_import_lookup_ch = gaston_inputs_ch.map {
+        branchKey,
+        _pairId,
+        _segmentation,
+        _platform,
+        _sampleId,
+        _configJson,
+        clusteredH5ad,
+        latestZarr,
+        _nRestarts,
+        _useGpu,
+        _terminalToken ->
+            tuple(branchKey, clusteredH5ad, latestZarr)
+    }
+
+    gaston_prepared_ch = GASTON_PREPARE(gaston_inputs_ch)
+    gaston_glmpca_ch = GASTON_GLM_PCA(gaston_prepared_ch)
+
+    gaston_postprocess_metadata_ch = gaston_glmpca_ch
+        .join(gaston_postprocess_config_ch)
+        .map {
+            branchKey,
+            pairId,
+            segmentation,
+            platform,
+            sampleId,
+            _trainingConfig,
+            preparedDir,
+            glmpcaDir,
+            latestZarr,
+            _nRestarts,
+            _useGpu,
+            postprocessConfigJson ->
+                tuple(
+                    branchKey,
+                    pairId,
+                    segmentation,
+                    platform,
+                    sampleId,
+                    postprocessConfigJson,
+                    preparedDir,
+                    glmpcaDir,
+                    latestZarr,
+                )
+        }
+
+    gaston_train_inputs_ch = gaston_glmpca_ch.flatMap {
+        branchKey,
+        pairId,
+        segmentation,
+        platform,
+        sampleId,
+        gastonConfig,
+        preparedDir,
+        glmpcaDir,
+        latestZarr,
+        nRestarts,
+        useGpu ->
+            (0..<nRestarts).collect { seed ->
+                tuple(
+                    groupKey(branchKey, nRestarts as int),
+                    pairId,
+                    segmentation,
+                    platform,
+                    sampleId,
+                    gastonConfig,
+                    preparedDir,
+                    glmpcaDir,
+                    latestZarr,
+                    seed,
+                    useGpu,
+                )
+            }
+    }
+
+    gaston_seed_results_ch = GASTON_TRAIN(gaston_train_inputs_ch)
+    gaston_seed_groups_ch = gaston_seed_results_ch
+        .groupTuple()
+        .map { branchGroupKey, seedDirs ->
+            tuple(branchGroupKey.getGroupTarget(), seedDirs)
+        }
+
+    gaston_postprocess_inputs_ch = gaston_seed_groups_ch
+        .join(gaston_postprocess_metadata_ch)
+        .map {
+            branchKey,
+            seedDirs,
+            pairId,
+            segmentation,
+            platform,
+            sampleId,
+            postprocessConfigJson,
+            preparedDir,
+            glmpcaDir,
+            latestZarr ->
+                tuple(
+                    branchKey,
+                    pairId,
+                    segmentation,
+                    platform,
+                    sampleId,
+                    postprocessConfigJson,
+                    preparedDir,
+                    glmpcaDir,
+                    latestZarr,
+                    seedDirs,
+                )
+        }
+
+    gaston_standalone_ch = GASTON_POSTPROCESS(gaston_postprocess_inputs_ch)
+    gaston_import_inputs_ch = gaston_standalone_ch
+        .join(gaston_import_lookup_ch)
+        .map {
+            branchKey,
+            pairId,
+            segmentation,
+            platform,
+            sampleId,
+            gastonConfig,
+            standaloneDir,
+            _postprocessLatestZarr,
+            clusteredH5ad,
+            latestZarr ->
+                tuple(
+                    branchKey,
+                    pairId,
+                    segmentation,
+                    platform,
+                    sampleId,
+                    gastonConfig,
+                    standaloneDir,
+                    clusteredH5ad,
+                    latestZarr,
+                )
+        }
+
+    GASTON_IMPORT(gaston_import_inputs_ch)
 
     // rca-hook:H11: the annotation QC report (plan §3.6, §9; M7), map_first runs only:
     // after FINALIZE, the pair's cortical depth and the branch's MENDER when they run.

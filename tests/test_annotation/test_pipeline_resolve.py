@@ -1321,6 +1321,7 @@ workflow {
 
 
 @pytest.mark.slow
+@pytest.mark.nextflow
 @pytest.mark.skipif(NEXTFLOW is None, reason="nextflow is unavailable")
 def test_the_resolve_process_resolves_a_synthetic_map_output(
     tmp_path: Path, fake_mmc: FakeMmc

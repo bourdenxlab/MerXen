@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
+
 import anndata as ad
 import dask.dataframe as dd
 import geopandas as gpd
@@ -13,8 +16,10 @@ from scipy import sparse
 from shapely.geometry import box
 from spatialdata.models import Labels2DModel, PointsModel, ShapesModel, TableModel
 
+from merxen.io import spatialdata_io
 from merxen.io.spatialdata_io import (
     prepare_source_spatialdata_contract,
+    upgrade_spatialdata_contract,
     upgrade_spatialdata_contract_in_memory,
 )
 from merxen.io.spatialdata_schema import (
@@ -157,6 +162,34 @@ def test_upgrade_maps_proseg_ids_and_repairs_duplicate_transcript_ids() -> None:
         sdata_obj.attrs[MERXEN_SCHEMA_ATTR]["schema_version"] == MERXEN_SCHEMA_VERSION
     )
     validate_merxen_schema(sdata_obj, deep=True)
+
+
+def test_store_upgrade_serializes_with_another_store_writer(
+    tmp_path: Path,
+    store_lock_contention: Any,
+) -> None:
+    """The rewrite-and-swap upgrade waits for a writer holding the store lock
+    through another staged symlink, and keeps the lock from its read through the
+    rewrite and the swap, so no concurrent write lands in the replaced copy."""
+    store = tmp_path / "latest.zarr"
+    _raw_proseg_spatialdata().write(store)
+
+    changed = store_lock_contention.run(
+        lambda staged: upgrade_spatialdata_contract(staged, platform="MERSCOPE"),
+        store,
+        reads=[(sd, "read_zarr")],
+        persists=[
+            (spatialdata_io, "write_spatialdata_zarr"),
+            (spatialdata_io, "remove_path"),
+        ],
+    )
+
+    assert changed
+    upgraded = sd.read_zarr(store)
+    assert upgraded.attrs[MERXEN_SCHEMA_ATTR]["schema_version"] == MERXEN_SCHEMA_VERSION
+    assert not any(
+        ".merxen-" in path.name for path in tmp_path.iterdir() if path.is_dir()
+    )
 
 
 def test_upgrade_is_a_noop_for_current_schema() -> None:

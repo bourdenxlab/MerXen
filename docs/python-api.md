@@ -31,11 +31,12 @@ The subpackage structure mirrors the Nextflow stage graph:
 `build → segment-nuclei → segment → enrich → register-images → mask-image-quantification → qc → align →
 materialize-alignment → alignment-qc → compare → visualize → spatial-gene-analysis →
 clustering-squidpy → compute-cortical-depth → distance-from-object →
-mapmycells`. Cortical depth is skipped unless `--cortical_depth_enabled true`
+mapmycells → gaston`. Cortical depth is skipped unless `--cortical_depth_enabled true`
 is set. Alignment is skipped unless
 `--enable_alignment true` is set, object distance is skipped unless
 `--distance_from_object_enabled true` is set, and MapMyCells is opt-in because
-it requires local reference files.
+it requires local reference files. GASTON is also opt-in and uses its own
+segmentation selector.
 
 ## `merxen.config`
 
@@ -47,10 +48,10 @@ configs against these.
   `DistanceFromObjectConfig`, `DistanceFromObjectCohortConfig`,
   `QCConfig`, `AlignmentConfig`, `AlignmentQCConfig`, `ComparisonConfig`,
   `VisualizationConfig`, `SpatialGeneAnalysisConfig`,
-  `ClusteringSquidpyConfig`.
+  `ClusteringSquidpyConfig`, `GastonConfig`.
 - Sub-models: `CellposeConfig`, `TilingConfig`, `MaskFilterConfig`,
   `ProsegConfig`, `ProsegHybridConfig`, `MemoryConfig`, `DatasetConfig`,
-  `MerscopeBuildConfig`, `XeniumBuildConfig`.
+  `MerscopeBuildConfig`, `MerscopeBeadRemovalConfig`, `XeniumBuildConfig`.
 - `PipelineConfig(BaseSettings)` — loads `MERXEN_*` env vars.
 - `load_config_from_json(path, cls)` — helper every CLI uses.
 
@@ -72,6 +73,42 @@ with Groovy.
 - `build_spatialdata_artifact(config, *, force_rerun)` — orchestrator.
 - `write_merscope_spatialdata(...)` / `write_xenium_spatialdata(...)`.
 
+### `io.bead_removal` — [bead_removal/](../src/merxen/io/bead_removal/)
+Optional removal of coverslip fiducial beads from MERSCOPE image planes before
+the max projection. Off by default. The package is lazy (its names load on first
+use): a default build, segmentation, enrichment or quantification run imports only
+the light `params` and `provenance` submodules for the image-preprocessing record,
+never the correction code, and the package imports no GPU code. Configured by `MerscopeBeadRemovalConfig`
+(`MerscopeBuildConfig.bead_removal`); see
+[stages/spatialdata-build.md](stages/spatialdata-build.md#merscope-bead-removal-optional).
+- `list_mosaic_planes(images_dir)` / `MosaicPlaneReader` — read raw
+  `mosaic_<stain>_z<N>.tif` planes by window.
+- `calibrate_bead_model(reader, *, config, z_layers, params, n_workers)` —
+  per-dataset calibration: tissue mask, calibration tiles, bead-presence
+  decision, PSF library, stain responses and classifier thresholds. Returns a
+  `BeadCalibration` (`save` / `load`, `calibration_sha256()`); raises
+  `BeadCalibrationError` with a per-tile table when the data cannot be
+  corrected (no beads, ambiguous, beads not focused at plane 0, no tissue-free
+  area).
+- `correct_window(stacks, *, origin_yx, calibration, z_layers, params, fill, core)` —
+  correct one window of plane stacks; `apply_bead_model` subtracts a fitted
+  model. Results depend only on the window's own pixels.
+- `run_bead_removal(...)` — chunk-major driver (process pool, parent-only
+  writes) used by the MERSCOPE builder; returns a `BeadRemovalRunResult`.
+- `write_bead_removal_qc(...)` — writes the `bead_removal_qc/` folder
+  (`QC_DIRNAME`).
+- `PsfSubtractParams` / `DEFAULT_PARAMS` / `params_sha256` and
+  `BEAD_REMOVAL_VERSION` — the fixed algorithm parameters and their identity.
+- `provenance` — `build_image_preprocessing_record`,
+  `check_bead_removal_reuse` (the cache guard), and the segmentation sidecar
+  helpers.
+- `fill` — the bounded fill (`FillParams`, `apply_bounded_fill`), in hybrid (the
+  config default: `eps` 1.0, dilation 3, no texture gate) or flat mode (`eps` 0.3,
+  dilation 2), reached through the config's `fill` and `fill_mode`. `eps` and
+  `dilation` default per mode, and `texture_gate=True` restores the earlier
+  texture-gated hybrid behaviour. The hybrid mode has a device port in
+  `gpu/fill.py`, called by the GPU `correct_window`.
+
 ### `io.spatialdata_io` — [spatialdata_io.py](../src/merxen/io/spatialdata_io.py)
 - `write_spatialdata_zarr(sdata, path, ...)`.
 - `convert_to_latest_zarr(raw_path, latest_path, quality_column_alias=...)` —
@@ -81,6 +118,8 @@ with Groovy.
   pre-schema latest store.
 - `prepare_source_spatialdata_contract(sdata, platform=...)` — normalizes
   source-reader IDs while preserving vendor provenance.
+- `spatialdata_write_lock(path)` — exclusive store-adjacent lock shared by
+  annotation importers before re-reading and replacing a table.
 
 ### `io.spatialdata_schema` — [spatialdata_schema.py](../src/merxen/io/spatialdata_schema.py)
 - `stamp_merxen_schema(...)` / `register_segmentation_branch(...)` — publish
@@ -121,6 +160,16 @@ with Groovy.
 - `run_segmentation_pipeline(config, *, force_rerun)` — full stage entry point.
 - `run_cellpose_nuclei_segmentation(config, *, force_rerun)` — reusable
   DAPI-only nuclei entry point.
+
+### `segmentation.bead_mask_veto` — [bead_mask_veto.py](../src/merxen/segmentation/bead_mask_veto.py)
+- `prepare_bead_mask_veto(config, *, source, recorded, sdata, shape)` — resolve
+  the bead table and the DAPI reader, or `None` when the veto does nothing.
+- `apply_bead_mask_veto(mask_path, veto, ...)` — drop the cell masks that sit on a
+  modelled bead and have no DAPI nucleus, and write `bead_mask_veto.json`.
+- `bead_mask_veto_identity(config, source, recorded)` — the parameters recorded in
+  the mask sidecar and compared on reuse.
+- `tissue_dapi_floor(sdata)` — the tissue DAPI level (Otsu threshold of the log DAPI
+  of the coarsest projection level) above which a mask is always kept.
 
 ### `segmentation.cellpose` — [cellpose.py](../src/merxen/segmentation/cellpose.py)
 - `build_cellpose_model(config)`.
@@ -304,6 +353,23 @@ See [Section alignment](stages/alignment.md).
   RAPIDS compute never imports or writes SpatialData.
 
 See [Squidpy clustering](stages/clustering-squidpy.md).
+
+### `analysis.gaston`
+
+- `prepare_gaston_input(config)` — validate raw counts and export cell-ID
+  ordered native centroids plus a checksummed portable bundle.
+- `run_gaston_glmpca(config, input_dir, output_dir)` — CPU-only GLM-PCA with
+  explicit convergence and finite-value checks.
+- `run_gaston_training(config, input_dir, features_path, seed, output_dir)` —
+  one independently resumable CPU/CUDA neural-network restart.
+- `rank_seed_results(...)` / `select_num_domains(...)` — finite-loss model
+  selection and fixed, Kneedle, or explicit-fallback domain selection.
+- `postprocess_gaston(...)` — raw isodepth/domain annotations, portable cell
+  table, likelihood diagnostics, and plots.
+- `import_gaston_annotations(...)` — standalone H5AD writer and locked,
+  owned-column SpatialData table merge.
+
+See [GASTON spatial domains](stages/gaston.md).
 
 ### `analysis.spatial_gene_analysis`
 - `run_spatial_gene_analysis(config)` — full stage entry point for

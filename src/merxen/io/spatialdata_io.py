@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import shutil
+import threading
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -86,6 +87,17 @@ def spatialdata_write_lock_path(zarr_path: Path | str) -> Path:
     return store_path.with_name(f"{store_path.name}.merxen-write.lock")
 
 
+_HELD_WRITE_LOCKS = threading.local()
+
+
+def _write_locks_held_by_this_thread() -> set[Path]:
+    held: set[Path] | None = getattr(_HELD_WRITE_LOCKS, "lock_paths", None)
+    if held is None:
+        held = set()
+        _HELD_WRITE_LOCKS.lock_paths = held
+    return held
+
+
 @contextmanager
 def spatialdata_write_lock(zarr_path: Path | str) -> Iterator[Path]:
     """Serialize all additive MerXen writes to one SpatialData store.
@@ -97,19 +109,37 @@ def spatialdata_write_lock(zarr_path: Path | str) -> Iterator[Path]:
     complete, preventing a stale read/modify/write cycle from dropping columns
     written by another terminal analysis.
 
+    The lock is not re-entrant: it is an ``flock`` on a file opened per call,
+    and a second open of that file conflicts with the first even in the same
+    process. A nested acquisition by the thread that already holds it would
+    therefore wait forever, so it raises instead. Helpers that run under a
+    caller's lock take the open store and do not lock again.
+
     Args:
         zarr_path: SpatialData Zarr whose table or elements will be updated.
 
     Yields:
         The store-adjacent lock path while the exclusive lock is held.
+
+    Raises:
+        RuntimeError: If this thread already holds the lock for the store.
     """
     lock_path = spatialdata_write_lock_path(zarr_path)
+    held = _write_locks_held_by_this_thread()
+    if lock_path in held:
+        raise RuntimeError(
+            f"This thread already holds the SpatialData write lock {lock_path}; "
+            "taking it again would deadlock. Pass the open store to a helper "
+            "that does not take the lock."
+        )
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a", encoding="utf-8") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
+        held.add(lock_path)
         try:
             yield lock_path
         finally:
+            held.discard(lock_path)
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
@@ -1536,9 +1566,29 @@ def upgrade_spatialdata_contract(
     quality_column_alias: str | None = None,
     platform: str | None = None,
 ) -> bool:
-    """Atomically upgrade an existing store to the current MerXen contract."""
+    """Atomically upgrade an existing store to the current MerXen contract.
+
+    The store write lock is held from the read across the full rewrite and the
+    directory swap, so no other writer's changes land in the store being
+    replaced (they would be lost with the old copy).
+    """
     requested_path = Path(zarr_path)
     path = requested_path.resolve() if requested_path.is_symlink() else requested_path
+    with spatialdata_write_lock(path):
+        return _upgrade_spatialdata_contract_locked(
+            path,
+            quality_column_alias=quality_column_alias,
+            platform=platform,
+        )
+
+
+def _upgrade_spatialdata_contract_locked(
+    path: Path,
+    *,
+    quality_column_alias: str | None,
+    platform: str | None,
+) -> bool:
+    """Rewrite and swap one store; the caller holds its write lock."""
     sdata_obj = sd.read_zarr(path)
     changed = upgrade_spatialdata_contract_in_memory(
         sdata_obj,

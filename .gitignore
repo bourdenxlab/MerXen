@@ -22,6 +22,7 @@ dag-*.dot
 run_logs/
 results*
 results/
+reports/
 /*results*
 
 # Scratch notebooks
@@ -55,6 +56,10 @@ eggs/
 .eggs/
 lib/
 lib64/
+# Nextflow's Groovy helpers are source, rather than Python build output.
+!workflows/lib/
+workflows/lib/*
+!workflows/lib/*.groovy
 parts/
 sdist/
 var/
@@ -246,12 +251,11 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Nextflow loads the pipeline's Groovy classes from workflows/lib; the Python
-# packaging rule lib/ above must not hide them.
-!/workflows/lib/
-
 # Private local configuration: never commit (docs/local-configuration.md).
 # .env is already ignored above.
 /.aliases.tsv
 /workflows/conf/site.config
 /workflows/conf/*.site.config
+
+# Exact LGPL source distributed with the optional GASTON runtime.
+!licenses/sources/glmpca-0.1.0.tar.gz

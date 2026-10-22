@@ -18,8 +18,12 @@ from spatialdata.models import TableModel
 
 from merxen.alignment.manifest import NONRIGID_ELEMENT_SUFFIX
 from merxen.config import MaskImageQuantificationConfig
+from merxen.io.bead_removal.provenance import (
+    IMAGE_PREPROCESSING_ATTR,
+    bead_removal_table_metadata,
+)
 from merxen.io.image_source import build_image_source, fetch_tile
-from merxen.io.spatialdata_io import write_or_replace_element
+from merxen.io.spatialdata_io import spatialdata_write_lock, write_or_replace_element
 from merxen.io.spatialdata_schema import (
     INSTANCE_ID_COLUMN,
     SOURCE_CELL_ID_COLUMN,
@@ -63,6 +67,7 @@ def build_mask_image_quantification_table(
     table_key: str = MASK_IMAGE_QUANTIFICATION_TABLE_KEY,
     shape_key: str = MOSAIK_CELLPOSE_SHAPE_NAME,
     tile_size: int = 2048,
+    bead_removal: Mapping[str, Any] | None = None,
 ) -> MaskImageQuantificationResult:
     """Quantify every image channel over nonzero Cellpose mask labels.
 
@@ -73,6 +78,10 @@ def build_mask_image_quantification_table(
         table_key: SpatialData table key that will receive the result.
         shape_key: SpatialData shape region represented by the rows.
         tile_size: Square tile size used when streaming image and mask crops.
+        bead_removal: Table metadata of a bead-corrected source (see
+            :func:`merxen.io.bead_removal.provenance.bead_removal_table_metadata`),
+            recorded in the table's ``uns`` and the summary. ``None`` leaves
+            both exactly as without bead removal.
 
     Returns:
         AnnData table plus a JSON-serializable summary.
@@ -138,6 +147,10 @@ def build_mask_image_quantification_table(
         "shape_key": shape_key,
         "statistics": list(IMAGE_QUANTIFICATION_STATS),
     }
+    if bead_removal is not None:
+        # PolyT and DAPI intensities of a corrected source must not be pooled
+        # with uncorrected samples; the flag travels with the table.
+        table.uns["mask_image_quantification"].update(bead_removal)
 
     summary = {
         "dataset_name": str(dataset_name),
@@ -148,6 +161,8 @@ def build_mask_image_quantification_table(
         "statistics": list(IMAGE_QUANTIFICATION_STATS),
         "images": image_summaries,
     }
+    if bead_removal is not None:
+        summary["bead_removal"] = dict(bead_removal)
     return MaskImageQuantificationResult(table=table, summary=summary)
 
 
@@ -170,8 +185,32 @@ def run_mask_image_quantification(
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    # The image table and the hybrid-table join each replace a whole table, so
+    # the store lock is held from the read until both are persisted.
+    with spatialdata_write_lock(latest_path):
+        return _quantify_store(
+            config,
+            latest_path=latest_path,
+            mask_path=mask_path,
+            paths=paths,
+            force_rerun=force_rerun,
+        )
+
+
+def _quantify_store(
+    config: MaskImageQuantificationConfig,
+    *,
+    latest_path: Path,
+    mask_path: Path,
+    paths: dict[str, Path],
+    force_rerun: bool,
+) -> dict[str, Path]:
+    """Quantify one store and persist its tables; the caller holds its lock."""
     sdata_obj = sd.read_zarr(latest_path)
     try:
+        bead_removal = bead_removal_table_metadata(
+            (getattr(sdata_obj, "attrs", None) or {}).get(IMAGE_PREPROCESSING_ATTR)
+        )
         existing_quantification = (
             not force_rerun
             and config.table_key in sdata_obj.tables
@@ -187,6 +226,14 @@ def run_mask_image_quantification(
                     f"{sorted(quantified)}, now {sorted(current)}); re-quantifying."
                 )
                 existing_quantification = False
+        if existing_quantification and (
+            _recorded_bead_removal(sdata_obj.tables[config.table_key]) != bead_removal
+        ):
+            log_status(
+                f"[{config.dataset_name}] The stored image quantification does "
+                "not record the store's bead removal; re-quantifying."
+            )
+            existing_quantification = False
         if existing_quantification:
             if _hybrid_image_join_is_complete(
                 sdata_obj,
@@ -217,6 +264,7 @@ def run_mask_image_quantification(
             table_key=config.table_key,
             shape_key=config.shape_key,
             tile_size=config.tile_size,
+            bead_removal=bead_removal,
         )
         parsed_table = TableModel.parse(
             result.table,
@@ -286,6 +334,13 @@ def join_cellpose_image_quantification_to_hybrid(
         ]
 
     updated = hybrid_table.copy()
+    previous_feature_obs_columns = [
+        column
+        for column in updated.obs.columns
+        if str(column).startswith(HYBRID_IMAGE_QUANTIFICATION_OBS_PREFIX)
+    ]
+    if previous_feature_obs_columns:
+        updated.obs.drop(columns=previous_feature_obs_columns, inplace=True)
     feature_names = image_table.var_names.astype(str).tolist()
     feature_obs_columns = _unique_spatialdata_obs_columns(
         [
@@ -319,6 +374,7 @@ def join_cellpose_image_quantification_to_hybrid(
         "obs_prefix": HYBRID_IMAGE_QUANTIFICATION_OBS_PREFIX,
         "n_matched_cells": int(matched.sum()),
         "n_unmatched_hybrid_cells": int((~matched).sum()),
+        **(_recorded_bead_removal(image_table) or {}),
     }
     return HybridImageQuantificationJoin(
         table=updated,
@@ -332,6 +388,27 @@ def join_cellpose_image_quantification_to_hybrid(
             "n_features": int(image_table.n_vars),
         },
     )
+
+
+def _recorded_bead_removal(table: ad.AnnData) -> dict[str, Any] | None:
+    """Return the bead-removal metadata a quantification table carries.
+
+    Args:
+        table: Image quantification table (or a table holding its join marker).
+
+    Returns:
+        The bead-removal keys of ``uns["mask_image_quantification"]`` as plain
+        Python values, or ``None`` when the table records none (no bead removal,
+        or a table written before the flag existed).
+    """
+    info = dict(table.uns.get("mask_image_quantification", {}))
+    if "bead_corrected_stains" not in info:
+        return None
+    return {
+        "bead_corrected_stains": [str(s) for s in info["bead_corrected_stains"]],
+        "bead_removal_version": int(info["bead_removal_version"]),
+        "bead_removal_fill": bool(info["bead_removal_fill"]),
+    }
 
 
 def _unique_spatialdata_obs_columns(
@@ -413,18 +490,26 @@ def _hybrid_image_join_is_complete(
         return True
     if image_table_key not in sdata_obj.tables:
         return False
+    hybrid_table = sdata_obj.tables[PROSEG_HYBRID_TABLE_KEY]
     marker = dict(
-        sdata_obj.tables[PROSEG_HYBRID_TABLE_KEY].uns.get(
+        hybrid_table.uns.get(
             HYBRID_IMAGE_QUANTIFICATION_OBSM_KEY,
             {},
         )
     )
     expected_features = sdata_obj.tables[image_table_key].var_names.astype(str).tolist()
+    marker_obs_columns = marker.get("obs_columns")
+    current_obs_columns = [
+        str(column)
+        for column in hybrid_table.obs.columns
+        if str(column).startswith(HYBRID_IMAGE_QUANTIFICATION_OBS_PREFIX)
+    ]
     return (
         marker.get("source_table_key") == str(image_table_key)
         and marker.get("feature_names") == expected_features
-        and HYBRID_IMAGE_QUANTIFICATION_OBSM_KEY
-        in sdata_obj.tables[PROSEG_HYBRID_TABLE_KEY].obsm
+        and isinstance(marker_obs_columns, list)
+        and marker_obs_columns == current_obs_columns
+        and HYBRID_IMAGE_QUANTIFICATION_OBSM_KEY in hybrid_table.obsm
     )
 
 

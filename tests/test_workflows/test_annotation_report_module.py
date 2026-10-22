@@ -661,6 +661,7 @@ def _option_values(arguments: list[str], option: str) -> list[str]:
 # Channel logic (stub runs)
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_a_report_runs_once_per_finalized_branch(harness: dict[str, Any]) -> None:
     reports = _report_rows(harness["stub"]["trace"])
@@ -677,6 +678,7 @@ def test_a_report_runs_once_per_finalized_branch(harness: dict[str, Any]) -> Non
     assert emitted == set(reports)
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_a_report_waits_for_its_depth_and_mender_outputs(
     harness: dict[str, Any],
@@ -697,6 +699,7 @@ def test_a_report_waits_for_its_depth_and_mender_outputs(
     assert int(reports[("P1", "reseg")]["start"]) < int(depth["P1:XENIUM"]["complete"])
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_a_failed_depth_task_drops_only_its_branch(harness: dict[str, Any]) -> None:
     trace = harness["stub"]["trace"]
@@ -716,6 +719,7 @@ def test_a_failed_depth_task_drops_only_its_branch(harness: dict[str, Any]) -> N
     assert lines["annotation report items failed (see the report)"] == "none"
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_a_report_stages_each_platforms_outputs_under_its_sample(
     harness: dict[str, Any],
@@ -777,6 +781,7 @@ def test_a_report_stages_each_platforms_outputs_under_its_sample(
     assert "./mender_2/xenium" in listing
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_a_branch_without_depth_mender_or_alignment_says_so(
     harness: dict[str, Any],
@@ -798,6 +803,7 @@ def test_a_branch_without_depth_mender_or_alignment_says_so(
     ]
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_report_resources_and_publish_dir(harness: dict[str, Any]) -> None:
     reports = _report_rows(harness["stub"]["trace"])
@@ -819,6 +825,7 @@ def test_report_resources_and_publish_dir(harness: dict[str, Any]) -> None:
         assert record["pair_id"] == pair_id and record["species"] == "human"
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_resume_keeps_the_reports_cached(harness: dict[str, Any]) -> None:
     rows = _rows(harness["resume"]["trace"], REPORT)
@@ -830,6 +837,7 @@ def test_resume_keeps_the_reports_cached(harness: dict[str, Any]) -> None:
 # The real script (fake merxen)
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_the_real_script_calls_the_report_command_cpu_only(
     harness: dict[str, Any],
@@ -858,6 +866,7 @@ def test_the_real_script_calls_the_report_command_cpu_only(
         assert env["PYTHONPATH"].split(os.pathsep)[0].endswith("/../src")
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_a_failed_report_item_reaches_the_summary(harness: dict[str, Any]) -> None:
     lines = {
@@ -875,6 +884,7 @@ def test_a_failed_report_item_reaches_the_summary(harness: dict[str, Any]) -> No
 # Groovy helpers
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_pair_and_branch_specs_follow_the_row_settings(
     harness: dict[str, Any],
@@ -906,6 +916,7 @@ def test_pair_and_branch_specs_follow_the_row_settings(
     ]
 
 
+@pytest.mark.nextflow
 @needs_nextflow
 def test_report_arguments_quote_and_check_their_inputs(
     harness: dict[str, Any],
