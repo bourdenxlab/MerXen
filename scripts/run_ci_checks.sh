@@ -76,8 +76,13 @@ case "${run_tests}" in
         export NUMBA_NUM_THREADS="${NUMBA_NUM_THREADS:-2}"
         pytest_args=(-n "${MERXEN_CI_PYTEST_WORKERS:-4}" --dist load)
         if [[ -n "${MERXEN_CI_PYTEST_ARGS:-}" ]]; then
-            # shellcheck disable=SC2206
-            pytest_args+=(${MERXEN_CI_PYTEST_ARGS})
+            # Split the way a shell would, so a quoted marker expression such
+            # as -m "not slow and not nextflow" stays one argument. Python
+            # re-quotes each argument; nothing in the value is expanded.
+            quoted_args="$("${venv_dir}/bin/python" -c \
+                'import shlex, sys; print(shlex.join(shlex.split(sys.argv[1])))' \
+                "${MERXEN_CI_PYTEST_ARGS}")"
+            eval "pytest_args+=(${quoted_args})"
         else
             pytest_args+=(-m "not slow")
         fi
