@@ -27,6 +27,7 @@ from merxen.io.bead_removal import backend
 from merxen.io.bead_removal.backend import (
     BeadRemovalBackendError,
     backend_record,
+    fill_forces_cpu,
     gpu_library_versions,
     load_gpu_backend,
     requested_backend_identity,
@@ -153,7 +154,7 @@ def test_cpu_never_touches_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize("requested", ["auto", "cuda"])
-def test_the_fill_forces_the_cpu_with_a_warning(
+def test_the_flat_fill_forces_the_cpu_with_a_warning(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     lock_env: Path,
@@ -162,21 +163,58 @@ def test_the_fill_forces_the_cpu_with_a_warning(
     _torch_must_not_be_consulted(monkeypatch)
 
     with caplog.at_level(logging.WARNING, logger=_LOGGER):
-        assert resolve_device(requested, fill_enabled=True) == "cpu"
+        assert resolve_device(requested, fill_enabled=True, fill_mode="flat") == "cpu"
 
     assert "fill runs on the CPU backend only" in caplog.text
     assert requested in caplog.text
 
 
+def test_a_fill_without_a_mode_is_taken_as_the_flat_fill() -> None:
+    """A caller that does not name the mode keeps the old, CPU-only behaviour."""
+    assert fill_forces_cpu(True, "flat")
+    assert resolve_device("cpu", fill_enabled=True) == "cpu"
+    assert not fill_forces_cpu(True, "hybrid")
+    assert not fill_forces_cpu(False, "flat")
+
+
+@pytest.mark.parametrize("fill_mode", ["flat", "hybrid"])
 def test_the_fill_with_cpu_is_silent(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    fill_mode: str,
 ) -> None:
     _torch_must_not_be_consulted(monkeypatch)
 
     with caplog.at_level(logging.INFO, logger=_LOGGER):
-        assert resolve_device("cpu", fill_enabled=True) == "cpu"
+        assert resolve_device("cpu", fill_enabled=True, fill_mode=fill_mode) == "cpu"
 
     assert caplog.text == ""
+
+
+@pytest.mark.parametrize("requested", ["auto", "cuda"])
+def test_the_hybrid_fill_does_not_force_the_cpu(
+    fake_gpu: _FakeGpu,
+    lock_env: Path,
+    caplog: pytest.LogCaptureFixture,
+    requested: str,
+) -> None:
+    """The hybrid fill has a GPU port, so it resolves like no fill at all."""
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        assert (
+            resolve_device(requested, fill_enabled=True, fill_mode="hybrid") == "cuda"
+        )
+
+    assert fake_gpu.calls == 1
+    assert caplog.text == ""
+
+
+def test_the_hybrid_fill_still_needs_a_working_gpu_for_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_cuda(monkeypatch, "torch reports no CUDA device")
+
+    with pytest.raises(BeadRemovalBackendError, match="no CUDA device"):
+        resolve_device("cuda", fill_enabled=True, fill_mode="hybrid")
 
 
 def test_cuda_without_a_cuda_device_raises_with_the_remedy(
@@ -535,7 +573,14 @@ def test_the_requested_identity_does_not_resolve_anything(
     _torch_must_not_be_consulted(monkeypatch)
 
     assert requested_backend_identity("cpu") == {"device": "cpu"}
+    # The flat fill forces the CPU; the hybrid fill does not.
+    assert requested_backend_identity("cuda", fill_enabled=True, fill_mode="flat") == {
+        "device": "cpu"
+    }
     assert requested_backend_identity("cuda", fill_enabled=True) == {"device": "cpu"}
+    assert (
+        requested_backend_identity("auto", fill_enabled=True, fill_mode="hybrid") == {}
+    )
     # An auto request has no device before it is resolved: nothing to compare.
     assert requested_backend_identity("auto") == {}
 
@@ -607,7 +652,7 @@ import bead_synth as bs
 assert MerscopeBeadRemovalConfig().device == "cpu"
 assert resolve_device("cpu") == "cpu"
 assert resolve_device("auto") == "cpu"          # no lock configured
-assert resolve_device("cuda", fill_enabled=True) == "cpu"
+assert resolve_device("cuda", fill_enabled=True, fill_mode="flat") == "cpu"
 assert backend.backend_record("cpu")["device"] == "cpu"
 assert backend.requested_backend_identity("auto") == {{}}
 assert driver.describe_backend("cpu")["update_order"] == "brightness"

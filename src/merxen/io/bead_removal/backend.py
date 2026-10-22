@@ -43,6 +43,8 @@ TRITON_CACHE_ENV_VAR = "TRITON_CACHE_DIR"
 # source at a time in brightness order, the GPU fits colour classes in turn.
 UPDATE_ORDER = {"cpu": "brightness", "cuda": "colour"}
 DEVICE_REMEDY = "Set merscope_bead_removal_device to cpu to use the CPU backend"
+# The only fill mode with a GPU implementation.
+HYBRID_FILL_MODE = "hybrid"
 
 # Result of the Triton smoke test, kept for the process: the library versions
 # it reports are recorded in the provenance.
@@ -53,16 +55,34 @@ class BeadRemovalBackendError(RuntimeError):
     """The requested bead-removal device cannot be used on this host."""
 
 
+def fill_forces_cpu(fill_enabled: bool, fill_mode: str) -> bool:
+    """Tell whether a fill configuration can only run on the CPU backend.
+
+    The hybrid fill has a GPU implementation; the flat fill does not.
+
+    Args:
+        fill_enabled: Whether the residual-footprint fill is on.
+        fill_mode: Mode of the fill (``"flat"`` or ``"hybrid"``); read only
+            when the fill is on.
+
+    Returns:
+        True when the fill is on in a mode without a GPU implementation.
+    """
+    return fill_enabled and fill_mode != HYBRID_FILL_MODE
+
+
 def resolve_device(
     requested: str,
     *,
     fill_enabled: bool = False,
+    fill_mode: str = "flat",
 ) -> Literal["cpu", "cuda"]:
     """Resolve the configured device to the one that will run the correction.
 
     Rules:
-      * the fill has no GPU implementation, so with the fill on the device is
-        ``"cpu"`` (a WARNING when something else was requested);
+      * the flat fill has no GPU implementation, so with the flat fill on the
+        device is ``"cpu"`` (a WARNING when something else was requested); the
+        hybrid fill runs on either device;
       * ``"cpu"`` is always ``"cpu"``;
       * ``"cuda"`` needs a CUDA device and a Triton kernel that compiles and
         gives the right numbers (a 64 px smoke test, run in a child process
@@ -75,6 +95,9 @@ def resolve_device(
     Args:
         requested: ``"auto"``, ``"cpu"`` or ``"cuda"``.
         fill_enabled: Whether the residual-footprint fill is on.
+        fill_mode: Mode of the fill (``"flat"`` or ``"hybrid"``); read only when
+            the fill is on. The default is the mode without a GPU
+            implementation, so a caller that omits it is kept on the CPU.
 
     Returns:
         ``"cpu"`` or ``"cuda"``.
@@ -88,11 +111,11 @@ def resolve_device(
             f"unknown bead-removal device {requested!r}; expected one of "
             f"{list(VALID_DEVICES)}."
         )
-    if fill_enabled:
+    if fill_forces_cpu(fill_enabled, fill_mode):
         if requested != "cpu":
             logger.warning(
-                "[BEADS] The bead-removal fill runs on the CPU backend only; "
-                "using device cpu instead of %s.",
+                "[BEADS] The flat bead-removal fill runs on the CPU backend only; "
+                "using device cpu instead of %s (the hybrid fill runs on the GPU).",
                 requested,
             )
         return "cpu"
@@ -326,6 +349,7 @@ def requested_backend_identity(
     requested: str,
     *,
     fill_enabled: bool = False,
+    fill_mode: str = "flat",
 ) -> dict[str, Any]:
     """Describe the backend a request would use, without resolving it.
 
@@ -335,13 +359,15 @@ def requested_backend_identity(
 
     Args:
         requested: ``"auto"``, ``"cpu"`` or ``"cuda"``.
-        fill_enabled: Whether the fill is on (it forces the CPU backend).
+        fill_enabled: Whether the fill is on.
+        fill_mode: Mode of the fill; the flat fill forces the CPU backend, the
+            hybrid fill does not.
 
     Returns:
         ``{"device": "cpu"}``; for ``"cuda"`` also the library versions of this
         environment; ``{}`` for ``"auto"``.
     """
-    if fill_enabled or requested == "cpu":
+    if fill_forces_cpu(fill_enabled, fill_mode) or requested == "cpu":
         return {"device": "cpu"}
     if requested == "cuda":
         versions = gpu_library_versions()

@@ -308,7 +308,7 @@ def _effective_gates(params: FillParams) -> tuple[float, float, float]:
     return params.peak_snr, params.max_cover, params.deadband
 
 
-def _effective_params(params: FillParams) -> FillParams:
+def effective_params(params: FillParams) -> FillParams:
     """Return ``params`` with the mode's effective gates (see ``_effective_gates``).
 
     Flat mode returns the object itself, so its processing is untouched.
@@ -726,7 +726,7 @@ def _fill_plane(
         raw: Input plane (0 = invalid pixel).
         eps: Share of the model light the fill may remove at most.
         noise: Dataset-global pixel noise of the plane.
-        p: Fill parameters, with the mode's effective gates (``_effective_params``).
+        p: Fill parameters, with the mode's effective gates (``effective_params``).
         ctr: Counters of the plane (filled in place).
         origin_yx: Absolute mosaic coordinate of pixel (0, 0); used by the texture
             map of hybrid mode.
@@ -901,7 +901,7 @@ def apply_bounded_fill(
             f"origin_yx must be a multiple of {BLOCK} px in hybrid mode; "
             f"got {origin_yx}"
         )
-    config = _effective_params(config)
+    config = effective_params(config)
     if noise is None:
         raise ValueError(
             "fill needs the dataset-global per-plane noise (calibration); it is "

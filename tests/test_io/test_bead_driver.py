@@ -787,11 +787,11 @@ def test_gpu_consumer_names_a_chunk_that_cannot_be_written(
     assert not _lock_is_held(lock) and not _consumer_threads()
 
 
-def test_the_fill_is_refused_on_the_gpu(
+def test_the_flat_fill_is_refused_on_the_gpu(
     mosaic: MosaicFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     stand_in = _StandIn()
-    with pytest.raises(ValueError, match="no GPU implementation"):
+    with pytest.raises(ValueError, match="flat bead-removal fill has no GPU"):
         _run_stand_in(
             mosaic, tmp_path / "w", stand_in, monkeypatch, fill=FillParams(enabled=True)
         )
@@ -807,6 +807,57 @@ def test_the_fill_is_refused_on_the_gpu(
             fill=FillParams(enabled=True),
             core=(0, 1, 0, 1),
         )
+
+
+def test_the_hybrid_fill_reaches_the_gpu_corrector(
+    mosaic: MosaicFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The hybrid fill is not refused on the GPU: the corrector gets its parameters."""
+    seen: list[Any] = []
+
+    class _Recording(_StandIn):
+        def __call__(self, stacks: Any, **kwargs: Any) -> Any:
+            seen.append(kwargs["fill"])
+            return super().__call__(stacks, **kwargs)
+
+    stand_in = _Recording()
+    fill = FillParams(enabled=True, mode="hybrid")
+    with caplog.at_level("INFO", logger=driver.logger.name):
+        _, run = _run_stand_in(mosaic, tmp_path / "w", stand_in, monkeypatch, fill=fill)
+
+    assert stand_in.cores
+    assert seen and all(f == fill for f in seen)
+    assert run.device == "cuda"
+    assert "fill on, hybrid mode" in caplog.text
+
+
+def test_the_gpu_window_function_passes_the_fill_to_the_gpu_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    received: dict[str, Any] = {}
+
+    def _correct_window(stacks: Any, **kwargs: Any) -> Any:
+        received.update(kwargs)
+        return {"PolyT": np.zeros((4, 4), np.float32)}, None, {}
+
+    gpu = types.SimpleNamespace(correct_window=_correct_window)
+    monkeypatch.setattr(driver, "load_gpu_backend", lambda: gpu)
+    fill = FillParams(enabled=True, mode="hybrid")
+
+    driver._cuda_window_fn(
+        {},
+        origin_yx=(0, 0),
+        calibration=real_calibration(),
+        z_layers=[1],
+        params=DEFAULT_PARAMS,
+        fill=fill,
+        core=(0, 2, 0, 2),
+    )
+
+    assert received["fill"] is fill and received["output"] == "maxproj"
 
 
 def test_get_window_corrector_loads_the_gpu_backend_only_for_cuda() -> None:

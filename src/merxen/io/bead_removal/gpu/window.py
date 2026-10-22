@@ -1,7 +1,8 @@
 """GPU end-to-end window correction.
 
-The counterpart of ``merxen.io.bead_removal.apply.correct_window`` (without the
-fill), with an optional device-side max projection.
+The counterpart of ``merxen.io.bead_removal.apply.correct_window``, with an optional
+device-side max projection. The hybrid mode of the fill runs on the device between the
+subtraction and the projection (:mod:`.fill`); the flat mode is CPU only.
 """
 
 # Window dimensions and matrices keep the capital letters of the formulas they port
@@ -28,6 +29,7 @@ from merxen.io.bead_removal.apply import (
     _plane,
 )
 from merxen.io.bead_removal.detect import empty_sources
+from merxen.io.bead_removal.fill import FillParams
 from merxen.io.bead_removal.model import BeadModel
 from merxen.io.bead_removal.params import (
     DEFAULT_PARAMS,
@@ -37,6 +39,7 @@ from merxen.io.bead_removal.params import (
 )
 
 from . import ops
+from .fill import fill_plane
 from .fit import FitOpts
 from .model import fit_window_library
 
@@ -76,12 +79,13 @@ def correct_window(
     calibration: CorrectionCalibration,
     z_layers: Sequence[int],
     params: PsfSubtractParams = DEFAULT_PARAMS,
+    fill: FillParams | None = None,
     core: tuple[int, int, int, int] | None = None,
     opts: FitOpts | None = None,
     output: str = "numpy",
     timers: dict[str, float] | None = None,
 ) -> tuple[dict[str, Any], BeadModel, dict[str, Any]]:
-    """GPU equivalent of ``merxen.io.bead_removal.correct_window`` (no fill).
+    """GPU equivalent of ``merxen.io.bead_removal.correct_window``.
 
     Args:
         stacks: Stain -> planes ({z: 2-D numpy array} or [nz, Y, X]); numpy (host) or
@@ -90,6 +94,10 @@ def correct_window(
         calibration: Dataset calibration.
         z_layers: Planes to output (1..7).
         params: Fixed parameters.
+        fill: Optional fill configuration. The hybrid fill runs on the device after
+            the subtraction for the stains in ``fill.stains`` when ``fill.enabled``
+            (its counters go to ``stats["fill"][stain]``, as on the CPU); the flat
+            fill has no GPU implementation.
         core: Optional (y0, y1, x0, x1) the change statistics are computed on.
         opts: GPU execution options (default: the production configuration, see
             ``FitOpts``).
@@ -103,9 +111,15 @@ def correct_window(
         ``model.B[k]`` are device tensors.
 
     Raises:
-        ValueError: ``z_layers`` invalid, a required stain or plane is missing, or the
-            calibration's ``params_sha256`` differs from the hash of ``params``.
+        ValueError: ``z_layers`` invalid, a required stain or plane is missing, the
+            calibration's ``params_sha256`` differs from the hash of ``params``, or
+            ``fill`` is enabled in a mode other than hybrid.
     """
+    if fill is not None and fill.enabled and fill.mode != "hybrid":
+        raise ValueError(
+            f"the {fill.mode} bead-removal fill has no GPU implementation; run it "
+            "on the CPU backend or use the hybrid fill"
+        )
     tm_ = timers if timers is not None else {}
 
     def tick(name: str, t0: float) -> float:
@@ -227,6 +241,17 @@ def correct_window(
             removed_p99=[],
             max_brightening=0.0,
         )
+        # As on the CPU, the fill acts on the stains it is configured for, and only
+        # where the model has fits to take light from.
+        filling = (
+            fill is not None
+            and fill.enabled
+            and s in fill.stains
+            and bool(model.fits)
+            and rho > 0
+        )
+        fill_total: dict[str, float] = {}
+        fill_planes: dict[int, dict[str, float]] = {}
         for i_z, k in enumerate(zs):
             img = raw[s][k]
             fit = model.fits.get(k)
@@ -238,6 +263,20 @@ def correct_window(
                 cast(torch.Tensor, fit.model) if fit is not None else None,
                 rho,
             )
+            if filling and fit is not None and fill is not None:
+                arr, counters = fill_plane(
+                    arr,
+                    torch.clamp(rho * cast(torch.Tensor, fit.model), min=0.0),
+                    img,
+                    plane=k,
+                    params=fill,
+                    noise=model.noise,
+                    origin_yx=origin_al,
+                )
+                if counters is not None:
+                    fill_planes[k] = counters
+                    for name, count in counters.items():
+                        fill_total[name] = fill_total.get(name, 0.0) + count
             cube[i_z] = arr
             del arr
             rc = img[pad_tl[0] + y0 : pad_tl[0] + y1, pad_tl[1] + x0 : pad_tl[1] + x1]
@@ -260,6 +299,10 @@ def correct_window(
                 )
                 stats["n_saturated_px_acc"] = stats["n_saturated_px"]
         stats["per_stain"][s] = per
+        if filling:
+            stats.setdefault("fill", {})[s] = dict(
+                fill_total, **({"per_plane": fill_planes} if fill_planes else {})
+            )
         if padded:
             cube = cube[:, sl[0], sl[1]]
         if output == "maxproj":

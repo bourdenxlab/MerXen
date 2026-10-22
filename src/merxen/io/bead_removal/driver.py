@@ -53,6 +53,7 @@ from merxen.io.bead_removal.apply import SPECTRAL_STAIN, correct_window
 from merxen.io.bead_removal.backend import (
     DEVICE_REMEDY,
     backend_record,
+    fill_forces_cpu,
     load_gpu_backend,
 )
 from merxen.io.bead_removal.calibrate import BeadCalibration
@@ -629,12 +630,16 @@ def _cuda_window_fn(
 
     The GPU function projects the whole window on the device (one transfer of
     one plane per stain instead of one per z layer); the CPU function takes the
-    core only, so the core is cut out here.
+    core only, so the core is cut out here. The hybrid fill runs on the device
+    before the projection.
+
+    Raises:
+        ValueError: The fill is on in a mode without a GPU implementation (flat).
     """
-    if fill is not None and fill.enabled:
+    if fill is not None and fill_forces_cpu(fill.enabled, fill.mode):
         raise ValueError(
-            "the bead-removal fill has no GPU implementation; the device resolves "
-            "to cpu when the fill is on"
+            f"the {fill.mode} bead-removal fill has no GPU implementation; the "
+            "device resolves to cpu when it is on"
         )
     gpu = load_gpu_backend()
     projections, model, stats = gpu.correct_window(
@@ -643,6 +648,7 @@ def _cuda_window_fn(
         calibration=calibration,
         z_layers=list(z_layers),
         params=params,
+        fill=fill,
         core=core,
         output="maxproj",
     )
@@ -1544,8 +1550,9 @@ def run_bead_removal(
         progress_every: Log progress with ETA every this many finished chunks.
         device: Resolved backend, ``"cpu"`` (process pool) or ``"cuda"`` (one GPU
             consumer in this process under the host GPU lock named by
-            ``MERXEN_GPU_LOCK_FILE``; no fill; ``max_workers``, the memory
-            arguments and ``max_tasks_per_child`` do not apply).
+            ``MERXEN_GPU_LOCK_FILE``; the hybrid fill only, no flat fill;
+            ``max_workers``, the memory arguments and ``max_tasks_per_child`` do
+            not apply).
 
     Returns:
         Run summary with wall time, CPU time, I/O share, peak memory and the
@@ -1553,7 +1560,7 @@ def run_bead_removal(
 
     Raises:
         ValueError: Invalid ``z_layers``, stains, device or dtype, a parameter-hash
-            mismatch, a fill that does not fit the halo (or any fill on the GPU),
+            mismatch, a fill that does not fit the halo (or a flat fill on the GPU),
             or a store shape that does not match the region.
         BeadRemovalBackendError: ``device`` is ``"cuda"`` and the GPU backend
             cannot be imported.
@@ -1569,9 +1576,10 @@ def run_bead_removal(
             "calibration_dir is required (the workers load the saved calibration)"
         )
     fill_on = fill is not None and fill.enabled
-    if fill_on and device == "cuda":
+    if fill is not None and device == "cuda" and fill_forces_cpu(fill_on, fill.mode):
         raise ValueError(
-            "the bead-removal fill has no GPU implementation; run it with device cpu"
+            f"the {fill.mode} bead-removal fill has no GPU implementation; run it "
+            "with device cpu or use the hybrid fill"
         )
     check_fill_support(fill, halo_px)
     work = Path(work_dir)
@@ -1609,7 +1617,7 @@ def run_bead_removal(
         estimate = memory = 0.0
         logger.info(
             "[BEADS] %d chunks, core %d px, halo %d px, device cuda, %d reader "
-            "thread(s), %d window(s) read ahead, z_layers %s, stains %s, fill off",
+            "thread(s), %d window(s) read ahead, z_layers %s, stains %s, fill %s",
             len(tasks),
             core_px,
             halo_px,
@@ -1617,6 +1625,9 @@ def run_bead_removal(
             GPU_QUEUE_WINDOWS,
             zs,
             list(stains),
+            f"on, {fill.mode} mode ({fill_params_sha256(fill)[:8]})"
+            if fill is not None and fill.enabled
+            else "off",
         )
     else:
         window = core_px + 2 * halo_px + ENVELOPE_BLOCK_PX

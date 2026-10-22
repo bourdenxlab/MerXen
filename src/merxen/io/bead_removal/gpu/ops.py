@@ -73,7 +73,8 @@ def to_dev(
 # padding and separable filters
 def pad_dim(x: torch.Tensor, n: int, dim: int, mode: str) -> torch.Tensor:
     """Pad ``n`` samples on both sides of ``dim`` with scipy conventions: 'reflect' =
-    half-sample symmetric (d c b a | a b c d | d c b a), 'nearest' = edge replicate."""
+    half-sample symmetric (d c b a | a b c d | d c b a), 'nearest' = edge replicate,
+    'constant' = zeros."""
     if n == 0:
         return x
     L = x.shape[dim]
@@ -87,6 +88,10 @@ def pad_dim(x: torch.Tensor, n: int, dim: int, mode: str) -> torch.Tensor:
         shp[dim] = n
         head = x.narrow(dim, 0, 1).expand(*shp)
         tail = x.narrow(dim, L - 1, 1).expand(*shp)
+    elif mode == "constant":
+        shp = list(x.shape)
+        shp[dim] = n
+        head = tail = x.new_zeros(shp)
     else:
         raise ValueError(mode)
     return torch.cat([head, x, tail], dim)
@@ -103,11 +108,11 @@ def gauss_kernel(sigma: float, truncate: float = 4.0) -> torch.Tensor:
 
 
 def gaussian_filter(
-    x: torch.Tensor, sigma: float, mode: str = "reflect"
+    x: torch.Tensor, sigma: float, mode: str = "reflect", truncate: float = 4.0
 ) -> torch.Tensor:
-    """scipy.ndimage.gaussian_filter of a 2-D float32 tensor (truncate 4, separable,
-    given boundary mode)."""
-    k = gauss_kernel(sigma)
+    """scipy.ndimage.gaussian_filter of a 2-D float32 tensor (separable, given
+    boundary mode and truncation, default 4)."""
+    k = gauss_kernel(sigma, truncate)
     r = (k.numel() - 1) // 2
     y = x[None, None]
     y = F.conv2d(pad_dim(y, r, 2, mode), k.view(1, 1, -1, 1))
@@ -316,10 +321,10 @@ def lower_envelope(
         reach = max(1, ENVELOPE_GAUSS_REACH_BLOCKS + 1 - win_blocks // 2)
         c = fill_undefined_blocks(c, reach)
     c = gaussian_filter(c, ENVELOPE_GAUSS_SIGMA_BLOCKS, "nearest")
-    return _bilinear_blocks(c, Y, X, block)
+    return bilinear_blocks(c, Y, X, block)
 
 
-def _bilinear_blocks(c: torch.Tensor, Y: int, X: int, block: int) -> torch.Tensor:
+def bilinear_blocks(c: torch.Tensor, Y: int, X: int, block: int) -> torch.Tensor:
     """scipy map_coordinates(order=1, mode='nearest') of the block grid at the pixel
     centres (separable lerp)."""
     by, bx = c.shape
