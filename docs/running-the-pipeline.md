@@ -56,6 +56,7 @@ Common optional parameters:
 | `--distance_from_object_enabled` | Run registered polygon-edge distance annotation and paired near-vs-far pseudobulk analysis. Defaults to `false`. |
 | `--distance_from_object_segmentations` | Object-distance branches; defaults to `proseg,original,cellpose`. The former names remain accepted aliases. |
 | `--mender_enabled` | Run independent CPU-only MENDER spatial-domain analysis. Defaults to `false`. |
+| `--pciseq_enabled` | Run pciSeq cell typing immediately after clustering. Defaults to `false`; requires `--pciseq_reference_path`. See [pciSeq](stages/pciseq.md). |
 | `--mender_segmentations` | MENDER segmentation subset or `all`; defaults to `proseg_hybrid`. |
 | `--gaston_enabled` | Run terminal GASTON spatial-domain analysis. Defaults to `false`. |
 | `--gaston_segmentations` | Independent GASTON branches; defaults to `proseg_hybrid`, accepts comma-separated subsets or `all`. |

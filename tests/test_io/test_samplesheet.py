@@ -28,6 +28,24 @@ def test_parse_samplesheet_preserves_optional_model_selectors(tmp_path: Path) ->
     assert second.merscope_cellpose_model == "/path/to/merscope-model"
 
 
+def test_parse_samplesheet_preserves_pciseq_overrides(tmp_path: Path) -> None:
+    """Blank overrides inherit pipeline settings and false remains disabled."""
+    csv_path = tmp_path / "samplesheet.csv"
+    reference = tmp_path / "reference.csv"
+    csv_path.write_text(
+        "pair_id,pciseq_enabled,pciseq_reference_path\n"
+        f"P1,true,{reference}\nP2,false,\nP3,,\n"
+    )
+
+    enabled, disabled, inherited = parse_samplesheet(csv_path)
+
+    assert enabled.pciseq_enabled is True
+    assert enabled.pciseq_reference_path == reference
+    assert disabled.pciseq_enabled is False
+    assert disabled.pciseq_reference_path is None
+    assert inherited.pciseq_enabled is None
+
+
 def test_parse_samplesheet_supports_raw_dirs_and_cached_spatialdata(
     tmp_path: Path,
 ) -> None:

@@ -1,9 +1,17 @@
-# Third-party notices for the optional GASTON stage
+# Third-party notices for optional stages
 
-MerXen's own code is licensed under the MIT License in `LICENSE`. The optional
-GASTON environment and container include separately licensed software; the MIT
+MerXen's own code is licensed under the MIT License in `LICENSE`. Optional
+stage environments and containers include separately licensed software; the MIT
 license does not replace those licenses. No endorsement by Princeton University,
 GASTON's contributors, or other dependency authors is implied.
+
+## pciSeq
+
+The optional pciSeq runtime imports the unmodified `pciSeq_3d` package from
+https://github.com/acycliq/pciSeq_3d, commit
+`5e2c0fd1841f8a4022a2fa341ece965687e343dd`. Its MIT license and copyright
+notice are reproduced in `licenses/pciSeq-MIT.txt`. Installed dependencies
+retain their own licenses and notices.
 
 ## GASTON
 

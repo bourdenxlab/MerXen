@@ -80,6 +80,9 @@ When `SPATIAL_GENE_ANALYSIS` is active, the workflow joins on its completion
 channel so clustering starts after per-gene spatial analysis. Otherwise, when
 only `VISUALIZE` is active, clustering waits for visualisation.
 `MAPMYCELLS`, when selected, consumes the clustered H5ADs written here.
+Optional [pciSeq cell typing](pciseq.md) runs immediately after clustering when
+`pciseq_enabled=true`; it uses native RNA spots and segmentation plus a supplied
+reference expression matrix and writes separate annotated outputs.
 `--only_stage clustering_squidpy` reads the published latest zarrs directly.
 
 ## Python entry points

@@ -1,0 +1,15 @@
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/merxen
+COPY requirements/requirements.pciseq.lock ./requirements/requirements.pciseq.lock
+RUN python -m pip install --no-cache-dir -r requirements/requirements.pciseq.lock
+COPY src ./src
+COPY LICENSE THIRD_PARTY_NOTICES.md /usr/share/merxen/licenses/
+COPY licenses/ /usr/share/merxen/licenses/licenses/
+ENV PYTHONPATH=/opt/merxen/src
+
+RUN python -c "import pciSeq; import merxen.pciseq_compute"
+CMD ["python"]

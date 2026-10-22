@@ -23,6 +23,7 @@ include {
     CLUSTERING_SQUIDPY_COMPUTE;
     CLUSTERING_SQUIDPY_FINALIZE
 } from "./modules/clustering_squidpy"
+include { PCISEQ_PREPARE; PCISEQ_COMPUTE; PCISEQ_FINALIZE } from "./modules/pciseq"
 include { MAPMYCELLS } from "./modules/mapmycells"
 include {
     MENDER_PREPARE;
@@ -903,6 +904,8 @@ def normalizeStage(rawValue, paramName) {
         "clustering": "clustering_squidpy",
         "clustering_squidpy": "clustering_squidpy",
         "squidpy": "clustering_squidpy",
+        "pciseq": "pciseq",
+        "pci_seq": "pciseq",
         "cell_type_mapping": "mapmycells",
         "celltype_mapping": "mapmycells",
         "map_my_cells": "mapmycells",
@@ -920,7 +923,7 @@ def normalizeStage(rawValue, paramName) {
             "build_viewer_caches, mask_image_quantification, " +
             "compute_cortical_depth, distance_from_object, qc, align, align_qc, " +
             "compare, visualize, spatial_gene_analysis, mecr, " +
-            "clustering_squidpy, mender, mapmycells, gaston"
+            "clustering_squidpy, pciseq, mender, mapmycells, gaston"
         )
     }
     return aliases[key]
@@ -937,7 +940,8 @@ def activeStageOrder(
     mecrEnabled,
     menderEnabled,
     registerImagesEnabled,
-    gastonEnabled = false
+    gastonEnabled = false,
+    pciseqEnabled = false
 ) {
     def stages = ["build_spatialdata", "segment_nuclei", "segment", "enrich"]
     // Registered images join the zarr before the viewer cache and quantification
@@ -966,6 +970,9 @@ def activeStageOrder(
         stages += ["spatial_gene_analysis"]
     }
     stages += ["clustering_squidpy"]
+    if (pciseqEnabled) {
+        stages += ["pciseq"]
+    }
     // compute_cortical_depth is sequenced AFTER clustering_squidpy so the per-cell
     // cluster annotations exist for its depth violin plots. It is a terminal
     // opt-in stage; see the default stop_stage handling in rowSampleSettings.
@@ -1018,6 +1025,9 @@ def validateStage(
         }
         if (stage == "gaston") {
             hint = " Pass --gaston_enabled true to use GASTON."
+        }
+        if (stage == "pciseq") {
+            hint = " Pass --pciseq_enabled true to use pciSeq."
         }
         throw new IllegalArgumentException(
             "${paramName} '${stage}' is not active for this run.${hint} " +
@@ -1885,6 +1895,116 @@ def appendGastonPreflightChecks(errors, settings, params) {
     }
 }
 
+def pciseqPublishedH5adPath(pairId, segmentation, platform, params) {
+    return normalizedPath(publishedPairPath(
+        params.outdir,
+        pairId,
+        "${segmentation}/clustering_squidpy/clustering_squidpy_out/" +
+            "${platform.toLowerCase()}/${pairId}_${platform}_clustered.h5ad",
+    ))
+}
+
+def pciseqSpatialdataPath(row, settings, platform, params) {
+    def fields = platform == "MERSCOPE"
+        ? ["merscope_spatialdata_path", "merscope_zarr_path"]
+        : ["xenium_spatialdata_path"]
+    return normalizedPath(chooseField(row, fields) ?: publishedDatasetPath(
+        params.outdir,
+        settings.pair_id,
+        platform,
+        "latest/latest_spatialdata.zarr",
+    ))
+}
+
+def appendPciseqPreflightChecks(errors, row, settings, params) {
+    if (!settings.run_pciseq) {
+        return
+    }
+    appendPreflightFileCheck(
+        errors,
+        settings.pciseq_reference_path,
+        "PCISEQ reference expression matrix for ${settings.pair_id}",
+    )
+    if (!(params.pciseq_geometry_mode in ["project_2d", "labels_3d"])) {
+        errors << "pciseq_geometry_mode must be project_2d or labels_3d"
+    }
+    if (params.pciseq_geometry_mode == "labels_3d") {
+        appendPreflightFileCheck(errors, params.pciseq_labels_path, "PCISEQ 3D labels")
+    }
+    if (settings.run_clustering_squidpy) {
+        return
+    }
+    settings.analysis_segmentations.each { segmentation ->
+        settings.active_platforms.each { platform ->
+            def label = "${settings.pair_id}:${platform}:${segmentation}"
+            def h5ad = pciseqPublishedH5adPath(
+                settings.pair_id, segmentation, platform, params,
+            )
+            if (!h5ad.toFile().isFile()) {
+                errors << "Missing PCISEQ clustered H5AD for ${label}: ${h5ad}"
+            }
+            def zarr = pciseqSpatialdataPath(row, settings, platform, params)
+            if (!zarr.toFile().isDirectory()) {
+                errors << "Missing PCISEQ latest SpatialData Zarr for ${label}: ${zarr}"
+                return
+            }
+            def keys = analysisLayerKeys(platform, segmentation)
+            def elements = [["tables", keys.table_key]]
+            if (params.pciseq_geometry_mode == "project_2d") {
+                elements << ["shapes", keys.shape_key]
+            }
+            if (!isBlankPath(params.pciseq_points_key)) {
+                elements << ["points", params.pciseq_points_key.toString()]
+            }
+            elements.each { kind, key ->
+                def element = zarr.resolve(kind).resolve(key)
+                if (!element.toFile().exists()) {
+                    errors << "Missing PCISEQ native ${kind} '${key}' for ${label}: ${element}"
+                }
+            }
+        }
+    }
+}
+
+def pciseqConfigJson(pairId, segmentation, platform, sampleId, spatialdataPath, settings, params) {
+    def keys = analysisLayerKeys(platform, segmentation)
+    def parseArray = { value ->
+        return value instanceof Collection
+            ? value
+            : new groovy.json.JsonSlurper().parseText(value.toString())
+    }
+    def options = params.pciseq_options instanceof Map
+        ? params.pciseq_options
+        : new groovy.json.JsonSlurper().parseText(params.pciseq_options.toString())
+    return groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([
+        pair_id: pairId,
+        sample_id: sampleId,
+        platform: platform,
+        segmentation: segmentation,
+        source_h5ad: "source_clustered.h5ad",
+        spatialdata_path: spatialdataPath.toString(),
+        reference_path: settings.pciseq_reference_path,
+        table_key: keys.table_key,
+        shape_key: keys.shape_key,
+        points_key: params.pciseq_points_key,
+        geometry_mode: params.pciseq_geometry_mode,
+        overlap_policy: params.pciseq_overlap_policy,
+        pixel_size_um: params.pciseq_pixel_size_um,
+        max_pixels: params.pciseq_max_pixels,
+        coordinate_system: params.pciseq_coordinate_system,
+        labels_path: optionalNormalizedPathString(params.pciseq_labels_path),
+        origin_um: parseArray.call(params.pciseq_origin_um),
+        voxel_size_um: parseArray.call(params.pciseq_voxel_size_um),
+        max_iter: params.pciseq_max_iter,
+        n_neighbors: params.pciseq_n_neighbors,
+        options: options,
+        write_spatialdata_table: boolOrDefault(
+            params.pciseq_write_spatialdata_table, true, "pciseq_write_spatialdata_table",
+        ),
+        output_dir: "pciseq_out",
+    ]))
+}
+
 def runPreflightChecks(row, settings, params) {
     CellposeSettings.preflight(row, settings, params)
     def errors = []
@@ -1899,6 +2019,7 @@ def runPreflightChecks(row, settings, params) {
     appendMecrPreflightChecks(errors, settings, params)
     appendMenderPreflightChecks(errors, settings, params)
     appendGastonPreflightChecks(errors, settings, params)
+    appendPciseqPreflightChecks(errors, row, settings, params)
     if (errors) {
         throw new IllegalArgumentException(
             "Preflight checks failed for sample ${settings.pair_id} " +
@@ -1999,6 +2120,14 @@ def rowSampleSettings(row, params) {
     def activePlatforms = activePlatformsForMode(analysisMode)
     def analysisSegmentations = normalizeAnalysisSegmentation(
         rowFieldOrDefault(row, "analysis_segmentation", params.analysis_segmentation)
+    )
+    def pciseqEnabled = boolOrDefault(
+        rowFieldOrDefault(row, "pciseq_enabled", params.pciseq_enabled),
+        false,
+        "pciseq_enabled for ${pairId}",
+    )
+    def pciseqReferencePath = optionalNormalizedPathString(
+        rowFieldOrDefault(row, "pciseq_reference_path", params.pciseq_reference_path),
     )
     def requestedAlignmentEnabled = boolOrDefault(
         rowFieldOrDefault(row, "enable_alignment", params.enable_alignment),
@@ -2312,6 +2441,7 @@ def rowSampleSettings(row, params) {
         menderEnabled,
         registerImagesEnabled,
         gastonEnabled,
+        pciseqEnabled,
     )
     def startStage = normalizeStage(startStageRaw, startParamName)
     def stopStage = normalizeStage(stopStageRaw, stopParamName)
@@ -2346,6 +2476,8 @@ def rowSampleSettings(row, params) {
             stopStage = "distance_from_object"
         } else if (corticalDepthEnabled && stageOrder.contains("compute_cortical_depth")) {
             stopStage = "compute_cortical_depth"
+        } else if (pciseqEnabled) {
+            stopStage = "pciseq"
         }
     }
     if (stageOrder.indexOf(startStage) > stageOrder.indexOf(stopStage)) {
@@ -2413,6 +2545,7 @@ def rowSampleSettings(row, params) {
         stageOrder,
     )
     def runMapMyCells = stageInRange("mapmycells", startStage, stopStage, stageOrder)
+    def runPciseq = stageInRange("pciseq", startStage, stopStage, stageOrder)
     // Extending the historical clustering stop for MENDER must not implicitly
     // activate MapMyCells, which otherwise lies between clustering and MENDER.
     if (autoExtendedToMender || autoExtendedToGaston) {
@@ -2515,6 +2648,8 @@ def rowSampleSettings(row, params) {
         run_visualize: runVisualize,
         run_spatial_gene_analysis: runSpatialGeneAnalysis,
         run_clustering_squidpy: runClusteringSquidpy,
+        run_pciseq: runPciseq,
+        pciseq_reference_path: pciseqReferencePath,
         run_mender: runMender,
         run_mapmycells: runMapMyCells,
         mender_published_output_mode: runMender && !runClusteringSquidpy,
@@ -2724,6 +2859,7 @@ workflow {
             "distance segmentations=" +
             "${settings.distance_from_object_segmentations.join(', ')}; " +
             "mender=${settings.run_mender}; " +
+            "pciseq=${settings.run_pciseq}; " +
             "mender segmentations=${settings.mender_segmentations.join(', ')}; " +
             "required clustering segmentations=" +
             "${settings.required_clustering_segmentations.join(', ')}; " +
@@ -4251,11 +4387,103 @@ workflow {
     clustering_computed_ch = CLUSTERING_SQUIDPY_COMPUTE(clustering_prepared_ch)
     clustering_results_ch = CLUSTERING_SQUIDPY_FINALIZE(clustering_computed_ch)
 
+    pciseq_current_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
+        if (!(settings.run_pciseq && settings.run_clustering_squidpy)) {
+            []
+        } else {
+            settings.analysis_segmentations.collect { segmentation ->
+                tuple("${pairId}|${segmentation}", settings)
+            }
+        }
+    }
+
+    pciseq_current_inputs_ch = clustering_results_ch
+        .map { pairId, segmentation, samplesJson, clusteringOutDir ->
+            tuple("${pairId}|${segmentation}", pairId, segmentation, samplesJson, clusteringOutDir)
+        }
+        .join(pciseq_current_gate_ch)
+        .flatMap { _key, pairId, segmentation, samplesJson, clusteringOutDir, settings ->
+            def samples = new groovy.json.JsonSlurper().parseText(samplesJson.toString())
+            samples.collect { sample ->
+                def platform = sample.platform.toString()
+                def sampleId = sample.sample_id.toString()
+                def h5ad = normalizedPath(clusteringOutDir).resolve(
+                    "${platform.toLowerCase()}/${sampleId}_clustered.h5ad",
+                )
+                def zarr = normalizedPath(sample.zarr_path).toRealPath()
+                tuple(
+                    pairId, segmentation, platform,
+                    pciseqConfigJson(pairId, segmentation, platform, sampleId, zarr, settings, params),
+                    h5ad,
+                    normalizedPath(settings.pciseq_reference_path),
+                    isBlankPath(params.pciseq_labels_path) ? [] : [normalizedPath(params.pciseq_labels_path)],
+                )
+            }
+        }
+
+    pciseq_published_inputs_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!(settings.run_pciseq && !settings.run_clustering_squidpy)) {
+            []
+        } else {
+            settings.analysis_segmentations.collectMany { segmentation ->
+                settings.active_platforms.collect { platform ->
+                    def sampleId = "${pairId}_${platform}"
+                    def zarr = pciseqSpatialdataPath(row, settings, platform, params).toRealPath()
+                    tuple(
+                        pairId, segmentation, platform,
+                        pciseqConfigJson(pairId, segmentation, platform, sampleId, zarr, settings, params),
+                        pciseqPublishedH5adPath(pairId, segmentation, platform, params),
+                        normalizedPath(settings.pciseq_reference_path),
+                        isBlankPath(params.pciseq_labels_path) ? [] : [normalizedPath(params.pciseq_labels_path)],
+                    )
+                }
+            }
+        }
+    }
+
+    pciseq_inputs_ch = pciseq_current_inputs_ch.mix(pciseq_published_inputs_ch)
+    pciseq_prepared_ch = PCISEQ_PREPARE(pciseq_inputs_ch)
+    pciseq_computed_ch = PCISEQ_COMPUTE(pciseq_prepared_ch)
+    pciseq_results_ch = PCISEQ_FINALIZE(pciseq_computed_ch)
+
+    pciseq_completion_expectations_ch = sample_rows_ch
+        .filter { _pairId, _row, settings -> settings.run_pciseq }
+        .map { pairId, _row, settings ->
+            tuple(pairId, settings.active_platforms.size() * settings.analysis_segmentations.size())
+        }
+    pciseq_done_per_pair_ch = pciseq_results_ch
+        .map { pairId, _segmentation, _platform, _outDir -> tuple(pairId, true) }
+        .combine(pciseq_completion_expectations_ch, by: 0)
+        .map { pairId, _done, expectedCount ->
+            tuple(groupKey(pairId, expectedCount as int), true)
+        }
+        .groupTuple()
+        .map { pairKey, _doneFlags -> tuple(pairKey.getGroupTarget(), true) }
+
+    // This gate covers both live clustering and published-input restarts.
+    // Later stages cannot read the store until every pciSeq writer has finished.
+    post_pciseq_sample_rows_ch = sample_rows_ch
+        .filter { _pairId, _row, settings -> !settings.run_pciseq }
+        .mix(
+            sample_rows_ch
+                .filter { _pairId, _row, settings -> settings.run_pciseq }
+                .join(pciseq_done_per_pair_ch)
+                .map { pairId, row, settings, _done -> tuple(pairId, row, settings) }
+        )
+    post_pciseq_pair_gate_ch = post_pciseq_sample_rows_ch.map {
+        pairId, _row, _settings -> tuple(pairId, true)
+    }
+    clustering_downstream_results_ch = clustering_results_ch
+        .combine(post_pciseq_pair_gate_ch, by: 0)
+        .map { pairId, segmentation, samplesJson, clusteringOutDir, _done ->
+            tuple(pairId, segmentation, samplesJson, clusteringOutDir)
+        }
+
     // Cortical depth runs after clustering so the per-cell broad_class and
     // subcluster_label annotations exist and its depth violin plots can be
     // produced. The distance-from-object branch consumes its tissue-region
     // annotation when both opt-in stages run in the same invocation.
-    clustering_completion_expectations_ch = sample_rows_ch.flatMap {
+    clustering_completion_expectations_ch = post_pciseq_sample_rows_ch.flatMap {
         pairId, _row, settings ->
             if (!(settings.run_clustering_squidpy &&
                   (settings.run_compute_cortical_depth ||
@@ -4266,7 +4494,7 @@ workflow {
             }
     }
 
-    clustering_done_per_pair_ch = clustering_results_ch
+    clustering_done_per_pair_ch = clustering_downstream_results_ch
         .map { pairId, _segmentation, _samplesJson, _clusteringOutDir ->
             tuple(pairId, true)
         }
@@ -4278,7 +4506,7 @@ workflow {
         .map { pairKey, _doneFlags -> tuple(pairKey.getGroupTarget(), true) }
 
     compute_cortical_depth_after_clustering_gate_ch =
-        sample_rows_ch.flatMap { pairId, row, settings ->
+        post_pciseq_sample_rows_ch.flatMap { pairId, row, settings ->
             if (!(settings.run_compute_cortical_depth && settings.run_clustering_squidpy)) {
                 []
             } else {
@@ -4310,7 +4538,7 @@ workflow {
     // produced when a clustering table already exists in that zarr, otherwise
     // they are skipped with a logged note.
     compute_cortical_depth_without_clustering_gate_ch =
-        sample_rows_ch.flatMap { pairId, row, settings ->
+        post_pciseq_sample_rows_ch.flatMap { pairId, row, settings ->
             if (!(settings.run_compute_cortical_depth && !settings.run_clustering_squidpy)) {
                 []
             } else {
@@ -4356,7 +4584,7 @@ workflow {
     )
 
     distance_from_object_after_cortical_gate_ch =
-        sample_rows_ch.flatMap { pairId, row, settings ->
+        post_pciseq_sample_rows_ch.flatMap { pairId, row, settings ->
             if (!(settings.run_distance_from_object &&
                   settings.run_compute_cortical_depth)) {
                 []
@@ -4392,7 +4620,7 @@ workflow {
         }
 
     distance_from_object_after_clustering_gate_ch =
-        sample_rows_ch.flatMap { pairId, row, settings ->
+        post_pciseq_sample_rows_ch.flatMap { pairId, row, settings ->
             if (!(settings.run_distance_from_object &&
                   !settings.run_compute_cortical_depth &&
                   settings.run_clustering_squidpy)) {
@@ -4441,7 +4669,7 @@ workflow {
         }
 
     distance_from_object_without_terminal_dependency_gate_ch =
-        sample_rows_ch.flatMap { pairId, row, settings ->
+        post_pciseq_sample_rows_ch.flatMap { pairId, row, settings ->
             if (!(settings.run_distance_from_object &&
                   !settings.run_compute_cortical_depth &&
                   !settings.run_clustering_squidpy)) {
@@ -4533,7 +4761,7 @@ workflow {
 
     DISTANCE_FROM_OBJECT_COHORT(distance_from_object_cohort_inputs_ch)
 
-    mapmycells_after_clustering_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
+    mapmycells_after_clustering_gate_ch = post_pciseq_sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!(settings.run_mapmycells && settings.run_clustering_squidpy)) {
             []
         } else {
@@ -4544,7 +4772,7 @@ workflow {
         }
     }
 
-    mapmycells_from_clustering_ch = clustering_results_ch
+    mapmycells_from_clustering_ch = clustering_downstream_results_ch
         .map { pairId, segmentation, samplesJson, clusteringOutDir ->
             tuple("${pairId}|${segmentation}", pairId, segmentation, samplesJson, clusteringOutDir)
         }
@@ -4553,7 +4781,7 @@ workflow {
             tuple(pairId, segmentation, samplesJson, clusteringOutDir)
         }
 
-    mapmycells_published_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
+    mapmycells_published_ch = post_pciseq_sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!(settings.run_mapmycells && !settings.run_clustering_squidpy)) {
             []
         } else {
@@ -4590,7 +4818,7 @@ workflow {
     // is grouped with a known pair-specific cardinality, so no pair waits for
     // another pair. Cohort summaries are intentionally outside the barrier.
     // MENDER consumes this token without depending on other terminal analyses.
-    pair_terminal_specs_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
+    pair_terminal_specs_ch = post_pciseq_sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!settings.run_terminal_analyses) {
             []
         } else {
@@ -4607,7 +4835,7 @@ workflow {
         }
     }
 
-    pair_terminal_immediate_ch = sample_rows_ch.flatMap {
+    pair_terminal_immediate_ch = post_pciseq_sample_rows_ch.flatMap {
         pairId, _row, settings ->
             if (settings.run_terminal_analyses && currentPairTerminalStage(settings) == null) {
                 [tuple(pairId, true)]
@@ -4629,11 +4857,11 @@ workflow {
         _key, pairId, _platform, _latestZarr, _corticalDepthOut ->
             tuple(pairId, "compute_cortical_depth", true)
     }
-    clustering_terminal_events_ch = clustering_results_ch.map {
+    clustering_terminal_events_ch = clustering_downstream_results_ch.map {
         pairId, _segmentation, _samplesJson, _clusteringOutDir ->
             tuple(pairId, "clustering_squidpy", true)
     }
-    terminal_extra_clustering_gate_ch = sample_rows_ch.flatMap {
+    terminal_extra_clustering_gate_ch = post_pciseq_sample_rows_ch.flatMap {
         pairId, _row, settings ->
             if (!(settings.run_terminal_analyses &&
                   settings.run_mapmycells &&
@@ -4649,7 +4877,7 @@ workflow {
                     }
             }
     }
-    terminal_extra_clustering_terminal_events_ch = clustering_results_ch
+    terminal_extra_clustering_terminal_events_ch = clustering_downstream_results_ch
         .map { pairId, segmentation, _samplesJson, _clusteringOutDir ->
             tuple("${pairId}|${segmentation}", pairId)
         }
@@ -4678,7 +4906,7 @@ workflow {
         pair_terminal_grouped_ch
     )
 
-    mender_current_clustering_gate_ch = sample_rows_ch.flatMap {
+    mender_current_clustering_gate_ch = post_pciseq_sample_rows_ch.flatMap {
         pairId, _row, settings ->
             if (!(settings.run_mender && settings.run_clustering_squidpy)) {
                 []
@@ -4689,7 +4917,7 @@ workflow {
             }
     }
 
-    mender_current_artifacts_ch = clustering_results_ch
+    mender_current_artifacts_ch = clustering_downstream_results_ch
         .map { pairId, segmentation, samplesJson, clusteringOutDir ->
             tuple(
                 "${pairId}|${segmentation}",
@@ -4733,7 +4961,7 @@ workflow {
                 }
         }
 
-    mender_published_artifacts_ch = sample_rows_ch.flatMap {
+    mender_published_artifacts_ch = post_pciseq_sample_rows_ch.flatMap {
         pairId, _row, settings ->
             if (!(settings.run_mender && settings.mender_published_output_mode)) {
                 []
@@ -4890,7 +5118,7 @@ workflow {
     mender_finalized_ch = MENDER_FINALIZE(mender_finalize_inputs_ch)
     MENDER_IMPORT(mender_finalized_ch)
 
-    gaston_current_clustering_gate_ch = sample_rows_ch.flatMap {
+    gaston_current_clustering_gate_ch = post_pciseq_sample_rows_ch.flatMap {
         pairId, _row, settings ->
             if (!(settings.run_gaston && settings.run_clustering_squidpy)) {
                 []
@@ -4901,7 +5129,7 @@ workflow {
             }
     }
 
-    gaston_current_artifacts_ch = clustering_results_ch
+    gaston_current_artifacts_ch = clustering_downstream_results_ch
         .map { pairId, segmentation, samplesJson, clusteringOutDir ->
             tuple(
                 "${pairId}|${segmentation}",
@@ -4945,7 +5173,7 @@ workflow {
                 }
         }
 
-    gaston_published_artifacts_ch = sample_rows_ch.flatMap {
+    gaston_published_artifacts_ch = post_pciseq_sample_rows_ch.flatMap {
         pairId, _row, settings ->
             if (!(settings.run_gaston && settings.gaston_published_output_mode)) {
                 []

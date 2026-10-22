@@ -136,6 +136,12 @@ consume the quantified/enriched zarrs directly. In `analysis_mode=merscope` or
 `analysis_mode=xenium`, only the selected platform traverses those stages, and
 paired-only `ALIGN`, `MATERIALIZE_ALIGNMENT`, `ALIGN_QC`, and `COMPARE` are
 inactive for that row.
+The optional [pciSeq stage](stages/pciseq.md) runs immediately after clustering
+as `PCISEQ_PREPARE` → `PCISEQ_COMPUTE` → `PCISEQ_FINALIZE`, independently for
+each active platform and analysis segmentation. It requires a supplied
+genes-by-cell-type reference expression matrix. Only computation uses the
+dedicated pciSeq runtime. Enabled pairs finish pciSeq before later consumers
+of the clustering outputs proceed, including standalone published-input ranges.
 `MAPMYCELLS` consumes the AnnData files written by
 `CLUSTERING_SQUIDPY` and is opt-in because it requires local reference files.
 GASTON independently joins the reusable terminal token for each pair, which is

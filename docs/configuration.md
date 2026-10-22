@@ -124,6 +124,7 @@ to `none` or `/dev/null` on purpose:
 | `distance_from_object_enabled` | `false` | Insert registered polygon-edge distance analysis after cortical depth/clustering. A non-empty samplesheet value overrides this per row. |
 | `distance_from_object_segmentations` | `proseg, original, cellpose` | Cell-table branches for object distance. Legacy `reseg`, `original_seg`, and `proseg_mask` values remain accepted aliases. A samplesheet value may override this per row. |
 | `mender_enabled` | `false` | Enable independent per-platform/per-segmentation MENDER spatial-domain analysis. A non-empty samplesheet value may override this per row. |
+| `pciseq_enabled` | `false` | Run optional pciSeq cell typing immediately after clustering; supports a per-row override. Requires `pciseq_reference_path`. See [all pciSeq settings](stages/pciseq.md#parameters). |
 | `mender_segmentations` | `proseg_hybrid` | MENDER branches: any comma-separated subset of `reseg`, `original_seg`, `proseg_mask`, and `proseg_hybrid`, or `all`. A non-empty samplesheet value may override this per row. |
 | `gaston_enabled` | `false` | Run GASTON as an opt-in terminal stage. A non-empty samplesheet value overrides this per row. |
 | `gaston_segmentations` | `proseg_hybrid` | Independent GASTON branch selector: any segmentation, a comma-separated subset, or `all`. This does not change `analysis_segmentation`. |
@@ -148,7 +149,7 @@ to `none` or `/dev/null` on purpose:
 Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
 `build_spatialdata`, `segment_nuclei`, `segment`, `enrich`, `register_images`,
 `mask_image_quantification`, `qc`, `mecr`, `align`, `align_qc`, `compare`,
-`visualize`, `spatial_gene_analysis`, `clustering_squidpy`,
+`visualize`, `spatial_gene_analysis`, `clustering_squidpy`, `pciseq`,
 `compute_cortical_depth`, `distance_from_object`, `mender`, `mapmycells`, and `gaston`.
 `register_images` is available only for rows that set
 `xenium_registered_images_csv` and process Xenium.
@@ -163,6 +164,9 @@ only for rows whose effective `enable_alignment` value is `true`.
 `distance_from_object` is available only when the effective
 `distance_from_object_enabled` value is `true`.
 `mender` is available only when the effective `mender_enabled` value is `true`.
+`pciseq` is available only when the effective `pciseq_enabled` value is `true`.
+Enabling it extends the historical clustering stop when no later enabled
+terminal stage takes precedence; explicit single-stage selections remain exact.
 `gaston` is available only when the effective `gaston_enabled` value is
 `true`. Enabling it extends the historical default stop from clustering to
 GASTON. Explicit `only_stage` selections and non-default stop stages stay exact.
