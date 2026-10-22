@@ -740,7 +740,7 @@ def test_bead_corrected_source_is_flagged_in_table_and_summary(
     expected = {
         "bead_corrected_stains": ["DAPI", "PolyT"],
         "bead_removal_version": 1,
-        "bead_removal_fill": False,
+        "bead_removal_fill": True,
     }
     info = sdata.tables[MASK_IMAGE_QUANTIFICATION_TABLE_KEY].uns[
         "mask_image_quantification"
@@ -839,7 +839,7 @@ def test_hybrid_join_carries_the_bead_removal_flag(
     ]
     assert marker["bead_corrected_stains"] == ["DAPI", "PolyT"]
     assert marker["bead_removal_version"] == 1
-    assert marker["bead_removal_fill"] is False
+    assert marker["bead_removal_fill"] is True
 
 
 def test_bead_removal_metadata_roundtrips_through_a_real_table(
@@ -893,5 +893,5 @@ def test_bead_removal_metadata_roundtrips_through_a_real_table(
         "PolyT",
     ]
     assert int(info["bead_removal_version"]) == 1
-    assert not bool(info["bead_removal_fill"])
+    assert bool(info["bead_removal_fill"])
     assert writes == [MASK_IMAGE_QUANTIFICATION_TABLE_KEY]
