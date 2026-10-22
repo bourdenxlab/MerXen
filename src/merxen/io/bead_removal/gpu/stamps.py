@@ -49,6 +49,7 @@ class TmplDev:
     def eval(self, r: torch.Tensor, s: torch.Tensor | float = 1.0) -> torch.Tensor:
         """Profile at radii ``r`` (float32) dilated by ``s`` (broadcastable): interp(r /
         s) / s^2, zero beyond the table (numpy.interp(..., right=0))."""
+        norm: torch.Tensor | float
         if isinstance(s, torch.Tensor):
             t = r / (s * self.ds)
             norm = 1.0 / (s * s)
