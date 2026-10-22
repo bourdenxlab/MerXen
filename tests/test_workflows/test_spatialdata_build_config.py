@@ -391,6 +391,7 @@ def _run_bead_harness(tmp_path: Path, *params: str) -> dict[str, str]:
     return results
 
 
+@pytest.mark.nextflow
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
 def test_a_published_source_zarr_must_match_the_requested_bead_removal(
     tmp_path: Path,
@@ -426,6 +427,7 @@ def test_a_published_source_zarr_must_match_the_requested_bead_removal(
     }
 
 
+@pytest.mark.nextflow
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
 def test_the_default_is_a_hybrid_fill_that_keeps_the_gpu_device(
     tmp_path: Path,
@@ -444,6 +446,7 @@ def test_the_default_is_a_hybrid_fill_that_keeps_the_gpu_device(
     }
 
 
+@pytest.mark.nextflow
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
 def test_the_flat_fill_is_compared_and_replaces_the_device_key(
     tmp_path: Path,
@@ -468,6 +471,7 @@ def test_the_flat_fill_is_compared_and_replaces_the_device_key(
     }
 
 
+@pytest.mark.nextflow
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
 def test_the_hybrid_fill_mode_is_compared_and_added_to_the_build_json(
     tmp_path: Path,
@@ -491,6 +495,7 @@ def test_the_hybrid_fill_mode_is_compared_and_added_to_the_build_json(
     }
 
 
+@pytest.mark.nextflow
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
 @pytest.mark.parametrize(
     ("fill", "mode", "expected"),
