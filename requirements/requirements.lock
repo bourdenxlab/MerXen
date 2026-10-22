@@ -886,7 +886,9 @@ pydantic==2.13.0
     #   pydantic-zarr
     #   sssom-pydantic
 pydantic-core==2.46.0
-    # via pydantic
+    # via
+    #   ome-types
+    #   pydantic
 pydantic-extra-types==2.11.1
     # via ome-types
 pydantic-settings==2.13.1
@@ -949,6 +951,7 @@ pytest-logging==2015.11.4
     # via prefixcommons
 pytest-xdist==3.8.0
     # via
+    #   merxen (pyproject.toml)
     #   cell-type-mapper
     #   mmc-gene-mapper
 python-dateutil==2.9.0.post0
@@ -1299,8 +1302,6 @@ typeguard==4.5.1
     # via inflect
 typing-extensions==4.15.0
     # via
-    #   aiosignal
-    #   anyio
     #   beautifulsoup4
     #   formulaic
     #   jupyter-client
@@ -1311,8 +1312,6 @@ typing-extensions==4.15.0
     #   pydantic-core
     #   pydantic-extra-types
     #   pystow
-    #   referencing
-    #   scanpy
     #   spatialdata
     #   sqlalchemy
     #   torch
