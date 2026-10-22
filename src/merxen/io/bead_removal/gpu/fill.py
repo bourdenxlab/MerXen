@@ -2,9 +2,10 @@
 
 The numpy implementation (:mod:`merxen.io.bead_removal.fill`, ``mode="hybrid"``) is
 the specification; this module reproduces it per plane on the device, with the same
-operations in the same order: the texture-sd gate (high-pass, robust per-block sd on
-blocks aligned to the absolute mosaic grid, truncated block smoothing, noise floor),
-the candidate mask, its cross dilation, the coarse (8 px block) and fine Gaussian
+operations in the same order: the candidate mask (``eps x light`` above the noise
+floor and, with ``texture_gate``, above the texture-sd gate: high-pass, robust
+per-block sd on blocks aligned to the absolute mosaic grid, truncated block
+smoothing), its cross dilation, the coarse (8 px block) and fine Gaussian
 fill cascades with the ``tau`` trust weights and the final smoothing, the one-sided
 bound ``removal <= eps x model light`` and the never-brighter clamp, and the same
 counters.
@@ -39,6 +40,8 @@ from merxen.io.bead_removal.fill import (
     MIN_KNOWN_BLOCK,
     FillParams,
     effective_params,
+    fill_dilation,
+    fill_eps,
 )
 
 from . import ops
@@ -171,7 +174,7 @@ def _coarse_fields(
     """
     h, w = c.shape
     hb, wb = h // BLOCK, w // BLOCK
-    iterations = max(1, -(-(p.dilation + 2) // BLOCK))
+    iterations = max(1, -(-(fill_dilation(p) + 2) // BLOCK))
     hole_b = _any_blocks(cand, BLOCK)
     for _ in range(iterations):
         hole_b = _dilate_square(hole_b, 1)
@@ -313,9 +316,10 @@ def fill_plane(
     Returns:
         (plane, counters): the new plane (``corrected`` itself when the plane is not
         processed or nothing changes) and the plane's counters (``cand_px``,
-        ``texture_dropped_px``, ``unfilled_px``, ``changed_px``, ``removed_sum``, as
-        the numpy fill reports them), or ``None`` when the plane is skipped (``eps``
-        0 or ``plane`` not in ``params.planes``).
+        ``texture_dropped_px`` (with ``texture_gate`` only), ``unfilled_px``,
+        ``changed_px``, ``removed_sum``, as the numpy fill reports them), or
+        ``None`` when the plane is skipped (``eps`` 0 or ``plane`` not in
+        ``params.planes``).
 
     Raises:
         ValueError: The mode is not hybrid, ``origin_yx`` is not a multiple of BLOCK,
@@ -330,7 +334,8 @@ def fill_plane(
             f"origin_yx must be a multiple of {BLOCK} px in hybrid mode; "
             f"got {origin_yx}"
         )
-    eps = float(params.eps[min(plane, len(params.eps) - 1)])
+    plane_eps = fill_eps(params)
+    eps = float(plane_eps[min(plane, len(plane_eps) - 1)])
     if eps <= 0 or (params.planes is not None and plane not in params.planes):
         return corrected, None
     if plane not in noise:
@@ -350,9 +355,9 @@ def fill_plane(
     u = eps * lt
     floor = max(p.floor_frac * float(noise[plane]), 1.0)
     cand = (u > p.gate * floor) & valid
-    if bool(cand.any()):
-        # Texture gate: the model's uncertainty must exceed the local texture sd of
-        # the corrected plane, not only the global noise floor.
+    if p.texture_gate and bool(cand.any()):
+        # Texture gate (opt-in): the model's uncertainty must exceed the local
+        # texture sd of the corrected plane, not only the global noise floor.
         sd = _texture_sd_map(c, valid, cand, origin_yx, p)
         textured = cand & (u > p.gate * sd.clamp(min=floor))
         ctr["texture_dropped_px"] = float((cand & ~textured).sum())
@@ -365,7 +370,8 @@ def fill_plane(
         f0, have0 = _upsample_coarse(fc, have_c, h, w)
         del fc, have_c
         m0 = (u > p.gate * floor) & cand
-        m = _dilate_cross(m0, p.dilation) & valid
+        dilation = fill_dilation(p)
+        m = _dilate_cross(m0, dilation) & valid
         del m0
         if bool(m.any()):
             known = valid & ~m
@@ -389,11 +395,11 @@ def fill_plane(
             udil = (
                 F.max_pool2d(
                     u[None, None],
-                    kernel_size=2 * p.dilation + 1,
+                    kernel_size=2 * dilation + 1,
                     stride=1,
-                    padding=p.dilation,
+                    padding=dilation,
                 )[0, 0]
-                if p.dilation
+                if dilation
                 else u
             )
             # One-sided, bounded by the (dilated) model uncertainty (hybrid: no

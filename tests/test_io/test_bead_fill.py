@@ -12,11 +12,15 @@ N2 null test on flat background (no more than the noise deadband), N3 tissue is
 left alone while the same ring on flat background is filled.
 
 Hybrid mode: H1 fills residual ring light on textured background where flat mode
-does nothing, H2 never brighter and bounded by eps x light, H3 the gate follows the
-local texture sd, H4 chunk invariance across window origins that are not on the
-32 px texture grid, H5 the flat hash and support are unchanged and the hybrid
-support fits, H6 the mode's effective gates ignore the flat fields, H7 invalid
-pixels, H8 the origin check, H9 ``correct_window`` passes the absolute origin.
+does nothing, H2 never brighter and bounded by eps x light, H3 the texture gate
+(opt-in) follows the local texture sd, H4 chunk invariance across window origins
+that are not on the 32 px texture grid (default and texture gate), H5 the flat hash
+and support are unchanged and the hybrid support fits, H6 the mode's effective
+gates ignore the flat fields, H7 invalid pixels, H8 the origin check, H9
+``correct_window`` passes the absolute origin, H11 the defaults of the hybrid fill
+(eps 1.0, dilation 3, no texture gate) and that the flat mode is untouched, H12 the
+default gates on the noise floor and never builds the texture map, H13 the earlier
+hybrid behaviour stays reachable.
 
 Chunk invariance: B1 a faint candidate bridge to a bright source outside the
 window (0.00 difference at margin 256 and at ``support_px + 2``), B2 the support of
@@ -40,6 +44,8 @@ from merxen.io.bead_removal.fill import (
     MAX_SUPPORT_PX,
     FillParams,
     apply_bounded_fill,
+    fill_dilation,
+    fill_eps,
     fill_params_sha256,
     support_px,
 )
@@ -558,6 +564,11 @@ def test_f14_dense_coating_is_not_filled() -> None:
 # Hybrid mode
 # ---------------------------------------------------------------------------
 HYBRID = FillParams(enabled=True, mode="hybrid")
+# The hybrid fill before its defaults became stronger: texture gate, bound 0.3 x the
+# model light, 2 px mask dilation.
+TEXTURE_HYBRID = FillParams(
+    enabled=True, mode="hybrid", eps=(0.3,) * 8, dilation=2, texture_gate=True
+)
 # Hash of the flat defaults before the hybrid mode existed (a recorded cache
 # identity must not change).
 FLAT_DEFAULT_SHA256 = "89cee507dacf718f6e34c035602e4f743b84598bbf8048c6308174bdbb71c82a"
@@ -611,10 +622,15 @@ def test_h1_hybrid_fills_textured_background_where_flat_mode_does_nothing(
     assert (out < corr).sum() > 1000
     ring = light[0] > 600
     assert (corr[0] - out[0])[ring].mean() > 0.3 * 0.4 * light[0][ring].mean()
-    # No flatness gate, premise guard or bright-source restriction in the counters.
+    # No flatness gate, premise guard or bright-source restriction in the counters,
+    # and no texture counter without the texture gate.
     assert stats["cand_px"] > 0
     assert not {"not_flat_px", "dense_skipped_px", "reach_dropped_px"} & set(stats)
-    assert "texture_dropped_px" in stats
+    assert "texture_dropped_px" not in stats
+    # The texture gate (opt-in) reports what it dropped.
+    gated: dict[str, Any] = {}
+    _fill(corr, light, raw, TEXTURE_HYBRID, stats=gated)
+    assert "texture_dropped_px" in gated
 
 
 def test_h2_hybrid_is_one_sided_and_bounded_by_eps_times_the_model(
@@ -628,15 +644,15 @@ def test_h2_hybrid_is_one_sided_and_bounded_by_eps_times_the_model(
         assert (out[i] >= corr[i] - udil - 1e-3).all()
 
 
-def test_h3_the_hybrid_gate_is_the_local_texture_sd_not_the_global_noise() -> None:
+def test_h3_the_texture_gate_is_the_local_texture_sd_not_the_global_noise() -> None:
     """On white noise of sd 100 only pixels near eps x light > ~100 are filled."""
     rng = np.random.default_rng(7)
     light = make_light((512, 512))
     corr = (1800 + rng.normal(0, 100, light.shape) + 0.4 * light).astype(np.float32)
-    out = _fill(corr, light, corr + light, HYBRID)
+    out = _fill(corr, light, corr + light, TEXTURE_HYBRID)
     n_changed = 0
     for i, k in enumerate(Z):
-        u = HYBRID.eps[k] * light[i]
+        u = TEXTURE_HYBRID.eps[k] * light[i]
         changed = out[i] < corr[i]
         n_changed += int(changed.sum())
         # A candidate has u above the local sd (about 100, well above the global
@@ -646,19 +662,23 @@ def test_h3_the_hybrid_gate_is_the_local_texture_sd_not_the_global_noise() -> No
     assert n_changed > 500
 
 
-def test_h3b_a_textured_plane_is_filled_less_than_a_quiet_one() -> None:
+def test_h3b_with_the_texture_gate_a_textured_plane_is_filled_less() -> None:
     quiet = make_textured_planes(texture_amp=0.0)
     busy = make_textured_planes(texture_amp=3000.0)
-    n_quiet = (_fill(*quiet, HYBRID) < quiet[0]).sum()
-    n_busy = (_fill(*busy, HYBRID) < busy[0]).sum()
+    n_quiet = (_fill(*quiet, TEXTURE_HYBRID) < quiet[0]).sum()
+    n_busy = (_fill(*busy, TEXTURE_HYBRID) < busy[0]).sum()
     assert n_busy < n_quiet
 
 
-def test_h4_hybrid_chunk_invariance_for_origins_off_the_texture_grid() -> None:
+@pytest.mark.parametrize("params", [HYBRID, TEXTURE_HYBRID], ids=["default", "texture"])
+def test_h4_hybrid_chunk_invariance_for_origins_off_the_texture_grid(
+    params: FillParams,
+) -> None:
     """Windows whose origin is on the 16 px grid but not on the 32 px texture grid.
 
     The texture blocks sit on the absolute grid, so a window that starts 16 px past
-    a block edge must give the same pixels as the full mosaic.
+    a block edge must give the same pixels as the full mosaic (with the texture gate;
+    the default has no texture map and only the 144 px coarse support).
     """
     size = (704, 1024)
     beads = (
@@ -670,15 +690,15 @@ def test_h4_hybrid_chunk_invariance_for_origins_off_the_texture_grid() -> None:
     # Part of the mosaic is outside the data (invalid), as at a real mosaic edge.
     corr[:, :, :40] = 0
     raw[:, :, :40] = 0
-    full = _fill(corr, light, raw, HYBRID, origin_yx=(0, 0))
+    full = _fill(corr, light, raw, params, origin_yx=(0, 0))
     assert (full < corr).sum() > 1000
-    margin = support_px(HYBRID)["total"] + 2
+    margin = support_px(params)["total"] + 2
     for y0, y1, x0, x1 in [(16, 704, 48, 1024), (32, 688, 16, 976), (0, 704, 80, 1008)]:
         sub = _fill(
             corr[:, y0:y1, x0:x1],
             light[:, y0:y1, x0:x1],
             raw[:, y0:y1, x0:x1],
-            HYBRID,
+            params,
             origin_yx=(y0, x0),
         )
         ya, yb = (margin if y0 > 0 else 0), (y1 - y0 - (margin if y1 < size[0] else 0))
@@ -686,10 +706,13 @@ def test_h4_hybrid_chunk_invariance_for_origins_off_the_texture_grid() -> None:
         a = sub[:, ya:yb, xa:xb]
         b = full[:, y0 + ya : y0 + yb, x0 + xa : x0 + xb]
         assert np.abs(a - b).max() == 0.0, (y0, y1, x0, x1)
-    # The origin is what aligns the blocks: a wrong origin changes the result.
+    if not params.texture_gate:
+        return
+    # The origin is what aligns the texture blocks: a wrong origin changes the
+    # result.
     window = (slice(None), slice(16, None), slice(48, None))
-    wrong = _fill(corr[window], light[window], raw[window], HYBRID, origin_yx=(0, 0))
-    right = _fill(corr[window], light[window], raw[window], HYBRID, origin_yx=(16, 48))
+    wrong = _fill(corr[window], light[window], raw[window], params, origin_yx=(0, 0))
+    right = _fill(corr[window], light[window], raw[window], params, origin_yx=(16, 48))
     assert not np.array_equal(wrong, right)
 
 
@@ -705,28 +728,48 @@ def test_h5_flat_hash_is_unchanged_and_the_hybrid_support_fits() -> None:
         "coarse": 144,
         "total": 232,
     }
-    # Hybrid has its own hash, which follows its texture fields.
+    # Hybrid has its own hash, which follows its fields; the texture fields count
+    # only with the texture gate, which does read them.
     assert fill_params_sha256(HYBRID) != FLAT_ENABLED_SHA256
-    assert fill_params_sha256(HYBRID) != fill_params_sha256(
+    assert fill_params_sha256(HYBRID) != fill_params_sha256(TEXTURE_HYBRID)
+    assert fill_params_sha256(HYBRID) == fill_params_sha256(
         dataclasses.replace(HYBRID, texture_hp_sigma=5.0)
     )
-    # High-pass radius 24 + (1 + 1) blocks of 32 px behind the 144 px coarse path.
+    assert fill_params_sha256(TEXTURE_HYBRID) != fill_params_sha256(
+        dataclasses.replace(TEXTURE_HYBRID, texture_hp_sigma=5.0)
+    )
+    # No texture map, no reach: only the 144 px coarse path (the fine path is the
+    # 24 px Gaussian, the 3 px dilation and the 6 px smoothing).
     assert support_px(HYBRID) == {
+        "fine": 33,
+        "cover": 0,
+        "reach": 0,
+        "coarse": 144,
+        "total": 144,
+    }
+    # Texture gate: high-pass radius 24 + (1 + 1) blocks of 32 px behind the 144 px
+    # coarse path.
+    assert support_px(TEXTURE_HYBRID) == {
         "fine": 32,
         "cover": 0,
         "reach": 88,
         "coarse": 144,
         "total": 232,
     }
-    assert support_px(HYBRID)["total"] <= MAX_SUPPORT_PX
+    assert support_px(TEXTURE_HYBRID)["total"] <= MAX_SUPPORT_PX
     # The original smoothing (4 blocks, 128 px) would not fit: it is refused.
     for radius in (2, 4):
         with pytest.raises(ValueError, match="support"):
-            FillParams(mode="hybrid", texture_radius_blocks=radius)
+            FillParams(mode="hybrid", texture_gate=True, texture_radius_blocks=radius)
     assert (
-        support_px(dataclasses.replace(HYBRID, texture_radius_blocks=0))["total"] < 232
+        support_px(dataclasses.replace(TEXTURE_HYBRID, texture_radius_blocks=0))[
+            "total"
+        ]
+        < 232
     )
-    # In flat mode the texture fields are not read, so they do not count.
+    # Without the gate, and in flat mode, the texture fields are not read, so they
+    # do not count.
+    assert FillParams(mode="hybrid", texture_radius_blocks=4).texture_gate is False
     assert FillParams(texture_radius_blocks=4).mode == "flat"
 
 
@@ -833,6 +876,95 @@ def test_h9_correct_window_passes_the_absolute_origin_to_the_hybrid_fill(
         )
         assert len(calls) == 1
         assert calls[0].get("origin_yx") == expected
+
+
+def test_h11_the_hybrid_defaults_are_the_strong_fill_and_flat_is_untouched() -> None:
+    """eps 1.0, dilation 3, no texture gate for hybrid; flat keeps 0.3 and 2."""
+    hybrid = FillParams(enabled=True, mode="hybrid")
+    assert hybrid.eps == (1.0,) * 8
+    assert hybrid.dilation == 3
+    assert hybrid.texture_gate is False
+    # The defaults are resolved when the object is built, so equal settings are equal.
+    assert hybrid == FillParams(
+        enabled=True, mode="hybrid", eps=(1.0,) * 8, dilation=3, texture_gate=False
+    )
+    flat = FillParams(enabled=True)
+    assert flat.eps == (0.3,) * 8 and flat.dilation == 2
+    assert fill_eps(flat) == flat.eps and fill_dilation(flat) == flat.dilation
+    assert fill_eps(hybrid) == (1.0,) * 8 and fill_dilation(hybrid) == 3
+    # A mode default can be overridden field by field.
+    assert FillParams(mode="hybrid", dilation=2).dilation == 2
+    assert FillParams(mode="hybrid", dilation=2).eps == (1.0,) * 8
+    assert FillParams(eps=(0.5,) * 8).dilation == 2
+    assert FillParams(dilation=4).eps == (0.3,) * 8
+    # The hash of a flat fill does not know the new fields.
+    assert fill_params_sha256(flat) == FLAT_ENABLED_SHA256
+    assert fill_params_sha256(FillParams(texture_gate=True)) == FLAT_DEFAULT_SHA256
+    for bad in ({"eps": (0.3,) * 3}, {"eps": (1.5,) * 8}, {"dilation": -1}):
+        with pytest.raises(ValueError):
+            FillParams(mode="hybrid", **bad)
+
+
+def test_h11b_flat_mode_output_is_unchanged_by_the_new_fields() -> None:
+    """Flat output does not depend on ``texture_gate``, and equals the explicit flat."""
+    corr, light, raw = make_planes()
+    base = _fill(corr, light, raw, FillParams(enabled=True))
+    explicit = _fill(
+        corr, light, raw, FillParams(enabled=True, eps=(0.3,) * 8, dilation=2)
+    )
+    gated = _fill(corr, light, raw, FillParams(enabled=True, texture_gate=True))
+    assert np.array_equal(base, explicit)
+    assert np.array_equal(base, gated)
+    assert (base < corr).sum() > 1000
+
+
+def test_h12_the_default_gate_is_the_noise_floor_and_has_no_texture_map(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candidates are the pixels with eps x light above the global noise floor."""
+
+    def refuse(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("the texture map must not be built without the gate")
+
+    corr, light, raw = make_textured_planes(texture_amp=3000.0)
+    with monkeypatch.context() as patch:
+        patch.setattr(fill, "_texture_sd_map", refuse)
+        out = _fill(corr, light, raw, HYBRID)
+        with pytest.raises(AssertionError, match="texture map"):
+            _fill(corr, light, raw, TEXTURE_HYBRID)
+    # Everything the fill changed lies within the dilated candidate set, which is
+    # where eps x light exceeds the floor (37 counts); the bound is eps x light.
+    for i, k in enumerate(Z):
+        u = HYBRID.eps[k] * light[i]
+        changed = out[i] < corr[i]
+        assert changed.sum() > 1000
+        assert (ndi.grey_dilation(u, size=2 * 3 + 1)[changed] > NOISE[k]).all()
+        udil = ndi.grey_dilation(u, size=2 * HYBRID.dilation + 1)
+        assert (out[i] >= corr[i] - udil - 1e-3).all()
+    # The candidate set is a function of the model light and the noise floor alone:
+    # a busy and a quiet plane have the same candidates (the texture gate would
+    # drop many on the busy one).
+    counts = []
+    for amp in (0.0, 3000.0):
+        stats: dict[str, Any] = {}
+        _fill(*make_textured_planes(texture_amp=amp), HYBRID, stats=stats)
+        counts.append(stats["cand_px"])
+    assert counts[0] == counts[1] > 0
+
+
+def test_h13_the_default_removes_more_bead_light_than_the_earlier_hybrid() -> None:
+    """The stronger bound and the wider mask suppress more of the residual ring."""
+    corr, light, raw = make_textured_planes()
+    strong = _fill(corr, light, raw, HYBRID)
+    earlier = _fill(corr, light, raw, TEXTURE_HYBRID)
+    assert (earlier <= corr).all() and (strong <= corr).all()
+    assert (corr - strong).sum() > 1.5 * (corr - earlier).sum()
+    ring = light[0] > 600
+    assert (corr[0] - strong[0])[ring].mean() > (corr[0] - earlier[0])[ring].mean()
+    # The earlier behaviour is reachable with the fields and keeps its bound.
+    for i in range(len(Z)):
+        udil = ndi.grey_dilation(0.3 * light[i], size=5)
+        assert (earlier[i] >= corr[i] - udil - 1e-3).all()
 
 
 def test_h10_hybrid_correct_window_is_never_brighter_than_the_subtraction() -> None:

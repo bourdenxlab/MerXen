@@ -4,12 +4,15 @@ The numpy fill (:mod:`merxen.io.bead_removal.fill`, hybrid mode) is the
 specification. These tests compare the device implementation with it:
 
 * P1 on identical inputs (a textured plane with bead rings, several window origins)
-  the two agree to float32 rounding and report the same counters;
+  the two agree to float32 rounding and report the same counters, for the default
+  hybrid fill (eps 1.0, dilation 3, no texture gate) and for the opt-in texture
+  gate with the earlier bound and dilation;
 * P2 the bounds hold on the device: never brighter, removal at most ``eps x light``
   (max filtered over the dilation), invalid pixels unchanged;
-* W1 end to end (``correct_window`` on both backends): at most 0.5 % of the pixels
-  differ by more than 10 counts, the removed light agrees to 1 %, the result is
-  never brighter than the subtraction, and removal stays within ``eps x model``;
+* W1 end to end (``correct_window`` on both backends, both settings): at most
+  0.5 % of the pixels differ by more than 10 counts, the removed light agrees to
+  1 %, the result is never brighter than the subtraction, and removal stays within
+  ``eps x model``;
 * C1 chunk invariance: the plane filled in two windows with different origins
   agrees beyond the support margin;
 * D1 two runs are bitwise identical;
@@ -36,11 +39,15 @@ from merxen.io.bead_removal.fill import FillParams, apply_bounded_fill, support_
 
 from . import bead_synth as bs
 from .bead_build_fixtures import open_projection_store, real_calibration, write_mosaic
-from .test_bead_fill import NOISE, Z, make_textured_planes
+from .test_bead_fill import NOISE, TEXTURE_HYBRID, Z, make_textured_planes
 
 needs_gpu = pytest.mark.gpu
 
 HYBRID = FillParams(enabled=True, mode="hybrid")
+# The default hybrid fill and the earlier one (texture gate, 0.3 x light, dilation 2).
+SETTINGS = pytest.mark.parametrize(
+    "params", [HYBRID, TEXTURE_HYBRID], ids=["default", "texture"]
+)
 STAINS = ("PolyT", "DAPI")
 # Beads of a 704 x 1024 window with texture (the window of the numpy chunk
 # invariance test of the hybrid mode).
@@ -122,6 +129,7 @@ def _numpy_fill(
     light: np.ndarray,
     raw: np.ndarray,
     origin_yx: tuple[int, int],
+    params: FillParams = HYBRID,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     stats: dict[str, Any] = {}
     out = apply_bounded_fill(
@@ -129,7 +137,7 @@ def _numpy_fill(
         light,
         raw=raw,
         z_layers=Z,
-        config=HYBRID,
+        config=params,
         stain="PolyT",
         noise=NOISE,
         stats=stats,
@@ -141,20 +149,29 @@ def _numpy_fill(
 # ---------------------------------------------------------------------------
 # P1, P2: the plane fill against the numpy fill
 @needs_gpu
+@SETTINGS
 @pytest.mark.parametrize("origin_yx", [(0, 0), (16, 48), (4112, 80)])
 def test_p1_device_fill_matches_the_numpy_fill_on_identical_inputs(
     fill_module: ModuleType,
     planes: tuple[np.ndarray, np.ndarray, np.ndarray],
     origin_yx: tuple[int, int],
+    params: FillParams,
 ) -> None:
     corr, light, raw = planes
-    ref, ref_stats = _numpy_fill(corr, light, raw, origin_yx)
-    out, counters = _device_fill(fill_module, corr, light, raw, origin_yx)
+    ref, ref_stats = _numpy_fill(corr, light, raw, origin_yx, params)
+    out, counters = _device_fill(fill_module, corr, light, raw, origin_yx, params)
 
     assert (ref < corr).sum() > 1000  # a real test: the fill acts
     assert np.abs(out - ref).max() <= 0.05
     assert int((out < corr).sum()) == int((ref < corr).sum())
-    for key in ("cand_px", "texture_dropped_px", "changed_px"):
+    # The texture counter exists with the texture gate only, on both backends.
+    assert ("texture_dropped_px" in ref_stats) == params.texture_gate
+    for k in Z:
+        assert ("texture_dropped_px" in counters[k]) == params.texture_gate
+    keys = ["cand_px", "changed_px"]
+    if params.texture_gate:
+        keys.append("texture_dropped_px")
+    for key in keys:
         total = sum(c[key] for c in counters.values())
         assert total == ref_stats[key], key
         for k in Z:
@@ -200,19 +217,21 @@ def _stacks(st: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
 
 
 @needs_gpu
+@SETTINGS
 @pytest.mark.parametrize("origin_yx", [(0, 0), (16, 48)])
 def test_w1_gpu_hybrid_window_agrees_with_the_cpu_hybrid_window(
     gpu: ModuleType,
     synth: dict[str, np.ndarray],
     cal: Any,
     origin_yx: tuple[int, int],
+    params: FillParams,
 ) -> None:
     stacks = _stacks(synth)
     cpu, _, _ = cpu_correct_window(
-        stacks, origin_yx=origin_yx, calibration=cal, z_layers=Z, fill=HYBRID
+        stacks, origin_yx=origin_yx, calibration=cal, z_layers=Z, fill=params
     )
     out, model, stats = gpu.correct_window(
-        stacks, origin_yx=origin_yx, calibration=cal, z_layers=Z, fill=HYBRID
+        stacks, origin_yx=origin_yx, calibration=cal, z_layers=Z, fill=params
     )
     base, _, _ = gpu.correct_window(
         stacks, origin_yx=origin_yx, calibration=cal, z_layers=Z
@@ -229,15 +248,14 @@ def test_w1_gpu_hybrid_window_agrees_with_the_cpu_hybrid_window(
     assert (out["PolyT"] <= raw).all()
     for i, k in enumerate(Z):
         light = np.maximum(model.fits[k].model.cpu().numpy(), 0.0)
-        udil = ndi.grey_dilation(HYBRID.eps[k] * light, size=2 * HYBRID.dilation + 1)
+        udil = ndi.grey_dilation(params.eps[k] * light, size=2 * params.dilation + 1)
         removed = base["PolyT"][i].astype(np.float64) - out["PolyT"][i]
         assert (removed <= udil + 1e-2).all(), k
     # DAPI is not a fill stain: it is untouched by the fill.
     assert np.array_equal(out["DAPI"], base["DAPI"])
     counters = stats["fill"]["PolyT"]
-    assert {"cand_px", "texture_dropped_px", "changed_px", "removed_sum"} <= set(
-        counters
-    )
+    assert {"cand_px", "changed_px", "removed_sum"} <= set(counters)
+    assert ("texture_dropped_px" in counters) == params.texture_gate
     assert set(counters["per_plane"]) == set(Z)
     assert "DAPI" not in stats["fill"]
 
@@ -287,14 +305,17 @@ def test_w1_maxproj_output_equals_the_projection_of_the_filled_planes(
 # ---------------------------------------------------------------------------
 # C1: chunk invariance
 @needs_gpu
+@SETTINGS
 def test_c1_device_fill_is_chunk_invariant_beyond_the_support_margin(
-    fill_module: ModuleType, planes: tuple[np.ndarray, np.ndarray, np.ndarray]
+    fill_module: ModuleType,
+    planes: tuple[np.ndarray, np.ndarray, np.ndarray],
+    params: FillParams,
 ) -> None:
     """Windows whose origin is on the 16 px grid but not on the 32 px texture grid."""
     corr, light, raw = planes
-    full, _ = _device_fill(fill_module, corr, light, raw, (0, 0))
+    full, _ = _device_fill(fill_module, corr, light, raw, (0, 0), params)
     assert (full < corr).sum() > 1000
-    margin = support_px(HYBRID)["total"] + 2
+    margin = support_px(params)["total"] + 2
     for y0, y1, x0, x1 in [(16, 704, 48, 1024), (32, 688, 16, 976), (0, 704, 80, 1008)]:
         sub, _ = _device_fill(
             fill_module,
@@ -302,6 +323,7 @@ def test_c1_device_fill_is_chunk_invariant_beyond_the_support_margin(
             np.ascontiguousarray(light[:, y0:y1, x0:x1]),
             np.ascontiguousarray(raw[:, y0:y1, x0:x1]),
             (y0, x0),
+            params,
         )
         ya, yb = (margin if y0 > 0 else 0), (y1 - y0 - (margin if y1 < SIZE[0] else 0))
         xa, xb = (margin if x0 > 0 else 0), (x1 - x0 - (margin if x1 < SIZE[1] else 0))
@@ -310,11 +332,13 @@ def test_c1_device_fill_is_chunk_invariant_beyond_the_support_margin(
         # Different window shapes may pick different convolution algorithms: allow
         # float32 rounding, nothing of the size of a different decision.
         assert np.abs(a - b).max() <= 0.05, (y0, y1, x0, x1)
+    if not params.texture_gate:
+        return
     # The origin is what aligns the texture blocks: a wrong origin changes the result.
     window = (slice(None), slice(16, None), slice(48, None))
     args = [np.ascontiguousarray(a[window]) for a in (corr, light, raw)]
-    wrong, _ = _device_fill(fill_module, *args, (0, 0))
-    right, _ = _device_fill(fill_module, *args, (16, 48))
+    wrong, _ = _device_fill(fill_module, *args, (0, 0), params)
+    right, _ = _device_fill(fill_module, *args, (16, 48), params)
     assert not np.array_equal(wrong, right)
 
 

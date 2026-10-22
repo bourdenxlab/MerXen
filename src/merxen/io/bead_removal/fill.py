@@ -42,16 +42,24 @@ The interpolation is a normalised-convolution cascade from coarse to fine levels
 with fixed Gaussian supports; a hole that is larger than the coarsest support is
 left unchanged (never invented).
 
-Hybrid mode (``FillParams.mode == "hybrid"``) is the original, more aggressive
-behaviour of the method, offered as an option. It fills wherever the model's own
-uncertainty ``eps x light`` exceeds ``gate x`` the local texture sd of the
-corrected plane (robust sd of the high-passed plane in blocks aligned to the
-absolute mosaic grid), also in tissue. There is no flatness gate, no noise
-deadband (hard one-sided clip), no bright-source restriction and no dense-coating
-skip, so tissue puncta next to a bead can be dimmed. The bound is unchanged: the
-result is never brighter than the subtraction result and never lower than
-``corrected - eps x model light`` (max-filtered over the mask dilation). The
-texture map adds to the support (see :func:`support_px`).
+Hybrid mode (``FillParams.mode == "hybrid"``) is the aggressive, mask-oriented
+variant, the default of the pipeline: it suppresses bead light as strongly as the
+model allows, also in tissue, and so favours clean masks over faithful pixel
+values. It fills wherever the model's own uncertainty ``eps x light`` exceeds the
+noise floor (``gate x floor_frac x`` the dataset-global pixel noise of the plane),
+with ``eps`` 1.0 (the removal bound is the full model light) and a mask dilation
+of 3 px. There is no flatness gate, no noise deadband (hard one-sided clip), no
+bright-source restriction and no dense-coating skip, so tissue puncta next to a
+bead can be dimmed. The bound is unchanged: the result is never brighter than the
+subtraction result and never lower than ``corrected - eps x model light``
+(max-filtered over the mask dilation).
+
+The earlier hybrid behaviour stays reachable: ``texture_gate=True`` additionally
+requires ``eps x light`` to exceed the local texture sd of the corrected plane
+(robust sd of the high-passed plane in blocks aligned to the absolute mosaic grid),
+and ``eps=(0.3, 0.3, ...)`` with ``dilation=2`` restore the earlier bound and mask.
+The texture map adds to the support (see :func:`support_px`); without it the
+support of the hybrid fill is the 144 px of the coarse path.
 """
 
 from __future__ import annotations
@@ -87,14 +95,22 @@ COVER_BLOCKS = 33
 # A block takes part in the flatness test if at least this fraction of its
 # pixels is known.
 MIN_KNOWN_BLOCK = 0.25
-# FillParams fields that only the hybrid mode reads (not hashed in flat mode).
-_HYBRID_ONLY_FIELDS = (
-    "mode",
+# Mode-dependent defaults of ``FillParams.eps`` and ``FillParams.dilation`` (the
+# value ``None`` selects them). The flat fill keeps its conservative bound and mask;
+# the hybrid fill removes up to the full model light and dilates the mask by 3 px.
+FLAT_EPS = 0.3
+HYBRID_EPS = 1.0
+FLAT_DILATION = 2
+HYBRID_DILATION = 3
+# FillParams fields of the texture map (read only with ``texture_gate``).
+_TEXTURE_FIELDS = (
     "texture_block",
     "texture_hp_sigma",
     "texture_smooth",
     "texture_radius_blocks",
 )
+# FillParams fields that only the hybrid mode reads (not hashed in flat mode).
+_HYBRID_ONLY_FIELDS = ("mode", "texture_gate", *_TEXTURE_FIELDS)
 _SQUARE = ndi.generate_binary_structure(2, 2)
 _CROSS = ndi.generate_binary_structure(2, 1)
 
@@ -117,15 +133,21 @@ class FillParams:
             belong to.
         eps: Per plane (index = z): the fill may remove at most
             ``eps[z] x model light`` below the subtraction result. 0 switches a
-            plane off. 0.3 covers about the 95th percentile of the measured
-            residual / model light ratio at bright pixels on synthetic ground
-            truth (the median is negative: the subtraction over-subtracts).
+            plane off. ``None`` (default) selects the mode's default, which is
+            stored in the field when the object is built: 0.3 on every plane in flat
+            mode (it covers about the 95th percentile of the measured residual /
+            model light ratio at bright pixels on synthetic ground truth; the
+            median is negative: the subtraction over-subtracts) and 1.0 in hybrid
+            mode (the removal bound is the whole model light, so that no mask is
+            left on a modelled bead; only the masks matter downstream).
         gate: A pixel is a fill candidate where ``eps x light > gate x noise
             floor``.
         floor_frac: Noise floor = ``floor_frac x`` the dataset-global pixel
             noise of the plane.
         dilation: Dilation (px, cross structure) of the candidate mask before
-            filling; also the support of the bound.
+            filling; also the support of the bound. ``None`` (default) selects the
+            mode's default, stored in the field when the object is built: 2 in flat
+            mode, 3 in hybrid mode.
         peak_snr: Restriction to bright sources: a candidate pixel is kept only
             if a bright candidate pixel (``eps x light`` at least ``peak_snr x``
             the global pixel noise of the plane) lies within ``bright_reach_px``
@@ -168,24 +190,34 @@ class FillParams:
         smooth: Gaussian sigma (px) of the final smoothing inside the mask
             (0 = off).
         mode: ``"flat"`` (default) acts on flat background only, as described
-            above. ``"hybrid"`` is the original behaviour: it fills where
-            ``eps x light > gate x max(texture sd, noise floor)`` in tissue as
-            well, and may dim tissue puncta close to a bead. In hybrid mode
-            ``flat_max``, ``deadband``, ``peak_snr``, ``bright_reach_px`` and
-            ``max_cover`` are ignored; the effective values are no flatness gate,
-            a hard one-sided clip (deadband 0), no bright-source restriction
-            (peak_snr 0) and no dense-coating skip (max_cover 1.0). The fill
-            cascade, the dilation and the bound ``removal <= eps x light`` are
-            the same.
-        texture_block: Hybrid only. Side (px) of the blocks of the texture map;
-            the blocks are aligned to the absolute mosaic grid, so the result does
-            not depend on how the mosaic is cut into windows.
-        texture_hp_sigma: Hybrid only. Gaussian sigma (px) of the high-pass
+            above. ``"hybrid"`` fills where ``eps x light > gate x floor`` in
+            tissue as well (and, with ``texture_gate``, where it also exceeds the
+            local texture sd), and may dim tissue puncta close to a bead. In
+            hybrid mode ``flat_max``, ``deadband``, ``peak_snr``,
+            ``bright_reach_px`` and ``max_cover`` are ignored; the effective values
+            are no flatness gate, a hard one-sided clip (deadband 0), no
+            bright-source restriction (peak_snr 0) and no dense-coating skip
+            (max_cover 1.0). The fill cascade and the bound ``removal <= eps x
+            light`` are the same as in flat mode; ``eps`` and ``dilation`` have
+            their own defaults. Build a hybrid configuration with
+            ``FillParams(mode="hybrid", ...)``: ``dataclasses.replace(flat,
+            mode="hybrid")`` keeps the (already resolved) flat ``eps`` and
+            ``dilation``.
+        texture_gate: Hybrid only (not read in flat mode). True: a candidate pixel
+            must also have ``eps x light > gate x`` the local texture sd of the
+            corrected plane (the earlier hybrid behaviour; the texture map adds to
+            the support and to the cost). False (default): candidates are the
+            pixels where ``eps x light`` exceeds the noise floor, and the texture
+            map is not computed.
+        texture_block: Texture gate only. Side (px) of the blocks of the texture
+            map; the blocks are aligned to the absolute mosaic grid, so the result
+            does not depend on how the mosaic is cut into windows.
+        texture_hp_sigma: Texture gate only. Gaussian sigma (px) of the high-pass
             (``plane - gaussian(plane)``, computed over valid pixels only) whose
             robust (MAD) sd per block is the texture sd.
-        texture_smooth: Hybrid only. Gaussian sigma (in blocks) with which the
+        texture_smooth: Texture gate only. Gaussian sigma (in blocks) with which the
             per-block sd is smoothed.
-        texture_radius_blocks: Hybrid only. Radius (blocks) at which the
+        texture_radius_blocks: Texture gate only. Radius (blocks) at which the
             smoothing kernel is truncated. The original smoothing (sigma 1 block,
             scipy's default truncation at 4 sigma) reaches 4 blocks = 128 px; with
             the 24 px high-pass and the 144 px coarse path the total support
@@ -202,10 +234,10 @@ class FillParams:
     enabled: bool = False
     stains: tuple[str, ...] = ("PolyT",)
     reference_stain: str = "PolyT"
-    eps: tuple[float, ...] = (0.3,) * NZ_MAX
+    eps: tuple[float, ...] | None = None
     gate: float = 1.0
     floor_frac: float = 1.0
-    dilation: int = 2
+    dilation: int | None = None
     peak_snr: float = 3.0
     bright_reach_px: int = 64
     planes: tuple[int, ...] | None = None
@@ -217,6 +249,7 @@ class FillParams:
     tau: float = 0.5
     smooth: float = 1.5
     mode: Literal["flat", "hybrid"] = "flat"
+    texture_gate: bool = False
     texture_block: int = 32
     texture_hp_sigma: float = 6.0
     texture_smooth: float = 1.0
@@ -230,12 +263,26 @@ class FillParams:
                 f"calibrated): stains must be ({self.reference_stain!r},); "
                 f"got {tuple(self.stains)}"
             )
-        if len(self.eps) != NZ_MAX or min(self.eps) < 0 or max(self.eps) > 1:
+        if self.mode not in ("flat", "hybrid"):
+            raise ValueError(f"mode must be 'flat' or 'hybrid'; got {self.mode!r}")
+        # The mode's defaults are resolved here (frozen dataclass: object.__setattr__),
+        # so after construction ``eps`` and ``dilation`` always hold values.
+        hybrid = self.mode == "hybrid"
+        if self.eps is None:
+            object.__setattr__(
+                self, "eps", (HYBRID_EPS if hybrid else FLAT_EPS,) * NZ_MAX
+            )
+        if self.dilation is None:
+            object.__setattr__(
+                self, "dilation", HYBRID_DILATION if hybrid else FLAT_DILATION
+            )
+        eps = fill_eps(self)
+        if len(eps) != NZ_MAX or min(eps) < 0 or max(eps) > 1:
             raise ValueError(f"eps must have {NZ_MAX} values in [0, 1]; got {self.eps}")
         if (
             self.gate <= 0
             or self.floor_frac <= 0
-            or self.dilation < 0
+            or fill_dilation(self) < 0
             or not 0 < self.tau <= 1
         ):
             raise ValueError(
@@ -250,8 +297,6 @@ class FillParams:
                 f"bright_reach_px must be in [1, {MAX_REACH_PX}]; "
                 f"got {self.bright_reach_px}"
             )
-        if self.mode not in ("flat", "hybrid"):
-            raise ValueError(f"mode must be 'flat' or 'hybrid'; got {self.mode!r}")
         if (
             self.texture_block < 1
             or self.texture_hp_sigma <= 0
@@ -279,17 +324,51 @@ def fill_params_sha256(params: FillParams) -> str:
         params: The fill parameters.
 
     Returns:
-        Hex SHA-256 of the sorted-key JSON dump of the dataclass. The fields that
-        only hybrid mode reads (``_HYBRID_ONLY_FIELDS``) are left out in flat
-        mode, so the hash of a flat configuration is the one it had before the
-        hybrid mode existed.
+        Hex SHA-256 of the sorted-key JSON dump of the dataclass (with the mode's
+        defaults of ``eps`` and ``dilation`` resolved). The fields that only
+        hybrid mode reads (``_HYBRID_ONLY_FIELDS``) are left out in flat mode, so
+        the hash of a flat configuration is the one it had before the hybrid mode
+        existed; the fields of the texture map are also left out in hybrid mode
+        without ``texture_gate``, which does not read them.
     """
     fields = dataclasses.asdict(params)
     if params.mode == "flat":
         for name in _HYBRID_ONLY_FIELDS:
             del fields[name]
+    elif not params.texture_gate:
+        for name in _TEXTURE_FIELDS:
+            del fields[name]
     payload = json.dumps(fields, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def fill_eps(params: FillParams) -> tuple[float, ...]:
+    """Return the per-plane ``eps`` of a fill (the mode's default when unset).
+
+    Args:
+        params: The fill parameters.
+
+    Returns:
+        The tuple of ``eps`` values (index = z).
+    """
+    if params.eps is not None:
+        return params.eps
+    default = HYBRID_EPS if params.mode == "hybrid" else FLAT_EPS
+    return (default,) * NZ_MAX
+
+
+def fill_dilation(params: FillParams) -> int:
+    """Return the mask dilation (px) of a fill (the mode's default when unset).
+
+    Args:
+        params: The fill parameters.
+
+    Returns:
+        The dilation in px.
+    """
+    if params.dilation is not None:
+        return params.dilation
+    return HYBRID_DILATION if params.mode == "hybrid" else FLAT_DILATION
 
 
 def _gauss_radius(sigma: float) -> int:
@@ -322,7 +401,7 @@ def effective_params(params: FillParams) -> FillParams:
 
 
 def _texture_reach_px(params: FillParams) -> int:
-    """Reach (px) of the candidate set of hybrid mode through the texture map.
+    """Reach (px) of the candidate set of the texture gate (hybrid mode).
 
     A pixel's texture sd is the smoothed sd of the blocks within
     ``texture_radius_blocks`` blocks of its own block (at most ``texture_block - 1``
@@ -351,19 +430,22 @@ def support_px(params: FillParams) -> dict[str, int]:
         candidate set, which the coverage test, the flatness test and the coarse
         hole are computed from, depends on pixels that far away), of the coarse
         path ("coarse": coarse fill field and flatness test) and the overall
-        maximum ("total"). "reach" is the bright-source reach in flat mode and the
-        reach of the texture map in hybrid mode (high-pass radius plus the blocks
-        of the sd smoothing, see ``texture_radius_blocks``). The flat defaults
-        give 32, 136, 64, 144 and 232, the hybrid defaults 32, 0, 88, 144 and 232.
+        maximum ("total"). "reach" is the bright-source reach in flat mode, the
+        reach of the texture map in hybrid mode with ``texture_gate`` (high-pass
+        radius plus the blocks of the sd smoothing, see ``texture_radius_blocks``)
+        and 0 in hybrid mode without it. The flat defaults give 32, 136, 64, 144
+        and 232, the hybrid defaults (no texture gate, dilation 3) 33, 0, 0, 144 and
+        144, the hybrid fill with the texture gate and dilation 2 32, 0, 88, 144 and
+        232.
     """
     peak_snr, max_cover, _deadband = _effective_gates(params)
     smooth = _gauss_radius(params.smooth) if params.smooth else 0
-    fine = _gauss_radius(max(params.fine_sigmas)) + params.dilation + smooth
+    fine = _gauss_radius(max(params.fine_sigmas)) + fill_dilation(params) + smooth
     # The coverage test is window-level, outside the crops.
     cover = (COVER_BLOCKS // 2 + 1) * BLOCK if max_cover < 1.0 else 0
     coarse = (_gauss_radius(max(params.coarse_sigmas)) + 1 + 1) * BLOCK
     if params.mode == "hybrid":
-        reach = _texture_reach_px(params)
+        reach = _texture_reach_px(params) if params.texture_gate else 0
     else:
         reach = params.bright_reach_px if peak_snr > 0 else 0
     return {
@@ -460,7 +542,7 @@ def _coarse_fields(
     h, w = c.shape
     hb, wb = h // BLOCK, w // BLOCK
     cand_b = cand.reshape(hb, BLOCK, wb, BLOCK).any(axis=(1, 3))
-    iterations = max(1, int(np.ceil((p.dilation + 2) / BLOCK)))
+    iterations = max(1, int(np.ceil((fill_dilation(p) + 2) / BLOCK)))
     hole_b = ndi.binary_dilation(cand_b, structure=_SQUARE, iterations=iterations)
     area = float(BLOCK * BLOCK)
     kn64 = np.where(hole_b, 0.0, _block_sums(valid, hb, wb) / area)
@@ -676,9 +758,10 @@ def _fill_crop(
     m0 = (u > p.gate * floor) & cand
     if not m0.any():
         return c, np.zeros(c.shape, bool)
+    dilation = fill_dilation(p)
     m = (
-        ndi.binary_dilation(m0, structure=_CROSS, iterations=p.dilation)
-        if p.dilation
+        ndi.binary_dilation(m0, structure=_CROSS, iterations=dilation)
+        if dilation
         else m0
     )
     m &= valid
@@ -699,7 +782,7 @@ def _fill_crop(
         )
         wm = gaussian_filter(m.astype(np.float32), p.smooth, mode="constant")
         f = np.where(m & (wm > 0.5) & have, fm / np.maximum(wm, 1e-3), f)
-    udil = ndi.grey_dilation(u, size=2 * p.dilation + 1) if p.dilation else u
+    udil = ndi.grey_dilation(u, size=2 * dilation + 1) if dilation else u
     # One-sided, bounded by the (dilated) model uncertainty, and only the part
     # beyond the noise deadband.
     rem = np.minimum(np.maximum(c - f - p.deadband * floor, 0.0), udil)
@@ -743,9 +826,9 @@ def _fill_plane(
     u = (eps * light).astype(np.float32)
     floor = max(p.floor_frac * noise, 1.0)
     cand = (u > p.gate * floor) & valid
-    if p.mode == "hybrid" and cand.any():
-        # Texture gate: the model's uncertainty must exceed the local texture sd of
-        # the corrected plane, not only the global noise floor.
+    if p.mode == "hybrid" and p.texture_gate and cand.any():
+        # Texture gate (opt-in): the model's uncertainty must exceed the local
+        # texture sd of the corrected plane, not only the global noise floor.
         sd = _texture_sd_map(c, valid, cand, origin_yx, p)
         textured = cand & (u > p.gate * np.maximum(sd, floor))
         ctr["texture_dropped_px"] = ctr.get("texture_dropped_px", 0.0) + float(
@@ -854,8 +937,8 @@ def apply_bounded_fill(
     """Remove residual bead light left by the subtraction.
 
     Bounded, one-sided inpainting: on flat background only in flat mode, wherever
-    the model uncertainty exceeds the local texture in hybrid mode. See the module
-    docstring for the guarantees.
+    the model uncertainty exceeds the noise floor (and, with ``texture_gate``, the
+    local texture) in hybrid mode. See the module docstring for the guarantees.
 
     Args:
         corrected: Subtraction result [n_z, Y, X] float32 (planes in ``z_layers``
@@ -875,14 +958,14 @@ def apply_bounded_fill(
             restriction), ``reach_dropped_px`` (dropped by it),
             ``dense_skipped_px`` (premise guard), ``not_flat_px`` (surroundings
             not flat: tissue, texture), ``unfilled_px`` (no known pixel within
-            reach), ``changed_px`` and ``removed_sum``. Hybrid mode adds
-            ``texture_dropped_px`` (candidates below the local texture sd) and
-            reports no ``reach_dropped_px``, ``dense_skipped_px`` or
-            ``not_flat_px``.
-        origin_yx: Absolute mosaic coordinate of pixel (0, 0). Hybrid mode aligns
-            its texture blocks to the absolute grid with it, and requires a
-            multiple of ``BLOCK`` (``correct_window`` passes a multiple of 16).
-            Flat mode does not read it.
+            reach), ``changed_px`` and ``removed_sum``. Hybrid mode reports no
+            ``reach_dropped_px``, ``dense_skipped_px`` or ``not_flat_px``, and
+            adds ``texture_dropped_px`` (candidates below the local texture sd)
+            with ``texture_gate`` only.
+        origin_yx: Absolute mosaic coordinate of pixel (0, 0). Hybrid mode requires
+            a multiple of ``BLOCK`` (``correct_window`` passes a multiple of 16)
+            and, with ``texture_gate``, aligns its texture blocks to the absolute
+            grid with it. Flat mode does not read it.
 
     Returns:
         float32 array [n_z, Y, X], never brighter than ``corrected``, never lower
@@ -911,7 +994,8 @@ def apply_bounded_fill(
     tot: dict[str, float] = {}
     for i, k in enumerate(z_layers):
         k = int(k)
-        eps = float(config.eps[min(k, len(config.eps) - 1)])
+        plane_eps = fill_eps(config)
+        eps = float(plane_eps[min(k, len(plane_eps) - 1)])
         if eps <= 0 or (config.planes is not None and k not in config.planes):
             continue
         if k not in noise:
