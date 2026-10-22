@@ -303,6 +303,8 @@ def test_build_gets_a_gpu_queue_and_nv_only_for_the_gpu_device(
             nextflow,
             "run",
             str(probe),
+            "-ansi-log",
+            "false",
             "-c",
             str(config),
             "-c",
@@ -324,7 +326,9 @@ def test_build_gets_a_gpu_queue_and_nv_only_for_the_gpu_device(
     assert completed.returncode == 0, (
         completed.stdout[-3000:] + completed.stderr[-2000:]
     )
-    assert f"RESULT {expected}" in completed.stdout
+    assert f"RESULT {expected}" in completed.stdout, (
+        completed.stdout[-3000:] + completed.stderr[-2000:]
+    )
 
 
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
