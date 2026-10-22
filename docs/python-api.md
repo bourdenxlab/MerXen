@@ -102,8 +102,10 @@ never the correction code, and the package imports no GPU code. Configured by `M
 - `provenance` — `build_image_preprocessing_record`,
   `check_bead_removal_reuse` (the cache guard), and the segmentation sidecar
   helpers.
-- `fill` — the experimental bounded fill (`FillParams`, `apply_bounded_fill`), in
-  flat or hybrid mode, reached through the config's `fill` and `fill_mode`.
+- `fill` — the bounded fill (`FillParams`, `apply_bounded_fill`), in hybrid (the
+  config default) or flat mode, reached through the config's `fill` and
+  `fill_mode`. The hybrid mode has a device port in `gpu/fill.py`, called by the
+  GPU `correct_window`.
 
 ### `io.spatialdata_io` — [spatialdata_io.py](../src/merxen/io/spatialdata_io.py)
 - `write_spatialdata_zarr(sdata, path, ...)`.

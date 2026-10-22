@@ -44,8 +44,8 @@ Common optional parameters:
 | `--analysis_segmentation` | `all` (default), `both`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, or `proseg_hybrid`. `all` expands to `reseg,original_seg,proseg_mask,proseg_hybrid`; `both` restricts the run to `reseg,original_seg`. |
 | `--force_spatialdata_build` | Force rebuilding the SpatialData zarr even when a cached one exists. Defaults to `false`. |
 | `--merscope_bead_removal` | Remove coverslip fiducial beads from MERSCOPE PolyT/DAPI before the max projection, for rows whose `merscope_bead_removal` column is blank. Defaults to `false`. Needs raw TIFFs and `merscope_z_range` from plane `1`; see [bead removal](stages/spatialdata-build.md#merscope-bead-removal-optional). |
-| `--merscope_bead_removal_fill` | Experimental residual-footprint fill for samples with bead removal on (flat background only; off by default). |
-| `--merscope_bead_removal_fill_mode` | `flat` (default) or `hybrid`: the original fill that also acts in tissue and may dim puncta near beads. Needs `--merscope_bead_removal_fill true`. See [configuration](configuration.md). |
+| `--merscope_bead_removal_fill` | Residual-footprint fill for samples with bead removal on. On by default (hybrid mode); `--merscope_bead_removal_fill false` switches it off. See [configuration](configuration.md). |
+| `--merscope_bead_removal_fill_mode` | `hybrid` (default; also acts in tissue and may dim puncta near beads; runs on the CPU or the GPU) or `flat` (flat background only; CPU only). Ignored with `--merscope_bead_removal_fill false`. See [configuration](configuration.md). |
 | `--merscope_bead_removal_device` | Device of the bead-removal correction: `cpu` (default), `cuda` or `auto`. See [configuration](configuration.md). |
 | `--force_proseg_rerun` | Force rebuilding ProSeg bases from the current Cellpose/transcript inputs rather than reusing persistent latest zarrs. Defaults to `false`. |
 | `--enable_alignment` | Run optional DAPI-only VALIS alignment and alignment QC before comparison. Paired mode only. Defaults to `false`. |

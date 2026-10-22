@@ -252,9 +252,12 @@ PolyT and DAPI must be present with planes `0` to the highest requested plane.
 ### Configuration
 
 `MerscopeBuildConfig.bead_removal` is `None` (off) unless the workflow adds it.
-Nextflow only ever sets `enabled`, `fill` when the fill param is on and `device`
-when the device param is not `cpu`; the other fields are fixed algorithm
-settings for Python callers and tests. Unknown keys are rejected.
+Nextflow sets `enabled`, `fill` as the fill param resolves (on by default) and,
+with the fill on, `fill_mode`, and `device` when the device param is not `cpu`
+and not forced to the CPU by the flat fill; these keys sit inside the
+bead-removal block only, so builds without bead removal keep their JSON. The
+other fields are fixed algorithm settings for Python callers and tests. Unknown
+keys are rejected.
 
 | Field | Default | Meaning |
 |-------|---------|---------|
@@ -269,46 +272,59 @@ settings for Python callers and tests. Unknown keys are rejected.
 | `calibration_tile_px` | `2048` | Width of a calibration tile. |
 | `min_offtissue_distance_px` | `500` | Minimum distance of a calibration tile from tissue. |
 | `min_ring_prominence` | `0.010` | Gate on the plane-1 ring that decides whether a tile has beads. |
-| `fill` | `false` | The experimental fill below. Requires `enabled`. |
-| `fill_mode` | `flat` | `flat` or `hybrid` (see [hybrid mode](#hybrid-fill-mode-merscope_bead_removal_fill_mode)). Requires `fill`. |
-| `device` | `cpu` | `cpu`, `cuda` or `auto`: the device that runs the correction ([GPU backend](#gpu-backend-optional)). The fill forces `cpu`. The device is not part of the parameter hash. |
+| `fill` | `true` | The residual-footprint fill below; `false` switches it off. Only acts with `enabled`; `fill: true` written next to `enabled: false` is refused. |
+| `fill_mode` | `hybrid` | `hybrid` or `flat` (see [fill modes](#fill-modes-merscope_bead_removal_fill_mode)). Only read with `fill`: giving it explicitly with `fill: false` is refused. |
+| `device` | `cpu` | `cpu`, `cuda` or `auto`: the device that runs the correction ([GPU backend](#gpu-backend-optional)). The flat fill forces `cpu`; the default hybrid fill runs on either device. The device is not part of the parameter hash. |
 
-### Experimental fill (`merscope_bead_removal_fill`)
+### Residual-footprint fill (`merscope_bead_removal_fill`)
 
-`--merscope_bead_removal_fill true` also fills the small residual of bead light
-that the subtraction leaves in the reference stain, with an estimate of the flat
-background around it. It is **experimental and off by default.** It is one
-pipeline param with no samplesheet column, applies only to samples that have
-bead removal on, and is refused without it.
-
-Treat it as flat background only. Where the surroundings are not flat (tissue,
-and in practice nearly every tissue window) it does nothing, and it never adds
-light to structure. Its benefit is small and limited to bead rings off tissue.
-It costs about 4-8 % more CPU per chunk and about 1.7 GB more peak memory per
-worker. The fill is never used to judge whether a sample passes. The QC warns
+With bead removal on, the build also fills the residual of bead light that the
+subtraction leaves in the reference stain. **It is on by default, in hybrid mode**;
+`--merscope_bead_removal_fill false` switches it off. It is one pipeline param
+with no samplesheet column, applies only to samples that have bead removal on,
+and changes the cache identity (see below). It is bounded and one-sided: the
+result is never brighter than the subtraction and never more than `eps` (0.3) x
+the subtracted model light lower, so it can only remove what the bead model could
+have missed. The fill is never used to judge whether a sample passes. The QC warns
 `fill_guard` when more than half of the fill's candidate pixels are skipped as a
-densely coated area. `summary.json["fill"]["counters"]` are pixel totals summed
-over the chunks; each counts the whole window of its chunk including the 256 px
-halo, so they exceed the pixels of the output by about 1.3 times (the
-`fill_guard` ratio is not affected). The cache guard treats the fill like the switch itself (see
-below).
+densely coated area (flat mode only). `summary.json["fill"]["counters"]` are pixel
+totals summed over the chunks; each counts the whole window of its chunk
+including the 256 px halo, so they exceed the pixels of the output by about 1.3
+times (the `fill_guard` ratio is not affected). The cache guard treats the fill
+like the switch itself (see below).
 
-#### Hybrid fill mode (`merscope_bead_removal_fill_mode`)
+#### Fill modes (`merscope_bead_removal_fill_mode`)
 
-`--merscope_bead_removal_fill_mode hybrid` (default `flat`; only used with
-`--merscope_bead_removal_fill true`) switches the fill to the original, more
-aggressive behaviour: it fills wherever the bead model's own uncertainty
-(`eps` x the subtracted model light) exceeds the local texture sd of the
-corrected plane, **also in tissue**, so it can dim tissue puncta close to a
-bead. There is no flatness gate, no noise deadband, no bright-source restriction
-and no dense-coating skip. The bound is the same as in `flat` mode: the result is
-never brighter than the subtraction and never more than `eps` (0.3) x the model
-light lower. The texture sd is the robust sd of the high-passed plane in 32 px
-blocks aligned to the absolute mosaic grid, so it does not depend on the chunk
-cut. Like the flat fill it runs on the CPU only. The mode is recorded in the
-`mode` key of the fill block of the provenance record (absent means `flat`), is
-part of the fill parameter hash, and changing it makes a cached zarr unusable
-(see below).
+`--merscope_bead_removal_fill_mode` is `hybrid` (default) or `flat`; it is read
+only with the fill on and ignored with `--merscope_bead_removal_fill false`.
+
+**`hybrid`** fills wherever the bead model's own uncertainty (`eps` x the
+subtracted model light) exceeds the local texture sd of the corrected plane,
+**also in tissue**, so it can dim tissue puncta close to a bead. There is no
+flatness gate, no noise deadband, no bright-source restriction and no
+dense-coating skip. The texture sd is the robust sd of the high-passed plane in
+32 px blocks aligned to the absolute mosaic grid, so it does not depend on the
+chunk cut. It runs on the CPU and, with `merscope_bead_removal_device` `cuda` or
+`auto`, on the GPU (a device port of the same operations: on identical input it
+agrees with the CPU fill to float32 rounding; end to end, on two production
+windows (4096 px core, 256 px halo, planes 1-6), it differs from the CPU result by
+more than 10 counts on 0.001 % and 0.08 % of the pixels and the total removed
+light agrees to within 0.03 %; two GPU runs are bitwise identical). On the CPU
+it is the expensive mode, because it processes every candidate pixel including
+those in tissue: a 2.6 Gpx mosaic took about 2.1 h for the bead step on the CPU,
+against about 31 min on the GPU without the fill. On the GPU it adds about 0.5 s
+(10-15 %) to a window and about 0.7 GB of peak device memory.
+
+**`flat`** acts on flat background only: where the surroundings are not flat
+(tissue, and in practice nearly every tissue window) it does nothing, and it
+never adds light to structure, so its benefit is small and limited to bead rings
+off tissue. It runs on the CPU only (a request for `cuda` or `auto` with the flat
+fill logs a warning and uses the CPU), costs about 4-8 % more CPU per chunk and
+about 1.7 GB more peak memory per worker.
+
+The mode is recorded in the `mode` key of the fill block of the provenance record
+(absent means `flat`), is part of the fill parameter hash, and changing it makes a
+cached zarr unusable (see below).
 
 ### Caching and how to rebuild
 
@@ -319,7 +335,10 @@ method and version, a hash of the parameters, a hash of the calibration, the
 fill setting, the device, the calibration thresholds and rho, and a run
 summary. A zarr built before this record existed reads as "bead removal off".
 
-A cached zarr is **never** reused for a request that disagrees with its record:
+A cached zarr is **never** reused for a request that disagrees with its record.
+The fill is on by default, so a zarr built with bead removal before the hybrid fill
+became the default (no fill) is refused by a default request: rebuild it, or
+request what it was built with (`--merscope_bead_removal_fill false`).
 
 | Cached zarr | Request | Result |
 |-------------|---------|--------|
@@ -454,8 +473,9 @@ hosts without a GPU. The backend is chosen with `merscope_bead_removal_device`
 
 The device is resolved once per sample, before any work, and never changes
 mid-sample: windows are not mixed between devices and there is no fallback after
-the sample has started. The fill has no GPU implementation, so a build with the
-fill on runs on the CPU (with a warning when `cuda` was requested). The code
+the sample has started. The default hybrid fill runs on the GPU too; the flat
+fill has no GPU implementation, so a build with the flat fill on runs on the CPU
+(with a warning when `cuda` was requested). The code
 supports torch 2.6 to 2.14 and Triton 3.2 to 3.8 (CUDA 12.4 to 13.0) and adds no
 dependency; the library versions and the GPU name are recorded with the run, and
 outputs differ between library versions by at most 0.01 counts.
