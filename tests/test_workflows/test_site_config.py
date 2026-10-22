@@ -333,6 +333,7 @@ def _site_params(config: dict[str, Any]) -> dict[str, Any]:
 
 
 @needs_nextflow
+@pytest.mark.nextflow
 @pytest.mark.parametrize("profile", ["standard", "dwight", "conda", "apptainer"])
 def test_without_a_site_config_the_site_params_stay_null(
     project: Path, profile: str
@@ -346,6 +347,7 @@ def test_without_a_site_config_the_site_params_stay_null(
 
 
 @needs_nextflow
+@pytest.mark.nextflow
 def test_the_apptainer_profile_mounts_nothing_without_bind_paths(
     project: Path,
 ) -> None:
@@ -366,6 +368,7 @@ def test_the_apptainer_profile_mounts_nothing_without_bind_paths(
 
 
 @needs_nextflow
+@pytest.mark.nextflow
 def test_the_templates_fill_the_site_params(
     project: Path, example_site_env: dict[str, str]
 ) -> None:
@@ -391,6 +394,7 @@ def test_the_templates_fill_the_site_params(
 
 
 @needs_nextflow
+@pytest.mark.nextflow
 def test_the_apptainer_profile_reads_the_image_and_bind_paths_from_params(
     project: Path, example_site_env: dict[str, str]
 ) -> None:
@@ -413,6 +417,7 @@ def test_the_apptainer_profile_reads_the_image_and_bind_paths_from_params(
 
 
 @needs_nextflow
+@pytest.mark.nextflow
 @pytest.mark.parametrize("state", ["unset", "empty"])
 def test_site_configs_beside_the_configs_are_found_when_the_variables_are_off(
     project: Path, example_site_env: dict[str, str], state: str
@@ -429,6 +434,7 @@ def test_site_configs_beside_the_configs_are_found_when_the_variables_are_off(
 
 
 @needs_nextflow
+@pytest.mark.nextflow
 @pytest.mark.parametrize("value", ["none", "/dev/null"])
 def test_none_beats_a_site_config_beside_the_configs(project: Path, value: str) -> None:
     """A deliberate "no site config" holds even with a file beside the config."""
@@ -442,6 +448,7 @@ def test_none_beats_a_site_config_beside_the_configs(project: Path, value: str) 
 
 
 @needs_nextflow
+@pytest.mark.nextflow
 @pytest.mark.parametrize(
     ("variable", "profile"),
     [(SITE_VARIABLE, "conda"), (DWIGHT_VARIABLE, "dwight")],
@@ -653,6 +660,7 @@ def check_results(
 
 
 @needs_nextflow
+@pytest.mark.nextflow
 def test_the_check_matches_the_rule_on_every_case(
     check_results: tuple[dict[str, dict[str, Any]], dict[str, list[str]]],
 ) -> None:
@@ -674,6 +682,7 @@ def test_the_check_matches_the_rule_on_every_case(
 
 
 @needs_nextflow
+@pytest.mark.nextflow
 @pytest.mark.parametrize("label", sorted(NAMED_REFUSED))
 def test_the_check_refuses_a_missing_site_config(
     label: str,
@@ -692,6 +701,7 @@ def test_the_check_refuses_a_missing_site_config(
 
 
 @needs_nextflow
+@pytest.mark.nextflow
 @pytest.mark.parametrize("label", sorted(NAMED_ACCEPTED))
 def test_the_check_accepts_a_launch_that_turned_its_site_config_off(
     label: str,
@@ -735,6 +745,7 @@ def _run_main(
 
 
 @needs_nextflow
+@pytest.mark.nextflow
 @pytest.mark.parametrize(
     ("profile", "variables", "expected"),
     [
@@ -782,6 +793,7 @@ def test_main_nf_stops_a_launch_without_its_site_config(
 
 
 @needs_nextflow
+@pytest.mark.nextflow
 def test_main_nf_accepts_a_launch_with_the_site_configs(
     project: Path, example_site_env: dict[str, str]
 ) -> None:

@@ -224,6 +224,7 @@ def test_dwight_cellpose_locations_come_from_the_site_config() -> None:
     ) in template
 
 
+@pytest.mark.nextflow
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
 def test_dwight_resolves_the_cellpose_locations_from_the_site_config(
     example_site_env: dict[str, str],
