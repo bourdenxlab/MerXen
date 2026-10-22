@@ -114,6 +114,7 @@ def test_required_hitl_hooks_occur_once() -> None:
     assert f"startsWith('{TORCH_MINOR}.')" in library
 
 
+@pytest.mark.nextflow
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow unavailable")
 def test_full_pipeline_preview_loads_model_library_without_scheduling(
     tmp_path: Path,
@@ -159,6 +160,7 @@ def test_full_pipeline_preview_loads_model_library_without_scheduling(
     assert not list(output.rglob("*.npy"))
 
 
+@pytest.mark.nextflow
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow unavailable")
 def test_default_config_and_individual_platform_overrides(tmp_path: Path) -> None:
     cases = [{"options": _defaults(), "row": {}}]
@@ -200,6 +202,7 @@ def test_default_config_and_individual_platform_overrides(tmp_path: Path) -> Non
     assert results[-1]["selected"]["cellpose"]["cellprob_threshold"] == 0
 
 
+@pytest.mark.nextflow
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow unavailable")
 def test_model_preflight_and_protected_outdir(tmp_path: Path) -> None:
     model = tmp_path / "bundle/model"
@@ -319,6 +322,7 @@ def test_model_preflight_and_protected_outdir(tmp_path: Path) -> None:
     assert results[-1]["selected"]["cellpose_model_policy"]["experimental_arm"]
 
 
+@pytest.mark.nextflow
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow unavailable")
 def test_downstream_selector_requires_matching_published_identity(
     tmp_path: Path,

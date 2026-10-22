@@ -95,6 +95,7 @@ def _stage_like_nextflow(store: Path, work_dir: Path) -> Path:
     return staged
 
 
+@pytest.mark.store_lock
 def test_writers_through_two_staged_symlinks_serialize(tmp_path: Path) -> None:
     store = tmp_path / "results" / "P1" / "merscope" / "latest" / "latest.zarr"
     store.mkdir(parents=True)
@@ -104,6 +105,7 @@ def test_writers_through_two_staged_symlinks_serialize(tmp_path: Path) -> None:
     _assert_writers_serialize(first, second)
 
 
+@pytest.mark.store_lock
 def test_writers_through_symlinked_parent_serialize(tmp_path: Path) -> None:
     real_results = tmp_path / "storage" / "results"
     store = real_results / "P1" / "merscope" / "latest" / "latest.zarr"

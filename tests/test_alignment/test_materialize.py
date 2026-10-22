@@ -429,6 +429,7 @@ def test_materializer_refuses_to_write_when_reconciliation_is_disabled(
     assert ALIGNMENT_MANIFEST_ATTR not in sd.read_zarr(merscope_path).attrs
 
 
+@pytest.mark.integration
 def test_materializer_writes_aligned_vectors_tables_labels_image_and_manifest(
     materialized_pair: _MaterializedPair,
 ) -> None:
@@ -494,6 +495,7 @@ def test_materializer_writes_aligned_vectors_tables_labels_image_and_manifest(
     )
 
 
+@pytest.mark.integration
 def test_materializer_completes_an_interrupted_manifest(
     materialized_pair: _MaterializedPair,
 ) -> None:
@@ -512,6 +514,7 @@ def test_materializer_completes_an_interrupted_manifest(
     assert manifest["complete"] is True
 
 
+@pytest.mark.integration
 def test_materializer_reconciles_refreshed_native_transcripts(
     materialized_pair: _MaterializedPair,
 ) -> None:
@@ -553,6 +556,7 @@ def test_materializer_reconciles_refreshed_native_transcripts(
     )
 
 
+@pytest.mark.integration
 def test_materializer_rebuilds_a_deleted_aligned_label(
     materialized_pair: _MaterializedPair,
 ) -> None:

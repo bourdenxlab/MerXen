@@ -43,6 +43,7 @@ def _preview(
     )
 
 
+@pytest.mark.nextflow
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
 @pytest.mark.parametrize("use_symlink", [False, True])
 def test_preview_rejects_protected_output_before_scheduling(
@@ -63,6 +64,7 @@ def test_preview_rejects_protected_output_before_scheduling(
     assert list(protected.iterdir()) == []
 
 
+@pytest.mark.nextflow
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
 def test_preview_accepts_separate_output_without_running_gpu(tmp_path: Path) -> None:
     """Preview should compile the harness without reading images or loading a model."""

@@ -124,6 +124,7 @@ def test_dwight_gpu_processes_use_one_fixed_host_lock(
     assert "${PWD}/.merxen_gpu.lock" not in combined_config_text
 
 
+@pytest.mark.nextflow
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
 def test_default_standard_and_dwight_profiles_resolve_equivalently(
     tmp_path: Path,
@@ -191,6 +192,7 @@ def test_dwight_sends_task_temporary_files_to_the_site_config_directory() -> Non
     assert re.search(r"\benv\s*\{[^}]*\bTMPDIR\s*=\s*params\.task_tmp_dir\b", template)
 
 
+@pytest.mark.nextflow
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
 def test_dwight_resolves_task_tmpdir_from_the_site_config(
     example_site_env: dict[str, str], tmp_path: Path

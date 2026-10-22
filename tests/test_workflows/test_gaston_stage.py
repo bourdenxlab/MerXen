@@ -153,6 +153,7 @@ _GASTON_TABLE_NAMES = {
 }
 
 
+@pytest.mark.nextflow
 def test_gaston_only_stage_preview_normalizes_segmentations_and_row_overrides(
     tmp_path: Path,
 ) -> None:

@@ -294,8 +294,20 @@ class StoreLockContention:
 def store_lock_contention(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> StoreLockContention:
-    """Check that a writer serializes with another process on the store lock."""
+    """Check that a writer serializes with another process on the store lock.
+
+    Every test that uses it is marked ``store_lock``
+    (:func:`pytest_collection_modifyitems`).
+    """
     return StoreLockContention(monkeypatch, tmp_path)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Mark store-lock contention tests before ``-m`` selects tests."""
+    for item in items:
+        if "store_lock_contention" in getattr(item, "fixturenames", ()):
+            item.add_marker(pytest.mark.store_lock)
 
 
 def _record_outcome(
