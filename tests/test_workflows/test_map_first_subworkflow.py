@@ -81,7 +81,9 @@ MAP = "CLUSTERING_SQUIDPY_ANNOTATE_MAP"
 RESOLVE = "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE"
 PREP = "ANNOTATE_REFERENCE_PREP"
 PANEL = "ANNOTATE_PANEL"
-SLOW_PREP_SECONDS = 4
+# Long enough that every other fixture branch is mapped and resolved before the
+# slow PREP ends, also on a small CI runner busy with other test workers.
+SLOW_PREP_SECONDS = 40
 
 
 def _hash(tag: str) -> str:
