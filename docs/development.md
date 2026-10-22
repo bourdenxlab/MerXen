@@ -84,16 +84,23 @@ and intend to fix it before the PR is reviewed.
 ## Continuous integration
 
 [.github/workflows/ci.yml](../.github/workflows/ci.yml) runs on every push
-to `main` and every PR:
+to `main` and every PR, as two jobs in parallel. Each installs from
+`requirements/requirements.lock` with `uv`, then `pip install -e . --no-deps`;
+the uv cache keeps the wheels built from Git sources between runs.
 
-1. Install from `requirements/requirements.lock` with `uv`, then `pip install -e . --no-deps`.
-2. `ruff check .`
-3. `ruff format --check .`
-4. `mypy src/`
-5. `pytest -n 4 --dist load -m "not slow"` (four pytest-xdist workers, one
-   BLAS/OpenMP/numba thread each)
+- **lint**: `ruff check .`, `ruff format --check .` and `mypy src/`. mypy
+  starts from the cache saved by the latest push to `main`.
+- **test**: checks the locked Cellpose runtime, installs Nextflow, then runs
+  the full test tier, `pytest -n 4 --dist load -m "not slow"` (four
+  pytest-xdist workers, one BLAS/OpenMP/numba thread each). The job summary
+  lists the 20 slowest tests.
 
-Run the same gate locally before pushing:
+A new push to a PR cancels that PR's run in progress. The separate
+[Privacy](../.github/workflows/privacy.yml) workflow checks the branch name,
+PR text and commit messages.
+
+Run the same checks locally before pushing (the fast test tier unless you ask
+for the full one; see [Test tiers](#test-tiers)):
 
 ```bash
 scripts/run_ci_checks.sh
