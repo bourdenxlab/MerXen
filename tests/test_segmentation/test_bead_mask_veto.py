@@ -7,7 +7,9 @@ labels are dense and their pixels unchanged, V5 the counts sidecar and the INFO
 line, V6 pruned and blob beads are used, V7 nothing is rewritten when nothing is
 vetoed, V8 the veto is a no-op (no identity, nothing prepared) without bead removal,
 without a bead table or when disabled, V9 the DAPI reader, V10 a ring that cannot
-be estimated keeps the mask, V11 the config. The Cellpose stage: S1 the veto runs
+be estimated keeps the mask, V11 the config, V14 the tissue DAPI floor keeps a
+cell whose ring holds brighter neighbouring nuclei, V15 the floor is the Otsu level
+of the coarsest projection level. The Cellpose stage: S1 the veto runs
 before the transcripts are seeded and is recorded in the mask sidecar, S2 reuse of
 those masks, S3 masks from before the veto are refused, S4 no-op runs keep their
 sidecar and write no veto file.
@@ -44,6 +46,7 @@ from merxen.segmentation.bead_mask_veto import (
     make_dapi_reader,
     prepare_bead_mask_veto,
     read_bead_table,
+    tissue_dapi_floor,
     veto_sidecar_path,
 )
 from merxen.segmentation.pipeline import run_cellpose_segmentation
@@ -106,6 +109,7 @@ def make_veto(
     config: BeadMaskVetoConfig,
     dapi: np.ndarray,
     beads: tuple[tuple[int, ...], ...] = BEADS,
+    dapi_floor: float | None = None,
 ) -> PreparedBeadMaskVeto:
     """A prepared veto that reads its DAPI from an array."""
     table = pd.DataFrame(beads, columns=["y", "x", "A0", "blob", "pruned"])
@@ -117,6 +121,7 @@ def make_veto(
         bead_x=used["x"].to_numpy(np.float64),
         n_table_beads=len(table),
         read_dapi=lambda y0, y1, x0, x1: dapi[y0:y1, x0:x1],
+        dapi_floor=dapi_floor,
     )
 
 
@@ -270,6 +275,16 @@ def test_v8_the_veto_does_nothing_without_bead_removal_a_table_or_when_disabled(
     )
     assert prepared is not None and prepared.identity == identity
     assert prepared.n_table_beads == len(BEADS) and prepared.bead_y.size == 4
+    # The background (100) and the nuclei (500) give a floor between them.
+    assert prepared.dapi_floor is not None and 100.0 < prepared.dapi_floor < 500.0
+    no_floor = prepare_bead_mask_veto(
+        BeadMaskVetoConfig(tissue_floor=False),
+        source=source,
+        recorded=_record(enabled=True),
+        sdata=sdata,
+        shape=shape,
+    )
+    assert no_floor is not None and no_floor.dapi_floor is None
 
     # A source built without bead removal (or before the record), or a disabled
     # veto, is a no-op even with a table present.
@@ -292,7 +307,10 @@ def test_v8b_the_identity_holds_the_decision_parameters_only() -> None:
         first = bead_mask_veto_identity(config, "s", {})
         assert first == bead_mask_veto_identity(other, "s", {})
         assert first is not None and first["a0_min"] == 500.0
+        assert first["tissue_floor"] is True and first["version"] == 2
         assert first != bead_mask_veto_identity(BeadMaskVetoConfig(), "s", {})
+        without_floor = BeadMaskVetoConfig(a0_min=500.0, tissue_floor=False)
+        assert first != bead_mask_veto_identity(without_floor, "s", {})
 
 
 def test_v9_the_dapi_reader_reads_the_dapi_channel_of_the_projection() -> None:
@@ -339,6 +357,7 @@ def test_v11_the_config_defaults_and_validation() -> None:
     )
     assert (config.ring_inner_px, config.ring_outer_px) == (10.0, 25.0)
     assert (config.dapi_percentile, config.dapi_noise_multiple) == (90.0, 3.0)
+    assert config.tissue_floor is True
     assert SegmentationConfig.model_fields["bead_mask_veto"].default == config
     with pytest.raises(ValidationError, match="ring_outer_px"):
         BeadMaskVetoConfig(ring_inner_px=30.0, ring_outer_px=25.0)
@@ -360,6 +379,96 @@ def test_v13_the_bead_table_of_the_qc_is_read(tmp_path: Path) -> None:
     broken.write_text("y,x\n1,2\n")
     with pytest.raises(ValueError, match="A0"):
         read_bead_table(broken)
+
+
+def tissue_scene() -> tuple[np.ndarray, np.ndarray]:
+    """One cell (label 1) with its own nucleus on a bead at the centre, crowded by
+    brighter neighbouring nuclei that fill most of its DAPI background ring."""
+    yy, xx = np.mgrid[:SIZE, :SIZE].astype(np.float32)
+    mask = np.zeros((SIZE, SIZE), np.uint32)
+    cell = _disc(yy, xx, 120, 120, 0, 12)
+    mask[cell] = 1
+    dapi = BACKGROUND + np.random.default_rng(1).normal(0, 4, (SIZE, SIZE))
+    dapi[cell] = 600.0
+    angle = np.arctan2(yy - 120, xx - 120)
+    neighbours = _disc(yy, xx, 120, 120, 12, 40) & (np.sin(4 * angle) > -0.3)
+    dapi[neighbours] = 1500.0
+    return mask, dapi.astype(np.float32)
+
+
+def test_v14_the_tissue_floor_keeps_a_cell_whose_ring_holds_brighter_nuclei(
+    tmp_path: Path,
+) -> None:
+    mask, dapi = tissue_scene()
+    ys, xs = np.nonzero(mask == 1)
+
+    def read(y0: int, y1: int, x0: int, x1: int) -> np.ndarray:
+        return dapi[y0:y1, x0:x1]
+
+    config, shape = BeadMaskVetoConfig(), (SIZE, SIZE)
+    # The ring test alone sees no nucleus: the neighbours outshine the cell.
+    assert has_dapi_nucleus(ys, xs, read, shape, config) is False
+    assert has_dapi_nucleus(ys, xs, read, shape, config, 300.0) is True
+    # A bead "cell" on the glass stays below the floor and is still dropped.
+    ring_mask, glass = make_scene()
+    ys, xs = np.nonzero(ring_mask == 1)
+
+    def read_glass(y0: int, y1: int, x0: int, x1: int) -> np.ndarray:
+        return glass[y0:y1, x0:x1]
+
+    assert has_dapi_nucleus(ys, xs, read_glass, shape, config, 300.0) is False
+
+    # Through the veto: dropped without the floor, kept (and recorded) with it.
+    bead = ((120, 120, 1000, 0, 0),)
+    for floor, n_vetoed in ((None, 1), (300.0, 0)):
+        path = tmp_path / f"tissue_{floor}.npy"
+        np.save(path, mask)
+        result = apply_bead_mask_veto(
+            path, make_veto(config, dapi, beads=bead, dapi_floor=floor)
+        )
+        assert result.n_vetoed == n_vetoed
+        assert result.n_kept_with_nucleus == 1 - n_vetoed
+        counts = json.loads(veto_sidecar_path(path).read_text())["counts"]
+        assert counts["dapi_floor"] == floor
+
+
+def _projection(dapi: np.ndarray) -> xr.DataArray:
+    return xr.DataArray(
+        np.stack([np.zeros_like(dapi), dapi]),
+        dims=("c", "y", "x"),
+        coords={"c": ["PolyT", "DAPI"]},
+    )
+
+
+def test_v15_the_floor_is_the_otsu_level_of_the_coarsest_projection_level() -> None:
+    rng = np.random.default_rng(2)
+    half = np.full((64, 64), 100.0) + rng.normal(0, 5, (64, 64))
+    half[:, 32:] += 900.0
+    floor = tissue_dapi_floor(make_sdata(half.astype(np.float32)))
+    # It lies above the glass (left half) and below the tissue (right half).
+    assert floor is not None
+    assert np.median(half[:, :32]) < floor < half[:, 32:].min()
+
+    # Multiscale: the coarsest level decides (here with other values than scale0).
+    coarse = (half[::2, ::2] / 10.0).astype(np.float32)
+    tree = xr.DataTree.from_dict(
+        {
+            "scale0": xr.Dataset({"image": _projection(half.astype(np.float32))}),
+            "scale1": xr.Dataset({"image": _projection(coarse)}),
+        }
+    )
+    multiscale = types.SimpleNamespace(images={MERSCOPE_ZPROJ_IMAGE_NAME: tree})
+    coarse_floor = tissue_dapi_floor(multiscale)
+    assert coarse_floor is not None
+    assert np.median(coarse[:, :16]) < coarse_floor < coarse[:, 16:].min()
+
+    # No contrast: no floor. No DAPI channel: an error.
+    assert tissue_dapi_floor(make_sdata(np.full((8, 8), 7.0, np.float32))) is None
+    no_dapi = make_sdata(half.astype(np.float32))
+    image = no_dapi.images[MERSCOPE_ZPROJ_IMAGE_NAME]
+    no_dapi.images[MERSCOPE_ZPROJ_IMAGE_NAME] = image.isel(c=[0])
+    with pytest.raises(ValueError, match="DAPI"):
+        tissue_dapi_floor(no_dapi)
 
 
 def qc_written_table(folder: Path) -> Path:

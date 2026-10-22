@@ -15,9 +15,14 @@ A mask is dropped when both hold:
 * it has no DAPI-positive nucleus: the ``dapi_percentile`` (90th) of the DAPI inside
   the mask does not exceed the median of the DAPI in a ring 10 to 25 px around the
   mask plus ``dapi_noise_multiple`` (3) robust noise units (1.4826 x the median
-  absolute deviation of that ring). The DAPI is the DAPI channel of the same
-  projection Cellpose segmented. The separate nuclei segmentation is deliberately
-  not used (it runs in its own task and misses nuclei).
+  absolute deviation of that ring), and it does not reach the tissue DAPI level of
+  the slide either (``tissue_floor``; the Otsu threshold of the log DAPI of the
+  coarsest projection level). In tissue the ring takes in neighbouring nuclei, so
+  the ring test alone drops real cells that happen to lie on a bead; the floor keeps
+  them, while bead "cells" on the glass stay far below it. The DAPI is the DAPI
+  channel of the same projection Cellpose segmented. The separate nuclei
+  segmentation is deliberately not used (it runs in its own task and misses
+  nuclei).
 
 The bead table is ``bead_removal_qc/beads.csv.gz`` of the source SpatialData zarr
 (coordinates in mosaic pixels, the pixel grid of the masks). The step does nothing
@@ -42,6 +47,7 @@ import numpy as np
 import pandas as pd
 from scipy import ndimage as ndi
 from scipy.spatial import cKDTree
+from skimage.filters import threshold_otsu
 
 from merxen.config import BeadMaskVetoConfig
 from merxen.io.bead_removal.provenance import segmentation_identity
@@ -49,6 +55,7 @@ from merxen.io.image_source import (
     MERSCOPE_ZPROJ_IMAGE_NAME,
     build_image_source,
     fetch_tile,
+    image_to_cyx,
 )
 from merxen.segmentation.mask_filter import drop_labels_from_mask
 
@@ -61,10 +68,14 @@ BEAD_TABLE_NAME = "beads.csv.gz"
 VETO_SIDECAR_NAME = "bead_mask_veto.json"
 VETO_SIDECAR_SCHEMA = 1
 # Bump when the decision rule changes: masks of another version are not reused.
-VETO_ALGORITHM_VERSION = 1
+# 2: the tissue DAPI floor (``tissue_floor``).
+VETO_ALGORITHM_VERSION = 2
 DAPI_CHANNEL = "DAPI"
 # Robust sd of a Gaussian from the median absolute deviation.
 MAD_TO_SD = 1.4826
+# Largest side (px) of the overview the tissue DAPI floor is computed on; a coarsest
+# projection level larger than this is subsampled.
+FLOOR_OVERVIEW_MAX_PX = 4096
 
 DapiReader = Callable[[int, int, int, int], np.ndarray]
 
@@ -81,6 +92,9 @@ class PreparedBeadMaskVeto:
         n_table_beads: Number of beads in the table, before the ``A0`` limit.
         read_dapi: ``read_dapi(y0, y1, x0, x1)`` returns the DAPI of that window
             of the projection Cellpose segmented, float32 ``[y1 - y0, x1 - x0]``.
+        dapi_floor: Tissue DAPI level of the slide; a mask whose DAPI percentile
+            reaches it is kept. ``None`` when ``tissue_floor`` is off or the level
+            cannot be estimated.
     """
 
     config: BeadMaskVetoConfig
@@ -89,6 +103,7 @@ class PreparedBeadMaskVeto:
     bead_x: np.ndarray
     n_table_beads: int
     read_dapi: DapiReader
+    dapi_floor: float | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +121,7 @@ class BeadMaskVetoResult:
         n_kept_unmeasurable: Masks near a bead that were kept because the DAPI
             background ring had too few pixels.
         written: Whether the mask file was rewritten (False when nothing dropped).
+        dapi_floor: The tissue DAPI floor that was applied, or ``None``.
     """
 
     n_masks: int
@@ -117,9 +133,10 @@ class BeadMaskVetoResult:
     n_kept_with_nucleus: int
     n_kept_unmeasurable: int
     written: bool
+    dapi_floor: float | None = None
 
-    def counts(self) -> dict[str, int | bool]:
-        """Return the counts as a JSON-safe mapping."""
+    def counts(self) -> dict[str, int | bool | float | None]:
+        """Return the counts (and the applied DAPI floor) as a JSON-safe mapping."""
         return {
             "n_masks": self.n_masks,
             "n_masks_after": self.n_masks_after,
@@ -130,6 +147,7 @@ class BeadMaskVetoResult:
             "n_kept_with_nucleus": self.n_kept_with_nucleus,
             "n_kept_unmeasurable": self.n_kept_unmeasurable,
             "written": self.written,
+            "dapi_floor": self.dapi_floor,
         }
 
 
@@ -190,6 +208,7 @@ def bead_mask_veto_identity(
         "dapi_percentile": float(config.dapi_percentile),
         "dapi_noise_multiple": float(config.dapi_noise_multiple),
         "min_ring_px": int(config.min_ring_px),
+        "tissue_floor": bool(config.tissue_floor),
     }
 
 
@@ -261,6 +280,55 @@ def make_dapi_reader(sdata: Any, shape: tuple[int, int]) -> DapiReader:
     return read_dapi
 
 
+def tissue_dapi_floor(sdata: Any) -> float | None:
+    """Estimate the tissue DAPI level of the projection Cellpose segments.
+
+    The Otsu threshold of ``log1p`` of the positive DAPI of the coarsest level of
+    the projection (subsampled to at most ``FLOOR_OVERVIEW_MAX_PX`` per side), back
+    in counts. It separates the glass from the tissue, so a DAPI nucleus, or tissue,
+    reaches it and a bead "cell" on the glass does not.
+
+    Args:
+        sdata: The source SpatialData (read from the zarr).
+
+    Returns:
+        The DAPI level in counts, or ``None`` when the overview has fewer than two
+        distinct positive values (no threshold).
+
+    Raises:
+        ValueError: The projection image or its DAPI channel is missing.
+    """
+    images = getattr(sdata, "images", None)
+    if images is None or MERSCOPE_ZPROJ_IMAGE_NAME not in images:
+        raise ValueError(
+            f"the bead-mask veto needs the {MERSCOPE_ZPROJ_IMAGE_NAME} image of the "
+            "source SpatialData"
+        )
+    image = images[MERSCOPE_ZPROJ_IMAGE_NAME]
+    children = getattr(image, "children", None)
+    if children:
+        # Multiscale: scale0 ... scaleN, the last the coarsest.
+        coarsest = max(
+            children, key=lambda name: int("".join(filter(str.isdigit, name)) or 0)
+        )
+        image = image[coarsest].ds["image"]
+    data = image_to_cyx(image)
+    channels = [str(c) for c in data.coords["c"].values] if "c" in data.coords else []
+    if DAPI_CHANNEL not in channels:
+        raise ValueError(
+            f"the bead-mask veto needs a {DAPI_CHANNEL} channel in "
+            f"{MERSCOPE_ZPROJ_IMAGE_NAME}; found {channels}"
+        )
+    dapi = data.isel(c=channels.index(DAPI_CHANNEL))
+    longest = max(int(dapi.shape[0]), int(dapi.shape[1]))
+    step = max(1, -(-longest // FLOOR_OVERVIEW_MAX_PX))
+    values = np.asarray(dapi[::step, ::step], dtype=np.float64)
+    values = values[np.isfinite(values) & (values > 0)]
+    if values.size < 2 or float(values.min()) == float(values.max()):
+        return None
+    return float(np.expm1(threshold_otsu(np.log1p(values))))
+
+
 def prepare_bead_mask_veto(
     config: BeadMaskVetoConfig,
     *,
@@ -298,6 +366,7 @@ def prepare_bead_mask_veto(
         bead_x=used["x"].to_numpy(dtype=np.float64),
         n_table_beads=int(len(table)),
         read_dapi=make_dapi_reader(sdata, shape),
+        dapi_floor=tissue_dapi_floor(sdata) if config.tissue_floor else None,
     )
 
 
@@ -372,12 +441,14 @@ def has_dapi_nucleus(
     read_dapi: DapiReader,
     shape: tuple[int, int],
     config: BeadMaskVetoConfig,
+    dapi_floor: float | None = None,
 ) -> bool | None:
     """Decide whether one mask contains a DAPI-positive nucleus.
 
     The ``dapi_percentile`` of the DAPI inside the mask is compared with the median
     of the DAPI in the ring between ``ring_inner_px`` and ``ring_outer_px`` around
-    the mask, plus ``dapi_noise_multiple`` robust noise units of that ring.
+    the mask, plus ``dapi_noise_multiple`` robust noise units of that ring. A mask
+    whose percentile reaches ``dapi_floor`` has a nucleus whatever the ring says.
 
     Args:
         ys: Rows (mosaic px) of the mask pixels.
@@ -385,6 +456,8 @@ def has_dapi_nucleus(
         read_dapi: Reader of the DAPI of the segmented projection.
         shape: ``(height, width)`` of the mask grid.
         config: Veto parameters.
+        dapi_floor: Tissue DAPI level (see :func:`tissue_dapi_floor`), or ``None``
+            for the ring test alone.
 
     Returns:
         True or False, or ``None`` when the ring has fewer than ``min_ring_px``
@@ -396,6 +469,12 @@ def has_dapi_nucleus(
     dapi = read_dapi(y0, y1, x0, x1)
     inside = np.zeros(dapi.shape, bool)
     inside[ys - y0, xs - x0] = True
+    mask_values = dapi[inside & np.isfinite(dapi)]
+    if mask_values.size == 0:
+        return None
+    level = float(np.percentile(mask_values, config.dapi_percentile))
+    if dapi_floor is not None and level >= dapi_floor:
+        return True
     distance = ndi.distance_transform_edt(~inside)
     ring = (
         (distance >= config.ring_inner_px)
@@ -407,10 +486,6 @@ def has_dapi_nucleus(
     ring_values = dapi[ring].astype(np.float64)
     background = float(np.median(ring_values))
     noise = MAD_TO_SD * float(np.median(np.abs(ring_values - background)))
-    mask_values = dapi[inside & np.isfinite(dapi)]
-    if mask_values.size == 0:
-        return None
-    level = float(np.percentile(mask_values, config.dapi_percentile))
     return level > background + config.dapi_noise_multiple * noise
 
 
@@ -464,7 +539,12 @@ def apply_bead_mask_veto(
         last = np.searchsorted(labels, near, side="right")
         for label, start, stop in zip(near, first, last, strict=True):
             verdict = has_dapi_nucleus(
-                ys[start:stop], xs[start:stop], veto.read_dapi, shape, config
+                ys[start:stop],
+                xs[start:stop],
+                veto.read_dapi,
+                shape,
+                config,
+                veto.dapi_floor,
             )
             if verdict is None:
                 n_unmeasurable += 1
@@ -493,13 +573,14 @@ def apply_bead_mask_veto(
         n_kept_with_nucleus=n_with_nucleus,
         n_kept_unmeasurable=n_unmeasurable,
         written=written,
+        dapi_floor=veto.dapi_floor,
     )
     _write_veto_sidecar(mask_path, veto.identity, result)
     prefix = f"[{dataset_name}] " if dataset_name else ""
     logger.info(
         "%sBead mask veto: dropped %d of %d Cellpose masks (%d centred on a modelled "
         "bead with A0 >= %g, %d of %d table beads used; %d kept with a DAPI nucleus, "
-        "%d kept without a measurable DAPI background)",
+        "%d kept without a measurable DAPI background; tissue DAPI floor %s)",
         prefix,
         result.n_vetoed,
         result.n_masks,
@@ -509,6 +590,7 @@ def apply_bead_mask_veto(
         result.n_table_beads,
         result.n_kept_with_nucleus,
         result.n_kept_unmeasurable,
+        "off" if veto.dapi_floor is None else f"{veto.dapi_floor:.1f}",
     )
     return result
 
