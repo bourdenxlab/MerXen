@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -136,14 +137,21 @@ def test_gaston_environment_is_pinned_and_separate() -> None:
     assert "gaston" not in base_environment.lower()
 
 
-# Each row is its own pair with only its selected artifacts present. One
-# preview covers all of them: a preview costs several seconds, and it compiles
-# the workflow without evaluating the rows (it passes without a samplesheet).
+# Each row is its own pair, and all rows share one launch: a launch costs
+# several seconds. -preview cannot check them, as it never reads the
+# samplesheet, and the modules have no stubs. So the run is real and stops at
+# the preflight: the last row selects all four segmentations but lacks the
+# proseg_hybrid artifacts, and its preflight error ends the run before any task
+# starts. The preflight checks the rows in samplesheet order, so an error that
+# names only that row shows the earlier rows, which have exactly their selected
+# artifacts, passed.
 _GASTON_SELECTOR_CASES = {
     "GASTON_DEFAULT": (None, ["proseg_hybrid"]),
     "GASTON_SUBSET": ("reseg,proseg_mask", ["reseg", "proseg_mask"]),
     "GASTON_ALL": ("all", ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"]),
+    "GASTON_STOP": ("all", ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"]),
 }
+_GASTON_MISSING_ARTIFACT = ("GASTON_STOP", "proseg_hybrid")
 
 _GASTON_TABLE_NAMES = {
     "reseg": "table_MOSAIK_proseg_clustering_squidpy",
@@ -154,17 +162,19 @@ _GASTON_TABLE_NAMES = {
 
 
 @pytest.mark.nextflow
-def test_gaston_only_stage_preview_normalizes_segmentations_and_row_overrides(
+def test_gaston_only_stage_rows_normalize_segmentations_and_pass_preflight(
     tmp_path: Path,
 ) -> None:
-    """Compile published-output mode with only the selected artifacts present."""
+    """Launch published-output mode and check each row's GASTON selection."""
     if shutil.which("nextflow") is None:
         pytest.skip("nextflow is not installed")
     outdir = tmp_path / "results"
     rows = []
-    for pair_id, (selector, expected_segmentations) in _GASTON_SELECTOR_CASES.items():
+    for pair_id, (selector, selected_segmentations) in _GASTON_SELECTOR_CASES.items():
         latest_zarr = outdir / pair_id / "xenium" / "latest" / "latest_spatialdata.zarr"
-        for segmentation in expected_segmentations:
+        for segmentation in selected_segmentations:
+            if (pair_id, segmentation) == _GASTON_MISSING_ARTIFACT:
+                continue
             h5ad = (
                 outdir
                 / pair_id
@@ -205,7 +215,9 @@ def test_gaston_only_stage_preview_normalizes_segmentations_and_row_overrides(
             str(REPO_ROOT / "workflows" / "nextflow.config"),
             "-profile",
             "conda",
-            "-preview",
+            # Should the last row ever pass its preflight, the GASTON tasks fail
+            # at once instead of building their conda environment.
+            "-without-conda",
             "--samplesheet",
             str(samplesheet),
             "--outdir",
@@ -219,7 +231,26 @@ def test_gaston_only_stage_preview_normalizes_segmentations_and_row_overrides(
         check=False,
         timeout=60,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    run_log = (tmp_path / ".nextflow.log").read_text()
+    selections = {
+        pair_id: (segmentations.split(", "), stages)
+        for pair_id, segmentations, stages in re.findall(
+            r"Sample (\w+): .*; GASTON segmentations=([^;]*); selected stages=(.*)$",
+            run_log,
+            re.MULTILINE,
+        )
+    }
+    assert selections == {
+        pair_id: (segmentations, "gaston")
+        for pair_id, (_selector, segmentations) in _GASTON_SELECTOR_CASES.items()
+    }, output
+    failed_pairs = set(re.findall(r"Preflight checks failed for sample (\w+)", run_log))
+    missing = set(re.findall(r"Missing GASTON .+? for (\w+):XENIUM:(\w+): ", run_log))
+    assert failed_pairs == {_GASTON_MISSING_ARTIFACT[0]}, output
+    assert missing == {_GASTON_MISSING_ARTIFACT}, output
+    assert not list((tmp_path / "work").glob("*/*")), "a task started:\n" + output
 
 
 @pytest.mark.slow
