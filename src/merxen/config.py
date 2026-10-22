@@ -128,6 +128,11 @@ class BeadMaskVetoConfig(BaseModel):
             (1.4826 x the median absolute deviation of the ring).
         min_ring_px: Fewest ring pixels with which the DAPI background can be
             estimated; a mask with fewer is kept (never vetoed on a guess).
+        tissue_floor: Also keep every mask whose DAPI percentile reaches the tissue
+            DAPI level of the slide (the Otsu threshold of the log DAPI of the
+            coarsest projection level), whatever its ring says (default True). In
+            tissue the ring takes in neighbouring nuclei, and the ring test alone
+            drops real cells that happen to lie on a bead.
         chunk_mb: Memory (MB) of one row chunk of the mask passes.
     """
 
@@ -142,6 +147,7 @@ class BeadMaskVetoConfig(BaseModel):
     dapi_percentile: float = Field(default=90.0, gt=0.0, lt=100.0)
     dapi_noise_multiple: float = Field(default=3.0, ge=0.0)
     min_ring_px: int = Field(default=200, ge=1)
+    tissue_floor: bool = True
     chunk_mb: int = Field(default=64, gt=0)
 
     @model_validator(mode="after")

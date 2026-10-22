@@ -147,21 +147,29 @@ every cell mask is dropped that
   plus 3 robust noise units (1.4826 x the median absolute deviation of that ring).
   The DAPI is the DAPI channel of the same projection Cellpose segmented; the
   nuclei segmentation (a separate task that misses nuclei) is not used. A mask
-  whose ring has fewer than 200 usable pixels is kept.
+  whose ring has fewer than 200 usable pixels is kept, **and**
+- does not reach the tissue DAPI level of the slide either: a mask whose DAPI 90th
+  percentile reaches the Otsu threshold of the log DAPI of the coarsest projection
+  level (which separates the glass from the tissue) is always kept. In tissue the
+  ring takes in neighbouring nuclei, and the ring test alone dropped real cells
+  that happened to lie on a bead (about 1,050 of the 1,457 masks it would drop on
+  a test section were in tissue, most with a nucleus); with the floor the veto
+  drops the bead "cells" on the glass and almost nothing in tissue.
 
 The kept labels are relabeled densely (as the area filter does), so the probability
 logits and the transcript seeding follow the vetoed masks. The veto does nothing,
 and the masks stay bit-identical with no new file, when the source zarr has no
 bead-removal record (bead removal off, a legacy zarr, Xenium) or no bead table.
 It logs one INFO line with the counts and writes `bead_mask_veto.json` next to the
-masks (parameters, beads used, masks near a bead, vetoed, kept with a nucleus).
+masks (parameters, beads used, masks near a bead, vetoed, kept with a nucleus,
+the tissue DAPI floor applied).
 
 It is on by default: `--merscope_bead_mask_veto false` switches it off, and the
 key is written into the segmentation config of samples with bead removal on only,
 so other samples keep their config and task hashes. The parameters are the fields
 of `BeadMaskVetoConfig` (`a0_min`, `min_distance_px`, `radius_fraction`,
 `ring_inner_px`, `ring_outer_px`, `dapi_percentile`, `dapi_noise_multiple`,
-`min_ring_px`); only the switch is a pipeline param. The veto is resolved before
+`min_ring_px`, `tissue_floor`); only the switch is a pipeline param. The veto is resolved before
 Cellpose starts, so a source without the `MERSCOPE_z_projection` image or its DAPI
 channel fails at the start and not after the segmentation.
 

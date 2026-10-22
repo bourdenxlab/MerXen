@@ -168,6 +168,8 @@ never the correction code, and the package imports no GPU code. Configured by `M
   modelled bead and have no DAPI nucleus, and write `bead_mask_veto.json`.
 - `bead_mask_veto_identity(config, source, recorded)` — the parameters recorded in
   the mask sidecar and compared on reuse.
+- `tissue_dapi_floor(sdata)` — the tissue DAPI level (Otsu threshold of the log DAPI
+  of the coarsest projection level) above which a mask is always kept.
 
 ### `segmentation.cellpose` — [cellpose.py](../src/merxen/segmentation/cellpose.py)
 - `build_cellpose_model(config)`.
