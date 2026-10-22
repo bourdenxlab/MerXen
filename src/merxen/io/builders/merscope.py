@@ -517,7 +517,9 @@ def _resolve_bead_removal_device(config: MerscopeBeadRemovalConfig) -> str:
     """
     from merxen.io.bead_removal.backend import resolve_device
 
-    device: str = resolve_device(config.device, fill_enabled=config.fill)
+    device: str = resolve_device(
+        config.device, fill_enabled=config.fill, fill_mode=config.fill_mode
+    )
     logger.info(
         "[MERSCOPE] Bead removal device: %s (requested %s)", device, config.device
     )

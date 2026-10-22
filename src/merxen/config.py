@@ -241,16 +241,20 @@ class MerscopeBeadRemovalConfig(BaseModel):
     calibration_tile_px: int = 2048
     min_offtissue_distance_px: int = 500
     min_ring_prominence: float = 0.010
-    # Optional inpainting of the residual bead footprint after subtraction.
-    fill: bool = False
-    # Mode of the fill: "flat" acts on flat background only (inert in tissue);
-    # "hybrid" is the original, more aggressive fill that also acts in tissue and
-    # may dim puncta close to a bead. Needs fill=True when not "flat".
-    fill_mode: Literal["flat", "hybrid"] = "flat"
+    # Bounded one-sided fill of the residual bead footprint after the subtraction.
+    # On by default (it only acts when removal is enabled); fill=False switches it
+    # off.
+    fill: bool = True
+    # Mode of the fill: "hybrid" (default) fills wherever the bead model's
+    # uncertainty exceeds the local texture, also in tissue, and may dim puncta
+    # close to a bead; "flat" acts on flat background only (inert in tissue) and
+    # runs on the CPU only. Only read with fill=True; giving it explicitly with
+    # fill=False is refused.
+    fill_mode: Literal["flat", "hybrid"] = "hybrid"
     # Device of the window correction: "cpu" is the validated numpy path and the
     # default; "cuda" needs a GPU with Triton; "auto" uses the GPU only when it
-    # is available and the host GPU lock is configured. The fill always runs on
-    # the CPU.
+    # is available and the host GPU lock is configured. The hybrid fill runs on
+    # either device; the flat fill runs on the CPU only.
     device: Literal["auto", "cpu", "cuda"] = "cpu"
 
     @field_validator("halo_px")
@@ -288,10 +292,14 @@ class MerscopeBeadRemovalConfig(BaseModel):
                 f"{self.detection_plane}."
             )
         # The fill is a refinement of the subtraction, so it has nothing to
-        # act on when removal itself is off.
-        if self.fill and not self.enabled:
+        # act on when removal itself is off. It is on by default, so only an
+        # explicit fill=True next to enabled=False is a contradiction.
+        if self.fill and not self.enabled and "fill" in self.model_fields_set:
             raise ValueError("fill requires enabled=True.")
-        if self.fill_mode != "flat" and not self.fill:
+        # The mode only applies to the fill; with the fill off the default mode is
+        # ignored and an explicit one is refused (a silent no-op would hide a typo
+        # in the intent).
+        if not self.fill and "fill_mode" in self.model_fields_set:
             raise ValueError(
                 f"fill_mode {self.fill_mode!r} requires fill=True (the mode only "
                 "applies to the fill)."

@@ -36,7 +36,13 @@ _OFF = {"enabled": False, "fill": {"enabled": False}}
 
 
 def _cfg(*, fill: bool = False, **kwargs: Any) -> MerscopeBeadRemovalConfig:
-    """Return an enabled bead-removal config."""
+    """Return an enabled bead-removal config.
+
+    The fill is off unless asked for, and then flat unless a mode is given: the
+    default of the config is the hybrid fill, which these tests name explicitly.
+    """
+    if fill:
+        kwargs.setdefault("fill_mode", "flat")
     return MerscopeBeadRemovalConfig(enabled=True, fill=fill, **kwargs)
 
 

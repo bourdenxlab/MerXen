@@ -454,7 +454,9 @@ def test_bead_removal_calibrates_before_projecting_and_maps_the_channels(
         # The store has one channel per dataset stain, in dataset order.
         assert kwargs["store_channels"] == {"PolyT": 2, "DAPI": 1}
         assert kwargs["halo_px"] == 256 and kwargs["core_px"] == 64
-        assert kwargs["fill"] is None
+        # The fill is on by default, in hybrid mode.
+        assert kwargs["fill"] is not None
+        assert kwargs["fill"].enabled and kwargs["fill"].mode == "hybrid"
         assert (Path(kwargs["calibration_dir"]) / "calibration.json").exists()
         assert result.bead_calibration is not None
         assert result.bead_removal is not None
@@ -552,10 +554,12 @@ def test_bead_removal_device_is_resolved_once_and_recorded_with_versions(
 
     written = _written_sdata(monkeypatch)
     raw = _write_tiny_raw(tmp_path / "raw")
-    resolved: list[tuple[str, bool]] = []
+    resolved: list[tuple[str, bool, str]] = []
 
-    def _resolve(requested: str, *, fill_enabled: bool = False) -> str:
-        resolved.append((requested, fill_enabled))
+    def _resolve(
+        requested: str, *, fill_enabled: bool = False, fill_mode: str = "flat"
+    ) -> str:
+        resolved.append((requested, fill_enabled, fill_mode))
         return "cuda"
 
     monkeypatch.setattr("merxen.io.bead_removal.backend.resolve_device", _resolve)
@@ -598,7 +602,8 @@ def test_bead_removal_device_is_resolved_once_and_recorded_with_versions(
         ),
     )
 
-    assert resolved == [("auto", False)]
+    # The default fill (hybrid) is passed along: it does not force the CPU.
+    assert resolved == [("auto", True, "hybrid")]
     assert calibration_backends == ["cuda"]
     assert devices == ["cuda"]
     record = written[0].attrs[IMAGE_PREPROCESSING_ATTR]["bead_removal"]
@@ -832,7 +837,8 @@ def _guard_config(
     )
 
 
-def _on_record(*, fill: bool = False) -> dict:
+def _on_record(*, fill: bool = True) -> dict:
+    """Record of a bead build with the config defaults (hybrid fill on)."""
     return build_image_preprocessing_record(
         z_layers=[1, 2, 3],
         stainings=["PolyT", "DAPI"],

@@ -45,11 +45,12 @@ def _function_text(main_text: str, name: str) -> str:
     return main_text[start:end]
 
 
-def test_bead_removal_params_default_off() -> None:
+def test_bead_removal_is_off_by_default_and_the_fill_is_on() -> None:
     config_text = (_REPO_ROOT / "workflows" / "nextflow.config").read_text()
 
     assert "merscope_bead_removal = false" in config_text
-    assert "merscope_bead_removal_fill = false" in config_text
+    # With bead removal on, the fill is on by default (hybrid mode).
+    assert "merscope_bead_removal_fill = true" in config_text
 
 
 def test_bead_removal_keys_only_set_inside_the_requested_block() -> None:
@@ -73,9 +74,18 @@ def test_bead_removal_fill_key_is_nested_inside_the_bead_block() -> None:
     bead_block = build_config[block_start:block_end]
 
     assert "[enabled: true]" in bead_block
-    assert "params.merscope_bead_removal_fill" in bead_block
-    assert "beadRemoval.fill = true" in bead_block
+    # The fill settings are written as they resolve, not only off the default.
+    assert "merscopeBeadRemovalFillRequested(params)" in bead_block
+    assert "beadRemoval.fill = beadFill" in bead_block
     assert build_config.count("fill") == bead_block.count("fill")
+
+
+def test_bead_removal_fill_helper_is_on_by_default() -> None:
+    helper = _function_text(_main_text(), "merscopeBeadRemovalFillRequested")
+
+    assert "params.merscope_bead_removal_fill" in helper
+    assert "boolOrDefault(" in helper
+    assert "true," in helper and "false," not in helper
 
 
 def test_bead_removal_helper_reads_row_then_param_as_a_boolean() -> None:
@@ -111,7 +121,7 @@ def test_bead_removal_fill_logs_once_in_the_workflow_block() -> None:
     workflow_block = main_text[main_text.index("\nworkflow {") :]
 
     assert workflow_block.count("merscope_bead_removal_fill is on") == 1
-    assert "params.merscope_bead_removal_fill" in workflow_block
+    assert "merscopeBeadRemovalFillRequested(params)" in workflow_block
 
 
 def test_bead_removal_device_param_defaults_to_cpu() -> None:
@@ -130,10 +140,10 @@ def test_bead_removal_device_key_is_set_only_when_not_cpu() -> None:
 
     assert build_config.count("beadRemoval.device") == 1
     assert "beadRemoval.device = beadDevice" in bead_block
-    assert 'if (beadDevice != "cpu" && !beadFill) {' in bead_block
+    assert 'if (beadDevice != "cpu" && !beadForcesCpu) {' in bead_block
     assert "merscopeBeadRemovalDevice(params)" in bead_block
     # The key sits behind the guard, not next to the unconditional keys.
-    guard = bead_block.index('if (beadDevice != "cpu" && !beadFill) {')
+    guard = bead_block.index('if (beadDevice != "cpu" && !beadForcesCpu) {')
     assert guard < bead_block.index("beadRemoval.device = beadDevice")
     assert bead_block.index("beadRemoval.device = beadDevice") < bead_block.index(
         "merscopeOptions.bead_removal = beadRemoval"
@@ -157,24 +167,41 @@ def test_bead_removal_preflight_checks_the_device_value() -> None:
     assert "merscope_bead_removal_device must be auto, cpu or cuda" in preflight
 
 
-def test_bead_removal_device_key_is_not_written_with_the_fill() -> None:
-    """The fill forces the CPU, so the device would only change the task hash."""
+def test_bead_removal_device_key_is_not_written_with_the_flat_fill() -> None:
+    """The flat fill forces the CPU, so the device would only change the task hash.
+
+    The default hybrid fill runs on the GPU, so it keeps the device key.
+    """
     build_config = _function_text(_main_text(), "buildConfigForPlatform")
 
-    assert 'if (beadDevice != "cpu" && !beadFill) {' in build_config
+    assert 'if (beadDevice != "cpu" && !beadForcesCpu) {' in build_config
+    assert 'beadFill && merscopeBeadRemovalFillMode(params) == "flat"' in (
+        " ".join(build_config.split())
+    )
 
 
-def test_bead_removal_fill_mode_param_defaults_to_flat() -> None:
+def test_bead_removal_fill_mode_param_defaults_to_hybrid() -> None:
     config_text = (_REPO_ROOT / "workflows" / "nextflow.config").read_text()
 
-    assert 'merscope_bead_removal_fill_mode = "flat"' in config_text
+    assert 'merscope_bead_removal_fill_mode = "hybrid"' in config_text
     # The comment above the param says what the modes are.
-    line = config_text.index('merscope_bead_removal_fill_mode = "flat"')
-    assert "hybrid" in config_text[line - 400 : line]
+    line = config_text.index('merscope_bead_removal_fill_mode = "hybrid"')
+    assert "flat" in config_text[line - 600 : line]
 
 
-def test_bead_removal_fill_mode_key_only_in_the_fill_branch_off_default() -> None:
-    """Flat-fill build JSONs (and task hashes) must keep their form."""
+def test_the_gpu_queue_and_container_follow_the_flat_fill_only() -> None:
+    """The build asks for a GPU unless the flat fill forces the CPU."""
+    config_text = (_REPO_ROOT / "workflows" / "nextflow.config").read_text()
+    flat_guard = "params.merscope_bead_removal_fill_mode"
+
+    # Command-line values are strings ("false" is truthy): they are parsed.
+    assert "!params.merscope_bead_removal_fill" not in config_text
+    assert config_text.count(flat_guard) >= 3  # queue, cluster options, --nv
+    assert config_text.count("!flatFill") == 3
+
+
+def test_bead_removal_fill_mode_key_only_in_the_fill_branch() -> None:
+    """The mode is written with the fill on, inside the bead block, never without."""
     build_config = _function_text(_main_text(), "buildConfigForPlatform")
     block_start = build_config.index("if (merscopeBeadRemovalRequested(")
     block_end = build_config.index("return [", block_start)
@@ -184,19 +211,20 @@ def test_bead_removal_fill_mode_key_only_in_the_fill_branch_off_default() -> Non
     assert "fill_mode" not in build_config[:block_start]
     assert "fill_mode" not in build_config[block_end:]
     fill_branch = bead_block.index("if (beadFill) {")
-    guard = bead_block.index('if (beadFillMode != "flat") {')
-    key = bead_block.index("beadRemoval.fill_mode = beadFillMode")
+    key = bead_block.index(
+        "beadRemoval.fill_mode = merscopeBeadRemovalFillMode(params)"
+    )
     after_fill_branch = bead_block.index("def beadDevice")
-    # The key sits behind the fill branch and the non-default guard.
-    assert fill_branch < bead_block.index("beadRemoval.fill = true") < guard < key
+    # The key sits behind the fill branch: with the fill off no mode is written.
+    assert bead_block.index("beadRemoval.fill = beadFill") < fill_branch < key
     assert key < after_fill_branch
 
 
-def test_bead_removal_fill_mode_helper_defaults_to_flat_and_normalises() -> None:
+def test_bead_removal_fill_mode_helper_defaults_to_hybrid_and_normalises() -> None:
     helper = _function_text(_main_text(), "merscopeBeadRemovalFillMode")
 
     assert "params.merscope_bead_removal_fill_mode" in helper
-    assert 'return "flat"' in helper
+    assert 'return "hybrid"' in helper
     assert ".toLowerCase()" in helper
 
 
@@ -206,7 +234,8 @@ def test_bead_removal_preflight_checks_the_fill_mode_value() -> None:
     assert "merscopeBeadRemovalFillMode(params)" in preflight
     assert '["flat", "hybrid"]' in preflight
     assert "merscope_bead_removal_fill_mode must be flat or hybrid" in preflight
-    assert "only applies to the " in preflight
+    # The mode is ignored with the fill off: no error for a mode without the fill.
+    assert "only applies to the " not in preflight
 
 
 def test_published_source_zarr_fill_mode_is_compared() -> None:
@@ -261,6 +290,7 @@ _BEAD_HARNESS_FUNCTIONS = (
     "publishedDatasetPath",
     "merscopeBeadRemovalRequested",
     "merscopeBeadRemovalDevice",
+    "merscopeBeadRemovalFillRequested",
     "merscopeBeadRemovalFillMode",
     "appendMerscopeBeadRemovalPreflightChecks",
     "onOffText",
@@ -343,24 +373,54 @@ def test_a_published_source_zarr_must_match_the_requested_bead_removal(
     assert results["blank_z_zarr_only"] == "OK"
     assert results["blank_z_with_dir"] == "ERROR"
     assert results["z_1_6_with_dir"] == "OK"
-    assert json.loads(results["config"]) == {"enabled": True, "device": "cuda"}
+    # An explicit false is a bead build without the fill, with no mode written.
+    assert json.loads(results["config"]) == {
+        "enabled": True,
+        "fill": False,
+        "device": "cuda",
+    }
 
 
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
-def test_the_fill_request_is_compared_and_replaces_the_device_key(
+def test_the_default_is_a_hybrid_fill_that_keeps_the_gpu_device(
+    tmp_path: Path,
+) -> None:
+    """No fill param: hybrid fill on, compared with the zarr, device kept."""
+    results = _run_bead_harness(tmp_path, "--merscope_bead_removal_device", "cuda")
+
+    assert results["on_on"] == "ERROR"  # the zarr has no fill, the request does
+    assert results["fill_on"] == "ERROR"  # a flat fill, the request is hybrid
+    assert results["fill_hybrid"] == "OK"
+    assert json.loads(results["config"]) == {
+        "enabled": True,
+        "fill": True,
+        "fill_mode": "hybrid",
+        "device": "cuda",
+    }
+
+
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
+def test_the_flat_fill_is_compared_and_replaces_the_device_key(
     tmp_path: Path,
 ) -> None:
     results = _run_bead_harness(
         tmp_path,
         "--merscope_bead_removal_fill",
         "true",
+        "--merscope_bead_removal_fill_mode",
+        "flat",
         "--merscope_bead_removal_device",
         "cuda",
     )
 
     assert results["on_on"] == "ERROR"  # the zarr has no fill, the request does
     assert results["fill_on"] == "OK"
-    assert json.loads(results["config"]) == {"enabled": True, "fill": True}
+    assert results["fill_hybrid"] == "ERROR"
+    assert json.loads(results["config"]) == {
+        "enabled": True,
+        "fill": True,
+        "fill_mode": "flat",
+    }
 
 
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
@@ -390,9 +450,11 @@ def test_the_hybrid_fill_mode_is_compared_and_added_to_the_build_json(
 @pytest.mark.parametrize(
     ("fill", "mode", "expected"),
     [
-        ("false", "hybrid", "ERROR"),  # the mode needs the fill
+        ("false", "hybrid", "OK"),  # the mode is ignored without the fill
         ("true", "bogus", "ERROR"),  # not flat or hybrid
+        ("false", "bogus", "ERROR"),  # a misspelt value is refused in any case
         ("true", "hybrid", "OK"),
+        ("true", "flat", "OK"),
         ("false", "flat", "OK"),
     ],
 )

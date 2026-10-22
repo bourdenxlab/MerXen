@@ -842,7 +842,9 @@ def test_builder_writes_the_qc_folder_into_the_zarr(
     assert {p.name for p in qc_dir.iterdir()} >= {"summary.json", "chunks.csv"}
     summary = json.loads((qc_dir / "summary.json").read_text())
     assert summary["n_chunks"] == 1 and summary["errors"] == []
-    assert seen["fill"] is None and seen["stainings"]
+    # The fill is on by default, in hybrid mode.
+    assert seen["fill"] is not None and seen["fill"].mode == "hybrid"
+    assert seen["stainings"]
     # The temporary projection is gone once the build is done.
     assert list(tmp_path.glob("merscope_projection_*")) == []
 

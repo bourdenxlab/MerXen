@@ -139,7 +139,11 @@ def _check_cached_bead_removal(
     # Only a GPU request looks at torch (for its versions); the default and the
     # CPU device never import it.
     requested_backend = (
-        requested_backend_identity(bead_removal.device, fill_enabled=bead_removal.fill)
+        requested_backend_identity(
+            bead_removal.device,
+            fill_enabled=bead_removal.fill,
+            fill_mode=bead_removal.fill_mode,
+        )
         if bead_removal is not None and bead_removal.enabled
         else None
     )

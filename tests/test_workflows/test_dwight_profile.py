@@ -172,7 +172,9 @@ def test_gpu_profile_adds_nv_to_the_build_only_for_the_gpu_device() -> None:
 
     assert "BUILD_SPATIALDATA|ALIGN" not in gpu_profile
     assert "containerOptions = {" in block
-    assert "!= 'cpu'" in block and "!params.merscope_bead_removal_fill" in block
+    assert "!= 'cpu'" in block
+    # Only the flat fill (CPU only) keeps the GPU out of the container.
+    assert "!flatFill" in block and "'flat'" in block
     assert "? '--nv' : ''" in block
     # Nothing else is added for the build: no clean environment, no new binds.
     assert "-C" not in block and "--no-home" not in block
@@ -228,6 +230,7 @@ workflow { BUILD_SPATIALDATA(1) | view }
             "queue=gpu cluster=[--gpus-per-node=1] nv=true",
         ),
         (["--merscope_bead_removal_device", "auto"], "queue=htc cluster=[] nv=true"),
+        # The default hybrid fill runs on the GPU, so it keeps the GPU request.
         (
             [
                 "--merscope_bead_removal_device",
@@ -235,7 +238,31 @@ workflow { BUILD_SPATIALDATA(1) | view }
                 "--merscope_bead_removal_fill",
                 "true",
             ],
+            "queue=gpu cluster=[--gpus-per-node=1] nv=true",
+        ),
+        # The flat fill is CPU only: no GPU queue, no --nv.
+        (
+            [
+                "--merscope_bead_removal_device",
+                "cuda",
+                "--merscope_bead_removal_fill",
+                "true",
+                "--merscope_bead_removal_fill_mode",
+                "flat",
+            ],
             "queue=htc cluster=[] nv=false",
+        ),
+        # Without the fill the mode does not matter.
+        (
+            [
+                "--merscope_bead_removal_device",
+                "cuda",
+                "--merscope_bead_removal_fill",
+                "false",
+                "--merscope_bead_removal_fill_mode",
+                "flat",
+            ],
+            "queue=gpu cluster=[--gpus-per-node=1] nv=true",
         ),
     ],
 )

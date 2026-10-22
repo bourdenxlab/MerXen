@@ -387,26 +387,26 @@ def buildConfigForPlatform(row, pairId, platform) {
         // hashes) are unchanged.
         if (merscopeBeadRemovalRequested(row, pairId, params)) {
             def beadRemoval = [enabled: true]
-            def beadFill = boolOrDefault(
-                params.merscope_bead_removal_fill,
-                false,
-                "merscope_bead_removal_fill"
-            )
+            // The fill settings are written as they resolve (the fill is on in
+            // hybrid mode by default), so the build JSON does not depend on the
+            // defaults of the Python config. They sit inside the bead block, so
+            // builds without bead removal keep their JSON and task hashes.
+            def beadFill = merscopeBeadRemovalFillRequested(params)
+            beadRemoval.fill = beadFill
             if (beadFill) {
-                beadRemoval.fill = true
-                // Only set off the default, so flat-fill build configs (and
-                // their task hashes) keep their form.
-                def beadFillMode = merscopeBeadRemovalFillMode(params)
-                if (beadFillMode != "flat") {
-                    beadRemoval.fill_mode = beadFillMode
-                }
+                // The mode is only read with the fill, and the config refuses it
+                // without.
+                beadRemoval.fill_mode = merscopeBeadRemovalFillMode(params)
             }
             // Only set off the default, so CPU bead build configs (and their
-            // task hashes) keep their form. The fill has no GPU implementation
-            // and forces the CPU, so with the fill the device is not written
-            // (it would change the hash for nothing).
+            // task hashes) keep their form. The flat fill has no GPU
+            // implementation and forces the CPU, so with it the device is not
+            // written (it would change the hash for nothing).
             def beadDevice = merscopeBeadRemovalDevice(params)
-            if (beadDevice != "cpu" && !beadFill) {
+            def beadForcesCpu = (
+                beadFill && merscopeBeadRemovalFillMode(params) == "flat"
+            )
+            if (beadDevice != "cpu" && !beadForcesCpu) {
                 beadRemoval.device = beadDevice
             }
             merscopeOptions.bead_removal = beadRemoval
@@ -1703,20 +1703,13 @@ def appendMerscopeBeadRemovalPreflightChecks(errors, row, settings, params) {
             "got '${params.merscope_bead_removal_device}'."
         )
     }
+    // The mode is read only with the fill (it is ignored when the fill is off),
+    // but a misspelt value is refused in any case.
     def beadFillMode = merscopeBeadRemovalFillMode(params)
     if (!(beadFillMode in ["flat", "hybrid"])) {
         errors << (
             "merscope_bead_removal_fill_mode must be flat or hybrid; " +
             "got '${params.merscope_bead_removal_fill_mode}'."
-        )
-    } else if (beadFillMode != "flat" && !boolOrDefault(
-        params.merscope_bead_removal_fill,
-        false,
-        "merscope_bead_removal_fill"
-    )) {
-        errors << (
-            "merscope_bead_removal_fill_mode ${beadFillMode} only applies to the " +
-            "fill: set merscope_bead_removal_fill to true or use flat."
         )
     }
     def merscopeDir = chooseField(row, ["merscope_dir"])
@@ -1803,11 +1796,7 @@ def appendPublishedBeadRemovalChecks(errors, row, settings, params) {
         return
     }
     def requested = merscopeBeadRemovalRequested(row, settings.pair_id, params)
-    def requestedFill = requested && boolOrDefault(
-        params.merscope_bead_removal_fill,
-        false,
-        "merscope_bead_removal_fill"
-    )
+    def requestedFill = requested && merscopeBeadRemovalFillRequested(params)
     def requestedFillMode = merscopeBeadRemovalFillMode(params)
     def recorded = publishedBeadRemovalState(sourceZarr)
     def remedy = (
@@ -1962,10 +1951,20 @@ def merscopeBeadRemovalDevice(params) {
     return rawDevice.toString().trim().toLowerCase()
 }
 
+// The residual-footprint fill is on by default (hybrid mode); false switches it
+// off for every sample that has bead removal on.
+def merscopeBeadRemovalFillRequested(params) {
+    return boolOrDefault(
+        params.merscope_bead_removal_fill,
+        true,
+        "merscope_bead_removal_fill"
+    )
+}
+
 def merscopeBeadRemovalFillMode(params) {
     def rawMode = params.merscope_bead_removal_fill_mode
     if (rawMode == null || rawMode.toString().trim().isEmpty()) {
-        return "flat"
+        return "hybrid"
     }
     return rawMode.toString().trim().toLowerCase()
 }
@@ -2717,11 +2716,10 @@ workflow {
             // The fill is a global switch and only acts on samples that have
             // bead removal on, so say once that it is active, and only when
             // some sample asks for bead removal.
-            if (beadRequested.any { requested -> requested } && boolOrDefault(
-                params.merscope_bead_removal_fill,
-                false,
-                "merscope_bead_removal_fill"
-            )) {
+            if (
+                beadRequested.any { requested -> requested } &&
+                merscopeBeadRemovalFillRequested(params)
+            ) {
                 log.info(
                     "merscope_bead_removal_fill is on (mode " +
                     "${merscopeBeadRemovalFillMode(params)}): samples with bead " +
