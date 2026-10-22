@@ -1,8 +1,15 @@
 # Testing the Cellpose HITL changes
 
 Start with HITL-0's runtime and provenance checks. HITL-1 follows after HITL-0's
-acceptance and merge. The published baseline is `/srv/storage/MerXen/results/`;
+acceptance and merge. The published baseline is `$MERXEN_RESULTS_ROOT/`;
 all acceptance predictions and reports must go outside that directory.
+
+Commands below name samples by their aliases (HD1; see
+[sample aliases](../local-configuration.md#sample-aliases)) and host locations by
+`.env` variables (`$MERXEN_...`). Load the variables into the shell first
+(`. "$MERXEN_ENV_FILE"`, or `. .env` in the main checkout), and give the real pair
+id (`.aliases.tsv`) where a path or samplesheet shows an alias: result directories
+carry the real pair ids.
 
 ## 1. Check the code without running segmentation
 
@@ -10,13 +17,13 @@ On Dwight, check out the implementation branch in a separate test checkout.
 Use `origin/main` instead once HITL-1 has merged:
 
 ```bash
-cd /home/becalia/code/MerXen
+cd /path/to/MerXen
 git fetch origin
-export MERXEN_TEST_CHECKOUT=$(mktemp -d /srv/storage/MerXen/tmp/hitl-checkout.XXXXXX)
+export MERXEN_TEST_CHECKOUT=$(mktemp -d $MERXEN_TASK_TMP_DIR/hitl-checkout.XXXXXX)
 git worktree add --detach "$MERXEN_TEST_CHECKOUT" origin/codex/hitl-1-model-plumbing
 cd "$MERXEN_TEST_CHECKOUT"
 export PYTHONPATH="$MERXEN_TEST_CHECKOUT/src"
-/srv/storage/MerXen/ci-venv/bin/python -m pytest \
+$MERXEN_STORAGE_ROOT/ci-venv/bin/python -m pytest \
   tests/test_segmentation/test_model_identity.py \
   tests/test_segmentation/test_output_paths.py \
   tests/test_scripts/test_hitl0_tile_check.py \
@@ -29,7 +36,7 @@ mocked model loading, so this step does not run Cellpose on your images or
 change the production environment. It checks explicit model selection,
 checksums, legacy reuse, provenance through staged symlinks and workflow wiring.
 
-## 2. Check one real P7513 tile
+## 2. Check one real HD1 tile
 
 Use the production environment checked on 2026-10-19, rather than rebuilding the
 environment used by active pipeline runs. If that cached environment has since
@@ -38,8 +45,8 @@ been removed, select another environment satisfying the new pins first.
 From the test checkout above:
 
 ```bash
-export MERXEN_TEST_PYTHON=/srv/storage/MerXen/work/conda/env-0e319c40ef50b2834c65ae2f7f53bbcd/bin/python
-export MERXEN_CHECK_ROOT=$(mktemp -d /srv/storage/MerXen/tmp/hitl0-check.XXXXXX)
+export MERXEN_TEST_PYTHON=$MERXEN_STORAGE_ROOT/work/conda/env-0e319c40ef50b2834c65ae2f7f53bbcd/bin/python
+export MERXEN_CHECK_ROOT=$(mktemp -d $MERXEN_TASK_TMP_DIR/hitl0-check.XXXXXX)
 "$MERXEN_TEST_PYTHON" -c \
   'from merxen.segmentation.model_identity import require_cellpose_runtime; print(require_cellpose_runtime())'
 
@@ -47,11 +54,11 @@ nextflow run workflows/acceptance/hitl0_tile_check.nf \
   -ansi-log false -work-dir "$MERXEN_CHECK_ROOT/work" \
   --source_root "$MERXEN_TEST_CHECKOUT" \
   --python "$MERXEN_TEST_PYTHON" \
-  --config /srv/storage/MerXen/work/d2/2bb63695bfa15cdb697b604cb6f624/segment_config.json \
-  --source_zarr /srv/storage/MerXen/work/c9/800bf12cfc879ab1368ba767fff599/spatialdata_out/source_spatialdata.zarr \
-  --baseline_mask /srv/storage/MerXen/results/P7513/xenium/segmentation/cellpose_masks_tiled.npy \
-  --baseline_stats /srv/storage/MerXen/results/P7513/xenium/segmentation/cellpose_stitching_stats.json \
-  --protected_root /srv/storage/MerXen/results \
+  --config $MERXEN_STORAGE_ROOT/work/d2/2bb63695bfa15cdb697b604cb6f624/segment_config.json \
+  --source_zarr $MERXEN_STORAGE_ROOT/work/c9/800bf12cfc879ab1368ba767fff599/spatialdata_out/source_spatialdata.zarr \
+  --baseline_mask $MERXEN_RESULTS_ROOT/HD1/xenium/segmentation/cellpose_masks_tiled.npy \
+  --baseline_stats $MERXEN_RESULTS_ROOT/HD1/xenium/segmentation/cellpose_stitching_stats.json \
+  --protected_root $MERXEN_RESULTS_ROOT \
   --gpu_lock_file /tmp/merxen-dwight-gpu.lock \
   --image_key morphology_focus --tile_index 44 \
   --outdir "$MERXEN_CHECK_ROOT/report"
@@ -134,7 +141,7 @@ Dockerfile change remains unvalidated until the container work resumes.
 From the test checkout, first run the new fast checks:
 
 ```bash
-/srv/storage/MerXen/ci-venv/bin/python -m pytest \
+$MERXEN_STORAGE_ROOT/ci-venv/bin/python -m pytest \
   tests/test_segmentation/test_hitl_registry.py \
   tests/test_segmentation/test_cellpose_tile.py \
   tests/test_segmentation/test_model_identity.py \
@@ -152,13 +159,13 @@ were captured before the shared tile function was extracted.
 Prepare a candidate fixture using the already verified stock weights:
 
 ```bash
-export MERXEN_TEST_PYTHON=/srv/storage/MerXen/work/conda/env-0e319c40ef50b2834c65ae2f7f53bbcd/bin/python
-export MERXEN_HITL1_FIXTURE=$(mktemp -d /srv/storage/MerXen/tmp/hitl1-fixture.XXXXXX)
+export MERXEN_TEST_PYTHON=$MERXEN_STORAGE_ROOT/work/conda/env-0e319c40ef50b2834c65ae2f7f53bbcd/bin/python
+export MERXEN_HITL1_FIXTURE=$(mktemp -d $MERXEN_TASK_TMP_DIR/hitl1-fixture.XXXXXX)
 "$MERXEN_TEST_PYTHON" scripts/acceptance/prepare_hitl1_fixture.py \
-  --config /srv/storage/MerXen/work/d2/2bb63695bfa15cdb697b604cb6f624/segment_config.json \
-  --source-zarr /srv/storage/MerXen/work/c9/800bf12cfc879ab1368ba767fff599/spatialdata_out/source_spatialdata.zarr \
+  --config $MERXEN_STORAGE_ROOT/work/d2/2bb63695bfa15cdb697b604cb6f624/segment_config.json \
+  --source-zarr $MERXEN_STORAGE_ROOT/work/c9/800bf12cfc879ab1368ba767fff599/spatialdata_out/source_spatialdata.zarr \
   --weights "$HOME/.cellpose/models/cpsam_v2" \
-  --protected-root /srv/storage/MerXen/results \
+  --protected-root $MERXEN_RESULTS_ROOT \
   --output-dir "$MERXEN_HITL1_FIXTURE"
 ```
 
@@ -171,16 +178,16 @@ for testing plumbing; it is not an accepted fine-tune.
 Run the same locked, production-context tile through the shared tile function:
 
 ```bash
-export MERXEN_HITL1_CHECK_ROOT=$(mktemp -d /srv/storage/MerXen/tmp/hitl1-check.XXXXXX)
+export MERXEN_HITL1_CHECK_ROOT=$(mktemp -d $MERXEN_TASK_TMP_DIR/hitl1-check.XXXXXX)
 nextflow run workflows/acceptance/hitl0_tile_check.nf \
   -ansi-log false -work-dir "$MERXEN_HITL1_CHECK_ROOT/work" \
   --source_root "$MERXEN_TEST_CHECKOUT" \
   --python "$MERXEN_TEST_PYTHON" \
   --config "$MERXEN_HITL1_FIXTURE/segment_config.json" \
-  --source_zarr /srv/storage/MerXen/work/c9/800bf12cfc879ab1368ba767fff599/spatialdata_out/source_spatialdata.zarr \
-  --baseline_mask /srv/storage/MerXen/results/P7513/xenium/segmentation/cellpose_masks_tiled.npy \
-  --baseline_stats /srv/storage/MerXen/results/P7513/xenium/segmentation/cellpose_stitching_stats.json \
-  --protected_root /srv/storage/MerXen/results \
+  --source_zarr $MERXEN_STORAGE_ROOT/work/c9/800bf12cfc879ab1368ba767fff599/spatialdata_out/source_spatialdata.zarr \
+  --baseline_mask $MERXEN_RESULTS_ROOT/HD1/xenium/segmentation/cellpose_masks_tiled.npy \
+  --baseline_stats $MERXEN_RESULTS_ROOT/HD1/xenium/segmentation/cellpose_stitching_stats.json \
+  --protected_root $MERXEN_RESULTS_ROOT \
   --gpu_lock_file /tmp/merxen-dwight-gpu.lock \
   --image_key morphology_focus --tile_index 44 \
   --outdir "$MERXEN_HITL1_CHECK_ROOT/report"
@@ -210,12 +217,12 @@ records the passing fixture run, runtime, agreement scores and preserved report
 location. Use fresh fixture and report directories for each repeat.
 
 To check the main-workflow wiring without scheduling segmentation, use the
-fixture's `nextflow-params.json` with a P7513 samplesheet and `-preview`:
+fixture's `nextflow-params.json` with a HD1 samplesheet and `-preview`:
 
 ```bash
 nextflow run workflows/main.nf -profile dwight,conda -preview \
   -params-file "$MERXEN_HITL1_FIXTURE/nextflow-params.json" \
-  --samplesheet /absolute/path/to/P7513-samplesheet.csv \
+  --samplesheet /absolute/path/to/HD1-samplesheet.csv \
   --analysis_mode xenium --stop_stage segment \
   --outdir "$MERXEN_HITL1_FIXTURE/preview-arm"
 ```

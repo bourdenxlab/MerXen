@@ -19,7 +19,7 @@ from merxen.analysis.mapmycells import (
 )
 from merxen.config import MapMyCellsConfig, MapMyCellsSampleConfig
 
-# Human MERSCOPE panel genes whose Ensembl IDs are blank in the P7513 var.
+# Human MERSCOPE panel genes whose Ensembl IDs are blank in the HD1 var.
 MERSCOPE_MISSING_IDS = {
     "LIF": "ENSG00000128342",
     "LIFR": "ENSG00000113594",

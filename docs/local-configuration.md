@@ -17,11 +17,10 @@ placeholders only.
 | `workflows/conf/site.config` | `workflows/conf/site.config.example` | Nextflow config (params) | `workflows/nextflow.config` (every profile) |
 | `workflows/conf/dwight.site.config` | `workflows/conf/dwight.site.config.example` | Nextflow config (params, `env`) | `workflows/conf/dwight.config` (standard, dwight, local) |
 
-The two Nextflow site files arrive with the Nextflow part of the cleanup; a
-future host adds `workflows/conf/<host>.site.config` beside its own profile
-file. The project keeps one canonical alias table, group-readable and outside
-every repository, so that every developer and every pipeline task sees the
-same aliases; `.aliases.tsv` in a checkout is a link to it, or
+A future host adds `workflows/conf/<host>.site.config` beside its own
+profile file. The project keeps one canonical alias table, group-readable
+and outside every repository, so that every developer and every pipeline task
+sees the same aliases; `.aliases.tsv` in a checkout is a link to it, or
 `MERXEN_ALIAS_FILE` names it.
 
 ### `.env` format

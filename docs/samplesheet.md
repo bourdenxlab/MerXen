@@ -92,7 +92,7 @@ refinement). Relative paths resolve against the CSV's directory.
 
 ```csv
 image_key,image_path,alignment_matrix,channel_names
-post_xenium_if,Slide511_s2.ome.tiff,Slide511_s2_matrix.csv,DAPI;p62;AT8
+post_xenium_if,if_slide1.ome.tiff,if_slide1_matrix.csv,DAPI;p62;AT8
 ```
 
 Full details: [Image registration](stages/register-images.md#inputs).

@@ -874,7 +874,7 @@ def _check_override_against_manifest(
 
     The VZG2 image is always the archive's own mosaic, so its pixel-to-micron
     relation is fixed by the manifest. A stale override (for example one with
-    the bounding-box origin dropped, as in the 2026-09-08 VZG2 build) would
+    the bounding-box origin dropped, as in the 2026-09-08 MS2 build) would
     misregister every image-derived segmentation against the transcripts, and
     the segmentation stage cannot tell because the stale matrix is what the
     zarr records.

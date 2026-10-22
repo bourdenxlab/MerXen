@@ -339,7 +339,7 @@ def _require_seeding_matches_transforms(
     """Fail when a reusable ProSeg CSV was seeded with a different mask affine.
 
     The CSV's ``cell_id`` seeds are fixed when it is written. Reusing one after
-    the transform was corrected (as for the 2026-09-08 VZG2 outputs) would give
+    the transform was corrected (as for the 2026-09-08 MS2 outputs) would give
     ProSeg seeds that are offset from their Cellpose cells. A CSV written by
     this module records its affine in :func:`_seeding_transforms_path`; older
     CSVs are checked against the mask directly and then get that record.

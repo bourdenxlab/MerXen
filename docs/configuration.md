@@ -2,14 +2,19 @@
 
 MerXen configuration lives in four places:
 
-1. **Shell environment** — a `.env` file for Python-side defaults.
+1. **Shell environment** — a `.env` file for Python-side defaults and for
+   every location that scripts, tests and notebooks read
+   ([Local configuration](local-configuration.md)).
 2. **Portable Nextflow parameters** — scientific and algorithmic defaults in
    [workflows/nextflow.config](../workflows/nextflow.config), overridable per
    run with `--<name>`.
-3. **Execution profiles** — host capacity, local software/reference paths,
-   hardware choices, concurrency, and GPU locking. The default Dwight settings
-   live in
-   [workflows/conf/dwight.config](../workflows/conf/dwight.config).
+3. **Execution profiles** — host capacity, local software paths, hardware
+   choices, concurrency, and GPU locking. The default Dwight settings live in
+   [workflows/conf/dwight.config](../workflows/conf/dwight.config). The data
+   locations of a host (reference sources and caches, the Cellpose model
+   store, the task temporary directory, container images and bind mounts) are
+   in no tracked file: two private, gitignored site configs hold them
+   ([Site configs](#site-configs-private-host-locations)).
 4. **Pydantic models** — [src/merxen/config.py](../src/merxen/config.py) — the
    authoritative schema every CLI command validates its JSON config against.
 
@@ -32,12 +37,55 @@ Variables, from [.env.example](../.env.example):
 The `MERXEN_` prefix is wired up via `model_config = {"env_prefix": "MERXEN_"}`
 in [config.py:202](../src/merxen/config.py#L202).
 
+`.env.example` also lists the location variables of this host (storage roots,
+reference caches, the results root, ...), all commented out. Code reads them
+through `merxen.local_config`; a variable that is not set is an error that
+names it, never a built-in default. Docs write them as `$MERXEN_...`.
+
 ## Nextflow parameters
 
 Portable defaults live in
 [workflows/nextflow.config](../workflows/nextflow.config). Dwight-specific
 defaults are included automatically through Nextflow's reserved `standard`
 profile. Override either kind with `--<name>` on the command line.
+
+### Site configs (private host locations)
+
+No tracked file holds a host path. The locations of a host live in two
+gitignored Nextflow files that the tracked configs include; each has a tracked
+template with placeholders (copy it without the `.example` suffix and fill in
+the values):
+
+| File | Template | Included by | Sets |
+|------|----------|-------------|------|
+| `workflows/conf/site.config` | `site.config.example` | `nextflow.config`, so every profile | `apptainer_container`, `apptainer_bind_paths`, `clustering_squidpy_gpu_container`, `mender_container` |
+| `workflows/conf/dwight.site.config` | `dwight.site.config.example` | `conf/dwight.config`, so the `standard`, `dwight` and `local` profiles | the legacy MapMyCells / WHB sources and caches, `annotation_gene_id_fallback_csv`, `cellpose_model_store`, `cellpose_protected_output_roots`, `task_tmp_dir`, and the task environment (`TMPDIR`, `MERXEN_ALIAS_FILE`) |
+
+Each file is found at the path in `MERXEN_SITE_CONFIG` /
+`MERXEN_DWIGHT_SITE_CONFIG`, else beside its template in `workflows/conf/`. An
+unset or empty variable means "look beside the template"; `none` (or
+`/dev/null`) means "no file, on purpose"; a variable naming a file that does not
+exist makes Nextflow stop with "Unable to parse config file" (the cause is in
+`.nextflow.log`). A git worktree and a code export contain neither file, so
+set the variables there; the private `.env` names both
+([Local configuration](local-configuration.md)). A site config may only set
+params that a tracked config declares, and the two files share no param (a test
+checks both). In the tables below, a Dwight value written `$MERXEN_...` is the
+value of that `.env` variable, which `dwight.site.config` also holds.
+
+Without a site config several params stay `null`, and a `null` here does not
+always fail by itself: the reference caches fall back to `<outdir>` and the
+reference downloads default to on, task temporary files land on the small root
+disk, and the `apptainer` profile runs its tasks without a container. `main.nf`
+therefore stops a launch with an error in two cases, unless the variable is set
+to `none` or `/dev/null` on purpose:
+
+- a `standard`, `dwight` or `local` launch with no `task_tmp_dir` (no Dwight
+  site config): "no Dwight site config ... set `MERXEN_DWIGHT_SITE_CONFIG`,
+  install `workflows/conf/dwight.site.config`, or
+  `MERXEN_DWIGHT_SITE_CONFIG=none` to run without host locations";
+- an `apptainer` launch with no `apptainer_container` (no site config): the same
+  message for `MERXEN_SITE_CONFIG` and `workflows/conf/site.config`.
 
 ### Required
 
@@ -85,7 +133,7 @@ profile. Override either kind with `--<name>` on the command line.
 | `merscope_bead_removal_fill_mode` | `hybrid` | Mode of the fill: `hybrid` (strong: it removes up to the whole model light wherever that exceeds the noise floor, with a 3 px mask dilation and no texture gate, also in tissue, so it may dim puncta near beads; it favours clean masks over faithful pixel values; runs on the CPU or the GPU) or `flat` (flat background only, inert in tissue; CPU only, a `cuda`/`auto` device request falls back to the CPU with a warning). Ignored when `merscope_bead_removal_fill` is `false`. No samplesheet column. Changes the cache identity like the fill itself. See [stages/spatialdata-build.md](stages/spatialdata-build.md#fill-modes-merscope_bead_removal_fill_mode). |
 | `merscope_bead_mask_veto` | `true` | Drop the Cellpose cell masks that are centred on a modelled bead (fitted amplitude A0 >= 400) and have no DAPI nucleus, before the masks are saved and ProSeg is seeded. On by default; `false` switches it off. It is written into the segmentation config of samples with bead removal on only (other samples keep their config and task hashes) and does nothing for a source without a bead table. Masks computed with another veto setting, or before the veto existed, are refused on reuse. No samplesheet column. See [stages/segmentation.md](stages/segmentation.md#bead-mask-veto). |
 | `merscope_bead_removal_device` | `cpu` | Device of the bead-removal correction: `cpu` (the validated numpy path, the default), `cuda` (optional GPU backend; fails at the start of the sample when there is no CUDA device or the Triton kernels do not compile) or `auto` (GPU only when CUDA is available and the host GPU lock `MERXEN_GPU_LOCK_FILE` is set, else CPU). The hybrid fill (the default) runs on either device, the flat fill on the CPU only. No samplesheet column. Changing the device re-runs the build; a cached zarr built on the other device is reused with a warning. The GPU path needs torch 2.6-2.14 and Triton 3.2-3.8 in the build environment (CUDA 12.4-13.0) and a C compiler; the first window adds about 5 s of kernel compilation. It takes the host GPU lock once around the window loop only (see [GPU lock](#bead-removal-gpu-lock)), so a build that has to wait holds its `BUILD_SPATIALDATA` slot. On container profiles the `gpu` profile passes the GPU into the build. The Dwight profile sets `cuda` (validated on the workstation with torch 2.14 and Triton 3.8). See [stages/spatialdata-build.md](stages/spatialdata-build.md#gpu-backend-optional). |
-| `merscope_allow_transform_override_mismatch` | `false` | VZG2 builds fail when `merscope_transform_path` places the mosaic more than 1 µm away from the archive manifest. `true` keeps the override with a warning, for archives whose `bbox_microns` is known to be wrong. See [stages/spatialdata-build.md](stages/spatialdata-build.md). |
+| `merscope_allow_transform_override_mismatch` | `false` | `.vzg2` builds fail when `merscope_transform_path` places the mosaic more than 1 µm away from the archive manifest. `true` keeps the override with a warning, for archives whose `bbox_microns` is known to be wrong. See [stages/spatialdata-build.md](stages/spatialdata-build.md). |
 | `force_proseg_rerun` | `false` | Rebuild ProSeg bases from the current Cellpose/transcript inputs instead of reusing a persistent `latest_spatialdata.zarr`. Useful with `-resume` after upstream inputs were rebuilt. |
 | `qc_registration_strict` | `false` | Fail the QC task (instead of only warning in its outputs) when the segmentation registration check flags cells that do not sit on their transcripts. See [stages/qc.md](stages/qc.md#registration-check). |
 | `start_stage` | `build_spatialdata` | Fallback first stage. Skipped upstream stages are read from published outputs. A samplesheet `start_stage` value overrides this per row. |
@@ -93,7 +141,9 @@ profile. Override either kind with `--<name>` on the command line.
 | `only_stage` | `null` | Fallback single-stage selector. A row-level `only_stage` overrides row start/stop values; row start/stop values suppress the global `only_stage` fallback for that row. |
 | `gpu_process_lock_enabled` | Dwight: `true` | Serialize local GPU-heavy processes so `CELLPOSE_SEGMENT`, GPU `ALIGN`, and GPU `CLUSTERING_SQUIDPY` do not compete for one workstation GPU. ProSeg does not take this lock. |
 | `gpu_process_lock_file` | Dwight: `/tmp/merxen-dwight-gpu.lock` | One host-wide lock shared by tasks and concurrent launches on Dwight. |
-| `task_tmp_dir` | Dwight: `/srv/storage/MerXen/tmp` | Exported to every task as `TMPDIR`, so library temporary files land on the `/srv/storage` RAID rather than `/tmp` on the small root disk. The directory must exist (`mkdir -p` it once per host). ProSeg and the proseg_hybrid refinement write their large intermediates to `$MERXEN_TMPDIR` if set, otherwise to the task's work directory, never to the system temporary directory. |
+| `task_tmp_dir` | `null`; Dwight: `$MERXEN_TASK_TMP_DIR` | Exported to every task as `TMPDIR` (the Dwight site config sets the `env` entry), so library temporary files land on the storage RAID rather than `/tmp` on the small root disk. The directory must exist (`mkdir -p` it once per host). `null` stops a `standard`, `dwight` or `local` launch (see [Site configs](#site-configs-private-host-locations)). ProSeg and the proseg_hybrid refinement write their large intermediates to `$MERXEN_TMPDIR` if set, otherwise to the task's work directory, never to the system temporary directory. |
+| `apptainer_container` | `null`; HPC: `site.config` | Image of the `apptainer` profile (`process.container`). `null` leaves the tasks without a container, so an `apptainer` launch with no site config stops (see [Site configs](#site-configs-private-host-locations)). |
+| `apptainer_bind_paths` | `null`; HPC: `site.config` | Comma-separated host directories the `apptainer` and `gpu` profiles mount into every container (`-B <paths>`). `null` mounts none beyond Apptainer's own. |
 
 Stage names accepted by `start_stage`, `stop_stage`, and `only_stage` are:
 `build_spatialdata`, `segment_nuclei`, `segment`, `enrich`, `register_images`,
@@ -192,7 +242,7 @@ arms with verified provenance for reuse.
 | `register_post_xenium_if_nonrigid_min_confident_fraction` | `0.1` | Reject the complete non-rigid pass when too little overlapping tissue supports it. |
 | `register_images_max_forks` | Dwight: `2` | Maximum concurrent registration processes. |
 
-`REGISTER_IMAGES` requests 8 CPUs and 32 GB (P7513 optical-flow validation peaked at 2.7 GB; full registration remains bounded by image resampling). The viewer pyramid of each
+`REGISTER_IMAGES` requests 8 CPUs and 32 GB (HD1 optical-flow validation peaked at 2.7 GB; full registration remains bounded by image resampling). The viewer pyramid of each
 registered image follows `viewer_cache_build_image_pyramid`.
 
 ### Viewer caches
@@ -467,7 +517,7 @@ The following settings are read only when
 | `clustering_squidpy_figure_dpi` | `180` | DPI for PNG plots. |
 | `clustering_squidpy_use_gpu` | Dwight: `true` | Use RAPIDS single-cell acceleration when available. |
 | `clustering_squidpy_gpu_conda` | `envs/environment.clustering-gpu.yml` | Dedicated RAPIDS environment used only by `CLUSTERING_SQUIDPY_COMPUTE`. |
-| `clustering_squidpy_gpu_container` | Site GPU image path | Dedicated RAPIDS image used only by `CLUSTERING_SQUIDPY_COMPUTE` with Apptainer. Build it from `containers/Dockerfile.clustering-gpu` or override this path. |
+| `clustering_squidpy_gpu_container` | `null`; HPC: `site.config` | Dedicated RAPIDS image used only by `CLUSTERING_SQUIDPY_COMPUTE` with Apptainer. Build it from `containers/Dockerfile.clustering-gpu` or override this path. |
 | `clustering_squidpy_max_forks` | Dwight: `4` | Maximum concurrent Squidpy clustering tasks. GPU-backed tasks still share the local GPU lock when enabled. |
 | `clustering_squidpy_gpu_vram_monitor` | Dwight: `true` | Run a lightweight `nvidia-smi` sampler around each `CLUSTERING_SQUIDPY_COMPUTE` task. |
 | `clustering_squidpy_gpu_vram_monitor_interval_seconds` | `2` | Sampling interval for the clustering GPU VRAM monitor. |
@@ -512,7 +562,7 @@ The following settings are read only when
 | `mender_run_umap` | `true` | Generate the context embedding. |
 | `mender_write_spatialdata_table` | `true` | Import `mender_domain` into the derived clustered SpatialData table. |
 | `mender_conda` | `envs/environment.mender.yml` | Old compatible CPU environment used only by compute. |
-| `mender_container` | Site MENDER SIF path | CPU-only image built from `containers/Dockerfile.mender`; override for portable Apptainer runs. |
+| `mender_container` | `null`; HPC: `site.config` | CPU-only image built from `containers/Dockerfile.mender`; override for portable Apptainer runs. |
 | `mender_compute_max_forks` | Dwight: `2` | At 192 GB per compute task, at most 384 GB is reserved concurrently. |
 
 See [MENDER spatial domains](stages/mender.md) for the data contract, restart
@@ -588,7 +638,7 @@ contracts.
 | `mecr_cell_metadata_path` | Atlas-dependent | Maps raw H5AD cell labels to cluster aliases. |
 | `mecr_taxonomy_metadata_path` | Atlas-dependent | Resolves taxonomy node labels. |
 | `mecr_cluster_membership_path` | Atlas-dependent | Maps cluster aliases to taxonomy nodes. |
-| `mecr_reference_cache_dir` | `<outdir>/mapmycells_cache` | Durable Allen reference cache. The Dwight profile uses `/media/mathieubo/SSD1/MerXen/mapmycells`. |
+| `mecr_reference_cache_dir` | `<outdir>/mapmycells_cache` | Durable Allen reference cache. The Dwight profile uses `$MERXEN_MAPMYCELLS_CACHE_DIR`. |
 | `mecr_auto_download_reference` | `true` | For mouse, download or reuse the complete WMB raw reference and metadata. Downloads are resumable and use four concurrent transfers. |
 | `mecr_taxonomy_level` | atlas-dependent | `CCN202210140_SUPC` for WHB or `CCN20230722_CLAS` for WMB. |
 | `mecr_gene_symbol_column` | `gene_symbol` | Reference `var` column containing gene symbols. |
@@ -622,7 +672,7 @@ runs once, and is shared across all samples and segmentation branches. See
 | `mapmycells_gene_mapping_db_path` | `null` | Optional `mmc_gene_mapper` SQLite DB. Human-to-WMB runs download it when automatic downloads are enabled. |
 | `mapmycells_region_name` | species-dependent | Human: `frontal_a44_a45_a46_a32_acc`; mouse: `region`. Short safe name used in region output directories and annotation prefixes. |
 | `mapmycells_region_labels` | species-dependent | Human defaults to the four frontal WHB labels. Mouse defaults empty and requires explicit WMB `region_of_interest_acronym` values for region mode. |
-| `mapmycells_region_cache_dir` | `<outdir>/mapmycells_cache` | Durable cache for Allen WHB/WMB downloads, the gene mapper, and generated region reference files. The Dwight profile overrides this with `/media/mathieubo/SSD1/MerXen/mapmycells`. |
+| `mapmycells_region_cache_dir` | `<outdir>/mapmycells_cache` | Durable cache for Allen WHB/WMB downloads, the gene mapper, and generated region reference files. The Dwight profile overrides this with `$MERXEN_MAPMYCELLS_CACHE_DIR`. |
 | `mapmycells_region_min_cells_per_leaf` | `10` | Drop region taxonomy leaf aliases with fewer cells than this before precomputing stats. |
 | `mapmycells_region_force_rebuild` | `false` | Build a new region reference directory even if a matching cached build exists. Earlier builds are never deleted; see [MapMyCells region reference cache](stages/mapmycells.md#region-reference-cache). |
 | `mapmycells_region_query_markers_n_per_utility` | `10` | Marker count target passed to Allen's `QueryMarkerRunner` for the region reference. |

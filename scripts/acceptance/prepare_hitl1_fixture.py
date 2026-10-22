@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     config = SegmentationConfig.model_validate_json(args.config.read_text())
     if config.dataset.platform != "XENIUM":
-        raise ValueError("This fixture targets the human Xenium P7513 acceptance case")
+        raise ValueError("This fixture targets the human Xenium HD1 acceptance case")
     weights = args.weights.resolve(strict=True)
     with weights.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()

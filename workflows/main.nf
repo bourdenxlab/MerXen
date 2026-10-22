@@ -2689,6 +2689,18 @@ def validateMenderParams(params) {
 }
 
 workflow {
+    // Private site configs (docs/local-configuration.md): stop a launch whose
+    // site locations are missing instead of letting null params fall back.
+    def siteConfigProblems = SiteConfigCheck.problems(
+        workflow.profile,
+        workflow.containerEngine,
+        params,
+        System.getenv(),
+    )
+    if (siteConfigProblems) {
+        error(siteConfigProblems.join("\n"))
+    }
+
     if (!params.samplesheet) {
         error "Missing required parameter: --samplesheet"
     }
