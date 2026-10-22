@@ -138,25 +138,6 @@ Pytest runs on `MERXEN_CI_PYTEST_WORKERS` parallel pytest-xdist workers
 BLAS, OpenMP and numba threads unless `OMP_NUM_THREADS`, `MKL_NUM_THREADS`,
 `OPENBLAS_NUM_THREADS` or `NUMBA_NUM_THREADS` is already set.
 
-### Test tiers
-
-`MERXEN_CI_TEST_TIER` picks the tests the script runs:
-
-| Tier | Selection | Used by |
-|------|-----------|---------|
-| `fast` | `-m "not slow and not nextflow and not store_lock and not integration"` | the pre-push hook (default) |
-| `full` | `-m "not slow"` | CI on every PR and every push to `main` |
-
-The fast tier misses Nextflow, cross-process lock and end-to-end store
-regressions until CI. Run the full tier locally when a change touches the
-workflows, store locking or a stage's store writes, or before asking for a
-review:
-
-```bash
-MERXEN_CI_TEST_TIER=full git push
-MERXEN_CI_TEST_TIER=full scripts/run_ci_checks.sh
-```
-
 For example, to push from a Mac while skipping lockfile CUDA packages:
 
 ```bash
@@ -178,7 +159,27 @@ MERXEN_CI_PYTEST_ARGS="tests/test_cortical_depth -q" \
 scripts/run_ci_checks.sh
 ```
 
-Branch protection on `main` should require this workflow to pass.
+Branch protection on `main` should require both CI jobs, `lint` and `test`, to
+pass.
+
+### Test tiers
+
+`MERXEN_CI_TEST_TIER` picks the tests the script runs:
+
+| Tier | Selection | Used by |
+|------|-----------|---------|
+| `fast` | `-m "not slow and not nextflow and not store_lock and not integration"` | the pre-push hook (default) |
+| `full` | `-m "not slow"` | CI on every PR and every push to `main` |
+
+The fast tier misses Nextflow, cross-process lock and end-to-end store
+regressions until CI. Run the full tier locally when a change touches the
+workflows, store locking or a stage's store writes, or before asking for a
+review:
+
+```bash
+MERXEN_CI_TEST_TIER=full git push
+MERXEN_CI_TEST_TIER=full scripts/run_ci_checks.sh
+```
 
 ## Version bumps
 
