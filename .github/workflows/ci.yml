@@ -43,4 +43,11 @@ jobs:
           echo "NXF_VER=${NXF_VER}" >> "$GITHUB_ENV"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Tests
-        run: pytest -m "not slow"
+        env:
+          # One BLAS, OpenMP and numba thread per pytest-xdist worker: the
+          # runner has 4 vCPUs and runs 4 workers.
+          OMP_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
+          OPENBLAS_NUM_THREADS: "1"
+          NUMBA_NUM_THREADS: "1"
+        run: pytest -n 4 --dist load -m "not slow"

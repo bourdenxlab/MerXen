@@ -81,7 +81,8 @@ to `main` and every PR:
 2. `ruff check .`
 3. `ruff format --check .`
 4. `mypy src/`
-5. `pytest -m "not slow"`
+5. `pytest -n 4 --dist load -m "not slow"` (four pytest-xdist workers, one
+   BLAS/OpenMP/numba thread each)
 
 Run the same gate locally before pushing:
 
@@ -112,6 +113,11 @@ keeps local Mac pushes from being blocked by CUDA lockfile packages or
 platform-specific scientific wheel crashes while preserving Linux/server parity.
 Set `MERXEN_CI_RUN_TESTS=true` to force pytest, or use
 `MERXEN_CI_PYTEST_ARGS` to run a smaller target.
+
+Pytest runs on `MERXEN_CI_PYTEST_WORKERS` parallel pytest-xdist workers
+(default 4; `0` runs every test in one process). Each worker is limited to 2
+BLAS, OpenMP and numba threads unless `OMP_NUM_THREADS`, `MKL_NUM_THREADS`,
+`OPENBLAS_NUM_THREADS` or `NUMBA_NUM_THREADS` is already set.
 
 For example, to push from a Mac while skipping lockfile CUDA packages:
 

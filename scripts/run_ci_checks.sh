@@ -67,11 +67,19 @@ fi
 
 case "${run_tests}" in
     true | 1 | yes)
+        # Tests run on parallel pytest-xdist workers (0 runs them in this
+        # process). Each worker gets a few BLAS, OpenMP and numba threads, or
+        # every worker would start one per core. Values already set win.
+        export OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}"
+        export MKL_NUM_THREADS="${MKL_NUM_THREADS:-2}"
+        export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-2}"
+        export NUMBA_NUM_THREADS="${NUMBA_NUM_THREADS:-2}"
+        pytest_args=(-n "${MERXEN_CI_PYTEST_WORKERS:-4}" --dist load)
         if [[ -n "${MERXEN_CI_PYTEST_ARGS:-}" ]]; then
             # shellcheck disable=SC2206
-            pytest_args=(${MERXEN_CI_PYTEST_ARGS})
+            pytest_args+=(${MERXEN_CI_PYTEST_ARGS})
         else
-            pytest_args=(-m "not slow")
+            pytest_args+=(-m "not slow")
         fi
         "${venv_dir}/bin/pytest" "${pytest_args[@]}"
         ;;
