@@ -15,7 +15,7 @@ Set `xenium_cellpose_model` or `merscope_cellpose_model` to a bundle directory,
 its weights file, or a 64-character registry hash. A directory contains `model`
 and `model.json`. Hashes resolve under `cellpose_model_store`, which may also be
 set with the exported `MERXEN_CELLPOSE_MODEL_STORE` variable. Dwight supplies
-`/srv/storage/MerXen/cellpose_models` as its site default.
+`$MERXEN_STORAGE_ROOT/cellpose_models` as its site default.
 
 The same-named samplesheet columns override the run parameter for that platform;
 blank cells inherit it. Cell-model selection and the overrides below leave the
@@ -99,5 +99,5 @@ transcript assignment. Regression hashes captured before extraction pin the
 synthetic masks, logits and stitching statistics.
 
 See the [testing guide](../hitl/testing-guide.md) for a stock-checkpoint fixture,
-fast validation tests and the locked P7513 tile check. A passing fixture confirms
+fast validation tests and the locked HD1 tile check. A passing fixture confirms
 plumbing; it does not establish that a fine-tune improves segmentation.

@@ -35,7 +35,7 @@ REFERENCE_SIZE = 768
 IMAGE_SIZE = 640
 IMAGE_PIXEL_SIZE_UM = 1.25
 # True image-pixel -> reference-pixel affine: 90 degree rotation and 1.25x scale,
-# the same geometry as the P7513 post-Xenium IF.
+# the same geometry as the HD1 post-Xenium IF.
 TRUE_MATRIX = np.array(
     [
         [0.0, IMAGE_PIXEL_SIZE_UM, -20.0],
@@ -229,8 +229,8 @@ def test_load_alignment_matrix_rejects_invalid_files(
         load_alignment_matrix(path)
 
 
-def test_matrix_scale_matches_pixel_sizes_of_p7513() -> None:
-    """The real P7513 matrix agrees with 0.343 um IF and 0.2125 um Xenium pixels."""
+def test_matrix_scale_matches_pixel_sizes_of_hd1() -> None:
+    """The real HD1 matrix agrees with 0.343 um IF and 0.2125 um Xenium pixels."""
     matrix = np.array(
         [
             [0.015618826142675095, 1.615313853507129, -1418.89],

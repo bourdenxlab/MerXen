@@ -89,7 +89,7 @@ preparation is the expensive step, keep the Nextflow work directory and use
 
 Enable WMB MECR explicitly with `--species mouse --mecr_enabled true`. The
 Dwight profile stores the reference under
-`/media/mathieubo/SSD1/MerXen/mapmycells/abc_atlas`; other profiles should set
+`$MERXEN_LEGACY_ABC_ATLAS_DIR` (set in its site config); other profiles should set
 `--mecr_reference_cache_dir` to a location with at least 160 GB free.
 
 MECR can be disabled globally with:
