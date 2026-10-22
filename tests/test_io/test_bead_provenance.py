@@ -621,6 +621,60 @@ class TestSegmentationSidecar:
         remove_segmentation_sidecar(mask)
         assert not segmentation_sidecar_path(mask).exists()
 
+    VETO = {"version": 1, "a0_min": 400.0, "ring_px": [10.0, 25.0]}
+
+    def test_the_bead_mask_veto_is_recorded_only_when_applied(
+        self, tmp_path: Path
+    ) -> None:
+        record = _enabled_record()
+        without = write_segmentation_sidecar(tmp_path / "a" / "masks.npy", record)
+        with_veto = write_segmentation_sidecar(
+            tmp_path / "b" / "masks.npy", record, bead_mask_veto=self.VETO
+        )
+        # A run without the veto writes the sidecar it always wrote.
+        assert set(json.loads(without.read_text())) == {"schema", "bead_removal"}
+        assert json.loads(with_veto.read_text())["bead_mask_veto"] == self.VETO
+
+    def test_a_matching_veto_is_reused(self, tmp_path: Path) -> None:
+        mask = tmp_path / "masks.npy"
+        record = _enabled_record()
+        write_segmentation_sidecar(mask, record, bead_mask_veto=self.VETO)
+        check_segmentation_sidecar(mask, record, bead_mask_veto=self.VETO)
+
+    @pytest.mark.parametrize(
+        ("stored", "requested", "message"),
+        [
+            (None, VETO, "computed without the bead-mask veto but this run applies"),
+            (VETO, None, "computed with the bead-mask veto .* applies without"),
+            (VETO, {**VETO, "a0_min": 500.0}, "A0 >= 400.0.*A0 >= 500.0"),
+        ],
+    )
+    def test_a_different_veto_is_refused_with_the_usual_remedy(
+        self,
+        tmp_path: Path,
+        stored: dict[str, Any] | None,
+        requested: dict[str, Any] | None,
+        message: str,
+    ) -> None:
+        mask = tmp_path / "masks.npy"
+        record = _enabled_record()
+        write_segmentation_sidecar(mask, record, bead_mask_veto=stored)
+        with pytest.raises(ValueError, match=message) as err:
+            check_segmentation_sidecar(
+                mask, record, dataset_name="D", bead_mask_veto=requested
+            )
+        assert "merxen cellpose-segment --force-rerun" in str(err.value)
+        assert "new --outdir" in str(err.value)
+
+    def test_the_nuclei_sidecar_and_the_store_sidecar_know_no_veto(
+        self, tmp_path: Path
+    ) -> None:
+        record = _enabled_record()
+        write_segmentation_sidecar(tmp_path / "masks.npy", record, nuclei=True)
+        check_segmentation_sidecar(tmp_path / "masks.npy", record, nuclei=True)
+        write_store_segmentation_sidecar(tmp_path, record)
+        check_store_segmentation_sidecar(tmp_path, record)
+
 
 class TestStoreSegmentationSidecar:
     """The record inside a ProSeg store of the image its prior masks came from."""

@@ -97,6 +97,60 @@ class MaskFilterConfig(BaseModel):
         return self
 
 
+class BeadMaskVetoConfig(BaseModel):
+    """Parameters of the bead-mask veto of the MERSCOPE Cellpose segmentation.
+
+    After the Cellpose cell masks are stitched and filtered, a mask whose centroid
+    lies on a modelled coverslip bead and that has no DAPI-positive nucleus is
+    dropped before the masks are saved and the transcripts are seeded. The step
+    reads the bead table ``bead_removal_qc/beads.csv.gz`` of the source SpatialData
+    zarr and does nothing (bit-identical masks, no new file) when the source was
+    built without bead removal or has no bead table. Only ``enabled`` is set by the
+    workflow; the other fields are the method's parameters and are recorded in the
+    mask sidecar, so masks computed with other values are not silently reused.
+
+    Attributes:
+        enabled: Run the veto (default True). It acts only on a source with bead
+            removal and a bead table, whatever this says.
+        a0_min: Beads with a fitted amplitude A0 below this (counts) are ignored.
+        min_distance_px: A mask is near a bead when the distance of its centroid to
+            the bead is at most ``max(min_distance_px, radius_fraction x r)`` with
+            ``r = sqrt(area / pi)`` the equivalent radius of the mask.
+        radius_fraction: See ``min_distance_px``.
+        ring_inner_px: Inner distance (px) from the mask of the DAPI background
+            ring.
+        ring_outer_px: Outer distance (px) from the mask of the DAPI background
+            ring.
+        dapi_percentile: Percentile of the DAPI inside the mask that is compared
+            with the ring.
+        dapi_noise_multiple: A mask has a DAPI-positive nucleus when its DAPI
+            percentile exceeds the ring median plus this many robust noise units
+            (1.4826 x the median absolute deviation of the ring).
+        min_ring_px: Fewest ring pixels with which the DAPI background can be
+            estimated; a mask with fewer is kept (never vetoed on a guess).
+        chunk_mb: Memory (MB) of one row chunk of the mask passes.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    a0_min: float = Field(default=400.0, gt=0.0)
+    min_distance_px: float = Field(default=8.0, ge=0.0)
+    radius_fraction: float = Field(default=0.35, ge=0.0)
+    ring_inner_px: float = Field(default=10.0, ge=0.0)
+    ring_outer_px: float = Field(default=25.0, gt=0.0)
+    dapi_percentile: float = Field(default=90.0, gt=0.0, lt=100.0)
+    dapi_noise_multiple: float = Field(default=3.0, ge=0.0)
+    min_ring_px: int = Field(default=200, ge=1)
+    chunk_mb: int = Field(default=64, gt=0)
+
+    @model_validator(mode="after")
+    def _check_ring(self) -> BeadMaskVetoConfig:
+        if self.ring_outer_px <= self.ring_inner_px:
+            raise ValueError("ring_outer_px must be larger than ring_inner_px.")
+        return self
+
+
 class TilingConfig(BaseModel):
     """Parameters for memory-adaptive Cellpose tiling."""
 
@@ -395,6 +449,9 @@ class SegmentationConfig(BaseModel):
     cellpose_model_policy: CellposeModelPolicy = CellposeModelPolicy()
     mask_filter: MaskFilterConfig = MaskFilterConfig()
     nuclei_mask_filter: MaskFilterConfig = MaskFilterConfig()
+    # Drops Cellpose cell masks that sit on a modelled bead and have no DAPI
+    # nucleus. Acts only on a source with bead removal and a bead table.
+    bead_mask_veto: BeadMaskVetoConfig = BeadMaskVetoConfig()
     tiling: TilingConfig = TilingConfig()
     proseg: ProsegConfig = ProsegConfig()
     proseg_hybrid: ProsegHybridConfig = ProsegHybridConfig()

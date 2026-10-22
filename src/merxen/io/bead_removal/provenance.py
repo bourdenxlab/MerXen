@@ -451,6 +451,7 @@ def write_segmentation_sidecar(
     recorded: Mapping[str, Any] | None,
     *,
     nuclei: bool = False,
+    bead_mask_veto: Mapping[str, Any] | None = None,
 ) -> Path:
     """Record which image a Cellpose mask was computed from.
 
@@ -459,15 +460,21 @@ def write_segmentation_sidecar(
         recorded: ``merxen_image_preprocessing`` of the source SpatialData, or
             ``None`` for a legacy store.
         nuclei: True for the DAPI-only nuclei mask.
+        bead_mask_veto: Parameters of the bead-mask veto that was applied to the
+            cell masks (``bead_mask_veto_identity``), or ``None`` when none was.
+            Written under the key ``bead_mask_veto``, and only when given, so the
+            sidecar of a run without the veto is what it always was.
 
     Returns:
         Path of the written sidecar.
     """
     path = segmentation_sidecar_path(mask_path, nuclei=nuclei)
-    payload = {
+    payload: dict[str, Any] = {
         "schema": SEGMENTATION_SIDECAR_SCHEMA,
         "bead_removal": segmentation_identity(recorded),
     }
+    if bead_mask_veto is not None:
+        payload["bead_mask_veto"] = _json_safe(dict(bead_mask_veto))
     path.parent.mkdir(parents=True, exist_ok=True)
     # Written through a temporary name so a reader never sees half a file.
     temporary = path.with_name(f".{path.name}.tmp")
@@ -490,11 +497,14 @@ def check_segmentation_sidecar(
     *,
     nuclei: bool = False,
     dataset_name: str = "",
+    bead_mask_veto: Mapping[str, Any] | None = None,
 ) -> None:
     """Refuse to reuse Cellpose masks computed from a differently corrected image.
 
     Rules:
-      * sidecar present: its bead-removal identity must equal the source's;
+      * sidecar present: its bead-removal identity must equal the source's, and
+        the bead-mask veto it records (absent: none) must equal the one the run
+        would apply;
       * sidecar missing and the source had bead removal on: the masks predate
         the correction, so they are refused;
       * sidecar missing and the source had it off or is legacy: reused as
@@ -506,6 +516,9 @@ def check_segmentation_sidecar(
             ``None`` for a legacy store.
         nuclei: True for the DAPI-only nuclei mask.
         dataset_name: Dataset label for the message.
+        bead_mask_veto: Parameters of the bead-mask veto the run would apply to
+            the cell masks (``bead_mask_veto_identity``), or ``None`` when it
+            would apply none. Masks computed before the veto existed record none.
 
     Raises:
         ValueError: If the masks and the source disagree about bead removal,
@@ -532,6 +545,11 @@ def check_segmentation_sidecar(
             "Reusing the masks would segment a different image than the one that "
             "is quantified."
         ),
+        veto_consequence=(
+            "Reusing the masks would keep masks on modelled beads that the request "
+            "drops, or drop masks the request keeps."
+        ),
+        bead_mask_veto=bead_mask_veto,
     )
 
 
@@ -617,8 +635,15 @@ def _check_identity_sidecar(
     remedy: str,
     missing_reason: str,
     consequence: str,
+    veto_consequence: str = "",
+    bead_mask_veto: Mapping[str, Any] | None = None,
 ) -> None:
-    """Compare a stored bead-removal identity with the source's (shared rules)."""
+    """Compare a stored bead-removal identity with the source's (shared rules).
+
+    The bead-mask veto recorded next to it (absent: none) is compared with
+    ``bead_mask_veto``, the one the run would apply; the ProSeg store sidecar
+    records none and is compared with none.
+    """
     source_identity = segmentation_identity(recorded)
     prefix = f"[{dataset_name}] " if dataset_name else ""
     if not sidecar.is_file():
@@ -629,7 +654,8 @@ def _check_identity_sidecar(
             f"{subject_path} has no {sidecar.name}, {missing_reason}. {remedy}"
         )
     try:
-        stored = json.loads(sidecar.read_text()).get("bead_removal")
+        payload = json.loads(sidecar.read_text())
+        stored = payload.get("bead_removal")
     except (OSError, ValueError, AttributeError) as exc:
         raise ValueError(
             f"{prefix}could not read {sidecar} ({exc}), so it cannot be verified "
@@ -639,12 +665,29 @@ def _check_identity_sidecar(
         raise ValueError(
             f"{prefix}{sidecar} does not hold a bead-removal identity. {remedy}"
         )
-    if stored == source_identity:
-        return
-    raise ValueError(
-        f"{prefix}{subject_path} was computed from an image with bead removal "
-        f"{_describe_identity(stored)} but the source SpatialData has "
-        f"{_describe_identity(source_identity)}. {consequence} {remedy}"
+    if stored != source_identity:
+        raise ValueError(
+            f"{prefix}{subject_path} was computed from an image with bead removal "
+            f"{_describe_identity(stored)} but the source SpatialData has "
+            f"{_describe_identity(source_identity)}. {consequence} {remedy}"
+        )
+    stored_veto = payload.get("bead_mask_veto")
+    expected_veto = None if bead_mask_veto is None else _json_safe(dict(bead_mask_veto))
+    if stored_veto != expected_veto:
+        raise ValueError(
+            f"{prefix}{subject_path} was computed {_describe_veto(stored_veto)} but "
+            f"this run applies {_describe_veto(expected_veto)}. {veto_consequence} "
+            f"{remedy}"
+        )
+
+
+def _describe_veto(veto: object) -> str:
+    """Summarise a recorded bead-mask veto for an error message."""
+    if not isinstance(veto, Mapping):
+        return "without the bead-mask veto"
+    return (
+        f"with the bead-mask veto (version {veto.get('version')}, "
+        f"A0 >= {veto.get('a0_min')})"
     )
 
 

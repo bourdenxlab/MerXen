@@ -220,6 +220,51 @@ def test_bead_removal_fill_mode_key_only_in_the_fill_branch() -> None:
     assert key < after_fill_branch
 
 
+def test_bead_mask_veto_param_defaults_on_and_is_documented() -> None:
+    config_text = (_REPO_ROOT / "workflows" / "nextflow.config").read_text()
+
+    assert "merscope_bead_mask_veto = true" in config_text
+    line = config_text.index("merscope_bead_mask_veto = true")
+    comment = config_text[line - 500 : line]
+    assert "modelled bead" in comment and "bead removal on" in comment
+
+
+def test_bead_mask_veto_helper_defaults_to_true_and_parses_booleans() -> None:
+    helper = _function_text(_main_text(), "merscopeBeadMaskVetoRequested")
+
+    assert "params.merscope_bead_mask_veto" in helper
+    assert "boolOrDefault(" in helper
+    assert "true," in helper
+    assert '"merscope_bead_mask_veto"' in helper
+
+
+def test_bead_mask_veto_key_only_reaches_the_config_of_bead_removal_rows() -> None:
+    """Rows without bead removal keep their segmentation JSON and task hashes."""
+    main_text = _main_text()
+    meta = _function_text(main_text, "segmentMetaForPlatform")
+    merscope = meta[: meta.index('if (platform == "XENIUM")')]
+
+    # The key is set once, behind the bead-removal check of the row, for MERSCOPE.
+    assert meta.count("bead_mask_veto") == 1
+    guard = merscope.index("if (merscopeBeadRemovalRequested(")
+    key = merscope.index(
+        "merscopeMeta.bead_mask_veto = [enabled: merscopeBeadMaskVetoRequested(params)]"
+    )
+    assert merscope.index("def merscopeMeta = ") < guard < key
+    assert key < merscope.index("return merscopeMeta")
+
+    # In the segmentation config it is copied from the meta when present, and is
+    # not part of the base config that every row gets.
+    workflow = main_text[main_text.index("\nworkflow {") :]
+    base = workflow.index("def baseConfig = [")
+    base_end = workflow.index("// hitl-hook:C4", base)
+    assert "bead_mask_veto" not in workflow[base:base_end]
+    copy = workflow.index("if (meta.bead_mask_veto) {")
+    assert workflow.index("baseConfig.bead_mask_veto = meta.bead_mask_veto") > copy
+    assert base_end < copy < workflow.index("def segmentConfig = baseConfig + [")
+    assert workflow.count("bead_mask_veto") == 3  # check, assignment, source
+
+
 def test_bead_removal_fill_mode_helper_defaults_to_hybrid_and_normalises() -> None:
     helper = _function_text(_main_text(), "merscopeBeadRemovalFillMode")
 

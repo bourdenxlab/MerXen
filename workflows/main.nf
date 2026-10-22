@@ -443,7 +443,7 @@ def segmentMetaForPlatform(row, platform, params) {
     def modelSettings = CellposeSettings.settings(row, platform, params)
     def extra = modelSettings ? [cellpose_settings: modelSettings] : [:]
     if (platform == "MERSCOPE") {
-        return extra + [
+        def merscopeMeta = extra + [
             channels: parseChannels(row.merscope_channels, ["DAPI", "PolyT"]),
             image_prefix: chooseField(row, ["merscope_image_prefix"]) ?: null,
             z_range: parseRange(row.merscope_z_range, 0, 6),
@@ -455,6 +455,12 @@ def segmentMetaForPlatform(row, platform, params) {
                 params.default_merscope_voxel_layers
             ),
         ]
+        // Only for rows with bead removal on, so the segmentation config (and its
+        // task hash) of every other row is unchanged.
+        if (merscopeBeadRemovalRequested(row, row.pair_id?.toString()?.trim(), params)) {
+            merscopeMeta.bead_mask_veto = [enabled: merscopeBeadMaskVetoRequested(params)]
+        }
+        return merscopeMeta
     }
 
     if (platform == "XENIUM") {
@@ -1961,6 +1967,16 @@ def merscopeBeadRemovalFillRequested(params) {
     )
 }
 
+// The veto of Cellpose cell masks on modelled beads is on by default; false
+// switches it off. It only reaches the config of samples with bead removal on.
+def merscopeBeadMaskVetoRequested(params) {
+    return boolOrDefault(
+        params.merscope_bead_mask_veto,
+        true,
+        "merscope_bead_mask_veto"
+    )
+}
+
 def merscopeBeadRemovalFillMode(params) {
     def rawMode = params.merscope_bead_removal_fill_mode
     if (rawMode == null || rawMode.toString().trim().isEmpty()) {
@@ -2938,6 +2954,11 @@ workflow {
                 if (meta.cellpose_settings.cellpose_model_policy) {
                     baseConfig.cellpose_model_policy = meta.cellpose_settings.cellpose_model_policy
                 }
+            }
+
+            // Only present for rows with bead removal on (see segmentMetaForPlatform).
+            if (meta.bead_mask_veto) {
+                baseConfig.bead_mask_veto = meta.bead_mask_veto
             }
 
             def segmentConfig = baseConfig + [
