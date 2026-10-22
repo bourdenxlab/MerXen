@@ -104,6 +104,12 @@ jobs:
           curl -fsSL "https://github.com/nextflow-io/nextflow/releases/download/v${NXF_VER}/nextflow" -o "$HOME/.local/bin/nextflow"
           chmod +x "$HOME/.local/bin/nextflow"
           "$HOME/.local/bin/nextflow" -version
+          # The workflow tests run stub tasks with the pipeline's real resource
+          # directives (8+ CPUs, tens of GB), which the local executor refuses on
+          # a 4-vCPU runner. Raise its limits for every launch; the project and
+          # profile configs still take precedence over this home config.
+          mkdir -p "$HOME/.nextflow"
+          printf 'executor {\n    cpus = 128\n    memory = "2 TB"\n}\n' > "$HOME/.nextflow/config"
           echo "NXF_VER=${NXF_VER}" >> "$GITHUB_ENV"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       # The full test tier (docs/development.md): every test except the slow

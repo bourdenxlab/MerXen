@@ -25,6 +25,11 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = REPO_ROOT / "workflows"
 NEXTFLOW = shutil.which("nextflow")
+_EXCLUDES = [
+    arg
+    for pattern in (".git", ".lineage", ".nextflow", ".nf-test", "nf-test.config")
+    for arg in ("-exclude", pattern)
+]
 
 
 @pytest.mark.nextflow
@@ -41,6 +46,10 @@ def test_nextflow_lint_reports_no_errors(tmp_path: Path) -> None:
             "lint",
             "-project-dir",
             str(WORKFLOWS),
+            # The default excludes also skip every path with a "work" component,
+            # which a CI checkout (.../work/<repo>/<repo>) has: all files would be
+            # excluded and nothing linted. Keep the other defaults.
+            *_EXCLUDES,
             "-o",
             "json",
             str(WORKFLOWS),
