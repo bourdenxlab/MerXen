@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -112,16 +113,230 @@ def test_dwight_gpu_processes_use_one_fixed_host_lock(
         "GASTON_TRAIN",
     ):
         assert f'withName: "{process_name}"' in dwight_config_text
+    # Five tasks hold the lock for their whole run; BUILD_SPATIALDATA only
+    # exports the path (see the bead-removal test below).
     assert (
         dwight_config_text.count(
             'MERXEN_GPU_LOCK_FILE="${params.gpu_process_lock_file}"'
         )
-        == 5
+        == 6
     )
     assert dwight_config_text.count('exec 9<"\\${MERXEN_GPU_LOCK_FILE}"') == 5
     assert 'exec 9>"\\${MERXEN_GPU_LOCK_FILE}"' not in dwight_config_text
     assert dwight_config_text.count("set -o noclobber") == 5
     assert "${PWD}/.merxen_gpu.lock" not in combined_config_text
+
+
+def _process_block(config_text: str, process_name: str) -> str:
+    """Return the ``withName`` block of one process in the process scope."""
+    start = config_text.index(f'withName: "{process_name}"')
+    end = config_text.find("withName:", start + 1)
+    return config_text[start:end]
+
+
+def test_dwight_bead_removal_runs_on_the_validated_gpu(
+    dwight_config_text: str,
+) -> None:
+    """The workstation runs the bead correction on the GPU it was validated on."""
+    assert 'merscope_bead_removal_device = "cuda"' in dwight_config_text
+    assert 'merscope_bead_removal_device = "cpu"' not in dwight_config_text
+    assert "torch 2.14 / Triton 3.8" in dwight_config_text
+
+
+def test_dwight_build_exports_the_gpu_lock_path_without_taking_the_lock(
+    dwight_config_text: str,
+) -> None:
+    """The build holds no lock; the Python GPU phase takes it around its loop."""
+    block = _process_block(dwight_config_text, "BUILD_SPATIALDATA")
+
+    assert "maxForks = params.build_spatialdata_max_forks" in block
+    assert "beforeScript" in block
+    assert '"${params.gpu_process_lock_enabled}" == "true"' in block
+    assert 'export MERXEN_GPU_LOCK_FILE="${params.gpu_process_lock_file}"' in block
+    assert "flock" not in block
+    assert "exec 9" not in block
+
+
+def test_gpu_profile_passes_the_gpu_into_the_build_container() -> None:
+    """Without --nv the cuda device fails inside the container (loudly)."""
+    repo_root = Path(__file__).resolve().parents[2]
+    text = (repo_root / "workflows" / "nextflow.config").read_text()
+    gpu_profile = text[text.index("    gpu {") :]
+    gpu_profile = gpu_profile[: gpu_profile.index("// compute profiles")]
+
+    for process_name in (
+        "CELLPOSE_SEGMENT",
+        "ALIGN",
+        "CLUSTERING_SQUIDPY_COMPUTE",
+    ):
+        block = _process_block(gpu_profile, process_name)
+        options = next(
+            line for line in block.splitlines() if "containerOptions" in line
+        )
+        assert "--nv" in options
+
+
+def test_gpu_profile_adds_nv_to_the_build_only_for_the_gpu_device() -> None:
+    """The gpu profile keeps --nv off CPU-only containers, the default build too."""
+    repo_root = Path(__file__).resolve().parents[2]
+    text = (repo_root / "workflows" / "nextflow.config").read_text()
+    gpu_profile = text[text.index("    gpu {") :]
+    gpu_profile = gpu_profile[: gpu_profile.index("// compute profiles")]
+    block = _process_block(gpu_profile, "BUILD_SPATIALDATA")
+
+    assert "BUILD_SPATIALDATA|ALIGN" not in gpu_profile
+    assert "containerOptions = {" in block
+    assert "!= 'cpu'" in block
+    # Only the flat fill (CPU only) keeps the GPU out of the container.
+    assert "!flatFill" in block and "'flat'" in block
+    assert "? '--nv' : ''" in block
+    # Nothing else is added for the build: no clean environment, no new binds.
+    assert "-C" not in block and "--no-home" not in block
+
+
+@pytest.mark.nextflow
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
+def test_resolved_bead_removal_device_lock_export_and_gpu_container(
+    tmp_path: Path,
+) -> None:
+    """Nextflow resolves the cpu device, the lock export and the --nv option."""
+    workflow_dir = Path(__file__).resolve().parents[2] / "workflows"
+    dwight = _resolved_config(workflow_dir, profile="dwight", cwd=tmp_path)
+    gpu = _resolved_config(workflow_dir, profile="gpu", cwd=tmp_path)
+
+    assert dwight["params"]["merscope_bead_removal_device"] == "cuda"
+    assert gpu["params"]["merscope_bead_removal_device"] == "cpu"
+    script = dwight["process"]["withName:BUILD_SPATIALDATA"]["beforeScript"]
+    assert (
+        f'export MERXEN_GPU_LOCK_FILE="{dwight["params"]["gpu_process_lock_file"]}"'
+        in script
+    )
+    assert "flock" not in script
+    assert gpu["process"]["withName:ALIGN"]["containerOptions"].endswith("--nv")
+    # The build gets --nv (and a GPU queue) only for the GPU device: closures.
+    build = gpu["process"]["withName:BUILD_SPATIALDATA"]
+    assert "'--nv'" in build["containerOptions"]
+    assert "'gpu' : 'htc'" in build["queue"]
+    assert "--gpus-per-node=1" in build["clusterOptions"]
+
+
+_DIRECTIVE_PROBE = """
+process BUILD_SPATIALDATA {
+    input:
+    val x
+    output:
+    stdout
+    script:
+    \"\"\"
+    echo "RESULT queue=${task.queue} cluster=[${task.clusterOptions}] nv=\\
+${task.containerOptions.contains('--nv')}"
+    \"\"\"
+}
+workflow { BUILD_SPATIALDATA(1) | view }
+"""
+
+# The build asks for more CPUs and memory than a CI runner has, and the local
+# executor refuses such a task; the probe only reads the directives under test.
+_PROBE_RESOURCES = """
+process {
+    withName: "BUILD_SPATIALDATA" {
+        cpus = 1
+        memory = "1 GB"
+    }
+}
+"""
+
+
+@pytest.mark.nextflow
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
+@pytest.mark.parametrize(
+    ("extra_args", "expected"),
+    [
+        ([], "queue=htc cluster=[] nv=false"),
+        (["--merscope_bead_removal_device", "cpu"], "queue=htc cluster=[] nv=false"),
+        (
+            ["--merscope_bead_removal_device", "cuda"],
+            "queue=gpu cluster=[--gpus-per-node=1] nv=true",
+        ),
+        (["--merscope_bead_removal_device", "auto"], "queue=htc cluster=[] nv=true"),
+        # The default hybrid fill runs on the GPU, so it keeps the GPU request.
+        (
+            [
+                "--merscope_bead_removal_device",
+                "cuda",
+                "--merscope_bead_removal_fill",
+                "true",
+            ],
+            "queue=gpu cluster=[--gpus-per-node=1] nv=true",
+        ),
+        # The flat fill is CPU only: no GPU queue, no --nv.
+        (
+            [
+                "--merscope_bead_removal_device",
+                "cuda",
+                "--merscope_bead_removal_fill",
+                "true",
+                "--merscope_bead_removal_fill_mode",
+                "flat",
+            ],
+            "queue=htc cluster=[] nv=false",
+        ),
+        # Without the fill the mode does not matter.
+        (
+            [
+                "--merscope_bead_removal_device",
+                "cuda",
+                "--merscope_bead_removal_fill",
+                "false",
+                "--merscope_bead_removal_fill_mode",
+                "flat",
+            ],
+            "queue=gpu cluster=[--gpus-per-node=1] nv=true",
+        ),
+    ],
+)
+def test_build_gets_a_gpu_queue_and_nv_only_for_the_gpu_device(
+    tmp_path: Path, extra_args: list[str], expected: str
+) -> None:
+    """The default build stays a CPU task in the gpu profile; cuda asks for a GPU."""
+    nextflow = shutil.which("nextflow")
+    assert nextflow is not None
+    config = Path(__file__).resolve().parents[2] / "workflows" / "nextflow.config"
+    probe = tmp_path / "probe.nf"
+    probe.write_text(_DIRECTIVE_PROBE)
+    resources = tmp_path / "probe_resources.config"
+    resources.write_text(_PROBE_RESOURCES)
+    completed = subprocess.run(
+        [
+            nextflow,
+            "run",
+            str(probe),
+            "-ansi-log",
+            "false",
+            "-c",
+            str(config),
+            "-c",
+            str(resources),
+            "-profile",
+            "gpu",
+            "--outdir",
+            str(tmp_path / "out"),
+            *extra_args,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=120,
+        env={**os.environ, "NXF_OFFLINE": "true"},
+    )
+
+    assert completed.returncode == 0, (
+        completed.stdout[-3000:] + completed.stderr[-2000:]
+    )
+    assert f"RESULT {expected}" in completed.stdout, (
+        completed.stdout[-3000:] + completed.stderr[-2000:]
+    )
 
 
 @pytest.mark.nextflow

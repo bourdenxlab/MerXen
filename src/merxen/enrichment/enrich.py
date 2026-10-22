@@ -25,6 +25,11 @@ from tqdm.auto import tqdm
 from merxen.alignment.manifest import invalidate_alignment_materialization
 from merxen.config import EnrichmentConfig
 from merxen.enrichment.assignment import clone_table_for_region
+from merxen.io.bead_removal.provenance import (
+    IMAGE_PREPROCESSING_ATTR,
+    check_store_segmentation_sidecar,
+    read_image_preprocessing_attr,
+)
 from merxen.io.image_source import (
     MERSCOPE_ZPROJ_IMAGE_NAME,
     build_merscope_z_projection,
@@ -712,6 +717,58 @@ def _read_latest_zarr_for_enrichment(
         return sd.read_zarr(write_path)
 
 
+def _source_image_preprocessing(config: EnrichmentConfig) -> dict[str, Any] | None:
+    """Read the preprocessing record of the source SpatialData (``None`` if none)."""
+    original_path = Path(config.original_data_path)
+    if not original_path.exists():
+        return None
+    return read_image_preprocessing_attr(original_path)
+
+
+def _check_store_matches_source(
+    write_path: Path, config: EnrichmentConfig, dataset_name: str
+) -> None:
+    """Refuse to enrich a ProSeg store that was built from another image.
+
+    The segmentation step records which image the store's masks came from. A
+    store whose record disagrees with the source's (or has none while the
+    source is bead-corrected) holds cells from an image other than the one that
+    is quantified, and stamping the source's record onto it would hide that.
+
+    Raises:
+        ValueError: The store and the source disagree about bead removal.
+    """
+    check_store_segmentation_sidecar(
+        write_path,
+        _source_image_preprocessing(config),
+        dataset_name=dataset_name,
+    )
+
+
+def _copy_image_preprocessing_attr(dst: Any, config: EnrichmentConfig) -> bool:
+    """Carry the source build's preprocessing record onto the latest zarr root.
+
+    The latest zarr is rebuilt from the ProSeg output and so never inherits the
+    attributes of the SpatialData it was segmented from. Without the record,
+    downstream stages could not tell that PolyT/DAPI intensities came from a
+    bead-corrected projection. A source without a record (legacy build, raw
+    Xenium bundle) leaves the store untouched.
+
+    Args:
+        dst: The latest SpatialData store being enriched; its metadata is
+            persisted by the caller, which holds the store write lock.
+        config: Enrichment configuration.
+
+    Returns:
+        True when the attribute was added or changed.
+    """
+    recorded = _source_image_preprocessing(config)
+    if recorded is None or dst.attrs.get(IMAGE_PREPROCESSING_ATTR) == recorded:
+        return False
+    dst.attrs[IMAGE_PREPROCESSING_ATTR] = recorded
+    return True
+
+
 def enrich_single_latest(
     config: EnrichmentConfig,
     *,
@@ -798,12 +855,20 @@ def _enrich_store_in_place(
     dataset_name = str(config.dataset_name).upper()
     platform = config.platform.upper()
 
+    # Before anything is read or written, also when the store is skipped as
+    # already enriched.
+    _check_store_matches_source(write_path, config, dataset_name)
     log_status(f"[{dataset_name}] Loading latest zarr for enrichment: {write_path}")
     dst = _read_latest_zarr_for_enrichment(write_path, platform, dataset_name)
 
     already_enriched = _is_already_enriched(dst, platform)
     if already_enriched and (not force_rerun):
-        if _record_mask_model_identities(dst, config):
+        # The record is refreshed here too: a store enriched before the source
+        # was corrected (or by an older version) has none, and quantification
+        # reads it from this store.
+        changed = _record_mask_model_identities(dst, config)
+        changed = _copy_image_preprocessing_attr(dst, config) or changed
+        if changed:
             write_spatialdata_metadata(dst, write_attrs=True)
         log_status(f"[{dataset_name}] Already enriched; skipping.")
         del dst
@@ -845,6 +910,7 @@ def _enrich_store_in_place(
             dst,
             reason="incremental Cellpose nucleus shapes added",
         )
+        _copy_image_preprocessing_attr(dst, config)
         write_spatialdata_metadata(dst, write_attrs=True)
         del dst, nuclei_gdf
         force_release(note=f"after incremental nuclei enrichment ({dataset_name})")
@@ -1041,6 +1107,7 @@ def _enrich_store_in_place(
         dst,
         reason="native enrichment points, shapes, tables, or images replaced",
     )
+    _copy_image_preprocessing_attr(dst, config)
     write_spatialdata_metadata(dst, write_attrs=True)
     del dst, src, cp_gdf, nuclei_gdf
     force_release(note=f"after in-place enrichment ({dataset_name})")

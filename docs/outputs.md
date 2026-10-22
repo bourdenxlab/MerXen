@@ -89,13 +89,38 @@ Published with `mode: "symlink"` — the target of the symlink is the Nextflow
 work directory or the cached path. See
 [Caching and reuse](pipeline.md#caching-and-reuse).
 
+Every raw-TIFF MERSCOPE build also writes the root attribute
+`merxen_image_preprocessing` (z planes, stains, and the bead-removal identity,
+including its calibration summary). Enrichment copies it onto the latest zarr.
+
+When bead removal is on (`merscope_bead_removal`), the zarr also contains
+`bead_removal_qc/`, the report of the correction:
+
+| File | Contents |
+|------|----------|
+| `bead_removal_qc/summary.json` | Status (`pass` or `warn`), warnings, bead density, runtimes, classifier recall, the classifier rescue and PSF library spread. |
+| `bead_removal_qc/calibration.json`, `psf_library.npz`, `psf_montage.png` | Calibration decision, thresholds, stain responses and the measured PSF library. |
+| `bead_removal_qc/overview.png`, `bead_density.png`, `stretch_field.png`, `change_overview.png` | Overview maps: tiles and tissue, bead density, PSF stretch, and removed light. |
+| `bead_removal_qc/before_after*.png`, `before_after_crops.npz` | Raw and corrected crops at six locations. |
+| `bead_removal_qc/residual_profiles.json`, `.png` | Residual bead profile at planes `1`-`4`, on and off tissue. |
+| `bead_removal_qc/beads.csv.gz`, `chunks.csv` | Per-bead and per-chunk tables. |
+
+Reading guide: [stages/spatialdata-build.md](stages/spatialdata-build.md#the-qc-folder).
+Segmentation also writes `image_preprocessing.json` (cell masks) and
+`nuclei_image_preprocessing.json` (nuclei masks) next to the persistent masks on
+every run (the recorded identity is `null` with bead removal off), recording
+which image the masks were computed from; the cell-mask file also records the
+bead-mask veto that was applied (`bead_mask_veto`), and `bead_mask_veto.json`
+holds its parameters and counts. They are not published through `publishDir`; see
+[Segmentation](#segmentation).
+
 ### Latest SpatialData
 
 Path: `${outdir}/<pair_id>/<platform>/latest/`
 
 | File | Contents |
 |------|----------|
-| `latest_spatialdata.zarr` | Durable current SpatialData artifact. Segmentation writes the refined ProSeg result here, then enrichment updates it in place with additive shapes, images, and tables. This is the primary downstream input. |
+| `latest_spatialdata.zarr` | Durable current SpatialData artifact. Segmentation writes the refined ProSeg result here, then enrichment updates it in place with additive shapes, images, and tables. This is the primary downstream input. Its root also holds `segmentation_image_preprocessing.json`, the bead-removal identity of the image its prior masks (and so its cells) came from; it is checked before the store is reused or enriched. |
 
 #### SpatialData identifier contract
 

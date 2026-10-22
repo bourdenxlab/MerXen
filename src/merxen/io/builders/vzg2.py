@@ -226,6 +226,23 @@ def resolve_vzg2_path(input_path: Path) -> Path | None:
     return candidates[0] if candidates else None
 
 
+def refuse_bead_removal(build_config: MerscopeBuildConfig) -> None:
+    """Refuse a bead-removal request for a VZG2 archive.
+
+    Raises:
+        ValueError: If bead removal is enabled in ``build_config``.
+    """
+    bead_removal = build_config.bead_removal
+    if bead_removal is not None and bead_removal.enabled:
+        # A VZG2 archive holds one already-projected plane per stain, so there is
+        # no bead plane to detect on and no z stack to correct before projecting.
+        raise ValueError(
+            "merscope_bead_removal needs raw z-plane TIFFs "
+            "(images/mosaic_<stain>_z<N>.tif); VZG2 archives hold one projected "
+            "plane. Set merscope_bead_removal false for this sample."
+        )
+
+
 def write_vzg2_spatialdata(
     *,
     input_path: Path,
@@ -234,6 +251,7 @@ def write_vzg2_spatialdata(
     transform_path_override: Path | None = None,
 ) -> Path:
     """Build a MERSCOPE SpatialData zarr directly from a VZG2 archive."""
+    refuse_bead_removal(build_config)
     archive_path = resolve_vzg2_path(input_path)
     if archive_path is None:
         raise FileNotFoundError(f"No .vzg2 archive found at: {input_path}")

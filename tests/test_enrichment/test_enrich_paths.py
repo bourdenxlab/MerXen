@@ -13,11 +13,13 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pytest
+import spatialdata as sd
 import xarray as xr
 from shapely.geometry import box
+from spatialdata.models import Image2DModel
 
 import merxen.enrichment.enrich as enrich_module
-from merxen.config import EnrichmentConfig
+from merxen.config import EnrichmentConfig, MerscopeBeadRemovalConfig
 from merxen.enrichment.enrich import (
     CELLPOSE_NUCLEI_SHAPE_NAME,
     MERSCOPE_OLD_SHAPE_NAME,
@@ -28,12 +30,21 @@ from merxen.enrichment.enrich import (
     XENIUM_OLD_CELL_SHAPE_NAME,
     XENIUM_OLD_NUCLEUS_SHAPE_NAME,
     _cellpose_gdf_from_mask,
+    _copy_image_preprocessing_attr,
     _is_already_enriched,
     _read_latest_zarr_for_enrichment,
     _remove_partial_enrichment_artifacts_from_zarr_path,
     _remove_path,
     enrich_single_latest,
 )
+from merxen.io.bead_removal.provenance import (
+    IMAGE_PREPROCESSING_ATTR,
+    STORE_SIDECAR_NAME,
+    build_image_preprocessing_record,
+    read_image_preprocessing_attr,
+    write_store_segmentation_sidecar,
+)
+from merxen.io.spatialdata_io import write_spatialdata_metadata
 
 
 def test_cellpose_polygon_export_preserves_sparse_mask_labels(
@@ -262,6 +273,245 @@ def test_enrich_single_latest_writes_elements_in_place(
     assert ORIGINAL_TABLE_NAME in dst.tables
     assert not any("__enrich_tmp" in path.name for path in target.parent.iterdir())
     assert not any("pre_enrich_backup" in path.name for path in target.parent.iterdir())
+
+
+def _write_preprocessing_record(zarr_path: Path, record: dict[str, Any]) -> None:
+    """Give a stand-in source zarr the root record a raw-TIFF build writes."""
+    (zarr_path / "zarr.json").write_text(
+        json.dumps(
+            {
+                "zarr_format": 3,
+                "node_type": "group",
+                "attributes": {IMAGE_PREPROCESSING_ATTR: record},
+            }
+        )
+    )
+
+
+def _bead_record() -> dict[str, Any]:
+    return build_image_preprocessing_record(
+        z_layers=(1, 2, 3),
+        stainings=["PolyT", "DAPI"],
+        bead_removal_cfg=MerscopeBeadRemovalConfig(enabled=True),
+        calibration={"calibration_sha256": "cal-1"},
+    )
+
+
+def test_enrichment_copies_the_source_preprocessing_record(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The latest zarr inherits the record of the SpatialData it came from."""
+    stub = _stub_merscope_enrichment(monkeypatch, tmp_path)
+    stub.dst.attrs = {}
+    record = _bead_record()
+    _write_preprocessing_record(stub.original, record)
+    write_store_segmentation_sidecar(stub.target, record)
+
+    enrich_single_latest(
+        _stub_merscope_enrichment_config(
+            tmp_path, stub, persistent_output_path=stub.target
+        )
+    )
+
+    assert stub.dst.attrs[IMAGE_PREPROCESSING_ATTR] == record
+
+
+def test_enrichment_refuses_a_store_built_from_another_image(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A ProSeg store without (or with another) image record is not enriched.
+
+    Stamping the source's record onto it would hide that its cells were
+    segmented from an uncorrected image.
+    """
+    stub = _stub_merscope_enrichment(monkeypatch, tmp_path)
+    stub.dst.attrs = {}
+    record = _bead_record()
+    _write_preprocessing_record(stub.original, record)
+    config = _stub_merscope_enrichment_config(
+        tmp_path, stub, persistent_output_path=stub.target
+    )
+
+    # No record in the store: it predates the correction.
+    with pytest.raises(ValueError, match="predates the correction"):
+        enrich_single_latest(config)
+    # The record of an uncorrected image.
+    write_store_segmentation_sidecar(stub.target, None)
+    with pytest.raises(ValueError, match="--force_proseg_rerun"):
+        enrich_single_latest(config)
+
+    assert IMAGE_PREPROCESSING_ATTR not in stub.dst.attrs
+    assert not stub.dst.shapes.keys() - {"cell_boundaries"}
+
+
+def test_the_already_enriched_skip_checks_and_refreshes_the_record(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The skip path used to neither check the store nor stamp the record."""
+    stub = _stub_merscope_enrichment(monkeypatch, tmp_path)
+    stub.dst.attrs = {}
+    config = _stub_merscope_enrichment_config(
+        tmp_path, stub, persistent_output_path=stub.target
+    )
+    enrich_single_latest(config)  # a legacy source: enriched, no record
+    assert IMAGE_PREPROCESSING_ATTR not in stub.dst.attrs
+    written: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "merxen.enrichment.enrich.write_spatialdata_metadata",
+        lambda sdata_obj, **kwargs: written.append(dict(sdata_obj.attrs)),
+    )
+
+    # The source is corrected now but the enriched store came from the old image.
+    record = _bead_record()
+    _write_preprocessing_record(stub.original, record)
+    with pytest.raises(ValueError, match="predates the correction"):
+        enrich_single_latest(config)
+    assert written == []
+
+    # A store segmented from the corrected image is skipped and gets the record.
+    write_store_segmentation_sidecar(stub.target, record)
+    enrich_single_latest(config)
+
+    assert stub.dst.attrs[IMAGE_PREPROCESSING_ATTR] == record
+    assert written and written[-1][IMAGE_PREPROCESSING_ATTR] == record
+    # Unchanged on a second skip: nothing is rewritten.
+    count = len(written)
+    enrich_single_latest(config)
+    assert len(written) == count
+
+
+def test_the_store_sidecar_is_not_removed_by_enrichment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stub = _stub_merscope_enrichment(monkeypatch, tmp_path)
+    record = _bead_record()
+    _write_preprocessing_record(stub.original, record)
+    write_store_segmentation_sidecar(stub.target, record)
+
+    enrich_single_latest(
+        _stub_merscope_enrichment_config(
+            tmp_path, stub, persistent_output_path=stub.target
+        )
+    )
+
+    assert (stub.target / STORE_SIDECAR_NAME).is_file()
+
+
+def test_enrichment_without_a_source_record_adds_no_attribute(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A legacy source leaves the latest zarr's attributes as they were."""
+    stub = _stub_merscope_enrichment(monkeypatch, tmp_path)
+    stub.dst.attrs = {"other": 1}
+
+    enrich_single_latest(
+        _stub_merscope_enrichment_config(
+            tmp_path, stub, persistent_output_path=stub.target
+        )
+    )
+
+    assert stub.dst.attrs["other"] == 1
+    assert IMAGE_PREPROCESSING_ATTR not in stub.dst.attrs
+
+
+def test_incremental_nuclei_enrichment_also_copies_the_record(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The nuclei-only path persists the same attribute as a full enrichment."""
+    target = tmp_path / "results" / "latest" / "latest_spatialdata.zarr"
+    target.mkdir(parents=True)
+    latest = tmp_path / "latest_input.zarr"
+    latest.symlink_to(target, target_is_directory=True)
+    original = tmp_path / "source.zarr"
+    original.mkdir()
+    record = _bead_record()
+    _write_preprocessing_record(original, record)
+    write_store_segmentation_sidecar(target, record)
+    mask = tmp_path / "nuclei.npy"
+    np.save(mask, np.ones((4, 4), dtype=np.uint32))
+    dst = SimpleNamespace(
+        shapes={
+            MOSAIK_PROSEG_SHAPE_NAME: gpd.GeoDataFrame(
+                {"cell_id": ["1"], "geometry": [box(0.0, 0.0, 1.0, 1.0)]},
+                geometry="geometry",
+            ),
+            MOSAIK_CELLPOSE_SHAPE_NAME: object(),
+            MERSCOPE_OLD_SHAPE_NAME: object(),
+        },
+        images={MERSCOPE_ZPROJ_IMAGE_NAME: object()},
+        tables={ORIGINAL_TABLE_NAME: object()},
+        attrs={},
+    )
+    monkeypatch.setattr("merxen.enrichment.enrich.sd.read_zarr", lambda path: dst)
+    monkeypatch.setattr(
+        "merxen.enrichment.enrich._dataset_cellpose_transform",
+        lambda config: ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+    )
+    monkeypatch.setattr(
+        "merxen.enrichment.enrich._cellpose_gdf_from_mask",
+        lambda *args, **kwargs: gpd.GeoDataFrame(
+            {"cell_id": ["nucleus_1"], "geometry": [box(0.1, 0.1, 0.9, 0.9)]},
+            geometry="geometry",
+        ),
+    )
+    monkeypatch.setattr(
+        "merxen.enrichment.enrich.write_or_replace_element",
+        lambda sdata_obj, key, element_type, value, *, overwrite=True: (
+            getattr(sdata_obj, element_type).__setitem__(key, value) or True
+        ),
+    )
+
+    enrich_single_latest(
+        EnrichmentConfig(
+            dataset_name="P1_MERSCOPE",
+            platform="MERSCOPE",
+            latest_zarr_path=latest,
+            mask_path=mask,
+            nuclei_mask_path=mask,
+            original_data_path=original,
+            output_dir=tmp_path / "enrich_out",
+            persistent_output_path=target,
+        )
+    )
+
+    assert dst.attrs[IMAGE_PREPROCESSING_ATTR] == record
+
+
+def test_copied_record_is_persisted_in_the_zarr_root(tmp_path: Path) -> None:
+    """The attribute survives write_metadata on a real store."""
+    latest = tmp_path / "latest.zarr"
+    sd.SpatialData(
+        images={
+            "im": Image2DModel.parse(
+                np.zeros((1, 8, 8), dtype=np.uint16), dims=("c", "y", "x")
+            )
+        }
+    ).write(latest)
+    original = tmp_path / "source.zarr"
+    original.mkdir()
+    record = _bead_record()
+    _write_preprocessing_record(original, record)
+    config = EnrichmentConfig(
+        dataset_name="P1_MERSCOPE",
+        platform="MERSCOPE",
+        latest_zarr_path=latest,
+        mask_path=tmp_path / "m.npy",
+        nuclei_mask_path=tmp_path / "m.npy",
+        original_data_path=original,
+        output_dir=tmp_path / "out",
+    )
+
+    store = sd.read_zarr(latest)
+    _copy_image_preprocessing_attr(store, config)
+    write_spatialdata_metadata(store, write_attrs=True)
+
+    assert read_image_preprocessing_attr(latest) == record
 
 
 def test_enrichment_serializes_with_another_store_writer(

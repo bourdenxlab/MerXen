@@ -46,6 +46,9 @@ class SamplePair:
         spatial_gene_analysis_transcript_analysis_enabled: Optional row-level
             switch for the annotation-dependent transcript analysis within
             spatial-gene analysis.
+        merscope_bead_removal: Optional row-level switch for removing coverslip
+            fiducial beads from MERSCOPE PolyT/DAPI before the max projection.
+            Blank or omitted values inherit the Nextflow parameter.
         mender_enabled: Optional row-level MENDER stage switch.
         mender_segmentations: Optional independent MENDER segmentation selector.
         start_stage: Optional row-level first stage.
@@ -69,6 +72,7 @@ class SamplePair:
     merscope_voxel_layers: int = 7
     xenium_voxel_layers: int = 2
     xenium_spec_path: Path | None = None
+    merscope_bead_removal: bool | None = None
     merscope_cellpose_model: str | None = None
     xenium_cellpose_model: str | None = None
     analysis_mode: str | None = None
@@ -116,8 +120,8 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
         analysis_mode, enable_alignment, analysis_segmentation, start_stage,
         stop_stage, only_stage, spatial_gene_analysis_enabled,
         spatial_gene_analysis_transcript_analysis_enabled, mender_enabled,
-        mender_segmentations, merscope_cellpose_model, xenium_cellpose_model,
-        and all optional gaston_* row overrides
+        mender_segmentations, merscope_bead_removal, merscope_cellpose_model,
+        xenium_cellpose_model, and all optional gaston_* row overrides
 
     Backward-compatible aliases:
         merscope_zarr_path -> merscope_spatialdata_path
@@ -182,6 +186,9 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
                     row.get("xenium_voxel_layers"), default=2
                 ),
                 xenium_spec_path=_optional_path(row.get("xenium_spec_path")),
+                merscope_bead_removal=_parse_optional_bool(
+                    row.get("merscope_bead_removal")
+                ),
                 merscope_cellpose_model=_optional_string(
                     row.get("merscope_cellpose_model")
                 ),

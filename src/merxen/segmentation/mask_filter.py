@@ -182,6 +182,147 @@ def _chunk_rows_for_target(
     return max(1, min(int(height), target_bytes // row_bytes))
 
 
+def _write_relabelled_mask(
+    mask_mmap: np.ndarray,
+    label_map: np.ndarray,
+    output_path: Path,
+    *,
+    chunk_mb: int,
+    show_progress: bool,
+    progress_desc: str,
+) -> None:
+    """Stream ``label_map[mask]`` to a temporary ``.npy``, then replace the output.
+
+    The input memory map is released before the file is replaced, so the output may
+    be the input file.
+
+    Args:
+        mask_mmap: Two-dimensional integer label mask (memory map).
+        label_map: Lookup table from old to new label (0 drops a label); same
+            dtype as the mask.
+        output_path: Destination ``.npy`` (replaced atomically).
+        chunk_mb: Memory (MB) of one row chunk.
+        show_progress: Show a progress bar over the chunks.
+        progress_desc: Label of the progress bar.
+    """
+    dtype = np.dtype(mask_mmap.dtype)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = output_path.with_name(f".{output_path.name}.tmp.{os.getpid()}.npy")
+    if tmp_path.exists():
+        tmp_path.unlink()
+
+    try:
+        out_mem = np.lib.format.open_memmap(
+            str(tmp_path),
+            mode="w+",
+            dtype=dtype,
+            shape=mask_mmap.shape,
+        )
+        chunk_rows = _chunk_rows_for_target(mask_mmap.shape, dtype, chunk_mb)
+        row_starts: Iterable[int] = range(0, int(mask_mmap.shape[0]), chunk_rows)
+        if show_progress:
+            row_starts = tqdm(
+                row_starts,
+                total=int(np.ceil(mask_mmap.shape[0] / chunk_rows)),
+                desc=progress_desc,
+                unit="chunk",
+            )
+        for y0 in row_starts:
+            y1 = min(int(mask_mmap.shape[0]), int(y0) + chunk_rows)
+            out_mem[y0:y1] = label_map[mask_mmap[y0:y1]]
+        out_mem.flush()
+        del out_mem, mask_mmap
+        tmp_path.replace(output_path)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+
+
+def drop_labels_from_mask(
+    mask_path: Path | str,
+    drop_labels: Iterable[int],
+    *,
+    chunk_mb: int = 256,
+    show_progress: bool = False,
+) -> dict[str, Any]:
+    """Remove the given labels from a labeled mask, in place.
+
+    Like :func:`filter_labeled_mask_by_area`, the mask is streamed through a
+    temporary ``.npy`` in row chunks before it replaces the original, and the kept
+    labels are compactly relabeled from 1..N (in label order) so downstream
+    transcript seed IDs remain dense. Nothing is written when no present label is
+    dropped, so the file stays bit-identical.
+
+    Args:
+        mask_path: Two-dimensional integer label mask (``.npy``); rewritten.
+        drop_labels: Labels to set to background. Labels that are 0 or absent from
+            the mask are ignored.
+        chunk_mb: Memory (MB) of one row chunk.
+        show_progress: Show a progress bar over the chunks.
+
+    Returns:
+        Dict with ``n_labels`` (labels before), ``n_kept``, ``n_dropped`` and
+        ``written``.
+
+    Raises:
+        ValueError: The mask is not two-dimensional or has a negative label.
+        TypeError: The mask is not an integer array.
+        OverflowError: The kept labels do not fit the dtype of the mask.
+    """
+    mask_path = Path(mask_path)
+    mask_mmap = np.load(mask_path, mmap_mode="r")
+    if mask_mmap.ndim != 2:
+        raise ValueError(f"Expected a 2D mask array, got shape={mask_mmap.shape}")
+    if not np.issubdtype(mask_mmap.dtype, np.integer):
+        raise TypeError(f"Expected an integer labeled mask, got {mask_mmap.dtype}")
+    if np.issubdtype(mask_mmap.dtype, np.signedinteger) and int(mask_mmap.min()) < 0:
+        raise ValueError("Labeled masks must not contain negative labels")
+
+    max_label = int(mask_mmap.max())
+    # Counted in row chunks: a whole-mask bincount would copy a large mask to int64.
+    counts = np.zeros(max_label + 1, dtype=np.int64)
+    rows = _chunk_rows_for_target(mask_mmap.shape, mask_mmap.dtype, chunk_mb)
+    for y0 in range(0, int(mask_mmap.shape[0]), rows):
+        present = np.bincount(np.asarray(mask_mmap[y0 : y0 + rows]).reshape(-1))
+        counts[: present.size] += present
+    foreground = counts > 0
+    foreground[0] = False
+    dropped = np.zeros_like(foreground)
+    wanted = np.asarray(list(drop_labels), dtype=np.int64)
+    wanted = wanted[(wanted > 0) & (wanted <= max_label)]
+    dropped[wanted] = True
+    dropped &= foreground
+    keep = foreground & ~dropped
+    n_labels = int(np.count_nonzero(foreground))
+    n_kept = int(np.count_nonzero(keep))
+    summary = {
+        "n_labels": n_labels,
+        "n_kept": n_kept,
+        "n_dropped": n_labels - n_kept,
+        "written": False,
+    }
+    if n_kept == n_labels:
+        del mask_mmap
+        return summary
+
+    dtype = np.dtype(mask_mmap.dtype)
+    if n_kept > np.iinfo(dtype).max:
+        raise OverflowError(f"Cannot relabel {n_kept:,} masks into dtype {dtype}")
+    label_map = np.zeros(max_label + 1, dtype=dtype)
+    label_map[keep] = np.arange(1, n_kept + 1, dtype=dtype)
+    _write_relabelled_mask(
+        mask_mmap,
+        label_map,
+        mask_path,
+        chunk_mb=chunk_mb,
+        show_progress=show_progress,
+        progress_desc="drop-labels mask",
+    )
+    summary["written"] = True
+    return summary
+
+
 def filter_labeled_mask_by_area(
     mask_path: Path | str,
     *,
@@ -293,37 +434,14 @@ def filter_labeled_mask_by_area(
     label_map = np.zeros(max_label + 1, dtype=dtype)
     label_map[keep] = np.arange(1, n_kept + 1, dtype=dtype)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = output_path.with_name(f".{output_path.name}.tmp.{os.getpid()}.npy")
-    if tmp_path.exists():
-        tmp_path.unlink()
-
-    try:
-        out_mem = np.lib.format.open_memmap(
-            str(tmp_path),
-            mode="w+",
-            dtype=dtype,
-            shape=mask_mmap.shape,
-        )
-        chunk_rows = _chunk_rows_for_target(mask_mmap.shape, dtype, chunk_mb)
-        row_starts: Iterable[int] = range(0, int(mask_mmap.shape[0]), chunk_rows)
-        if show_progress:
-            row_starts = tqdm(
-                row_starts,
-                total=int(np.ceil(mask_mmap.shape[0] / chunk_rows)),
-                desc="area-filter mask",
-                unit="chunk",
-            )
-        for y0 in row_starts:
-            y1 = min(int(mask_mmap.shape[0]), int(y0) + chunk_rows)
-            out_mem[y0:y1] = label_map[mask_mmap[y0:y1]]
-        out_mem.flush()
-        del out_mem, mask_mmap
-        tmp_path.replace(output_path)
-    except Exception:
-        if tmp_path.exists():
-            tmp_path.unlink()
-        raise
+    _write_relabelled_mask(
+        mask_mmap,
+        label_map,
+        output_path,
+        chunk_mb=chunk_mb,
+        show_progress=show_progress,
+        progress_desc="area-filter mask",
+    )
 
     return {
         "mask_path": str(output_path),

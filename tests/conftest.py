@@ -13,6 +13,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import select
 import subprocess
 import sys
@@ -297,14 +298,13 @@ def store_lock_contention(
     """Check that a writer serializes with another process on the store lock.
 
     Every test that uses it is marked ``store_lock``
-    (:func:`pytest_collection_modifyitems`).
+    (:func:`_mark_store_lock_tests`).
     """
     return StoreLockContention(monkeypatch, tmp_path)
 
 
-@pytest.hookimpl(tryfirst=True)
-def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
-    """Mark store-lock contention tests before ``-m`` selects tests."""
+def _mark_store_lock_tests(items: list[pytest.Item]) -> None:
+    """Mark every test that uses :func:`store_lock_contention` ``store_lock``."""
     for item in items:
         if "store_lock_contention" in getattr(item, "fixturenames", ()):
             item.add_marker(pytest.mark.store_lock)
@@ -382,3 +382,46 @@ def _has_blocked_flock(lock_inode: int) -> bool:
         if fields[6].rsplit(":", 1)[-1] == str(lock_inode):
             return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# the "gpu" marker: tests that need a CUDA device
+_GPU_MARKER_DOC = (
+    "gpu: needs a CUDA device; skipped unless selected with -m gpu "
+    "(or MERXEN_RUN_GPU_TESTS=1) and run under the shared GPU lock of the host"
+)
+_GPU_SELECTED = re.compile(r"(?<!not )\bgpu\b")
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Register the ``gpu`` marker (pyproject.toml does not list it)."""
+    config.addinivalue_line("markers", _GPU_MARKER_DOC)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Mark store-lock tests; skip ``gpu`` tests unless they were asked for.
+
+    It runs before ``-m`` selects tests, so the selection sees ``store_lock``.
+
+    The GPU of the workstation is shared and guarded by a process lock, so a
+    plain ``pytest`` (the pre-push hook, CI) must not start CUDA work. Select
+    them with ``flock <gpu lock file> pytest -m gpu``. A test that is selected
+    but finds no CUDA device skips itself (see the ``cuda`` fixture of
+    ``tests/test_io/test_bead_removal_gpu.py``).
+    """
+    _mark_store_lock_tests(items)
+    expression = config.getoption("markexpr", default="") or ""
+    if (
+        _GPU_SELECTED.search(expression)
+        or os.environ.get("MERXEN_RUN_GPU_TESTS") == "1"
+    ):
+        return
+    skip = pytest.mark.skip(
+        reason="GPU tests are opt-in: run `pytest -m gpu` under the GPU lock"
+    )
+    for item in items:
+        if "gpu" in item.keywords:
+            item.add_marker(skip)

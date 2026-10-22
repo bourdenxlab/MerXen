@@ -2,19 +2,27 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import anndata as ad
+import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pytest
+import spatialdata as sd
 import xarray as xr
-from spatialdata.models import TableModel
+from shapely.geometry import box
+from spatialdata.models import Image2DModel, ShapesModel, TableModel
 
 import merxen.mask_image_quantification as quantification_module
-from merxen.config import MaskImageQuantificationConfig
+from merxen.config import MaskImageQuantificationConfig, MerscopeBeadRemovalConfig
+from merxen.io.bead_removal.provenance import (
+    IMAGE_PREPROCESSING_ATTR,
+    build_image_preprocessing_record,
+)
 from merxen.mask_image_quantification import (
     HYBRID_IMAGE_QUANTIFICATION_OBS_PREFIX,
     HYBRID_IMAGE_QUANTIFICATION_OBSM_KEY,
@@ -686,3 +694,204 @@ def test_aligned_counterpart_image_is_not_quantified(
     run_mask_image_quantification(cfg, force_rerun=True)
     table = sdata.tables[MASK_IMAGE_QUANTIFICATION_TABLE_KEY]
     assert set(table.var["image_key"]) == {"MERSCOPE_z_projection"}
+
+
+def _bead_preprocessing(*, enabled: bool = True) -> dict[str, Any]:
+    return build_image_preprocessing_record(
+        z_layers=(1, 2, 3),
+        stainings=["PolyT", "DAPI"],
+        bead_removal_cfg=MerscopeBeadRemovalConfig(enabled=True) if enabled else None,
+        calibration={"calibration_sha256": "cal-1"} if enabled else None,
+    )
+
+
+def _bead_sdata(record: dict[str, Any] | None) -> SimpleNamespace:
+    return SimpleNamespace(
+        images={"img": _image(np.ones((2, 2, 1)), ["DAPI"])},
+        tables={},
+        attrs={} if record is None else {IMAGE_PREPROCESSING_ATTR: record},
+    )
+
+
+def _bead_config(tmp_path: Path) -> MaskImageQuantificationConfig:
+    latest = tmp_path / "latest.zarr"
+    latest.mkdir(exist_ok=True)
+    mask_path = tmp_path / "mask.npy"
+    np.save(mask_path, np.array([[1, 1], [2, 0]], dtype=np.uint32))
+    return MaskImageQuantificationConfig(
+        dataset_name="P1_MERSCOPE",
+        platform="MERSCOPE",
+        latest_zarr_path=latest,
+        mask_path=mask_path,
+        output_dir=tmp_path / "quant_out",
+    )
+
+
+def test_bead_corrected_source_is_flagged_in_table_and_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A table from a bead-corrected projection says which stains were corrected."""
+    sdata = _bead_sdata(_bead_preprocessing())
+    _patch_in_memory_zarr(monkeypatch, sdata)
+
+    outputs = run_mask_image_quantification(_bead_config(tmp_path))
+
+    expected = {
+        "bead_corrected_stains": ["DAPI", "PolyT"],
+        "bead_removal_version": 1,
+        "bead_removal_fill": True,
+    }
+    info = sdata.tables[MASK_IMAGE_QUANTIFICATION_TABLE_KEY].uns[
+        "mask_image_quantification"
+    ]
+    assert {key: info[key] for key in expected} == expected
+    summary = json.loads(outputs["summary"].read_text())
+    assert summary["bead_removal"] == expected
+
+
+@pytest.mark.parametrize("record", [None, "off"])
+def test_source_without_bead_removal_leaves_the_table_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    record: str | None,
+) -> None:
+    """Default runs keep the table and summary exactly as before."""
+    source = None if record is None else _bead_preprocessing(enabled=False)
+    sdata = _bead_sdata(source)
+    _patch_in_memory_zarr(monkeypatch, sdata)
+
+    outputs = run_mask_image_quantification(_bead_config(tmp_path))
+
+    info = sdata.tables[MASK_IMAGE_QUANTIFICATION_TABLE_KEY].uns[
+        "mask_image_quantification"
+    ]
+    assert set(info) == {"table_key", "shape_key", "statistics"}
+    assert "bead_removal" not in json.loads(outputs["summary"].read_text())
+
+
+def test_table_without_the_flag_is_requantified_for_a_corrected_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A table written before the store recorded bead removal is not reused."""
+    sdata = _bead_sdata(None)
+    writes = _patch_in_memory_zarr(monkeypatch, sdata)
+    cfg = _bead_config(tmp_path)
+    run_mask_image_quantification(cfg)
+
+    sdata.attrs[IMAGE_PREPROCESSING_ATTR] = _bead_preprocessing()
+    run_mask_image_quantification(cfg)
+    run_mask_image_quantification(cfg)
+
+    assert writes == [MASK_IMAGE_QUANTIFICATION_TABLE_KEY] * 2
+    info = sdata.tables[MASK_IMAGE_QUANTIFICATION_TABLE_KEY].uns[
+        "mask_image_quantification"
+    ]
+    assert info["bead_corrected_stains"] == ["DAPI", "PolyT"]
+
+
+def test_flagged_table_is_requantified_when_bead_removal_is_off_again(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A stale flag must not describe a source that no longer had the correction."""
+    sdata = _bead_sdata(_bead_preprocessing())
+    writes = _patch_in_memory_zarr(monkeypatch, sdata)
+    cfg = _bead_config(tmp_path)
+    run_mask_image_quantification(cfg)
+
+    sdata.attrs[IMAGE_PREPROCESSING_ATTR] = _bead_preprocessing(enabled=False)
+    run_mask_image_quantification(cfg)
+
+    assert writes == [MASK_IMAGE_QUANTIFICATION_TABLE_KEY] * 2
+    info = sdata.tables[MASK_IMAGE_QUANTIFICATION_TABLE_KEY].uns[
+        "mask_image_quantification"
+    ]
+    assert "bead_corrected_stains" not in info
+
+
+def test_hybrid_join_carries_the_bead_removal_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The hybrid table's feature marker repeats the image table's flag."""
+    hybrid = ad.AnnData(
+        X=np.asarray([[5], [7]], dtype=np.int64),
+        obs=pd.DataFrame(
+            {
+                "instance_id": np.asarray([1, 2], dtype=np.uint64),
+                "region": pd.Categorical(["MOSAIK_proseg_hybrid"] * 2),
+            },
+            index=["1", "2"],
+        ),
+        var=pd.DataFrame(index=["GeneA"]),
+    )
+    hybrid.uns["spatialdata_attrs"] = {"instance_key": "instance_id"}
+    sdata = _bead_sdata(_bead_preprocessing())
+    sdata.tables["table_MOSAIK_proseg_hybrid"] = hybrid
+    _patch_in_memory_zarr(monkeypatch, sdata)
+
+    run_mask_image_quantification(_bead_config(tmp_path))
+
+    marker = sdata.tables["table_MOSAIK_proseg_hybrid"].uns[
+        HYBRID_IMAGE_QUANTIFICATION_OBSM_KEY
+    ]
+    assert marker["bead_corrected_stains"] == ["DAPI", "PolyT"]
+    assert marker["bead_removal_version"] == 1
+    assert marker["bead_removal_fill"] is True
+
+
+def test_bead_removal_metadata_roundtrips_through_a_real_table(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The flag survives the zarr write and lets a second run reuse the table."""
+    image = Image2DModel.parse(
+        np.ones((1, 2, 2), dtype=np.uint16), dims=("c", "y", "x"), c_coords=["DAPI"]
+    )
+    shapes = ShapesModel.parse(
+        gpd.GeoDataFrame({"geometry": [box(0, 0, 1, 1)]}, index=["1"])
+    )
+    store = tmp_path / "latest.zarr"
+    sd.SpatialData(images={"img": image}, shapes={"MOSAIK_cellpose": shapes}).write(
+        store
+    )
+    mask_path = tmp_path / "mask.npy"
+    np.save(mask_path, np.array([[1, 1], [1, 0]], dtype=np.uint32))
+    loaded = sd.read_zarr(store)
+    loaded.attrs[IMAGE_PREPROCESSING_ATTR] = _bead_preprocessing()
+    loaded.write_metadata(write_attrs=True)
+    cfg = MaskImageQuantificationConfig(
+        dataset_name="P1_MERSCOPE",
+        platform="MERSCOPE",
+        latest_zarr_path=store,
+        mask_path=mask_path,
+        output_dir=tmp_path / "quant_out",
+    )
+    writes: list[str] = []
+    real_write = quantification_module.write_or_replace_element
+
+    def _recording_write(sdata_obj: Any, key: str, *args: Any, **kwargs: Any) -> bool:
+        writes.append(key)
+        return bool(real_write(sdata_obj, key, *args, **kwargs))
+
+    monkeypatch.setattr(
+        quantification_module, "write_or_replace_element", _recording_write
+    )
+
+    run_mask_image_quantification(cfg)
+    run_mask_image_quantification(cfg)
+
+    info = (
+        sd.read_zarr(store)
+        .tables[MASK_IMAGE_QUANTIFICATION_TABLE_KEY]
+        .uns["mask_image_quantification"]
+    )
+    assert [str(stain) for stain in info["bead_corrected_stains"]] == [
+        "DAPI",
+        "PolyT",
+    ]
+    assert int(info["bead_removal_version"]) == 1
+    assert bool(info["bead_removal_fill"])
+    assert writes == [MASK_IMAGE_QUANTIFICATION_TABLE_KEY]

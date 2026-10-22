@@ -383,6 +383,34 @@ def buildConfigForPlatform(row, pairId, platform) {
         )) {
             merscopeOptions.allow_transform_override_mismatch = true
         }
+        // Only set when requested, so default build configs (and their task
+        // hashes) are unchanged.
+        if (merscopeBeadRemovalRequested(row, pairId, params)) {
+            def beadRemoval = [enabled: true]
+            // The fill settings are written as they resolve (the fill is on in
+            // hybrid mode by default), so the build JSON does not depend on the
+            // defaults of the Python config. They sit inside the bead block, so
+            // builds without bead removal keep their JSON and task hashes.
+            def beadFill = merscopeBeadRemovalFillRequested(params)
+            beadRemoval.fill = beadFill
+            if (beadFill) {
+                // The mode is only read with the fill, and the config refuses it
+                // without.
+                beadRemoval.fill_mode = merscopeBeadRemovalFillMode(params)
+            }
+            // Only set off the default, so CPU bead build configs (and their
+            // task hashes) keep their form. The flat fill has no GPU
+            // implementation and forces the CPU, so with it the device is not
+            // written (it would change the hash for nothing).
+            def beadDevice = merscopeBeadRemovalDevice(params)
+            def beadForcesCpu = (
+                beadFill && merscopeBeadRemovalFillMode(params) == "flat"
+            )
+            if (beadDevice != "cpu" && !beadForcesCpu) {
+                beadRemoval.device = beadDevice
+            }
+            merscopeOptions.bead_removal = beadRemoval
+        }
         return [
             dataset_name: "${pairId}_MERSCOPE",
             platform: "MERSCOPE",
@@ -415,7 +443,7 @@ def segmentMetaForPlatform(row, platform, params) {
     def modelSettings = CellposeSettings.settings(row, platform, params)
     def extra = modelSettings ? [cellpose_settings: modelSettings] : [:]
     if (platform == "MERSCOPE") {
-        return extra + [
+        def merscopeMeta = extra + [
             channels: parseChannels(row.merscope_channels, ["DAPI", "PolyT"]),
             image_prefix: chooseField(row, ["merscope_image_prefix"]) ?: null,
             z_range: parseRange(row.merscope_z_range, 0, 6),
@@ -427,6 +455,12 @@ def segmentMetaForPlatform(row, platform, params) {
                 params.default_merscope_voxel_layers
             ),
         ]
+        // Only for rows with bead removal on, so the segmentation config (and its
+        // task hash) of every other row is unchanged.
+        if (merscopeBeadRemovalRequested(row, row.pair_id?.toString()?.trim(), params)) {
+            merscopeMeta.bead_mask_veto = [enabled: merscopeBeadMaskVetoRequested(params)]
+        }
+        return merscopeMeta
     }
 
     if (platform == "XENIUM") {
@@ -1655,6 +1689,149 @@ def appendRegisterImagesPreflightChecks(errors, settings) {
     }
 }
 
+def appendMerscopeBeadRemovalPreflightChecks(errors, row, settings, params) {
+    // Rows without a MERSCOPE input never use the bead config.
+    if (!("MERSCOPE" in settings.active_platforms)) {
+        return
+    }
+    if (!settings.run_build) {
+        // The build is skipped: the published source zarr is used as it is.
+        appendPublishedBeadRemovalChecks(errors, row, settings, params)
+        return
+    }
+    if (!merscopeBeadRemovalRequested(row, settings.pair_id, params)) {
+        return
+    }
+    def beadDevice = merscopeBeadRemovalDevice(params)
+    if (!(beadDevice in ["auto", "cpu", "cuda"])) {
+        errors << (
+            "merscope_bead_removal_device must be auto, cpu or cuda; " +
+            "got '${params.merscope_bead_removal_device}'."
+        )
+    }
+    // The mode is read only with the fill (it is ignored when the fill is off),
+    // but a misspelt value is refused in any case.
+    def beadFillMode = merscopeBeadRemovalFillMode(params)
+    if (!(beadFillMode in ["flat", "hybrid"])) {
+        errors << (
+            "merscope_bead_removal_fill_mode must be flat or hybrid; " +
+            "got '${params.merscope_bead_removal_fill_mode}'."
+        )
+    }
+    def merscopeDir = chooseField(row, ["merscope_dir"])
+    // Without a raw folder nothing is projected (a cached zarr is reused), so
+    // the z range and the raw folder only matter when merscope_dir is set.
+    if (!merscopeDir) {
+        return
+    }
+    def zRange = parseRange(row.merscope_z_range, 0, 6)
+    if (zRange[0] < 1) {
+        errors << (
+            "merscope_bead_removal needs merscope_z_range to start at plane 1 " +
+            "or later (plane 0 is the bead plane and is read for detection " +
+            "only); got ${zRange[0]}-${zRange[1]}. Use for example 1-6."
+        )
+    }
+    // Plane 7 is allowed here only if the dataset has it. That is checked
+    // against the planes present by the calibration and the projection driver.
+    if (zRange[1] > 7) {
+        errors << (
+            "merscope_bead_removal supports planes up to 7; " +
+            "got ${zRange[0]}-${zRange[1]}."
+        )
+    }
+    if (!normalizedPath(merscopeDir).toFile().isDirectory()) {
+        errors << (
+            "merscope_bead_removal needs a raw MERSCOPE input folder with " +
+            "z-plane TIFFs (images/mosaic_<stain>_z<N>.tif); merscope_dir " +
+            "is not a directory: ${merscopeDir}"
+        )
+    }
+}
+
+def onOffText(flag) {
+    return flag ? "on" : "off"
+}
+
+def publishedBeadRemovalState(zarrPath) {
+    // Bead removal and fill switches recorded in the root attribute
+    // merxen_image_preprocessing of a built source zarr. A legacy zarr (no
+    // record) or unreadable metadata reads as "off", like in the Python guard.
+    def root = zarrPath.toFile()
+    def attrs = null
+    try {
+        def v3 = new File(root, "zarr.json")
+        def v2 = new File(root, ".zattrs")
+        if (v3.isFile()) {
+            attrs = new groovy.json.JsonSlurper().parseText(v3.text)?.attributes
+        } else if (v2.isFile()) {
+            attrs = new groovy.json.JsonSlurper().parseText(v2.text)
+        }
+    } catch (Exception ignored) {
+        attrs = null
+    }
+    def record = (attrs instanceof Map) ? attrs.get("merxen_image_preprocessing") : null
+    def bead = (record instanceof Map) ? record.get("bead_removal") : null
+    def fill = (bead instanceof Map) ? bead.get("fill") : null
+    return [
+        enabled: (bead instanceof Map) && bead.get("enabled") == true,
+        fill: (fill instanceof Map) && fill.get("enabled") == true,
+        // A fill block without a mode is a flat fill.
+        fillMode: ((fill instanceof Map) ? fill.get("mode") : null) ?: "flat",
+    ]
+}
+
+def appendPublishedBeadRemovalChecks(errors, row, settings, params) {
+    // With the build stage skipped (start/only stage past BUILD_SPATIALDATA) the
+    // published source zarr feeds the later stages without passing the Python
+    // reuse guard, so a mismatch with the requested bead removal is refused here:
+    // it must never run silently on the other image.
+    if (!settings.need_build_results) {
+        return
+    }
+    def sourceZarr = normalizedPath(
+        publishedDatasetPath(
+            params.outdir,
+            settings.pair_id,
+            "MERSCOPE",
+            "spatialdata/spatialdata_out/source_spatialdata.zarr",
+        )
+    )
+    if (!sourceZarr.toFile().isDirectory()) {
+        // Reported when the path is required (requireExistingPath).
+        return
+    }
+    def requested = merscopeBeadRemovalRequested(row, settings.pair_id, params)
+    def requestedFill = requested && merscopeBeadRemovalFillRequested(params)
+    def requestedFillMode = merscopeBeadRemovalFillMode(params)
+    def recorded = publishedBeadRemovalState(sourceZarr)
+    def remedy = (
+        "Run from the build stage with --force_spatialdata_build true (needs " +
+        "merscope_dir) or change merscope_bead_removal / " +
+        "merscope_bead_removal_fill / merscope_bead_removal_fill_mode to match " +
+        "the published zarr."
+    )
+    if (recorded.enabled != requested) {
+        errors << (
+            "The published MERSCOPE source zarr ${sourceZarr} was built with " +
+            "bead removal ${onOffText(recorded.enabled)} but ${onOffText(requested)} " +
+            "is requested. ${remedy}"
+        )
+    } else if (requested && recorded.fill != requestedFill) {
+        errors << (
+            "The published MERSCOPE source zarr ${sourceZarr} was built with " +
+            "the bead-removal fill ${onOffText(recorded.fill)} but " +
+            "${onOffText(requestedFill)} is requested. ${remedy}"
+        )
+    } else if (requestedFill && recorded.fillMode != requestedFillMode) {
+        errors << (
+            "The published MERSCOPE source zarr ${sourceZarr} was built with " +
+            "the bead-removal fill mode ${recorded.fillMode} but " +
+            "${requestedFillMode} is requested. ${remedy}"
+        )
+    }
+}
+
 def appendGastonPreflightChecks(errors, settings, params) {
     if (!(settings.run_gaston && settings.gaston_published_output_mode)) {
         return
@@ -1718,6 +1895,7 @@ def runPreflightChecks(row, settings, params) {
     appendCorticalDepthPreflightChecks(errors, row, settings, params)
     appendSpatialGeneTranscriptPreflightChecks(errors, row, settings, params)
     appendDistanceFromObjectPreflightChecks(errors, row, settings, params)
+    appendMerscopeBeadRemovalPreflightChecks(errors, row, settings, params)
     appendMecrPreflightChecks(errors, settings, params)
     appendMenderPreflightChecks(errors, settings, params)
     appendGastonPreflightChecks(errors, settings, params)
@@ -1761,6 +1939,50 @@ def boolOrDefault(rawValue, defaultValue, label) {
         "Unknown boolean value for ${label}: '${rawValue}'. " +
         "Use true or false."
     )
+}
+
+def merscopeBeadRemovalRequested(row, pairId, params) {
+    return boolOrDefault(
+        rowFieldOrDefault(row, "merscope_bead_removal", params.merscope_bead_removal),
+        false,
+        "merscope_bead_removal for ${pairId}"
+    )
+}
+
+def merscopeBeadRemovalDevice(params) {
+    def rawDevice = params.merscope_bead_removal_device
+    if (rawDevice == null || rawDevice.toString().trim().isEmpty()) {
+        return "cpu"
+    }
+    return rawDevice.toString().trim().toLowerCase()
+}
+
+// The residual-footprint fill is on by default (hybrid mode); false switches it
+// off for every sample that has bead removal on.
+def merscopeBeadRemovalFillRequested(params) {
+    return boolOrDefault(
+        params.merscope_bead_removal_fill,
+        true,
+        "merscope_bead_removal_fill"
+    )
+}
+
+// The veto of Cellpose cell masks on modelled beads is on by default; false
+// switches it off. It only reaches the config of samples with bead removal on.
+def merscopeBeadMaskVetoRequested(params) {
+    return boolOrDefault(
+        params.merscope_bead_mask_veto,
+        true,
+        "merscope_bead_mask_veto"
+    )
+}
+
+def merscopeBeadRemovalFillMode(params) {
+    def rawMode = params.merscope_bead_removal_fill_mode
+    if (rawMode == null || rawMode.toString().trim().isEmpty()) {
+        return "hybrid"
+    }
+    return rawMode.toString().trim().toLowerCase()
 }
 
 def rowSampleSettings(row, params) {
@@ -2514,10 +2736,26 @@ workflow {
     preflight_done_ch = sample_rows_raw_ch
         .map { _pairId, row, settings ->
             runPreflightChecks(row, settings, params)
-            true
+            ("MERSCOPE" in settings.active_platforms) &&
+                merscopeBeadRemovalRequested(row, settings.pair_id, params)
         }
         .collect()
-        .map { true }
+        .map { beadRequested ->
+            // The fill is a global switch and only acts on samples that have
+            // bead removal on, so say once that it is active, and only when
+            // some sample asks for bead removal.
+            if (
+                beadRequested.any { requested -> requested } &&
+                merscopeBeadRemovalFillRequested(params)
+            ) {
+                log.info(
+                    "merscope_bead_removal_fill is on (mode " +
+                    "${merscopeBeadRemovalFillMode(params)}): samples with bead " +
+                    "removal also get the residual-footprint fill"
+                )
+            }
+            true
+        }
 
     sample_rows_ch = sample_rows_raw_ch
         .combine(preflight_done_ch)
@@ -2728,6 +2966,11 @@ workflow {
                 if (meta.cellpose_settings.cellpose_model_policy) {
                     baseConfig.cellpose_model_policy = meta.cellpose_settings.cellpose_model_policy
                 }
+            }
+
+            // Only present for rows with bead removal on (see segmentMetaForPlatform).
+            if (meta.bead_mask_veto) {
+                baseConfig.bead_mask_veto = meta.bead_mask_veto
             }
 
             def segmentConfig = baseConfig + [

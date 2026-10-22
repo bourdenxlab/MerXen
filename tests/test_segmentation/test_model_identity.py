@@ -381,6 +381,104 @@ def test_tiled_inference_records_loaded_identity_with_aligned_probabilities(
 
 
 @pytest.mark.usefixtures("pinned_runtime")
+def test_before_overwrite_runs_after_the_refusals_and_before_the_old_mask_goes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hook lets a caller drop the records of the outputs that are replaced."""
+    weights = tmp_path / "cpsam_v2"
+    weights.write_bytes(b"bad weights")
+    monkeypatch.setattr(
+        cellpose,
+        "build_cellpose_model",
+        lambda config: SimpleNamespace(pretrained_model=weights),
+    )
+    mask = tmp_path / "cellpose_masks_tiled.npy"
+    mask.write_bytes(b"existing mask")
+    calls: list[bool] = []
+
+    def run() -> None:
+        cellpose.run_tiled_cellpose(
+            fetch_tile_fn=lambda *args: np.zeros((8, 8, 1), dtype=np.uint16),
+            height=8,
+            width=8,
+            dataset_name="synthetic",
+            output_mask_path=mask,
+            cellpose_config=CellposeConfig(),
+            mask_filter_config=MaskFilterConfig(),
+            tiling_config=TilingConfig(),
+            memory_config=MemoryConfig(),
+            before_overwrite=lambda: calls.append(mask.exists()),
+        )
+
+    # Refused (bad weights): the hook is not called.
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        run()
+    assert calls == []
+    assert mask.read_bytes() == b"existing mask"
+
+
+@pytest.mark.usefixtures("pinned_runtime")
+def test_before_overwrite_is_called_once_while_the_old_mask_still_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    weights = tmp_path / "candidate"
+    weights.write_bytes(b"synthetic weights")
+
+    class Model:
+        pretrained_model = weights
+
+        def eval(self, image: np.ndarray, **kwargs: object) -> tuple:
+            del kwargs
+            mask = np.zeros(image.shape[:2], dtype=np.uint32)
+            mask[2:6, 2:6] = 1
+            return mask, [None, None, np.full(mask.shape, 3.0)], None
+
+    monkeypatch.setattr(cellpose, "build_cellpose_model", lambda config: Model())
+    monkeypatch.setattr(cellpose, "choose_working_tile_size", lambda **kwargs: 8)
+    mask_path = tmp_path / "cellpose_masks_tiled.npy"
+    np.save(mask_path, np.ones((2, 2), dtype=np.uint32))
+    config = CellposeConfig(pretrained_model=str(weights))
+    expected = identify_cellpose_model(Model(), config)
+    expected.inference_context = CellposeInferenceContext(
+        platform="XENIUM",
+        species="human",
+        channels=["DAPI", "18S"],
+        image_key="morphology_focus",
+        pixel_size_um=(0.2125, 0.2125),
+        mask_filter=MaskFilterConfig(),
+        tiling=TilingConfig(),
+    )
+    seen: list[tuple[bool, tuple[int, ...]]] = []
+    # The model identity of the old mask must match for the run to be allowed.
+    write_model_identity(mask_path, expected)
+
+    cellpose.run_tiled_cellpose(
+        fetch_tile_fn=lambda *bbox: np.arange(64, dtype=np.uint16).reshape(8, 8, 1),
+        height=8,
+        width=8,
+        dataset_name="synthetic",
+        output_mask_path=mask_path,
+        cellpose_config=config,
+        expected_model_identity=expected,
+        mask_filter_config=MaskFilterConfig(),
+        tiling_config=TilingConfig(
+            tile_size_candidates=[8],
+            min_tile_size=8,
+            stitch_overlap_px=0,
+            filter_per_tile=False,
+            write_stitching_stats=False,
+        ),
+        memory_config=MemoryConfig(),
+        before_overwrite=lambda: seen.append(
+            (mask_path.exists(), np.load(mask_path).shape)
+        ),
+    )
+
+    assert seen == [(True, (2, 2))]
+    assert np.load(mask_path).shape == (8, 8)
+
+
+@pytest.mark.usefixtures("pinned_runtime")
 def test_bad_weights_leave_existing_outputs_untouched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
