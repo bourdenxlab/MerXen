@@ -148,18 +148,24 @@ def real_env_file() -> Path:
 
 _WriterResult = TypeVar("_WriterResult")
 
-# A holder or writer may import SpatialData from scratch, so every wait that
-# covers a start-up or a whole writer run is generous.
+# A writer may import SpatialData from scratch, so every wait that covers a
+# start-up or a whole writer run is generous.
 _STORE_LOCK_TIMEOUT_SECONDS = 180.0
 _STORE_LOCK_POLL_SECONDS = 0.05
 
-# Holds the store write lock through the path in argv[1] until stdin closes or
-# a line arrives, in its own process (as a second Nextflow task would).
+# Holds the lock file in argv[1] until stdin closes or a line arrives, in its
+# own process (as a second Nextflow task would). It takes the same exclusive
+# flock as spatialdata_write_lock but imports only the standard library:
+# importing SpatialData would cost about 2 s per test. The lock file is derived
+# by spatialdata_write_lock_path from the holder's own staging, and
+# tests/test_io/test_spatialdata_write_lock.py covers two real
+# spatialdata_write_lock holders in separate processes.
 _STORE_LOCK_HOLDER = """
+import fcntl
 import sys
-from merxen.io.spatialdata_io import spatialdata_write_lock
 
-with spatialdata_write_lock(sys.argv[1]):
+with open(sys.argv[1], "a", encoding="utf-8") as handle:
+    fcntl.flock(handle, fcntl.LOCK_EX)
     print("held", flush=True)
     sys.stdin.readline()
 """
@@ -241,12 +247,12 @@ class StoreLockContention:
                 lambda label: persists_seen.append((label, _lock_is_held(holder_path))),
             )
 
+        holder_lock = spatialdata_write_lock_path(holder_path)
         holder = subprocess.Popen(
-            [sys.executable, "-c", _STORE_LOCK_HOLDER, str(holder_path)],
+            [sys.executable, "-I", "-c", _STORE_LOCK_HOLDER, str(holder_lock)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,
-            env={**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, sys.path))},
         )
         outcome: dict[str, Any] = {}
         writer = threading.Thread(
@@ -256,7 +262,7 @@ class StoreLockContention:
         )
         try:
             _wait_for_holder(holder)
-            lock_inode = spatialdata_write_lock_path(holder_path).stat().st_ino
+            lock_inode = holder_lock.stat().st_ino
             writer.start()
             _wait_until_blocked_on(lock_inode, writer, outcome)
             assert reads_seen == [], "the writer read the store before the lock"
