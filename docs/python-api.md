@@ -103,9 +103,11 @@ never the correction code, and the package imports no GPU code. Configured by `M
   `check_bead_removal_reuse` (the cache guard), and the segmentation sidecar
   helpers.
 - `fill` — the bounded fill (`FillParams`, `apply_bounded_fill`), in hybrid (the
-  config default) or flat mode, reached through the config's `fill` and
-  `fill_mode`. The hybrid mode has a device port in `gpu/fill.py`, called by the
-  GPU `correct_window`.
+  config default: `eps` 1.0, dilation 3, no texture gate) or flat mode (`eps` 0.3,
+  dilation 2), reached through the config's `fill` and `fill_mode`. `eps` and
+  `dilation` default per mode, and `texture_gate=True` restores the earlier
+  texture-gated hybrid behaviour. The hybrid mode has a device port in
+  `gpu/fill.py`, called by the GPU `correct_window`.
 
 ### `io.spatialdata_io` — [spatialdata_io.py](../src/merxen/io/spatialdata_io.py)
 - `write_spatialdata_zarr(sdata, path, ...)`.
@@ -158,6 +160,14 @@ never the correction code, and the package imports no GPU code. Configured by `M
 - `run_segmentation_pipeline(config, *, force_rerun)` — full stage entry point.
 - `run_cellpose_nuclei_segmentation(config, *, force_rerun)` — reusable
   DAPI-only nuclei entry point.
+
+### `segmentation.bead_mask_veto` — [bead_mask_veto.py](../src/merxen/segmentation/bead_mask_veto.py)
+- `prepare_bead_mask_veto(config, *, source, recorded, sdata, shape)` — resolve
+  the bead table and the DAPI reader, or `None` when the veto does nothing.
+- `apply_bead_mask_veto(mask_path, veto, ...)` — drop the cell masks that sit on a
+  modelled bead and have no DAPI nucleus, and write `bead_mask_veto.json`.
+- `bead_mask_veto_identity(config, source, recorded)` — the parameters recorded in
+  the mask sidecar and compared on reuse.
 
 ### `segmentation.cellpose` — [cellpose.py](../src/merxen/segmentation/cellpose.py)
 - `build_cellpose_model(config)`.

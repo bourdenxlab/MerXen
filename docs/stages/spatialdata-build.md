@@ -283,9 +283,10 @@ subtraction leaves in the reference stain. **It is on by default, in hybrid mode
 `--merscope_bead_removal_fill false` switches it off. It is one pipeline param
 with no samplesheet column, applies only to samples that have bead removal on,
 and changes the cache identity (see below). It is bounded and one-sided: the
-result is never brighter than the subtraction and never more than `eps` (0.3) x
-the subtracted model light lower, so it can only remove what the bead model could
-have missed. The fill is never used to judge whether a sample passes. The QC warns
+result is never brighter than the subtraction and never more than `eps` x the
+subtracted model light lower (`eps` is 1.0 in hybrid mode and 0.3 in flat mode),
+so it can only remove what the bead model could have missed. The fill is never
+used to judge whether a sample passes. The QC warns
 `fill_guard` when more than half of the fill's candidate pixels are skipped as a
 densely coated area (flat mode only). `summary.json["fill"]["counters"]` are pixel
 totals summed over the chunks; each counts the whole window of its chunk
@@ -298,22 +299,37 @@ like the switch itself (see below).
 `--merscope_bead_removal_fill_mode` is `hybrid` (default) or `flat`; it is read
 only with the fill on and ignored with `--merscope_bead_removal_fill false`.
 
-**`hybrid`** fills wherever the bead model's own uncertainty (`eps` x the
-subtracted model light) exceeds the local texture sd of the corrected plane,
-**also in tissue**, so it can dim tissue puncta close to a bead. There is no
-flatness gate, no noise deadband, no bright-source restriction and no
-dense-coating skip. The texture sd is the robust sd of the high-passed plane in
-32 px blocks aligned to the absolute mosaic grid, so it does not depend on the
-chunk cut. It runs on the CPU and, with `merscope_bead_removal_device` `cuda` or
-`auto`, on the GPU (a device port of the same operations: on identical input it
-agrees with the CPU fill to float32 rounding; end to end, on two production
-windows (4096 px core, 256 px halo, planes 1-6), it differs from the CPU result by
-more than 10 counts on 0.001 % and 0.08 % of the pixels and the total removed
-light agrees to within 0.03 %; two GPU runs are bitwise identical). On the CPU
-it is the expensive mode, because it processes every candidate pixel including
-those in tissue: a 2.6 Gpx mosaic took about 2.1 h for the bead step on the CPU,
-against about 31 min on the GPU without the fill. On the GPU it adds about 0.5 s
-(10-15 %) to a window and about 0.7 GB of peak device memory.
+**`hybrid`** is the strong, mask-oriented fill: it suppresses bead light as far
+as the model allows, **also in tissue**, so it can dim tissue puncta close to a
+bead, and it favours clean masks over faithful PolyT and DAPI pixel values (the
+pixel values are not used for any analysis; the masks are). A pixel is a candidate
+where the bead model's own uncertainty, `eps` x the subtracted model light, exceeds
+the noise floor (the dataset-global pixel noise of the plane). The defaults are
+`eps` 1.0 on every plane (the removal bound is the whole model light) and a
+mask dilation of 3 px, and **no texture gate**: the texture map is not computed.
+There is no flatness gate, no noise deadband, no bright-source restriction and no
+dense-coating skip. In a quick test on 10 crops, compared with the earlier hybrid
+settings, real cells in tissue were kept and the bead "cells" dropped by about
+25 %; the Cellpose masks that remain on modelled beads are dropped by the
+[bead-mask veto](segmentation.md#bead-mask-veto). The earlier behaviour stays
+reachable in Python (`FillParams(mode="hybrid", eps=(0.3,) * 8, dilation=2,
+texture_gate=True)`): the texture gate additionally requires `eps` x the model
+light to exceed the local texture sd of the corrected plane, the robust sd of the
+high-passed plane in 32 px blocks aligned to the absolute mosaic grid. Without the
+texture map the support of the fill is the 144 px of the coarse path (232 px with
+it), well inside the 256 px halo, so the result does not depend on the chunk cut.
+It runs on the CPU and, with `merscope_bead_removal_device` `cuda` or `auto`, on
+the GPU (a device port of the same operations: on identical input it agrees with
+the CPU fill to float32 rounding, for the new defaults and for the texture-gated
+settings; end to end, on a synthetic window, at most 0.5 % of the pixels differ by
+more than 10 counts and the removed light agrees to 1 %; two GPU runs are bitwise
+identical). Timings were measured with the earlier, texture-gated settings, which
+process fewer candidate pixels but also compute the texture map, and have not been
+repeated for the new defaults: on the CPU it is the expensive mode, because it
+processes every candidate pixel including those in tissue (a 2.6 Gpx mosaic took
+about 2.1 h for the bead step on the CPU, against about 31 min on the GPU without
+the fill); on the GPU it added about 0.5 s (10-15 %) to a window and about 0.7 GB
+of peak device memory.
 
 **`flat`** acts on flat background only: where the surroundings are not flat
 (tissue, and in practice nearly every tissue window) it does nothing, and it
@@ -324,7 +340,11 @@ about 1.7 GB more peak memory per worker.
 
 The mode is recorded in the `mode` key of the fill block of the provenance record
 (absent means `flat`), is part of the fill parameter hash, and changing it makes a
-cached zarr unusable (see below).
+cached zarr unusable (see below). The hash covers every parameter of the fill
+(with `eps` and `dilation` resolved), so a zarr built with the earlier hybrid
+settings has another fill hash: a default request reuses it with a warning that
+names the difference ("fill parameter hash"), and a rebuild is needed to get the
+new fill. The hash of a flat fill is unchanged.
 
 ### Caching and how to rebuild
 
@@ -376,7 +396,11 @@ To change the setting of a sample that has a cached zarr:
    flag). The persistent ProSeg latest zarr is checked the same way (its root
    holds `segmentation_image_preprocessing.json`): it is not reused for masks of
    another image, and `--force_proseg_rerun true` rebuilds it from the new
-   masks ([segmentation.md](segmentation.md)).
+   masks ([segmentation.md](segmentation.md)). The sidecar of the cell masks
+   also records the [bead-mask veto](segmentation.md#bead-mask-veto) that was
+   applied to them (`bead_mask_veto`, absent: none), and masks computed with
+   another veto setting, or from before the veto existed, are refused with the
+   same remedy.
 4. Enrichment refuses a latest zarr whose record differs from the source's, then
    copies `merxen_image_preprocessing` onto it (also when the store is already
    enriched), and mask image quantification records it in its table (see

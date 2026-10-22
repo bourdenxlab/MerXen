@@ -109,8 +109,10 @@ Reading guide: [stages/spatialdata-build.md](stages/spatialdata-build.md#the-qc-
 Segmentation also writes `image_preprocessing.json` (cell masks) and
 `nuclei_image_preprocessing.json` (nuclei masks) next to the persistent masks on
 every run (the recorded identity is `null` with bead removal off), recording
-which image the masks were computed from. They are not published through
-`publishDir`; see [Segmentation](#segmentation).
+which image the masks were computed from; the cell-mask file also records the
+bead-mask veto that was applied (`bead_mask_veto`), and `bead_mask_veto.json`
+holds its parameters and counts. They are not published through `publishDir`; see
+[Segmentation](#segmentation).
 
 ### Latest SpatialData
 
