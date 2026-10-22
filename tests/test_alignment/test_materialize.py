@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+import shutil
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -370,7 +371,47 @@ def test_point_validation_ignores_unordered_categorical_dictionary_order() -> No
         _assert_preserved_point_frame(native, aligned)
 
 
-def test_materializer_reconciles_vectors_tables_labels_image_and_manifest(
+@dataclass(frozen=True)
+class _MaterializedPair:
+    merscope_path: Path
+    xenium_path: Path
+    output_dir: Path
+    config: AlignmentConfig
+
+
+@pytest.fixture(scope="module")
+def materialized_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A pair materialized once per module (so once per xdist worker)."""
+    root = tmp_path_factory.mktemp("materialized_template")
+    merscope_path, xenium_path, output_dir = _write_materialization_pair(root)
+    first = materialize_alignment(
+        _materialization_config(merscope_path, xenium_path, output_dir)
+    )
+    assert first["status"] == "complete"
+    return root
+
+
+@pytest.fixture
+def materialized_pair(materialized_template: Path, tmp_path: Path) -> _MaterializedPair:
+    """A private copy of the materialized pair for one test to change.
+
+    The copy keeps file mtimes and the manifest records store-relative paths,
+    so the copy is as current as the template.
+    """
+    root = tmp_path / "pair"
+    shutil.copytree(materialized_template, root, symlinks=True)
+    merscope_path = root / "merscope.zarr"
+    xenium_path = root / "xenium.zarr"
+    output_dir = root / "align_out"
+    return _MaterializedPair(
+        merscope_path=merscope_path,
+        xenium_path=xenium_path,
+        output_dir=output_dir,
+        config=_materialization_config(merscope_path, xenium_path, output_dir),
+    )
+
+
+def test_materializer_refuses_to_write_when_reconciliation_is_disabled(
     tmp_path: Path,
 ) -> None:
     merscope_path, xenium_path, output_dir = _write_materialization_pair(tmp_path)
@@ -387,23 +428,16 @@ def test_materializer_reconciles_vectors_tables_labels_image_and_manifest(
         materialize_alignment(no_reconcile)
     assert ALIGNMENT_MANIFEST_ATTR not in sd.read_zarr(merscope_path).attrs
 
-    first = materialize_alignment(config)
-    (output_dir / "transform_chain.json").unlink()
-    second = materialize_alignment(config)
 
-    assert first["status"] == "complete"
-    assert second["status"] == "current"
-    interrupted = sd.read_zarr(merscope_path)
-    interrupted_manifest = dict(interrupted.attrs[ALIGNMENT_MANIFEST_ATTR])
-    interrupted_manifest["complete"] = False
-    interrupted.attrs[ALIGNMENT_MANIFEST_ATTR] = interrupted_manifest
-    write_spatialdata_metadata(interrupted, write_attrs=True)
-    recovered_complete = materialize_alignment(config)
-    assert recovered_complete["status"] == "complete"
-    assert recovered_complete["recovered_incomplete_manifest"] is True
+def test_materializer_writes_aligned_vectors_tables_labels_image_and_manifest(
+    materialized_pair: _MaterializedPair,
+) -> None:
+    pair = materialized_pair
+    (pair.output_dir / "transform_chain.json").unlink()
+    assert materialize_alignment(pair.config)["status"] == "current"
 
-    moving = sd.read_zarr(merscope_path)
-    fixed = sd.read_zarr(xenium_path)
+    moving = sd.read_zarr(pair.merscope_path)
+    fixed = sd.read_zarr(pair.xenium_path)
     manifest = moving.attrs[ALIGNMENT_MANIFEST_ATTR]
     assert manifest["version"] == 2
     assert manifest["complete"] is True
@@ -459,6 +493,30 @@ def test_materializer_reconciles_vectors_tables_labels_image_and_manifest(
         to_coordinate_system="merxen_xenium",
     )
 
+
+def test_materializer_completes_an_interrupted_manifest(
+    materialized_pair: _MaterializedPair,
+) -> None:
+    pair = materialized_pair
+    interrupted = sd.read_zarr(pair.merscope_path)
+    interrupted_manifest = dict(interrupted.attrs[ALIGNMENT_MANIFEST_ATTR])
+    interrupted_manifest["complete"] = False
+    interrupted.attrs[ALIGNMENT_MANIFEST_ATTR] = interrupted_manifest
+    write_spatialdata_metadata(interrupted, write_attrs=True)
+
+    recovered_complete = materialize_alignment(pair.config)
+
+    assert recovered_complete["status"] == "complete"
+    assert recovered_complete["recovered_incomplete_manifest"] is True
+    manifest = sd.read_zarr(pair.merscope_path).attrs[ALIGNMENT_MANIFEST_ATTR]
+    assert manifest["complete"] is True
+
+
+def test_materializer_reconciles_refreshed_native_transcripts(
+    materialized_pair: _MaterializedPair,
+) -> None:
+    pair = materialized_pair
+    moving = sd.read_zarr(pair.merscope_path)
     assert invalidate_alignment_materialization(moving, reason="hybrid columns added")
     assert moving.attrs[ALIGNMENT_MANIFEST_ATTR]["complete"] is False
     native_frame = moving.points["transcripts"].compute()
@@ -483,9 +541,10 @@ def test_materializer_reconciles_vectors_tables_labels_image_and_manifest(
     )
     write_spatialdata_metadata(moving, write_attrs=True)
 
-    reconciled = materialize_alignment(config)
+    reconciled = materialize_alignment(pair.config)
+
     assert reconciled["status"] == "complete"
-    refreshed = sd.read_zarr(merscope_path)
+    refreshed = sd.read_zarr(pair.merscope_path)
     aligned_frame = refreshed.points["transcripts_aligned_nonrigid"].compute()
     pd.testing.assert_series_equal(
         native_frame["hybrid_assignment"].reset_index(drop=True),
@@ -493,11 +552,19 @@ def test_materializer_reconciles_vectors_tables_labels_image_and_manifest(
         check_names=False,
     )
 
-    del refreshed.labels["cells_aligned_nonrigid_labels"]
-    refreshed.delete_element_from_disk("cells_aligned_nonrigid_labels")
-    recovered = materialize_alignment(config)
+
+def test_materializer_rebuilds_a_deleted_aligned_label(
+    materialized_pair: _MaterializedPair,
+) -> None:
+    pair = materialized_pair
+    moving = sd.read_zarr(pair.merscope_path)
+    del moving.labels["cells_aligned_nonrigid_labels"]
+    moving.delete_element_from_disk("cells_aligned_nonrigid_labels")
+
+    recovered = materialize_alignment(pair.config)
+
     assert recovered["status"] == "complete"
-    assert "cells_aligned_nonrigid_labels" in sd.read_zarr(merscope_path).labels
+    assert "cells_aligned_nonrigid_labels" in sd.read_zarr(pair.merscope_path).labels
 
 
 def _write_materialization_pair(tmp_path: Path) -> tuple[Path, Path, Path]:
