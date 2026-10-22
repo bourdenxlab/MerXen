@@ -228,6 +228,17 @@ ${task.containerOptions.contains('--nv')}"
 workflow { BUILD_SPATIALDATA(1) | view }
 """
 
+# The build asks for more CPUs and memory than a CI runner has, and the local
+# executor refuses such a task; the probe only reads the directives under test.
+_PROBE_RESOURCES = """
+process {
+    withName: "BUILD_SPATIALDATA" {
+        cpus = 1
+        memory = "1 GB"
+    }
+}
+"""
+
 
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
 @pytest.mark.parametrize(
@@ -285,20 +296,26 @@ def test_build_gets_a_gpu_queue_and_nv_only_for_the_gpu_device(
     config = Path(__file__).resolve().parents[2] / "workflows" / "nextflow.config"
     probe = tmp_path / "probe.nf"
     probe.write_text(_DIRECTIVE_PROBE)
+    resources = tmp_path / "probe_resources.config"
+    resources.write_text(_PROBE_RESOURCES)
     completed = subprocess.run(
         [
             nextflow,
             "run",
             str(probe),
+            "-ansi-log",
+            "false",
             "-c",
             str(config),
+            "-c",
+            str(resources),
             "-profile",
             "gpu",
             "--outdir",
             str(tmp_path / "out"),
             *extra_args,
         ],
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
         cwd=tmp_path,
@@ -306,7 +323,12 @@ def test_build_gets_a_gpu_queue_and_nv_only_for_the_gpu_device(
         env={**os.environ, "NXF_OFFLINE": "true"},
     )
 
-    assert f"RESULT {expected}" in completed.stdout
+    assert completed.returncode == 0, (
+        completed.stdout[-3000:] + completed.stderr[-2000:]
+    )
+    assert f"RESULT {expected}" in completed.stdout, (
+        completed.stdout[-3000:] + completed.stderr[-2000:]
+    )
 
 
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
