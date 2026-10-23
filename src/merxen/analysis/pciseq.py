@@ -157,6 +157,11 @@ def _resolve_native_keys(
 
 
 def _affine(element: Any, coordinate_system: str, dimensions: int) -> np.ndarray:
+    # Native MerXen coordinates are microns even when vendor shape metadata
+    # maps them into an image pixel grid. Selecting intrinsic is explicit.
+    if coordinate_system == "intrinsic":
+        return np.eye(dimensions + 1)
+
     from spatialdata.transformations import get_transformation
 
     axes = ("x", "y", "z")[:dimensions]

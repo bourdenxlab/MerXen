@@ -192,6 +192,61 @@ def test_separate_affines_align_points_and_shapes(tmp_path: Path) -> None:
     assert pixels[int(inputs.spots.y.iloc[1]), int(inputs.spots.x.iloc[1])] == 2
 
 
+@pytest.mark.parametrize("platform,scale", [("XENIUM", 4.7), ("MERSCOPE", 9.25)])
+def test_intrinsic_vendor_boundaries_keep_native_micron_spot_alignment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    scale: float,
+) -> None:
+    """Legacy image-grid metadata must not rescale explicitly native inputs."""
+    import spatialdata as sd
+
+    vendor_affine = np.diag([scale, scale, 1.0])
+    data = _data(
+        shape_affine=Affine(
+            vendor_affine, input_axes=("x", "y"), output_axes=("x", "y")
+        )
+    )
+    shape_key = f"{platform.lower()}_cell_boundaries"
+    data.shapes[shape_key] = data.shapes.pop("shapes_original")
+    data.attrs[MERXEN_SCHEMA_ATTR]["segmentations"]["original"]["shape"] = shape_key
+    config = _config(
+        tmp_path,
+        platform=platform,
+        segmentation="original_seg",
+        coordinate_system="intrinsic",
+    )
+    _source(config.source_h5ad, region=shape_key)
+    _reference().to_csv(config.reference_path)
+    monkeypatch.setattr(sd, "read_zarr", lambda path: data)
+    prepared = tmp_path / "prepared"
+    prepare_pciseq(config, prepared)
+
+    manifest = json.loads((prepared / "manifest.json").read_text())
+    assert manifest["coordinate_system"] == "intrinsic"
+    np.testing.assert_array_equal(manifest["point_affine"], np.eye(3))
+    np.testing.assert_array_equal(manifest["shape_affine"], np.eye(3))
+    spots = pd.read_csv(prepared / "spots.csv")
+    pixels = sparse.load_npz(prepared / "masks" / "plane_0000.npz").tocsr()
+    assert pixels[int(spots.y.iloc[0]), int(spots.x.iloc[0])] == 1
+    assert pixels[int(spots.y.iloc[1]), int(spots.x.iloc[1])] == 2
+
+    transformed = prepare_pciseq_inputs(
+        data,
+        config=config.model_copy(update={"coordinate_system": "global"}),
+        reference=_reference(),
+    )
+    np.testing.assert_array_equal(transformed.metadata["shape_affine"], vendor_affine)
+    global_pixels = transformed.planes[0].tocsr()
+    assert (
+        global_pixels[
+            int(transformed.spots.y.iloc[1]), int(transformed.spots.x.iloc[1])
+        ]
+        == 1
+    )
+
+
 def test_polygon_holes_and_shared_edges_are_preserved(tmp_path: Path) -> None:
     first = Polygon(
         [(0, 0), (4, 0), (4, 4), (0, 4)], holes=[[(1, 1), (3, 1), (3, 3), (1, 3)]]
@@ -276,6 +331,49 @@ def test_real_3d_volume_maps_measured_coordinates_without_extrusion(
         prepare_pciseq_inputs(
             _data(point_frame=no_z), config=config, reference=_reference()
         )
+
+
+def test_intrinsic_3d_grid_uses_native_xyz_without_declared_point_transform(
+    tmp_path: Path,
+) -> None:
+    """A native micron volume and measured XYZ share the chosen intrinsic frame."""
+    volume = np.zeros((3, 6, 12), dtype=np.uint64)
+    volume[:, 1:4, 1:4] = 17
+    volume[:, 1:4, 7:10] = LARGE_ID
+    path = tmp_path / "labels.npy"
+    np.save(path, volume)
+    frame = pd.DataFrame(
+        {
+            "x": [11.0, 17.0],
+            "y": [21.0, 21.0],
+            "z": [32.0, 34.0],
+            "gene": ["A", "B"],
+            "transcript_id": [51, 52],
+        }
+    )
+    data = _data(
+        point_frame=frame,
+        point_affine=Affine(
+            np.diag([10.0, 10.0, 10.0, 1.0]),
+            input_axes=("x", "y", "z"),
+            output_axes=("x", "y", "z"),
+        ),
+    )
+    config = _config(
+        tmp_path,
+        coordinate_system="intrinsic",
+        geometry_mode="labels_3d",
+        labels_path=path,
+        origin_um=[10, 20, 30],
+        voxel_size_um=[1, 1, 2],
+    )
+    inputs = prepare_pciseq_inputs(data, config=config, reference=_reference())
+    assert inputs.spots.x.tolist() == [1.0, 7.0]
+    assert inputs.spots.y.tolist() == [1.0, 1.0]
+    assert inputs.spots.z_plane.tolist() == [1.0, 2.0]
+    assert inputs.metadata["coordinate_system"] == "intrinsic"
+    np.testing.assert_array_equal(inputs.metadata["point_affine"], np.eye(4))
+    assert inputs.metadata["out_of_bounds_spots"] == 0
 
 
 def test_volume_rejects_mismatched_ids(tmp_path: Path) -> None:

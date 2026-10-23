@@ -75,6 +75,15 @@ rasterizes the polygons at `pciseq_pixel_size_um`, and explicitly records a 2D
 projection. It does not infer a 3D mask from polygons. Aligned/nonrigid shapes
 used for clustering plots are not used as native segmentation seeds.
 
+Set `pciseq_coordinate_system=intrinsic` when native shapes and transcript
+coordinates already share physical microns. MerXen's native microscopy inputs
+use this convention; vendor boundary layers can retain a `global` transform
+into image pixels while native transcript points remain in microns. Intrinsic
+mode uses the stored coordinates directly for both elements and records that
+choice in the preparation manifest. For 3D labels, supply the grid origin and
+voxel sizes in the same intrinsic micron frame. The default `global` and other
+named coordinate systems continue to apply each element's declared transform.
+
 Input cells and spots are independent of clustering's cell/gene QC subset.
 Extracellular spots with supported genes are retained for probabilistic
 assignment. Preparation reports exclusions for controls, invalid coordinates,
@@ -135,7 +144,7 @@ per acquisition.
 | `pciseq_pixel_size_um` | `1.0` | Raster resolution for polygon projection. |
 | `pciseq_max_pixels` | `100000000` | Maximum number of raster voxels before rejecting input. |
 | `pciseq_points_key` | `null` | Optional explicit native transcript points element. |
-| `pciseq_coordinate_system` | `global` | Shared physical coordinate frame for shapes and points. |
+| `pciseq_coordinate_system` | `global` | Named physical frame applying element transforms, or `intrinsic` for stored native micron coordinates. |
 | `pciseq_labels_path` | `null` | Genuine 3D label-volume NPY. |
 | `pciseq_origin_um` | `[0,0,0]` | 3D grid physical origin, in x/y/z order. |
 | `pciseq_voxel_size_um` | `[1,1,1]` | 3D voxel dimensions, in x/y/z order. |
