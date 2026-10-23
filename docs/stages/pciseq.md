@@ -83,6 +83,12 @@ mode uses the stored coordinates directly for both elements and records that
 choice in the preparation manifest. For 3D labels, supply the grid origin and
 voxel sizes in the same intrinsic micron frame. The default `global` and other
 named coordinate systems continue to apply each element's declared transform.
+For registered MerXen original vendor boundaries, preparation rejects the known
+legacy mismatch of identity transcript `global` coordinates and a different
+boundary `global` transform before reading transcript data. Choose `intrinsic`
+for the native micron convention, or a verified named physical frame. This
+check uses the segmentation registry and transforms; it does not infer units
+from coordinate ranges or change stored metadata.
 
 Input cells and spots are independent of clustering's cell/gene QC subset.
 Extracellular spots with supported genes are retained for probabilistic

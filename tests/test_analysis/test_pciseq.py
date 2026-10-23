@@ -15,7 +15,7 @@ import pytest
 from scipy import sparse
 from shapely.geometry import Polygon, box
 from spatialdata.models import PointsModel, ShapesModel, TableModel
-from spatialdata.transformations import Affine, Identity
+from spatialdata.transformations import Affine, Identity, set_transformation
 
 from merxen.analysis.pciseq import (
     finalize_pciseq,
@@ -23,7 +23,11 @@ from merxen.analysis.pciseq import (
     prepare_pciseq_inputs,
 )
 from merxen.config import PciSeqConfig
-from merxen.io.spatialdata_schema import MERXEN_SCHEMA_ATTR
+from merxen.io.spatialdata_schema import (
+    MERXEN_SCHEMA_ATTR,
+    MERXEN_SCHEMA_VERSION,
+    ORIGINAL_ID_NAMESPACE,
+)
 
 LARGE_ID = 2**53 + 7
 
@@ -225,6 +229,7 @@ def test_intrinsic_vendor_boundaries_keep_native_micron_spot_alignment(
 
     manifest = json.loads((prepared / "manifest.json").read_text())
     assert manifest["coordinate_system"] == "intrinsic"
+    assert manifest["coordinate_policy"] == "intrinsic_native_microns"
     np.testing.assert_array_equal(manifest["point_affine"], np.eye(3))
     np.testing.assert_array_equal(manifest["shape_affine"], np.eye(3))
     spots = pd.read_csv(prepared / "spots.csv")
@@ -245,6 +250,96 @@ def test_intrinsic_vendor_boundaries_keep_native_micron_spot_alignment(
         ]
         == 1
     )
+
+
+@pytest.mark.parametrize("platform", ["XENIUM", "MERSCOPE"])
+def test_registered_vendor_frame_conflict_fails_before_reading_transcripts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    """Known legacy global metadata must not silently misalign an original run."""
+    from merxen.analysis import pciseq
+
+    data = _data(
+        shape_affine=Affine(
+            np.diag([5.0, 5.0, 1.0]),
+            input_axes=("x", "y"),
+            output_axes=("x", "y"),
+        )
+    )
+    shape_key = f"{platform.lower()}_cell_boundaries"
+    data.shapes[shape_key] = data.shapes.pop("shapes_original")
+    schema = data.attrs[MERXEN_SCHEMA_ATTR]
+    schema.update(schema_version=MERXEN_SCHEMA_VERSION, platform=platform)
+    schema["segmentations"]["original"].update(
+        shape=shape_key, id_namespace=ORIGINAL_ID_NAMESPACE
+    )
+
+    def forbidden_chunks(*args: object, **kwargs: object) -> None:
+        pytest.fail("transcripts were materialized before the frame check")
+
+    monkeypatch.setattr(pciseq, "iter_points_chunks", forbidden_chunks)
+    with pytest.raises(ValueError, match="pciseq_coordinate_system=intrinsic"):
+        prepare_pciseq_inputs(
+            data,
+            config=_config(tmp_path, platform=platform, segmentation="original_seg"),
+            reference=_reference(),
+        )
+
+
+@pytest.mark.parametrize("coordinate_system", ["global", "sample_um"])
+def test_registered_vendor_shared_physical_frame_remains_available(
+    tmp_path: Path, coordinate_system: str
+) -> None:
+    """Verified transforms still apply for matching global or explicit frames."""
+    point_affine = Affine(
+        np.array([[2, 0, 20], [0, 3, -10], [0, 0, 1]]),
+        input_axes=("x", "y"),
+        output_axes=("x", "y"),
+    )
+    data = _data(point_affine=point_affine, shape_affine=point_affine)
+    shape_key = "xenium_cell_boundaries"
+    data.shapes[shape_key] = data.shapes.pop("shapes_original")
+    schema = data.attrs[MERXEN_SCHEMA_ATTR]
+    schema.update(schema_version=MERXEN_SCHEMA_VERSION, platform="XENIUM")
+    schema["segmentations"]["original"].update(
+        shape=shape_key, id_namespace=ORIGINAL_ID_NAMESPACE
+    )
+    if coordinate_system == "sample_um":
+        # A separate named physical frame can have different local transforms.
+        data.shapes[shape_key].geometry = [box(1, 1, 5, 5), box(7, 1, 11, 5)]
+        shape_affine = Affine(
+            np.array([[2, 0, 18], [0, 3, -13], [0, 0, 1]]),
+            input_axes=("x", "y"),
+            output_axes=("x", "y"),
+        )
+        set_transformation(
+            data.shapes[shape_key], shape_affine, to_coordinate_system="sample_um"
+        )
+        set_transformation(
+            data.points["transcripts"],
+            point_affine,
+            to_coordinate_system="sample_um",
+        )
+        set_transformation(
+            data.points["transcripts"], Identity(), to_coordinate_system="global"
+        )
+    inputs = prepare_pciseq_inputs(
+        data,
+        config=_config(
+            tmp_path,
+            segmentation="original_seg",
+            coordinate_system=coordinate_system,
+        ),
+        reference=_reference(),
+    )
+    assert inputs.metadata["coordinate_policy"] == "declared_element_transforms"
+    np.testing.assert_array_equal(
+        inputs.metadata["point_affine"],
+        [[2, 0, 20], [0, 3, -10], [0, 0, 1]],
+    )
+    pixels = inputs.planes[0].tocsr()
+    assert pixels[int(inputs.spots.y.iloc[0]), int(inputs.spots.x.iloc[0])] == 1
+    assert pixels[int(inputs.spots.y.iloc[1]), int(inputs.spots.x.iloc[1])] == 2
 
 
 def test_polygon_holes_and_shared_edges_are_preserved(tmp_path: Path) -> None:

@@ -22,6 +22,8 @@ from merxen.config import PciSeqConfig
 from merxen.control_features import classify_control_transcripts
 from merxen.io.spatialdata_schema import (
     MERXEN_SCHEMA_ATTR,
+    MERXEN_SCHEMA_VERSION,
+    ORIGINAL_ID_NAMESPACE,
     canonical_instance_series,
     canonical_shape_instance_series,
     choose_primary_points_key,
@@ -182,6 +184,45 @@ def _affine(element: Any, coordinate_system: str, dimensions: int) -> np.ndarray
     ):
         raise ValueError("pciSeq requires a finite invertible spatial affine")
     return matrix
+
+
+def _check_native_vendor_frame(
+    sdata_obj: Any, config: PciSeqConfig, shape_key: str, points_key: str
+) -> None:
+    if (
+        config.geometry_mode != "project_2d"
+        or config.coordinate_system != "global"
+        or config.segmentation != "original_seg"
+    ):
+        return
+    schema = getattr(sdata_obj, "attrs", {}).get(MERXEN_SCHEMA_ATTR, {})
+    original = schema.get("segmentations", {}).get("original", {})
+    if (
+        schema.get("schema_version") != MERXEN_SCHEMA_VERSION
+        or schema.get("platform") != config.platform
+        or schema.get("primary_points") != points_key
+        or original.get("points") != points_key
+        or original.get("shape") != shape_key
+        or original.get("id_namespace") != ORIGINAL_ID_NAMESPACE
+        or original.get("coordinate_variant_of") is not None
+        or shape_key != f"{config.platform.lower()}_cell_boundaries"
+    ):
+        return
+    point_matrix = _affine(sdata_obj.points[points_key], "global", 2)
+    shape_matrix = _affine(sdata_obj.shapes[shape_key], "global", 2)
+    if np.allclose(point_matrix, np.eye(3)) and not np.allclose(
+        shape_matrix, point_matrix
+    ):
+        raise ValueError(
+            "Registered MerXen native vendor boundaries and transcript points "
+            "declare different 'global' transforms. Vendor boundaries can retain "
+            "a micron-to-image-pixel transform while native points remain in "
+            "microns. Select coordinate_system='intrinsic' "
+            "(Nextflow: pciseq_coordinate_system=intrinsic) when both stored "
+            "coordinates are native microns, or select a verified shared named "
+            "physical coordinate system. Refusing to rescale this segmentation "
+            "against unchanged transcript coordinates."
+        )
 
 
 def _load_spots(
@@ -408,6 +449,7 @@ def prepare_pciseq_inputs(
     """
     shape_key, points_key, table_key = _resolve_native_keys(sdata_obj, config)
     shapes = sdata_obj.shapes[shape_key]
+    _check_native_vendor_frame(sdata_obj, config, shape_key, points_key)
     spots, counts, point_matrix = _load_spots(
         sdata_obj.points[points_key], config=config, reference=reference
     )
@@ -422,6 +464,11 @@ def prepare_pciseq_inputs(
         "points_key": points_key,
         "source_table_key": table_key,
         "coordinate_system": config.coordinate_system,
+        "coordinate_policy": (
+            "intrinsic_native_microns"
+            if config.coordinate_system == "intrinsic"
+            else "declared_element_transforms"
+        ),
         "point_affine": point_matrix.tolist(),
         "geometry_mode": config.geometry_mode,
     }
