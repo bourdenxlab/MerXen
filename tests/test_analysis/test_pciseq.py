@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -352,6 +353,71 @@ def test_prepare_and_finalize_preserve_clustered_subset_and_stable_ids(
     assert int(spot_ids.loc[1, "instance_id"]) == LARGE_ID
     assert int(spot_ids.loc[1, "transcript_id"]) == 22
     assert pd.isna(spot_ids.loc[2, "instance_id"])
+
+
+def test_reference_preparation_manifest_is_embedded_and_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Atlas and regional provenance survives both model process boundaries."""
+    import spatialdata as sd
+
+    origin_path = tmp_path / "reference_origin.json"
+    config = _config(tmp_path, reference_manifest_path=origin_path)
+    _source(config.source_h5ad)
+    _reference().to_csv(config.reference_path)
+    origin = {
+        "source": "whb",
+        "region_labels": ["Human ACC"],
+        "level": "cluster",
+        "donor_balance": True,
+        "reference_sha256": hashlib.sha256(
+            config.reference_path.read_bytes()
+        ).hexdigest(),
+    }
+    origin_path.write_text(json.dumps(origin, indent=2) + "\n")
+    monkeypatch.setattr(sd, "read_zarr", lambda path: _data())
+    prepared = tmp_path / "prepared"
+
+    prepare_pciseq(config, prepared)
+
+    prepared_metadata = json.loads((prepared / "manifest.json").read_text())
+    assert prepared_metadata["reference_preparation"] == origin
+    assert (
+        prepared / "reference_manifest.json"
+    ).read_bytes() == origin_path.read_bytes()
+    result = finalize_pciseq(config, prepared, _computed(tmp_path), tmp_path / "final")
+    assert (tmp_path / "final" / "reference_manifest.json").read_bytes() == (
+        origin_path.read_bytes()
+    )
+    annotated = ad.read_h5ad(result["annotated_h5ad"])
+    embedded = json.loads(annotated.uns["merxen_pciseq"]["prepared_manifest_json"])
+    assert embedded["reference_preparation"] == origin
+
+
+@pytest.mark.parametrize("checksum", [None, "not-a-sha256", "0" * 64])
+def test_reference_manifest_checksum_fails_before_spatialdata_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    checksum: str | None,
+) -> None:
+    """A missing, malformed or mismatched origin cannot label another matrix."""
+    import spatialdata as sd
+
+    origin_path = tmp_path / "reference_origin.json"
+    config = _config(tmp_path, reference_manifest_path=origin_path)
+    _source(config.source_h5ad)
+    _reference().to_csv(config.reference_path)
+    origin = {} if checksum is None else {"reference_sha256": checksum}
+    origin_path.write_text(json.dumps(origin))
+
+    def forbidden_read(path: Path) -> None:
+        pytest.fail("SpatialData was opened before checking reference provenance")
+
+    monkeypatch.setattr(sd, "read_zarr", forbidden_read)
+
+    with pytest.raises(ValueError):
+        prepare_pciseq(config, tmp_path / "prepared")
+    assert not (tmp_path / "prepared").exists()
 
 
 def test_empty_reported_class_summary_becomes_uncertain(

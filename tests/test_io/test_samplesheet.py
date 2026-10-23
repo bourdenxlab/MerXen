@@ -46,6 +46,40 @@ def test_parse_samplesheet_preserves_pciseq_overrides(tmp_path: Path) -> None:
     assert inherited.pciseq_enabled is None
 
 
+def test_parse_samplesheet_preserves_pciseq_reference_selection(tmp_path: Path) -> None:
+    """Region lists can override inherited settings with JSON or explicit []."""
+    path = tmp_path / "samplesheet.csv"
+    metadata = tmp_path / "classes.csv"
+    path.write_text(
+        "pair_id,pciseq_reference_source,pciseq_region_labels,pciseq_region_mode,"
+        "pciseq_reference_level,pciseq_seaad_cohort,"
+        "pciseq_reference_custom_metadata_path\n"
+        f'P1,SEA-AD,"[""MTG"",""DLPFC""]",required,subclass,control,{metadata}\n'
+        "P2,custom,[],whole_brain,,,\n"
+        "P3,,,,,,\n"
+    )
+
+    first, second, inherited = parse_samplesheet(path)
+
+    assert first.pciseq_reference_source == "SEA-AD"
+    assert first.pciseq_region_labels == ["MTG", "DLPFC"]
+    assert first.pciseq_region_mode == "required"
+    assert first.pciseq_reference_level == "subclass"
+    assert first.pciseq_seaad_cohort == "control"
+    assert first.pciseq_reference_custom_metadata_path == metadata
+    assert second.pciseq_region_labels == []
+    assert second.pciseq_region_mode == "whole_brain"
+    assert inherited.pciseq_region_labels is None
+
+
+def test_parse_samplesheet_rejects_non_string_pciseq_regions(tmp_path: Path) -> None:
+    """Malformed labels cannot silently become source-specific region names."""
+    path = tmp_path / "samplesheet.csv"
+    path.write_text('pair_id,pciseq_region_labels\nP1,"[""VISp"",1]"\n')
+    with pytest.raises(ValueError, match="JSON string list"):
+        parse_samplesheet(path)
+
+
 def test_parse_samplesheet_supports_raw_dirs_and_cached_spatialdata(
     tmp_path: Path,
 ) -> None:

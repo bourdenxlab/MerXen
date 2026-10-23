@@ -92,7 +92,7 @@ Each stage is one Nextflow module and one `merxen` subcommand, sharing a Pydanti
 | [Visualization](docs/stages/visualization.md) | Single-platform or paired figure generation | always |
 | [Spatial gene analysis](docs/stages/spatial-gene-analysis.md) | Cell-level spatial autocorrelation and assignment-independent transcript-coordinate patterns | always |
 | [Squidpy clustering](docs/stages/clustering-squidpy.md) | First-pass Scanpy/Squidpy clustering (RAPIDS-backed) | always |
-| [pciSeq](docs/stages/pciseq.md) | Probabilistic cell typing and transcript assignment from native spots, segmentation, and a supplied reference | off (`--pciseq_enabled`) |
+| [pciSeq](docs/stages/pciseq.md) | Probabilistic cell typing and transcript assignment with regional Allen WMB, WHB, SEA-AD, or custom references | off (`--pciseq_enabled`) |
 | [MENDER](docs/stages/mender.md) | Independent CPU-only MENDER spatial-domain analysis | off (`--mender_enabled`) |
 | [MapMyCells](docs/stages/mapmycells.md) | Local Allen Institute MapMyCells cell type assignment | off (past default `stop_stage`) |
 | [Distance from object](docs/stages/distance-from-object.md) | Nearest registered polygon-edge annotation and grey-matter paired near-vs-far PyDESeq2 | off (`--distance_from_object_enabled`) |

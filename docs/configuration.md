@@ -124,7 +124,7 @@ to `none` or `/dev/null` on purpose:
 | `distance_from_object_enabled` | `false` | Insert registered polygon-edge distance analysis after cortical depth/clustering. A non-empty samplesheet value overrides this per row. |
 | `distance_from_object_segmentations` | `proseg, original, cellpose` | Cell-table branches for object distance. Legacy `reseg`, `original_seg`, and `proseg_mask` values remain accepted aliases. A samplesheet value may override this per row. |
 | `mender_enabled` | `false` | Enable independent per-platform/per-segmentation MENDER spatial-domain analysis. A non-empty samplesheet value may override this per row. |
-| `pciseq_enabled` | `false` | Run optional pciSeq cell typing immediately after clustering; supports a per-row override. Requires `pciseq_reference_path`. See [all pciSeq settings](stages/pciseq.md#parameters). |
+| `pciseq_enabled` | `false` | Run optional pciSeq cell typing immediately after clustering; supports a per-row override. Prepares a species-matched Allen reference by default; human requires `pciseq_region_labels`. See [pciSeq settings](stages/pciseq.md#parameters) and [reference settings](stages/pciseq-references.md#parameters). |
 | `mender_segmentations` | `proseg_hybrid` | MENDER branches: any comma-separated subset of `reseg`, `original_seg`, `proseg_mask`, and `proseg_hybrid`, or `all`. A non-empty samplesheet value may override this per row. |
 | `gaston_enabled` | `false` | Run GASTON as an opt-in terminal stage. A non-empty samplesheet value overrides this per row. |
 | `gaston_segmentations` | `proseg_hybrid` | Independent GASTON branch selector: any segmentation, a comma-separated subset, or `all`. This does not change `analysis_segmentation`. |

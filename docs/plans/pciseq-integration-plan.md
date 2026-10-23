@@ -3,6 +3,10 @@
 Implement on `feature/pciSeq`, following three worker investigations of the
 upstream API, Nextflow orchestration, and MerXen's spatial schema.
 
+The subsequent [reference-preparation layer](pciseq-reference-preparation-plan.md)
+extends the initial explicit-matrix contract with species-matched Allen atlases,
+regional selection, donor-balanced profiles, and custom reference preparation.
+
 ## Contracts established before implementation
 
 - Add `pciseq` immediately after `clustering_squidpy`, disabled by default.

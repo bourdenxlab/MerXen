@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import json
 import os
@@ -89,6 +90,9 @@ def test_pciseq_is_optional_and_immediately_follows_clustering() -> None:
     module = (REPO_ROOT / "workflows" / "modules" / "pciseq.nf").read_text()
     assert "pciseq_enabled = false" in config
     assert 'pciseq_overlap_policy = "background"' in config
+    assert 'pciseq_reference_source = "auto"' in config
+    assert 'pciseq_region_mode = "auto"' in config
+    assert 'reference_manifest_path: "reference_input/reference_manifest.json"' in main
     assert "overlap_policy: params.pciseq_overlap_policy" in main
     assert re.search(
         r'stages \+= \["clustering_squidpy"\]\s*'
@@ -103,6 +107,9 @@ def test_pciseq_is_optional_and_immediately_follows_clustering() -> None:
     assert 'export CUDA_VISIBLE_DEVICES=""' in module
     assert "--prepared-dir" in module
     assert "--computed-dir" in module
+    assert "cache false" in module
+    assert "merxen prepare-pciseq-reference --config" in module
+    assert ".combine(pciseq_reference_results_ch, by: 0)" in main
 
 
 def test_downstream_stages_wait_for_every_pciseq_finalization() -> None:
@@ -129,6 +136,110 @@ def test_downstream_stages_wait_for_every_pciseq_finalization() -> None:
     assert (
         "gaston_current_artifacts_ch = clustering_downstream_results_ch" in downstream
     )
+
+
+@pytest.mark.nextflow
+def test_pciseq_reference_settings_resolve_species_and_normalize_cache_keys(
+    tmp_path: Path,
+) -> None:
+    """Equivalent atlas/ROI selections share one key across pipeline branches."""
+    if shutil.which("nextflow") is None:
+        pytest.skip("nextflow is not installed")
+    main = (REPO_ROOT / "workflows" / "main.nf").read_text()
+    helpers = main[main.index("def parseChannels") : main.index("\nworkflow {")]
+    defaults = {}
+    for name, raw in re.findall(
+        r"^    (\w+) = (.+)$",
+        (REPO_ROOT / "workflows" / "nextflow.config").read_text(),
+        re.MULTILINE,
+    ):
+        with contextlib.suppress(json.JSONDecodeError):
+            defaults[name] = json.loads(raw)
+    (tmp_path / "defaults.json").write_text(json.dumps(defaults))
+    (tmp_path / "lib").symlink_to(REPO_ROOT / "workflows" / "lib")
+    assertions = """
+workflow {
+    def options = new groovy.json.JsonSlurper().parse(new File('defaults.json'))
+    def human = pciseqReferenceSettings([pciseq_region_labels: 'Human ACC'],
+        'human', options)
+    def mouse = pciseqReferenceSettings([pciseq_region_labels: 'VISp,MOp,VISp'],
+        'mouse', options)
+    def mouseWholeBrain = pciseqReferenceSettings([:], 'mouse', options)
+    def same = pciseqReferenceSettings([pciseq_reference_source: 'wmb',
+        pciseq_region_labels: '["MOp","VISp"]'], 'mouse', options)
+    def changed = pciseqReferenceSettings([pciseq_region_labels: 'VISp'],
+        'mouse', options)
+    def seaad = pciseqReferenceSettings([pciseq_reference_source: 'SEA-AD',
+        pciseq_region_labels: 'MTG', pciseq_seaad_cohort: 'control'],
+        'human', options)
+    def custom = pciseqReferenceSettings([pciseq_reference_path: 'custom.csv',
+        pciseq_region_mode: 'whole_brain'], 'human', options)
+    def errors = []
+    def missingRegion = pciseqReferenceSettings([:], 'human', options)
+    appendPciseqPreflightChecks(errors, [:], [run_pciseq: true,
+        pair_id: 'NO_REGION', pciseq_reference: missingRegion,
+        run_clustering_squidpy: true], options)
+    def wrongSpecies = pciseqReferenceSettings([pciseq_reference_source: 'whb',
+        pciseq_region_labels: 'MOp'], 'mouse', options)
+    appendPciseqPreflightChecks(errors, [:], [run_pciseq: true,
+        pair_id: 'WRONG_SPECIES', pciseq_reference: wrongSpecies,
+        run_clustering_squidpy: true], options)
+    def mouseErrors = []
+    appendPciseqPreflightChecks(mouseErrors, [:], [run_pciseq: true,
+        pair_id: 'MOUSE_WHOLE_BRAIN', pciseq_reference: mouseWholeBrain,
+        run_clustering_squidpy: true], options)
+    appendPciseqPreflightChecks(mouseErrors, [:], [run_pciseq: true,
+        pair_id: 'MOUSE_REGION', pciseq_reference: mouse,
+        run_clustering_squidpy: true], options)
+    def conflict = pciseqReferenceSettings([pciseq_region_mode: 'whole_brain',
+        pciseq_region_labels: 'MOp'], 'mouse', options)
+    appendPciseqPreflightChecks(errors, [:], [run_pciseq: true,
+        pair_id: 'CONFLICT', pciseq_reference: conflict,
+        run_clustering_squidpy: true], options)
+    new File('references.json').text = groovy.json.JsonOutput.toJson([
+        human: human, mouse: mouse, seaad: seaad, custom: custom,
+        mouse_whole_brain: mouseWholeBrain, mouse_errors: mouseErrors,
+        same_key: pciseqReferenceKey(mouse) == pciseqReferenceKey(same),
+        changed_key: pciseqReferenceKey(mouse) != pciseqReferenceKey(changed),
+        errors: errors,
+    ])
+}
+"""
+    (tmp_path / "references.nf").write_text(
+        "nextflow.enable.dsl = 2\n" + helpers + assertions
+    )
+
+    result = subprocess.run(
+        ["nextflow", "run", "references.nf", "-ansi-log", "false"],
+        cwd=tmp_path,
+        env={**os.environ, "NXF_OFFLINE": "true"},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    references = json.loads((tmp_path / "references.json").read_text())
+    assert references["human"]["source"] == "whb"
+    assert references["human"]["region_mode"] == "required"
+    assert references["human"]["level"] == "cluster"
+    assert references["mouse"]["source"] == "wmb"
+    assert references["mouse"]["region_labels"] == ["MOp", "VISp"]
+    assert references["mouse"]["region_mode"] == "required"
+    assert references["mouse"]["level"] == "subclass"
+    assert references["mouse_whole_brain"]["region_mode"] == "whole_brain"
+    assert references["mouse_whole_brain"]["region_labels"] == []
+    assert references["mouse_errors"] == []
+    assert references["seaad"]["source"] == "seaad"
+    assert references["seaad"]["level"] == "subclass"
+    assert references["seaad"]["seaad_cohort"] == "control"
+    assert references["custom"]["source"] == "custom"
+    assert references["same_key"] and references["changed_key"]
+    assert len(references["errors"]) == 3
+    assert "requires pciseq_region_labels" in references["errors"][0]
+    assert "incompatible with species 'mouse'" in references["errors"][1]
+    assert "whole_brain mode requires empty" in references["errors"][2]
 
 
 @pytest.mark.nextflow
@@ -204,7 +315,7 @@ workflow {
 
 @pytest.mark.nextflow
 def test_pciseq_standalone_runs_each_platform_and_segmentation(tmp_path: Path) -> None:
-    """Published inputs yield eight independent tasks and separate output paths."""
+    """Two samples share one prepared reference across nine model branches."""
     outdir = tmp_path / "results"
     reference = tmp_path / "reference.csv"
     reference.write_text("gene,type_a\nG1,1\n")
@@ -215,6 +326,7 @@ def test_pciseq_standalone_runs_each_platform_and_segmentation(tmp_path: Path) -
         "only_stage": "pci_seq",
         "pciseq_enabled": "true",
         "pciseq_reference_path": str(reference),
+        "pciseq_region_mode": "whole_brain",
     }
     for platform in ("MERSCOPE", "XENIUM"):
         # Explicit overrides prove standalone mode does not require a latest
@@ -223,16 +335,35 @@ def test_pciseq_standalone_runs_each_platform_and_segmentation(tmp_path: Path) -
         row[f"{platform.lower()}_spatialdata_path"] = str(zarr)
         for segmentation in _LAYERS:
             _published_input(outdir, row["pair_id"], platform, segmentation, zarr)
-    _write_samplesheet(tmp_path / "samplesheet.csv", [row])
+    second = {
+        **row,
+        "pair_id": "PCI_SHARED",
+        "analysis_mode": "xenium",
+        "analysis_segmentation": "original_seg",
+        "pciseq_region_labels": "[]",
+    }
+    _published_input(
+        outdir,
+        second["pair_id"],
+        "XENIUM",
+        "original_seg",
+        Path(second["xenium_spatialdata_path"]),
+    )
+    _write_samplesheet(tmp_path / "samplesheet.csv", [row, second])
 
     result = _run_nextflow(tmp_path, "-stub-run", "--pciseq_enabled", "false")
 
     assert result.returncode == 0, result.stdout + result.stderr
-    manifests = list(outdir.glob("PCI_PAIR/*/pciseq/pciseq_out/*/stub_manifest.json"))
-    assert len(manifests) == 8
+    manifests = list(outdir.glob("PCI_*/*/pciseq/pciseq_out/*/stub_manifest.json"))
+    assert len(manifests) == 9
     trace = (outdir / "nextflow" / "trace.tsv").read_text()
     for process in ("PCISEQ_PREPARE", "PCISEQ_COMPUTE", "PCISEQ_FINALIZE"):
-        assert len(re.findall(rf"\t{process}\t", trace)) == 8
+        assert len(re.findall(rf"\t{process}\t", trace)) == 9
+    assert len(re.findall(r"\tPCISEQ_REFERENCE\t", trace)) == 1
+    bundles = list(
+        outdir.glob("pciseq_references/*/pciseq_reference_out/reference.csv")
+    )
+    assert len(bundles) == 1
     run_log = (tmp_path / ".nextflow.log").read_text()
     assert "selected stages=pciseq" in run_log
     assert "submitted process > CLUSTERING_SQUIDPY" not in run_log
@@ -257,6 +388,7 @@ def test_pciseq_standalone_preflight_reports_missing_native_shape(
                 "analysis_segmentation": "cellpose",
                 "only_stage": "pciseq",
                 "pciseq_enabled": "true",
+                "pciseq_region_mode": "whole_brain",
                 "xenium_spatialdata_path": str(zarr),
             }
         ],
@@ -296,7 +428,7 @@ def test_pciseq_disabled_only_stage_explains_how_to_enable(tmp_path: Path) -> No
 
 
 @pytest.mark.nextflow
-def test_pciseq_default_stop_extension_and_reference_preflight(tmp_path: Path) -> None:
+def test_pciseq_default_stop_extension_and_region_preflight(tmp_path: Path) -> None:
     """Enabling pciSeq extends the default stop while row false remains exact."""
     _write_samplesheet(
         tmp_path / "samplesheet.csv",
@@ -329,8 +461,5 @@ def test_pciseq_default_stop_extension_and_reference_preflight(tmp_path: Path) -
         "PCI_OFF": "clustering_squidpy",
         "PCI_ON": "clustering_squidpy -> pciseq",
     }
-    assert (
-        "Missing required path parameter for PCISEQ reference expression matrix "
-        "for PCI_ON" in log
-    )
+    assert "PCISEQ requires pciseq_region_labels for PCI_ON" in log
     assert not list((tmp_path / "work").glob("*/*"))

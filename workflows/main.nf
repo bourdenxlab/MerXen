@@ -23,7 +23,12 @@ include {
     CLUSTERING_SQUIDPY_COMPUTE;
     CLUSTERING_SQUIDPY_FINALIZE
 } from "./modules/clustering_squidpy"
-include { PCISEQ_PREPARE; PCISEQ_COMPUTE; PCISEQ_FINALIZE } from "./modules/pciseq"
+include {
+    PCISEQ_REFERENCE;
+    PCISEQ_PREPARE;
+    PCISEQ_COMPUTE;
+    PCISEQ_FINALIZE
+} from "./modules/pciseq"
 include { MAPMYCELLS } from "./modules/mapmycells"
 include {
     MENDER_PREPARE;
@@ -1916,15 +1921,141 @@ def pciseqSpatialdataPath(row, settings, platform, params) {
     ))
 }
 
+def normalizePciseqRegionLabels(rawValue) {
+    if (rawValue == null) {
+        return []
+    }
+    def values = rawValue
+    if (!(values instanceof Collection)) {
+        def raw = values.toString().trim()
+        values = raw.startsWith("[")
+            ? new groovy.json.JsonSlurper().parseText(raw)
+            : raw.split(",").toList()
+    }
+    if (!(values instanceof Collection)) {
+        throw new IllegalArgumentException("pciseq_region_labels must be a list")
+    }
+    return values.collect { value -> value.toString().trim() }
+        .findAll { value -> value }
+        .unique()
+        .sort()
+}
+
+def pciseqReferenceSettings(row, species, params) {
+    def referencePath = optionalNormalizedPathString(
+        rowFieldOrDefault(row, "pciseq_reference_path", params.pciseq_reference_path),
+    )
+    def source = rowFieldOrDefault(
+        row, "pciseq_reference_source", params.pciseq_reference_source,
+    ).toString().trim().toLowerCase().replaceAll(/[-_]/, "")
+    // A supplied prebuilt matrix retains the original pciSeq input contract.
+    if (referencePath != null && source == "auto") {
+        source = "custom"
+    } else if (source == "auto") {
+        source = species == "mouse" ? "wmb" : "whb"
+    }
+    def regionLabels = normalizePciseqRegionLabels(rowFieldOrDefault(
+        row, "pciseq_region_labels", params.pciseq_region_labels,
+    ))
+    def regionMode = rowFieldOrDefault(
+        row, "pciseq_region_mode", params.pciseq_region_mode,
+    ).toString().trim().toLowerCase()
+    if (regionMode == "auto") {
+        regionMode = regionLabels || species == "human" ? "required" : "whole_brain"
+    }
+    // TODO: after coronal-slice registration to Allen CCFv3, restrict mouse
+    // classes to intersected regions plus a 100 µm anatomical safety buffer.
+    def referenceLevel = rowFieldOrDefault(
+        row, "pciseq_reference_level", params.pciseq_reference_level,
+    ).toString().trim().toLowerCase()
+    if (referenceLevel == "auto" && source in ["wmb", "whb", "seaad"]) {
+        referenceLevel = source == "whb" ? "cluster" : "subclass"
+    }
+    return [
+        species: species,
+        source: source,
+        reference_root: optionalNormalizedPathString(rowFieldOrDefault(
+            row, "pciseq_reference_root", params.pciseq_reference_root,
+        )),
+        reference_path: referencePath,
+        region_labels: regionLabels,
+        region_mode: regionMode,
+        level: referenceLevel,
+        min_cells_per_type: params.pciseq_reference_min_cells as int,
+        normalization_target_sum: params.pciseq_reference_normalize_target_sum as double,
+        donor_balance: boolOrDefault(
+            params.pciseq_reference_donor_balance, true, "pciseq_reference_donor_balance",
+        ),
+        seaad_cohort: rowFieldOrDefault(
+            row, "pciseq_seaad_cohort", params.pciseq_seaad_cohort,
+        ).toString().trim().toLowerCase(),
+        auto_download: boolOrDefault(
+            params.pciseq_reference_auto_download, true, "pciseq_reference_auto_download",
+        ),
+        verify_checksums: boolOrDefault(
+            params.pciseq_reference_verify_checksums, true, "pciseq_reference_verify_checksums",
+        ),
+        gene_id_mode: params.pciseq_reference_gene_id_mode.toString(),
+        custom_metadata_path: optionalNormalizedPathString(rowFieldOrDefault(
+            row, "pciseq_reference_custom_metadata_path", params.pciseq_reference_custom_metadata_path,
+        )),
+        output_dir: "pciseq_reference_out",
+    ]
+}
+
+def pciseqReferenceKey(referenceSettings) {
+    def digest = java.security.MessageDigest.getInstance("SHA-256")
+    def json = groovy.json.JsonOutput.toJson(referenceSettings)
+    return digest.digest(json.getBytes("UTF-8")).encodeHex().toString()
+}
+
 def appendPciseqPreflightChecks(errors, row, settings, params) {
     if (!settings.run_pciseq) {
         return
     }
-    appendPreflightFileCheck(
-        errors,
-        settings.pciseq_reference_path,
-        "PCISEQ reference expression matrix for ${settings.pair_id}",
-    )
+    def reference = settings.pciseq_reference
+    if (!(reference.source in ["wmb", "whb", "seaad", "custom"])) {
+        errors << "pciseq_reference_source must be auto, wmb, whb, seaad, or custom"
+    }
+    if ((reference.species == "mouse" && reference.source in ["whb", "seaad"]) ||
+        (reference.species == "human" && reference.source == "wmb")) {
+        errors << "PCISEQ reference source '${reference.source}' is incompatible with species '${reference.species}'"
+    }
+    if (!(reference.region_mode in ["required", "whole_brain"])) {
+        errors << "pciseq_region_mode must be auto, required, or whole_brain"
+    }
+    if (reference.region_mode == "required" && !reference.region_labels) {
+        errors << (
+            "PCISEQ requires pciseq_region_labels for ${settings.pair_id}; " +
+            "set pciseq_region_mode=whole_brain explicitly to use an unrestricted reference"
+        )
+    }
+    if (reference.region_mode == "whole_brain" && reference.region_labels) {
+        errors << "PCISEQ whole_brain mode requires empty pciseq_region_labels"
+    }
+    if (!(reference.seaad_cohort in ["all", "ad", "control"])) {
+        errors << "pciseq_seaad_cohort must be all, ad, or control"
+    }
+    if (reference.source != "seaad" && reference.seaad_cohort != "all") {
+        errors << "pciseq_seaad_cohort applies only to the seaad reference source"
+    }
+    if (reference.source == "custom") {
+        appendPreflightFileCheck(
+            errors,
+            reference.reference_path,
+            "PCISEQ reference expression matrix for ${settings.pair_id}",
+        )
+        if (reference.region_labels && isBlankPath(reference.custom_metadata_path)) {
+            errors << "PCISEQ custom reference region filtering requires pciseq_reference_custom_metadata_path"
+        }
+    } else if (!isBlankPath(reference.reference_path)) {
+        errors << "PCISEQ pciseq_reference_path requires pciseq_reference_source=custom or auto"
+    }
+    if (!isBlankPath(reference.custom_metadata_path)) {
+        appendPreflightFileCheck(
+            errors, reference.custom_metadata_path, "PCISEQ custom reference metadata",
+        )
+    }
     if (!(params.pciseq_geometry_mode in ["project_2d", "labels_3d"])) {
         errors << "pciseq_geometry_mode must be project_2d or labels_3d"
     }
@@ -1983,7 +2114,8 @@ def pciseqConfigJson(pairId, segmentation, platform, sampleId, spatialdataPath, 
         segmentation: segmentation,
         source_h5ad: "source_clustered.h5ad",
         spatialdata_path: spatialdataPath.toString(),
-        reference_path: settings.pciseq_reference_path,
+        reference_path: "reference_input/reference.csv",
+        reference_manifest_path: "reference_input/reference_manifest.json",
         table_key: keys.table_key,
         shape_key: keys.shape_key,
         points_key: params.pciseq_points_key,
@@ -2126,9 +2258,7 @@ def rowSampleSettings(row, params) {
         false,
         "pciseq_enabled for ${pairId}",
     )
-    def pciseqReferencePath = optionalNormalizedPathString(
-        rowFieldOrDefault(row, "pciseq_reference_path", params.pciseq_reference_path),
-    )
+    def pciseqReference = pciseqReferenceSettings(row, species, params)
     def requestedAlignmentEnabled = boolOrDefault(
         rowFieldOrDefault(row, "enable_alignment", params.enable_alignment),
         false,
@@ -2649,7 +2779,9 @@ def rowSampleSettings(row, params) {
         run_spatial_gene_analysis: runSpatialGeneAnalysis,
         run_clustering_squidpy: runClusteringSquidpy,
         run_pciseq: runPciseq,
-        pciseq_reference_path: pciseqReferencePath,
+        pciseq_reference_path: pciseqReference.reference_path,
+        pciseq_reference: pciseqReference,
+        pciseq_reference_key: pciseqReferenceKey(pciseqReference),
         run_mender: runMender,
         run_mapmycells: runMapMyCells,
         mender_published_output_mode: runMender && !runClusteringSquidpy,
@@ -2860,6 +2992,8 @@ workflow {
             "${settings.distance_from_object_segmentations.join(', ')}; " +
             "mender=${settings.run_mender}; " +
             "pciseq=${settings.run_pciseq}; " +
+            "pciseq reference=${settings.pciseq_reference.source}; " +
+            "pciseq regions=${settings.pciseq_reference.region_labels.join(', ')}; " +
             "mender segmentations=${settings.mender_segmentations.join(', ')}; " +
             "required clustering segmentations=" +
             "${settings.required_clustering_segmentations.join(', ')}; " +
@@ -4387,6 +4521,20 @@ workflow {
     clustering_computed_ch = CLUSTERING_SQUIDPY_COMPUTE(clustering_prepared_ch)
     clustering_results_ch = CLUSTERING_SQUIDPY_FINALIZE(clustering_computed_ch)
 
+    pciseq_reference_inputs_ch = sample_rows_ch
+        .filter { _pairId, _row, settings -> settings.run_pciseq }
+        .map { _pairId, _row, settings ->
+            def reference = settings.pciseq_reference
+            tuple(
+                settings.pciseq_reference_key,
+                groovy.json.JsonOutput.toJson(reference),
+                isBlankPath(reference.reference_path) ? [] : [normalizedPath(reference.reference_path)],
+                isBlankPath(reference.custom_metadata_path) ? [] : [normalizedPath(reference.custom_metadata_path)],
+            )
+        }
+        .unique { entry -> entry[0] }
+    pciseq_reference_results_ch = PCISEQ_REFERENCE(pciseq_reference_inputs_ch)
+
     pciseq_current_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!(settings.run_pciseq && settings.run_clustering_squidpy)) {
             []
@@ -4412,10 +4560,10 @@ workflow {
                 )
                 def zarr = normalizedPath(sample.zarr_path).toRealPath()
                 tuple(
+                    settings.pciseq_reference_key,
                     pairId, segmentation, platform,
                     pciseqConfigJson(pairId, segmentation, platform, sampleId, zarr, settings, params),
                     h5ad,
-                    normalizedPath(settings.pciseq_reference_path),
                     isBlankPath(params.pciseq_labels_path) ? [] : [normalizedPath(params.pciseq_labels_path)],
                 )
             }
@@ -4430,10 +4578,10 @@ workflow {
                     def sampleId = "${pairId}_${platform}"
                     def zarr = pciseqSpatialdataPath(row, settings, platform, params).toRealPath()
                     tuple(
+                        settings.pciseq_reference_key,
                         pairId, segmentation, platform,
                         pciseqConfigJson(pairId, segmentation, platform, sampleId, zarr, settings, params),
                         pciseqPublishedH5adPath(pairId, segmentation, platform, params),
-                        normalizedPath(settings.pciseq_reference_path),
                         isBlankPath(params.pciseq_labels_path) ? [] : [normalizedPath(params.pciseq_labels_path)],
                     )
                 }
@@ -4441,7 +4589,17 @@ workflow {
         }
     }
 
-    pciseq_inputs_ch = pciseq_current_inputs_ch.mix(pciseq_published_inputs_ch)
+    pciseq_inputs_ch = pciseq_current_inputs_ch
+        .mix(pciseq_published_inputs_ch)
+        .combine(pciseq_reference_results_ch, by: 0)
+        .map {
+            _referenceKey, pairId, segmentation, platform, configJson,
+            sourceH5ad, labelFiles, referenceBundle ->
+                tuple(
+                    pairId, segmentation, platform, configJson,
+                    sourceH5ad, referenceBundle, labelFiles,
+                )
+        }
     pciseq_prepared_ch = PCISEQ_PREPARE(pciseq_inputs_ch)
     pciseq_computed_ch = PCISEQ_COMPUTE(pciseq_prepared_ch)
     pciseq_results_ch = PCISEQ_FINALIZE(pciseq_computed_ch)

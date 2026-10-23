@@ -138,8 +138,11 @@ paired-only `ALIGN`, `MATERIALIZE_ALIGNMENT`, `ALIGN_QC`, and `COMPARE` are
 inactive for that row.
 The optional [pciSeq stage](stages/pciseq.md) runs immediately after clustering
 as `PCISEQ_PREPARE` → `PCISEQ_COMPUTE` → `PCISEQ_FINALIZE`, independently for
-each active platform and analysis segmentation. It requires a supplied
-genes-by-cell-type reference expression matrix. Only computation uses the
+each active platform and analysis segmentation. `PCISEQ_REFERENCE` prepares and
+shares each distinct atlas/region/cohort reference before those branches run.
+The default source is Allen WHB for human and WMB for mouse; SEA-AD and custom
+matrices are selectable. Human samples require explicit regions by default.
+See [reference preparation](stages/pciseq-references.md). Only computation uses the
 dedicated pciSeq runtime. Enabled pairs finish pciSeq before later consumers
 of the clustering outputs proceed, including standalone published-input ranges.
 `MAPMYCELLS` consumes the AnnData files written by

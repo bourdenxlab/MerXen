@@ -4,19 +4,20 @@ The optional `pciseq` stage runs immediately after `clustering_squidpy` for each
 active platform and selected analysis segmentation. It uses the public
 [`pciSeq.fit` API](https://github.com/acycliq/pciSeq_3d) to estimate cell types
 and transcript-to-cell assignments jointly, from RNA spots, segmentation masks,
-and a supplied single-cell reference. It does not use Leiden labels as training
+and a single-cell reference. It does not use Leiden labels as training
 labels. Existing clustering and raw expression counts remain in the annotated
 output.
 
 ## Run it
 
-Enable the stage and supply a reference expression matrix:
+Enable the stage and select the sample's anatomical region. With `source=auto`,
+human samples use Allen WHB and mouse samples use Allen WMB:
 
 ```bash
 nextflow run workflows/main.nf -profile conda \
     --samplesheet workflows/samplesheet.csv \
     --pciseq_enabled true \
-    --pciseq_reference_path references/mean_expression.csv
+    --pciseq_region_labels A46
 ```
 
 Enabling pciSeq extends the historical default stop from clustering to pciSeq.
@@ -29,16 +30,24 @@ nextflow run workflows/main.nf -profile conda \
     --samplesheet workflows/samplesheet.csv \
     --only_stage pciseq \
     --pciseq_enabled true \
-    --pciseq_reference_path references/mean_expression.csv
+    --pciseq_region_labels A46
 ```
 
 `pci_seq` is an accepted stage alias. Samplesheets may override
-`pciseq_enabled` and `pciseq_reference_path` per row; blank cells inherit the
-global setting. `analysis_segmentation` determines the branches, with all four
+reference settings per row; blank cells inherit the global setting. Human
+samples require explicit regions by default. Mouse samples use whole brain
+until anatomical registration is available; omit the region argument for them.
+See [reference preparation](pciseq-references.md) for SEA-AD, custom inputs,
+native region labels, and all reference parameters.
+
+`analysis_segmentation` determines the branches, with all four
 selected by default. A published-input run checks the exact clustered H5AD,
 latest SpatialData, and native segmentation layers before starting tasks.
 
-The reference is a CSV or TSV with gene identifiers in the first column and
+For a prebuilt custom reference, set `pciseq_reference_source=custom` and
+`pciseq_reference_path`. Regional restriction also requires a class/region
+metadata CSV, or explicitly choose `pciseq_region_mode=whole_brain` for an
+unrestricted reference. The expression input is a CSV or TSV with gene identifiers in the first column and
 cell types in the remaining columns:
 
 ```text
@@ -50,8 +59,8 @@ AQP4,0,0,15
 
 Values must be finite, nonnegative **mean expression**, with unique genes and
 unique cell-type names. Match reference gene identifiers to the native
-transcript gene names, including case. Supply raw mean expression rather than
-log-transformed expression; MerXen cannot infer the reference's normalization
+transcript gene names, including case. Supply linear mean expression rather than
+log-transformed expression; MerXen cannot infer a custom reference's normalization
 from its values. Every class needs positive expression in the retained panel.
 `Zero` is reserved by pciSeq for its low-expression class. Atlas marker-lookup
 JSONs and MapMyCells precomputed statistics are different formats and cannot be
@@ -97,7 +106,7 @@ parameter file:
 
 ```yaml
 pciseq_enabled: true
-pciseq_reference_path: references/mean_expression.csv
+pciseq_region_labels: ["Human A46"]
 pciseq_geometry_mode: labels_3d
 pciseq_labels_path: inputs/cell_labels.npy
 pciseq_origin_um: [0, 0, 0]
@@ -117,7 +126,10 @@ per acquisition.
 | Parameter | Default | Meaning |
 |---|---|---|
 | `pciseq_enabled` | `false` | Enable the optional stage. |
-| `pciseq_reference_path` | `null` | Required genes-by-cell-type reference CSV/TSV. |
+| `pciseq_reference_source` | `auto` | Species-matched Allen atlas; also `wmb`, `whb`, `seaad`, or `custom`. |
+| `pciseq_region_labels` | `[]` | Native anatomical regions; required for human by default. |
+| `pciseq_region_mode` | `auto` | Human requires regions; mouse uses whole brain. Explicit `required` or `whole_brain` overrides this. |
+| `pciseq_reference_path` | `null` | Optional custom genes-by-cell-type CSV/TSV. |
 | `pciseq_geometry_mode` | `project_2d` | Native polygon projection or explicit `labels_3d`. |
 | `pciseq_overlap_policy` | `background` | Put polygon-overlap seed pixels in background; `error` rejects overlaps. |
 | `pciseq_pixel_size_um` | `1.0` | Raster resolution for polygon projection. |
@@ -139,6 +151,9 @@ count, iteration limit, flat-cell retention, and headless operation. These
 settings cannot be overridden through `pciseq_options`. Use a parameter file
 for array/dictionary settings.
 
+Additional atlas, donor, taxonomy, and integrity settings are listed in
+[reference preparation](pciseq-references.md#parameters).
+
 ## Outputs and interpretation
 
 Outputs are published under
@@ -151,6 +166,8 @@ Outputs are published under
 - `cell_data.json` and `gene_data.json`: raw upstream result records.
 - Cell/spot ID maps and preparation/computation manifests: coordinate choices,
   exclusions, reference provenance, model options, and upstream version/commit.
+- `reference_manifest.json`: atlas release, input checksums, regional/cohort
+  filters, normalization, and the checksum of the expression prior used.
 - With table writing enabled, a separate `<native_table_key>_pciseq` table in
   the source SpatialData store.
 
@@ -164,7 +181,7 @@ and assignment quality before using results for analysis.
 
 ## Runtime and direct CLI
 
-`PCISEQ_PREPARE` and `PCISEQ_FINALIZE` run in MerXen's standard environment.
+`PCISEQ_REFERENCE`, `PCISEQ_PREPARE`, and `PCISEQ_FINALIZE` run in MerXen's standard environment.
 `PCISEQ_COMPUTE` uses the pinned upstream commit
 `5e2c0fd1841f8a4022a2fa341ece965687e343dd` in a separate runtime. The stage runs
 without a viewer or upstream SpatialData exports. Subsequent clustering
@@ -183,6 +200,10 @@ isolated runtime; the active MerXen interpreter performs spatial I/O. Required
 JSON fields are `pair_id`, `sample_id`, `platform`, `segmentation`, `source_h5ad`,
 `spatialdata_path`, and `reference_path`; other fields match the parameter table
 without the `pciseq_` prefix. Nextflow generates this configuration automatically.
+For this direct CLI, first run `merxen prepare-pciseq-reference` and set
+`reference_path` and `reference_manifest_path` to its outputs. The pipeline
+does this automatically and shares each prepared reference across matching
+sample/segmentation branches.
 
 To refresh only this runtime's dependency lock and conda cache identity:
 

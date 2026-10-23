@@ -1,3 +1,50 @@
+process PCISEQ_REFERENCE {
+    tag "${reference_key}"
+    // The Python builder validates source fingerprints and owns its shared cache.
+    // Re-run that lookup when .env resolves a different healthy reference root.
+    cache false
+
+    publishDir {
+        "${params.outdir}/pciseq_references/${reference_key}"
+    }, mode: "copy", overwrite: true
+
+    input:
+    tuple val(reference_key), val(config_json),
+        path(reference_files, stageAs: "custom_reference/*"),
+        path(metadata_files, stageAs: "custom_metadata/*")
+
+    output:
+    tuple val(reference_key), path("pciseq_reference_out")
+
+    script:
+    def config = new groovy.json.JsonSlurper().parseText(config_json.toString())
+    config.reference_path = !reference_files ? null : (
+        reference_files instanceof Collection ? reference_files[0] : reference_files
+    ).toString()
+    config.custom_metadata_path = !metadata_files ? null : (
+        metadata_files instanceof Collection ? metadata_files[0] : metadata_files
+    ).toString()
+    def stagedConfig = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(config))
+    """
+    set -euo pipefail
+    export PYTHONPATH="${projectDir}/../src:\${PYTHONPATH:-}"
+    export OMP_NUM_THREADS="${task.cpus}"
+    export OPENBLAS_NUM_THREADS="${task.cpus}"
+    cat > pciseq_reference_config.json <<'JSON'
+${stagedConfig}
+JSON
+    merxen prepare-pciseq-reference --config pciseq_reference_config.json
+    """
+
+    stub:
+    """
+    mkdir -p pciseq_reference_out
+    echo 'gene,type_a' > pciseq_reference_out/reference.csv
+    echo '{}' > pciseq_reference_out/reference_manifest.json
+    echo 'cell_type,n_cells' > pciseq_reference_out/class_support.csv
+    """
+}
+
 process PCISEQ_PREPARE {
     tag "${pair_id}:${platform}:${segmentation}"
 
@@ -7,7 +54,7 @@ process PCISEQ_PREPARE {
         val(platform),
         val(config_json),
         path(source_h5ad, stageAs: "source_clustered.h5ad"),
-        path(reference_file),
+        path(reference_bundle, stageAs: "reference_input"),
         path(label_files)
 
     output:
@@ -18,7 +65,8 @@ process PCISEQ_PREPARE {
 
     script:
     def config = new groovy.json.JsonSlurper().parseText(config_json.toString())
-    config.reference_path = reference_file.toString()
+    config.reference_path = "${reference_bundle}/reference.csv"
+    config.reference_manifest_path = "${reference_bundle}/reference_manifest.json"
     config.labels_path = !label_files ? null : (
         label_files instanceof Collection ? label_files[0] : label_files
     ).toString()

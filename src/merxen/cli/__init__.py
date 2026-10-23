@@ -32,6 +32,7 @@ from merxen.cli.run_mask_image_quantification import (
 )
 from merxen.cli.run_mecr import mecr_command, mecr_reference_command
 from merxen.cli.run_pciseq import pciseq_command
+from merxen.cli.run_pciseq_reference import prepare_pciseq_reference_command
 from merxen.cli.run_qc import qc_command
 from merxen.cli.run_segmentation import (
     cellpose_nuclei_segment_command,
@@ -82,3 +83,4 @@ main.add_command(mecr_command)
 main.add_command(clustering_squidpy_command)
 main.add_command(mapmycells_command)
 main.add_command(pciseq_command)
+main.add_command(prepare_pciseq_reference_command)

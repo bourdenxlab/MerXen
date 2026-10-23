@@ -15,6 +15,7 @@ dependencies = [
     "pandas>=2.0",
     "geopandas>=1.0",
     "anndata>=0.10.9,<0.13.0",
+    "h5py>=3.11",
     "pyarrow>=15.0.0,<24",
     "imagecodecs>=2024.12.30",
     "tifffile>=2025.1",

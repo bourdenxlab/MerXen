@@ -1798,6 +1798,103 @@ class MapMyCellsConfig(BaseModel):
         return self
 
 
+class PciSeqReferenceConfig(BaseModel):
+    """Prepare linear mean-expression profiles from a region-matched atlas."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    species: Literal["human", "mouse"] = "human"
+    source: Literal["auto", "wmb", "whb", "seaad", "custom"] = "auto"
+    reference_root: Path | None = None
+    reference_path: Path | None = None
+    custom_metadata_path: Path | None = None
+    region_labels: list[str] = Field(default_factory=list)
+    region_mode: Literal["auto", "required", "whole_brain"] = "auto"
+    level: str = Field(default="auto", min_length=1)
+    min_cells_per_type: int = Field(default=10, ge=1)
+    normalization_target_sum: float = Field(default=10000.0, gt=0, allow_inf_nan=False)
+    donor_balance: bool = True
+    seaad_cohort: Literal["all", "ad", "control"] = "all"
+    auto_download: bool = True
+    verify_checksums: bool = True
+    chunk_rows: int = Field(default=2048, ge=1)
+    gene_id_mode: Literal["symbol", "ensembl"] = "symbol"
+    gene_names: list[str] | None = None
+    output_dir: Path = Path("pciseq_reference_out")
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def _normalize_source(cls: type[PciSeqReferenceConfig], value: Any) -> Any:
+        if isinstance(value, str):
+            key = value.strip().lower().replace("-", "").replace("_", "")
+            return {
+                "auto": "auto",
+                "wmb": "wmb",
+                "whb": "whb",
+                "seaad": "seaad",
+                "custom": "custom",
+            }.get(key, value)
+        return value
+
+    @field_validator("region_labels", mode="before")
+    @classmethod
+    def _parse_reference_regions(
+        cls: type[PciSeqReferenceConfig], value: Any
+    ) -> list[str]:
+        import json
+
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raw = value.strip()
+            value = json.loads(raw) if raw.startswith("[") else raw.split(",")
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("region_labels must be a list or comma-separated string")
+        return sorted({str(label).strip() for label in value if str(label).strip()})
+
+    @model_validator(mode="after")
+    def _validate_reference_selection(
+        self: PciSeqReferenceConfig,
+    ) -> PciSeqReferenceConfig:
+        if self.source == "auto":
+            self.source = (
+                "custom"
+                if self.reference_path is not None
+                else ("wmb" if self.species == "mouse" else "whb")
+            )
+        if self.source == "wmb" and self.species != "mouse":
+            raise ValueError("WMB is a mouse reference; set species='mouse'")
+        if self.source in {"whb", "seaad"} and self.species != "human":
+            raise ValueError("WHB and SEA-AD require species='human'")
+        if self.region_mode == "auto":
+            # TODO: replace the mouse whole-brain fallback with regions covered by
+            # CCFv3-registered coronal sections, including a 100 um safety margin.
+            self.region_mode = (
+                "required"
+                if self.region_labels or self.species == "human"
+                else "whole_brain"
+            )
+        if self.source == "custom":
+            if self.reference_path is None:
+                raise ValueError("custom reference requires reference_path")
+            if self.region_labels and self.custom_metadata_path is None:
+                raise ValueError(
+                    "Regional custom references require custom_metadata_path "
+                    "with cell_type and region columns"
+                )
+        elif self.reference_path is not None:
+            raise ValueError("reference_path is only used with auto/custom sources")
+        if self.region_mode == "required" and not self.region_labels:
+            raise ValueError(
+                "Specify region_labels or explicitly select region_mode='whole_brain'"
+            )
+        if self.region_mode == "whole_brain" and self.region_labels:
+            raise ValueError("whole_brain mode cannot also specify region_labels")
+        if self.source != "seaad" and self.seaad_cohort != "all":
+            raise ValueError("seaad_cohort applies only to the SEA-AD source")
+        return self
+
+
 class PciSeqConfig(BaseModel):
     """Parameters for one optional pciSeq cell-typing acquisition.
 
@@ -1815,6 +1912,7 @@ class PciSeqConfig(BaseModel):
     source_h5ad: Path
     spatialdata_path: Path
     reference_path: Path
+    reference_manifest_path: Path | None = None
     table_key: str | None = None
     shape_key: str | None = None
     points_key: str | None = None

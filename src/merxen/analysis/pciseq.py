@@ -531,6 +531,15 @@ def prepare_pciseq(config: PciSeqConfig, output_dir: Path) -> Path:
     reference = _read_reference(config.reference_path)
     with config.reference_path.open("rb") as handle:
         reference_sha256 = hashlib.file_digest(handle, "sha256").hexdigest()
+    reference_origin = None
+    if config.reference_manifest_path is not None:
+        reference_origin = json.loads(config.reference_manifest_path.read_text())
+        if not isinstance(reference_origin, dict):
+            raise ValueError("The prepared reference manifest must be a JSON object")
+        if reference_origin.get("reference_sha256") != reference_sha256:
+            raise ValueError(
+                "The reference manifest checksum does not match the supplied matrix"
+            )
     source = ad.read_h5ad(config.source_h5ad)
     source_ids = _table_ids(source)
     sdata_obj = sd.read_zarr(config.spatialdata_path)
@@ -583,6 +592,11 @@ def prepare_pciseq(config: PciSeqConfig, output_dir: Path) -> Path:
         "spatialdata_path": str(config.spatialdata_path.resolve()),
         "clustered_cell_count": source.n_obs,
     }
+    if config.reference_manifest_path is not None:
+        manifest["reference_preparation"] = reference_origin
+        shutil.copy2(
+            config.reference_manifest_path, output_dir / "reference_manifest.json"
+        )
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     return manifest_path
@@ -810,6 +824,9 @@ def finalize_pciseq(
         shutil.copy2(computed_dir / filename, output_dir / filename)
     for filename in ("manifest.json", "cell_id_map.csv", "spot_id_map.csv"):
         shutil.copy2(prepared_dir / filename, output_dir / filename)
+    reference_manifest = prepared_dir / "reference_manifest.json"
+    if reference_manifest.exists():
+        shutil.copy2(reference_manifest, output_dir / "reference_manifest.json")
     summary = {
         "sample_id": config.sample_id,
         "platform": config.platform,
