@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 
@@ -18,8 +19,24 @@ from merxen.io.czi import (
     run_convert_czi_scene,
     run_read_czi_info,
 )
+from merxen.io.ome_tiff_writer import pyramid_level_shapes
 
 _OME_SUFFIXES = (".ome.tif", ".ome.tiff")
+_MIN_BAND_HEIGHT = 2048
+_MIN_LEVEL_SIZE = 1024
+
+
+def _band_height(tile_size: int, width: int, height: int) -> int:
+    """Return the smallest valid band height of at least ``_MIN_BAND_HEIGHT`` rows.
+
+    The writer needs a band height that is a multiple of the tile size and, for
+    an image taller than one band, of ``2**n_sub`` (``n_sub`` pyramid
+    reductions), so that band boundaries stay aligned at every level.
+    """
+    shapes = pyramid_level_shapes((height, width), min_level_size=_MIN_LEVEL_SIZE)
+    n_sub = len(shapes) - 1
+    step = math.lcm(tile_size, 2**n_sub)
+    return -(-_MIN_BAND_HEIGHT // step) * step
 
 
 def _default_workers() -> int:
@@ -128,7 +145,9 @@ def convert_czi_command(
             click.echo(warning, err=True)
         pixel_size, pixel_size_source = resolve_czi_pixel_size(info, pixel_size_um)
         n_workers = workers or _default_workers()
-        band_height = -(-max(2048, tile_size) // tile_size) * tile_size
+        meta = next(m for m in info.scenes if m.index == scene_index)
+        _, _, scene_width, scene_height = meta.bbox_xywh
+        band_height = _band_height(tile_size, scene_width, scene_height)
         result = run_convert_czi_scene(
             input_path,
             output_path,
@@ -139,6 +158,7 @@ def convert_czi_command(
             image_name=image_name,
             tile_size=tile_size,
             band_height=band_height,
+            min_level_size=_MIN_LEVEL_SIZE,
             compression=compression,
             workers=n_workers,
         )

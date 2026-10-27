@@ -810,7 +810,7 @@ def run_read_czi_info(
     interpreter = czi_runtime_python(python)
     if interpreter is None:
         return read_czi_info(path)
-    payload = _run_runtime(interpreter, "info", {"path": str(path)})
+    payload = _run_runtime(interpreter, "info", {"path": os.path.abspath(path)})
     return CziFileInfo.from_dict(payload["info"])
 
 
@@ -832,10 +832,20 @@ def run_convert_czi_scene(
     interpreter = czi_runtime_python(python)
     if interpreter is None:
         return convert_czi_scene(path, output_path, **kwargs)
+    # The runtime starts in a temporary directory: every path must be absolute
+    # in the caller's working directory, or a relative output is written there
+    # and deleted with it.
     request = {
-        "path": str(path),
-        "output_path": str(output_path),
-        **{k: (str(v) if isinstance(v, Path) else v) for k, v in kwargs.items()},
+        "path": os.path.abspath(path),
+        "output_path": os.path.abspath(output_path),
+        **{
+            k: (
+                os.path.abspath(v)
+                if v is not None and (isinstance(v, os.PathLike) or k == "tmp_dir")
+                else v
+            )
+            for k, v in kwargs.items()
+        },
     }
     payload = _run_runtime(interpreter, "convert", request)
     return CziConversionResult.from_dict(payload["result"])

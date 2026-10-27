@@ -97,6 +97,58 @@ def test_convert_single_scene(tmp_path: Path, backend_args: list[str]) -> None:
     assert "Converted scene 0 (96×80 px, 3 channels: DAPI, AF568, AF647)" in output
 
 
+def test_relative_input_and_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_args: list[str]
+) -> None:
+    """Relative paths mean the caller's directory, also through the CZI runtime."""
+    (tmp_path / "in.czi").symlink_to(FIXTURES / "one_scene_hole.czi")
+    monkeypatch.chdir(tmp_path)
+    code, output = run(
+        [
+            "--input",
+            "in.czi",
+            "--output",
+            "rel.ome.tif",
+            "--tile-size",
+            "16",
+            "--workers",
+            "2",
+            "--summary-json",
+            "s.json",
+            *backend_args,
+        ]
+    )
+    assert code == 0, output
+    info = read_ome_tiff_info(tmp_path / "rel.ome.tif")
+    assert info.level_shapes_cyx[0] == (3, 80, 96)
+    summary = json.loads((tmp_path / "s.json").read_text())
+    assert summary["output_path"] == "rel.ome.tif"
+
+
+@pytest.mark.parametrize(
+    ("tile_size", "width", "height", "expected"),
+    [
+        (1024, 100, 100, 2048),
+        (16, 100, 100, 2048),
+        (48, 40000, 61003, 2112),
+        (80, 40000, 61003, 2240),
+        (48, 40000, 2000, 2112),
+    ],
+)
+def test_band_height_is_valid_for_any_tile_size(
+    tile_size: int, width: int, height: int, expected: int
+) -> None:
+    from merxen.cli.run_convert_czi import _band_height
+    from merxen.io.ome_tiff_writer import pyramid_level_shapes
+
+    band = _band_height(tile_size, width, height)
+    n_sub = len(pyramid_level_shapes((height, width), min_level_size=1024)) - 1
+    assert band >= 2048
+    assert band % tile_size == 0
+    assert band % 2**n_sub == 0
+    assert band == expected
+
+
 def test_several_scenes_need_a_choice(tmp_path: Path, backend_args: list[str]) -> None:
     source = str(FIXTURES / "two_scenes_zstd.czi")
     out = tmp_path / "out.ome.tif"
