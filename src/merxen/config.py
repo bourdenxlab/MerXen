@@ -486,12 +486,17 @@ class ViewerCacheConfig(BaseModel):
     pyramids, and image pyramid the comparison viewer would otherwise build on
     the fly. Parameter defaults mirror the viewer's own defaults; expose them via
     Nextflow params to keep them in lockstep with the viewer's runtime settings.
+
+    With ``image_only`` the step only builds image pyramids (of ``image_keys``, or
+    of every non-derived image) in an image-only store such as the
+    manual-registration prepared store; ``platform`` and ``original_data_path``
+    are then not needed.
     """
 
     dataset_name: str
-    platform: Literal["MERSCOPE", "XENIUM"]
+    platform: Literal["MERSCOPE", "XENIUM"] | None = None
     latest_zarr_path: Path
-    original_data_path: Path
+    original_data_path: Path | None = None
     output_dir: Path
     transform_path: Path | None = None
     downsample: int = Field(default=4, ge=2)
@@ -500,6 +505,25 @@ class ViewerCacheConfig(BaseModel):
     min_size: int = Field(default=1024, gt=0)
     shape_keys: list[str] | None = None
     build_image_pyramid: bool = True
+    image_only: bool = False
+    image_keys: list[str] | None = None
+
+    @model_validator(mode="after")
+    def _validate_mode(self: ViewerCacheConfig) -> ViewerCacheConfig:
+        if not self.image_only and (
+            self.platform is None or self.original_data_path is None
+        ):
+            raise ValueError(
+                "platform and original_data_path are required unless image_only is true"
+            )
+        if self.image_keys is not None:
+            if not self.image_only:
+                raise ValueError("image_keys is only used when image_only is true")
+            if not self.image_keys or len(set(self.image_keys)) != len(self.image_keys):
+                raise ValueError(
+                    f"image_keys must be non-empty and unique, got {self.image_keys}"
+                )
+        return self
 
 
 class MaskImageQuantificationConfig(BaseModel):
@@ -558,15 +582,15 @@ class RegisteredImageSpec(BaseModel):
         return names
 
 
-class ImageRegistrationConfig(BaseModel):
-    """Configuration for registering external images onto the mask grid."""
+class RegistrationSettings(BaseModel):
+    """Algorithm settings shared by REGISTER_IMAGES and manual registration.
 
-    dataset_name: str
-    platform: Literal["MERSCOPE", "XENIUM"]
-    latest_zarr_path: Path
-    output_dir: Path
-    images: list[RegisteredImageSpec] = Field(min_length=1)
-    reference_image_key: str = "morphology_focus"
+    Every field here is dumped into REGISTER_IMAGES provenance
+    (``image_registration._provenance``), so adding a field to this class changes the
+    provenance of every registered image and forces a re-run. New knobs go on a
+    subclass (for example ``ManualRegistrationSettings``), never here.
+    """
+
     reference_channel: str = "DAPI"
     reference_pixel_size_um: float = Field(default=0.2125, gt=0.0)
     matrix_scale_tolerance: float = Field(default=0.02, gt=0.0, lt=1.0)
@@ -603,14 +627,25 @@ class ImageRegistrationConfig(BaseModel):
         ge=0.0,
         le=1.0,
     )
+    tile_size: int = Field(default=4096, gt=0)
+    chunk_size: int = Field(default=4096, gt=0)
+    build_viewer_pyramid: bool = True
+
+
+class ImageRegistrationConfig(RegistrationSettings):
+    """Configuration for registering external images onto the mask grid."""
+
+    dataset_name: str
+    platform: Literal["MERSCOPE", "XENIUM"]
+    latest_zarr_path: Path
+    output_dir: Path
+    images: list[RegisteredImageSpec] = Field(min_length=1)
+    reference_image_key: str = "morphology_focus"
     registration_quality_enabled: bool = True
     registration_quality_pixel_size_um: float = Field(default=0.85, gt=0.0)
     registration_quality_smoothing_sigma_um: float = Field(default=0.68, ge=0.0)
     registration_quality_cell_label_key: str = "MOSAIK_cellpose_labels"
     registration_quality_nuclei_label_key: str = "cellpose_nuclei_labels"
-    tile_size: int = Field(default=4096, gt=0)
-    chunk_size: int = Field(default=4096, gt=0)
-    build_viewer_pyramid: bool = True
 
     @model_validator(mode="after")
     def _validate_image_keys(self: ImageRegistrationConfig) -> ImageRegistrationConfig:

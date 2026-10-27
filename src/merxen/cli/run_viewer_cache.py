@@ -30,6 +30,16 @@ def build_viewer_caches_command(config_path: Path, force_rerun: bool) -> None:
     """Materialize label masks, pyramids, and outlines into the enriched zarr."""
     cfg = load_config_from_json(config_path, ViewerCacheConfig)
     assert isinstance(cfg, ViewerCacheConfig)
+    if cfg.image_only or cfg.platform is None or cfg.original_data_path is None:
+        # Placeholder narrowing Optional types for mypy; MX4 replaces it with the
+        # image-only branch.
+        raise click.UsageError(
+            "image_only viewer caches are not available in this build"
+            if cfg.image_only
+            else (
+                "platform and original_data_path are required unless image_only is true"
+            )
+        )
 
     params = ViewerCacheParams(
         downsample=cfg.downsample,
