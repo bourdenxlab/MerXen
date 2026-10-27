@@ -10,6 +10,7 @@ matches the current format is skipped unless ``force`` is set.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ import zarr
 from spatialdata import read_zarr
 from spatialdata.models import Image2DModel, Labels2DModel
 from spatialdata.transformations import Affine, get_transformation
+from xarray import DataTree
 
 from merxen.io.image_source import image_to_cyx, registered_image_keys
 from merxen.io.spatialdata_io import (
@@ -634,6 +636,101 @@ def build_image_pyramid(
         ),
     )
     return "built"
+
+
+def build_image_pyramids_in_store(
+    sdata: Any,
+    zarr_path: Path,
+    *,
+    image_keys: Sequence[str] | None = None,
+    params: ViewerCacheParams | None = None,
+) -> dict[str, str]:
+    """Build the viewer image pyramid of every base image element in an open store.
+
+    The caller must hold ``spatialdata_write_lock(zarr_path)``; this helper never
+    takes it. It never writes root attributes (only derived image elements and
+    their markers).
+
+    Args:
+        sdata: SpatialData object backed by ``zarr_path``.
+        zarr_path: The store behind ``sdata``.
+        image_keys: Restrict to these image elements; None means every
+            non-derived image element.
+        params: Cache parameters (``downsample``, ``min_size``,
+            ``build_image_pyramid``, ``force``).
+
+    Returns:
+        ``{image_key: status}`` in sorted key order; status is ``"built"``,
+        ``"skipped"``, ``"no-levels"``, ``"stored_multiscale"`` or ``"disabled"``.
+
+    Raises:
+        ValueError: If a requested key is not a non-derived image element of the
+            store.
+    """
+    params = params or ViewerCacheParams()
+    zarr_path = Path(zarr_path)
+    available = sorted(str(k) for k in sdata.images if not is_derived_cache_key(str(k)))
+    if image_keys is None:
+        keys = available
+    else:
+        requested = {str(k) for k in image_keys}
+        missing = sorted(requested - set(available))
+        if missing:
+            raise ValueError(
+                f"Image element(s) {missing} are not base image elements of "
+                f"{zarr_path} (base images: {available})"
+            )
+        keys = [k for k in available if k in requested]
+    if not params.build_image_pyramid:
+        return {key: "disabled" for key in keys}
+    statuses: dict[str, str] = {}
+    for key in keys:
+        element = sdata.images[key]
+        if isinstance(element, DataTree):
+            # Already multiscale on disk: the viewer uses it as is.
+            statuses[key] = "stored_multiscale"
+            continue
+        base_cyx = image_to_cyx(element)
+        transformations = get_transformation(element, get_all=True)
+        coordinate_system = (
+            "global" if "global" in transformations else sorted(transformations)[0]
+        )
+        statuses[key] = build_image_pyramid(
+            sdata=sdata,
+            zarr_path=zarr_path,
+            image_key=key,
+            base_cyx=base_cyx,
+            channels=_channel_labels(base_cyx),
+            transform=transformations[coordinate_system],
+            params=params,
+            coordinate_system=coordinate_system,
+        )
+        log_status(f"Image pyramid for images[{key}]: {statuses[key]}")
+        force_release(note=f"after image pyramid for {key}")
+    return statuses
+
+
+def build_image_pyramid_caches(
+    zarr_path: str | Path,
+    *,
+    image_keys: Sequence[str] | None = None,
+    params: ViewerCacheParams | None = None,
+) -> dict[str, Any]:
+    """Pre-build viewer image pyramids in an image-only store (no masks, no platform).
+
+    Takes ``spatialdata_write_lock(zarr_path)`` from the read until the last cache
+    is written.
+
+    Returns:
+        ``{"image_pyramids": {image_key: status}}``.
+    """
+    zarr_path = Path(zarr_path)
+    with spatialdata_write_lock(zarr_path):
+        sdata = read_zarr(zarr_path, selection=("images",))
+        statuses = build_image_pyramids_in_store(
+            sdata, zarr_path, image_keys=image_keys, params=params
+        )
+    return {"image_pyramids": statuses}
 
 
 def _derived_complete(
