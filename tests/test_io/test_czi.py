@@ -676,6 +676,30 @@ def test_relative_paths_are_resolved_in_the_callers_directory(
     assert np.array_equal(level0.values, expected)
 
 
+def test_conversion_accepts_an_explicit_none_tmp_dir(
+    tmp_path: Path, czi_python: str | None
+) -> None:
+    """``tmp_dir=None`` is part of the contract and must survive the bridge."""
+    out = tmp_path / "none.ome.tif"
+    run_convert_czi_scene(
+        FIXTURES / "one_scene_hole.czi",
+        out,
+        python=czi_python,
+        scene=0,
+        channel_names=["A", "B", "C"],
+        pixel_size_um=0.5,
+        image_name="fixture_reference",
+        tile_size=16,
+        band_height=16,
+        min_level_size=16,
+        workers=1,
+        tmp_dir=None,
+    )
+    expected = np.load(FIXTURES / "oracle.npz")["one_scene_hole__s0"]
+    level0 = open_ome_tiff_level(read_ome_tiff_info(out), 0)
+    assert np.array_equal(level0.values, expected)
+
+
 def test_xml_is_never_logged(
     caplog: pytest.LogCaptureFixture, czi_python: str | None
 ) -> None:

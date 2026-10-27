@@ -841,7 +841,7 @@ def run_convert_czi_scene(
         **{
             k: (
                 os.path.abspath(v)
-                if isinstance(v, os.PathLike) or k == "tmp_dir"
+                if v is not None and (isinstance(v, os.PathLike) or k == "tmp_dir")
                 else v
             )
             for k, v in kwargs.items()
