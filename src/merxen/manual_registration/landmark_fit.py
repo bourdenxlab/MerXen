@@ -205,15 +205,16 @@ def robust_similarity(
         The fit on the used pairs with per-pair diagnostics in micrometres.
 
     Raises:
-        ValueError: On malformed input, fewer than 2 pairs or non-positive pixel sizes.
+        ValueError: On malformed input, fewer than 2 pairs, or pixel sizes that are
+            not finite and positive.
     """
     src, dst = _as_pairs(moving_xy, reference_xy)
     count = len(src)
     if count < 2:
         raise ValueError("a similarity fit needs at least 2 landmark pairs")
     pixel_ref, pixel_mov = reference_pixel_size_um, moving_pixel_size_um
-    if not (pixel_ref > 0.0 and pixel_mov > 0.0):
-        raise ValueError("pixel sizes must be positive")
+    if not all(math.isfinite(v) and v > 0.0 for v in (pixel_ref, pixel_mov)):
+        raise ValueError("pixel sizes must be finite and positive")
 
     used = np.ones(count, dtype=bool)
     outlier: np.ndarray

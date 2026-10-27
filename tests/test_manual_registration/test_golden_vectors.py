@@ -65,6 +65,10 @@ def _assert_same(actual: Any, expected: Any, path: str = "$") -> None:
             _assert_same(left, right, f"{path}[{index}]")
     elif isinstance(expected, bool) or isinstance(actual, bool):
         assert actual is expected, path
+    elif isinstance(expected, int) != isinstance(actual, int):
+        raise AssertionError(
+            f"{path}: int/float type mismatch {actual!r} vs {expected!r}"
+        )
     elif isinstance(expected, float) or isinstance(actual, float):
         assert math.isclose(actual, expected, rel_tol=RTOL, abs_tol=ATOL), path
     else:
@@ -89,6 +93,19 @@ def test_golden_file_is_reproducible(
     rebuilt = json.loads(script.render(script.build_golden_vectors()))
     _assert_same(rebuilt, golden)
     assert script.first_difference(rebuilt, golden) is None
+
+
+def test_first_difference_compares_ints_exactly(script: ModuleType) -> None:
+    assert script.first_difference(10, 10) is None
+    assert script.first_difference(10, 10.0) == "$"
+    assert script.first_difference(10.0, 10) == "$"
+    assert script.first_difference({"a": [1.0]}, {"a": [1]}) == "$.a[0]"
+    assert script.first_difference(1.0, 1.0 + 1e-12) is None
+    assert script.first_difference(True, 1) == "$"
+    with pytest.raises(AssertionError, match="int/float"):
+        _assert_same(10, 10.0)
+    with pytest.raises(AssertionError, match="int/float"):
+        _assert_same(10.0, 10)
 
 
 def test_golden_file_is_canonically_rendered(
