@@ -163,17 +163,21 @@ def _overview(summary: Mapping[str, Any]) -> np.ndarray | None:
         for role, key in (("reference", "reference"), ("moving", "moving_registered")):
             record = attrs["images"][role]
             tree = sdata.images[derived_image_pyramid_cache_key(key, 4)]
-            level = tree[list(tree.keys())[-1]]
-            image = (
-                level.to_dataset()["image"] if hasattr(level, "to_dataset") else level
-            )
+            image = _coarsest_level(tree)
             names = [str(name) for name in image.coords["c"].values]
             plane = np.asarray(
                 image.isel(c=names.index(record["registration_channel"])).values,
                 dtype=np.float32,
             )
             planes.append(plane)
-    except (KeyError, ValueError, OSError, IndexError, TypeError) as exc:
+    except (
+        KeyError,
+        ValueError,
+        OSError,
+        IndexError,
+        TypeError,
+        AttributeError,
+    ) as exc:
         logger.warning("%s: no overview (%s)", summary.get("run_id"), exc)
         return None
     reference, moving = (_normalise(plane) for plane in planes)
@@ -181,6 +185,14 @@ def _overview(summary: Mapping[str, Any]) -> np.ndarray | None:
     width = min(reference.shape[1], moving.shape[1])
     reference, moving = reference[:height, :width], moving[:height, :width]
     return np.dstack([moving, reference, moving])
+
+
+def _coarsest_level(element: Any) -> Any:
+    """The coarsest ``(c, y, x)`` DataArray of a (multi-scale) image element."""
+    if not hasattr(element, "keys"):
+        return element
+    node = element[list(element.keys())[-1]]
+    return node.to_dataset()["image"] if hasattr(node, "to_dataset") else node
 
 
 def _normalise(plane: np.ndarray) -> np.ndarray:
