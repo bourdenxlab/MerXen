@@ -9,7 +9,7 @@ import click
 
 from merxen.config import ViewerCacheConfig, load_config_from_json
 from merxen.viewer_cache import build_viewer_caches
-from merxen.viewer_cache.build import ViewerCacheParams
+from merxen.viewer_cache.build import ViewerCacheParams, build_image_pyramid_caches
 
 
 @click.command(name="build-viewer-caches")
@@ -30,17 +30,6 @@ def build_viewer_caches_command(config_path: Path, force_rerun: bool) -> None:
     """Materialize label masks, pyramids, and outlines into the enriched zarr."""
     cfg = load_config_from_json(config_path, ViewerCacheConfig)
     assert isinstance(cfg, ViewerCacheConfig)
-    if cfg.image_only or cfg.platform is None or cfg.original_data_path is None:
-        # Placeholder narrowing Optional types for mypy; MX4 replaces it with the
-        # image-only branch.
-        raise click.UsageError(
-            "image_only viewer caches are not available in this build"
-            if cfg.image_only
-            else (
-                "platform and original_data_path are required unless image_only is true"
-            )
-        )
-
     params = ViewerCacheParams(
         downsample=cfg.downsample,
         label_chunk_size=cfg.label_chunk_size,
@@ -50,13 +39,23 @@ def build_viewer_caches_command(config_path: Path, force_rerun: bool) -> None:
         build_image_pyramid=cfg.build_image_pyramid,
         force=force_rerun,
     )
-    summary = build_viewer_caches(
-        zarr_path=cfg.latest_zarr_path,
-        platform=cfg.platform,
-        original_data_path=cfg.original_data_path,
-        transform_path=cfg.transform_path,
-        params=params,
-    )
+    if cfg.image_only:
+        if cfg.shape_keys:
+            click.echo("Warning: shape_keys is ignored in image_only mode.")
+        summary = build_image_pyramid_caches(
+            cfg.latest_zarr_path, image_keys=cfg.image_keys, params=params
+        )
+    else:
+        # The config validator guarantees both; the assert narrows the Optional
+        # types for mypy.
+        assert cfg.platform is not None and cfg.original_data_path is not None
+        summary = build_viewer_caches(
+            zarr_path=cfg.latest_zarr_path,
+            platform=cfg.platform,
+            original_data_path=cfg.original_data_path,
+            transform_path=cfg.transform_path,
+            params=params,
+        )
 
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     summary_path = (
@@ -64,8 +63,12 @@ def build_viewer_caches_command(config_path: Path, force_rerun: bool) -> None:
     )
     summary_path.write_text(json.dumps(summary, indent=2, default=str) + "\n")
 
-    for shape_key, mask_result in summary.get("masks", {}).items():
-        click.echo(f"{shape_key}: {mask_result}")
-    click.echo(f"image_pyramid: {summary.get('image_pyramid')}")
+    if cfg.image_only:
+        for key, status in summary["image_pyramids"].items():
+            click.echo(f"image_pyramid[{key}]: {status}")
+    else:
+        for shape_key, mask_result in summary.get("masks", {}).items():
+            click.echo(f"{shape_key}: {mask_result}")
+        click.echo(f"image_pyramid: {summary.get('image_pyramid')}")
     click.echo(f"Saved summary: {summary_path}")
     click.echo(f"Viewer caches complete: {cfg.latest_zarr_path}")
