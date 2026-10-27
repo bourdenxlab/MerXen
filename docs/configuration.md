@@ -58,7 +58,7 @@ the values):
 
 | File | Template | Included by | Sets |
 |------|----------|-------------|------|
-| `workflows/conf/site.config` | `site.config.example` | `nextflow.config`, so every profile | `apptainer_container`, `apptainer_bind_paths`, `clustering_squidpy_gpu_container`, `mender_container` |
+| `workflows/conf/site.config` | `site.config.example` | `nextflow.config`, so every profile | `apptainer_container`, `apptainer_bind_paths`, `clustering_squidpy_gpu_container`, `mender_container`, `manual_registration_czi_python` |
 | `workflows/conf/dwight.site.config` | `dwight.site.config.example` | `conf/dwight.config`, so the `standard`, `dwight` and `local` profiles | the legacy MapMyCells / WHB sources and caches, `annotation_gene_id_fallback_csv`, `cellpose_model_store`, `cellpose_protected_output_roots`, `task_tmp_dir`, and the task environment (`TMPDIR`, `MERXEN_ALIAS_FILE`) |
 
 Each file is found at the path in `MERXEN_SITE_CONFIG` /
