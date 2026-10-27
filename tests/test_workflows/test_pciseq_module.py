@@ -35,11 +35,17 @@ def _run_nextflow(tmp_path: Path, *arguments: str) -> subprocess.CompletedProces
         pytest.skip("nextflow is not installed")
     environment = os.environ.copy()
     environment["NXF_ANSI_LOG"] = "false"
+    # Stub tasks run on the local executor, which refuses any task requesting
+    # more memory or CPUs than the machine has (CI runners have 16 GB, 4 CPUs).
+    limits = tmp_path / "resource_limits.config"
+    limits.write_text("process.resourceLimits = [cpus: 1, memory: 1.GB]\n")
     return subprocess.run(
         [
             "nextflow",
             "run",
             str(REPO_ROOT / "workflows" / "main.nf"),
+            "-c",
+            str(limits),
             "-profile",
             "conda",
             "-without-conda",
