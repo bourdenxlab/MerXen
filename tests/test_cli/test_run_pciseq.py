@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from click.testing import CliRunner
 
-from merxen.cli.run_pciseq import pciseq_command
+from merxen.cli.run_pciseq import pciseq_command, publish_pciseq_viewer_command
 
 
 def test_pciseq_cli_runs_compute_in_isolated_interpreter(
@@ -81,3 +81,46 @@ def test_pciseq_cli_runs_compute_in_isolated_interpreter(
     result = CliRunner().invoke(pciseq_command, ["--config", str(config_path)])
     assert isinstance(result.exception, subprocess.CalledProcessError)
     assert events == ["prepare"]
+
+
+def test_publish_completed_pciseq_does_not_rerun_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from merxen.analysis import pciseq_viewer
+    from merxen.cli import main, run_pciseq
+
+    results_dir = tmp_path / "completed"
+    results_dir.mkdir()
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "pair_id": "pair",
+                "sample_id": "sample",
+                "platform": "XENIUM",
+                "segmentation": "proseg_hybrid",
+                "source_h5ad": "clustered.h5ad",
+                "spatialdata_path": "latest_spatialdata.zarr",
+                "reference_path": "reference.csv",
+            }
+        )
+    )
+    calls = []
+
+    def publish(config: Any, directory: Path) -> dict:
+        calls.append((config.sample_id, config.segmentation, directory))
+        return {"source_key": "pciseq_proseg_hybrid", "native_spots": 10}
+
+    def unexpected_model(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("Publishing completed assignments must not invoke computation")
+
+    monkeypatch.setattr(pciseq_viewer, "publish_pciseq_viewer", publish)
+    monkeypatch.setattr(run_pciseq.subprocess, "run", unexpected_model)
+    result = CliRunner().invoke(
+        publish_pciseq_viewer_command,
+        ["--config", str(config_path), "--results-dir", str(results_dir)],
+    )
+    assert result.exit_code == 0, result.output
+    assert calls == [("sample", "proseg_hybrid", results_dir)]
+    assert json.loads(result.output)["source_key"] == "pciseq_proseg_hybrid"
+    assert "publish-pciseq-viewer" in main.commands

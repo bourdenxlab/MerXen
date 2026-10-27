@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import heapq
 import json
 import shutil
 from dataclasses import dataclass
@@ -46,8 +47,18 @@ _PROBABILITY_SEMANTICS = (
     "pciSeq reported summaries retain classes with probability >0.001 and "
     "truncate probabilities to three decimals. Missing entries are recorded "
     "as zero in the reported matrix; they are not exact posterior zeros. "
-    "Rows need not sum to one."
+    "Rows need not sum to one. Cells excluded from fitting have NaN "
+    "probabilities rather than reported posterior zeros."
 )
+_SEED_EXCLUSION_POLICY = "drop_overlap_seedless_smallest_area_then_highest_id"
+_EXCLUSION_REASON = "overlap_no_seed_pixels"
+_EXCLUSION_COLUMNS = [
+    "instance_id",
+    "reason",
+    "area_um2",
+    "polygon_raster_pixels",
+    "overlapping_instance_ids",
+]
 
 
 @dataclass
@@ -58,7 +69,30 @@ class PciSeqInputs:
     planes: list[sparse.coo_matrix]
     cell_id_map: pd.DataFrame
     spot_id_map: pd.DataFrame
+    excluded_cells: pd.DataFrame
     metadata: dict[str, Any]
+
+
+@dataclass
+class _RasterizedSeeds:
+    plane: sparse.coo_matrix
+    origin: list[float]
+    boundary_ties: int
+    ambiguous_pixels: int
+    instance_ids: np.ndarray
+    excluded_cells: pd.DataFrame
+
+
+def _empty_exclusions() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "instance_id": pd.Series(dtype="uint64"),
+            "reason": pd.Series(dtype=str),
+            "area_um2": pd.Series(dtype=float),
+            "polygon_raster_pixels": pd.Series(dtype="int64"),
+            "overlapping_instance_ids": pd.Series(dtype=str),
+        }
+    )
 
 
 def _positive_ids(values: Any, field: str) -> pd.Series:
@@ -298,7 +332,7 @@ def _load_spots(
 
 def _project_shapes(
     shapes: Any, matrix: np.ndarray, overlap_policy: str
-) -> tuple[list[Any], np.ndarray, list[Any]]:
+) -> tuple[list[Any], np.ndarray, list[tuple[int, int, Any]]]:
     ids = canonical_shape_instance_series(shapes, field_name="pciSeq shapes")
     ids = _positive_ids(ids, "pciSeq shape instances").to_numpy(dtype=np.uint64)
     coefficients = [
@@ -324,7 +358,7 @@ def _project_shapes(
         ):
             raise ValueError("pciSeq requires nonempty valid cell polygons")
     tree = STRtree(geometries)
-    overlaps: list[Any] = []
+    overlaps: list[tuple[int, int, Any]] = []
     for index, geometry in enumerate(geometries):
         for other in tree.query(geometry, predicate="intersects"):
             if other <= index:
@@ -338,7 +372,7 @@ def _project_shapes(
                     f"instances {int(ids[order[index]])} and "
                     f"{int(ids[order[other]])} overlap"
                 )
-            overlaps.append(intersection)
+            overlaps.append((index, int(other), intersection))
     return geometries, ids[order], overlaps
 
 
@@ -383,8 +417,8 @@ def _rasterize(
     spots: pd.DataFrame,
     pixel_size: float,
     max_pixels: int,
-    overlaps: list[Any],
-) -> tuple[sparse.coo_matrix, list[float], int, int]:
+    overlaps: list[tuple[int, int, Any]],
+) -> _RasterizedSeeds:
     bounds = np.asarray([geometry.bounds for geometry in geometries])
     xy = spots[["x", "y"]].to_numpy()
     minimum = np.minimum(bounds[:, :2].min(axis=0), xy.min(axis=0))
@@ -402,36 +436,111 @@ def _rasterize(
             f"pciSeq raster needs {width * height:,} pixels, above max_pixels="
             f"{max_pixels:,}; increase pixel_size_um or max_pixels"
         )
-    mask = np.zeros((height, width), dtype=np.uint32)
-    # A hybrid segmentation can deliberately overlap. Ambiguous prior pixels
-    # remain background so the model, rather than polygon order, assigns spots.
-    ambiguous = np.zeros((height, width), dtype=bool) if overlaps else None
-    for geometry in overlaps:
+    # Count pairwise overlaps so removing one seedless cell can restore another
+    # cell's unique pixels without rebuilding the full raster or dropping both.
+    coverage = np.zeros((height, width), dtype=np.uint32) if overlaps else None
+    adjacency: list[list[int]] = [[] for _ in geometries]
+    for edge, (first, second, geometry) in enumerate(overlaps):
+        adjacency[first].append(edge)
+        adjacency[second].append(edge)
         x0, y0, local = _local_geometry_mask(
             geometry, origin=origin, pixel_size=pixel_size, width=width, height=height
         )
-        assert ambiguous is not None
-        ambiguous[y0 : y0 + local.shape[0], x0 : x0 + local.shape[1]] |= local
+        assert coverage is not None
+        view = coverage[y0 : y0 + local.shape[0], x0 : x0 + local.shape[1]]
+        view[local] += 1
+
+    def seed_pixels(index: int) -> tuple[int, int]:
+        x0, y0, local = _local_geometry_mask(
+            geometries[index],
+            origin=origin,
+            pixel_size=pixel_size,
+            width=width,
+            height=height,
+        )
+        polygon_pixels = int(local.sum())
+        if coverage is not None:
+            local &= coverage[y0 : y0 + local.shape[0], x0 : x0 + local.shape[1]] == 0
+        return polygon_pixels, int(local.sum())
+
+    active = np.ones(len(geometries), dtype=bool)
+    candidates: list[tuple[float, int, int]] = []
+    for index, geometry in enumerate(geometries):
+        polygon_pixels, unique_pixels = seed_pixels(index)
+        if polygon_pixels == 0:
+            raise ValueError(
+                f"Instance {int(ids[index])} has no raster seed pixels even before "
+                "overlap removal; reduce pixel_size_um"
+            )
+        if unique_pixels == 0:
+            heapq.heappush(candidates, (geometry.area, -int(ids[index]), index))
+    exclusions: list[dict[str, Any]] = []
+    while candidates:
+        area, _, index = heapq.heappop(candidates)
+        polygon_pixels, unique_pixels = seed_pixels(index)
+        if unique_pixels:
+            continue
+        neighbors: set[int] = set()
+        assert coverage is not None
+        for edge in adjacency[index]:
+            first, second, intersection = overlaps[edge]
+            other = second if first == index else first
+            if not active[other]:
+                continue
+            neighbors.add(int(ids[other]))
+            x0, y0, local = _local_geometry_mask(
+                intersection,
+                origin=origin,
+                pixel_size=pixel_size,
+                width=width,
+                height=height,
+            )
+            view = coverage[y0 : y0 + local.shape[0], x0 : x0 + local.shape[1]]
+            view[local] -= 1
+        active[index] = False
+        exclusions.append(
+            {
+                "instance_id": int(ids[index]),
+                "reason": _EXCLUSION_REASON,
+                "area_um2": float(area),
+                "polygon_raster_pixels": polygon_pixels,
+                "overlapping_instance_ids": json.dumps(sorted(neighbors)),
+            }
+        )
+
+    excluded = _empty_exclusions()
+    if exclusions:
+        excluded = pd.DataFrame(exclusions, columns=_EXCLUSION_COLUMNS)
+        excluded["instance_id"] = excluded.instance_id.astype("uint64")
+    mask = np.zeros((height, width), dtype=np.uint32)
     boundary_ties = 0
-    for label, geometry in enumerate(geometries, start=1):
+    for label, index in enumerate(np.flatnonzero(active), start=1):
+        geometry = geometries[index]
         x0, y0, local = _local_geometry_mask(
             geometry, origin=origin, pixel_size=pixel_size, width=width, height=height
         )
         y1, x1 = y0 + local.shape[0], x0 + local.shape[1]
         view = mask[y0:y1, x0:x1]
-        if ambiguous is not None:
-            local &= ~ambiguous[y0:y1, x0:x1]
+        if coverage is not None:
+            local &= coverage[y0:y1, x0:x1] == 0
         boundary_ties += int((local & (view > 0)).sum())
         available = local & (view == 0)
         if not available.any():
             raise ValueError(
-                f"Instance {int(ids[label - 1])} has no unambiguous seed pixels; "
-                "reduce pixel_size_um or resolve fully overlapping polygons"
+                f"Instance {int(ids[index])} has no raster seed pixels after shared "
+                "boundary ties; reduce pixel_size_um"
             )
         view[available] = label
     spots.loc[:, ["x", "y"]] = (xy - origin) / pixel_size
-    ambiguous_pixels = int(ambiguous.sum()) if ambiguous is not None else 0
-    return sparse.coo_matrix(mask), origin.tolist(), boundary_ties, ambiguous_pixels
+    ambiguous_pixels = int(np.count_nonzero(coverage)) if coverage is not None else 0
+    return _RasterizedSeeds(
+        plane=sparse.coo_matrix(mask),
+        origin=origin.tolist(),
+        boundary_ties=boundary_ties,
+        ambiguous_pixels=ambiguous_pixels,
+        instance_ids=ids[active],
+        excluded_cells=excluded,
+    )
 
 
 def prepare_pciseq_inputs(
@@ -471,13 +580,15 @@ def prepare_pciseq_inputs(
         ),
         "point_affine": point_matrix.tolist(),
         "geometry_mode": config.geometry_mode,
+        "native_cell_count": len(shape_ids),
     }
+    excluded_cells = _empty_exclusions()
     if config.geometry_mode == "project_2d":
         shape_matrix = _affine(shapes, config.coordinate_system, 2)
         geometries, instance_ids, overlaps = _project_shapes(
             shapes, shape_matrix, config.overlap_policy
         )
-        plane, origin, ties, ambiguous_pixels = _rasterize(
+        raster = _rasterize(
             geometries,
             instance_ids,
             spots,
@@ -485,15 +596,18 @@ def prepare_pciseq_inputs(
             config.max_pixels,
             overlaps,
         )
-        planes = [plane]
+        planes = [raster.plane]
+        instance_ids = raster.instance_ids
+        excluded_cells = raster.excluded_cells
         voxel_size = [config.pixel_size_um, config.pixel_size_um, 1.0]
         metadata.update(
             shape_affine=shape_matrix.tolist(),
-            origin_um=[*origin, 0.0],
-            raster_boundary_ties=ties,
+            origin_um=[*raster.origin, 0.0],
+            raster_boundary_ties=raster.boundary_ties,
             overlap_policy=config.overlap_policy,
             geometric_overlap_pair_count=len(overlaps),
-            ambiguous_raster_pixels=ambiguous_pixels,
+            ambiguous_raster_pixels=raster.ambiguous_pixels,
+            seed_exclusion_policy=_SEED_EXCLUSION_POLICY,
             projection="Measured x/y projected onto native 2D cell polygons; z unused",
             out_of_bounds_spots=0,
         )
@@ -550,6 +664,7 @@ def prepare_pciseq_inputs(
     metadata.update(
         voxel_size=voxel_size,
         cell_count=len(instance_ids),
+        excluded_cell_count=len(excluded_cells),
         spot_count=len(spots),
         raster_shape=list(planes[0].shape),
     )
@@ -563,6 +678,7 @@ def prepare_pciseq_inputs(
             }
         ),
         spot_id_map=spot_map,
+        excluded_cells=excluded_cells,
         metadata=metadata,
     )
 
@@ -579,6 +695,8 @@ def prepare_pciseq(config: PciSeqConfig, output_dir: Path) -> Path:
     """
     import spatialdata as sd
 
+    from merxen.io.spatialdata_io import spatialdata_write_lock
+
     output_dir = Path(output_dir)
     reference = _read_reference(config.reference_path)
     with config.reference_path.open("rb") as handle:
@@ -594,8 +712,10 @@ def prepare_pciseq(config: PciSeqConfig, output_dir: Path) -> Path:
             )
     source = ad.read_h5ad(config.source_h5ad)
     source_ids = _table_ids(source)
-    sdata_obj = sd.read_zarr(config.spatialdata_path)
-    inputs = prepare_pciseq_inputs(sdata_obj, config=config, reference=reference)
+    # Lazy point reads must finish before another stage replaces store elements.
+    with spatialdata_write_lock(config.spatialdata_path):
+        sdata_obj = sd.read_zarr(config.spatialdata_path)
+        inputs = prepare_pciseq_inputs(sdata_obj, config=config, reference=reference)
     observed_genes = inputs.spots["gene_name"].unique()
     unsupported_classes = reference.columns[
         reference.loc[observed_genes].sum(axis=0) <= 0
@@ -607,6 +727,7 @@ def prepare_pciseq(config: PciSeqConfig, output_dir: Path) -> Path:
         )
     if not set(map(int, source_ids)).issubset(
         set(map(int, inputs.cell_id_map.instance_id))
+        | set(map(int, inputs.excluded_cells.instance_id))
     ):
         raise ValueError(
             "Clustered cell IDs do not belong to the selected segmentation"
@@ -621,6 +742,8 @@ def prepare_pciseq(config: PciSeqConfig, output_dir: Path) -> Path:
     inputs.spots.to_csv(output_dir / "spots.csv", index=False)
     inputs.cell_id_map.to_csv(output_dir / "cell_id_map.csv", index=False)
     inputs.spot_id_map.to_csv(output_dir / "spot_id_map.csv", index=False)
+    exclusions_path = output_dir / "excluded_cells.csv"
+    inputs.excluded_cells.to_csv(exclusions_path, index=False)
     reference.to_csv(output_dir / "reference.csv")
     source.write_h5ad(output_dir / "source.h5ad")
     options = {
@@ -643,6 +766,9 @@ def prepare_pciseq(config: PciSeqConfig, output_dir: Path) -> Path:
         "source_h5ad": str(config.source_h5ad.resolve()),
         "spatialdata_path": str(config.spatialdata_path.resolve()),
         "clustered_cell_count": source.n_obs,
+        "excluded_cells_sha256": hashlib.sha256(
+            exclusions_path.read_bytes()
+        ).hexdigest(),
     }
     if config.reference_manifest_path is not None:
         manifest["reference_preparation"] = reference_origin
@@ -671,6 +797,44 @@ def _read_id_maps(prepared_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     if not np.array_equal(np.sort(spot_map.spot_index), np.arange(len(spot_map))):
         raise ValueError("Prepared spot map indices must be sequential")
     return cell_map, spot_map
+
+
+def _read_exclusions(
+    prepared_dir: Path, metadata: dict[str, Any], cell_map: pd.DataFrame
+) -> pd.DataFrame:
+    """Validate the explicit exclusions without accepting unknown missing cells."""
+    count = metadata.get("excluded_cell_count", 0)
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise ValueError("Invalid prepared excluded cell count")
+    path = prepared_dir / "excluded_cells.csv"
+    fingerprint = metadata.get("excluded_cells_sha256")
+    # Prepared runs from before seed exclusions contain neither this file nor
+    # its manifest fields and continue to require complete modeled coverage.
+    if not path.exists() and not count and fingerprint is None:
+        return _empty_exclusions()
+    if (
+        not path.exists()
+        or not isinstance(fingerprint, str)
+        or hashlib.sha256(path.read_bytes()).hexdigest() != fingerprint
+    ):
+        raise ValueError("Prepared excluded cells checksum mismatch")
+    excluded = pd.read_csv(path, dtype={"instance_id": "uint64"})
+    if set(excluded.columns) != set(_EXCLUSION_COLUMNS) or len(excluded) != count:
+        raise ValueError("Prepared excluded cells do not match their manifest")
+    if not excluded.empty:
+        _positive_ids(excluded.instance_id, "excluded cell instances")
+        if (
+            metadata.get("seed_exclusion_policy") != _SEED_EXCLUSION_POLICY
+            or not excluded.reason.eq(_EXCLUSION_REASON).all()
+            or set(map(int, excluded.instance_id)) & set(map(int, cell_map.instance_id))
+        ):
+            raise ValueError("Prepared excluded cells conflict with modeled cells")
+    native_count = metadata.get("native_cell_count", len(cell_map) + count)
+    if native_count != len(cell_map) + count:
+        raise ValueError(
+            "Prepared native cell count does not match modeled/excluded cells"
+        )
+    return excluded
 
 
 def _summarize_cells(
@@ -723,6 +887,38 @@ def _summarize_cells(
         cell_map, on="label", how="left", validate="one_to_one"
     )
     return assignments, probabilities
+
+
+def _include_excluded_cells(
+    assignments: pd.DataFrame, probabilities: np.ndarray, excluded: pd.DataFrame
+) -> tuple[pd.DataFrame, np.ndarray]:
+    assignments["pciseq_exclusion_reason"] = ""
+    if excluded.empty:
+        return assignments, probabilities
+    assignments["label"] = assignments.label.astype("UInt32")
+    excluded_assignments = pd.DataFrame(
+        {
+            "label": pd.array([pd.NA] * len(excluded), dtype="UInt32"),
+            "instance_id": excluded.instance_id.to_numpy(dtype=np.uint64),
+            "pciseq_cell_type": None,
+            "pciseq_probability": np.nan,
+            "pciseq_status": "excluded_overlap",
+            "pciseq_exclusion_reason": excluded.reason.to_numpy(),
+            "reported_class_names": "[]",
+            "reported_probabilities": "[]",
+        }
+    )
+    return (
+        pd.concat([assignments, excluded_assignments], ignore_index=True),
+        np.concatenate(
+            [
+                probabilities,
+                np.full(
+                    (len(excluded), probabilities.shape[1]), np.nan, dtype=np.float32
+                ),
+            ]
+        ),
+    )
 
 
 def _summarize_spots(
@@ -832,10 +1028,14 @@ def finalize_pciseq(
                 "Computed pciSeq results belong to different prepared inputs"
             )
     cell_map, spot_map = _read_id_maps(prepared_dir)
+    excluded = _read_exclusions(prepared_dir, metadata, cell_map)
     cells = pd.DataFrame(json.loads((computed_dir / "cell_data.json").read_text()))
     genes = pd.DataFrame(json.loads((computed_dir / "gene_data.json").read_text()))
     classes = [*metadata["reference_classes"], "Zero"]
     assignments, probabilities = _summarize_cells(cells, cell_map, classes)
+    assignments, probabilities = _include_excluded_cells(
+        assignments, probabilities, excluded
+    )
     spot_assignments = _summarize_spots(genes, spot_map, cell_map)
     prepared_genes = pd.read_csv(
         prepared_dir / "spots.csv", usecols=["gene_name"], dtype={"gene_name": str}
@@ -850,8 +1050,15 @@ def finalize_pciseq(
     positions = pd.Index(assignments.instance_id).get_indexer(ids)
     if (positions < 0).any():
         raise ValueError("pciSeq results do not cover all clustered cell identifiers")
-    for column in ("pciseq_cell_type", "pciseq_probability", "pciseq_status"):
+    for column in (
+        "pciseq_probability",
+        "pciseq_status",
+        "pciseq_exclusion_reason",
+    ):
         annotated.obs[column] = assignments.iloc[positions][column].to_numpy()
+    annotated.obs["pciseq_cell_type"] = pd.Categorical(
+        assignments.iloc[positions].pciseq_cell_type.to_numpy()
+    )
     annotated.obsm["pciseq_reported_probabilities"] = probabilities[positions]
     annotated.uns["merxen_pciseq"] = {
         "geometry_mode": metadata["geometry_mode"],
@@ -876,6 +1083,11 @@ def finalize_pciseq(
         shutil.copy2(computed_dir / filename, output_dir / filename)
     for filename in ("manifest.json", "cell_id_map.csv", "spot_id_map.csv"):
         shutil.copy2(prepared_dir / filename, output_dir / filename)
+    exclusions_path = output_dir / "excluded_cells.csv"
+    if (prepared_dir / "excluded_cells.csv").exists():
+        shutil.copy2(prepared_dir / "excluded_cells.csv", exclusions_path)
+    else:
+        excluded.to_csv(exclusions_path, index=False)
     reference_manifest = prepared_dir / "reference_manifest.json"
     if reference_manifest.exists():
         shutil.copy2(reference_manifest, output_dir / "reference_manifest.json")
@@ -886,18 +1098,30 @@ def finalize_pciseq(
         "annotated_cells": annotated.n_obs,
         "model_cells": len(cell_map),
         "model_spots": len(spot_map),
+        "excluded_cells": len(excluded),
+        "excluded_annotated_cells": int(
+            annotated.obs.pciseq_status.eq("excluded_overlap").sum()
+        ),
         "probability_semantics": _PROBABILITY_SEMANTICS,
         "compute": compute,
     }
     if config.write_spatialdata_table:
-        summary["spatialdata_table_key"] = _write_derived_table(
-            config, annotated, metadata
+        from merxen.analysis.pciseq_viewer import publish_pciseq_viewer
+
+        summary["viewer_source"] = publish_pciseq_viewer(
+            config,
+            output_dir,
+            cell_assignments=assignments,
+            spot_assignments=spot_assignments,
+            annotated=annotated,
         )
+        summary["spatialdata_table_key"] = summary["viewer_source"]["embedding_table"]
     summary_path = output_dir / "pciseq_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2) + "\n")
     return {
         "annotated_h5ad": annotated_path,
         "cell_assignments": cell_path,
         "spot_assignments": spot_path,
+        "excluded_cells": exclusions_path,
         "summary": summary_path,
     }

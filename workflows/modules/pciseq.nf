@@ -139,6 +139,7 @@ process PCISEQ_FINALIZE {
     script:
     """
     set -euo pipefail
+    # SpatialData viewer publication schema 1; refresh pre-publication cached finalizations.
     export PYTHONPATH="${projectDir}/../src:\${PYTHONPATH:-}"
     export OMP_NUM_THREADS="${task.cpus}"
     python -m merxen.pciseq_stages finalize \

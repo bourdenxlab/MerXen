@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -52,11 +53,19 @@ def fake_upstream(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
     def fit(**kwargs: Any) -> tuple[pd.DataFrame, pd.DataFrame]:
         calls.append(kwargs)
+        classes = sorted(
+            kwargs["scRNAseq"].columns,
+            key=lambda name: [
+                int(part) if part.isdigit() else part.lower()
+                for part in re.split(r"(\d+)", name)
+            ],
+        )
+        assert classes == sorted(classes, key=str.lower)
         return (
             pd.DataFrame(
                 {
                     "Cell_Num": [2, 1],
-                    "ClassName": [["type_b", "Zero"], ["type_a"]],
+                    "ClassName": [[classes[1], "Zero"], [classes[0]]],
                     "Prob": [[0.8, 0.199], [0.999]],
                 }
             ),
@@ -104,6 +113,10 @@ def test_compute_calls_public_api_and_preserves_reported_results(
     assert json.loads((output / "cell_data.json").read_text())[0]["Prob"] == [
         0.8,
         0.199,
+    ]
+    assert json.loads((output / "cell_data.json").read_text())[0]["ClassName"] == [
+        "type_b",
+        "Zero",
     ]
     assert json.loads((output / "gene_data.json").read_text())[1]["neighbour"] == 0
 
@@ -171,7 +184,7 @@ def test_compute_forces_headless_export_free_options(
 
 
 @pytest.mark.parametrize(
-    "change", ["cell_ids", "spot_ids", "gene_mapping", "probability"]
+    "change", ["cell_ids", "spot_ids", "gene_mapping", "probability", "class_token"]
 )
 def test_compute_rejects_invalid_upstream_output(
     prepared_input: Path,
@@ -190,6 +203,8 @@ def test_compute_rejects_invalid_upstream_output(
             spots.loc[0, "spot_id"] = 0
         elif change == "gene_mapping":
             spots.loc[0, "gene_name"] = "gene_a"
+        elif change == "class_token":
+            cells.at[0, "ClassName"] = ["merxen_class_999999", "Zero"]
         else:
             cells.at[0, "Prob"] = [float("nan"), 0.1]
         return cells, spots
@@ -303,5 +318,142 @@ def test_compute_rejects_missing_segmentation_plane(
     source = prepared_input / "masks" / "plane_0000.npz"
     source.rename(source.with_name("plane_0001.npz"))
     with pytest.raises(ValueError, match="start at zero with no gaps"):
+        run_pciseq_compute(prepared_input, tmp_path / "computed")
+    assert not fake_upstream.calls
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        ["type2", "type10"],
+        ["L2/3 IT 2", "l2/3 IT 10"],
+        ["Alpha", "alpha"],
+        ["zero", "ZERO"],
+        ["merxen_class_000000", "Zero-like"],
+    ],
+)
+def test_compute_class_tokens_preserve_values_names_and_prepared_files(
+    prepared_input: Path,
+    fake_upstream: SimpleNamespace,
+    tmp_path: Path,
+    names: list[str],
+) -> None:
+    """Natural/lexical conflicts and case collisions do not alter class identity."""
+    path = prepared_input / "reference.csv"
+    reference = pd.read_csv(path, index_col=0)
+    reference.columns = names
+    reference.to_csv(path)
+    original_bytes = path.read_bytes()
+    output = tmp_path / "computed"
+    manifest = json.loads(run_pciseq_compute(prepared_input, output).read_text())
+    tokens = manifest["class_token_map"]
+    assert list(tokens.values()) == names
+    assert list(tokens) == sorted(tokens, key=str.lower)
+    passed = fake_upstream.calls[0]["scRNAseq"]
+    pd.testing.assert_frame_equal(passed.rename(columns=tokens), reference)
+    assert path.read_bytes() == original_bytes
+    cells = json.loads((output / "cell_data.json").read_text())
+    assert cells[0]["ClassName"] == [names[1], "Zero"]
+    assert cells[1]["ClassName"] == [names[0]]
+    assert [cell["Cell_Num"] for cell in cells] == [2, 1]
+    spots = json.loads((output / "gene_data.json").read_text())
+    assert [spot["spot_id"] for spot in spots] == [1, 0]
+    assert [spot["neighbour"] for spot in spots] == [2, 0]
+
+
+def test_compute_remaps_class_options_and_ignores_unknown_token_like_weights(
+    prepared_input: Path,
+    fake_upstream: SimpleNamespace,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Weight and MRF associations survive while unknown names remain ignored."""
+    path = prepared_input / "manifest.json"
+    manifest = json.loads(path.read_text())
+    options = {
+        "cell_type_weights": {
+            "type_a": 0.1,
+            "type_b": 0.2,
+            "Zero": 0.3,
+            "merxen_class_000000": 0.4,
+        },
+        "mrf_pooled_classes": [["type_b", "type_a"]],
+    }
+    manifest["options"] = options
+    path.write_text(json.dumps(manifest))
+    original_bytes = path.read_bytes()
+    result = json.loads(
+        run_pciseq_compute(prepared_input, tmp_path / "computed").read_text()
+    )
+    encode = {name: token for token, name in result["class_token_map"].items()}
+    passed_options = fake_upstream.calls[0]["opts"]
+    assert passed_options["cell_type_weights"] == {
+        encode["type_a"]: 0.1,
+        encode["type_b"]: 0.2,
+        "Zero": 0.3,
+    }
+    assert passed_options["mrf_pooled_classes"] == [
+        [encode["type_b"], encode["type_a"]]
+    ]
+    assert result["requested_options"] == options
+    assert (
+        result["resolved_options"]["cell_type_weights"] == options["cell_type_weights"]
+    )
+    assert (
+        result["resolved_options"]["mrf_pooled_classes"]
+        == options["mrf_pooled_classes"]
+    )
+    assert result["upstream_options"] == passed_options
+    assert result["ignored_cell_type_weight_names"] == ["merxen_class_000000"]
+    assert "unknown class" in caplog.text
+    assert path.read_bytes() == original_bytes
+
+
+def test_compute_does_not_mutate_recorded_options_when_upstream_mutates_arguments(
+    prepared_input: Path, fake_upstream: SimpleNamespace, tmp_path: Path
+) -> None:
+    """Nested model options and expression copies cannot rewrite provenance."""
+    manifest_path = prepared_input / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["options"] = {"cell_type_weights": {"type_a": 0.25, "Zero": 0.5}}
+    manifest_path.write_text(json.dumps(manifest))
+    original_reference = (prepared_input / "reference.csv").read_bytes()
+    original_fit = fake_upstream.fit
+
+    def mutating_fit(**kwargs: Any) -> tuple[pd.DataFrame, pd.DataFrame]:
+        cells, spots = original_fit(**kwargs)
+        kwargs["opts"]["cell_type_weights"]["Zero"] = 0.99
+        kwargs["scRNAseq"].iloc[0, 0] = 999
+        return cells, spots
+
+    fake_upstream.fit = mutating_fit
+    result = json.loads(
+        run_pciseq_compute(prepared_input, tmp_path / "computed").read_text()
+    )
+    assert result["requested_options"]["cell_type_weights"]["Zero"] == 0.5
+    assert result["resolved_options"]["cell_type_weights"]["Zero"] == 0.5
+    assert result["upstream_options"]["cell_type_weights"]["Zero"] == 0.5
+    assert (prepared_input / "reference.csv").read_bytes() == original_reference
+
+
+def test_compute_rejects_unknown_pooled_class_even_when_it_matches_a_token(
+    prepared_input: Path, fake_upstream: SimpleNamespace, tmp_path: Path
+) -> None:
+    path = prepared_input / "manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["options"] = {"mrf_pooled_classes": [["type_a", "merxen_class_000001"]]}
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="unknown cell classes"):
+        run_pciseq_compute(prepared_input, tmp_path / "computed")
+    assert not fake_upstream.calls
+
+
+def test_compute_rejects_reserved_zero_reference_class_before_fit(
+    prepared_input: Path, fake_upstream: SimpleNamespace, tmp_path: Path
+) -> None:
+    path = prepared_input / "reference.csv"
+    reference = pd.read_csv(path, index_col=0).rename(columns={"type_a": "Zero"})
+    reference.to_csv(path)
+    with pytest.raises(ValueError, match="cannot include Zero"):
         run_pciseq_compute(prepared_input, tmp_path / "computed")
     assert not fake_upstream.calls

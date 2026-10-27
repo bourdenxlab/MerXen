@@ -6,6 +6,8 @@ import argparse
 import hashlib
 import importlib
 import json
+import logging
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,7 @@ from scipy import sparse
 UPSTREAM_COMMIT = "5e2c0fd1841f8a4022a2fa341ece965687e343dd"
 _CELL_COLUMNS = {"Cell_Num", "ClassName", "Prob"}
 _SPOT_COLUMNS = {"spot_id", "gene_name", "neighbour"}
+logger = logging.getLogger(__name__)
 
 
 def _load_prepared(
@@ -165,6 +168,63 @@ def _validate_results(
             raise ValueError("pciSeq returned invalid class probability values")
 
 
+def _encode_class_names(
+    reference: pd.DataFrame, options: dict[str, Any]
+) -> tuple[pd.DataFrame, dict[str, Any], dict[str, str], list[str]]:
+    # Upstream natural-sorts labels, then asserts lexical order. Equal-width
+    # tokens agree under both orders while preserving every expression column.
+    width = max(6, len(str(len(reference.columns) - 1)))
+    token_map = {
+        f"merxen_class_{index:0{width}d}": name
+        for index, name in enumerate(reference.columns)
+    }
+    encode = {name: token for token, name in token_map.items()}
+    encode["Zero"] = "Zero"
+    encoded = reference.copy()
+    encoded.columns = list(token_map)
+    upstream_options = deepcopy(options)
+    ignored_weights: list[str] = []
+    weights = upstream_options.get("cell_type_weights")
+    if isinstance(weights, dict):
+        mapped_weights = {}
+        for name, weight in weights.items():
+            if name not in encode:
+                ignored_weights.append(str(name))
+                logger.warning("Ignoring cell_type_weights for unknown class %r", name)
+            else:
+                mapped_weights[encode[name]] = weight
+        upstream_options["cell_type_weights"] = mapped_weights
+    groups = upstream_options.get("mrf_pooled_classes")
+    if isinstance(groups, list):
+        mapped_groups = []
+        for group in groups:
+            if not isinstance(group, list) or any(
+                not isinstance(name, str) or name not in encode for name in group
+            ):
+                raise ValueError("mrf_pooled_classes contains unknown cell classes")
+            mapped_groups.append([encode[name] for name in group])
+        upstream_options["mrf_pooled_classes"] = mapped_groups
+    return encoded, upstream_options, token_map, ignored_weights
+
+
+def _restore_class_names(
+    cells: pd.DataFrame, token_map: dict[str, str]
+) -> pd.DataFrame:
+    if not isinstance(cells, pd.DataFrame) or "ClassName" not in cells:
+        raise ValueError("pciSeq returned malformed cellData columns")
+    decode = {**token_map, "Zero": "Zero"}
+    restored = []
+    for names in cells["ClassName"]:
+        if not isinstance(names, (list, np.ndarray)) or any(
+            not isinstance(name, str) or name not in decode for name in names
+        ):
+            raise ValueError("pciSeq returned unknown internal class tokens")
+        restored.append([decode[name] for name in names])
+    cells = cells.copy()
+    cells["ClassName"] = restored
+    return cells
+
+
 def run_pciseq_compute(prepared_dir: Path, output_dir: Path) -> Path:
     """Fit pciSeq to validated prepared input and write its reported results.
 
@@ -181,7 +241,7 @@ def run_pciseq_compute(prepared_dir: Path, output_dir: Path) -> Path:
     """
     manifest, spots, reference, planes = _load_prepared(prepared_dir)
     count, options = _validate_prepared(manifest, spots, reference, planes)
-    requested_options = dict(options)
+    requested_options = deepcopy(options)
     output_dir.mkdir(parents=True, exist_ok=True)
     options.update(
         {
@@ -199,13 +259,17 @@ def run_pciseq_compute(prepared_dir: Path, output_dir: Path) -> Path:
         raise ImportError(
             "pciSeq is unavailable; use the isolated pciseq-runtime environment"
         ) from error
-    # fit mutates its sparse masks. Only task-local copies cross this boundary.
+    encoded_reference, upstream_options, token_map, ignored_weights = (
+        _encode_class_names(reference, options)
+    )
+    # fit mutates its inputs. Only task-local copies cross this boundary.
     cells, genes = pciseq.fit(
         spots=spots.copy(),
         coo=[plane.copy() for plane in planes],
-        scRNAseq=reference.copy(),
-        opts=options,
+        scRNAseq=encoded_reference,
+        opts=deepcopy(upstream_options),
     )
+    cells = _restore_class_names(cells, token_map)
     _validate_results(
         cells,
         genes,
@@ -228,6 +292,9 @@ def run_pciseq_compute(prepared_dir: Path, output_dir: Path) -> Path:
         "spot_count": len(spots),
         "requested_options": requested_options,
         "resolved_options": options,
+        "upstream_options": upstream_options,
+        "class_token_map": token_map,
+        "ignored_cell_type_weight_names": ignored_weights,
         "has_converged": None,
         "convergence_status": "not_exposed_by_fit",
         "probability_semantics": (
@@ -243,6 +310,10 @@ def run_pciseq_compute(prepared_dir: Path, output_dir: Path) -> Path:
 
 def main() -> None:
     """Run the isolated pciSeq computation from prepared files."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prepared-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)

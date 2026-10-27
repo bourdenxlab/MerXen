@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import anndata as ad
 import geopandas as gpd
@@ -499,6 +502,144 @@ def _prepare(
     return config, prepared
 
 
+@pytest.mark.parametrize("local_write_fails", [False, True])
+def test_prepare_waits_for_shared_store_writer_and_detaches_before_local_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store_lock_contention: Any,
+    local_write_fails: bool,
+) -> None:
+    """A separate staged writer blocks reads until lazy native inputs are safe."""
+    import spatialdata as sd
+
+    from merxen.analysis import pciseq
+    from merxen.io.spatialdata_io import spatialdata_write_lock_path
+
+    config = _config(tmp_path)
+    _source(config.source_h5ad)
+    _reference().to_csv(config.reference_path)
+    data = _data()
+    store = sd.SpatialData(
+        points=data.points,
+        shapes={"shapes_proseg": data.shapes["shapes_proseg"]},
+        attrs={
+            MERXEN_SCHEMA_ATTR: {
+                "primary_points": "transcripts",
+                "segmentations": {
+                    "proseg": data.attrs[MERXEN_SCHEMA_ATTR]["segmentations"]["proseg"]
+                },
+            }
+        },
+    )
+    store.write(config.spatialdata_path)
+    lock_path = spatialdata_write_lock_path(config.spatialdata_path)
+    original_chunks = pciseq.iter_points_chunks
+    materialized_chunks: list[int] = []
+
+    def locked_chunks(*args: Any, **kwargs: Any) -> Iterator[pd.DataFrame]:
+        iterator = iter(original_chunks(*args, **kwargs))
+        while True:
+            with (
+                lock_path.open("a") as probe,
+                pytest.raises(BlockingIOError),
+            ):
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                chunk = next(iterator)
+            except StopIteration:
+                return
+            with lock_path.open("a") as probe, pytest.raises(BlockingIOError):
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            materialized_chunks.append(len(chunk))
+            yield chunk
+
+    original_save = sparse.save_npz
+    local_writes: list[Path] = []
+
+    def unlocked_save(path: Path, *args: Any, **kwargs: Any) -> None:
+        with lock_path.open("a") as probe:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                local_writes.append(path)
+                if local_write_fails:
+                    raise OSError("task-local mask write failed")
+                original_save(path, *args, **kwargs)
+            finally:
+                fcntl.flock(probe, fcntl.LOCK_UN)
+
+    monkeypatch.setattr(pciseq, "iter_points_chunks", locked_chunks)
+    monkeypatch.setattr(sparse, "save_npz", unlocked_save)
+    prepared = tmp_path / "prepared"
+
+    def prepare_staged(staged: Path) -> Path:
+        staged_config = config.model_copy(update={"spatialdata_path": staged})
+        return prepare_pciseq(staged_config, prepared)
+
+    def run_under_contention() -> Path:
+        return store_lock_contention.run(
+            prepare_staged,
+            config.spatialdata_path,
+            reads=[(sd, "read_zarr")],
+            # Rasterization is the last input operation requiring the source lock.
+            persists=[(pciseq, "_rasterize")],
+        )
+
+    if local_write_fails:
+        with pytest.raises(OSError, match="task-local mask write failed"):
+            run_under_contention()
+        assert not (prepared / "manifest.json").exists()
+    else:
+        result = run_under_contention()
+        assert result == prepared / "manifest.json"
+        assert json.loads(result.read_text())["cell_count"] == 2
+    assert materialized_chunks and sum(materialized_chunks) == 6
+    assert local_writes == [prepared / "masks" / "plane_0000.npz"]
+    with lock_path.open("a") as probe:
+        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(probe, fcntl.LOCK_UN)
+
+
+@pytest.mark.parametrize("failure_stage", ["store_read", "rasterization"])
+def test_prepare_releases_store_lock_after_input_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    """Read errors and seed-policy failures must not block later store writers."""
+    import spatialdata as sd
+
+    from merxen.io.spatialdata_io import spatialdata_write_lock_path
+
+    config = _config(tmp_path)
+    config.spatialdata_path.mkdir()
+    staged = tmp_path / "staged_input.zarr"
+    staged.symlink_to(config.spatialdata_path, target_is_directory=True)
+    config = config.model_copy(update={"spatialdata_path": staged})
+    _source(config.source_h5ad)
+    _reference().to_csv(config.reference_path)
+    lock_path = spatialdata_write_lock_path(config.spatialdata_path)
+
+    def read_store(path: Path) -> SimpleNamespace:
+        with lock_path.open("a") as probe, pytest.raises(BlockingIOError):
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if failure_stage == "store_read":
+            raise OSError("store read failed")
+        return _data(polygons=[box(0, 0, 4, 4), box(6.1, 1.1, 6.2, 1.2)])
+
+    monkeypatch.setattr(sd, "read_zarr", read_store)
+    expected_error = OSError if failure_stage == "store_read" else ValueError
+    expected_message = (
+        "store read failed" if failure_stage == "store_read" else "pixel|seed"
+    )
+    prepared = tmp_path / "prepared"
+    with pytest.raises(expected_error, match=expected_message):
+        prepare_pciseq(config, prepared)
+    assert not prepared.exists()
+    with lock_path.open("a") as probe:
+        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(probe, fcntl.LOCK_UN)
+
+
 def _computed(tmp_path: Path, *, empty: bool = False) -> Path:
     result = tmp_path / "computed"
     result.mkdir()
@@ -527,9 +668,11 @@ def test_prepare_and_finalize_preserve_clustered_subset_and_stable_ids(
     config, prepared = _prepare(tmp_path, monkeypatch)
     assert sparse.load_npz(prepared / "masks" / "plane_0000.npz").nnz > 0
     manifest = json.loads((prepared / "manifest.json").read_text())
+    assert pd.read_csv(prepared / "excluded_cells.csv").empty
     assert manifest["cell_count"] == 2
     assert manifest["clustered_cell_count"] == 1
     result = finalize_pciseq(config, prepared, _computed(tmp_path), tmp_path / "final")
+    assert pd.read_csv(tmp_path / "final" / "excluded_cells.csv").empty
     annotated = ad.read_h5ad(result["annotated_h5ad"])
     assert annotated.obs.instance_id.tolist() == [LARGE_ID]
     assert annotated.obs.pciseq_cell_type.tolist() == ["type_b"]
@@ -635,10 +778,6 @@ def test_reference_validation_rejects_duplicate_classes(tmp_path: Path) -> None:
 def test_finalize_adds_separate_table_with_aligned_region(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import spatialdata as sd
-
-    from merxen.io import spatialdata_io
-
     config, prepared = _prepare(tmp_path, monkeypatch)
     config.write_spatialdata_table = True
     source = ad.read_h5ad(prepared / "source.h5ad")
@@ -646,18 +785,24 @@ def test_finalize_adds_separate_table_with_aligned_region(
     source.uns["spatialdata_attrs"]["region"] = aligned
     source.obs["region"] = pd.Categorical([aligned])
     source.write_h5ad(prepared / "source.h5ad")
-    store = SimpleNamespace(shapes={aligned: object()}, labels={})
-    monkeypatch.setattr(sd, "read_zarr", lambda path: store)
-    writes: list[tuple[str, ad.AnnData]] = []
-    monkeypatch.setattr(
-        spatialdata_io,
-        "write_or_replace_element",
-        lambda sdata, key, kind, table, **kwargs: writes.append((key, table)),
-    )
-    finalize_pciseq(config, prepared, _computed(tmp_path), tmp_path / "final")
-    assert writes[0][0] == "table_proseg_pciseq"
-    assert writes[0][1].uns["spatialdata_attrs"]["region"] == aligned
-    assert writes[0][1].obs.pciseq_cell_type.tolist() == ["type_b"]
+    captured: dict[str, Any] = {}
+
+    def publish(
+        config_arg: PciSeqConfig, output_dir: Path, **kwargs: Any
+    ) -> dict[str, str]:
+        captured.update(kwargs)
+        captured["config"] = config_arg
+        return {"embedding_table": "table_proseg_pciseq"}
+
+    monkeypatch.setattr("merxen.analysis.pciseq_viewer.publish_pciseq_viewer", publish)
+    paths = finalize_pciseq(config, prepared, _computed(tmp_path), tmp_path / "final")
+    assert captured["config"] is config
+    assert captured["annotated"].uns["spatialdata_attrs"]["region"] == aligned
+    assert captured["annotated"].obs.pciseq_cell_type.tolist() == ["type_b"]
+    assert captured["cell_assignments"].instance_id.is_unique
+    assert captured["spot_assignments"].transcript_id.is_unique
+    summary = json.loads(paths["summary"].read_text())
+    assert summary["spatialdata_table_key"] == "table_proseg_pciseq"
 
 
 def test_real_spatialdata_write_preserves_source_table_and_aligned_link(
@@ -763,10 +908,238 @@ def test_default_hybrid_overlap_becomes_background_prior(tmp_path: Path) -> None
     assert data.shapes["shapes_proseg_hybrid"].geometry.iloc[0].area == 28
 
 
-def test_fully_overlapped_cell_has_actionable_seed_error(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="no unambiguous seed pixels"):
+def test_fully_overlapped_cell_is_rejected_by_strict_overlap_policy(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="overlap"):
         prepare_pciseq_inputs(
             _data(polygons=[box(0, 0, 10, 4), box(6, 1, 7, 2)]),
-            config=_config(tmp_path),
+            config=_config(tmp_path, overlap_policy="error"),
             reference=_reference(),
         )
+
+
+def _overlap_data(ids: list[int], polygons: list[Any]) -> SimpleNamespace:
+    data = _data()
+    shapes = ShapesModel.parse(
+        gpd.GeoDataFrame(
+            {"instance_id": np.asarray(ids, dtype=np.uint64)},
+            index=pd.Index(ids, dtype=np.uint64),
+            geometry=polygons,
+        ),
+        transformations={"global": Identity()},
+    )
+    data.shapes = {key: shapes for key in data.shapes}
+    return data
+
+
+def test_overlap_seedless_cell_exclusion_retains_spots_and_reports_native_id(
+    tmp_path: Path,
+) -> None:
+    """A valid cell with a subpixel free sliver is excluded without dropping RNA."""
+    outer, sliver = box(0, 0, 6, 7), box(1.01, 1.01, 6.01, 6.01)
+    assert sliver.difference(outer).area > 0
+    inputs = prepare_pciseq_inputs(
+        _overlap_data([17, LARGE_ID], [outer, sliver]),
+        config=_config(tmp_path, segmentation="proseg_hybrid"),
+        reference=_reference(),
+    )
+    assert inputs.cell_id_map.instance_id.tolist() == [17]
+    assert inputs.cell_id_map.label.tolist() == [1]
+    assert set(inputs.planes[0].data) == {1}
+    assert inputs.spot_id_map.transcript_id.tolist() == [21, 22, 23]
+    assert inputs.spots.gene_name.tolist() == ["A", "B", "A"]
+    assert inputs.metadata["native_cell_count"] == 2
+    assert inputs.metadata["excluded_cell_count"] == 1
+    assert inputs.metadata["seed_exclusion_policy"] == (
+        "drop_overlap_seedless_smallest_area_then_highest_id"
+    )
+    excluded = inputs.excluded_cells
+    assert str(excluded.instance_id.dtype) == "uint64"
+    assert excluded.instance_id.tolist() == [LARGE_ID]
+    assert excluded.reason.tolist() == ["overlap_no_seed_pixels"]
+    assert excluded.area_um2.iloc[0] == pytest.approx(25.0)
+    assert int(excluded.polygon_raster_pixels.iloc[0]) > 0
+    assert json.loads(excluded.overlapping_instance_ids.iloc[0]) == [17]
+
+
+@pytest.mark.parametrize("reverse_rows", [False, True])
+def test_duplicate_cells_keep_lowest_id_and_rebuild_remaining_seeds(
+    tmp_path: Path, reverse_rows: bool
+) -> None:
+    """Dropping one duplicate must free the survivor rather than exclude both."""
+    ids = [LARGE_ID, 17] if reverse_rows else [17, LARGE_ID]
+    inputs = prepare_pciseq_inputs(
+        _overlap_data(ids, [box(0, 0, 4, 4), box(0, 0, 4, 4)]),
+        config=_config(tmp_path, segmentation="proseg_hybrid"),
+        reference=_reference(),
+    )
+    assert inputs.cell_id_map.instance_id.tolist() == [17]
+    assert inputs.cell_id_map.label.tolist() == [1]
+    assert inputs.excluded_cells.instance_id.tolist() == [LARGE_ID]
+    mask = inputs.planes[0].tocsr()
+    assert mask[int(inputs.spots.y.iloc[0]), int(inputs.spots.x.iloc[0])] == 1
+    assert inputs.spot_id_map.transcript_id.tolist() == [21, 22, 23]
+
+
+def test_seedless_overlap_excludes_smaller_area_before_higher_id(
+    tmp_path: Path,
+) -> None:
+    """One removal frees a larger candidate with the same raster footprint."""
+    smaller, larger = box(1.02, 1.02, 6.01, 6.01), box(1.01, 1.01, 6.02, 6.02)
+    inputs = prepare_pciseq_inputs(
+        _overlap_data([17, LARGE_ID], [smaller, larger]),
+        config=_config(tmp_path, segmentation="proseg_hybrid"),
+        reference=_reference(),
+    )
+    assert inputs.excluded_cells.instance_id.tolist() == [17]
+    assert inputs.excluded_cells.area_um2.iloc[0] == pytest.approx(smaller.area)
+    assert inputs.cell_id_map.instance_id.tolist() == [LARGE_ID]
+    assert inputs.cell_id_map.label.tolist() == [1]
+    assert set(inputs.planes[0].data) == {1}
+
+
+@pytest.mark.parametrize("physical_overlap", [False, True])
+def test_raw_zero_pixel_cell_still_requires_better_resolution(
+    tmp_path: Path, physical_overlap: bool
+) -> None:
+    """An intrinsically unrasterizable cell cannot be relabeled an overlap loss."""
+    outer = box(0, 0, 4, 4) if physical_overlap else box(6, 0, 10, 4)
+    with pytest.raises(ValueError, match="pixel|seed"):
+        prepare_pciseq_inputs(
+            _overlap_data([17, LARGE_ID], [outer, box(1.1, 1.1, 1.2, 1.2)]),
+            config=_config(tmp_path, segmentation="proseg_hybrid"),
+            reference=_reference(),
+        )
+
+
+def _prepare_overlap_exclusion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[PciSeqConfig, Path, ad.AnnData]:
+    import spatialdata as sd
+
+    config = _config(tmp_path, segmentation="proseg_hybrid")
+    region = "shapes_proseg_hybrid"
+    source = ad.AnnData(
+        X=np.array([[3, 7], [11, 0], [2, 5]]),
+        obs=pd.DataFrame(
+            {
+                "instance_id": np.asarray([LARGE_ID, 123, 17], dtype=np.uint64),
+                "region": pd.Categorical([region] * 3),
+                "leiden": ["2", "1", "0"],
+            },
+            index=["large_cell", "excluded_cell", "retained_cell"],
+        ),
+        var=pd.DataFrame(index=["A", "B"]),
+    )
+    source.layers["counts"] = source.X.copy()
+    source.obsm["X_umap"] = np.arange(6).reshape(3, 2)
+    source = TableModel.parse(
+        source, region=region, region_key="region", instance_key="instance_id"
+    )
+    source.write_h5ad(config.source_h5ad)
+    _reference().to_csv(config.reference_path)
+    data = _overlap_data(
+        [17, 123, LARGE_ID],
+        [box(0, 0, 6, 7), box(1.01, 1.01, 6.01, 6.01), box(10, 0, 14, 4)],
+    )
+    monkeypatch.setattr(sd, "read_zarr", lambda path: data)
+    prepared = tmp_path / "prepared"
+    prepare_pciseq(config, prepared)
+    return config, prepared, source
+
+
+def test_overlap_exclusion_survives_prepare_finalize_without_fabricated_types(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Excluded rows remain distinguishable from a model-assigned Zero class."""
+    config, prepared, source = _prepare_overlap_exclusion(tmp_path, monkeypatch)
+    exclusion_path = prepared / "excluded_cells.csv"
+    metadata = json.loads((prepared / "manifest.json").read_text())
+    assert (
+        metadata["excluded_cells_sha256"]
+        == hashlib.sha256(exclusion_path.read_bytes()).hexdigest()
+    )
+    assert metadata["excluded_cell_count"] == 1
+    assert metadata["native_cell_count"] == 3
+    mapping = pd.read_csv(prepared / "cell_id_map.csv", dtype={"instance_id": "uint64"})
+    assert mapping.instance_id.tolist() == [17, LARGE_ID]
+    assert mapping.label.tolist() == [1, 2]
+    result = finalize_pciseq(config, prepared, _computed(tmp_path), tmp_path / "final")
+    annotated = ad.read_h5ad(result["annotated_h5ad"])
+    assert annotated.obs.instance_id.tolist() == [LARGE_ID, 123, 17]
+    assert annotated.obs_names.tolist() == source.obs_names.tolist()
+    assert annotated.obs.leiden.tolist() == source.obs.leiden.tolist()
+    np.testing.assert_array_equal(annotated.X, source.X)
+    np.testing.assert_array_equal(annotated.layers["counts"], source.layers["counts"])
+    np.testing.assert_array_equal(annotated.obsm["X_umap"], source.obsm["X_umap"])
+    assert annotated.obs.pciseq_cell_type.iloc[0] == "type_b"
+    assert pd.isna(annotated.obs.pciseq_cell_type.iloc[1])
+    assert annotated.obs.pciseq_cell_type.iloc[2] == "Zero"
+    assert annotated.obs.pciseq_status.tolist() == [
+        "assigned",
+        "excluded_overlap",
+        "zero_expression",
+    ]
+    assert np.isnan(annotated.obs.pciseq_probability.iloc[1])
+    assert np.isnan(annotated.obsm["pciseq_reported_probabilities"][1]).all()
+    assert annotated.obs.pciseq_exclusion_reason.iloc[1] == "overlap_no_seed_pixels"
+    assignments = pd.read_csv(
+        result["cell_assignments"], dtype={"instance_id": "uint64"}
+    )
+    excluded = assignments.set_index("instance_id").loc[123]
+    assert pd.isna(excluded.pciseq_cell_type)
+    assert np.isnan(excluded.pciseq_probability)
+    assert excluded.pciseq_status == "excluded_overlap"
+    assert excluded.pciseq_exclusion_reason == "overlap_no_seed_pixels"
+    assert (tmp_path / "final" / "excluded_cells.csv").read_bytes() == (
+        exclusion_path.read_bytes()
+    )
+    summary = json.loads(result["summary"].read_text())
+    assert summary["excluded_cells"] == 1
+    assert summary["excluded_annotated_cells"] == 1
+    spot_assignments = pd.read_csv(
+        result["spot_assignments"],
+        dtype={"instance_id": "UInt64", "transcript_id": "uint64"},
+    )
+    assert set(spot_assignments.transcript_id) == {21, 22, 23}
+    assert int(spot_assignments.set_index("spot_id").loc[1, "instance_id"]) == LARGE_ID
+
+
+@pytest.mark.parametrize("corruption", ["checksum", "count", "model_id", "reason"])
+def test_finalize_rejects_corrupt_overlap_exclusion_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, corruption: str
+) -> None:
+    """A valid checksum cannot authorize malformed or conflicting exclusions."""
+    config, prepared, _ = _prepare_overlap_exclusion(tmp_path, monkeypatch)
+    path = prepared / "excluded_cells.csv"
+    frame = pd.read_csv(path, dtype={"instance_id": "uint64"})
+    manifest_path = prepared / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    if corruption == "count":
+        manifest["excluded_cell_count"] = 2
+    elif corruption == "model_id":
+        frame.loc[0, "instance_id"] = 17
+    elif corruption == "reason":
+        frame.loc[0, "reason"] = "unspecified"
+    else:
+        frame.loc[0, "area_um2"] = 999.0
+    frame.to_csv(path, index=False)
+    if corruption != "checksum":
+        manifest["excluded_cells_sha256"] = hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError):
+        finalize_pciseq(config, prepared, _computed(tmp_path), tmp_path / "final")
+
+
+def test_finalize_does_not_silently_exclude_an_unknown_source_cell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, prepared, _ = _prepare_overlap_exclusion(tmp_path, monkeypatch)
+    source = ad.read_h5ad(prepared / "source.h5ad")
+    source.obs.loc["excluded_cell", "instance_id"] = 999
+    source.write_h5ad(prepared / "source.h5ad")
+    with pytest.raises(ValueError):
+        finalize_pciseq(config, prepared, _computed(tmp_path), tmp_path / "final")

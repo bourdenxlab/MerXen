@@ -90,6 +90,13 @@ for the native micron convention, or a verified named physical frame. This
 check uses the segmentation registry and transforms; it does not infer units
 from coordinate ranges or change stored metadata.
 
+Preparation holds the shared store lock while opening SpatialData and
+materializing its native inputs, including lazy transcript reads and
+rasterization. Concurrent registration, viewer-cache and image-quantification
+writers wait for that snapshot to finish. The lock is released before writing
+task-local files or fitting the model. Finalization takes the same lock when
+adding its derived tables, transcript assignments, and viewer source metadata.
+
 Input cells and spots are independent of clustering's cell/gene QC subset.
 Extracellular spots with supported genes are retained for probabilistic
 assignment. Preparation reports exclusions for controls, invalid coordinates,
@@ -101,8 +108,34 @@ manifest records this adaptation and its pixel count. Set
 `pciseq_overlap_policy=error` to reject overlapping polygons. Shared boundaries
 between polygons that only touch use a deterministic cell-ID tie break.
 
-Preparation rejects unusable geometries, cells that lose every seed pixel,
-and grids above the pixel budget. Upstream densifies segmentation planes during
+If overlap removes every seed pixel from a cell, preparation excludes that cell
+from the pciSeq fit. It removes the smallest-area unseedable candidate first
+(highest canonical ID on an area tie), then updates the overlaps before checking
+the remaining candidates. This prevents duplicate polygons from both being
+excluded and can restore usable seed pixels to another cell. Cells with usable
+seeds remain eligible regardless of clustering QC. Source polygons and measured
+transcripts remain intact; transcripts can still be assigned to retained cells
+or background. The retained model labels remain dense and map to canonical IDs.
+
+At the isolated compute boundary, reference classes receive reversible,
+fixed-width proxy names to satisfy the pinned pciSeq release's inconsistent
+natural and alphabetical ordering requirements. Expression columns and any
+class-specific weights or pooling groups keep their associations. Returned
+class names are restored before validation and output; prepared references,
+source cell IDs and atlas labels remain unchanged. The computation manifest
+records the proxy map and the options passed to pciSeq.
+
+`excluded_cells.csv` records each excluded canonical ID, reason, polygon area,
+raster pixel count and active overlapping IDs. Its checksum and the exclusion
+policy are recorded in the preparation manifest. Excluded cells present in the
+clustered output retain their observation and original counts, with a missing
+`pciseq_cell_type`, `pciseq_status=excluded_overlap`, an explicit
+`pciseq_exclusion_reason`, and NaN scalar and class probabilities. They have no
+fitted posterior and are distinct from the model's `Zero` expression class.
+
+Preparation rejects unusable geometries, cells with no raster pixels even before
+overlap removal, cells lost solely to shared boundary ties, and grids above the
+pixel budget. Upstream densifies segmentation planes during
 geometry extraction, so sparse input files do not remove the raster memory cost.
 
 Canonical cell IDs are mapped reversibly to dense mask labels. Native transcript
@@ -146,7 +179,7 @@ per acquisition.
 | `pciseq_region_mode` | `auto` | Human requires regions; mouse uses whole brain. Explicit `required` or `whole_brain` overrides this. |
 | `pciseq_reference_path` | `null` | Optional custom genes-by-cell-type CSV/TSV. |
 | `pciseq_geometry_mode` | `project_2d` | Native polygon projection or explicit `labels_3d`. |
-| `pciseq_overlap_policy` | `background` | Put polygon-overlap seed pixels in background; `error` rejects overlaps. |
+| `pciseq_overlap_policy` | `background` | Put overlap seed pixels in background and exclude overlap-erased cells; `error` rejects overlaps. |
 | `pciseq_pixel_size_um` | `1.0` | Raster resolution for polygon projection. |
 | `pciseq_max_pixels` | `100000000` | Maximum number of raster voxels before rejecting input. |
 | `pciseq_points_key` | `null` | Optional explicit native transcript points element. |
@@ -157,7 +190,7 @@ per acquisition.
 | `pciseq_max_iter` | `1000` | Model iteration limit. |
 | `pciseq_n_neighbors` | `9` | Candidate parent count, capped at the available cells. |
 | `pciseq_options` | `{}` | Additional upstream model options, such as `Inefficiency`. |
-| `pciseq_write_spatialdata_table` | `true` | Write a separate derived table under MerXen's store lock. |
+| `pciseq_write_spatialdata_table` | `true` | Publish the QC table, all-cell annotations, transcript assignments and viewer source under MerXen's store lock. |
 | `pciseq_conda` | `envs/environment.pciseq.yml` | Dedicated compute environment. |
 | `pciseq_container` | `null` | Dedicated compute image for container profiles. |
 
@@ -178,13 +211,18 @@ Outputs are published under
   `pciseq_probability`, `pciseq_status`, and reported class probability summaries.
 - `cell_assignments.csv` and `spot_assignments.csv`: assignments linked to
   canonical cell/transcript IDs.
-- `cell_data.json` and `gene_data.json`: raw upstream result records.
+- `excluded_cells.csv`: audited exclusions from the model's seed masks; source
+  cells remain in the annotated table and are explicitly marked as untyped.
+- `cell_data.json` and `gene_data.json`: upstream result records with original
+  class names restored.
 - Cell/spot ID maps and preparation/computation manifests: coordinate choices,
   exclusions, reference provenance, model options, and upstream version/commit.
 - `reference_manifest.json`: atlas release, input checksums, regional/cohort
   filters, normalization, and the checksum of the expression prior used.
 - With table writing enabled, a separate `<native_table_key>_pciseq` table in
-  the source SpatialData store.
+  the source SpatialData store for the clustered observations and their UMAP.
+  Viewer publication also adds an all-cell annotation table and a separate
+  points element with pciSeq transcript assignments, described below.
 
 Upstream's returned class probabilities are thresholded and truncated to three
 decimals. Missing classes are not measured zeros, and these summaries must not
@@ -193,6 +231,54 @@ biological cell type. The public `fit` API returns normally when the iteration
 limit is reached and does not expose convergence status; the computation
 manifest records that status as unavailable. Review upstream iteration logs
 and assignment quality before using results for analysis.
+
+## SpatialData and the napari viewer
+
+With `pciseq_write_spatialdata_table=true`, finalization publishes a named pciSeq
+source for the selected segmentation in `merxen_schema.analysis_sources`. The
+source records its native shapes, points, all-cell annotation table, clustered
+embedding table, assignment columns, and analysis fingerprint. Existing
+segmentation sources, assignments, and primary points remain unchanged.
+
+The all-cell `<native_table_key>_pciseq_cells` table includes every cell in
+`cell_assignments.csv`, including cells removed by clustering QC and explicitly
+excluded seed masks. It stores annotations without duplicating the expression
+matrix. The existing `<native_table_key>_pciseq` table retains the clustered
+subset's expression, original annotations, and UMAP; a cell absent from that
+subset can have a spatial pciSeq label without an embedding point.
+
+The additional `transcripts_pciseq_<branch>` points element retains the native
+measured coordinates, genes, transcript IDs, and coordinate transformations.
+Assignments join by exact transcript IDs to canonical cell IDs. Raster-frame
+coordinates and dense model labels are never used as viewer coordinates or
+native cell identifiers. Its `pciseq_assignment_status` distinguishes
+`assigned`, modelled `background`, and `not_modelled`. Unsupported genes and
+other spots omitted from the fit stay in the points element as `not_modelled`,
+with no inferred assignment. The `background` flag is true only for modelled
+background spots.
+
+The compatible napari-spatialomics-viewer offers pciSeq cell-type and transcript
+assignment sources separately from the existing methods. Each selection uses
+the matching segmentation. Transcript caches are specific to that source, so
+switching back to a native assignment does not reuse a pciSeq cell index. In a
+paired view, a source available only for Xenium remains selectable; the other
+platform does not borrow Xenium's assignments.
+For a moving platform with materialized aligned points, the viewer joins the
+pciSeq assignments onto those displayed positions by transcript ID. Native
+measured coordinates remain in the published pciSeq points element.
+
+Completed runs can be published without preparing inputs or fitting again:
+
+```bash
+merxen publish-pciseq-viewer \
+    --config pciseq_config.json \
+    --results-dir results/pair/proseg_hybrid/pciseq/pciseq_out/xenium
+```
+
+Use the completed run's configuration with `spatialdata_path` pointing to its
+native store. The results directory must contain the exported assignments,
+manifests, and annotated H5AD. Publication takes the shared SpatialData write
+lock and registers the viewer source only after its elements are written.
 
 ## Runtime and direct CLI
 

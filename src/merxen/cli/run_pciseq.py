@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -57,3 +58,27 @@ def pciseq_command(config_path: Path, compute_python: Path | None) -> None:
     click.echo("pciSeq complete:")
     for key, path in results.items():
         click.echo(f"- {key}: {path}")
+
+
+@click.command(name="publish-pciseq-viewer")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    required=True,
+    help="The PciSeqConfig JSON for the completed sample and segmentation.",
+)
+@click.option(
+    "--results-dir",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    required=True,
+    help="Completed pciSeq exports containing assignments and manifests.",
+)
+def publish_pciseq_viewer_command(config_path: Path, results_dir: Path) -> None:
+    """Publish completed assignments to SpatialData without running the model."""
+    from merxen.analysis.pciseq_viewer import publish_pciseq_viewer
+
+    config = load_config_from_json(config_path, PciSeqConfig)
+    assert isinstance(config, PciSeqConfig)
+    result = publish_pciseq_viewer(config, results_dir)
+    click.echo(json.dumps(result, indent=2, default=str))
