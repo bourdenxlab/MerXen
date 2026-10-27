@@ -466,6 +466,17 @@ def test_nonrigid_registration_warps_every_channel_into_one_final_image(
     assert summary["nonrigid"]["status"] == "applied"
     assert Path(summary["outputs"]["nonrigid_flow"]).exists()
     assert Path(summary["outputs"]["nonrigid_qc_plot"]).exists()
+    with np.load(summary["outputs"]["nonrigid_flow"]) as flow_data:
+        assert {
+            "flow_yx",
+            "confidence",
+            "residual_confidence",
+            "rejection_reasons",
+            "local_correlation",
+            "cycle_error_px",
+            "jacobian_determinant",
+        } <= set(flow_data.files)
+        assert flow_data["algorithm"].item() == "guarded_tvl1_v3"
 
 
 @pytest.mark.usefixtures("small_viewer_pyramids")

@@ -239,11 +239,17 @@ arms with verified provenance for reuse.
 | `register_post_xenium_if_nonrigid_tightness` | `0.3` | TV-L1 tightness parameter. |
 | `register_post_xenium_if_nonrigid_num_warp` / `register_post_xenium_if_nonrigid_num_iter` | `5` / `10` | TV-L1 coarse-to-fine warps and fixed-point iterations. |
 | `register_post_xenium_if_nonrigid_smoothing_sigma_um` | `10` | Physical Gaussian smoothing scale for the confidence-weighted accepted field. |
-| `register_post_xenium_if_nonrigid_max_displacement_um` | `20` | Reject raw vectors above this displacement and cap the accepted field. |
+| `register_post_xenium_if_nonrigid_max_displacement_um` | `20` | Reject raw vectors above this displacement and cap each accepted pass. Composed residual passes may exceed this total displacement. |
 | `register_post_xenium_if_nonrigid_max_cycle_error_um` | `5` | Maximum forward/backward inconsistency for a raw vector to contribute. |
 | `register_post_xenium_if_nonrigid_min_local_correlation` | `0.2` | Minimum local post-warp DAPI correlation for a raw vector to contribute. |
-| `register_post_xenium_if_nonrigid_min_jacobian` / `register_post_xenium_if_nonrigid_max_jacobian` | `0.5` / `2` | Allowed local area change of the final mapping; the guarded field is attenuated until these bounds hold. |
+| `register_post_xenium_if_nonrigid_min_jacobian` / `register_post_xenium_if_nonrigid_max_jacobian` | `0.5` / `2` | Allowed local area change of the final mapping. Unsafe neighbourhoods are smoothed/attenuated locally; global scaling is only a last-resort fallback. |
 | `register_post_xenium_if_nonrigid_min_confident_fraction` | `0.1` | Reject the complete non-rigid pass when too little overlapping tissue supports it. |
+| `register_post_xenium_if_nonrigid_residual_passes` | `1` | Number of evidence-gated residual-flow passes composed after the initial field (`0` restores single-pass behaviour). |
+| `register_post_xenium_if_nonrigid_min_residual_correlation_improvement` | `0.02` | Minimum local DAPI-correlation gain required to accept a residual update. |
+| `register_post_xenium_if_nonrigid_min_residual_initial_confidence` | `0.75` | Minimum smoothed confidence from the initial flow required for a full-field residual update. The final locally normalized tile refinement has its own bidirectional confidence, correlation-improvement and Jacobian guards. |
+| `register_post_xenium_if_registration_quality` | `true` | Compute per-cell DAPI agreement after the final post-Xenium IF warp. |
+| `register_post_xenium_if_registration_quality_pixel_size_um` | `0.85` | Pixel size for nuclear-scale registration-quality scoring. |
+| `register_post_xenium_if_registration_quality_smoothing_sigma_um` | `0.68` | DAPI smoothing scale used before per-cell shape correlation. |
 | `register_images_max_forks` | Dwight: `2` | Maximum concurrent registration processes. |
 
 `REGISTER_IMAGES` requests 8 CPUs and 32 GB (HD1 optical-flow validation peaked at 2.7 GB; full registration remains bounded by image resampling). The viewer pyramid of each

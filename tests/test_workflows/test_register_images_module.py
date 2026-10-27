@@ -80,5 +80,19 @@ def test_register_images_defaults_and_resources() -> None:
     assert "register_images_refine_affine = true" in config_text
     assert "register_post_xenium_if_nonrigid = false" in config_text
     assert "register_post_xenium_if_nonrigid_pixel_size_um = 3.4" in config_text
+    assert "register_post_xenium_if_nonrigid_residual_passes = 1" in config_text
+    assert (
+        "register_post_xenium_if_nonrigid_min_residual_correlation_improvement = 0.02"
+        in config_text
+    )
+    assert (
+        "register_post_xenium_if_nonrigid_min_residual_initial_confidence = 0.75"
+        in config_text
+    )
+    assert "register_post_xenium_if_registration_quality = true" in config_text
+    assert (
+        "register_post_xenium_if_registration_quality_pixel_size_um = 0.85"
+        in config_text
+    )
     assert 'withName: "REGISTER_IMAGES"' in config_text
     assert "maxForks = params.register_images_max_forks" in dwight_text

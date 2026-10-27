@@ -44,13 +44,14 @@ from merxen.io.spatialdata_io import (
 from merxen.memory import force_release, log_status
 from merxen.nonrigid_registration import NonrigidFlowResult, estimate_nonrigid_flow
 from merxen.plotting import prepare_plot_output, save_figure
+from merxen.registration_quality import score_registered_image_in_spatialdata
 from merxen.viewer_cache.build import ViewerCacheParams, build_image_pyramid
 from merxen.viewer_cache.format import derived_image_pyramid_cache_key
 
 logger = logging.getLogger(__name__)
 
 REGISTRATION_ALGORITHM = "explorer_affine_dapi_refine_v1"
-NONRIGID_REGISTRATION_ALGORITHM = "guarded_tvl1_v1"
+NONRIGID_REGISTRATION_ALGORITHM = "guarded_tvl1_v3"
 # OpenCV remapping indexes pixels with signed 16-bit integers.
 _MAX_CV2_DIMENSION = 32767
 _HIGHPASS_SIGMA_PX = 8.0
@@ -392,7 +393,12 @@ def run_image_registration(
 
     # Lock the resolved store: Nextflow stages see it through per-task symlinks.
     with spatialdata_write_lock(latest_path.resolve()):
-        sdata_obj = sd.read_zarr(latest_path, selection=("images",))
+        selection = (
+            ("images", "labels", "tables")
+            if config.registration_quality_enabled
+            else ("images",)
+        )
+        sdata_obj = sd.read_zarr(latest_path, selection=selection)
         try:
             reference = _reference_grid(sdata_obj, config)
             registry = _registry(sdata_obj)
@@ -412,6 +418,15 @@ def run_image_registration(
                     config=config,
                     force_rerun=force_rerun,
                 )
+                if config.registration_quality_enabled:
+                    summary = _add_registration_quality(
+                        sdata_obj=sdata_obj,
+                        spec=spec,
+                        reference=reference,
+                        registry=registry,
+                        config=config,
+                        summary=summary,
+                    )
                 summaries.append(summary)
                 outputs[f"{spec.image_key}_summary"] = Path(summary["summary_path"])
         finally:
@@ -434,6 +449,56 @@ def run_image_registration(
     )
     outputs["summary"] = combined_path
     return outputs
+
+
+def _add_registration_quality(
+    *,
+    sdata_obj: Any,
+    spec: RegisteredImageSpec,
+    reference: _ReferenceGrid,
+    registry: dict[str, Any],
+    config: ImageRegistrationConfig,
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    """Score the final registered DAPI and record the result with the image."""
+    paths = _output_paths(Path(config.output_dir), config.dataset_name, spec.image_key)
+    if spec.registration_channel is None:
+        quality = {
+            "status": "skipped_no_registration_channel",
+            "reason": "registration quality requires a moving DAPI channel",
+        }
+    else:
+        log_status(
+            f"[{config.dataset_name}] Scoring per-cell registration quality for "
+            f"{spec.image_key}"
+        )
+        quality = score_registered_image_in_spatialdata(
+            sdata_obj,
+            image_key=spec.image_key,
+            reference_image_key=reference.key,
+            reference_channel=config.reference_channel,
+            moving_channel=spec.registration_channel,
+            cell_label_key=config.registration_quality_cell_label_key,
+            nuclei_label_key=config.registration_quality_nuclei_label_key,
+            source_pixel_size_um=config.reference_pixel_size_um,
+            target_pixel_size_um=config.registration_quality_pixel_size_um,
+            smoothing_sigma_um=config.registration_quality_smoothing_sigma_um,
+            output_path=paths["registration_quality"],
+        )
+    updated = {**summary, "registration_quality": quality}
+    outputs = dict(updated.get("outputs", {}))
+    if quality.get("status") == "complete":
+        outputs["registration_quality"] = str(paths["registration_quality"])
+    updated["outputs"] = outputs
+    updated["summary_path"] = str(paths["summary"])
+    paths["summary"].write_text(json.dumps(_jsonable(updated), indent=2) + "\n")
+
+    entry = dict(registry.get(spec.image_key, {}))
+    entry["registration_quality"] = _jsonable(quality)
+    entry["summary"] = _jsonable(updated)
+    registry[spec.image_key] = entry
+    _write_registry(sdata_obj, registry)
+    return updated
 
 
 def _register_image(
@@ -837,6 +902,13 @@ def _refine_nonrigid_registration(
         min_jacobian=config.nonrigid_min_jacobian,
         max_jacobian=config.nonrigid_max_jacobian,
         min_confident_fraction=config.nonrigid_min_confident_fraction,
+        residual_passes=config.nonrigid_residual_passes,
+        min_residual_correlation_improvement=(
+            config.nonrigid_min_residual_correlation_improvement
+        ),
+        min_residual_initial_confidence=(
+            config.nonrigid_min_residual_initial_confidence
+        ),
     )
     if result.status != "applied":
         logger.warning(
@@ -1149,6 +1221,11 @@ def _provenance(
             "build_viewer_pyramid",
         },
     )
+    settings = {
+        key: value
+        for key, value in settings.items()
+        if not str(key).startswith("registration_quality_")
+    }
     if not config.nonrigid_enabled:
         settings = {
             key: value
@@ -1268,6 +1345,14 @@ def _write_nonrigid_outputs(
         paths["nonrigid_flow"],
         flow_yx=result.flow_yx.astype(np.float32, copy=False),
         confidence=result.confidence.astype(np.uint8, copy=False),
+        residual_confidence=result.residual_confidence.astype(np.uint8, copy=False),
+        rejection_reasons=result.rejection_reasons.astype(np.uint16, copy=False),
+        local_correlation=result.local_correlation.astype(np.float32, copy=False),
+        cycle_error_px=result.cycle_error_px.astype(np.float32, copy=False),
+        jacobian_determinant=result.jacobian_determinant.astype(
+            np.float32,
+            copy=False,
+        ),
         working_to_reference=np.asarray(
             refinement.working_to_reference,
             dtype=np.float64,
@@ -1338,7 +1423,7 @@ def _plot_nonrigid_qc(
         vmax=1.0,
         interpolation="nearest",
     )
-    axes[1, 1].set_title("Local DAPI correlation after raw TV-L1 flow")
+    axes[1, 1].set_title("Local DAPI correlation after final guarded flow")
     axes[1, 1].set_axis_off()
     fig.colorbar(correlation_plot, ax=axes[1, 1], label="local correlation")
     reason = f"; {result.reason}" if result.reason else ""
@@ -1424,6 +1509,7 @@ def _output_paths(
         "local_shifts": output_dir / f"{prefix}_registration_local_shifts.csv",
         "nonrigid_flow": output_dir / f"{prefix}_nonrigid_flow.npz",
         "nonrigid_qc_plot": output_dir / f"{prefix}_nonrigid_qc.png",
+        "registration_quality": (output_dir / f"{prefix}_registration_quality.csv.gz"),
     }
 
 

@@ -592,6 +592,22 @@ class ImageRegistrationConfig(BaseModel):
     nonrigid_min_jacobian: float = Field(default=0.5, gt=0.0, lt=1.0)
     nonrigid_max_jacobian: float = Field(default=2.0, gt=1.0)
     nonrigid_min_confident_fraction: float = Field(default=0.1, gt=0.0, le=1.0)
+    nonrigid_residual_passes: int = Field(default=1, ge=0, le=3)
+    nonrigid_min_residual_correlation_improvement: float = Field(
+        default=0.02,
+        ge=0.0,
+        le=1.0,
+    )
+    nonrigid_min_residual_initial_confidence: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=1.0,
+    )
+    registration_quality_enabled: bool = True
+    registration_quality_pixel_size_um: float = Field(default=0.85, gt=0.0)
+    registration_quality_smoothing_sigma_um: float = Field(default=0.68, ge=0.0)
+    registration_quality_cell_label_key: str = "MOSAIK_cellpose_labels"
+    registration_quality_nuclei_label_key: str = "cellpose_nuclei_labels"
     tile_size: int = Field(default=4096, gt=0)
     chunk_size: int = Field(default=4096, gt=0)
     build_viewer_pyramid: bool = True

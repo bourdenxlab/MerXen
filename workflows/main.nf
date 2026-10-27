@@ -3555,6 +3555,12 @@ workflow {
                 nonrigid_min_jacobian: params.register_post_xenium_if_nonrigid_min_jacobian,
                 nonrigid_max_jacobian: params.register_post_xenium_if_nonrigid_max_jacobian,
                 nonrigid_min_confident_fraction: params.register_post_xenium_if_nonrigid_min_confident_fraction,
+                nonrigid_residual_passes: params.register_post_xenium_if_nonrigid_residual_passes,
+                nonrigid_min_residual_correlation_improvement: params.register_post_xenium_if_nonrigid_min_residual_correlation_improvement,
+                nonrigid_min_residual_initial_confidence: params.register_post_xenium_if_nonrigid_min_residual_initial_confidence,
+                registration_quality_enabled: params.register_post_xenium_if_registration_quality,
+                registration_quality_pixel_size_um: params.register_post_xenium_if_registration_quality_pixel_size_um,
+                registration_quality_smoothing_sigma_um: params.register_post_xenium_if_registration_quality_smoothing_sigma_um,
                 build_viewer_pyramid: params.viewer_cache_build_image_pyramid,
             ]
 
