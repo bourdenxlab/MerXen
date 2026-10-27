@@ -10,7 +10,6 @@ import sys
 import textwrap
 from collections.abc import Callable
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -504,29 +503,177 @@ def test_unsupported_files(tmp_path: Path, czi_python: str | None) -> None:
     assert not out.exists()
 
 
-def test_multi_file_czi_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    pytest.importorskip("czifile")
+PROXY_PRELUDE = textwrap.dedent(
+    """
+    import json, logging, sys
+    from pathlib import Path
+    from types import SimpleNamespace
+    from merxen.io import czi
+
     real_open = czi._open_czi
+    """
+)
 
-    class Proxy:
-        def __init__(self, path: Path) -> None:
-            self._real = real_open(path)
-            self.header = SimpleNamespace(
-                file_part=1, file_guid="a", primary_file_guid="b"
-            )
 
-        def __getattr__(self, name: str) -> Any:
-            return getattr(self._real, name)
+def run_proxy_script(body: str, czi_python: str | None, *args: str) -> dict[str, Any]:
+    """Run ``PROXY_PRELUDE + body`` where czifile is (the runtime interpreter).
 
-        def __enter__(self) -> Proxy:
-            return self
+    The script prints one JSON object on its last stdout line.
+    """
+    code = PROXY_PRELUDE + textwrap.dedent(body)
+    env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
+    proc = subprocess.run(
+        [czi_python or sys.executable, "-c", code, *args],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload: dict[str, Any] = json.loads(proc.stdout.strip().splitlines()[-1])
+    return payload
 
-        def __exit__(self, *exc: object) -> None:
-            self._real.close()
 
-    monkeypatch.setattr(czi, "_open_czi", Proxy)
-    with pytest.raises(ValueError, match="multi-file CZI"):
-        czi.read_czi_info(FIXTURES / "one_scene_hole.czi")
+def test_multi_file_czi_is_rejected(czi_python: str | None) -> None:
+    result = run_proxy_script(
+        """
+        class Proxy:
+            def __init__(self, path):
+                self._real = real_open(path)
+                self.header = SimpleNamespace(
+                    file_part=1, file_guid="a", primary_file_guid="b"
+                )
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self._real.close()
+
+        czi._open_czi = Proxy
+        try:
+            czi.read_czi_info(Path(sys.argv[1]))
+        except ValueError as exc:
+            print(json.dumps({"error": str(exc)}))
+        else:
+            print(json.dumps({"error": None}))
+        """,
+        czi_python,
+        str(FIXTURES / "one_scene_hole.czi"),
+    )
+    assert result["error"] is not None
+    assert "multi-file CZI" in result["error"]
+
+
+def test_missing_channel_plane_is_zero_filled_and_warned_once(
+    tmp_path: Path, czi_python: str | None
+) -> None:
+    out = tmp_path / "out.ome.tif"
+    result = run_proxy_script(
+        """
+        class Image:
+            def __init__(self, real):
+                self._real = real
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            def __call__(self, **kwargs):
+                if kwargs.get("C") == 1:
+                    raise ValueError("selection matches no subblocks")
+                return self._real(**kwargs)
+
+        class Handle:
+            def __init__(self, path):
+                self._real = real_open(path)
+                self.header = self._real.header
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            @property
+            def scenes(self):
+                real = self._real.scenes
+
+                class Scenes:
+                    def __call__(self, *args, **kwargs):
+                        return real(*args, **kwargs)
+
+                    def __getitem__(self, key):
+                        return Image(real[key])
+
+                    def items(self):
+                        return [(k, Image(v)) for k, v in real.items()]
+
+                    def __getattr__(self, name):
+                        return getattr(real, name)
+
+                return Scenes()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self._real.close()
+
+        records = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        logging.getLogger().addHandler(Capture())
+        czi._open_czi = Handle
+        czi.convert_czi_scene(
+            Path(sys.argv[1]), Path(sys.argv[2]), scene=0,
+            channel_names=["A", "B", "C"], pixel_size_um=0.5, image_name="x",
+            tile_size=16, band_height=16, min_level_size=16, workers=3,
+        )
+        print(json.dumps({"warnings": [m for m in records if "no data for" in m]}))
+        """,
+        czi_python,
+        str(FIXTURES / "one_scene_hole.czi"),
+        str(out),
+    )
+    assert len(result["warnings"]) == 1
+    assert "channel 1, plane 0" in result["warnings"][0]
+    expected = np.load(FIXTURES / "oracle.npz")["one_scene_hole__s0"]
+    level0 = open_ome_tiff_level(read_ome_tiff_info(out), 0).values
+    assert not level0[1].any()
+    assert expected[1].any()
+    assert np.array_equal(level0[0], expected[0])
+    assert np.array_equal(level0[2], expected[2])
+
+
+def test_relative_paths_are_resolved_in_the_callers_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, czi_python: str | None
+) -> None:
+    """The runtime starts elsewhere; relative paths must still mean the caller's."""
+    (tmp_path / "in.czi").symlink_to(FIXTURES / "one_scene_hole.czi")
+    monkeypatch.chdir(tmp_path)
+    info = run_read_czi_info(Path("in.czi"), python=czi_python)
+    assert info.scenes[0].bbox_xywh == (-131, 20, 96, 80)
+    run_convert_czi_scene(
+        Path("in.czi"),
+        Path("rel.ome.tif"),
+        python=czi_python,
+        scene=0,
+        channel_names=["A", "B", "C"],
+        pixel_size_um=0.5,
+        image_name="fixture_reference",
+        tile_size=16,
+        band_height=16,
+        min_level_size=16,
+        workers=2,
+        tmp_dir=Path("pyramid-tmp"),
+    )
+    expected = np.load(FIXTURES / "oracle.npz")["one_scene_hole__s0"]
+    assert (tmp_path / "rel.ome.tif").is_file()
+    level0 = open_ome_tiff_level(read_ome_tiff_info(tmp_path / "rel.ome.tif"), 0)
+    assert np.array_equal(level0.values, expected)
 
 
 def test_xml_is_never_logged(
