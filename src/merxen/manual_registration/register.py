@@ -544,7 +544,10 @@ def _read_prepared_store(
                     f"{pfx} the {role} OME-TIFF changed since prepare "
                     f"(fingerprint mismatch): {rerun}"
                 )
-    recomputed = labelling_content_sha256(raw_labelling)
+    try:
+        recomputed = labelling_content_sha256(raw_labelling)
+    except ValueError as exc:
+        raise ValueError(f"{pfx} {LABELLING_ATTR} is not valid: {exc}") from exc
     if labelling.content_sha256 is not None and labelling.content_sha256 != recomputed:
         warnings.append(
             "stored labelling content_sha256 differs from the recomputed one; using "
