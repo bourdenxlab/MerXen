@@ -37,6 +37,39 @@ from merxen.manual_registration.simulate import make_synthetic_pair
 from ._scripts import load_script
 
 derive_script = load_script("derive_test_landmarks")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_farthest_point_order_spreads_points() -> None:
+    points = np.array([[0.0, 0.0], [1.0, 0.0], [10.0, 0.0], [5.0, 0.0], [0.0, 9.0]])
+
+    order = derive_script.farthest_point_order(points)
+
+    # Nearest the centroid (3), the farthest from it (4), then the tie between 0 and
+    # 2 (both 5 from the chosen set) goes to the lowest index.
+    assert order.tolist() == [3, 4, 0, 2, 1]
+    assert derive_script.farthest_point_order(np.zeros((0, 2))).size == 0
+
+
+def test_tissue_mask_finds_the_bright_disc() -> None:
+    yy, xx = np.mgrid[:200, :200]
+    image = np.where((yy - 100) ** 2 + (xx - 100) ** 2 < 60**2, 500.0, 5.0)
+    image = image + np.random.default_rng(0).normal(0, 1, image.shape)
+
+    mask = derive_script.tissue_mask(np.clip(image, 0, None))
+
+    assert 0.25 < mask.mean() < 0.35
+    assert mask[100, 100] and not mask[5, 5]
+
+
+def test_scripts_refuse_an_output_inside_the_repository() -> None:
+    inside = REPO_ROOT / "derived_landmarks.json"
+    with pytest.raises(SystemExit, match="repository"):
+        derive_script.main(["--store", "unused.zarr", "--out", str(inside)])
+    with pytest.raises(SystemExit, match="repository"):
+        load_script("export_reference_image").main(
+            ["--store", "unused.zarr", "--out", str(REPO_ROOT / "export.ome.tif")]
+        )
 
 
 @pytest.mark.integration
@@ -95,7 +128,6 @@ def test_derive_test_landmarks_recovers_a_rotated_mirrored_pair(
 # The real CZI pair through Nextflow (slow; never in CI)
 # --------------------------------------------------------------------------
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = REPO_ROOT / "workflows"
 SAME_SECTION_OVERRIDE = "same_section:matrix_scale_tolerance=0.05"
 
