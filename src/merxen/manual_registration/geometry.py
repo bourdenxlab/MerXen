@@ -122,8 +122,8 @@ def similarity_parameters(matrix_xy: np.ndarray) -> tuple[float, float, bool]:
 
 
 def _positive(name: str, value: float) -> None:
-    if not value > 0.0:
-        raise ValueError(f"{name} must be positive, got {value}")
+    if not (math.isfinite(value) and value > 0.0):
+        raise ValueError(f"{name} must be finite and positive, got {value}")
 
 
 def coarse_matrix_xy(

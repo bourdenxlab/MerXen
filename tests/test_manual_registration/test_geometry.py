@@ -181,6 +181,27 @@ def test_coarse_matrix_rejects_non_positive_pixel_sizes() -> None:
         )
 
 
+@pytest.mark.parametrize("bad", [float("inf"), float("nan"), -1.0, 0.0])
+@pytest.mark.parametrize("which", ["moving", "reference"])
+def test_pixel_sizes_must_be_finite_and_positive(which: str, bad: float) -> None:
+    sizes = {"moving_pixel_size_um": 1.0, "reference_pixel_size_um": 1.0}
+    sizes[f"{which}_pixel_size_um"] = bad
+    with pytest.raises(ValueError, match="finite and positive"):
+        coarse_matrix_xy(
+            CoarseTransform(),
+            moving_shape_yx=(10, 10),
+            reference_shape_yx=(10, 10),
+            **sizes,
+        )
+    with pytest.raises(ValueError, match="finite and positive"):
+        coarse_from_matrix(
+            np.eye(3),
+            moving_shape_yx=(10, 10),
+            reference_shape_yx=(10, 10),
+            **sizes,
+        )
+
+
 STATE_CASE = CASES[1]  # shapes and pixel sizes of the flip/rotate identities
 
 

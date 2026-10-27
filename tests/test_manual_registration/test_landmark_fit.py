@@ -288,6 +288,17 @@ def test_fit_errors() -> None:
         )
 
 
+@pytest.mark.parametrize("bad", [float("inf"), float("nan"), -1.0])
+@pytest.mark.parametrize("which", ["moving", "reference"])
+def test_robust_similarity_rejects_non_finite_pixel_sizes(
+    which: str, bad: float
+) -> None:
+    sizes = {"moving_pixel_size_um": 1.0, "reference_pixel_size_um": 1.0}
+    sizes[f"{which}_pixel_size_um"] = bad
+    with pytest.raises(ValueError, match="finite and positive"):
+        robust_similarity(MOVING, REFERENCE, reflection=False, **sizes)
+
+
 def test_leave_one_out_with_two_pairs_is_nan() -> None:
     loo = leave_one_out_residuals([[0, 0], [5, 1]], [[1, 1], [6, 2]], reflection=False)
     assert loo.shape == (2,)
