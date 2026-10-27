@@ -279,6 +279,40 @@ def test_invalid_level_factors_are_rejected(
         )
 
 
+def test_numpy_scalar_level_factors_are_accepted() -> None:
+    shapes = [(1000, 1000), (500, 500)]
+    levels = _ones_levels(shapes)
+
+    for factors in (
+        [(1.0, 1.0), (np.int64(2), np.int64(2))],
+        [(np.float32(1.0), np.float32(1.0)), (np.float32(2.0), np.float32(2.0))],
+    ):
+        result = read_working_channel(
+            open_level=lambda index: levels[index],
+            level_shapes_yx=shapes,
+            channel_index=0,
+            target_factor=2.0,
+            level_factors_xy=factors,
+        )
+        assert result.pixels.shape == (500, 500)
+        assert result.to_level0[0, 0] == 2.0
+    ReferenceGrid(
+        key="reference",
+        levels=levels,
+        transformations={"global": Identity()},
+        coordinate_system="global",
+        level_factors_xy=((1.0, 1.0), (np.int64(2), np.int64(2))),
+    )
+    with pytest.raises(ValueError, match="level_factors_xy"):
+        ReferenceGrid(
+            key="reference",
+            levels=levels,
+            transformations={"global": Identity()},
+            coordinate_system="global",
+            level_factors_xy=((1.0, 1.0), (np.bool_(True), np.int64(2))),
+        )
+
+
 def _holed_moving() -> tuple[np.ndarray, np.ndarray]:
     reference = _synthetic_dapi()
     rng = np.random.default_rng(5)
@@ -397,6 +431,19 @@ def test_measure_registration_overlay_needs_the_channel() -> None:
             reference=_in_memory_reference(reference),
             moving=_in_memory_moving(reference),
             registration_channel="p62",
+            matrix=np.eye(3),
+            settings=_settings(),
+        )
+
+
+def test_measure_registration_overlay_rejects_no_channel() -> None:
+    reference = _synthetic_dapi()
+
+    with pytest.raises(ValueError, match="registration channel"):
+        measure_registration_overlay(
+            reference=_in_memory_reference(reference),
+            moving=_in_memory_moving(reference),
+            registration_channel=None,  # type: ignore[arg-type]
             matrix=np.eye(3),
             settings=_settings(),
         )

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import numbers
 import os
 import re
 import shutil
@@ -163,9 +164,9 @@ def _check_level_factors(
         raise ValueError(message)
     for pair in factors:
         if len(pair) != 2 or not all(
-            isinstance(value, int | float)
-            and not isinstance(value, bool)
-            and math.isfinite(value)
+            isinstance(value, numbers.Real | np.integer | np.floating)
+            and not isinstance(value, bool | np.bool_)
+            and math.isfinite(float(value))
             and value > 0
             for value in pair
         ):
@@ -1138,8 +1139,12 @@ def measure_registration_overlay(
         ``p99_um`` and ``max_um`` when at least one window was accepted.
 
     Raises:
-        ValueError: If a registration channel is not found.
+        ValueError: If ``registration_channel`` is None or not found.
     """
+    if registration_channel is None:
+        raise ValueError(
+            "measure_registration_overlay needs a registration channel; got None"
+        )
     tuning = RegistrationTuning() if tuning is None else tuning
     refinement = _refine_registration(
         reference=reference,
