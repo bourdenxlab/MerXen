@@ -53,7 +53,16 @@ For each listed image:
    all other IF channels under the assumption that the source channels are
    mutually registered. Pixels outside the image footprint are 0. A viewer
    pyramid is built alongside it.
-7. **Record provenance** in `sdata.attrs["merxen_registered_images"]`. An image
+7. **Score registration per cell** (default on). At 0.85 µm/px, the final IF
+   DAPI is compared with `morphology_focus` DAPI within each
+   `MOSAIK_cellpose` mask. Pixel-wise DAPI correlation measures local shape
+   agreement. A second component compares DAPI contrast inside the Cellpose
+   nuclear mask with the surrounding part of the cell mask. The raw components,
+   a conservative combined score, and a validity flag are written to
+   `table_MOSAIK_cellpose` and `table_MOSAIK_proseg_hybrid` with the prefix
+   `registration_quality__<image_key>__`. Cells without enough nuclear or
+   surrounding pixels receive no score.
+8. **Record provenance** in `sdata.attrs["merxen_registered_images"]`. An image
    whose file, matrix, channel names, and settings are unchanged is skipped on
    rerun, also from a fresh Nextflow work directory: its stored summary is
    written out again (marked `"reused": true`) and its QC files are copied when
@@ -126,8 +135,15 @@ exists only for rows that set the CSV.
 | `register_images_out/<dataset>_<image_key>_registration_summary.json` | Matrices (Explorer and final), scale check, refinement status and correction, residuals before/after, output shape. |
 | `register_images_out/<dataset>_<image_key>_registration_qc.png` (+ `.pdf`) | DAPI overlay (Xenium green, image magenta), residual-shift field after registration, and before/after residual histograms. |
 | `register_images_out/<dataset>_<image_key>_registration_local_shifts.csv` | Per-window residual shifts (µm) and correlation before and after refinement. |
-| `register_images_out/<dataset>_<image_key>_nonrigid_flow.npz` | Coarse fixed-grid pull field, confidence mask, and grid-to-reference matrix. Written whenever non-rigid refinement is attempted, including rejected attempts. |
+| `register_images_out/<dataset>_<image_key>_nonrigid_flow.npz` | Coarse fixed-grid pull field, first/residual-pass confidence masks, rejection-reason bitmask, local correlation, cycle error, final Jacobian, and grid-to-reference matrix. Written whenever non-rigid refinement is attempted, including rejected attempts. |
 | `register_images_out/<dataset>_<image_key>_nonrigid_qc.png` (+ `.pdf`) | Affine/final DAPI overlays, applied displacement and confidence outline, and local DAPI correlation. |
+| `register_images_out/<dataset>_<image_key>_registration_quality.csv.gz` | One row per Cellpose cell with the combined score, DAPI Pearson correlation, reference/moving nuclear contrast, contrast agreement, pixel counts, and validity. |
+
+The `rejection_reasons` array is a bitmask: `1` outside overlap, `2` insufficient
+local support, `4` low correlation, `8` failed forward/backward consistency,
+`16` excessive displacement, and `32` unsafe raw Jacobian. Multiple bits may be
+set for one pixel. `residual_confidence` marks pixels whose evidence supported an
+accepted residual update.
 
 ### Reading the QC
 
@@ -204,16 +220,31 @@ image occupies 4.9 GB in the zarr, plus 0.3 GB for its viewer pyramid.
 | `nonrigid_pixel_size_um` / `nonrigid_smoothing_sigma_um` | `3.4` / `10` | Flow grid resolution and physical smoothing scale. |
 | `nonrigid_attachment` / `nonrigid_tightness` | `10` / `0.3` | TV-L1 data/regularization balance. |
 | `nonrigid_num_warp` / `nonrigid_num_iter` | `5` / `10` | TV-L1 coarse-to-fine warp and fixed-point counts. |
-| `nonrigid_max_displacement_um` / `nonrigid_max_cycle_error_um` | `20` / `5` | Raw-vector displacement and forward/backward consistency limits. |
+| `nonrigid_max_displacement_um` / `nonrigid_max_cycle_error_um` | `20` / `5` | Per-pass raw-vector displacement and forward/backward consistency limits. |
 | `nonrigid_min_local_correlation` | `0.2` | Minimum local DAPI correlation for a vector to contribute. |
-| `nonrigid_min_jacobian` / `nonrigid_max_jacobian` | `0.5` / `2` | Final local area-change bounds. |
+| `nonrigid_min_jacobian` / `nonrigid_max_jacobian` | `0.5` / `2` | Final local area-change bounds. Unsafe neighbourhoods are repaired locally so one fold does not attenuate the whole slide. |
 | `nonrigid_min_confident_fraction` | `0.1` | Minimum fraction of overlapping tissue that must support the field. |
+| `nonrigid_residual_passes` | `1` | Additional guarded passes composed onto the initial field. Set to `0` for the previous single-pass behaviour. |
+| `nonrigid_min_residual_correlation_improvement` | `0.02` | Minimum local DAPI-correlation gain required before a residual update can contribute. |
+| `nonrigid_min_residual_initial_confidence` | `0.75` | Minimum smoothed initial-flow confidence for full-field residual updates. |
+| `registration_quality_enabled` | `true` | Compute per-cell DAPI registration quality after the final warp. Nextflow: `--register_post_xenium_if_registration_quality`. |
+| `registration_quality_pixel_size_um` | `0.85` | Resolution for nuclear-scale per-cell scoring. Must be an integer multiple of the reference pixel size. |
+| `registration_quality_smoothing_sigma_um` | `0.68` | Light DAPI smoothing applied before per-cell shape correlation. |
 | `registration_pixel_size_um` | `0.85` | Working resolution for refinement and QC. |
 | `refinement_window_um` | `200` | Window size for local shift measurement. |
 | `min_refinement_windows` | `20` | Minimum usable windows to attempt refinement. |
 | `max_refinement_shift_um` / `max_refinement_rotation_deg` / `max_refinement_scale_change` | `50` / `2` / `0.02` | Safety limits on the correction. |
 | `tile_size` / `chunk_size` | `4096` / `4096` | Resampling tile and output chunk size (equal sizes avoid partial-chunk rewrites). |
 | `build_viewer_pyramid` | `true` | Build the viewer pyramid for each registered image. Nextflow follows `--viewer_cache_build_image_pyramid`. |
+
+When residual refinement is enabled, a final nucleus-scale stage revisits only
+low-correlation tissue in overlapping approximately 220 µm tiles. Each tile is
+normalized independently, which allows a shifted subregion to move even when a
+brighter or already aligned area dominates the whole-slide intensity range. A
+tile contributes only when bidirectional TV-L1 passes the usual confidence and
+Jacobian checks and improves its own DAPI correlation by at least 0.03. Sine
+windows feather overlapping accepted tiles; a final whole-slide correlation
+check rejects the combined update if it does not improve the registration.
 
 ## Python entry points
 
@@ -224,4 +255,5 @@ image occupies 4.9 GB in the zarr, plus 0.3 GB for its viewer pyramid.
 | `load_alignment_matrix`, `check_matrix_scale` | [image_registration.py](../../src/merxen/image_registration.py) |
 | `measure_local_shifts`, `fit_affine_displacement` | [image_registration.py](../../src/merxen/image_registration.py) |
 | `estimate_nonrigid_flow`, `flow_jacobian_determinant` | [nonrigid_registration.py](../../src/merxen/nonrigid_registration.py) |
+| `compute_cell_registration_quality`, `score_registered_image_in_spatialdata` | [registration_quality.py](../../src/merxen/registration_quality.py) |
 | `read_ome_tiff_info`, `open_ome_tiff_level` | [io/ome_tiff.py](../../src/merxen/io/ome_tiff.py) |

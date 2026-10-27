@@ -92,6 +92,7 @@ Each stage is one Nextflow module and one `merxen` subcommand, sharing a Pydanti
 | [Visualization](docs/stages/visualization.md) | Single-platform or paired figure generation | always |
 | [Spatial gene analysis](docs/stages/spatial-gene-analysis.md) | Cell-level spatial autocorrelation and assignment-independent transcript-coordinate patterns | always |
 | [Squidpy clustering](docs/stages/clustering-squidpy.md) | First-pass Scanpy/Squidpy clustering (RAPIDS-backed) | always |
+| [pciSeq](docs/stages/pciseq.md) | Probabilistic cell typing and transcript assignment with regional Allen WMB, WHB, SEA-AD, or custom references | off (`--pciseq_enabled`) |
 | [MENDER](docs/stages/mender.md) | Independent CPU-only MENDER spatial-domain analysis | off (`--mender_enabled`) |
 | [MapMyCells](docs/stages/mapmycells.md) | Local Allen Institute MapMyCells cell type assignment | off (past default `stop_stage`) |
 | [Distance from object](docs/stages/distance-from-object.md) | Nearest registered polygon-edge annotation and grey-matter paired near-vs-far PyDESeq2 | off (`--distance_from_object_enabled`) |
@@ -215,7 +216,7 @@ MerXen/
 └── Agents.md                   # Project standards (must-read for contributors)
 ```
 
-Stages with conflicting dependency stacks run in their own environments: `envs/environment.alignment.yml` pins the VALIS 1.2 image-registration stack for `ALIGN`, `envs/environment.clustering-gpu.yml` provides RAPIDS, and `envs/environment.mender.yml` isolates MENDER's AnnData 0.9 / Scanpy 1.9 requirement. Everything else uses `envs/environment.yml`.
+Stages with conflicting dependency stacks run in their own environments: `envs/environment.alignment.yml` pins the VALIS 1.2 image-registration stack for `ALIGN`, `envs/environment.clustering-gpu.yml` provides RAPIDS, and `envs/environment.mender.yml` isolates MENDER's AnnData 0.9 / Scanpy 1.9 requirement. Optional pciSeq computation uses `envs/environment.pciseq.yml`; preparation and finalization use the base environment. Other standard stages use `envs/environment.yml`.
 
 </details>
 

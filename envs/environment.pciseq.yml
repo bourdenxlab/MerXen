@@ -1,0 +1,9 @@
+# requirements.lock sha256: b94bdfcf1605507baf8c9dddfebeb1460a9a5a90048b95e3b1e4d4e25b075c45
+name: merxen-pciseq
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - -r ../requirements/requirements.pciseq.lock

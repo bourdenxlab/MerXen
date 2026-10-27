@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
+from pytest import MonkeyPatch
 from scipy.ndimage import gaussian_filter
 
 from merxen.nonrigid_registration import (
     NonrigidFlowResult,
+    _apply_local_residual_tiles,
+    _masked_correlation,
+    _prepare_image,
+    _repair_jacobian_locally,
     estimate_nonrigid_flow,
     flow_jacobian_determinant,
     warp_with_flow,
@@ -133,3 +138,150 @@ def test_flow_is_rejected_without_overlap() -> None:
     assert result.status == "rejected"
     assert result.reason == "no overlapping tissue pixels"
     assert not result.flow_yx.any()
+
+
+def test_jacobian_repair_is_local_instead_of_scaling_the_whole_field() -> None:
+    flow = np.zeros((2, 128, 128), dtype=np.float32)
+    flow[1] = 4.0
+    local_columns = np.arange(28, dtype=np.float32) - 13.5
+    flow[1, 50:78, 50:78] -= 0.8 * local_columns[None, :]
+
+    repaired, stats = _repair_jacobian_locally(
+        flow,
+        np.ones((128, 128), dtype=bool),
+        min_jacobian=0.5,
+        max_jacobian=2.0,
+        sigma_px=3.0,
+    )
+
+    jacobian = flow_jacobian_determinant(repaired)
+    assert jacobian.min() >= 0.5
+    assert jacobian.max() <= 2.0
+    np.testing.assert_array_equal(repaired[:, :, :30], flow[:, :, :30])
+    assert stats["global_fallback_scale"] == 1.0
+    assert stats["locally_changed_fraction"] < 0.2
+
+
+def test_residual_pass_improves_an_undercorrected_translation() -> None:
+    reference = _nuclei_image(192)
+    moving = cv2.warpAffine(
+        reference,
+        np.asarray([[1.0, 0.0, -7.0], [0.0, 1.0, 4.0]], dtype=np.float32),
+        (192, 192),
+    )
+    valid = np.ones(reference.shape, dtype=bool)
+    valid[:15] = False
+    valid[-15:] = False
+    valid[:, :15] = False
+    valid[:, -15:] = False
+    parameters = {
+        "pixel_size_um": 1.0,
+        "attachment": 10.0,
+        "tightness": 0.3,
+        "num_warp": 2,
+        "num_iter": 3,
+        "smoothing_sigma_um": 5.0,
+        "max_displacement_um": 12.0,
+        "max_cycle_error_um": 3.0,
+        "min_local_correlation": 0.2,
+        "min_jacobian": 0.5,
+        "max_jacobian": 2.0,
+        "min_confident_fraction": 0.1,
+    }
+
+    single_pass = estimate_nonrigid_flow(
+        reference,
+        moving,
+        valid,
+        residual_passes=0,
+        **parameters,
+    )
+    refined = estimate_nonrigid_flow(
+        reference,
+        moving,
+        valid,
+        residual_passes=1,
+        **parameters,
+    )
+
+    assert single_pass.status == "applied"
+    assert refined.status == "applied"
+    assert refined.stats["residual_passes"][0]["status"] == "applied"
+    assert refined.stats["pearson_after"] > single_pass.stats["pearson_after"]
+    assert refined.residual_confidence.any()
+    assert refined.jacobian_determinant[valid].min() >= 0.5
+    assert refined.jacobian_determinant[valid].max() <= 2.0
+
+
+def test_local_residual_tiles_correct_only_the_shifted_subregion(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "merxen.nonrigid_registration._LOCAL_RESIDUAL_TILE_UM",
+        64.0,
+    )
+    reference = _nuclei_image(256)
+    shifted = cv2.warpAffine(
+        reference,
+        np.asarray([[1.0, 0.0, -5.0], [0.0, 1.0, 2.0]], dtype=np.float32),
+        (256, 256),
+    )
+    moving = reference.copy()
+    moving[:, 128:] = shifted[:, 128:]
+    valid = np.ones(reference.shape, dtype=bool)
+    valid[:16] = False
+    valid[-16:] = False
+    valid[:, :16] = False
+    valid[:, -16:] = False
+    reference_prepared = _prepare_image(reference, valid, pixel_size_um=1.0)
+    moving_prepared = _prepare_image(moving, valid, pixel_size_um=1.0)
+    initial_flow = np.zeros((2, *reference.shape), dtype=np.float32)
+    initial_correlation = _masked_correlation(
+        reference_prepared,
+        moving_prepared,
+        valid,
+    )
+
+    flow, warped, jacobian, correlation, confidence, stats = (
+        _apply_local_residual_tiles(
+            reference_array=reference,
+            moving_array=moving,
+            reference_prepared=reference_prepared,
+            moving_prepared=moving_prepared,
+            valid_array=valid,
+            initial_flow=initial_flow,
+            initial_warped=moving_prepared,
+            initial_jacobian=np.ones(reference.shape, dtype=np.float32),
+            initial_correlation=initial_correlation,
+            min_correlation_improvement=0.03,
+            pixel_size_um=1.0,
+            attachment=10.0,
+            tightness=0.3,
+            num_warp=5,
+            num_iter=10,
+            smoothing_sigma_um=5.0,
+            max_displacement_um=12.0,
+            max_cycle_error_um=3.0,
+            min_local_correlation=0.2,
+            min_jacobian=0.5,
+            max_jacobian=2.0,
+            min_confident_fraction=0.1,
+        )
+    )
+
+    assert stats["status"] == "applied"
+    assert stats["accepted_tiles"] > 0
+    assert correlation > initial_correlation
+    assert confidence[:, 150:].any()
+    assert np.median(np.linalg.norm(flow[:, 32:224, 32:96], axis=0)) < 0.25
+    assert _masked_correlation(
+        reference_prepared[:, 150:],
+        warped[:, 150:],
+        valid[:, 150:],
+    ) > _masked_correlation(
+        reference_prepared[:, 150:],
+        moving_prepared[:, 150:],
+        valid[:, 150:],
+    )
+    assert jacobian[valid].min() >= 0.5
+    assert jacobian[valid].max() <= 2.0

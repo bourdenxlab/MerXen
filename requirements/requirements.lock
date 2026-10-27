@@ -2,7 +2,7 @@
 #    uv pip compile pyproject.toml --extra dev -o requirements/requirements.lock --python-platform x86_64-unknown-linux-gnu
 abc-atlas-access @ git+https://github.com/AllenInstitute/abc_atlas_access@b16ee223d3466a57b30066973413ccc948c2e983
     # via
-    #   --override /tmp/merxen-hitl-git-overrides.txt
+    #   --override /tmp/merxen-pciseq-git-pins.txt
     #   cell-type-mapper
     #   mmc-gene-mapper
 aiohappyeyeballs==2.6.1
@@ -75,7 +75,7 @@ bioregistry==0.14.4
     # via schemasheets
 bkbit @ git+https://github.com/danielsf/bkbit@7081742464fc2a678a77795f667fd3f945b0bca8
     # via
-    #   --override /tmp/merxen-hitl-git-overrides.txt
+    #   --override /tmp/merxen-pciseq-git-pins.txt
     #   mmc-gene-mapper
 bleach==6.4.0
     # via nbconvert
@@ -92,7 +92,7 @@ bump-my-version==1.3.0
     # via merxen (pyproject.toml)
 cell-type-mapper @ git+https://github.com/AllenInstitute/cell_type_mapper@824caef975618afdadf31172fe2d57e61e657b92
     # via
-    #   --override /tmp/merxen-hitl-git-overrides.txt
+    #   --override /tmp/merxen-pciseq-git-pins.txt
     #   merxen (pyproject.toml)
 cellpose==4.2.1.1
     # via merxen (pyproject.toml)
@@ -301,6 +301,7 @@ h11==0.16.0
     # via httpcore
 h5py==3.16.0
     # via
+    #   merxen (pyproject.toml)
     #   anndata
     #   mmc-gene-mapper
     #   scanpy
@@ -534,7 +535,7 @@ mistune==3.3.4
     # via nbconvert
 mmc-gene-mapper @ git+https://github.com/AllenInstitute/mmc_gene_mapper@e37a15194b1c7101d4a9df1f506eacd7dae5a4ef
     # via
-    #   --override /tmp/merxen-hitl-git-overrides.txt
+    #   --override /tmp/merxen-pciseq-git-pins.txt
     #   cell-type-mapper
 more-click==0.1.3
     # via bioregistry
@@ -886,9 +887,7 @@ pydantic==2.13.0
     #   pydantic-zarr
     #   sssom-pydantic
 pydantic-core==2.46.0
-    # via
-    #   ome-types
-    #   pydantic
+    # via pydantic
 pydantic-extra-types==2.11.1
     # via ome-types
 pydantic-settings==2.13.1
@@ -1084,7 +1083,7 @@ scanpy==1.12.1
     #   squidpy
 schemasheets @ git+https://github.com/linkml/schemasheets@212c4e5f6600d365ac7686d359b6b5e6a6e82965
     # via
-    #   --override /tmp/merxen-hitl-git-overrides.txt
+    #   --override /tmp/merxen-pciseq-git-pins.txt
     #   bkbit
     #   mmc-gene-mapper
 scikit-image==0.26.0
@@ -1250,14 +1249,11 @@ toolz==1.1.0
     #   partd
 torch==2.14.0
     # via
-    #   -c /tmp/merxen-hitl-runtime-constraints.txt
     #   merxen (pyproject.toml)
     #   cellpose
     #   torchvision
 torchvision==0.29.0
-    # via
-    #   -c /tmp/merxen-hitl-runtime-constraints.txt
-    #   cellpose
+    # via cellpose
 tornado==6.5.5
     # via
     #   distributed
@@ -1302,6 +1298,8 @@ typeguard==4.5.1
     # via inflect
 typing-extensions==4.15.0
     # via
+    #   aiosignal
+    #   anyio
     #   beautifulsoup4
     #   formulaic
     #   jupyter-client
@@ -1312,6 +1310,8 @@ typing-extensions==4.15.0
     #   pydantic-core
     #   pydantic-extra-types
     #   pystow
+    #   referencing
+    #   scanpy
     #   spatialdata
     #   sqlalchemy
     #   torch

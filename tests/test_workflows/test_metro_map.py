@@ -26,6 +26,10 @@ MODULES_DIR = REPO_ROOT / "workflows" / "modules"
 # reader's overview, not a DAG dump; these carry no scientific meaning.
 OMITTED_PROCESSES = {
     **dict.fromkeys(
+        ["PCISEQ_REFERENCE", "PCISEQ_PREPARE", "PCISEQ_COMPUTE", "PCISEQ_FINALIZE"],
+        "optional pciSeq analysis, documented in docs/stages/pciseq.md",
+    ),
+    **dict.fromkeys(
         [
             "GASTON_PREPARE",
             "GASTON_GLM_PCA",

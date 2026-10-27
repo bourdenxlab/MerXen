@@ -75,17 +75,18 @@ workflow {
         analysis_segmentation: 'reseg,original_seg', mender_enabled: true,
         gaston_enabled: true, stop_stage: 'gaston'], options)
     def published = caseSettings.exact + [pair_id: 'PUBLISHED']
-    sample_rows_ch = Channel.of(tuple('READY', [:], ready),
+    post_pciseq_sample_rows_ch = Channel.of(tuple('READY', [:], ready),
         tuple('MAPPED', [:], mapped), tuple('PUBLISHED', [:], published))
     mapmycells_results_ch = Channel.of(tuple('MAPPED', 'reseg', 'done'),
         tuple('MAPPED', 'original_seg', 'done'))
     distance_from_object_annotation_results_ch = Channel.empty()
     compute_cortical_depth_results_ch = Channel.empty()
-    clustering_results_ch = Channel.fromList(['READY', 'MAPPED'].collectMany { pair ->
-        ['reseg', 'original_seg', 'proseg_hybrid'].collect { seg ->
-            tuple(pair, seg, '[]', 'clustered')
-        }
-    })
+    clustering_downstream_results_ch = Channel.fromList(
+        ['READY', 'MAPPED'].collectMany { pair ->
+            ['reseg', 'original_seg', 'proseg_hybrid'].collect { seg ->
+                tuple(pair, seg, '[]', 'clustered')
+            }
+        })
 """
     artifacts = """
     gaston_artifacts_ch = Channel.fromList(

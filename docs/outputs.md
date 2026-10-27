@@ -194,8 +194,9 @@ Path: `${outdir}/<pair_id>/xenium/register_images/` (only for rows that set
 | `register_images_out/*_<image_key>_registration_summary.json` | Explorer and final matrices, scale check, refinement status, residuals before/after. |
 | `register_images_out/*_<image_key>_registration_qc.png` / `.pdf` | DAPI overlay, residual-shift field, and residual histograms. |
 | `register_images_out/*_<image_key>_registration_local_shifts.csv` | Per-window residual shifts before and after refinement. |
-| `register_images_out/*_<image_key>_nonrigid_flow.npz` | Accepted coarse pull field, confidence mask, and its pixel-to-reference affine when non-rigid refinement was attempted. |
+| `register_images_out/*_<image_key>_nonrigid_flow.npz` | Accepted coarse pull field, first/residual confidence masks, rejection-reason bitmask, local correlation, cycle error, final Jacobian, and its pixel-to-reference affine. |
 | `register_images_out/*_<image_key>_nonrigid_qc.png` / `.pdf` | Affine and final DAPI overlays, applied displacement, confidence boundary, and local DAPI correlation. |
+| `register_images_out/*_<image_key>_registration_quality.csv.gz` | Per-Cellpose-cell DAPI registration score and its correlation/contrast components. The same columns are attached to the Cellpose and hybrid source tables. |
 
 See [Image registration](stages/register-images.md#reading-the-qc).
 

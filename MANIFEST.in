@@ -3,3 +3,6 @@ recursive-include licenses *
 include containers/Dockerfile.gaston
 include envs/environment.gaston.yml
 include scripts/collect_gaston_licenses.py
+include containers/Dockerfile.pciseq
+include envs/environment.pciseq.yml
+include requirements/requirements.pciseq.lock
