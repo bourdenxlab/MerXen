@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -361,6 +362,22 @@ def test_plan_store_update_table() -> None:
     result_kind = _old_attrs()
     result_kind[STORE_ATTR]["kind"] = "result"
     assert _plan(result_kind).action == "refuse"
+    # 2b. a labelling attribute that is not a mapping is never carried or deleted
+    for broken in ([1, 2], "x", 3):
+        bad = _old_attrs()
+        bad[LABELLING_ATTR] = broken
+        for content in ("sha256:" + "b" * 64, "sha256:" + "c" * 64):
+            plan = _plan(bad, content_digest=content)
+            assert (plan.action, plan.old_store) == ("refuse", "none")
+            assert "not a mapping" in plan.message
+        forced = _plan(bad, force=True)
+        assert (forced.action, forced.status, forced.old_store) == (
+            "build",
+            "forced",
+            "supersede",
+        )
+        assert forced.carry_labelling is None
+        assert "labelling not carried over" in forced.warnings[0]
     # 3. newer schema
     newer = _old_attrs(store_extra={"schema_version": 2})
     assert "newer MerXen" in _plan(newer).message
@@ -443,6 +460,37 @@ def test_plan_store_update_table() -> None:
     )
 
 
+def test_remove_stale_temporaries_removes_only_aged_leftovers(tmp_path: Path) -> None:
+    prepared = tmp_path / "prepared"
+    prepared.mkdir()
+    old = time.time() - 25 * 3600
+    aged = [
+        prepared / ".T1_prepared.zarr.tmp-a",
+        prepared / ".T1_prepared.zarr.old-b",
+    ]
+    for directory in aged:
+        directory.mkdir()
+        (directory / "zarr.json").write_text("{}")
+    aged_lock = prepared / ".T1_prepared.zarr.tmp-a.merxen-write.lock"
+    aged_lock.write_text("")
+    for path in (*aged, aged_lock):
+        os.utime(path, (old, old))
+    kept = [
+        prepared / ".T1_prepared.zarr.tmp-c",
+        prepared / "T1_prepared.zarr",
+        prepared / "T1_prepared.zarr.superseded-x",
+        prepared / ".T2_prepared.zarr.tmp-a",
+    ]
+    for directory in kept:
+        directory.mkdir()
+    os.utime(kept[2], (old, old))
+    os.utime(kept[3], (old, old))
+
+    prepare_module._remove_stale_temporaries(prepared / "T1_prepared.zarr")
+
+    assert sorted(p.name for p in prepared.iterdir()) == sorted(p.name for p in kept)
+
+
 def test_single_strip_band_reader_decodes_each_plane_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -484,12 +532,14 @@ def test_single_strip_band_reader_decodes_each_plane_once(
         "z_stack",
         "same_file",
         "no_pixel_size",
+        "prepare_output_itself",
     ],
 )
 def test_input_errors(tmp_path: Path, case: str) -> None:
     _inputs(tmp_path)
     overrides: dict[str, Any] = {}
     match = ""
+    output_bytes: bytes | None = None
     if case == "scene_on_tiff":
         overrides["moving"] = {"path": tmp_path / "mov.ome.tif", "scene": "1"}
         match = r"\[T1\] moving image mov.ome.tif: scene is only valid for .czi inputs"
@@ -521,9 +571,21 @@ def test_input_errors(tmp_path: Path, case: str) -> None:
         _write_strip(tmp_path / "nopx.ome.tif", MOV, MOV_NAMES, None)
         overrides["moving"] = {"path": tmp_path / "nopx.ome.tif"}
         match = "moving_pixel_size_um"
+    elif case == "prepare_output_itself":
+        (tmp_path / "prepared").mkdir()
+        own_output = _write_strip(
+            tmp_path / "prepared" / "T1_moving.ome.tif", MOV, MOV_NAMES, 0.4
+        )
+        output_bytes = own_output.read_bytes()
+        overrides["moving"] = {"path": own_output}
+        match = "it is the prepare output itself"
     with pytest.raises(ValueError, match=match):
         run_manual_registration_prepare(_config(tmp_path, **overrides))
     assert not (tmp_path / "prepared" / "T1_prepared.zarr").exists()
+    if output_bytes is not None:
+        assert (tmp_path / "prepared" / "T1_moving.ome.tif").read_bytes() == (
+            output_bytes
+        )
 
 
 # --------------------------------------------------------------------------
@@ -695,6 +757,45 @@ def test_content_change_rebuilds_and_keeps_labelling(tmp_path: Path) -> None:
     matching = _store_attrs(store)["channel_matching"]
     assert matching["moving_unmatched"] == ["AF568b"]
     assert matching["reference_kept"] == ["DAPI"]
+
+
+@pytest.mark.integration
+def test_moved_input_rebuilds_with_new_path_and_keeps_labelling(
+    tmp_path: Path,
+) -> None:
+    ref_path, _ = _inputs(tmp_path)
+    config = _config(tmp_path)
+    run_manual_registration_prepare(config)
+    store = config.store_path
+    first = _store_attrs(store)
+    labelling = _labelling(store, extra_pairs=2)
+    _inject(store, labelling)
+
+    moved = tmp_path / "elsewhere" / "ref_moved.ome.tif"
+    moved.parent.mkdir()
+    ref_path.rename(moved)
+    outputs = run_manual_registration_prepare(
+        _config(tmp_path, reference={"path": moved})
+    )
+
+    assert json.loads(outputs["summary"].read_text())["status"] == (
+        "rebuilt_kept_labelling"
+    )
+    attrs = read_root_attrs(store)
+    record = attrs[STORE_ATTR]["images"]["reference"]
+    assert record["ome_tiff"]["path"] == str(moved)
+    assert record["source"]["path"] == str(moved)
+    assert Path(record["ome_tiff"]["path"]).exists()
+    assert attrs[STORE_ATTR]["grid_digest"] == first["grid_digest"]
+    assert attrs[STORE_ATTR]["content_digest"] != first["content_digest"]
+    assert canonical_json(attrs[LABELLING_ATTR]) == canonical_json(labelling)
+    assert _leftovers(tmp_path / "prepared") == []
+
+    # the new location is now the up-to-date one
+    again = run_manual_registration_prepare(
+        _config(tmp_path, reference={"path": moved})
+    )
+    assert json.loads(again["summary"].read_text())["status"] == "unchanged"
 
 
 @pytest.mark.integration
