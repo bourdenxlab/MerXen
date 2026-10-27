@@ -752,6 +752,37 @@ def test_interrupted_runs_never_leave_a_stale_result(
     last, _ = pair_mirrored.run("same_section", row_settings=settings, output="last")
     assert json.loads(last["task_summary_json"].read_text())["reused"] is True
 
+    # 6. A run with other inputs (not forced) that fails after the core rewrites
+    # the listed core QC files in place and leaves the store and the durable files
+    # of the current result: the next plain run of the current inputs must not
+    # report it as reused with the failed run's files.
+    def fail_figure(*_: Any, **__: Any) -> None:
+        raise OSError("simulated disk full")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(register_module, "write_tissue_qc_figure", fail_figure)
+        with pytest.raises(OSError, match="simulated disk full"):
+            pair_mirrored.run(
+                "same_section",
+                row_settings=settings + ";tissue_qc_sigma_um=25.0",
+                output="fail3",
+            )
+    assert read_root_attrs(store)[RESULT_ATTR]["provenance_digest"] == new_digest
+    summary_mtime = healed["summary_json"].stat().st_mtime_ns
+    assert all(path.stat().st_mtime_ns > summary_mtime for path in healed_qc.values())
+    recovered, recovered_summary = pair_mirrored.run(
+        "same_section", row_settings=settings, output="recovered"
+    )
+    assert "reused" not in json.loads(recovered["task_summary_json"].read_text())
+    assert recovered_summary["provenance_digest"] == new_digest
+    assert {
+        k: Path(v) for k, v in recovered_summary["outputs"]["core_qc"].items()
+    } == healed_qc
+    summary_mtime = recovered["summary_json"].stat().st_mtime_ns
+    assert all(path.stat().st_mtime_ns <= summary_mtime for path in healed_qc.values())
+    final, _ = pair_mirrored.run("same_section", row_settings=settings, output="final")
+    assert json.loads(final["task_summary_json"].read_text())["reused"] is True
+
 
 # --------------------------------------------------------------------------
 # 5. serial-like pair, both presets, compare

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -706,22 +707,57 @@ def test_reusable_refuses_a_missing_output_file(tmp_path: Path) -> None:
     assert _reusable(stored, DIGEST_NEW) is False
 
 
+def _list_core_qc(
+    stored: dict[str, Any], directory: Path, *keys: str
+) -> dict[str, Path]:
+    """List core QC files on ``stored``, written before its durable summary."""
+    summary = Path(stored["outputs"]["summary_json"])
+    before = summary.stat().st_mtime_ns - 5_000_000_000
+    listed: dict[str, Path] = {}
+    for key in keys:
+        path = directory / f"{key}.bin"
+        path.write_bytes(b"x")
+        os.utime(path, ns=(before, before))
+        listed[key] = path
+    stored["outputs"]["core_qc"] = {key: str(path) for key, path in listed.items()}
+    return listed
+
+
 def test_reusable_refuses_a_listed_core_qc_file_that_is_missing(
     tmp_path: Path,
 ) -> None:
     # A run that failed in the core deleted the files of the result it left current.
     stored = _stored_result(tmp_path)
     assert _reusable(stored, DIGEST_NEW) is True  # no core_qc key: nothing to check
-    listed = {}
-    for key in ("registration_qc_png", "nonrigid_flow_npz"):
-        path = tmp_path / f"{key}.bin"
-        path.write_bytes(b"x")
-        listed[key] = str(path)
-    stored["outputs"]["core_qc"] = dict(listed)
+    listed = _list_core_qc(stored, tmp_path, "registration_qc_png", "nonrigid_flow_npz")
     assert _reusable(stored, DIGEST_NEW) is True
-    Path(listed["nonrigid_flow_npz"]).unlink()
+    listed["nonrigid_flow_npz"].unlink()
     assert _reusable(stored, DIGEST_NEW) is False
     stored["outputs"]["core_qc"] = {}
+    assert _reusable(stored, DIGEST_NEW) is True
+
+
+def test_reusable_refuses_a_listed_core_qc_file_written_after_the_summary(
+    tmp_path: Path,
+) -> None:
+    # A run with other inputs that failed after the core rewrote the listed files
+    # in place (same names, other content) and left the store and the summary.
+    stored = _stored_result(tmp_path)
+    listed = _list_core_qc(stored, tmp_path, "registration_qc_png", "nonrigid_flow_npz")
+    summary = Path(stored["outputs"]["summary_json"])
+    assert _reusable(stored, DIGEST_NEW) is True
+    flow = listed["nonrigid_flow_npz"]
+    flow.write_bytes(b"other run")  # now: later than the summary
+    assert flow.stat().st_mtime_ns > summary.stat().st_mtime_ns
+    assert _reusable(stored, DIGEST_NEW) is False
+    # The same instant is not later: a complete run keeps its files and the summary
+    # (copied with its modification time) side by side.
+    stat = summary.stat()
+    os.utime(flow, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert _reusable(stored, DIGEST_NEW) is True
+    # A newer summary (a later, complete run) makes older files current again.
+    os.utime(flow, ns=(stat.st_atime_ns, stat.st_mtime_ns - 1))
+    os.utime(summary, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
     assert _reusable(stored, DIGEST_NEW) is True
 
 
