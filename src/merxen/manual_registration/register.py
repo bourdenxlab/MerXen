@@ -497,7 +497,7 @@ def _read_prepared_store(
             f"run is for {dataset_name!r}"
         )
     hint = (
-        "open it in the viewer > Manual Registration > Finish labelling and run again"
+        "open it in the viewer ▸ Manual Registration ▸ Finish labelling and run again"
     )
     if LABELLING_ATTR not in attrs:
         raise ValueError(f"{pfx} no landmarks in {path}; {hint}")
