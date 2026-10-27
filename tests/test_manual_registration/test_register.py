@@ -706,6 +706,25 @@ def test_reusable_refuses_a_missing_output_file(tmp_path: Path) -> None:
     assert _reusable(stored, DIGEST_NEW) is False
 
 
+def test_reusable_refuses_a_listed_core_qc_file_that_is_missing(
+    tmp_path: Path,
+) -> None:
+    # A run that failed in the core deleted the files of the result it left current.
+    stored = _stored_result(tmp_path)
+    assert _reusable(stored, DIGEST_NEW) is True  # no core_qc key: nothing to check
+    listed = {}
+    for key in ("registration_qc_png", "nonrigid_flow_npz"):
+        path = tmp_path / f"{key}.bin"
+        path.write_bytes(b"x")
+        listed[key] = str(path)
+    stored["outputs"]["core_qc"] = dict(listed)
+    assert _reusable(stored, DIGEST_NEW) is True
+    Path(listed["nonrigid_flow_npz"]).unlink()
+    assert _reusable(stored, DIGEST_NEW) is False
+    stored["outputs"]["core_qc"] = {}
+    assert _reusable(stored, DIGEST_NEW) is True
+
+
 def _touch_core_qc(qc_paths: dict[str, Path], *keys: str) -> None:
     for key in keys:
         qc_paths[key].write_bytes(b"x")

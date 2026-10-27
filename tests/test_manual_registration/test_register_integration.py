@@ -727,6 +727,31 @@ def test_interrupted_runs_never_leave_a_stale_result(
     task = json.loads(done["task_summary_json"].read_text())
     assert task["reused"] is True
 
+    # 5. A forced re-run that fails in the core has deleted the current result's
+    # core QC files (the store and the durable files stay): the next plain run
+    # does not report the result as reused but registers again and restores them.
+    core_qc = {k: Path(v) for k, v in again["outputs"]["core_qc"].items()}
+    assert core_qc and all(path.exists() for path in core_qc.values())
+    with monkeypatch.context() as patch:
+        patch.setattr(register_module, "register_onto_reference", fail)
+        with pytest.raises(RuntimeError, match="simulated core failure"):
+            pair_mirrored.run(
+                "same_section", row_settings=settings, output="fail2", force=True
+            )
+    assert read_root_attrs(store)[RESULT_ATTR]["provenance_digest"] == new_digest
+    assert not any(path.exists() for path in core_qc.values())
+    healed, healed_summary = pair_mirrored.run(
+        "same_section", row_settings=settings, output="healed"
+    )
+    assert "reused" not in json.loads(healed["task_summary_json"].read_text())
+    assert healed_summary["provenance_digest"] == new_digest
+    healed_qc = {k: Path(v) for k, v in healed_summary["outputs"]["core_qc"].items()}
+    assert healed_qc == core_qc
+    assert all(path.exists() for path in healed_qc.values())
+    # Complete again, so the following call is a no-op once more.
+    last, _ = pair_mirrored.run("same_section", row_settings=settings, output="last")
+    assert json.loads(last["task_summary_json"].read_text())["reused"] is True
+
 
 # --------------------------------------------------------------------------
 # 5. serial-like pair, both presets, compare
