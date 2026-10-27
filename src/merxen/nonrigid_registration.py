@@ -33,6 +33,64 @@ REJECTION_UNSAFE_JACOBIAN = np.uint16(1 << 5)
 
 
 @dataclass(frozen=True)
+class NonrigidTuning:
+    """Length scales of the guarded TV-L1 flow that are not exposed as config fields.
+
+    Attributes:
+        highpass_sigma_um: Gaussian sigma of the log-intensity high-pass applied
+            before TV-L1.
+        local_correlation_sigma_um: Gaussian sigma of the local correlation used by
+            the confidence guard, the residual passes and the local tiles.
+        local_residual_tiles: Run the low-correlation local tile stage after the
+            residual passes (only reached when ``residual_passes > 0``).
+        local_residual_tile_um: Edge length of a local residual tile.
+    """
+
+    highpass_sigma_um: float = _HIGHPASS_SIGMA_UM
+    local_correlation_sigma_um: float = _LOCAL_CORRELATION_SIGMA_UM
+    local_residual_tiles: bool = True
+    local_residual_tile_um: float = _LOCAL_RESIDUAL_TILE_UM
+
+    def __post_init__(self) -> None:
+        for name in (
+            "highpass_sigma_um",
+            "local_correlation_sigma_um",
+            "local_residual_tile_um",
+        ):
+            value = getattr(self, name)
+            if not (
+                isinstance(value, int | float)
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                and value > 0
+            ):
+                raise ValueError(
+                    f"NonrigidTuning.{name} must be a finite number > 0, got {value!r}"
+                )
+        if not isinstance(self.local_residual_tiles, bool):
+            raise ValueError(
+                "NonrigidTuning.local_residual_tiles must be a bool, "
+                f"got {self.local_residual_tiles!r}"
+            )
+
+
+def _resolve_tuning(tuning: NonrigidTuning | None) -> NonrigidTuning:
+    """Return ``tuning``, or the module defaults read at call time.
+
+    Reading the module constants here (not at class definition) keeps tests that
+    monkeypatch them effective for callers that pass no tuning.
+    """
+    if tuning is not None:
+        return tuning
+    return NonrigidTuning(
+        highpass_sigma_um=_HIGHPASS_SIGMA_UM,
+        local_correlation_sigma_um=_LOCAL_CORRELATION_SIGMA_UM,
+        local_residual_tiles=True,
+        local_residual_tile_um=_LOCAL_RESIDUAL_TILE_UM,
+    )
+
+
+@dataclass(frozen=True)
 class NonrigidFlowResult:
     """A guarded fixed-grid to moving-grid displacement field."""
 
@@ -69,13 +127,43 @@ def estimate_nonrigid_flow(
     residual_passes: int = 1,
     min_residual_correlation_improvement: float = 0.02,
     min_residual_initial_confidence: float = 0.75,
+    tuning: NonrigidTuning | None = None,
 ) -> NonrigidFlowResult:
     """Estimate and guard a TV-L1 pull displacement field.
 
     The returned ``flow_yx`` satisfies ``moving[p + flow(p)] ~= reference[p]``.
     Regions without reliable bidirectional support retain zero displacement, so
     the caller falls back to its affine mapping there.
+
+    Args:
+        reference: 2D reference image.
+        moving: 2D moving image on the reference grid.
+        valid: Boolean mask of pixels where the two images overlap on tissue.
+        pixel_size_um: Pixel size of the grid in micrometres.
+        attachment: TV-L1 data attachment weight.
+        tightness: TV-L1 tightness.
+        num_warp: Number of TV-L1 warps.
+        num_iter: Number of TV-L1 iterations per warp.
+        smoothing_sigma_um: Gaussian smoothing of the accepted flow.
+        max_displacement_um: Largest accepted displacement.
+        max_cycle_error_um: Largest accepted forward/backward cycle error.
+        min_local_correlation: Smallest accepted local correlation.
+        min_jacobian: Smallest accepted Jacobian determinant.
+        max_jacobian: Largest accepted Jacobian determinant.
+        min_confident_fraction: Smallest accepted fraction of confident pixels.
+        residual_passes: Number of residual refinement passes (0 disables them and the
+            local tile stage).
+        min_residual_correlation_improvement: Smallest correlation gain a residual pass
+            must bring.
+        min_residual_initial_confidence: Confidence fraction above which residual passes
+            are skipped.
+        tuning: Length scales and the local-tile switch; None uses the module defaults
+            (25 um high-pass, 15 um local correlation, 220 um local tiles on).
+
+    Returns:
+        The guarded flow with its confidence maps and statistics.
     """
+    tuning = _resolve_tuning(tuning)
     reference_array = np.asarray(reference, dtype=np.float32)
     moving_array = np.asarray(moving, dtype=np.float32)
     valid_array = np.asarray(valid, dtype=bool)
@@ -108,11 +196,13 @@ def estimate_nonrigid_flow(
         reference_array,
         valid_array,
         pixel_size_um=pixel_size_um,
+        highpass_sigma_um=tuning.highpass_sigma_um,
     )
     moving_prepared = _prepare_image(
         moving_array,
         valid_array,
         pixel_size_um=pixel_size_um,
+        highpass_sigma_um=tuning.highpass_sigma_um,
     )
     reference_input = np.where(valid_array, reference_prepared, 0.0).astype(
         np.float32,
@@ -160,7 +250,7 @@ def estimate_nonrigid_flow(
         reference_prepared,
         raw_warped,
         comparison_valid,
-        sigma_px=max(1.0, _LOCAL_CORRELATION_SIGMA_UM / float(pixel_size_um)),
+        sigma_px=max(1.0, tuning.local_correlation_sigma_um / float(pixel_size_um)),
     )
     raw_jacobian = flow_jacobian_determinant(forward)
     raw_magnitude = np.linalg.norm(forward, axis=0)
@@ -358,47 +448,50 @@ def estimate_nonrigid_flow(
             min_jacobian=min_jacobian,
             max_jacobian=max_jacobian,
             min_confident_fraction=min_confident_fraction,
+            tuning=tuning,
         )
-        (
-            guarded,
-            final_warped,
-            final_jacobian,
-            after_correlation,
-            local_residual_confidence,
-            local_residual_stats,
-        ) = _apply_local_residual_tiles(
-            reference_array=reference_array,
-            moving_array=moving_array,
-            reference_prepared=reference_prepared,
-            moving_prepared=moving_prepared,
-            valid_array=valid_array,
-            initial_flow=guarded,
-            initial_warped=final_warped,
-            initial_jacobian=final_jacobian,
-            initial_correlation=after_correlation,
-            min_correlation_improvement=max(
-                _LOCAL_RESIDUAL_MIN_CORRELATION_IMPROVEMENT,
-                float(min_residual_correlation_improvement),
-            ),
-            pixel_size_um=pixel_size_um,
-            attachment=attachment,
-            tightness=tightness,
-            num_warp=num_warp,
-            num_iter=num_iter,
-            smoothing_sigma_um=smoothing_sigma_um,
-            max_displacement_um=max_displacement_um,
-            max_cycle_error_um=max_cycle_error_um,
-            min_local_correlation=min_local_correlation,
-            min_jacobian=min_jacobian,
-            max_jacobian=max_jacobian,
-            min_confident_fraction=min_confident_fraction,
-        )
-        residual_confidence |= local_residual_confidence
+        if tuning.local_residual_tiles:
+            (
+                guarded,
+                final_warped,
+                final_jacobian,
+                after_correlation,
+                local_residual_confidence,
+                local_residual_stats,
+            ) = _apply_local_residual_tiles(
+                reference_array=reference_array,
+                moving_array=moving_array,
+                reference_prepared=reference_prepared,
+                moving_prepared=moving_prepared,
+                valid_array=valid_array,
+                initial_flow=guarded,
+                initial_warped=final_warped,
+                initial_jacobian=final_jacobian,
+                initial_correlation=after_correlation,
+                min_correlation_improvement=max(
+                    _LOCAL_RESIDUAL_MIN_CORRELATION_IMPROVEMENT,
+                    float(min_residual_correlation_improvement),
+                ),
+                pixel_size_um=pixel_size_um,
+                attachment=attachment,
+                tightness=tightness,
+                num_warp=num_warp,
+                num_iter=num_iter,
+                smoothing_sigma_um=smoothing_sigma_um,
+                max_displacement_um=max_displacement_um,
+                max_cycle_error_um=max_cycle_error_um,
+                min_local_correlation=min_local_correlation,
+                min_jacobian=min_jacobian,
+                max_jacobian=max_jacobian,
+                min_confident_fraction=min_confident_fraction,
+                tuning=tuning,
+            )
+            residual_confidence |= local_residual_confidence
     final_local_correlation, _ = _local_correlation(
         reference_prepared,
         final_warped,
         valid_array,
-        sigma_px=max(1.0, _LOCAL_CORRELATION_SIGMA_UM / float(pixel_size_um)),
+        sigma_px=max(1.0, tuning.local_correlation_sigma_um / float(pixel_size_um)),
     )
     return NonrigidFlowResult(
         status="applied",
@@ -486,9 +579,11 @@ def _prepare_image(
     valid: np.ndarray,
     *,
     pixel_size_um: float,
+    highpass_sigma_um: float | None = None,
 ) -> np.ndarray:
     logged = np.log1p(np.maximum(image, 0.0)).astype(np.float32, copy=False)
-    sigma_px = max(1.0, _HIGHPASS_SIGMA_UM / float(pixel_size_um))
+    sigma = _HIGHPASS_SIGMA_UM if highpass_sigma_um is None else highpass_sigma_um
+    sigma_px = max(1.0, sigma / float(pixel_size_um))
     highpass = logged - gaussian_filter(logged, sigma_px)
     values = highpass[valid]
     low, high = np.percentile(values, [1.0, 99.0])
@@ -720,6 +815,7 @@ def _apply_residual_passes(
     min_jacobian: float,
     max_jacobian: float,
     min_confident_fraction: float,
+    tuning: NonrigidTuning | None = None,
 ) -> tuple[
     np.ndarray,
     np.ndarray,
@@ -728,6 +824,7 @@ def _apply_residual_passes(
     np.ndarray,
     list[dict[str, Any]],
 ]:
+    tuning = _resolve_tuning(tuning)
     current_flow = np.asarray(initial_flow, dtype=np.float32)
     current_warped = np.asarray(initial_warped, dtype=np.float32)
     current_jacobian = np.asarray(initial_jacobian, dtype=np.float32)
@@ -740,7 +837,7 @@ def _apply_residual_passes(
     )
     local_sigma_px = max(
         1.0,
-        _LOCAL_CORRELATION_SIGMA_UM / float(pixel_size_um),
+        tuning.local_correlation_sigma_um / float(pixel_size_um),
     )
     deep_invalid = ~binary_dilation(
         valid_array,
@@ -781,6 +878,7 @@ def _apply_residual_passes(
             residual_passes=0,
             min_residual_correlation_improvement=(min_residual_correlation_improvement),
             min_residual_initial_confidence=min_residual_initial_confidence,
+            tuning=tuning,
         )
         stats: dict[str, Any] = {
             "pass": pass_index + 1,
@@ -795,11 +893,13 @@ def _apply_residual_passes(
             reference_array,
             pass_valid,
             pixel_size_um=pixel_size_um,
+            highpass_sigma_um=tuning.highpass_sigma_um,
         )
         pass_moving = _prepare_image(
             current_original,
             pass_valid,
             pixel_size_um=pixel_size_um,
+            highpass_sigma_um=tuning.highpass_sigma_um,
         )
         proposed = warp_with_flow(pass_moving, residual.flow_yx)
         before_local, _ = _local_correlation(
@@ -969,6 +1069,7 @@ def _apply_local_residual_tiles(
     min_jacobian: float,
     max_jacobian: float,
     min_confident_fraction: float,
+    tuning: NonrigidTuning | None = None,
 ) -> tuple[
     np.ndarray,
     np.ndarray,
@@ -978,12 +1079,13 @@ def _apply_local_residual_tiles(
     dict[str, Any],
 ]:
     """Refine low-correlation subregions using locally normalized TV-L1 tiles."""
+    tuning = _resolve_tuning(tuning)
     current_flow = np.asarray(initial_flow, dtype=np.float32)
     current_warped = np.asarray(initial_warped, dtype=np.float32)
     current_jacobian = np.asarray(initial_jacobian, dtype=np.float32)
     current_correlation = float(initial_correlation)
     no_confidence = np.zeros(valid_array.shape, dtype=bool)
-    tile_size_px = max(32, int(round(_LOCAL_RESIDUAL_TILE_UM / pixel_size_um)))
+    tile_size_px = max(32, int(round(tuning.local_residual_tile_um / pixel_size_um)))
     tile_size_px += tile_size_px % 2
     if min(valid_array.shape) < tile_size_px:
         return (
@@ -1010,7 +1112,7 @@ def _apply_local_residual_tiles(
     pass_valid = valid_array & current_footprint
     local_sigma_px = max(
         1.0,
-        _LOCAL_CORRELATION_SIGMA_UM / float(pixel_size_um),
+        tuning.local_correlation_sigma_um / float(pixel_size_um),
     )
     current_local, _ = _local_correlation(
         reference_prepared,
@@ -1063,6 +1165,7 @@ def _apply_local_residual_tiles(
                 max_jacobian=max_jacobian,
                 min_confident_fraction=min_confident_fraction,
                 residual_passes=0,
+                tuning=tuning,
             )
             attempted_tiles += 1
             if tile_result.status != "applied":

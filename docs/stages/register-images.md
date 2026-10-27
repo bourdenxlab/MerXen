@@ -246,14 +246,32 @@ Jacobian checks and improves its own DAPI correlation by at least 0.03. Sine
 windows feather overlapping accepted tiles; a final whole-slide correlation
 check rejects the combined update if it does not improve the registration.
 
+## Registration core
+
+`REGISTER_IMAGES` reads the images and handles provenance, skipping and the
+registry. `register_onto_reference` does the registration itself (refine the
+affine, estimate the guarded flow, resample onto the reference grid, build the
+viewer pyramid) for any `ReferenceGrid` and `MovingImage`, wherever they are
+stored. It never takes the store lock; the caller holds it. `RegistrationTuning`
+defaults reproduce this stage: window quality 0.3, no moving-tissue requirement,
+and `NonrigidTuning()` (25 µm high-pass, 15 µm local correlation, 220 µm local
+tiles on). The manual landmark registration workflow
+(`docs/stages/manual-registration.md`) uses the same core with its own presets.
+`push_points_through_registration` inverts the pull mapping by a fixed-point
+iteration (tolerance 1e-3 working pixels, at most 50 iterations).
+
 ## Python entry points
 
 | Function | File |
 |----------|------|
 | CLI `register_images_command` | [cli/run_image_registration.py](../../src/merxen/cli/run_image_registration.py) |
 | `run_image_registration` | [image_registration.py](../../src/merxen/image_registration.py) |
-| `load_alignment_matrix`, `check_matrix_scale` | [image_registration.py](../../src/merxen/image_registration.py) |
+| `register_onto_reference`, `RegistrationOutcome`, `RegistrationTuning` | [image_registration.py](../../src/merxen/image_registration.py) |
+| `ReferenceGrid`, `reference_grid`, `MovingImage`, `moving_image_from_ome_tiff` | [image_registration.py](../../src/merxen/image_registration.py) |
+| `read_working_channel`, `WorkingImage`, `measure_registration_overlay` | [image_registration.py](../../src/merxen/image_registration.py) |
+| `pull_points_through_registration`, `push_points_through_registration` | [image_registration.py](../../src/merxen/image_registration.py) |
+| `load_alignment_matrix`, `write_alignment_matrix`, `check_matrix_scale`, `registration_output_paths` | [image_registration.py](../../src/merxen/image_registration.py) |
 | `measure_local_shifts`, `fit_affine_displacement` | [image_registration.py](../../src/merxen/image_registration.py) |
-| `estimate_nonrigid_flow`, `flow_jacobian_determinant` | [nonrigid_registration.py](../../src/merxen/nonrigid_registration.py) |
+| `estimate_nonrigid_flow`, `NonrigidTuning`, `flow_jacobian_determinant` | [nonrigid_registration.py](../../src/merxen/nonrigid_registration.py) |
 | `compute_cell_registration_quality`, `score_registered_image_in_spatialdata` | [registration_quality.py](../../src/merxen/registration_quality.py) |
 | `read_ome_tiff_info`, `open_ome_tiff_level` | [io/ome_tiff.py](../../src/merxen/io/ome_tiff.py) |
