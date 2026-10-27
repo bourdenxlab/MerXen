@@ -13,6 +13,20 @@ https://github.com/acycliq/pciSeq_3d, commit
 notice are reproduced in `licenses/pciSeq-MIT.txt`. Installed dependencies
 retain their own licenses and notices.
 
+## Zeiss CZI reader runtime
+
+The optional CZI reader runtime (`envs/environment.czi.yml`, `requirements/requirements.czi.lock`)
+installs the unmodified `czifile` 2026.10.14 package (https://github.com/cgohlke/czifile), BSD 3-Clause,
+Copyright (c) 2013-2026, Christoph Gohlke. Its license is reproduced in
+`licenses/czifile-BSD-3-Clause.txt`. Compressed CZI data (JPEG XR, Zstandard) is decoded by the
+`imagecodecs` package (BSD 3-Clause, Christoph Gohlke), whose wheels bundle third-party codec libraries
+under their own licenses. MerXen calls both from `src/merxen/io/czi.py` and does not modify them.
+
+The small CZI test files in `tests/test_data/czi/` were generated once with Zeiss's `pylibCZIrw`
+(LGPL-3.0) in a throwaway environment (`scripts/manual_registration/make_czi_fixtures.py`). pylibCZIrw is
+not a MerXen dependency and is not distributed with MerXen. "CZI" names the file format only; no
+endorsement by Carl Zeiss is implied.
+
 ## GASTON
 
 - Upstream: https://github.com/raphael-group/GASTON
