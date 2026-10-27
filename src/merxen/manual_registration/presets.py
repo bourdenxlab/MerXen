@@ -7,21 +7,24 @@ sections, where only tissue-scale structure matches. Overrides come from the
 Nextflow params and from the samplesheet row as ``"key=value;preset:key=value"``
 text and are validated against the settings model.
 
-This module stays light (pydantic, the config models and the two tuning
-dataclasses); it imports no SpatialData or plotting code.
+This module stays light (pydantic and the config models); it imports no
+SpatialData or plotting code. The two tuning dataclasses are imported inside
+``registration_tuning``, because their modules load both.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
-from merxen.image_registration import RegistrationTuning
 from merxen.manual_registration.config import ManualRegistrationSettings
-from merxen.nonrigid_registration import NonrigidTuning
+from merxen.manual_registration.schema import CROP_SNAP_PX
+
+if TYPE_CHECKING:
+    from merxen.image_registration import RegistrationTuning
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +156,8 @@ def resolve_settings(
 
     Raises:
         ValueError: On an unknown preset, a malformed or unknown override, a
-            forbidden key or a value that fails validation.
+            forbidden key, a value that fails validation or a ``crop_snap_px``
+            below 64 (the factor the cropped pyramid levels must divide).
     """
     if preset not in PRESETS:
         raise ValueError(
@@ -194,6 +198,14 @@ def resolve_settings(
         raise ValueError(
             f"registration settings for preset {preset!r} are invalid: {exc}"
         ) from exc
+    if settings.crop_snap_px < CROP_SNAP_PX:
+        raise ValueError(
+            f"registration settings: crop_snap_px must be at least {CROP_SNAP_PX} "
+            f"(got {settings.crop_snap_px}): the pyramid levels the registration "
+            f"reads are cropped at factors that divide {CROP_SNAP_PX}, so a finer "
+            "snap cannot keep their pixel grids aligned; larger powers of two are "
+            "allowed"
+        )
     if from_overrides:
         logger.info(
             "Settings overrides for preset %s: %s",
@@ -205,6 +217,9 @@ def resolve_settings(
 
 def registration_tuning(settings: ManualRegistrationSettings) -> RegistrationTuning:
     """Return the registration-core tuning that goes with a run's settings."""
+    from merxen.image_registration import RegistrationTuning
+    from merxen.nonrigid_registration import NonrigidTuning
+
     return RegistrationTuning(
         refinement_min_window_quality=settings.refinement_min_window_quality,
         refinement_require_moving_tissue=settings.refinement_require_moving_tissue,

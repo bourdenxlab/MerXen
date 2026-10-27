@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+
 import pytest
 
 from merxen.config import ImageRegistrationConfig, RegistrationSettings
@@ -152,3 +155,36 @@ def test_registration_tuning_follows_settings() -> None:
     assert tuning.qc_initial_matrix_label == "Landmark matrix"
     same = registration_tuning(_resolve("same_section"))
     assert same.nonrigid == NonrigidTuning()
+
+
+@pytest.mark.parametrize("value", ["1", "16", "32"])
+def test_crop_snap_px_below_the_pyramid_limit_is_refused_up_front(value: str) -> None:
+    # Powers of two pass the settings model, but the pyramid levels are cropped at
+    # factors dividing 64, so a finer snap would fail late inside the core.
+    with pytest.raises(ValueError, match="registration settings: crop_snap_px") as exc:
+        _resolve("same_section", row_settings=f"crop_snap_px={value}")
+    assert "at least 64" in str(exc.value)
+    with pytest.raises(ValueError, match="crop_snap_px"):
+        _resolve("serial_section", global_settings=f"crop_snap_px={value}")
+
+
+@pytest.mark.parametrize("value", [64, 128, 512])
+def test_crop_snap_px_of_64_or_more_is_allowed(value: int) -> None:
+    settings = _resolve("same_section", row_settings=f"crop_snap_px={value}")
+    assert settings.crop_snap_px == value
+    assert _resolve("same_section").crop_snap_px == 64
+
+
+def test_presets_import_stays_light() -> None:
+    # The module docstring promises no SpatialData or plotting import.
+    code = (
+        "import sys\n"
+        "import merxen.manual_registration.presets\n"
+        "names = ('spatialdata', 'matplotlib.pyplot')\n"
+        "heavy = [m for m in names if m in sys.modules]\n"
+        "print(heavy)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    assert result.stdout.strip() == "[]"
