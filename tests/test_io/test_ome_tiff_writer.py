@@ -369,6 +369,7 @@ def test_import_isolation() -> None:
 
         sys.meta_path.insert(0, Blocker())
         import merxen.io.ome_tiff_writer
+        import merxen.io.czi
         """
     )
     env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
