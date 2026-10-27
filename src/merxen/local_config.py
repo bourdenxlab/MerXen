@@ -98,6 +98,8 @@ KNOWN: Final[tuple[str, ...]] = (
     "MERXEN_WHB_TAXONOMY_DIR",
     "MERXEN_WMB_TAXONOMY_DIR",
     "MERXEN_SEAAD_TERM_CSV",
+    "MERXEN_MANUAL_REGISTRATION_TEST_DIR",
+    "MERXEN_CZI_PYTHON",
 )
 
 _KEY_RE: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")

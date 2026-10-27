@@ -57,7 +57,7 @@ def test_alias_template_lists_the_aliases_and_is_refused_unedited() -> None:
         if line and not line.startswith("#"):
             aliases.add(line.split("\t")[0])
     expected = {"HD1", "HD2", "HD3", "HD4", "HD1_IF", "HD3_IF", "MS1", "MS2", "-"}
-    assert aliases == expected | {"HM1", "HM2", "HM3", "HM4"}
+    assert aliases == expected | {"HM1", "HM2", "HM3", "HM4", "LCM1", "LCM2"}
     with pytest.raises(LocalConfigError, match="template placeholder"):
         privacy.load_table(ALIASES_EXAMPLE)
 

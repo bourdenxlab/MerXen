@@ -57,6 +57,10 @@ MS2	mouse_section	pair_id	literal	<real pair id>
 MS2	mouse_section	name	none	<real nickname>
 MS2	mouse_section	variant	regex	<regex of the nickname that skips the public format name>	<format files>
 
+# --- Zeiss CZI pairs (manual-registration test data; slide tokens of the file names)
+LCM1	human_lcm_pair	name	literal	<real slide token>
+LCM2	human_lcm_pair	name	literal	<real slide token>
+
 # --- Deny-only rows (instruments, slides, run stamps, user names, host directories)
 -	instrument	deny	token	<instrument id>		<instrument>
 -	slide	deny	token	<slide id>		<slide>
