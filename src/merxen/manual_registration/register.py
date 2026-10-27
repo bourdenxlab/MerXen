@@ -932,8 +932,14 @@ def _reusable(stored: dict[str, Any] | None, digest: str) -> bool:
     summary last. A store that carries ``digest`` therefore proves nothing about
     the files until the durable summary carries it too (a failed or killed
     publish leaves the previous run's files next to the new store). The core QC
-    files the result lists must exist as well: a run deletes them before the
-    core and a failure in the core leaves them missing.
+    files the result lists must exist as well (a run deletes them before the
+    core, and a failure in the core leaves them missing) and none may be newer
+    than the durable summary. The core writes them in place, before the store
+    swap, so a run with other inputs that fails after the core (pyramids, tissue
+    QC, the CSV and attrs writes, a kill) leaves its own files under the names
+    the current result lists. The summary is written after the core and published
+    with ``shutil.copy2``, which keeps its modification time, so a listed file
+    modified after it belongs to a run that did not finish.
     """
     if stored is None:
         return False
@@ -951,10 +957,20 @@ def _reusable(stored: dict[str, Any] | None, digest: str) -> bool:
     # The core QC files are deleted before the core runs, so a run that fails in
     # the core leaves the previous result current with its listed files missing.
     core_qc = outputs.get("core_qc") or {}
-    if not all(Path(path).exists() for path in dict(core_qc).values()):
+    try:
+        summary_mtime = Path(outputs["summary_json"]).stat().st_mtime_ns
+        core_mtimes = [Path(path).stat().st_mtime_ns for path in dict(core_qc).values()]
+    except OSError:
         logger.info(
             "The result store is current but core QC files it lists are missing "
             "(an earlier run failed in the core?); registering again"
+        )
+        return False
+    if any(mtime > summary_mtime for mtime in core_mtimes):
+        logger.info(
+            "The result store is current but core QC files it lists were written "
+            "after its durable summary (a later run with other inputs failed after "
+            "the core?); registering again"
         )
         return False
     try:
