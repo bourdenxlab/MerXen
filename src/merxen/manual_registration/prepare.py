@@ -935,6 +935,10 @@ def _content_digest(
                     "ome_tiff_fingerprint": prepared[role].record["ome_tiff"][
                         "fingerprint"
                     ],
+                    # The recorded locations: an input that moved (same bytes)
+                    # must rebuild so the store points at the new path.
+                    "ome_tiff_path": prepared[role].record["ome_tiff"]["path"],
+                    "source_path": prepared[role].record["source"]["path"],
                     "converter_settings": prepared[role].converter_settings
                     if prepared[role].written_by_prepare
                     else None,
@@ -1030,6 +1034,8 @@ def _plan_store_update(
 
     The rules, top to bottom: no store: build. Not a prepared store, or written
     by a newer version: refuse (force: build, keep the old one as superseded).
+    A labelling attribute that is not a mapping: refuse (force: build without
+    it, keep the old store as superseded).
     Force: build, carry the labelling when both images keep shape and pixel size.
     Same content and intact: nothing to do. Same grid: rebuild, carry the
     labelling. Changed grid under a labelling: refuse. Changed grid, no
@@ -1080,6 +1086,33 @@ def _plan_store_update(
                 "force the rebuild.",
             )
         return _StorePlan("build", "forced", None, "supersede", None)
+
+    if has_labelling and labelling_dict is None:
+        # Unreadable labelling: never carry it silently, never delete the store.
+        if not force:
+            return _StorePlan(
+                "refuse",
+                None,
+                None,
+                "none",
+                f"[{dataset_name}] {store_path} has a labelling attribute "
+                f'("{LABELLING_ATTR}") that is not a mapping, so it cannot be '
+                "carried over. Repair it, or set "
+                "--manual_registration_force_prepare true (CLI: --force) to keep "
+                f"the old store as {name}.superseded-<UTC> and build a new one "
+                "without the labelling.",
+            )
+        return _StorePlan(
+            "build",
+            "forced",
+            None,
+            "supersede",
+            None,
+            (
+                "labelling not carried over: it was not readable; it remains in "
+                "{superseded}",
+            ),
+        )
 
     old_images = store_attr.get("images", {})
     if force:
