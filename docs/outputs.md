@@ -200,6 +200,41 @@ Path: `${outdir}/<pair_id>/xenium/register_images/` (only for rows that set
 
 See [Image registration](stages/register-images.md#reading-the-qc).
 
+### Manual registration (standalone workflows)
+
+Path: `<outdir>/<id>/prepared/` and `<outdir>/<id>/registered/` under the
+launch's **own** `--outdir` (use one separate from the main pipeline's); the
+processes publish nothing through Nextflow, Python writes these files.
+
+```
+<id>/prepared/<id>_prepared.zarr                         # the store the viewer edits; written atomically
+<id>/prepared/<id>_reference.ome.tif                     # only when converted (CZI) or normalised
+<id>/prepared/<id>_moving.ome.tif                        # same
+<id>/prepared/<id>_reference.prepare.json                # per-image provenance (conversion skip key)
+<id>/prepared/<id>_moving.prepare.json
+<id>/prepared/<id>_prepare_summary.json
+<id>/prepared/viewer_cache/                              # VIEWER_CACHE publishDir (symlink)
+<id>/registered/<run_name>/<run_id>_registered.zarr      # run_name = <preset>[_<run_label>]
+<id>/registered/<run_name>/<run_id>_landmark_matrix.csv
+<id>/registered/<run_name>/<run_id>_final_matrix.csv
+<id>/registered/<run_name>/<run_id>_landmarks.csv
+<id>/registered/<run_name>/<run_id>_manual_registration_summary.json
+<id>/registered/<run_name>/<run_id>_tissue_qc.png (+ .pdf)
+<id>/registered/<run_name>/qc/<run_id lower>_moving_registered_*   # registration/non-rigid QC of the core
+<id>/registered/<id>_run_comparison.{json,csv,png}
+```
+
+| File | Contents |
+|------|----------|
+| `<id>_prepared.zarr` | Image-only SpatialData store: `reference` and `moving` images, their viewer pyramids, and the root attributes `merxen_manual_registration_store` (prepared) and `merxen_manual_registration` (the viewer's labelling). |
+| `<run_id>_registered.zarr` | Reference (cropped) and `moving_registered` on the cropped reference grid, the root attributes `merxen_manual_registration_store` (result) and `merxen_manual_registration_result` (fit, matrices, QC, landmarks). |
+| `<run_id>_landmark_matrix.csv`, `<run_id>_final_matrix.csv` | 3 x 3 moving-to-reference matrices in full level-0 pixels: the landmark similarity and the refined affine (without the flow). |
+| `<run_id>_landmarks.csv` | One row per landmark pair with its position and residual at each stage. |
+| `<run_id>_manual_registration_summary.json` | The result attributes: settings, fit, refinement, non-rigid, QC, residuals, resources. |
+| `<id>_run_comparison.{csv,json,png}` | The runs of one id side by side (written when there are at least two). |
+
+See [Manual landmark registration](stages/manual-registration.md#outputs).
+
 ### Mask Image Quantification
 
 Path: `${outdir}/<pair_id>/<platform>/mask_image_quantification/`

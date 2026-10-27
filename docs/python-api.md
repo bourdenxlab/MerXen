@@ -15,6 +15,7 @@ merxen/
 ├── memory.py            # RAM monitoring helpers
 ├── _typing.py           # shared small types
 ├── cli/                 # Click entry points (one per stage)
+├── manual_registration/ # manual landmark registration (prepare, fit, register, QC)
 ├── io/                  # I/O: samplesheet, zarr, transcripts, images
 │   └── builders/        # per-platform SpatialData builders
 ├── segmentation/        # Cellpose tiling, ProSeg subprocess, mask utilities
@@ -229,6 +230,36 @@ never the correction code, and the package imports no GPU code. Configured by `M
   reading pixels.
 - `open_ome_tiff_level(info, level, *, channel_names)` — lazy `(c, y, x)`
   DataArray of one pyramid level.
+
+### `io.czi`, `io.ome_tiff_writer`, `io.channel_names`
+- `io.czi` — Zeiss CZI reader behind an isolated runtime:
+  `run_read_czi_info(path)`, `run_convert_czi_scene(...)`, `resolve_scene(...)`;
+  `CziRuntimeUnavailableError` when `MERXEN_CZI_PYTHON` is unset.
+- `io.ome_tiff_writer` — `write_pyramidal_ome_tiff(read_band, *, shape_cyx, ...)`,
+  a streamed, deterministic tiled BigTIFF writer with exact 2x2-mean levels.
+- `io.channel_names` — pure channel-name rules: `resolve_channel_names`,
+  `resolve_registration_channel`, `shared_channel_subset`, `stain_key`.
+
+## `merxen.manual_registration`
+
+Standalone manual landmark registration of an image pair
+([stage guide](stages/manual-registration.md)). One line per module:
+
+- `config` — pydantic models: `ManualRegistrationPrepareConfig`,
+  `ManualRegistrationImageInput`, `ManualRegistrationSettings`,
+  `ManualRegistrationRunConfig`, `ManualRegistrationCompareConfig`.
+- `schema` — root-attribute contract shared with the viewer (`STORE_ATTR`,
+  `LABELLING_ATTR`, `RESULT_ATTR`), canonical JSON and digests, `read_root_attrs`.
+- `geometry` — pure matrices: coarse transform, crops, `apply_matrix_xy`.
+- `landmark_fit` — robust similarity fit with outlier and reflection checks.
+- `prepare` — `run_manual_registration_prepare`: convert/normalise images, write
+  the prepared store.
+- `presets` — `PRESETS`, override grammar, `resolve_settings`.
+- `sources` — cropped OME-TIFF pyramids as registration-core inputs.
+- `register` — `run_manual_registration`: fit, refine, warp, QC, result store.
+- `qc` — tissue-scale and nucleus-scale alignment QC.
+- `compare` — `compare_runs`: side-by-side metrics of several runs.
+- `simulate` — synthetic pairs, simulated landmarks, `inject_labelling`.
 
 ## `merxen.mask_image_quantification`
 

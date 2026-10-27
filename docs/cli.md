@@ -2,10 +2,13 @@
 
 The `merxen` CLI is a Click command group registered by `pyproject.toml`
 ([line 44](../pyproject.toml#L44)) and defined at
-[src/merxen/cli/__init__.py](../src/merxen/cli/__init__.py). Each subcommand
-corresponds to exactly one Nextflow process, takes a single `--config
-<path>.json` argument, and validates it against the matching Pydantic model
-in [src/merxen/config.py](../src/merxen/config.py).
+[src/merxen/cli/__init__.py](../src/merxen/cli/__init__.py). Most subcommands
+correspond to exactly one Nextflow process, take a single `--config
+<path>.json` argument, and validate it against the matching Pydantic model
+in [src/merxen/config.py](../src/merxen/config.py) (the manual-registration
+models are in
+[src/merxen/manual_registration/config.py](../src/merxen/manual_registration/config.py));
+`convert-czi` and `manual-registration-fit` are ad-hoc tools without a process.
 
 ```
 $ merxen --help
@@ -41,6 +44,15 @@ Commands:
   mecr               Score mutually exclusive co-expression rates
   clustering-squidpy Run Scanpy/Squidpy clustering analysis
   mapmycells         Run local MapMyCells cell type assignment
+  convert-czi        Convert one scene of a Zeiss CZI to a pyramidal OME-TIFF
+  manual-registration-prepare
+                     Convert/validate both images, build the prepared store
+  manual-registration-register
+                     Register the moving image from the saved landmarks
+  manual-registration-fit
+                     Fit the saved landmarks and print what register would flag
+  manual-registration-compare
+                     Compare several manual-registration runs of one pair
 ```
 
 Logging is configured in the root `main()` group and streams to stderr at
@@ -378,6 +390,126 @@ merxen mapmycells --config mapmycells_config.json
 The active Python environment must include Allen's `cell_type_mapper` package.
 
 Details: [MapMyCells](stages/mapmycells.md).
+
+---
+
+## `merxen build-viewer-caches`
+
+Materialize label masks, outlines and image pyramids into a SpatialData zarr for
+the viewer.
+
+```bash
+merxen build-viewer-caches --config viewer_cache_config.json [--force-rerun]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--config PATH` | JSON validated against `ViewerCacheConfig`. |
+| `--force-rerun` | Rebuild caches even when an up-to-date marker is present. |
+
+A config with `image_only: true` (and optional `image_keys`) builds only the image
+pyramids of those elements and needs neither `platform` nor `original_data_path`;
+the [manual-registration prepare workflow](stages/manual-registration.md) uses it
+for prepared stores.
+
+---
+
+## `merxen convert-czi`
+
+Convert one scene of a Zeiss CZI to a tiled, pyramidal OME-TIFF. The CZI is read
+by the isolated CZI runtime (`MERXEN_CZI_PYTHON`, see
+[Development workflow](development.md#dependency-management)). It is an
+ad-hoc tool: prepare converts CZI rows itself.
+
+```bash
+merxen convert-czi --input slide.czi --output slide.ome.tif [--scene S] [--channel-names "DAPI;AF568"]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--input FILE` / `--output FILE` | The CZI and the `.ome.tif` / `.ome.tiff` to write. |
+| `--scene TEXT` | Scene index or name; required when the CZI has several. |
+| `--channel-names TEXT` | Override all channel names, `;`-separated, in C order. |
+| `--pixel-size-um FLOAT` | Pixel size in µm (default: the CZI's `Scaling` metadata). |
+| `--image-name TEXT` | OME image name (default `image`). |
+| `--workers INT` | Reader/compression threads (default `$DASK_NUM_WORKERS` or `min(8, CPUs)`). |
+| `--tile-size INT` / `--compression {zlib,zstd,none}` | Output tiling (default 1024) and compression (default `zlib`). |
+| `--summary-json FILE` | Write a JSON summary of the conversion. |
+| `--czi-python FILE` | Python of the CZI runtime (default `$MERXEN_CZI_PYTHON`). |
+
+---
+
+## `merxen manual-registration-prepare`
+
+Convert or validate both images of one pair and build the image-only prepared store
+the viewer labels.
+
+```bash
+merxen manual-registration-prepare --config prepare_config.json [--force]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--config PATH` | JSON validated against `ManualRegistrationPrepareConfig`. |
+| `--force` | Rebuild even when the image grid changed under existing landmarks; the old store is kept as `<name>.superseded-<UTC>`. |
+
+Details: [Manual landmark registration](stages/manual-registration.md).
+
+---
+
+## `merxen manual-registration-register`
+
+Register the moving image onto the reference from the landmarks saved in the
+prepared store (one preset).
+
+```bash
+merxen manual-registration-register --config register_config.json [--force-rerun]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--config PATH` | JSON validated against `ManualRegistrationRunConfig`. |
+| `--force-rerun` | Re-register even when an identical result exists. |
+
+Details: [Manual landmark registration](stages/manual-registration.md).
+
+---
+
+## `merxen manual-registration-fit`
+
+Fit the saved landmarks and print what register would flag (outliers, scale, reflection
+check, spread). Reads only; it takes seconds and is the authoritative check of the
+landmarks before a long register run.
+
+```bash
+merxen manual-registration-fit --store prepared.zarr --preset serial_section [--settings "k=v;preset:k=v"] [--json fit.json]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--store DIR` | Prepared store holding the labelling. |
+| `--preset {same_section,serial_section}` | Preset whose landmark settings apply. |
+| `--settings TEXT` | Overrides, as the samplesheet's `registration_settings`. |
+| `--json FILE` | Also write the fit as JSON. |
+
+Details: [Manual landmark registration](stages/manual-registration.md).
+
+---
+
+## `merxen manual-registration-compare`
+
+Compare several manual-registration runs of one pair (comparison CSV, JSON and
+figure).
+
+```bash
+merxen manual-registration-compare --config compare_config.json
+```
+
+| Option | Description |
+|--------|-------------|
+| `--config PATH` | JSON validated against `ManualRegistrationCompareConfig`. |
+
+Details: [Manual landmark registration](stages/manual-registration.md#reading-the-qc).
 
 ---
 
