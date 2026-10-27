@@ -1102,7 +1102,8 @@ def render(data: dict[str, Any]) -> str:
 def first_difference(actual: Any, expected: Any, path: str = "$") -> str | None:
     """Return the path of the first difference between two JSON structures.
 
-    Floats compare with ``rtol = atol = 1e-9``; strings, bools and ints exactly.
+    Floats compare with ``rtol = atol = 1e-9``; strings, bools and ints exactly, and an
+    int never equals a float.
     """
     if isinstance(actual, bool) or isinstance(expected, bool):
         return None if actual is expected else path
@@ -1123,6 +1124,8 @@ def first_difference(actual: Any, expected: Any, path: str = "$") -> str | None:
                 return found
         return None
     if isinstance(actual, int | float) and isinstance(expected, int | float):
+        if isinstance(actual, int) != isinstance(expected, int):
+            return path
         if isinstance(actual, int) and isinstance(expected, int):
             return None if actual == expected else path
         close = math.isclose(actual, expected, rel_tol=FLOAT_RTOL, abs_tol=FLOAT_ATOL)
