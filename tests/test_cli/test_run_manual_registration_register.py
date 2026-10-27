@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 from click.testing import CliRunner
-from tests.test_manual_registration._mr_helpers import a2_store
+from test_manual_registration._mr_helpers import a2_store
 
 from merxen.cli import run_manual_registration_register as cli
 from merxen.cli.run_manual_registration_register import (
