@@ -56,7 +56,8 @@ and reason are reported), and the comparison table puts the runs side by side.
 **Register, per (row x preset)** (`merxen manual-registration-register`):
 
 1. Validate the prepared store, resolve the settings (preset, then params, then
-   row), and skip the run when an identical result already exists.
+   row; a `crop_snap_px` below 64 is refused), and skip the run when an identical
+   result already exists (see "Re-runs" under Outputs).
 2. Crop both images to the effective crops (snapped inward to 64 px).
 3. Fit a robust similarity (rotation, scale, optional reflection) to the enabled
    landmark pairs; flag outliers; report the scale against the pixel-size ratio.
@@ -212,7 +213,10 @@ of the napari viewer repository); the outline:
 1. **Load** the prepared store: Dataset loader > Manual Registration > Load image
    data.
 2. **Crops** (optional, per image, in the original pixel frame). They are snapped
-   inward to multiples of 64 px, and an effective side must be at least 1024 px.
+   inward to multiples of 64 px (`crop_snap_px`, which must be at least 64: a
+   smaller value is refused at the start of the run, because the pyramid levels
+   it reads are cropped at factors that divide 64), and an effective side must
+   be at least 1024 px.
 3. **Coarse alignment** of the moving image: rotate (large angles, a 180 degree
    button), flip, shift. The state is stored as rotation, mirror and offset.
 4. **Landmark pairs**: place a point in the reference and its partner in the
@@ -250,7 +254,7 @@ through Nextflow):
 <id>/registered/<run_name>/<run_id>_landmarks.csv
 <id>/registered/<run_name>/<run_id>_manual_registration_summary.json
 <id>/registered/<run_name>/<run_id>_tissue_qc.png (+ .pdf)
-<id>/registered/<run_name>/qc/<run_id lower>_moving_registered_{registration_qc.png,registration_qc.pdf,registration_local_shifts.csv,nonrigid_flow.npz,nonrigid_qc.png,nonrigid_qc.pdf}
+<id>/registered/<run_name>/qc/<run_id lower>_moving_registered_{registration_qc.png,registration_qc.pdf,registration_local_shifts.csv,nonrigid_flow.npz,nonrigid_qc.png,nonrigid_qc.pdf}   # only the files the run wrote, see "Core QC files"
 <id>/registered/<id>_run_comparison.{json,csv,png}
 <outdir>/nextflow/{report,timeline,trace}*
 ```
@@ -259,6 +263,32 @@ through Nextflow):
 so runs never collide. `VIEWER_CACHE` publishes `viewer_cache_out/` and its
 `latest_input.zarr` symlink into `<id>/prepared/viewer_cache/`; the symlink is
 harmless.
+
+**Core QC files.** The registration core writes the `qc/` files, and a run lists
+in the summary (`outputs.core_qc`) only the ones it actually wrote:
+
+| File (suffix after `<run_id lower>_moving_registered_`) | Written when |
+|---|---|
+| `registration_qc.png` / `.pdf`, `registration_local_shifts.csv` | the refinement measured its windows |
+| `nonrigid_flow.npz`, `nonrigid_qc.png` / `.pdf` | a flow was computed (applied or rejected); not with `nonrigid_enabled=false` |
+
+A run deletes this run id's core QC files from earlier runs before the core
+starts, so a file under `qc/` belongs to the latest attempt, never to an earlier
+run with other settings or crops. When that attempt fails in the core, the files
+the previous result listed are gone, and the next launch registers again.
+
+**Re-runs.** An unchanged re-run is skipped in seconds, but only when the
+result is provably complete: the result store and the durable summary
+(published last) both carry the same `provenance_digest` as the new run, the
+summary says `complete`, every durable output and every file `outputs.core_qc`
+lists exists, and none of those core QC files is newer than the durable summary
+(a newer one belongs to a later run with other inputs that failed after the
+core). Anything else registers again; `--manual_registration_force_register true`
+(CLI `--force-rerun`) registers again regardless. A result store swap keeps the
+previous store as `<run_id>_registered.zarr.superseded-<UTC>` only for the
+instant of the swap; it is deleted after a successful swap, and any such
+leftover from a run that died between the two renames is removed by the next
+successful run.
 
 **Matrix CSVs** (`<run_id>_landmark_matrix.csv` = robust similarity,
 `<run_id>_final_matrix.csv` = refined affine **without** the flow): 3 lines of 3
@@ -311,8 +341,12 @@ matrix; the main pipeline applies its own refinement.
   run is still `complete`. The flow reports confident fraction, Pearson before and
   after, displacement and Jacobian statistics.
 - **Tissue Pearson per stage** (`tissue_qc.pearson`: coarse, landmark, affine,
-  final): correlation of high-pass tissue-scale intensity at 10 µm. It should
-  not fall from one stage to the next.
+  final): correlation of band-passed tissue-scale intensity. The working image
+  is the coarsest pyramid level that is not coarser than `tissue_qc_pixel_size_um`
+  (10 µm by default), block-averaged when that level is at least twice as fine,
+  so its size is at most the setting and often finer (5.5 µm for a 0.345 µm
+  scan); the size actually used is `tissue_qc.pixel_size_um`. It should not fall
+  from one stage to the next.
 - **Held-out residuals**: disabled pairs are never used in the fit; their median
   residual at each stage (`residual_summary_um.held_out`) is the honest measure
   of the registration error, in reference micrometres.
@@ -391,8 +425,8 @@ and is the set of keys `registration_settings` can override. Defaults are the
 | `landmark_outlier_policy` | `exclude` | `exclude`, `keep` or `fail` |
 | `landmarks_outside_crop` | `use` | `use`, `exclude` or `fail` for pairs outside the crops |
 | `landmark_min_spread_ratio`, `landmark_reflection_check_ratio` | 0.05, 0.5 | Spread and reflection checks |
-| `crop_snap_px`, `crop_min_size_px` | 64, 1024 | Crop snapping and minimum size |
-| `tissue_qc_pixel_size_um`, `tissue_qc_sigma_um`, `tissue_qc_highpass_sigma_um` | 10, 20, 200 | Tissue-scale QC |
+| `crop_snap_px`, `crop_min_size_px` | 64, 1024 | Crop snapping (at least 64, a power of two; smaller values are refused) and minimum size |
+| `tissue_qc_pixel_size_um`, `tissue_qc_sigma_um`, `tissue_qc_highpass_sigma_um` | 10, 20, 200 | Tissue-scale QC (the pixel size is a ceiling: the level used is recorded as `tissue_qc.pixel_size_um`) |
 | `nucleus_qc`, `nucleus_qc_pixel_size_um`, `nucleus_qc_window_um` | false, 1.7, 200 | Nucleus-scale QC |
 | `tile_size`, `chunk_size`, `build_viewer_pyramid` | 4096, 4096, true | Writing the result store |
 
