@@ -28,6 +28,27 @@ DIGEST_A = "sha256:" + "a" * 64
 DIGEST_B = "sha256:" + "b" * 64
 DIGEST_C = "sha256:" + "c" * 64
 
+# The header rows of the CSV outputs, spelled out (master design 3.8) so that a
+# change of the column tuples in the code cannot go unnoticed.
+LANDMARKS_CSV_HEADER = (
+    "id,colour,enabled,used_in_fit,outlier,outside_crop,reference_x_px,"
+    "reference_y_px,moving_x_px,moving_y_px,landmark_x_px,landmark_y_px,"
+    "affine_x_px,affine_y_px,final_x_px,final_y_px,residual_landmark_um,"
+    "residual_loo_um,residual_affine_um,residual_final_um,final_includes_flow,"
+    "push_converged"
+)
+COMPARISON_CSV_HEADER = (
+    "run_id,preset,run_label,fit_n_enabled,fit_n_used,fit_rms_um,"
+    "fit_scale_ratio,fit_rotation_deg,refinement_status,refinement_max_shift_um,"
+    "refinement_rotation_deg,refinement_scale_change,nonrigid_status,"
+    "nonrigid_confident_fraction,nonrigid_pearson_before,nonrigid_pearson_after,"
+    "jacobian_min,jacobian_max,tissue_pearson_coarse,tissue_pearson_landmark,"
+    "tissue_pearson_affine,tissue_pearson_final,used_median_landmark_um,"
+    "used_median_affine_um,used_median_final_um,held_out_median_landmark_um,"
+    "held_out_median_affine_um,held_out_median_final_um,nucleus_qc_median_um,"
+    "nucleus_qc_pearson,wall_time_s,peak_rss_gb"
+)
+
 # Appendix A.2 of the design: a 10-pair robust-fit example with a planted outlier.
 A2_PIXEL_SIZE = 0.34511
 A2_MOVING_SHAPE = (48000, 72000)

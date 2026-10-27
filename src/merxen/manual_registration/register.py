@@ -44,6 +44,7 @@ import merxen
 from merxen.image_registration import (
     NONRIGID_REGISTRATION_ALGORITHM,
     REGISTRATION_ALGORITHM,
+    RegistrationOutcome,
     RegistrationTuning,
     check_matrix_scale,
     measure_registration_overlay,
@@ -925,6 +926,21 @@ def _outputs_from_stored(
 
 
 def _reusable(stored: dict[str, Any] | None, digest: str) -> bool:
+    """Whether the stored result and its durable files are this run's, complete.
+
+    The durable CSVs and the summary are published after the store swap, the
+    summary last. A store that carries ``digest`` therefore proves nothing about
+    the files until the durable summary carries it too (a failed or killed
+    publish leaves the previous run's files next to the new store). The core QC
+    files the result lists must exist as well (a run deletes them before the
+    core, and a failure in the core leaves them missing) and none may be newer
+    than the durable summary. The core writes them in place, before the store
+    swap, so a run with other inputs that fails after the core (pyramids, tissue
+    QC, the CSV and attrs writes, a kill) leaves its own files under the names
+    the current result lists. The summary is written after the core and published
+    with ``shutil.copy2``, which keeps its modification time, so a listed file
+    modified after it belongs to a run that did not finish.
+    """
     if stored is None:
         return False
     if stored.get("status") != "complete" or stored.get("provenance_digest") != digest:
@@ -936,7 +952,108 @@ def _reusable(stored: dict[str, Any] | None, digest: str) -> bool:
         "landmarks_csv",
         "summary_json",
     )
-    return all(key in outputs and Path(outputs[key]).exists() for key in needed)
+    if not all(key in outputs and Path(outputs[key]).exists() for key in needed):
+        return False
+    # The core QC files are deleted before the core runs, so a run that fails in
+    # the core leaves the previous result current with its listed files missing.
+    core_qc = outputs.get("core_qc") or {}
+    try:
+        summary_mtime = Path(outputs["summary_json"]).stat().st_mtime_ns
+        core_mtimes = [Path(path).stat().st_mtime_ns for path in dict(core_qc).values()]
+    except OSError:
+        logger.info(
+            "The result store is current but core QC files it lists are missing "
+            "(an earlier run failed in the core?); registering again"
+        )
+        return False
+    if any(mtime > summary_mtime for mtime in core_mtimes):
+        logger.info(
+            "The result store is current but core QC files it lists were written "
+            "after its durable summary (a later run with other inputs failed after "
+            "the core?); registering again"
+        )
+        return False
+    try:
+        durable = json.loads(Path(outputs["summary_json"]).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if (
+        not isinstance(durable, dict)
+        or durable.get("status") != "complete"
+        or durable.get("provenance_digest") != digest
+    ):
+        logger.info(
+            "The result store is current but its durable files are from another "
+            "run (an interrupted publish?); registering again"
+        )
+        return False
+    return True
+
+
+# (outputs.core_qc key, registration_output_paths key) of the files the core writes.
+_CORE_QC_FILES = (
+    ("registration_qc_png", "qc_plot"),
+    ("registration_local_shifts_csv", "local_shifts"),
+    ("nonrigid_flow_npz", "nonrigid_flow"),
+    ("nonrigid_qc_png", "nonrigid_qc_plot"),
+)
+
+
+def _remove_core_qc_files(qc_paths: dict[str, Path]) -> None:
+    """Delete this run id's core QC files (PNG and PDF twins) from earlier runs.
+
+    The core writes the flow and the non-rigid plot only when a flow was computed
+    and the refinement plot and CSV only when the refinement measured something,
+    so a file that is still there after a run may belong to an earlier run (and to
+    another crop frame).
+    """
+    for _name, key in _CORE_QC_FILES:
+        path = Path(qc_paths[key])
+        path.unlink(missing_ok=True)
+        if path.suffix == ".png":
+            path.with_suffix(".pdf").unlink(missing_ok=True)
+
+
+def _core_qc_listing(
+    qc_paths: dict[str, Path], outcome: RegistrationOutcome
+) -> dict[str, str]:
+    """The core QC files written by this run, decided from the outcome.
+
+    The refinement plot and CSV exist when the refinement measured its windows
+    (``refinement.before``); the flow archive and the non-rigid plot when a flow
+    was computed (``nonrigid.result``), applied or rejected.
+    """
+    refinement, nonrigid = outcome.refinement, outcome.nonrigid
+    written = {
+        "qc_plot": refinement.before is not None
+        and refinement.working_to_reference is not None,
+        "local_shifts": refinement.before is not None
+        and refinement.working_to_reference is not None,
+        "nonrigid_flow": nonrigid.result is not None
+        and nonrigid.working_to_reference is not None,
+        "nonrigid_qc_plot": nonrigid.result is not None
+        and nonrigid.working_to_reference is not None,
+    }
+    return {
+        name: str(qc_paths[key])
+        for name, key in _CORE_QC_FILES
+        if written[key] and Path(qc_paths[key]).exists()
+    }
+
+
+def _remove_superseded_siblings(final: Path, *, keep: Path | None = None) -> None:
+    """Remove ``<final>.superseded-*`` stores left by a run that died mid-swap."""
+    for stale in final.parent.glob(f"{final.name}.superseded-*"):
+        if keep is not None and stale == keep:
+            continue
+        try:
+            if stale.is_dir() and not stale.is_symlink():
+                shutil.rmtree(stale)
+            else:
+                stale.unlink()
+            logger.info("Removed superseded result store %s", stale.name)
+        except OSError as exc:
+            logger.warning("Could not remove superseded store %s: %s", stale.name, exc)
 
 
 def _remove_stale_siblings(result_dir: Path, run_id: str) -> None:
@@ -1142,6 +1259,8 @@ def run_manual_registration(
             if superseded is not None:
                 os.rename(superseded, final)
             raise
+        # A run that died between the two renames left its superseded store behind.
+        _remove_superseded_siblings(final, keep=superseded)
     if superseded is not None:
         shutil.rmtree(superseded, ignore_errors=True)
     tmp_lock.unlink(missing_ok=True)
@@ -1218,6 +1337,7 @@ def _register_into_store(
     qc_dir = result_dir / "qc"
     qc_dir.mkdir(parents=True, exist_ok=True)
     qc_paths = registration_output_paths(qc_dir, run_id, "moving_registered")
+    _remove_core_qc_files(qc_paths)
     outcome = register_onto_reference(
         sdata_obj=sdata,
         zarr_path=tmp,
@@ -1345,16 +1465,7 @@ def _register_into_store(
     if nonrigid.status not in ("applied", "disabled"):
         warnings.append(f"non-rigid {nonrigid.status}: {nonrigid.reason}")
 
-    core_qc = {
-        name: str(qc_paths[key])
-        for name, key in (
-            ("registration_qc_png", "qc_plot"),
-            ("registration_local_shifts_csv", "local_shifts"),
-            ("nonrigid_flow_npz", "nonrigid_flow"),
-            ("nonrigid_qc_png", "nonrigid_qc_plot"),
-        )
-        if Path(qc_paths[key]).exists()
-    }
+    core_qc = _core_qc_listing(qc_paths, outcome)
     durable = {
         "landmark_matrix_csv": result_dir / f"{run_id}_landmark_matrix.csv",
         "final_matrix_csv": result_dir / f"{run_id}_final_matrix.csv",

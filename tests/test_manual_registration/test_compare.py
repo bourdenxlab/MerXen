@@ -15,7 +15,10 @@ from merxen.manual_registration.compare import (
     comparison_row,
 )
 from merxen.manual_registration.config import ManualRegistrationCompareConfig
+from merxen.manual_registration.register import LANDMARK_CSV_COLUMNS
 from merxen.manual_registration.schema import RESULT_SCHEMA
+
+from ._mr_helpers import COMPARISON_CSV_HEADER, LANDMARKS_CSV_HEADER
 
 
 def _summary(
@@ -113,7 +116,7 @@ def test_csv_columns_rows_and_values(two_runs: tuple[Path, list[Path]]) -> None:
     outputs = compare_runs(_config(tmp_path, paths))
     with outputs["comparison_csv"].open() as handle:
         text = handle.read()
-    assert text.splitlines()[0] == ",".join(COMPARISON_COLUMNS)
+    assert text.splitlines()[0] == COMPARISON_CSV_HEADER
     rows = list(csv.DictReader(text.splitlines()))
     assert [row["run_id"] for row in rows] == [
         "SYN1_same_section",
@@ -172,3 +175,10 @@ def test_comparison_row_tolerates_missing_blocks() -> None:
     assert list(row) == list(COMPARISON_COLUMNS)
     assert row["run_id"] == "SYN1_same_section"
     assert row["fit_rms_um"] is None and row["jacobian_max"] is None
+
+
+def test_csv_columns_are_the_documented_headers() -> None:
+    # Spelled-out strings (master design 3.8), not the constants under test.
+    assert ",".join(COMPARISON_COLUMNS) == COMPARISON_CSV_HEADER
+    assert ",".join(LANDMARK_CSV_COLUMNS) == LANDMARKS_CSV_HEADER
+    assert len(COMPARISON_COLUMNS) == 32 and len(LANDMARK_CSV_COLUMNS) == 22

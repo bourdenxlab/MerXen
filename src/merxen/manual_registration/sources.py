@@ -109,6 +109,14 @@ def crop_offset_affine(crop: CropRect, pixel_size_um: float) -> Affine:
 
     ``[[p, 0, p * x0], [0, p, p * y0], [0, 0, 1]]`` from cropped level-0 pixels
     to micrometres of the full image.
+
+    Args:
+        crop: The effective crop in level-0 pixels of the full image.
+        pixel_size_um: Level-0 pixel size of the image in micrometres.
+
+    Returns:
+        The ``("x", "y")`` to ``("x", "y")`` affine of the cropped image's
+        ``global`` coordinate system.
     """
     p = float(pixel_size_um)
     return Affine(

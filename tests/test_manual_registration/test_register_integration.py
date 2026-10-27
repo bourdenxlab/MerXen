@@ -19,6 +19,7 @@ from typing import Any
 import numpy as np
 import pytest
 import spatialdata as sd
+import tifffile
 from scipy.ndimage import gaussian_filter
 from skimage.filters import threshold_otsu
 from spatialdata.transformations import get_transformation
@@ -30,6 +31,7 @@ from merxen.image_registration import (
 )
 from merxen.io.ome_tiff import open_ome_tiff_level, read_ome_tiff_info
 from merxen.io.spatialdata_schema import validate_merxen_schema
+from merxen.manual_registration import register as register_module
 from merxen.manual_registration.compare import _overview, compare_runs
 from merxen.manual_registration.config import (
     ManualRegistrationCompareConfig,
@@ -61,7 +63,7 @@ from merxen.manual_registration.simulate import (
 )
 from merxen.viewer_cache.format import derived_image_pyramid_cache_key
 
-from ._mr_helpers import a2_store
+from ._mr_helpers import LANDMARKS_CSV_HEADER, a2_store
 
 pytestmark = pytest.mark.integration
 
@@ -114,20 +116,47 @@ def _moving_level(pair: SyntheticPair, level: int) -> np.ndarray:
     return np.asarray(open_ome_tiff_level(info, level).values[0], dtype=np.float64)
 
 
+def _untiled_copy(pair: SyntheticPair) -> Path:
+    """The moving image as an untiled single-level OME-TIFF.
+
+    Prepare cannot use such a file in place: it writes a tiled pyramidal copy, so
+    the prepared moving image has exact (integer-mean) level factors, as every
+    CZI-derived image does.
+    """
+    info = read_ome_tiff_info(pair.moving_path)
+    path = pair.moving_path.with_name("moving_untiled.ome.tif")
+    tifffile.imwrite(
+        path,
+        np.asarray(open_ome_tiff_level(info, 0).values),
+        ome=True,
+        metadata={
+            "axes": "CYX",
+            "PhysicalSizeX": P_MOV,
+            "PhysicalSizeY": P_MOV,
+            "PhysicalSizeXUnit": "µm",
+            "PhysicalSizeYUnit": "µm",
+            "Channel": {"Name": list(info.channel_names)},
+        },
+    )
+    return path
+
+
 def _prepare(
     root: Path,
     name: str,
     *,
     noise_um: float,
     outlier_um: float,
+    untiled_moving: bool = False,
     **pair_kwargs: Any,
 ) -> Prepared:
     pair = make_synthetic_pair(root / f"images_{name}", **pair_kwargs)
+    moving_path = _untiled_copy(pair) if untiled_moving else pair.moving_path
     outputs = run_manual_registration_prepare(
         ManualRegistrationPrepareConfig(
             dataset_name=name,
             reference=ManualRegistrationImageInput(path=pair.reference_path),
-            moving=ManualRegistrationImageInput(path=pair.moving_path),
+            moving=ManualRegistrationImageInput(path=moving_path),
             prepared_dir=root / name / "prepared",
             output_dir=root / f"prepare_out_{name}",
             workers=1,
@@ -220,6 +249,21 @@ def pair_serial(root: Path) -> Prepared:
 
 
 @pytest.fixture(scope="module")
+def pair_moving_crop(root: Path) -> Prepared:
+    return _prepare(
+        root,
+        "SYN4",
+        noise_um=0.5,
+        outlier_um=30.0,
+        untiled_moving=True,
+        rotation_deg=178.0,
+        mirror_x=False,
+        offset_um=(40.0, -25.0),
+        seed=0,
+    )
+
+
+@pytest.fixture(scope="module")
 def run_a(pair_a: Prepared) -> tuple[dict[str, Path], dict[str, Any]]:
     return pair_a.run("same_section")
 
@@ -279,6 +323,7 @@ def test_same_section_no_crop(
     outputs, summary = run_a
     pair = pair_a.pair
     assert summary["status"] == "complete"
+    assert outputs["landmarks_csv"].read_text().splitlines()[0] == LANDMARKS_CSV_HEADER
     rows = _landmark_rows(outputs)
     outlier = rows[rows["id"] == 5].iloc[0]
     assert bool(outlier["outlier"]) and not bool(outlier["used_in_fit"])
@@ -380,13 +425,34 @@ def test_same_section_with_a_crop(
     assert summary["crops"]["reference"]["requested"] == crop.model_dump()
     assert summary["crops"]["moving"]["requested"] is None
     attrs = read_root_attrs(outputs["result_store"])
-    assert attrs[STORE_ATTR]["images"]["reference"]["shape_yx"] == [1536, 1536]
+    effective = {"x0": 256, "y0": 256, "x1": 1792, "y1": 1792}
+    images = attrs[STORE_ATTR]["images"]
+    assert images["reference"]["shape_yx"] == [1536, 1536]
+    # The result variant of STORE_ATTR (what the viewer reads).
+    assert images["reference"]["crop"] == effective
+    assert images["reference"]["full_shape_yx"] == list(pair_a.pair.reference_shape_yx)
+    assert images["reference"]["pixel_size_um"] == P_REF
+    assert images["moving"]["element"] == "moving_registered"
+    assert images["moving"]["shape_yx"] == [1536, 1536]
+    assert images["moving"]["pixel_size_um"] == P_REF
+    assert images["moving"]["source_shape_yx"] == list(pair_a.pair.moving_shape_yx)
+    assert images["moving"]["source_pixel_size_um"] == P_MOV
+    moving_height, moving_width = pair_a.pair.moving_shape_yx
+    assert images["moving"]["source_crop"] == {
+        "x0": 0,
+        "y0": 0,
+        "x1": moving_width,
+        "y1": moving_height,
+    }
     sdata = sd.read_zarr(outputs["result_store"], selection=("images",))
-    matrix = get_transformation(sdata.images["reference"], "global").to_affine_matrix(
-        ("x", "y"), ("x", "y")
-    )
-    assert matrix[0, 2] == pytest.approx(2.0 * 256)
-    assert matrix[1, 2] == pytest.approx(2.0 * 256)
+    for key in ("reference", "moving_registered"):
+        matrix = get_transformation(sdata.images[key], "global").to_affine_matrix(
+            ("x", "y"), ("x", "y")
+        )
+        np.testing.assert_allclose(
+            matrix, [[P_REF, 0, P_REF * 256], [0, P_REF, P_REF * 256], [0, 0, 1]]
+        )
+        assert tuple(sdata.images[key].shape[1:]) == (1536, 1536)
 
     reference_xy = np.array([p.reference_xy_px for p in pair_a.pairs])
     moving_xy = np.array([p.moving_xy_px for p in pair_a.pairs])
@@ -434,6 +500,15 @@ def test_mirrored_pair_and_rerun_behaviour(pair_mirrored: Prepared) -> None:
     assert outputs["summary_json"].read_bytes() == durable
     assert reused["provenance_digest"] == summary["provenance_digest"]
 
+    # A durable output deleted since: the same inputs are registered again.
+    outputs["final_matrix_csv"].unlink()
+    restored, restored_summary = pair_mirrored.run(
+        "same_section", row_settings=settings, output="restored"
+    )
+    assert "reused" not in json.loads(restored["task_summary_json"].read_text())
+    assert restored["final_matrix_csv"].exists()
+    assert restored_summary["provenance_digest"] == summary["provenance_digest"]
+
     # One landmark moved by 1 px: a different digest, a re-run.
     moved = list(pair_mirrored.pairs)
     x, y = moved[1].reference_xy_px
@@ -452,6 +527,261 @@ def test_mirrored_pair_and_rerun_behaviour(pair_mirrored: Prepared) -> None:
     )
     assert siblings == []
     assert read_root_attrs(store)[RESULT_ATTR] == third_summary
+
+
+# --------------------------------------------------------------------------
+# 3b. a crop of the moving image, on an image that prepare rewrote
+# --------------------------------------------------------------------------
+
+MOVING_CROP = CropRect(x0=300, y0=260, x1=2300, y1=2350)
+REFERENCE_CROP = CropRect(x0=205, y0=205, x1=1843, y1=1843)
+
+
+def test_moving_crop_and_a_rerun_without_the_flow(
+    pair_moving_crop: Prepared,
+) -> None:
+    pair = pair_moving_crop
+    prepared = read_root_attrs(pair.store)[STORE_ATTR]["images"]
+    # The prepared moving image has exact level factors (every CZI pair does),
+    # the reference was used in place.
+    assert prepared["moving"]["ome_tiff"]["exact_level_factors"] is True
+    assert prepared["reference"]["ome_tiff"]["exact_level_factors"] is False
+    inject_labelling(
+        pair.store,
+        pair.pairs,
+        coarse=pair.coarse,
+        crops={"reference": REFERENCE_CROP, "moving": MOVING_CROP},
+    )
+    outputs, summary = pair.run("same_section", run_label="mcrop")
+
+    # Effective crops: origins round up, ends round down to multiples of 64.
+    effective_moving = {"x0": 320, "y0": 320, "x1": 2240, "y1": 2304}
+    assert summary["crops"]["moving"]["effective"] == effective_moving
+    assert summary["crops"]["moving"]["requested"] == MOVING_CROP.model_dump()
+    assert summary["crops"]["reference"]["effective"] == {
+        "x0": 256,
+        "y0": 256,
+        "x1": 1792,
+        "y1": 1792,
+    }
+    images = read_root_attrs(outputs["result_store"])[STORE_ATTR]["images"]
+    assert images["moving"]["source_crop"] == effective_moving
+    assert images["moving"]["source_shape_yx"] == list(pair.pair.moving_shape_yx)
+    assert images["moving"]["source_pixel_size_um"] == P_MOV
+    assert images["moving"]["shape_yx"] == [1536, 1536]
+    assert images["reference"]["crop"] == summary["crops"]["reference"]["effective"]
+    reference_xy = np.array([q.reference_xy_px for q in pair.pairs])
+    moving_xy = np.array([q.moving_xy_px for q in pair.pairs])
+    enabled = np.array([q.enabled for q in pair.pairs])
+    outside = points_outside_crop(reference_xy, REFERENCE_CROP) | points_outside_crop(
+        moving_xy, MOVING_CROP
+    )
+    assert summary["fit"]["n_outside_crop"] == int((outside & enabled).sum())
+
+    # The crop matrix has the moving origin added on the moving side.
+    full = np.asarray(summary["matrices"]["landmark_full"])
+    crop = np.asarray(summary["matrices"]["landmark_crop"])
+    np.testing.assert_allclose(crop[:2, :2], full[:2, :2])
+    np.testing.assert_allclose(
+        crop[:2, 2], full[:2, :2] @ [320, 320] + full[:2, 2] - [256, 256]
+    )
+
+    # The full-frame results are right whatever the crops.
+    landmark = load_alignment_matrix(outputs["landmark_matrix_csv"])
+    final = load_alignment_matrix(outputs["final_matrix_csv"])
+    assert _corner_error(landmark, pair.pair) <= 1.0
+    assert _corner_error(final, pair.pair) <= 1.0
+    rows = _landmark_rows(outputs)
+    held_out = rows[~rows["enabled"]]
+    final_error = np.median(_stage_error(held_out, "final", pair.pair))
+    assert final_error < np.median(_stage_error(held_out, "landmark", pair.pair))
+    assert final_error < 1.5
+    assert summary["tissue_qc"]["pearson"]["final"] > 0.9
+
+    # Pixels: the resampled moving image lines up with the reference crop.
+    sdata = sd.read_zarr(outputs["result_store"], selection=("images",))
+    reference = np.asarray(sdata.images["reference"].isel(c=0).values, dtype=float)
+    registered = np.asarray(
+        sdata.images["moving_registered"].isel(c=0).values, dtype=float
+    )
+    footprint = registered > 0
+    assert footprint.mean() > 0.5
+    correlation = np.corrcoef(
+        gaussian_filter(reference, 1.0)[footprint],
+        gaussian_filter(registered, 1.0)[footprint],
+    )[0, 1]
+    assert correlation > 0.9
+
+    # The same run id again, with the flow off: the files of the earlier flow are
+    # gone and no longer listed (they are in the crop frame of the earlier run).
+    core_before = summary["outputs"]["core_qc"]
+    assert summary["nonrigid"]["status"] == "applied"
+    flow_files = [
+        Path(core_before[k]) for k in ("nonrigid_flow_npz", "nonrigid_qc_png")
+    ]
+    assert all(path.exists() for path in flow_files)
+    _, no_flow = pair.run(
+        "same_section",
+        run_label="mcrop",
+        row_settings=FAST + ";nonrigid_enabled=false",
+        output="noflow",
+    )
+    assert no_flow["nonrigid"]["status"] == "disabled"
+    assert no_flow["provenance_digest"] != summary["provenance_digest"]
+    core_after = no_flow["outputs"]["core_qc"]
+    assert "nonrigid_flow_npz" not in core_after
+    assert "nonrigid_qc_png" not in core_after
+    assert Path(core_after["registration_qc_png"]).exists()
+    assert not any(path.exists() for path in flow_files)
+    assert not flow_files[1].with_suffix(".pdf").exists()
+
+
+# --------------------------------------------------------------------------
+# 4b. interrupted runs never leave a stale result
+# --------------------------------------------------------------------------
+
+
+def test_interrupted_runs_never_leave_a_stale_result(
+    pair_mirrored: Prepared, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = FAST + ";nonrigid_enabled=false"
+    outputs, baseline = pair_mirrored.run(
+        "same_section", row_settings=settings, output="base"
+    )
+    store = outputs["result_store"]
+    result_dir = store.parent
+    kept = {
+        key: outputs[key].read_bytes()
+        for key in (
+            "summary_json",
+            "landmark_matrix_csv",
+            "final_matrix_csv",
+            "landmarks_csv",
+        )
+    }
+    moved = list(pair_mirrored.pairs)
+    x, y = moved[2].reference_xy_px
+    moved[2] = moved[2].model_copy(update={"reference_xy_px": (x, y + 1.0)})
+    inject_labelling(pair_mirrored.store, moved, coarse=pair_mirrored.coarse)
+
+    # 1. The core fails: the previous store and durable files are untouched, the
+    # unfinished temporary store stays for the next run to remove.
+    def fail(**_: Any) -> None:
+        raise RuntimeError("simulated core failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(register_module, "register_onto_reference", fail)
+        with pytest.raises(RuntimeError, match="simulated core failure"):
+            pair_mirrored.run("same_section", row_settings=settings, output="fail")
+    stored = read_root_attrs(store)[RESULT_ATTR]
+    assert stored["provenance_digest"] == baseline["provenance_digest"]
+    assert all(outputs[key].read_bytes() == content for key, content in kept.items())
+    assert list(result_dir.glob(".*.zarr.partial-*"))
+
+    # 2. The publish after the swap fails once (disk full, killed task): the new
+    # store is in place, the durable files are still the previous run's.
+    real_publish = register_module._publish
+    calls: list[Path] = []
+
+    def flaky_publish(source: Path, target: Path) -> Path:
+        calls.append(target)
+        if len(calls) == 1:
+            raise OSError("simulated disk full")
+        return real_publish(source, target)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(register_module, "_publish", flaky_publish)
+        with pytest.raises(OSError, match="simulated disk full"):
+            pair_mirrored.run("same_section", row_settings=settings, output="flaky")
+    new_digest = read_root_attrs(store)[RESULT_ATTR]["provenance_digest"]
+    assert new_digest != baseline["provenance_digest"]
+    assert not list(result_dir.glob(".*partial-*"))  # the failed run's temp is gone
+    assert (
+        json.loads(outputs["summary_json"].read_text())["provenance_digest"]
+        == baseline["provenance_digest"]
+    )
+    # A run that died between the two renames of a swap leaves a full store.
+    leftover = store.with_name(store.name + ".superseded-20200101T000000Z")
+    (leftover / "images").mkdir(parents=True)
+
+    # 3. The retry does not reuse the store: it publishes the files of its run.
+    retried, summary = pair_mirrored.run(
+        "same_section", row_settings=settings, output="retry"
+    )
+    assert "reused" not in json.loads(retried["task_summary_json"].read_text())
+    assert summary["provenance_digest"] == new_digest
+    np.testing.assert_allclose(
+        load_alignment_matrix(retried["final_matrix_csv"]),
+        np.asarray(summary["matrices"]["final_affine_full"]),
+    )
+    assert read_root_attrs(store)[RESULT_ATTR] == summary
+    assert not leftover.exists()
+    assert not list(result_dir.glob("*.partial-*"))
+    assert not list(result_dir.glob("*.superseded-*"))
+
+    # 4. Everything is published now, so the next call is a no-op.
+    done, again = pair_mirrored.run(
+        "same_section", row_settings=settings, output="done"
+    )
+    assert again["provenance_digest"] == new_digest
+    task = json.loads(done["task_summary_json"].read_text())
+    assert task["reused"] is True
+
+    # 5. A forced re-run that fails in the core has deleted the current result's
+    # core QC files (the store and the durable files stay): the next plain run
+    # does not report the result as reused but registers again and restores them.
+    core_qc = {k: Path(v) for k, v in again["outputs"]["core_qc"].items()}
+    assert core_qc and all(path.exists() for path in core_qc.values())
+    with monkeypatch.context() as patch:
+        patch.setattr(register_module, "register_onto_reference", fail)
+        with pytest.raises(RuntimeError, match="simulated core failure"):
+            pair_mirrored.run(
+                "same_section", row_settings=settings, output="fail2", force=True
+            )
+    assert read_root_attrs(store)[RESULT_ATTR]["provenance_digest"] == new_digest
+    assert not any(path.exists() for path in core_qc.values())
+    healed, healed_summary = pair_mirrored.run(
+        "same_section", row_settings=settings, output="healed"
+    )
+    assert "reused" not in json.loads(healed["task_summary_json"].read_text())
+    assert healed_summary["provenance_digest"] == new_digest
+    healed_qc = {k: Path(v) for k, v in healed_summary["outputs"]["core_qc"].items()}
+    assert healed_qc == core_qc
+    assert all(path.exists() for path in healed_qc.values())
+    # Complete again, so the following call is a no-op once more.
+    last, _ = pair_mirrored.run("same_section", row_settings=settings, output="last")
+    assert json.loads(last["task_summary_json"].read_text())["reused"] is True
+
+    # 6. A run with other inputs (not forced) that fails after the core rewrites
+    # the listed core QC files in place and leaves the store and the durable files
+    # of the current result: the next plain run of the current inputs must not
+    # report it as reused with the failed run's files.
+    def fail_figure(*_: Any, **__: Any) -> None:
+        raise OSError("simulated disk full")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(register_module, "write_tissue_qc_figure", fail_figure)
+        with pytest.raises(OSError, match="simulated disk full"):
+            pair_mirrored.run(
+                "same_section",
+                row_settings=settings + ";tissue_qc_sigma_um=25.0",
+                output="fail3",
+            )
+    assert read_root_attrs(store)[RESULT_ATTR]["provenance_digest"] == new_digest
+    summary_mtime = healed["summary_json"].stat().st_mtime_ns
+    assert all(path.stat().st_mtime_ns > summary_mtime for path in healed_qc.values())
+    recovered, recovered_summary = pair_mirrored.run(
+        "same_section", row_settings=settings, output="recovered"
+    )
+    assert "reused" not in json.loads(recovered["task_summary_json"].read_text())
+    assert recovered_summary["provenance_digest"] == new_digest
+    assert {
+        k: Path(v) for k, v in recovered_summary["outputs"]["core_qc"].items()
+    } == healed_qc
+    summary_mtime = recovered["summary_json"].stat().st_mtime_ns
+    assert all(path.stat().st_mtime_ns <= summary_mtime for path in healed_qc.values())
+    final, _ = pair_mirrored.run("same_section", row_settings=settings, output="final")
+    assert json.loads(final["task_summary_json"].read_text())["reused"] is True
 
 
 # --------------------------------------------------------------------------

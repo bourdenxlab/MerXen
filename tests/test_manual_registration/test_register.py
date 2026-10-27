@@ -2,24 +2,35 @@
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import numpy as np
 import pytest
 
-from merxen.image_registration import push_points_through_registration
+from merxen.image_registration import (
+    pull_points_through_registration,
+    push_points_through_registration,
+    registration_output_paths,
+)
 from merxen.manual_registration import register as register_module
 from merxen.manual_registration.config import ManualRegistrationSettings
 from merxen.manual_registration.presets import resolve_settings
 from merxen.manual_registration.register import (
     LandmarkFitError,
     LandmarkFitReport,
+    _core_qc_listing,
     _landmark_records,
     _plain_json,
     _provenance_digest,
     _publish,
+    _remove_core_qc_files,
+    _remove_superseded_siblings,
     _residual_summary,
+    _reusable,
     _validate_prepared_store,
     fit_landmarks,
     fit_summary,
@@ -482,6 +493,70 @@ def test_records_with_a_flow_push_in_the_crop_frame() -> None:
     )
 
 
+def test_records_with_a_moving_origin_use_the_crop_frame() -> None:
+    # Moving crop origin (448, 64) and reference crop origin (192, 320): the push
+    # runs on the moving points shifted into the moving crop frame, and the result
+    # is shifted back by the reference origin.
+    origin_r, origin_m = (192, 320), (448, 64)
+    # The last point lies inside the flow grid in the crop frame only: without
+    # the moving origin subtracted it would fall beyond the grid's right edge.
+    edge = np.linalg.inv(MATRIX) @ np.array([600.0, 300.0, 1.0])
+    crop_points = np.array([[100.0, 100.0], [300.0, 200.0], [5000.0, 5000.0], edge[:2]])
+    assert (MATRIX @ [*(edge[:2] + origin_m), 1.0])[0] > 4 * 259 + 1.5
+    pairs = make_pairs(crop_points + origin_m, [(10.0, 10.0)] * 4)
+    flow = _flow()
+    kwargs: dict[str, Any] = {
+        "reference_pixel_size_um": 0.5,
+        "reference_origin_xy": origin_r,
+        "moving_origin_xy": origin_m,
+        "landmark_full": np.eye(3),
+        "final_affine_crop": MATRIX,
+    }
+    records = _landmark_records(
+        _report_for(pairs), flow_yx=flow, flow_working_to_reference=WORKING, **kwargs
+    )
+    inside = [0, 1, 3]
+    pushed, _ = push_points_through_registration(
+        crop_points[inside],
+        final_matrix=MATRIX,
+        flow_yx=flow,
+        working_to_reference=WORKING,
+    )
+    affine = crop_points @ MATRIX[:2, :2].T + MATRIX[:2, 2] + origin_r
+    for i, record in enumerate(records):
+        np.testing.assert_allclose(
+            record["moving_in_reference_xy_px"]["affine"], affine[i], atol=1e-9
+        )
+    for k, i in enumerate(inside):
+        np.testing.assert_allclose(
+            records[i]["moving_in_reference_xy_px"]["final"],
+            pushed[k] + origin_r,
+            atol=1e-9,
+        )
+        assert records[i]["final_includes_flow"] is True
+        # Pulling the recorded position back (crop frame) returns the point.
+        back = pull_points_through_registration(
+            np.asarray([records[i]["moving_in_reference_xy_px"]["final"]]) - origin_r,
+            final_matrix=MATRIX,
+            flow_yx=flow,
+            working_to_reference=WORKING,
+        )
+        np.testing.assert_allclose(back[0], crop_points[i], atol=1e-3)
+    assert records[2]["final_includes_flow"] is False
+    np.testing.assert_allclose(
+        records[2]["moving_in_reference_xy_px"]["final"],
+        records[2]["moving_in_reference_xy_px"]["affine"],
+    )
+    # Without a flow the final position is the affine one, in full reference px.
+    plain = _landmark_records(
+        _report_for(pairs), flow_yx=None, flow_working_to_reference=None, **kwargs
+    )
+    for i, record in enumerate(plain):
+        np.testing.assert_allclose(
+            record["moving_in_reference_xy_px"]["final"], affine[i], atol=1e-9
+        )
+
+
 def test_residual_summary_groups_and_empty_groups() -> None:
     def record(enabled: bool, used: bool, value: float) -> dict[str, Any]:
         return {
@@ -565,3 +640,209 @@ def test_plain_json_and_publish(tmp_path: Path) -> None:
     target = _publish(source, tmp_path / "sub" / "b.txt")
     assert target.read_text() == "hello"
     assert [p.name for p in target.parent.iterdir()] == ["b.txt"]
+
+
+# --------------------------------------------------------------------------
+# reuse, core QC files and leftover stores
+# --------------------------------------------------------------------------
+
+DIGEST_NEW = "sha256:" + "1" * 64
+DIGEST_OLD = "sha256:" + "2" * 64
+
+
+def _stored_result(
+    directory: Path,
+    *,
+    durable_digest: str | None = DIGEST_NEW,
+    durable_status: str = "complete",
+) -> dict[str, Any]:
+    outputs: dict[str, str] = {}
+    for key, name in (
+        ("landmark_matrix_csv", "lm.csv"),
+        ("final_matrix_csv", "final.csv"),
+        ("landmarks_csv", "landmarks.csv"),
+        ("summary_json", "summary.json"),
+    ):
+        path = directory / name
+        path.write_text("x\n")
+        outputs[key] = str(path)
+    if durable_digest is not None:
+        Path(outputs["summary_json"]).write_text(
+            json.dumps({"status": durable_status, "provenance_digest": durable_digest})
+        )
+    return {"status": "complete", "provenance_digest": DIGEST_NEW, "outputs": outputs}
+
+
+def test_reusable_needs_the_durable_summary_of_the_same_run(tmp_path: Path) -> None:
+    assert _reusable(None, DIGEST_NEW) is False
+    stored = _stored_result(tmp_path)
+    assert _reusable(stored, DIGEST_NEW) is True
+    assert _reusable(stored, DIGEST_OLD) is False
+    assert _reusable({**stored, "status": "failed"}, DIGEST_NEW) is False
+
+
+@pytest.mark.parametrize(
+    ("durable_digest", "durable_status"),
+    [
+        (DIGEST_OLD, "complete"),  # the publish after the swap never ran
+        (DIGEST_NEW, "failed"),
+        (None, "complete"),  # not a JSON object
+    ],
+)
+def test_reusable_refuses_a_stale_or_broken_durable_summary(
+    tmp_path: Path, durable_digest: str | None, durable_status: str
+) -> None:
+    stored = _stored_result(
+        tmp_path, durable_digest=durable_digest, durable_status=durable_status
+    )
+    assert _reusable(stored, DIGEST_NEW) is False
+
+
+def test_reusable_refuses_a_missing_output_file(tmp_path: Path) -> None:
+    stored = _stored_result(tmp_path)
+    Path(stored["outputs"]["final_matrix_csv"]).unlink()
+    assert _reusable(stored, DIGEST_NEW) is False
+    stored = _stored_result(tmp_path)
+    Path(stored["outputs"]["summary_json"]).unlink()
+    assert _reusable(stored, DIGEST_NEW) is False
+
+
+def _list_core_qc(
+    stored: dict[str, Any], directory: Path, *keys: str
+) -> dict[str, Path]:
+    """List core QC files on ``stored``, written before its durable summary."""
+    summary = Path(stored["outputs"]["summary_json"])
+    before = summary.stat().st_mtime_ns - 5_000_000_000
+    listed: dict[str, Path] = {}
+    for key in keys:
+        path = directory / f"{key}.bin"
+        path.write_bytes(b"x")
+        os.utime(path, ns=(before, before))
+        listed[key] = path
+    stored["outputs"]["core_qc"] = {key: str(path) for key, path in listed.items()}
+    return listed
+
+
+def test_reusable_refuses_a_listed_core_qc_file_that_is_missing(
+    tmp_path: Path,
+) -> None:
+    # A run that failed in the core deleted the files of the result it left current.
+    stored = _stored_result(tmp_path)
+    assert _reusable(stored, DIGEST_NEW) is True  # no core_qc key: nothing to check
+    listed = _list_core_qc(stored, tmp_path, "registration_qc_png", "nonrigid_flow_npz")
+    assert _reusable(stored, DIGEST_NEW) is True
+    listed["nonrigid_flow_npz"].unlink()
+    assert _reusable(stored, DIGEST_NEW) is False
+    stored["outputs"]["core_qc"] = {}
+    assert _reusable(stored, DIGEST_NEW) is True
+
+
+def test_reusable_refuses_a_listed_core_qc_file_written_after_the_summary(
+    tmp_path: Path,
+) -> None:
+    # A run with other inputs that failed after the core rewrote the listed files
+    # in place (same names, other content) and left the store and the summary.
+    stored = _stored_result(tmp_path)
+    listed = _list_core_qc(stored, tmp_path, "registration_qc_png", "nonrigid_flow_npz")
+    summary = Path(stored["outputs"]["summary_json"])
+    assert _reusable(stored, DIGEST_NEW) is True
+    flow = listed["nonrigid_flow_npz"]
+    flow.write_bytes(b"other run")  # now: later than the summary
+    assert flow.stat().st_mtime_ns > summary.stat().st_mtime_ns
+    assert _reusable(stored, DIGEST_NEW) is False
+    # The same instant is not later: a complete run keeps its files and the summary
+    # (copied with its modification time) side by side.
+    stat = summary.stat()
+    os.utime(flow, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert _reusable(stored, DIGEST_NEW) is True
+    # A newer summary (a later, complete run) makes older files current again.
+    os.utime(flow, ns=(stat.st_atime_ns, stat.st_mtime_ns - 1))
+    os.utime(summary, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+    assert _reusable(stored, DIGEST_NEW) is True
+
+
+def _touch_core_qc(qc_paths: dict[str, Path], *keys: str) -> None:
+    for key in keys:
+        qc_paths[key].write_bytes(b"x")
+        if qc_paths[key].suffix == ".png":
+            qc_paths[key].with_suffix(".pdf").write_bytes(b"x")
+
+
+def test_core_qc_files_of_an_earlier_run_are_removed(tmp_path: Path) -> None:
+    qc_paths = registration_output_paths(
+        tmp_path, "SYN1_same_section", "moving_registered"
+    )
+    other = registration_output_paths(
+        tmp_path, "SYN1_serial_section", "moving_registered"
+    )
+    keys = ("qc_plot", "local_shifts", "nonrigid_flow", "nonrigid_qc_plot")
+    _touch_core_qc(qc_paths, *keys)
+    _touch_core_qc(other, *keys)
+    _remove_core_qc_files(qc_paths)
+    left = {path.name for path in tmp_path.iterdir()}
+    assert left == {path.name for key in keys for path in (other[key],)} | {
+        other["qc_plot"].with_suffix(".pdf").name,
+        other["nonrigid_qc_plot"].with_suffix(".pdf").name,
+    }
+    _remove_core_qc_files(qc_paths)  # nothing left: still fine
+
+
+def _outcome(*, measured: bool, flow: bool) -> Any:
+    return SimpleNamespace(
+        refinement=SimpleNamespace(
+            before=object() if measured else None,
+            working_to_reference=np.eye(3) if measured else None,
+        ),
+        nonrigid=SimpleNamespace(
+            result=object() if flow else None,
+            working_to_reference=np.eye(3) if flow else None,
+        ),
+    )
+
+
+def test_core_qc_is_listed_from_the_outcome_not_from_the_disk(tmp_path: Path) -> None:
+    qc_paths = registration_output_paths(
+        tmp_path, "SYN1_same_section", "moving_registered"
+    )
+    _touch_core_qc(
+        qc_paths, "qc_plot", "local_shifts", "nonrigid_flow", "nonrigid_qc_plot"
+    )
+    # A flow that was not computed this run: the leftover files are not listed.
+    listing = _core_qc_listing(qc_paths, _outcome(measured=True, flow=False))
+    assert set(listing) == {"registration_qc_png", "registration_local_shifts_csv"}
+    assert listing["registration_qc_png"] == str(qc_paths["qc_plot"])
+    # Nothing measured and no flow: nothing is listed although the files exist.
+    assert _core_qc_listing(qc_paths, _outcome(measured=False, flow=False)) == {}
+    both = _core_qc_listing(qc_paths, _outcome(measured=True, flow=True))
+    assert set(both) == {
+        "registration_qc_png",
+        "registration_local_shifts_csv",
+        "nonrigid_flow_npz",
+        "nonrigid_qc_png",
+    }
+    # Claimed by the outcome but missing on disk: not listed either.
+    qc_paths["nonrigid_flow"].unlink()
+    assert "nonrigid_flow_npz" not in _core_qc_listing(
+        qc_paths, _outcome(measured=True, flow=True)
+    )
+
+
+def test_leftover_superseded_stores_are_removed(tmp_path: Path) -> None:
+    final = tmp_path / "SYN1_same_section_registered.zarr"
+    final.mkdir()
+    old = final.with_name(final.name + ".superseded-20260101T000000Z")
+    older = final.with_name(final.name + ".superseded-20250101T000000Z-2")
+    for path in (old, older):
+        path.mkdir()
+        (path / "zarr.json").write_text("{}")
+    kept = final.with_name(final.name + ".superseded-20260202T000000Z")
+    kept.mkdir()
+    other_run = (
+        tmp_path / "SYN1_serial_section_registered.zarr.superseded-20260101T000000Z"
+    )
+    other_run.mkdir()
+    _remove_superseded_siblings(final, keep=kept)
+    assert not old.exists() and not older.exists()
+    assert kept.exists() and other_run.exists() and final.exists()
+    _remove_superseded_siblings(final)
+    assert not kept.exists() and other_run.exists()

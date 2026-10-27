@@ -522,6 +522,11 @@ def inject_labelling(
             )
         old = attrs.get(LABELLING_ATTR)
         revision = int(old["revision"]) + 1 if old else 1
+        # Ids are never reused and next_id only increases (the viewer's rule), so
+        # a re-injection with fewer pairs keeps the old counter and colour seed.
+        old_landmarks = (old or {}).get("landmarks") or {}
+        old_next_id = int(old_landmarks.get("next_id", 1))
+        old_colour_seed = int(old_landmarks.get("colour_seed", 0))
         reference = store_attr.images["reference"]
         moving = store_attr.images["moving"]
 
@@ -590,8 +595,8 @@ def inject_labelling(
                 "moving": _crop_dict(crop_map.get("moving")),
             },
             "landmarks": {
-                "next_id": (max(ids) + 1) if ids else 1,
-                "colour_seed": 0,
+                "next_id": max(old_next_id, (max(ids) + 1) if ids else 1),
+                "colour_seed": old_colour_seed,
                 "pairs": [p.model_dump(mode="json") for p in pairs],
             },
         }

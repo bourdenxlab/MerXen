@@ -10,6 +10,7 @@ from scipy.ndimage import gaussian_filter, map_coordinates
 from skimage.filters import threshold_otsu
 
 from merxen.io.ome_tiff import open_ome_tiff_level, read_ome_tiff_info
+from merxen.io.spatialdata_io import spatialdata_write_lock
 from merxen.manual_registration.geometry import coarse_matrix_xy
 from merxen.manual_registration.schema import (
     LABELLING_ATTR,
@@ -20,6 +21,7 @@ from merxen.manual_registration.schema import (
     pair_colour,
     parse_labelling_attrs,
     read_root_attrs,
+    write_root_attr,
 )
 from merxen.manual_registration.simulate import (
     SyntheticPair,
@@ -233,3 +235,32 @@ def test_inject_labelling_needs_a_prepared_store_and_stores_crops(
     payload = read_root_attrs(store)[LABELLING_ATTR]
     assert payload["crops"]["moving"] == {"x0": 0, "y0": 0, "x1": 64, "y1": 64}
     assert payload["crops"]["reference"] is None
+
+
+def test_inject_labelling_never_lowers_next_id_and_keeps_the_colour_seed(
+    tmp_path: Path,
+) -> None:
+    store = _prepared(tmp_path / "s")
+    moving = [(100.0 * i + 50, 80.0 * i + 30) for i in range(10)]
+    reference = [(x * 0.8 + 10, y * 0.8 + 20) for x, y in moving]
+    pairs = make_pairs(moving, reference)
+    inject_labelling(store, pairs)
+    payload = read_root_attrs(store)[LABELLING_ATTR]
+    assert payload["landmarks"]["next_id"] == 11
+    assert payload["landmarks"]["colour_seed"] == 0
+    # The viewer's counter moved on (ids 11..24 were placed and deleted).
+    payload["landmarks"]["next_id"] = 25
+    payload["landmarks"]["colour_seed"] = 3
+    payload["content_sha256"] = labelling_content_sha256(payload)
+    with spatialdata_write_lock(store):
+        write_root_attr(store, LABELLING_ATTR, payload)
+
+    inject_labelling(store, pairs[:5])  # fewer pairs: next_id must not drop to 6
+    landmarks = read_root_attrs(store)[LABELLING_ATTR]["landmarks"]
+    assert landmarks["next_id"] == 25
+    assert landmarks["colour_seed"] == 3
+    assert len(landmarks["pairs"]) == 5
+
+    many = make_pairs(moving * 4, reference * 4)  # ids up to 40: above the counter
+    inject_labelling(store, many)
+    assert read_root_attrs(store)[LABELLING_ATTR]["landmarks"]["next_id"] == 41

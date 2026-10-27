@@ -1,8 +1,14 @@
 """Tissue-scale alignment QC of a manual registration, per stage.
 
 The tissue QC compares the reference and the moving registration channel at a
-coarse working pixel size (about 10 um) after a band-pass that keeps tissue-scale
-structure (layers, vessels, boundaries) and drops both nuclei and slow shading.
+coarse working pixel size after a band-pass that keeps tissue-scale structure
+(layers, vessels, boundaries) and drops both nuclei and slow shading. The working
+image is read with ``read_working_channel``: the coarsest pyramid level (the
+levels kept divide 64) that is not coarser than ``tissue_qc_pixel_size_um`` (10 um
+by default), block-averaged by an integer factor when that level is at least twice
+as fine as the target. The working size is therefore at most the setting and often
+finer (5.5 um for a 0.345 um scan); the size actually used is recorded as
+``tissue_qc.pixel_size_um``.
 It is computed for the coarse, landmark, affine and final mappings, so a
 registration that fails against the tissue shows up whatever the nuclei do.
 
