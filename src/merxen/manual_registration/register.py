@@ -931,7 +931,9 @@ def _reusable(stored: dict[str, Any] | None, digest: str) -> bool:
     The durable CSVs and the summary are published after the store swap, the
     summary last. A store that carries ``digest`` therefore proves nothing about
     the files until the durable summary carries it too (a failed or killed
-    publish leaves the previous run's files next to the new store).
+    publish leaves the previous run's files next to the new store). The core QC
+    files the result lists must exist as well: a run deletes them before the
+    core and a failure in the core leaves them missing.
     """
     if stored is None:
         return False
@@ -945,6 +947,15 @@ def _reusable(stored: dict[str, Any] | None, digest: str) -> bool:
         "summary_json",
     )
     if not all(key in outputs and Path(outputs[key]).exists() for key in needed):
+        return False
+    # The core QC files are deleted before the core runs, so a run that fails in
+    # the core leaves the previous result current with its listed files missing.
+    core_qc = outputs.get("core_qc") or {}
+    if not all(Path(path).exists() for path in dict(core_qc).values()):
+        logger.info(
+            "The result store is current but core QC files it lists are missing "
+            "(an earlier run failed in the core?); registering again"
+        )
         return False
     try:
         durable = json.loads(Path(outputs["summary_json"]).read_text(encoding="utf-8"))
