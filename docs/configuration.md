@@ -265,7 +265,7 @@ workflows (`manual_registration_prepare.nf`, `manual_registration_register.nf`);
 |-------|---------|-------------|
 | `manual_registration_presets` | `"same_section"` | Presets of rows with a blank `presets` column (`;`-separated: `same_section`, `serial_section`). |
 | `manual_registration_settings` | `""` | Settings overrides for every row, `key=value;preset:key=value`; the samplesheet's `registration_settings` column wins. |
-| `manual_registration_force_prepare` | `false` | Rebuild the prepared store that Python would otherwise keep. |
+| `manual_registration_force_prepare` | `false` | Rebuild the prepared store that Python would otherwise keep. The old store is kept as `<id>_prepared.zarr.superseded-<UTC>`; its landmarks are carried over only when both images keep their shape and pixel size, otherwise label the new store again (copy the superseded one first if needed). |
 | `manual_registration_force_register` | `false` | Re-run registrations that Python would otherwise skip. |
 | `manual_registration_czi_python` | `null` | Python of the isolated CZI runtime (`envs/environment.czi.yml`), or `in_process`. A host location: set it in the gitignored `workflows/conf/site.config`. Required for `.czi` rows; the prepare task exports it as `MERXEN_CZI_PYTHON`. |
 | `manual_registration_prepare_max_forks` | Dwight: `2` | Maximum concurrent prepare processes. |

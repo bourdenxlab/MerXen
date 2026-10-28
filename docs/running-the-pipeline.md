@@ -465,7 +465,8 @@ nextflow run workflows/manual_registration_register.nf -profile dwight,conda \
 ```
 
 Use an `--outdir` that is separate from the main pipeline's (the report, timeline
-and trace files under `<outdir>/nextflow/` are overwritten per launch). Every
+and trace files under `<outdir>/nextflow/` are overwritten per launch); the
+workflows refuse the main pipeline's default `./results`. Every
 sheet and store problem is reported in one `Preflight checks failed:` block
 before any task starts. See [Manual landmark registration](stages/manual-registration.md)
 for the samplesheet, the params, the CZI runtime and the outputs.

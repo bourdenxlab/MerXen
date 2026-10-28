@@ -451,7 +451,7 @@ merxen manual-registration-prepare --config prepare_config.json [--force]
 | Option | Description |
 |--------|-------------|
 | `--config PATH` | JSON validated against `ManualRegistrationPrepareConfig`. |
-| `--force` | Rebuild even when the image grid changed under existing landmarks; the old store is kept as `<name>.superseded-<UTC>`. |
+| `--force` | Rebuild even when the image grid changed under existing landmarks; the old store is kept as `<name>.superseded-<UTC>`. The landmarks are carried over only when both images keep their shape and pixel size; otherwise they stay in the superseded store and the new one must be labelled again. |
 
 Details: [Manual landmark registration](stages/manual-registration.md).
 

@@ -261,8 +261,12 @@ git push origin HEAD --tags
   `scripts/run_ci_checks.sh` and GitHub CI build the same venv. The tiny CZI test
   fixtures under `tests/test_data/czi/` are regenerated, on purpose only, with
   `scripts/manual_registration/make_czi_fixtures.py` in an ephemeral environment
-  (its docstring has the `uv run` command; the LGPL writer is never a
-  dependency).
+  (the LGPL writer is never a dependency):
+
+  ```bash
+  uv run --no-project --python 3.12 --with pylibCZIrw==6.1.0 --with numpy==2.2.6 \
+      python scripts/manual_registration/make_czi_fixtures.py --out tests/test_data/czi
+  ```
 
 - **Never `pip install <pkg>` directly.** That leaves you out of sync with
   the lockfile and CI.

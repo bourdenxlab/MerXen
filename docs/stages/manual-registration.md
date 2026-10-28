@@ -124,11 +124,16 @@ exist inside it. Use `-profile conda`, or convert first with
 one of the fields of [`ManualRegistrationSettings`](#config-schema) except the
 two forbidden ones (`reference_pixel_size_um`, `reference_channel`: set pixel
 sizes and registration channels in the samplesheet and re-run prepare). A single
-trailing `;` is allowed. Precedence, lowest to highest: the preset, the global
+trailing `;` is allowed; an empty item anywhere else (`a=1;;b=2`) and a key given
+twice in one scope are preflight errors. (Python's settings parser, used by
+`merxen manual-registration-fit --settings`, skips every empty item, so `a=1;;b=2`
+is accepted there and refused by the workflows; a duplicate key is refused by
+both.) Precedence, lowest to highest: the preset, the global
 `--manual_registration_settings` without prefix, the global `<preset>:` items,
 the row's items without prefix, the row's `<preset>:` items. The Groovy
-preflight checks the grammar, the keys and `landmark_min_pairs >= 3`; value
-types are checked by pydantic in the task.
+preflight checks the grammar, the keys, and that `landmark_min_pairs` and
+`landmark_min_used_pairs` are integers >= 3; other value types are checked by
+pydantic in the task.
 
 > **Serial-section pairs run with `same_section`** (to compare against
 > `serial_section`) need
@@ -158,10 +163,27 @@ nextflow run workflows/manual_registration_register.nf -profile dwight,conda \
 
 Use an `--outdir` **separate from the main pipeline's**: the Nextflow report,
 timeline and trace files under `<outdir>/nextflow/` are overwritten per launch.
+Both workflows refuse `--outdir` equal to the main pipeline's default `./results`
+(also written `results` or `./results/`) with "pass --outdir with a folder
+separate from the main pipeline's results", before any task starts. The report,
+timeline and trace observers are configured in `nextflow.config` and run before
+the script does, so a launch that forgets `--outdir` still rewrites
+`./results/nextflow/{report.html,timeline.html,trace.tsv}`; no task runs and no
+per-id folder is written.
 `-resume` is optional (all three processes are `cache false`; Python keeps its
 own provenance, skips unchanged work in seconds, and the viewer edits the
 prepared store in place, which Nextflow's input hashing cannot see). Keep one
 launch directory per workflow, or use `-resume <session>`.
+
+**Re-running prepare.** An unchanged pair keeps its store, labelling included. When
+the images are rebuilt on the same grid (same shapes and pixel sizes) the labelling
+is carried over. A changed grid under an existing labelling is refused, because the
+landmarks would no longer fit; `--manual_registration_force_prepare true` then
+builds the new store and keeps the old one next to it as
+`<id>_prepared.zarr.superseded-<UTC>`. The labelling is carried over into the new
+store **only when both images keep their shape and pixel size**; otherwise the
+active store has no landmarks, they stay in the `.superseded-<UTC>` store (keep it,
+or copy it elsewhere, before forcing) and the new store must be labelled again.
 
 **The CZI runtime.** Create it once from `envs/environment.czi.yml` (see
 [Development workflow](../development.md#dependency-management)), then set
@@ -175,7 +197,7 @@ preflight error.
 |---|---|---|
 | `manual_registration_presets` | `"same_section"` | Presets of rows with a blank `presets` column |
 | `manual_registration_settings` | `""` | Settings overrides for every row (the row's column wins) |
-| `manual_registration_force_prepare` | `false` | Rebuild the prepared store; a changed grid with a labelling needs it |
+| `manual_registration_force_prepare` | `false` | Rebuild the prepared store; a changed grid with a labelling needs it (see "Re-running prepare") |
 | `manual_registration_force_register` | `false` | Re-run registrations Python would skip |
 | `manual_registration_czi_python` | `null` | Python of the CZI runtime, or `in_process` (site config) |
 
@@ -193,12 +215,14 @@ register workflow additionally reads the root attributes of every prepared store
 | Message starts | What to do |
 |---|---|
 | `<id>: prepared store not found` | run the prepare workflow with the same samplesheet and `--outdir` |
-| `<id>: cannot read the root attributes` | the store is damaged: re-run prepare with `--manual_registration_force_prepare true` |
+| `<id>: cannot read the root attributes` | the store is damaged (or not a Zarr group): re-run prepare with `--manual_registration_force_prepare true`; the old store is kept as `<id>_prepared.zarr.superseded-<UTC>` and its landmarks are not carried over (see "Re-running prepare") |
+| `<id>: ... belongs to dataset <name>` | `prepared_store` points at another id's store: set it to this id's `<id>_prepared.zarr` |
 | `... was written by a newer MerXen/viewer` | update MerXen (or the viewer) |
 | `... is a result store, not a prepared store` | set `prepared_store` to the `<id>_prepared.zarr` store |
 | `no landmarks saved in ...` | open the store in the viewer, place the pairs, press Finish labelling |
 | `the landmarks in ... are a draft` | press Finish labelling |
-| `<id> (preset <p>): <n> enabled landmark pairs ..., at least <m> are needed` | enable or place more pairs, or lower `landmark_min_pairs` (>= 3) |
+| `<id> (preset <p>): <n> enabled landmark pairs ..., at least <m> are needed` | enable or place more pairs, or lower `landmark_min_pairs` and `landmark_min_used_pairs` together (both >= 3; `landmark_min_used_pairs` is 6 by default and must not exceed `landmark_min_pairs`) |
+| `<id> (preset <p>): landmark_min_pairs (<n>) is below landmark_min_used_pairs (<m>)` | lower `landmark_min_used_pairs` to at most `landmark_min_pairs`, or raise `landmark_min_pairs` (a row's or the params' override of either one counts) |
 | `run id '<run_id>' is used twice` | set `run_label` to tell the runs apart |
 
 A register task that fails drops only its own branch (`errorStrategy ignore`);
@@ -457,7 +481,7 @@ summary):
 |---|---|---|
 | `run_manual_registration_prepare(config)` | `merxen.manual_registration.prepare` | Convert/normalise both images and write the prepared store |
 | `run_manual_registration(config)` | `merxen.manual_registration.register` | One (pair, preset) run |
-| `fit_landmarks(...)` | `merxen.manual_registration.landmark_fit` | Robust similarity fit and outlier report (also `manual-registration-fit`) |
+| `fit_landmarks(...)` | `merxen.manual_registration.register` | Landmark fit of a prepared store's labelling (also `manual-registration-fit`); it calls `robust_similarity(...)` of `merxen.manual_registration.landmark_fit` |
 | `compare_runs(config)` | `merxen.manual_registration.compare` | Comparison CSV, JSON and figure |
 | `make_synthetic_pair`, `simulate_landmark_pairs`, `inject_labelling` | `merxen.manual_registration.simulate` | Synthetic pairs and viewer-compatible labelling for tests |
 | `run_read_czi_info`, `run_convert_czi_scene` | `merxen.io.czi` | CZI runtime bridge |
@@ -472,6 +496,12 @@ Scripts for the real-data validation (never imported by the package):
 human, for pairs without ground truth), `export_reference_image.py`
 (a SpatialData image channel to a pyramidal OME-TIFF) and
 `compare_czi_readers.py` (one-off comparison of two CZI readers).
+`derive_test_landmarks.py --inject` writes its labelling into the store as the
+viewer's save does, but never replaces a labelling that was not written by
+`merxen.manual_registration.simulate` (landmarks placed in the viewer): it stops
+with a message, and `--inject --force` saves the old labelling as
+`<out stem>.previous_labelling.<UTC>.json` next to `--out` before replacing it.
+The slow CZI-pair test skips instead when the store holds such a labelling.
 
 ## Validation results
 
@@ -493,7 +523,7 @@ Explorer matrix, plus 1 µm noise and one 40 µm outlier). Test:
 | 4 | Final affine vs HD1's final affine over the tissue grid | mean <= 0.5, max <= 1.0 µm | | |
 | 5 | Non-rigid: status, confident fraction, Pearson after | `applied`; within 0.05 and 0.01 of HD1's | | |
 | 6 | Held-out pairs 13 to 16: median final error; affine error | <= 1.0 µm; mean <= 0.5, max <= 1.0 µm | | |
-| 7 | Registered DAPI vs HD1's registered DAPI (x16 block mean, log) | Pearson >= 0.98 | | |
+| 7 | Registered DAPI vs HD1's registered DAPI (x16 block mean, log; tissue = Otsu of the downsampled Xenium `morphology_focus` DAPI) | Pearson >= 0.98 | | |
 | 8 | Both matrix CSVs load and pass the scale check | no exception | | |
 | 9 | Crop to the inner 80 % vs full | mean <= 0.5, max <= 1.0 µm | | |
 | 10 | Peak RSS of both runs | <= 48 GB | | |
@@ -532,7 +562,9 @@ metrics are recorded, not gated.
 **CZI reader comparison** (one-off, `scripts/manual_registration/compare_czi_readers.py`):
 per file, compression, ROIs compared, maximum absolute difference, mismatching
 pixel fraction and milliseconds per ROI for `czifile`, `pylibCZIrw` and the
-converted OME-TIFF.
+converted OME-TIFF. The two readers are compared on plane Z=0; the OME-TIFF, which
+the converter max-projects over Z, against the `pylibCZIrw` maximum over all Z
+planes.
 
 | File | Compression | ROIs | Max abs diff | Mismatch fraction | ms/ROI czifile | ms/ROI pylibCZIrw | ms/ROI OME-TIFF |
 |---|---|---|---|---|---|---|---|

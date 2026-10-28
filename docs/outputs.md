@@ -238,8 +238,8 @@ processes publish nothing through Nextflow, Python writes these files.
 A run deletes the core QC files of its own run id before the core starts, so
 `qc/` never keeps a file of an earlier run (for example a `nonrigid_*` file after
 a re-run without a flow). A re-run is reused only when the durable summary is
-complete and carries the same `provenance_digest` as the result store, and the
-core QC files it lists exist and are not newer than that summary; otherwise the
+complete, the result store and the summary both carry the same `provenance_digest`
+as the new run, and the core QC files it lists exist and are not newer than that summary; otherwise the
 registration runs again. The previous result store is renamed to
 `<run_id>_registered.zarr.superseded-<UTC>` during the swap and deleted after it
 succeeds; leftover `.superseded-*` stores of a run that died mid-swap are removed
