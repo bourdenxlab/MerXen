@@ -268,8 +268,8 @@ through Nextflow):
 <id>/prepared/<id>_prepared.zarr                         # the store the viewer edits; written atomically
 <id>/prepared/<id>_reference.ome.tif                     # only when converted (CZI) or normalised
 <id>/prepared/<id>_moving.ome.tif                        # same
-<id>/prepared/<id>_reference.prepare.json                # per-image provenance (conversion skip key)
-<id>/prepared/<id>_moving.prepare.json
+<id>/prepared/<id>_reference.prepare.json                # per-image provenance (conversion skip key); only when converted (CZI) or normalised
+<id>/prepared/<id>_moving.prepare.json                   # same
 <id>/prepared/<id>_prepare_summary.json
 <id>/prepared/viewer_cache/                              # VIEWER_CACHE publishDir (symlink to the work dir)
 <id>/registered/<run_name>/<run_id>_registered.zarr      # run_name = <preset>[_<run_label>]
@@ -493,7 +493,9 @@ CLI commands: `convert-czi`, `manual-registration-prepare`,
 
 Scripts for the real-data validation (never imported by the package):
 `scripts/manual_registration/derive_test_landmarks.py` (landmarks without a
-human, for pairs without ground truth), `export_reference_image.py`
+human, for pairs without ground truth: SIFT for the same section, tissue-scale
+window matching for serial sections, `--method auto|sift|window_ncc`),
+`export_reference_image.py`
 (a SpatialData image channel to a pyramidal OME-TIFF) and
 `compare_czi_readers.py` (one-off comparison of two CZI readers).
 `derive_test_landmarks.py --inject` writes its labelling into the store as the
@@ -537,7 +539,10 @@ simulated points are recorded only.
 
 **Zeiss CZI pair, LCM1** (a serial pair; no ground truth; both presets, run
 through Nextflow, with the documented `same_section:matrix_scale_tolerance=0.05`
-override). Landmarks from `derive_test_landmarks.py` (24 pairs, 8 held out). Test:
+override). Landmarks from `derive_test_landmarks.py` (24 pairs, 8 held out). SIFT
+fails on serial sections (the nuclei of adjacent sections do not correspond), so
+the script falls back to tissue-scale window matching; the method used is
+recorded in the validation JSON. Test:
 `tests/test_manual_registration/test_czi_pair.py::test_czi_pair_both_presets`.
 
 | Quantity | `same_section` | `serial_section` |

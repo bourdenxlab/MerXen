@@ -10,6 +10,15 @@ RANSAC similarity fit), picks landmark pairs spread over the tissue and writes
 them as a JSON file outside the repository. With ``--inject`` the labelling is
 written into the store the way the viewer's save does.
 
+SIFT tries the same section first. Adjacent serial sections share tissue-scale
+structure (outline, layers, vessels) but not nuclei, so there SIFT finds almost no
+consistent matches; ``--method auto`` (the default) then falls back to window
+matching: after the coarse warp, windows of band-passed DAPI (about 1 mm) are
+matched by normalised cross-correlation in two passes (the second one searches
+less, around the first pass's similarity) and a similarity is fitted by RANSAC.
+``--method sift`` and ``--method window_ncc`` run one of the two only. The method
+that produced the pairs is recorded in the diagnostics.
+
 The derived pairs are a test input of the workflow, never a result: nothing here
 is used by the pipeline.
 
@@ -50,6 +59,7 @@ from merxen.io.ome_tiff import open_ome_tiff_level, read_ome_tiff_info
 from merxen.manual_registration.geometry import (
     coarse_from_matrix,
     points_outside_crop,
+    similarity_parameters,
     snap_crop,
     wrap_deg,
 )
@@ -71,6 +81,7 @@ SCHEMA = "merxen.manual_registration.test_landmarks"
 MAX_WORKING_SIDE_PX = 8192
 RATIO_TEST = 0.75
 ROLES = ("reference", "moving")
+METHODS = ("auto", "sift", "window_ncc")
 # ``written_by.software`` of the labellings ``inject_labelling`` writes.
 SIMULATE_SOFTWARE = "merxen.manual_registration.simulate"
 
@@ -86,7 +97,7 @@ class DerivedLandmarks:
         scale_ratio: Matrix scale over the pixel-size ratio.
         crops: Effective-crop proposals per role (``None``: no crop).
         pairs: Landmark pairs (ids ``1..n``, every third one disabled).
-        diagnostics: Search and SIFT numbers (JSON-able).
+        diagnostics: Search, method and fit numbers (JSON-able).
     """
 
     matrix_full: np.ndarray
@@ -362,6 +373,35 @@ def _detect(
     return sift.detectAndCompute(image, mask=eroded.astype(np.uint8) * 255)
 
 
+def _ransac_similarity(
+    moving_xy: np.ndarray, reference_xy: np.ndarray, *, threshold_px: float
+) -> tuple[np.ndarray | None, np.ndarray]:
+    """Fit a proper similarity (no reflection) by RANSAC.
+
+    Args:
+        moving_xy: ``(N, 2)`` moving points.
+        reference_xy: ``(N, 2)`` reference points.
+        threshold_px: RANSAC reprojection threshold (the caller seeds OpenCV's
+            generator with ``cv2.setRNGSeed``).
+
+    Returns:
+        ``(3x3 matrix, inlier flags)``; the matrix is ``None`` when OpenCV finds no
+        fit.
+    """
+    transform, inliers = cv2.estimateAffinePartial2D(
+        np.asarray(moving_xy).astype(np.float32),
+        np.asarray(reference_xy).astype(np.float32),
+        method=cv2.RANSAC,
+        ransacReprojThreshold=float(threshold_px),
+        maxIters=20000,
+        confidence=0.999,
+        refineIters=10,
+    )
+    if transform is None or inliers is None:
+        return None, np.zeros(len(moving_xy), dtype=bool)
+    return np.vstack([transform, [0.0, 0.0, 1.0]]), inliers.ravel().astype(bool)
+
+
 def sift_similarity(
     ref_img: np.ndarray,
     mov_img: np.ndarray,
@@ -437,20 +477,12 @@ def sift_similarity(
     result["n_gated"] = int(keep.sum())
     if keep.sum() < 3:
         return result
-    transform, inliers = cv2.estimateAffinePartial2D(
-        moving_flipped[keep].astype(np.float32),
-        reference[keep].astype(np.float32),
-        method=cv2.RANSAC,
-        ransacReprojThreshold=float(ransac_threshold_px),
-        maxIters=20000,
-        confidence=0.999,
-        refineIters=10,
+    proper, flags = _ransac_similarity(
+        moving_flipped[keep], reference[keep], threshold_px=ransac_threshold_px
     )
-    if transform is None or inliers is None:
+    if proper is None:
         return result
-    proper = np.vstack([transform, [0.0, 0.0, 1.0]])
     matrix = proper @ flip if mirror else proper
-    flags = inliers.ravel().astype(bool)
     result.update(
         {
             "matrix_working": matrix,
@@ -459,6 +491,328 @@ def sift_similarity(
             "reference_xy": reference[keep][flags],
         }
     )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Window matching (tissue scale; the serial-section method)
+# ---------------------------------------------------------------------------
+
+
+def _bandpass(
+    pixels: np.ndarray,
+    mask: np.ndarray,
+    pixel_size_um: float,
+    *,
+    highpass_sigma_um: float,
+    smooth_sigma_um: float,
+) -> np.ndarray:
+    """Band-pass of the log image: tissue structure, no illumination or nuclei.
+
+    Outside the mask the image is set to its in-mask median before the high-pass (so
+    the tissue edge does not ring) and to 0 afterwards.
+
+    Args:
+        pixels: Raw 2-D working image.
+        mask: Tissue mask.
+        pixel_size_um: Working pixel size.
+        highpass_sigma_um: Gaussian sigma of the background that is subtracted.
+        smooth_sigma_um: Gaussian sigma of the final smoothing.
+
+    Returns:
+        float32 image, 0 outside the mask.
+    """
+    image = np.log1p(np.clip(np.asarray(pixels, dtype=np.float32), 0.0, None))
+    fill = float(np.median(image[mask])) if mask.any() else 0.0
+    image = np.where(mask, image, fill).astype(np.float32)
+    high = image - ndimage.gaussian_filter(image, highpass_sigma_um / pixel_size_um)
+    band = ndimage.gaussian_filter(high, smooth_sigma_um / pixel_size_um)
+    return np.where(mask, band, 0.0).astype(np.float32)
+
+
+def _parabolic_peak(values: np.ndarray, index: int) -> float:
+    """Sub-pixel position of the peak at integer ``index`` of a 1-D profile."""
+    if 0 < index < len(values) - 1:
+        left, centre, right = (float(values[i]) for i in (index - 1, index, index + 1))
+        denominator = left - 2.0 * centre + right
+        if denominator != 0.0:
+            return index + 0.5 * (left - right) / denominator
+    return float(index)
+
+
+def _match_window(
+    region: np.ndarray, window: np.ndarray, *, exclusion_px: int
+) -> tuple[float, float, float, float, bool]:
+    """Locate a window in a larger region by normalised cross-correlation.
+
+    Args:
+        region: Search region (``window`` plus the search margin on every side).
+        window: Template.
+        exclusion_px: Half-side of the square around the peak that the second peak
+            ignores.
+
+    Returns:
+        ``(peak, second_peak, x, y, on_border)``: the correlation maximum, the
+        highest value outside the exclusion square (``-1`` when nothing is left),
+        the sub-pixel position of the maximum as the template's top-left offset in
+        the region, and whether the integer maximum lies on the border of the
+        correlation map (the true shift may exceed the search).
+    """
+    scores = cv2.matchTemplate(region, window, cv2.TM_CCOEFF_NORMED)
+    _, peak, _, (peak_x, peak_y) = cv2.minMaxLoc(scores)
+    others = scores.copy()
+    others[
+        max(0, peak_y - exclusion_px) : peak_y + exclusion_px + 1,
+        max(0, peak_x - exclusion_px) : peak_x + exclusion_px + 1,
+    ] = -1.0
+    height, width = scores.shape
+    on_border = peak_x in (0, width - 1) or peak_y in (0, height - 1)
+    return (
+        float(peak),
+        float(others.max()),
+        _parabolic_peak(scores[peak_y, :], peak_x),
+        _parabolic_peak(scores[:, peak_x], peak_y),
+        bool(on_border),
+    )
+
+
+def _window_pass(
+    ref_band: np.ndarray,
+    mov_band: np.ndarray,
+    ref_mask: np.ndarray,
+    mov_mask: np.ndarray,
+    matrix: np.ndarray,
+    *,
+    search_px: int,
+    half_px: int,
+    stride_px: int,
+    exclusion_px: int,
+    min_mask_fraction: float,
+    min_peak: float,
+    min_peak_margin: float,
+) -> tuple[int, np.ndarray, np.ndarray]:
+    """Match reference windows against the moving image warped by ``matrix``.
+
+    Returns:
+        ``(windows tried, reference points, moving points)`` of the confident
+        windows; the points are ``(x, y)`` working px, the moving ones in the
+        unwarped (unflipped) moving frame.
+    """
+    height, width = ref_band.shape
+    size = (width, height)
+    warped = cv2.warpAffine(mov_band, matrix[:2], size, flags=cv2.INTER_LINEAR)
+    warped_mask = (
+        cv2.warpAffine(
+            mov_mask.astype(np.uint8), matrix[:2], size, flags=cv2.INTER_NEAREST
+        )
+        > 0
+    )
+    margin = half_px + search_px
+    n_windows = 0
+    reference_xy: list[tuple[float, float]] = []
+    warped_xy: list[tuple[float, float]] = []
+    for cy in range(margin, height - margin, stride_px):
+        for cx in range(margin, width - margin, stride_px):
+            rows = slice(cy - half_px, cy + half_px)
+            cols = slice(cx - half_px, cx + half_px)
+            if ref_mask[rows, cols].mean() < min_mask_fraction:
+                continue
+            area = (slice(cy - margin, cy + margin), slice(cx - margin, cx + margin))
+            if warped_mask[area].mean() < min_mask_fraction:
+                continue
+            n_windows += 1
+            peak, second, x, y, on_border = _match_window(
+                warped[area], ref_band[rows, cols], exclusion_px=exclusion_px
+            )
+            if on_border or peak <= min_peak or peak - second < min_peak_margin:
+                continue
+            # The window covers pixels cx - half .. cx + half - 1: its centre is
+            # cx - 0.5. The matched content sits at that centre plus the shift.
+            centre = (cx - 0.5, cy - 0.5)
+            reference_xy.append(centre)
+            warped_xy.append((centre[0] + x - search_px, centre[1] + y - search_px))
+    reference = np.asarray(reference_xy, dtype=np.float64).reshape(-1, 2)
+    moving = _apply(np.linalg.inv(matrix), np.asarray(warped_xy).reshape(-1, 2))
+    return n_windows, reference, moving
+
+
+def window_ncc_similarity(
+    ref_img: np.ndarray,
+    mov_img: np.ndarray,
+    ref_mask: np.ndarray,
+    mov_mask: np.ndarray,
+    *,
+    coarse_matrix: np.ndarray,
+    mirror: bool,
+    ref_pixel_size_um: float,
+    mov_pixel_size_um: float,
+    search_um: tuple[float, ...] = (600.0, 200.0),
+    window_um: float = 1000.0,
+    stride_um: float = 700.0,
+    min_mask_fraction: float = 0.9,
+    min_peak: float = 0.3,
+    min_peak_margin: float = 0.05,
+    exclusion_um: float = 100.0,
+    highpass_sigma_um: float = 150.0,
+    smooth_sigma_um: float = 8.0,
+    ransac_threshold_um: float = 60.0,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Fit a similarity by tissue-scale window matching after the coarse warp.
+
+    Serial sections share tissue-scale structure (outline, layers, vessels) but not
+    nuclei, so SIFT on nuclei finds no consistent matches. Both images are
+    band-passed (log, minus a wide Gaussian, then a narrow smoothing). Each pass
+    warps the moving image into the reference frame with the current matrix, matches
+    reference windows against it by normalised cross-correlation within a search
+    margin and fits a similarity to the confident window centres by RANSAC; the next
+    pass (a smaller search) warps with this pass's fit. A pass that finds no fit
+    ends the passes and the result is the last pass that did fit.
+
+    A window is kept when at least ``min_mask_fraction`` of it is tissue in the
+    reference and of its search region is tissue in the warped moving image. It is
+    confident when its correlation peak exceeds ``min_peak``, beats the best peak
+    outside an ``exclusion_um`` square by ``min_peak_margin`` and does not lie on the
+    border of the search region (the true shift may exceed the search).
+
+    Args:
+        ref_img: Reference working image (raw intensities).
+        mov_img: Moving working image (raw intensities).
+        ref_mask: Reference tissue mask.
+        mov_mask: Moving tissue mask.
+        coarse_matrix: 3x3 matrix from moving working px to reference working px
+            (improper for a mirror), e.g. ``coarse_search``'s ``matrix_working``.
+        mirror: Whether the coarse matrix mirrors (the searched state); the points
+            are flipped for the fit, so the fitted similarity is proper.
+        ref_pixel_size_um: Reference working pixel size.
+        mov_pixel_size_um: Moving working pixel size.
+        search_um: Search half-width per pass (one pass per value).
+        window_um: Window side.
+        stride_um: Distance between window centres.
+        min_mask_fraction: Smallest tissue fraction of a window and its search region.
+        min_peak: Smallest correlation peak of a confident window.
+        min_peak_margin: Smallest gap of the peak over the second peak.
+        exclusion_um: Half-side of the square around the peak that the second peak
+            ignores.
+        highpass_sigma_um: Gaussian sigma of the subtracted background.
+        smooth_sigma_um: Gaussian sigma of the smoothing.
+        ransac_threshold_um: RANSAC reprojection threshold.
+        seed: Seed of OpenCV's random generator.
+
+    Returns:
+        The keys of :func:`sift_similarity` (``matrix_working``, moving working px
+        unflipped to reference working px and improper when mirrored, ``None``
+        without a fit; ``n_inliers``; ``moving_xy`` and ``reference_xy``, the inlier
+        correspondences; ``n_keypoints_reference`` and ``n_keypoints_moving``, the
+        windows tried; ``n_ratio_matches`` and ``n_gated``, the confident windows;
+        all of the pass the matrix comes from, or of the first pass when none fit)
+        and ``passes``: per pass ``search_um``, ``n_windows``, ``n_confident``,
+        ``n_inliers``, ``scale``, ``rotation_deg`` (as in ``coarse_search``: the
+        rotation after the mirror, counter-clockwise on screen), and the median and
+        90th percentile of the inlier residuals in um (``None`` without a fit).
+
+    Raises:
+        ValueError: If ``mirror`` disagrees with the handedness of ``coarse_matrix``.
+    """
+    current = np.asarray(coarse_matrix, dtype=np.float64)
+    if (np.linalg.det(current[:2, :2]) < 0) != bool(mirror):
+        raise ValueError("mirror disagrees with the coarse matrix")
+    cv2.setRNGSeed(int(seed))
+    ref_band = _bandpass(
+        ref_img,
+        ref_mask,
+        ref_pixel_size_um,
+        highpass_sigma_um=highpass_sigma_um,
+        smooth_sigma_um=smooth_sigma_um,
+    )
+    mov_band = _bandpass(
+        mov_img,
+        mov_mask,
+        mov_pixel_size_um,
+        highpass_sigma_um=highpass_sigma_um,
+        smooth_sigma_um=smooth_sigma_um,
+    )
+    half_px = int(round(window_um / ref_pixel_size_um)) // 2
+    stride_px = max(1, int(round(stride_um / ref_pixel_size_um)))
+    exclusion_px = int(round(exclusion_um / ref_pixel_size_um))
+    flip = np.array(
+        [[-1.0, 0.0, mov_img.shape[1] - 1.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    )
+    result: dict[str, Any] = {
+        "matrix_working": None,
+        "n_inliers": 0,
+        "moving_xy": np.zeros((0, 2)),
+        "reference_xy": np.zeros((0, 2)),
+        "n_keypoints_reference": 0,
+        "n_keypoints_moving": 0,
+        "n_ratio_matches": 0,
+        "n_gated": 0,
+    }
+    passes: list[dict[str, Any]] = []
+    for index, search in enumerate(search_um):
+        n_windows, reference, moving = _window_pass(
+            ref_band,
+            mov_band,
+            ref_mask,
+            mov_mask,
+            current,
+            search_px=int(round(search / ref_pixel_size_um)),
+            half_px=half_px,
+            stride_px=stride_px,
+            exclusion_px=exclusion_px,
+            min_mask_fraction=min_mask_fraction,
+            min_peak=min_peak,
+            min_peak_margin=min_peak_margin,
+        )
+        record: dict[str, Any] = {
+            "search_um": float(search),
+            "n_windows": n_windows,
+            "n_confident": len(reference),
+            "n_inliers": 0,
+            "scale": None,
+            "rotation_deg": None,
+            "inlier_residual_median_um": None,
+            "inlier_residual_p90_um": None,
+        }
+        passes.append(record)
+        proper, flags = (
+            _ransac_similarity(
+                _apply(flip, moving) if mirror else moving,
+                reference,
+                threshold_px=ransac_threshold_um / ref_pixel_size_um,
+            )
+            if len(reference) >= 3
+            else (None, np.zeros(len(reference), dtype=bool))
+        )
+        if index == 0 or proper is not None:
+            result.update(
+                n_keypoints_reference=n_windows,
+                n_keypoints_moving=n_windows,
+                n_ratio_matches=len(reference),
+                n_gated=len(reference),
+            )
+        if proper is None:
+            break
+        current = proper @ flip if mirror else proper
+        scale, rotation_deg, _ = similarity_parameters(current)
+        residuals = (
+            np.linalg.norm(_apply(current, moving[flags]) - reference[flags], axis=1)
+            * ref_pixel_size_um
+        )
+        record.update(
+            n_inliers=int(flags.sum()),
+            scale=float(scale),
+            rotation_deg=float(rotation_deg),
+            inlier_residual_median_um=float(np.median(residuals)),
+            inlier_residual_p90_um=float(np.percentile(residuals, 90.0)),
+        )
+        result.update(
+            matrix_working=current,
+            n_inliers=int(flags.sum()),
+            moving_xy=moving[flags],
+            reference_xy=reference[flags],
+        )
+    result["passes"] = passes
     return result
 
 
@@ -528,13 +882,8 @@ def _disabled_ids(n_pairs: int, n_disabled: int) -> set[int]:
     return set(list(range(3, n_pairs + 1, 3))[:n_disabled])
 
 
-def _estimate(
-    store: Path,
-    *,
-    working_pixel_size_um: float,
-    seed: int,
-) -> dict[str, Any]:
-    """Coarse search and SIFT fit at one working pixel size."""
+def _load_and_search(store: Path, *, working_pixel_size_um: float) -> dict[str, Any]:
+    """Read both working images, their tissue masks and the coarse search."""
     ref, p_ref = load_working_dapi(
         store, "reference", pixel_size_um=working_pixel_size_um
     )
@@ -554,14 +903,37 @@ def _estimate(
         search["iou"],
         search["runner_up_iou"],
     )
+    return {
+        "ref": ref,
+        "mov": mov,
+        "p_ref": p_ref,
+        "p_mov": p_mov,
+        "q_ref": q_ref,
+        "scale": scale,
+        "ref_mask": ref_mask,
+        "mov_mask": mov_mask,
+        "search": search,
+    }
+
+
+def _estimate(
+    store: Path,
+    *,
+    working_pixel_size_um: float,
+    seed: int,
+) -> dict[str, Any]:
+    """Coarse search and SIFT fit at one working pixel size."""
+    state = _load_and_search(store, working_pixel_size_um=working_pixel_size_um)
+    q_ref = state["q_ref"]
+    search = state["search"]
     fit = sift_similarity(
-        ref.pixels,
-        mov.pixels,
-        ref_mask,
-        mov_mask,
+        state["ref"].pixels,
+        state["mov"].pixels,
+        state["ref_mask"],
+        state["mov_mask"],
         coarse=search,
         mirror=bool(search["mirror_x"]),
-        scale=scale,
+        scale=state["scale"],
         gate_px=500.0 / q_ref,
         ransac_threshold_px=max(2.0, 30.0 / q_ref),
         seed=seed,
@@ -574,17 +946,79 @@ def _estimate(
         fit["n_gated"],
         fit["n_inliers"],
     )
+    return {**state, "fit": fit, "method": "sift"}
+
+
+def _estimate_window(
+    store: Path,
+    *,
+    working_pixel_size_um: float,
+    seed: int,
+) -> dict[str, Any]:
+    """Coarse search and window-matching fit at one working pixel size."""
+    state = _load_and_search(store, working_pixel_size_um=working_pixel_size_um)
+    search = state["search"]
+    fit = window_ncc_similarity(
+        state["ref"].pixels,
+        state["mov"].pixels,
+        state["ref_mask"],
+        state["mov_mask"],
+        coarse_matrix=search["matrix_working"],
+        mirror=bool(search["mirror_x"]),
+        ref_pixel_size_um=state["q_ref"],
+        mov_pixel_size_um=state["q_ref"] * state["scale"],
+        seed=seed,
+    )
+    for number, record in enumerate(fit["passes"], start=1):
+        logger.info(
+            "window matching pass %d (search +-%.0f um): %d windows, %d confident, "
+            "%d inliers, scale %s, rotation %s deg, inlier residual median %s um",
+            number,
+            record["search_um"],
+            record["n_windows"],
+            record["n_confident"],
+            record["n_inliers"],
+            _format(record["scale"], "%.4f"),
+            _format(record["rotation_deg"], "%.2f"),
+            _format(record["inlier_residual_median_um"], "%.1f"),
+        )
+    return {**state, "fit": fit, "method": "window_ncc"}
+
+
+def _format(value: float | None, pattern: str) -> str:
+    return "n/a" if value is None else pattern % value
+
+
+def _usable(state: dict[str, Any], min_inliers: int) -> bool:
+    fit = state["fit"]
+    return fit["matrix_working"] is not None and fit["n_inliers"] >= min_inliers
+
+
+def _sift_counts(counts: dict[str, Any]) -> str:
+    """SIFT's keypoint and match counts (a fit or its diagnostics: same keys)."""
+    return (
+        f"keypoints ref/mov {counts['n_keypoints_reference']}/"
+        f"{counts['n_keypoints_moving']}, ratio matches {counts['n_ratio_matches']}, "
+        f"gated {counts['n_gated']}"
+    )
+
+
+def _window_counts(fit: dict[str, Any]) -> str:
+    return f"{fit['n_keypoints_reference']} windows, {fit['n_ratio_matches']} confident"
+
+
+def _sift_diagnostics(
+    state: dict[str, Any], retried_at: float | None
+) -> dict[str, Any]:
+    fit = state["fit"]
     return {
-        "ref": ref,
-        "mov": mov,
-        "p_ref": p_ref,
-        "p_mov": p_mov,
-        "q_ref": q_ref,
-        "scale": scale,
-        "ref_mask": ref_mask,
-        "mov_mask": mov_mask,
-        "search": search,
-        "fit": fit,
+        "n_keypoints_reference": fit["n_keypoints_reference"],
+        "n_keypoints_moving": fit["n_keypoints_moving"],
+        "n_ratio_matches": fit["n_ratio_matches"],
+        "n_gated": fit["n_gated"],
+        "n_inliers": fit["n_inliers"],
+        "ransac_threshold_um": max(2.0, 30.0 / state["q_ref"]) * state["q_ref"],
+        "retried_at_um": retried_at,
     }
 
 
@@ -596,6 +1030,8 @@ def derive(
     working_pixel_size_um: float = 10.0,
     min_inliers: int = 24,
     seed: int = 0,
+    method: str = "auto",
+    window_pixel_size_um: float = 11.0,
 ) -> DerivedLandmarks:
     """Derive an alignment, crops and landmark pairs for a prepared store.
 
@@ -603,51 +1039,96 @@ def derive(
         store: A prepared store.
         n_pairs: Pairs to derive (ids ``1..n_pairs``, farthest-point order).
         n_disabled: Pairs to disable (ids 3, 6, 9, ...), as the held-out set.
-        working_pixel_size_um: Working pixel size of the search.
-        min_inliers: RANSAC inliers needed; fewer retries once at half the pixel size.
+        working_pixel_size_um: Working pixel size of the SIFT search.
+        min_inliers: RANSAC inliers needed; with SIFT, fewer retries once at half
+            the pixel size.
         seed: Seed of the RANSAC random generator.
+        method: ``"sift"``; ``"window_ncc"`` (tissue-scale window matching, for
+            serial sections); or ``"auto"``: SIFT, and window matching when SIFT
+            ends with fewer than ``min_inliers`` inliers.
+        window_pixel_size_um: Working pixel size of the window matching.
 
     Returns:
-        The derived alignment.
+        The derived alignment (``diagnostics["method"]`` names the method that
+        produced the pairs).
 
     Raises:
+        ValueError: On an unknown ``method``.
         RuntimeError: If no usable alignment is found or fewer than ``n_pairs``
             pairs lie inside both crops.
     """
+    if method not in METHODS:
+        raise ValueError(f"method must be one of {METHODS}, got {method!r}")
     store = Path(store)
     attrs = read_root_attrs(store)[STORE_ATTR]
     shapes = {role: tuple(attrs["images"][role]["shape_yx"]) for role in ROLES}
     used_pixel_size = working_pixel_size_um
-    state = _estimate(
-        store,
-        working_pixel_size_um=used_pixel_size,
-        seed=seed,
-    )
     retried_at: float | None = None
-    if state["fit"]["n_inliers"] < min_inliers:
-        longest_um = max(
-            max(shapes[role]) * float(attrs["images"][role]["pixel_size_um"])
-            for role in ROLES
+    sift_diagnostics: dict[str, Any] | None = None
+    state: dict[str, Any] | None = None
+    if method in ("auto", "sift"):
+        state = _estimate(
+            store,
+            working_pixel_size_um=used_pixel_size,
+            seed=seed,
         )
-        finer = max(working_pixel_size_um / 2.0, longest_um / MAX_WORKING_SIDE_PX)
-        if finer < working_pixel_size_um:
-            logger.info(
-                "only %d inliers; retrying at %.2f um", state["fit"]["n_inliers"], finer
+        if state["fit"]["n_inliers"] < min_inliers:
+            longest_um = max(
+                max(shapes[role]) * float(attrs["images"][role]["pixel_size_um"])
+                for role in ROLES
             )
-            used_pixel_size = retried_at = finer
-            state = _estimate(
-                store,
-                working_pixel_size_um=finer,
-                seed=seed,
+            finer = max(working_pixel_size_um / 2.0, longest_um / MAX_WORKING_SIDE_PX)
+            if finer < working_pixel_size_um:
+                logger.info(
+                    "only %d inliers; retrying at %.2f um",
+                    state["fit"]["n_inliers"],
+                    finer,
+                )
+                used_pixel_size = retried_at = finer
+                state = _estimate(
+                    store,
+                    working_pixel_size_um=finer,
+                    seed=seed,
+                )
+        # Only SIFT's diagnostics (counts) are kept: on a fallback the SIFT state, with
+        # its working images and masks, is dropped before the window run starts.
+        sift_diagnostics = _sift_diagnostics(state, retried_at)
+        if not _usable(state, min_inliers):
+            fit = state["fit"]
+            if method == "sift":
+                raise RuntimeError(
+                    f"only {fit['n_inliers']} RANSAC inliers (keypoints ref/mov "
+                    f"{fit['n_keypoints_reference']}/{fit['n_keypoints_moving']}, "
+                    f"ratio matches {fit['n_ratio_matches']}, gated "
+                    f"{fit['n_gated']}); place landmarks by hand in the viewer"
+                )
+            logger.info(
+                "SIFT ended with %d inliers (%s): falling back to window matching",
+                fit["n_inliers"],
+                _sift_counts(fit),
+            )
+            state = None
+    if state is None:
+        used_pixel_size = window_pixel_size_um
+        state = _estimate_window(
+            store, working_pixel_size_um=window_pixel_size_um, seed=seed
+        )
+        if not _usable(state, min_inliers):
+            window = state["fit"]
+            if sift_diagnostics is None:
+                raise RuntimeError(
+                    f"only {window['n_inliers']} RANSAC inliers from window matching "
+                    f"({_window_counts(window)}); place landmarks by hand in the "
+                    "viewer"
+                )
+            sift = sift_diagnostics
+            raise RuntimeError(
+                f"only {sift['n_inliers']} RANSAC inliers from SIFT "
+                f"({_sift_counts(sift)}) and {window['n_inliers']} from window "
+                f"matching ({_window_counts(window)}); place landmarks by hand in "
+                "the viewer"
             )
     fit = state["fit"]
-    if fit["n_inliers"] < min_inliers or fit["matrix_working"] is None:
-        raise RuntimeError(
-            f"only {fit['n_inliers']} RANSAC inliers (keypoints ref/mov "
-            f"{fit['n_keypoints_reference']}/{fit['n_keypoints_moving']}, ratio "
-            f"matches {fit['n_ratio_matches']}, gated {fit['n_gated']}); place "
-            "landmarks by hand in the viewer"
-        )
     w_ref = state["ref"].to_level0
     w_mov = state["mov"].to_level0
     matrix_full = w_ref @ np.asarray(fit["matrix_working"]) @ np.linalg.inv(w_mov)
@@ -698,7 +1179,7 @@ def derive(
         reference_pixel_size_um=state["p_ref"],
     )
     search = state["search"]
-    diagnostics = {
+    diagnostics: dict[str, Any] = {
         "working_pixel_size_um": {
             "reference": state["q_ref"],
             "moving": state["q_ref"] * state["scale"],
@@ -714,18 +1195,23 @@ def derive(
                 "iou_by_mirror",
             )
         },
-        "sift": {
-            "n_keypoints_reference": fit["n_keypoints_reference"],
-            "n_keypoints_moving": fit["n_keypoints_moving"],
-            "n_ratio_matches": fit["n_ratio_matches"],
-            "n_gated": fit["n_gated"],
-            "n_inliers": fit["n_inliers"],
-            "ransac_threshold_um": max(2.0, 30.0 / state["q_ref"]) * state["q_ref"],
-            "retried_at_um": retried_at,
-        },
-        "requested_working_pixel_size_um": working_pixel_size_um,
+        "method": state["method"],
+        "sift": sift_diagnostics,
+        "requested_working_pixel_size_um": (
+            window_pixel_size_um
+            if state["method"] == "window_ncc"
+            else working_pixel_size_um
+        ),
         "used_working_pixel_size_um": used_pixel_size,
     }
+    if state["method"] == "window_ncc":
+        diagnostics["window_ncc"] = {
+            "working_pixel_size_um": {
+                "reference": state["q_ref"],
+                "moving": state["q_ref"] * state["scale"],
+            },
+            "passes": fit["passes"],
+        }
     return DerivedLandmarks(
         matrix_full=matrix_full,
         coarse=coarse,
@@ -749,8 +1235,10 @@ def _output_document(store: Path, derived: DerivedLandmarks) -> dict[str, Any]:
         "schema_version": 1,
         "store_grid_digest": attrs.get("grid_digest"),
         "working_pixel_size_um": diagnostics["working_pixel_size_um"],
+        "method": diagnostics["method"],
         "coarse_search": diagnostics["coarse_search"],
         "sift": diagnostics["sift"],
+        "window_ncc": diagnostics.get("window_ncc"),
         "matrix_full": derived.matrix_full.tolist(),
         "coarse": derived.coarse.model_dump(),
         "scale_ratio": derived.scale_ratio,
@@ -904,8 +1392,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--n-pairs", type=int, default=24)
     parser.add_argument("--n-disabled", type=int, default=8)
-    parser.add_argument("--working-pixel-size-um", type=float, default=10.0)
+    parser.add_argument(
+        "--working-pixel-size-um",
+        type=float,
+        default=10.0,
+        help="Working pixel size of the SIFT search.",
+    )
     parser.add_argument("--min-inliers", type=int, default=24)
+    parser.add_argument(
+        "--method",
+        choices=METHODS,
+        default="auto",
+        help=(
+            "sift; window_ncc (tissue-scale window matching, for serial sections); "
+            "auto: SIFT, then window matching when SIFT finds too few inliers."
+        ),
+    )
+    parser.add_argument(
+        "--window-pixel-size-um",
+        type=float,
+        default=11.0,
+        help="Working pixel size of the window matching.",
+    )
     parser.add_argument(
         "--inject",
         action="store_true",
@@ -956,6 +1464,8 @@ def main(argv: list[str] | None = None) -> int:
         working_pixel_size_um=args.working_pixel_size_um,
         min_inliers=args.min_inliers,
         seed=args.seed,
+        method=args.method,
+        window_pixel_size_um=args.window_pixel_size_um,
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(
