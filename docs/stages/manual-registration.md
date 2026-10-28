@@ -372,12 +372,16 @@ matrix; the main pipeline applies its own refinement.
   or `rejected_<reason>`, with a reason. A rejected guard keeps the previous mapping; the
   run is still `complete`. The refinement is `rejected_exceeds_limits` (shift,
   rotation or scale beyond the limits) or `rejected_no_correlation_gain` (the
-  correction did not raise the registration-channel correlation: the reason reads
-  like `DAPI correlation 0.4876 -> 0.4863 (gain -0.0013 < 0.0)`); in both cases the
+  correction did not raise the registration-channel correlation: the reason starts
+  with the channel's name and reads like
+  `DAPI correlation 0.4876 -> 0.4863 (gain -0.0013 < 0.0)`); in both cases the
   residual statistics and the QC figure show the unrefined state. With the check on,
   `refinement.pearson_before` and `refinement.pearson_candidate` give the
-  correlation without and with the correction (null when it cannot be measured, which
-  also rejects). The flow reports confident fraction, Pearson before and
+  correlation without and with the correction (null when it cannot be measured,
+  which also rejects). They are present only when the correction passed the
+  limits (status `applied` or `rejected_no_correlation_gain`); otherwise the
+  correlation before is `refinement_qc.before.pearson_log_registration_channel`.
+  The flow reports confident fraction, Pearson before and
   after, displacement and Jacobian statistics.
 - **Tissue Pearson per stage** (`tissue_qc.pearson`: coarse, landmark, affine,
   final): correlation of band-passed tissue-scale intensity. The working image
@@ -559,8 +563,10 @@ accuracy. The control is the current pipeline's own registration from the
 Explorer matrix: a third run, labelled `explorer`, whose 16 landmark pairs are
 the same tissue points as the simulated ones, mapped through the Explorer matrix
 exactly (no noise, no outlier, all enabled), with the same coarse, no crops and
-HD1's recorded row settings, through the shared core as `REGISTER_IMAGES` runs
-it. Checks 4 to 7 compare the `full` run (noisy landmarks and the outlier) with
+HD1's recorded row settings, and with the correlation-gain check off
+(`refinement_min_correlation_gain=-2`, as `REGISTER_IMAGES` has none; the `full`
+and crop runs keep the preset's 0.0), through the shared core as `REGISTER_IMAGES`
+runs it. Checks 4 to 7 compare the `full` run (noisy landmarks and the outlier) with
 it, so they measure what the manual path adds to the pipeline's own result.
 The comparisons with HD1's stored registration are kept in the validation JSON as
 recorded values, never gates: `4_vs_stored`, `5_vs_stored`, `6_vs_stored`,
