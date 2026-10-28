@@ -482,8 +482,15 @@ def _import_czifile() -> Any:
 
 
 def _open_czi(path: Path) -> Any:
-    """Open a CZI (module-level so tests can replace it); not thread-safe."""
-    return _import_czifile().CziFile(path, memmap=True, squeeze=False)
+    """Open a CZI (module-level so tests can replace it); not thread-safe.
+
+    The file is read, not memory-mapped (``memmap=False``): a map keeps every page
+    it has touched resident until the handle is closed, so a conversion with one
+    handle per reader thread would end up with the whole mosaic counted as
+    resident memory. Each handle reads through its own file object, so reader
+    threads that use one handle each do not contend for a lock.
+    """
+    return _import_czifile().CziFile(path, memmap=False, squeeze=False)
 
 
 def read_czi_info(path: Path) -> CziFileInfo:
