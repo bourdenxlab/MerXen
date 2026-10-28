@@ -13,6 +13,7 @@ of the fit and the QC; ``same_section`` must complete, its numbers are recorded.
 from __future__ import annotations
 
 import csv
+import dataclasses
 import json
 import os
 import shutil
@@ -739,6 +740,7 @@ def test_main_force_replaces_after_saving_the_old_labelling(
 # --------------------------------------------------------------------------
 
 WORKFLOWS = REPO_ROOT / "workflows"
+PRESET_NAMES = ("same_section", "serial_section")
 SAME_SECTION_OVERRIDE = "same_section:matrix_scale_tolerance=0.05"
 
 
@@ -789,171 +791,151 @@ def _nextflow(
     )
 
 
+def _dig(mapping: Any, *keys: str) -> Any:
+    """``mapping[k1][k2]...``, or ``None`` where a level or key is missing."""
+    for key in keys:
+        if not isinstance(mapping, dict) or key not in mapping:
+            return None
+        mapping = mapping[key]
+    return mapping
+
+
 def _held_out(summary: dict[str, Any], stage: str) -> float | None:
-    return summary["residual_summary_um"]["held_out"][stage]["median"]  # type: ignore[no-any-return]
+    return _dig(summary, "residual_summary_um", "held_out", stage, "median")  # type: ignore[no-any-return]
 
 
-@pytest.mark.slow
-def test_czi_pair_both_presets(real_path: Callable[[str], Path]) -> None:  # noqa: C901
-    test_dir = real_path("MERXEN_MANUAL_REGISTRATION_TEST_DIR")
-    evidence = real_path("MERXEN_EVIDENCE_ROOT")
-    task_tmp = real_path("MERXEN_TASK_TMP_DIR")
-    czi_python = real_path("MERXEN_CZI_PYTHON")
-    manifest_path = evidence / "manual_registration" / "czi_test_pairs.json"
-    if not manifest_path.is_file():
-        pytest.skip(
-            "the CZI test manifest does not exist (docs/stages/manual-registration.md)"
-        )
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    alias = manifest["default"]
-    entry = manifest["pairs"][alias]
-    runs = evidence / "manual_registration" / "runs"
-    outdir = runs / "out"
-    runs.mkdir(parents=True, exist_ok=True)
-    sheet = runs / "samplesheet.csv"
-    with sheet.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(
-            [
-                "id",
-                "reference_image",
-                "moving_image",
-                "presets",
-                "registration_settings",
-            ]
-        )
-        writer.writerow(
-            [
-                alias,
-                str(test_dir / entry["reference"]),
-                str(test_dir / entry["moving"]),
-                "same_section;serial_section",
-                SAME_SECTION_OVERRIDE,
-            ]
-        )
+def _validate_register_run(
+    *,
+    registered: subprocess.CompletedProcess[str],
+    outdir: Path,
+    alias: str,
+    derived: Any,
+) -> tuple[dict[str, Any], list[str]]:
+    """Read what the register launch left behind and evaluate the gates.
 
-    # 1. Prepare through Nextflow (the real resource requests apply).
-    prepared = _nextflow(
-        "manual_registration_prepare.nf",
-        launch=runs / "launch_prepare",
-        sheet=sheet,
-        outdir=outdir,
-        czi_python=czi_python,
-        task_tmp=task_tmp,
-        timeout=6 * 3600,
-    )
-    assert prepared.returncode == 0, prepared.stdout[-3000:] + prepared.stderr[-3000:]
-    prepared_dir = outdir / alias / "prepared"
-    store = prepared_dir / f"{alias}_prepared.zarr"
-    summary = json.loads(
-        (prepared_dir / f"{alias}_prepare_summary.json").read_text(encoding="utf-8")
-    )
-    for role in ("reference", "moving"):
-        assert summary["images"][role]["czi"] is not None, role
-        provenance = json.loads(
-            (prepared_dir / f"{alias}_{role}.prepare.json").read_text(encoding="utf-8")
-        )
-        assert provenance["conversion"]["converter"].startswith("czifile=="), role
+    A failed launch, a missing summary or a partial run is a failed gate and never an
+    exception, so the caller can write the measurements before it fails the test.
 
-    # 2. Derive and inject test landmarks, unless the store holds someone's own.
-    if derive_script.is_foreign_labelling(read_root_attrs(store).get(LABELLING_ATTR)):
-        pytest.skip(
-            f"the prepared store of {alias} holds a labelling that "
-            f"{derive_script.SIMULATE_SOFTWARE} did not write (landmarks placed in "
-            "the viewer): this test does not replace it. To run the test on derived "
-            "landmarks, run scripts/manual_registration/derive_test_landmarks.py "
-            "--inject --force on the store (the old labelling is saved first)"
-        )
-    derived = derive_script.derive(store, n_pairs=24, n_disabled=8)
-    landmarks_json = runs / f"{alias}_test_landmarks.json"
-    landmarks_json.write_text(
-        json.dumps(derive_script._output_document(store, derived), indent=2) + "\n",
-        encoding="utf-8",
-    )
-    derive_script._inject(store, derived, landmarks_json)
+    Args:
+        registered: The finished register launch.
+        outdir: The launch's ``--outdir``.
+        alias: Dataset alias.
+        derived: The derived landmarks the run used.
 
-    # 3. Register both presets through Nextflow.
-    registered = _nextflow(
-        "manual_registration_register.nf",
-        launch=runs / "launch_register",
-        sheet=sheet,
-        outdir=outdir,
-        czi_python=czi_python,
-        task_tmp=task_tmp,
-        timeout=12 * 3600,
-    )
-    assert registered.returncode == 0, (
-        registered.stdout[-3000:] + registered.stderr[-3000:]
-    )
-
-    # 4. Read the results.
-    summaries: dict[str, dict[str, Any]] = {}
-    for preset in ("same_section", "serial_section"):
-        path = (
-            outdir
-            / alias
-            / "registered"
-            / preset
-            / f"{alias}_{preset}_manual_registration_summary.json"
-        )
-        summaries[preset] = json.loads(path.read_text(encoding="utf-8"))
-    comparison = outdir / alias / "registered" / f"{alias}_run_comparison.csv"
-    with comparison.open(encoding="utf-8") as handle:
-        compared = list(csv.DictReader(handle))
-
+    Returns:
+        ``(measurements with their gates, failure messages)``.
+    """
     measured: dict[str, Any] = {
         "alias": alias,
         "derive": derived.diagnostics,
+        "derive_method": derived.diagnostics["method"],
         "scale_ratio_matrix": derived.scale_ratio,
-        "runs": {
-            preset: {
-                "fit": result["fit"],
-                "refinement": result["refinement"],
-                "nonrigid": result["nonrigid"],
-                "tissue_pearson": result["tissue_qc"]["pearson"],
-                "held_out_median_um": {
-                    stage: _held_out(result, stage)
-                    for stage in ("landmark", "affine", "final")
-                },
-                "nucleus_qc": result["nucleus_qc"],
-                "resources": result["resources"],
-                "warnings": result["warnings"],
-            }
-            for preset, result in summaries.items()
-        },
+        "runs": {},
+        "gates": {},
     }
     failures: list[str] = []
 
     def gate(name: str, passed: bool, detail: Any) -> None:
-        measured.setdefault("gates", {})[name] = {
-            "passed": bool(passed),
-            "detail": detail,
-        }
+        measured["gates"][name] = {"passed": bool(passed), "detail": detail}
         if not passed:
             failures.append(f"{name}: {detail}")
 
-    # The override is the documented way to run same_section on a serial pair. These
-    # are gates like the others: a failure is recorded and asserted after the
-    # numbers are written, so a failed run keeps its measurements.
+    gate(
+        "0_register_returncode",
+        registered.returncode == 0,
+        {
+            "returncode": registered.returncode,
+            "stdout_tail": registered.stdout[-3000:],
+            "stderr_tail": registered.stderr[-3000:],
+        },
+    )
+    registered_dir = outdir / alias / "registered"
+    summaries: dict[str, dict[str, Any]] = {}
+    for preset in PRESET_NAMES:
+        path = (
+            registered_dir
+            / preset
+            / f"{alias}_{preset}_manual_registration_summary.json"
+        )
+        try:
+            summaries[preset] = json.loads(path.read_text(encoding="utf-8"))
+            gate(f"0_summary_{preset}", True, path.name)
+        except (OSError, ValueError) as exc:
+            gate(f"0_summary_{preset}", False, f"{preset}: {path.name}: {exc!r}")
+    measured["runs"] = {
+        preset: {
+            "fit": result.get("fit"),
+            "refinement": result.get("refinement"),
+            "nonrigid": result.get("nonrigid"),
+            "tissue_pearson": _dig(result, "tissue_qc", "pearson"),
+            "held_out_median_um": {
+                stage: _held_out(result, stage)
+                for stage in ("landmark", "affine", "final")
+            },
+            "nucleus_qc": result.get("nucleus_qc"),
+            "resources": result.get("resources"),
+            "warnings": result.get("warnings"),
+        }
+        for preset, result in summaries.items()
+    }
+
+    # The override is the documented way to run same_section on a serial pair.
     gate(
         "0_override",
-        all(
-            result["settings"]["matrix_scale_tolerance"] == 0.05
+        len(summaries) == len(PRESET_NAMES)
+        and all(
+            _dig(result, "settings", "matrix_scale_tolerance") == 0.05
             for result in summaries.values()
         )
         and PRESETS["same_section"].get("matrix_scale_tolerance", 0.02) != 0.05,
         {
-            preset: result["settings"]["matrix_scale_tolerance"]
+            preset: _dig(result, "settings", "matrix_scale_tolerance")
             for preset, result in summaries.items()
         },
     )
     gate(
         "0_complete",
-        all(result["status"] == "complete" for result in summaries.values()),
-        {preset: result["status"] for preset, result in summaries.items()},
+        len(summaries) == len(PRESET_NAMES)
+        and all(result.get("status") == "complete" for result in summaries.values()),
+        {preset: result.get("status") for preset, result in summaries.items()},
     )
+    serial = summaries.get("serial_section")
+    if serial is not None:
+        try:
+            _gate_serial_run(serial, derived, gate)
+        except (KeyError, TypeError) as exc:
+            gate("1_to_4_serial_run", False, f"{type(exc).__name__}: {exc}")
+    comparison = registered_dir / f"{alias}_run_comparison.csv"
+    try:
+        with comparison.open(encoding="utf-8") as handle:
+            compared = list(csv.DictReader(handle))
+        stores_ok = len(summaries) == len(PRESET_NAMES) and len(compared) == 2
+        stores_ok = stores_ok and comparison.with_suffix(".png").is_file()
+        for preset in summaries:
+            store = registered_dir / preset / f"{alias}_{preset}_registered.zarr"
+            stores_ok = stores_ok and (
+                read_root_attrs(store)[STORE_ATTR]["kind"] == "result"
+            )
+            validate_merxen_schema(sd.read_zarr(store, selection=("images",)))
+        gate("5_stores_and_comparison", stores_ok, {"rows": len(compared)})
+    except Exception as exc:  # noqa: BLE001 (a missing or unreadable output is a gate)
+        gate("5_stores_and_comparison", False, f"{type(exc).__name__}: {exc}")
+    gate(
+        "6_resources",
+        len(summaries) == len(PRESET_NAMES)
+        and all(
+            (_dig(result, "resources", "peak_rss_gb") or float("inf")) <= 48.0
+            for result in summaries.values()
+        ),
+        {preset: result.get("resources") for preset, result in summaries.items()},
+    )
+    return measured, failures
 
-    serial = summaries["serial_section"]
+
+def _gate_serial_run(
+    serial: dict[str, Any], derived: Any, gate: Callable[[str, bool, Any], None]
+) -> None:
+    """Gates 1 to 4: plausibility of the ``serial_section`` fit and QC."""
     fit = serial["fit"]
     gate(
         "1_fit",
@@ -1001,27 +983,163 @@ def test_czi_pair_both_presets(real_path: Callable[[str], Path]) -> None:  # noq
         )
     else:
         gate("4_nonrigid", nonrigid["reason"] is not None, nonrigid)
-    stores = {
-        preset: outdir
-        / alias
-        / "registered"
-        / preset
-        / f"{alias}_{preset}_registered.zarr"
-        for preset in summaries
-    }
-    ok = len(set(stores.values())) == 2
-    for result_store in stores.values():
-        ok = ok and read_root_attrs(result_store)[STORE_ATTR]["kind"] == "result"
-        validate_merxen_schema(sd.read_zarr(result_store, selection=("images",)))
-    ok = ok and len(compared) == 2
-    ok = ok and comparison.with_suffix(".png").is_file()
-    gate("5_stores_and_comparison", ok, {"rows": len(compared)})
-    gate(
-        "6_resources",
-        all(r["resources"]["peak_rss_gb"] <= 48.0 for r in summaries.values()),
-        {p: r["resources"] for p, r in summaries.items()},
+
+
+def test_register_gates_record_a_failed_launch_and_missing_summaries(
+    tmp_path: Path,
+) -> None:
+    failed = subprocess.CompletedProcess(
+        args=["nextflow"], returncode=1, stdout="launched", stderr="boom"
+    )
+    derived = dataclasses.replace(_derived(), diagnostics={"method": "window_ncc"})
+
+    measured, failures = _validate_register_run(
+        registered=failed, outdir=tmp_path, alias="X1", derived=derived
     )
 
+    gates = measured["gates"]
+    assert gates["0_register_returncode"]["passed"] is False
+    assert gates["0_register_returncode"]["detail"]["returncode"] == 1
+    assert "boom" in gates["0_register_returncode"]["detail"]["stderr_tail"]
+    for preset in PRESET_NAMES:  # the preset is named in its failed gate
+        assert gates[f"0_summary_{preset}"]["passed"] is False
+        assert preset in gates[f"0_summary_{preset}"]["detail"]
+    assert {
+        "0_override",
+        "0_complete",
+        "5_stores_and_comparison",
+        "6_resources",
+    } <= set(gates)
+    assert not any(gates[name]["passed"] for name in gates)
+    assert len(failures) == len(gates)
+    assert measured["derive_method"] == "window_ncc" and measured["runs"] == {}
+    json.dumps(measured, default=float)  # what the test writes
+
+
+def test_register_gates_read_the_summaries_that_exist(tmp_path: Path) -> None:
+    folder = tmp_path / "X1" / "registered" / "same_section"
+    folder.mkdir(parents=True)
+    (folder / "X1_same_section_manual_registration_summary.json").write_text(
+        json.dumps({"status": "failed", "settings": {"matrix_scale_tolerance": 0.05}}),
+        encoding="utf-8",
+    )
+    ok = subprocess.CompletedProcess(
+        args=["nextflow"], returncode=0, stdout="", stderr=""
+    )
+
+    measured, failures = _validate_register_run(
+        registered=ok,
+        outdir=tmp_path,
+        alias="X1",
+        derived=dataclasses.replace(_derived(), diagnostics={"method": "sift"}),
+    )
+
+    gates = measured["gates"]
+    assert gates["0_register_returncode"]["passed"] is True
+    assert gates["0_summary_same_section"]["passed"] is True
+    assert gates["0_summary_serial_section"]["passed"] is False
+    assert gates["0_complete"]["detail"] == {"same_section": "failed"}
+    assert set(measured["runs"]) == {"same_section"}
+    assert measured["runs"]["same_section"]["fit"] is None
+    assert not any(failure.startswith("0_register_returncode") for failure in failures)
+    assert any(failure.startswith("0_summary_serial_section") for failure in failures)
+
+
+@pytest.mark.slow
+def test_czi_pair_both_presets(real_path: Callable[[str], Path]) -> None:
+    test_dir = real_path("MERXEN_MANUAL_REGISTRATION_TEST_DIR")
+    evidence = real_path("MERXEN_EVIDENCE_ROOT")
+    task_tmp = real_path("MERXEN_TASK_TMP_DIR")
+    czi_python = real_path("MERXEN_CZI_PYTHON")
+    manifest_path = evidence / "manual_registration" / "czi_test_pairs.json"
+    if not manifest_path.is_file():
+        pytest.skip(
+            "the CZI test manifest does not exist (docs/stages/manual-registration.md)"
+        )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    alias = manifest["default"]
+    entry = manifest["pairs"][alias]
+    runs = evidence / "manual_registration" / "runs"
+    outdir = runs / "out"
+    runs.mkdir(parents=True, exist_ok=True)
+    sheet = runs / "samplesheet.csv"
+    with sheet.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "id",
+                "reference_image",
+                "moving_image",
+                "presets",
+                "registration_settings",
+            ]
+        )
+        writer.writerow(
+            [
+                alias,
+                str(test_dir / entry["reference"]),
+                str(test_dir / entry["moving"]),
+                ";".join(PRESET_NAMES),
+                SAME_SECTION_OVERRIDE,
+            ]
+        )
+
+    # 1. Prepare through Nextflow (the real resource requests apply).
+    prepared = _nextflow(
+        "manual_registration_prepare.nf",
+        launch=runs / "launch_prepare",
+        sheet=sheet,
+        outdir=outdir,
+        czi_python=czi_python,
+        task_tmp=task_tmp,
+        timeout=6 * 3600,
+    )
+    assert prepared.returncode == 0, prepared.stdout[-3000:] + prepared.stderr[-3000:]
+    prepared_dir = outdir / alias / "prepared"
+    store = prepared_dir / f"{alias}_prepared.zarr"
+    summary = json.loads(
+        (prepared_dir / f"{alias}_prepare_summary.json").read_text(encoding="utf-8")
+    )
+    for role in ("reference", "moving"):
+        assert summary["images"][role]["czi"] is not None, role
+        provenance = json.loads(
+            (prepared_dir / f"{alias}_{role}.prepare.json").read_text(encoding="utf-8")
+        )
+        assert provenance["conversion"]["converter"].startswith("czifile=="), role
+
+    # 2. Derive and inject test landmarks, unless the store holds someone's own.
+    if derive_script.is_foreign_labelling(read_root_attrs(store).get(LABELLING_ATTR)):
+        pytest.skip(
+            f"the prepared store of {alias} holds a labelling that "
+            f"{derive_script.SIMULATE_SOFTWARE} did not write (landmarks placed in "
+            "the viewer): this test does not replace it. To run the test on derived "
+            "landmarks, run scripts/manual_registration/derive_test_landmarks.py "
+            "--inject --force on the store (the old labelling is saved first)"
+        )
+    derived = derive_script.derive(store, n_pairs=24, n_disabled=8, method="auto")
+    landmarks_json = runs / f"{alias}_test_landmarks.json"
+    landmarks_json.write_text(
+        json.dumps(derive_script._output_document(store, derived), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    derive_script._inject(store, derived, landmarks_json)
+
+    # 3. Register both presets through Nextflow. A failed launch is recorded as a
+    # gate, not asserted here: the measurements are written first.
+    registered = _nextflow(
+        "manual_registration_register.nf",
+        launch=runs / "launch_register",
+        sheet=sheet,
+        outdir=outdir,
+        czi_python=czi_python,
+        task_tmp=task_tmp,
+        timeout=12 * 3600,
+    )
+
+    # 4. Read what exists, evaluate the gates, write the measurements, then fail.
+    measured, failures = _validate_register_run(
+        registered=registered, outdir=outdir, alias=alias, derived=derived
+    )
     (runs / f"{alias}_validation.json").write_text(
         json.dumps(measured, indent=2, default=float) + "\n", encoding="utf-8"
     )
