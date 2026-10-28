@@ -209,7 +209,9 @@ preflight error.
 | `manual_registration_force_register` | `false` | Re-run registrations Python would skip |
 | `manual_registration_czi_python` | `null` | Python of the CZI runtime, or `in_process` (site config) |
 
-Resources: `MANUAL_REGISTRATION_PREPARE` 8 CPUs / 16 GB,
+Resources: `MANUAL_REGISTRATION_PREPARE` 8 CPUs / 16 GB (the conversion streams
+bands and maps no file; measured peak about 4 GB on a 72k x 61k px, 3-channel pair,
+and about 3.5 cores busy),
 `MANUAL_REGISTRATION_REGISTER` 8 CPUs / 48 GB (a full 80k x 61k px Zeiss scan;
 refinement working images are capped at 32767 px per side),
 `MANUAL_REGISTRATION_COMPARE` 1 CPU / 4 GB. The Dwight profile limits the first
@@ -753,10 +755,21 @@ JPEG-XR (6.3 GB). LCM2's moving image has a negative CZI origin (its scene bound
 box starts at x = -131315) and JPEG-XR tiles; both were handled, and the prepared
 grid is the bounding box. A prepare took about 17 min per pair (the
 `MANUAL_REGISTRATION_PREPARE` task about 16 min, of which the two CZI conversions
-took about 12 min; the viewer-cache task about 1 min). It peaked at 38.3 GB (LCM1)
-and 40.5 GB (LCM2) resident memory in the Nextflow task trace, well above the 16 GB
-the process declares (see Resources under Workflows and launch); the local executor
-does not enforce the directive. Re-running prepare on the unchanged LCM1 pair took
+took about 12 min; the viewer-cache task about 1 min). At commit `9054957` the
+prepare peaked at 38.3 GB (LCM1) and 40.5 GB (LCM2) resident memory in the Nextflow
+task trace, well above the 16 GB the process declares (see Resources under Workflows
+and launch; the local executor does not enforce the directive). Almost all of it was
+file pages kept mapped by the converter: the memory map of the CZI (each reader
+thread mapped the whole file and every touched page stayed resident until the
+handles closed) and the memory maps of the reduced pyramid levels; the anonymous
+memory, which the banding bounds, was 2 to 3 GB. Since the conversion no longer
+maps any file (`memmap=False` for the CZI, plain scratch files for the reduced
+levels), the LCM2 prepare peaks at about 4 GB (3.9 GB for the whole task tree, 3.4 GB
+of it anonymous, as measured by a per-process sampler of resident anonymous and
+file-backed pages). The OME-TIFFs are byte-identical to those of the mapped converter, and the wall time
+is unchanged. The prepare uses about 3.5 cores, within the 8 it declares; the
+`%cpu` column of a task's `.command.trace` is in tenths of a percent (Nextflow's own
+trace report divides it by 10). Re-running prepare on the unchanged LCM1 pair took
 12 s (status `unchanged`).
 
 **Tile seams and crops.** The scanner's tile grid is faintly visible in both LCM1
