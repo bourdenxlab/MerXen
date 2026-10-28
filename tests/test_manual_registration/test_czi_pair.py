@@ -31,9 +31,14 @@ from merxen.manual_registration.config import (
 from merxen.manual_registration.geometry import points_outside_crop, wrap_deg
 from merxen.manual_registration.prepare import run_manual_registration_prepare
 from merxen.manual_registration.presets import PRESETS
-from merxen.manual_registration.schema import STORE_ATTR, read_root_attrs
+from merxen.manual_registration.schema import (
+    LABELLING_ATTR,
+    STORE_ATTR,
+    read_root_attrs,
+)
 from merxen.manual_registration.simulate import make_synthetic_pair
 
+from ._mr_helpers import A2_COARSE, a2_pairs, a2_store
 from ._scripts import load_script
 
 derive_script = load_script("derive_test_landmarks")
@@ -122,6 +127,140 @@ def test_derive_test_landmarks_recovers_a_rotated_mirrored_pair(
     moving = np.array([p.moving_xy_px for p in derived.pairs])
     assert not points_outside_crop(reference, derived.crops["reference"]).any()
     assert not points_outside_crop(moving, derived.crops["moving"]).any()
+
+
+# --------------------------------------------------------------------------
+# --inject never replaces a labelling that was not written by simulate
+# --------------------------------------------------------------------------
+
+
+def _derived(*, disabled: tuple[int, ...] = (3, 6)) -> Any:
+    return derive_script.DerivedLandmarks(
+        matrix_full=np.eye(3),
+        coarse=A2_COARSE,
+        scale_ratio=1.0,
+        crops={"reference": None, "moving": None},
+        pairs=a2_pairs(disabled=disabled),
+        diagnostics={},
+    )
+
+
+def _labelling(store: Path) -> dict[str, Any]:
+    return read_root_attrs(store)[LABELLING_ATTR]  # type: ignore[no-any-return]
+
+
+def _backups(folder: Path) -> list[Path]:
+    return sorted(folder.glob("*.previous_labelling.*.json"))
+
+
+@pytest.mark.parametrize("status", ["finished", "draft"])
+def test_inject_refuses_a_labelling_written_elsewhere(
+    tmp_path: Path, status: str
+) -> None:
+    # a2_store writes a labelling with another written_by.software (a viewer save).
+    store = a2_store(tmp_path, disabled=(1,), status=status)
+    before = _labelling(store)
+    out = tmp_path / "landmarks.json"
+
+    with pytest.raises(derive_script.ForeignLabellingError, match="--force"):
+        derive_script._inject(store, _derived(), out)
+
+    assert _labelling(store) == before
+    assert _backups(tmp_path) == []
+
+
+def test_inject_force_saves_the_old_labelling_before_replacing_it(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = a2_store(tmp_path, disabled=(1,))
+    before = _labelling(store)
+    out = tmp_path / "runs" / "landmarks.json"
+
+    with caplog.at_level("WARNING"):
+        revision = derive_script._inject(store, _derived(), out, force=True)
+
+    (backup,) = _backups(out.parent)
+    assert backup.parent == out.parent
+    assert backup.name.startswith("landmarks.previous_labelling.20")
+    assert backup.name.endswith("Z.json")
+    assert json.loads(backup.read_text(encoding="utf-8")) == before
+    assert str(backup) in caplog.text
+    after = _labelling(store)
+    assert revision == before["revision"] + 1 == after["revision"]
+    assert after["written_by"]["software"] == derive_script.SIMULATE_SOFTWARE
+    assert after["status"] == "finished"
+    assert [p["id"] for p in after["landmarks"]["pairs"] if not p["enabled"]] == [3, 6]
+
+
+def test_inject_replaces_its_own_labelling_without_force_or_backup(
+    tmp_path: Path,
+) -> None:
+    store = a2_store(tmp_path)
+    out = tmp_path / "landmarks.json"
+    derive_script._inject(store, _derived(), out, force=True)  # now simulate's
+    (first_backup,) = _backups(tmp_path)
+    first_backup.unlink()
+
+    assert derive_script._inject(store, _derived(disabled=(2,)), out) == 3
+    assert (
+        _labelling(store)["written_by"]["software"] == derive_script.SIMULATE_SOFTWARE
+    )
+    assert _backups(tmp_path) == []
+
+
+def test_inject_leaves_an_identical_finished_labelling_alone(tmp_path: Path) -> None:
+    store = a2_store(tmp_path, disabled=(3, 6), coarse=A2_COARSE)
+    before = _labelling(store)
+
+    # The content equals the derived one, so nothing is written even though the
+    # labelling is not simulate's and --force was not given.
+    assert derive_script._inject(store, _derived(), tmp_path / "landmarks.json") is None
+
+    assert _labelling(store) == before
+    assert _backups(tmp_path) == []
+
+
+def test_main_refuses_a_foreign_labelling_before_deriving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = a2_store(tmp_path, disabled=(1,))
+    before = _labelling(store)
+    out = tmp_path / "landmarks.json"
+
+    def no_derivation(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("the derivation must not start")
+
+    monkeypatch.setattr(derive_script, "derive", no_derivation)
+    with pytest.raises(SystemExit, match="--force"):
+        derive_script.main(["--store", str(store), "--out", str(out), "--inject"])
+    assert _labelling(store) == before and not out.exists()
+
+    with pytest.raises(SystemExit) as parsed:
+        derive_script.main(["--store", str(store), "--out", str(out), "--force"])
+    assert parsed.value.code == 2
+
+
+def test_main_force_replaces_after_saving_the_old_labelling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = a2_store(tmp_path, disabled=(1,))
+    before = _labelling(store)
+    out = tmp_path / "landmarks.json"
+    monkeypatch.setattr(derive_script, "derive", lambda *_a, **_k: _derived())
+    monkeypatch.setattr(
+        derive_script, "_output_document", lambda *_a, **_k: {"schema": "x"}
+    )
+
+    status = derive_script.main(
+        ["--store", str(store), "--out", str(out), "--inject", "--force"]
+    )
+
+    assert status == 0
+    (backup,) = _backups(tmp_path)
+    assert json.loads(backup.read_text(encoding="utf-8")) == before
+    assert (
+        _labelling(store)["written_by"]["software"] == derive_script.SIMULATE_SOFTWARE
+    )
 
 
 # --------------------------------------------------------------------------
@@ -245,14 +384,22 @@ def test_czi_pair_both_presets(real_path: Callable[[str], Path]) -> None:  # noq
         )
         assert provenance["conversion"]["converter"].startswith("czifile=="), role
 
-    # 2. Derive and inject test landmarks.
+    # 2. Derive and inject test landmarks, unless the store holds someone's own.
+    if derive_script.is_foreign_labelling(read_root_attrs(store).get(LABELLING_ATTR)):
+        pytest.skip(
+            f"the prepared store of {alias} holds a labelling that "
+            f"{derive_script.SIMULATE_SOFTWARE} did not write (landmarks placed in "
+            "the viewer): this test does not replace it. To run the test on derived "
+            "landmarks, run scripts/manual_registration/derive_test_landmarks.py "
+            "--inject --force on the store (the old labelling is saved first)"
+        )
     derived = derive_script.derive(store, n_pairs=24, n_disabled=8)
     landmarks_json = runs / f"{alias}_test_landmarks.json"
     landmarks_json.write_text(
         json.dumps(derive_script._output_document(store, derived), indent=2) + "\n",
         encoding="utf-8",
     )
-    derive_script._inject(store, derived)
+    derive_script._inject(store, derived, landmarks_json)
 
     # 3. Register both presets through Nextflow.
     registered = _nextflow(
@@ -314,14 +461,28 @@ def test_czi_pair_both_presets(real_path: Callable[[str], Path]) -> None:  # noq
         if not passed:
             failures.append(f"{name}: {detail}")
 
-    # The override is the documented way to run same_section on a serial pair.
-    for preset, result in summaries.items():
-        assert result["settings"]["matrix_scale_tolerance"] == 0.05, preset
-    assert PRESETS["same_section"].get("matrix_scale_tolerance", 0.02) != 0.05
-    assert summaries["same_section"]["status"] == "complete"
+    # The override is the documented way to run same_section on a serial pair. These
+    # are gates like the others: a failure is recorded and asserted after the
+    # numbers are written, so a failed run keeps its measurements.
+    gate(
+        "0_override",
+        all(
+            result["settings"]["matrix_scale_tolerance"] == 0.05
+            for result in summaries.values()
+        )
+        and PRESETS["same_section"].get("matrix_scale_tolerance", 0.02) != 0.05,
+        {
+            preset: result["settings"]["matrix_scale_tolerance"]
+            for preset, result in summaries.items()
+        },
+    )
+    gate(
+        "0_complete",
+        all(result["status"] == "complete" for result in summaries.values()),
+        {preset: result["status"] for preset, result in summaries.items()},
+    )
 
     serial = summaries["serial_section"]
-    assert serial["status"] == "complete"
     fit = serial["fit"]
     gate(
         "1_fit",

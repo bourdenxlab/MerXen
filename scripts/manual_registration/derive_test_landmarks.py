@@ -19,6 +19,11 @@ Example::
     python scripts/manual_registration/derive_test_landmarks.py \\
         --store "$runs/out/LCM1/prepared/LCM1_prepared.zarr" \\
         --out "$runs/LCM1_test_landmarks.json" --inject
+
+``--inject`` never replaces a labelling that was placed by hand in the viewer
+(any labelling whose ``written_by.software`` is not the simulate module's): it
+stops with a message. ``--inject --force`` replaces it after saving the old one
+as ``<out stem>.previous_labelling.<UTC>.json`` next to ``--out``.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ import json
 import logging
 import math
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +71,8 @@ SCHEMA = "merxen.manual_registration.test_landmarks"
 MAX_WORKING_SIDE_PX = 8192
 RATIO_TEST = 0.75
 ROLES = ("reference", "moving")
+# ``written_by.software`` of the labellings ``inject_labelling`` writes.
+SIMULATE_SOFTWARE = "merxen.manual_registration.simulate"
 
 
 @dataclass(frozen=True)
@@ -754,34 +762,113 @@ def _output_document(store: Path, derived: DerivedLandmarks) -> dict[str, Any]:
     }
 
 
-def _inject(store: Path, derived: DerivedLandmarks) -> None:
-    """Write the derived labelling into the store, unless it is already there."""
+class ForeignLabellingError(RuntimeError):
+    """The store holds a labelling that this script did not write."""
+
+
+def _planned_content_sha256(derived: DerivedLandmarks) -> str:
+    return labelling_content_sha256(
+        {
+            "coarse": {
+                "rotation_deg": round(derived.coarse.rotation_deg, 4),
+                "mirror_x": derived.coarse.mirror_x,
+                "offset_um": [
+                    round(derived.coarse.offset_um[0], 4),
+                    round(derived.coarse.offset_um[1], 4),
+                ],
+            },
+            "crops": {
+                role: None if crop is None else crop.model_dump()
+                for role, crop in derived.crops.items()
+            },
+            "landmarks": {"pairs": [p.model_dump() for p in derived.pairs]},
+        }
+    )
+
+
+def is_foreign_labelling(labelling: dict[str, Any] | None) -> bool:
+    """Whether a stored labelling was not written by ``simulate`` (a person's own)."""
+    if not labelling:
+        return False
+    written_by = labelling.get("written_by")
+    software = written_by.get("software") if isinstance(written_by, dict) else None
+    return software != SIMULATE_SOFTWARE
+
+
+def _check_overwrite(store: Path, *, force: bool) -> dict[str, Any] | None:
+    """Return the labelling that a forced injection would replace, or raise.
+
+    Raises:
+        ForeignLabellingError: When the store holds a labelling that was not
+            written by ``simulate`` and ``force`` is false.
+    """
+    current = read_root_attrs(store).get(LABELLING_ATTR)
+    if not is_foreign_labelling(current):
+        return None
+    assert current is not None
+    if not force:
+        landmarks = current.get("landmarks")
+        pairs = landmarks.get("pairs", []) if isinstance(landmarks, dict) else []
+        raise ForeignLabellingError(
+            f"{store} holds a labelling that was not written by "
+            f"{SIMULATE_SOFTWARE} (revision {current.get('revision')}, status "
+            f"{current.get('status')!r}, {len(pairs)} pairs): it is not replaced; "
+            "pass --force to replace it (the old labelling is saved next to --out "
+            "first)"
+        )
+    return current
+
+
+def _save_previous_labelling(previous: dict[str, Any], out: Path) -> Path:
+    """Write the labelling about to be replaced next to ``out``; return the path."""
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    backup = out.with_name(f"{out.stem}.previous_labelling.{stamp}.json")
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    backup.write_text(json.dumps(previous, indent=2) + "\n", encoding="utf-8")
+    return backup
+
+
+def _inject(
+    store: Path, derived: DerivedLandmarks, out: Path, *, force: bool = False
+) -> int | None:
+    """Write the derived labelling into the store.
+
+    The labelling is left alone when the store already holds this content. A
+    labelling that ``simulate`` wrote may be replaced. Any other one (a person's
+    landmarks from the viewer) is replaced only with ``force``, after it has been
+    saved to ``<out stem>.previous_labelling.<UTC>.json`` next to ``out``.
+
+    Args:
+        store: The prepared store.
+        derived: The derived labelling.
+        out: The output JSON path (the backup goes next to it).
+        force: Replace a labelling that ``simulate`` did not write.
+
+    Returns:
+        The new revision, or ``None`` when the store already held this labelling.
+
+    Raises:
+        ForeignLabellingError: On a labelling that ``simulate`` did not write
+            when ``force`` is false.
+    """
     current = read_root_attrs(store).get(LABELLING_ATTR)
     if current and current.get("status") == "finished":
         try:
             existing = labelling_content_sha256(current)
         except ValueError:
             existing = None
-        planned = labelling_content_sha256(
-            {
-                "coarse": {
-                    "rotation_deg": round(derived.coarse.rotation_deg, 4),
-                    "mirror_x": derived.coarse.mirror_x,
-                    "offset_um": [
-                        round(derived.coarse.offset_um[0], 4),
-                        round(derived.coarse.offset_um[1], 4),
-                    ],
-                },
-                "crops": {
-                    role: None if crop is None else crop.model_dump()
-                    for role, crop in derived.crops.items()
-                },
-                "landmarks": {"pairs": [p.model_dump() for p in derived.pairs]},
-            }
-        )
-        if existing == planned:
+        if existing == _planned_content_sha256(derived):
             logger.info("the store already holds this labelling: unchanged")
-            return
+            return None
+    previous = _check_overwrite(store, force=force)
+    if previous is not None:
+        backup = _save_previous_labelling(previous, out)
+        logger.warning(
+            "replacing a labelling that was not written by %s; the old one is "
+            "saved in %s",
+            SIMULATE_SOFTWARE,
+            backup,
+        )
     revision = inject_labelling(
         store,
         derived.pairs,
@@ -790,6 +877,7 @@ def _inject(store: Path, derived: DerivedLandmarks) -> None:
         status="finished",
     )
     logger.info("labelling written to the store (revision %d)", revision)
+    return revision
 
 
 def _refuse_inside_repository(out: Path) -> None:
@@ -821,7 +909,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--inject",
         action="store_true",
-        help="Write the labelling (status finished) into --store.",
+        help=(
+            "Write the labelling (status finished) into --store. A labelling that "
+            "this script did not write (landmarks placed in the viewer) is not "
+            "replaced unless --force is given."
+        ),
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "With --inject: replace a labelling that was not written by "
+            "merxen.manual_registration.simulate. The old labelling is saved first "
+            "as <out stem>.previous_labelling.<UTC>.json next to --out."
+        ),
     )
     parser.add_argument("--seed", type=int, default=0)
     return parser
@@ -836,9 +937,18 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         The exit status.
     """
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.force and not args.inject:
+        parser.error("--force needs --inject")
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     _refuse_inside_repository(args.out)
+    if args.inject:
+        # Fail before the derivation (minutes) when the injection would be refused.
+        try:
+            _check_overwrite(args.store, force=args.force)
+        except ForeignLabellingError as exc:
+            raise SystemExit(str(exc)) from exc
     derived = derive(
         args.store,
         n_pairs=args.n_pairs,
@@ -854,7 +964,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     logger.info("wrote %s", args.out)
     if args.inject:
-        _inject(args.store, derived)
+        try:
+            _inject(args.store, derived, args.out, force=args.force)
+        except ForeignLabellingError as exc:
+            raise SystemExit(str(exc)) from exc
     print(
         f"rotation {derived.coarse.rotation_deg:.2f} deg, mirror "
         f"{derived.coarse.mirror_x}, scale ratio {derived.scale_ratio:.4f}, "
