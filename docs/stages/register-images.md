@@ -254,8 +254,10 @@ affine, estimate the guarded flow, resample onto the reference grid, build the
 viewer pyramid) for any `ReferenceGrid` and `MovingImage`, wherever they are
 stored. It never takes the store lock; the caller holds it. `RegistrationTuning`
 defaults reproduce this stage: window quality 0.3, no moving-tissue requirement,
-and `NonrigidTuning()` (25 µm high-pass, 15 µm local correlation, 220 µm local
-tiles on). The manual landmark registration workflow
+no correlation-gain check on the refinement (`refinement_min_correlation_gain`
+is `None`, so every refinement inside the limits is applied and the summary is
+unchanged), and `NonrigidTuning()` (25 µm high-pass, 15 µm local correlation,
+220 µm local tiles on). The manual landmark registration workflow
 (`docs/stages/manual-registration.md`) uses the same core with its own presets.
 `push_points_through_registration` inverts the pull mapping by a fixed-point
 iteration (tolerance 1e-3 working pixels, at most 50 iterations).
