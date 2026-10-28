@@ -8,6 +8,7 @@ import sys
 import pytest
 
 from merxen.config import ImageRegistrationConfig, RegistrationSettings
+from merxen.image_registration import RegistrationTuning
 from merxen.manual_registration.config import ManualRegistrationSettings
 from merxen.manual_registration.presets import (
     FORBIDDEN_OVERRIDES,
@@ -19,6 +20,8 @@ from merxen.manual_registration.presets import (
 )
 from merxen.nonrigid_registration import NonrigidTuning
 
+# The serial_section table is unchanged since v1: v2 only inherits the new
+# refinement_min_correlation_gain default, so the key must not appear here.
 SERIAL_V1 = {
     "matrix_scale_tolerance": 0.05,
     "registration_pixel_size_um": 6.0,
@@ -56,12 +59,13 @@ def test_preset_tables_are_pinned() -> None:
     assert PRESETS["same_section"] == {}
     assert set(PRESET_VERSIONS) == set(PRESETS)
     assert PRESET_VERSIONS == {
-        "same_section": "same_section_v1",
-        "serial_section": "serial_section_v1",
+        "same_section": "same_section_v2",
+        "serial_section": "serial_section_v2",
     }
     fields = set(ManualRegistrationSettings.model_fields)
     assert set(PRESETS["serial_section"]) <= fields
     assert PRESETS["serial_section"] == SERIAL_V1
+    assert "refinement_min_correlation_gain" not in PRESETS["serial_section"]
     assert {"reference_pixel_size_um", "reference_channel"} == FORBIDDEN_OVERRIDES
 
 
@@ -76,6 +80,67 @@ def test_same_section_equals_register_images_defaults() -> None:
             assert settings.reference_pixel_size_um == 0.2125
         else:
             assert getattr(settings, name) == expected, name
+
+
+def test_same_section_differs_from_register_images_in_the_correlation_gain() -> None:
+    # REGISTER_IMAGES has no such setting (adding it to RegistrationSettings would
+    # change the provenance of every registered image), so it applies every
+    # refinement inside the limits.
+    assert "refinement_min_correlation_gain" not in RegistrationSettings.model_fields
+    assert "refinement_min_correlation_gain" in ManualRegistrationSettings.model_fields
+    assert RegistrationTuning().refinement_min_correlation_gain is None
+
+
+@pytest.mark.parametrize("preset", ["same_section", "serial_section"])
+def test_both_presets_carry_the_correlation_gain_default(preset: str) -> None:
+    assert _resolve(preset).refinement_min_correlation_gain == 0.0
+    tuning = registration_tuning(_resolve(preset))
+    assert tuning.refinement_min_correlation_gain == 0.0
+
+
+def test_registration_tuning_passes_the_correlation_gain_through() -> None:
+    for text, expected in (
+        ("0.01", 0.01),
+        ("-0.5", -0.5),
+        ("2", 2.0),
+        # -2 is the lowest value the settings accept and disables the check.
+        ("-2", None),
+        ("-2.0", None),
+    ):
+        settings = _resolve(
+            "serial_section",
+            row_settings=f"refinement_min_correlation_gain={text}",
+        )
+        tuning = registration_tuning(settings)
+        assert tuning.refinement_min_correlation_gain == expected, text
+
+
+def test_correlation_gain_overrides_follow_the_scope_precedence() -> None:
+    key = "refinement_min_correlation_gain"
+    glob = f"{key}=0.1;serial_section:{key}=0.2"
+    assert (
+        _resolve("same_section", global_settings=glob).refinement_min_correlation_gain
+        == 0.1
+    )
+    assert (
+        _resolve("serial_section", global_settings=glob).refinement_min_correlation_gain
+        == 0.2
+    )
+    row = f"same_section:{key}=-2"
+    settings = _resolve("same_section", global_settings=glob, row_settings=row)
+    assert settings.refinement_min_correlation_gain == -2.0
+    assert registration_tuning(settings).refinement_min_correlation_gain is None
+
+
+@pytest.mark.parametrize("value", ["-2.5", "2.5", "nan", "inf", "none", "off", "abc"])
+def test_correlation_gain_override_errors(value: str) -> None:
+    # The grammar has no None: the check is disabled with -2, anything outside
+    # [-2, 2] or not a finite number is refused.
+    with pytest.raises(ValueError, match="refinement_min_correlation_gain") as excinfo:
+        _resolve(
+            "same_section", row_settings=f"refinement_min_correlation_gain={value}"
+        )
+    assert str(excinfo.value).startswith("registration settings")
 
 
 def test_precedence_of_override_scopes() -> None:

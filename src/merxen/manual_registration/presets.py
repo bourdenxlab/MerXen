@@ -2,10 +2,11 @@
 
 A preset is a named set of ``ManualRegistrationSettings`` values. ``same_section``
 is the settings' defaults (equal to the ``REGISTER_IMAGES`` defaults except that
-the non-rigid stage is on); ``serial_section`` is tuned for adjacent serial
-sections, where only tissue-scale structure matches. Overrides come from the
-Nextflow params and from the samplesheet row as ``"key=value;preset:key=value"``
-text and are validated against the settings model.
+the non-rigid stage is on and a refinement must not lower the registration-channel
+correlation); ``serial_section`` is tuned for adjacent serial sections, where only
+tissue-scale structure matches, and inherits the correlation check. Overrides come
+from the Nextflow params and from the samplesheet row as
+``"key=value;preset:key=value"`` text and are validated against the settings model.
 
 This module stays light (pydantic and the config models); it imports no
 SpatialData or plotting code. The two tuning dataclasses are imported inside
@@ -27,6 +28,10 @@ if TYPE_CHECKING:
     from merxen.image_registration import RegistrationTuning
 
 logger = logging.getLogger(__name__)
+
+# A refinement_min_correlation_gain at or below this value disables the check: the
+# correlation moves by at most 2 (from -1 to 1), so no refinement can fall short.
+CORRELATION_GAIN_DISABLED = -2.0
 
 # Changing any value below requires bumping its PRESET_VERSIONS entry: the version
 # is part of the provenance digest and of the result attrs.
@@ -59,8 +64,8 @@ PRESETS: dict[str, dict[str, Any]] = {
     },
 }
 PRESET_VERSIONS: dict[str, str] = {
-    "same_section": "same_section_v1",
-    "serial_section": "serial_section_v1",
+    "same_section": "same_section_v2",
+    "serial_section": "serial_section_v2",
 }
 # Fixed by the samplesheet and the prepared store, never by a settings override.
 FORBIDDEN_OVERRIDES: frozenset[str] = frozenset(
@@ -216,13 +221,21 @@ def resolve_settings(
 
 
 def registration_tuning(settings: ManualRegistrationSettings) -> RegistrationTuning:
-    """Return the registration-core tuning that goes with a run's settings."""
+    """Return the registration-core tuning that goes with a run's settings.
+
+    A ``refinement_min_correlation_gain`` of ``-2`` (the lowest value the settings
+    accept) becomes ``None``: no correlation check, like ``REGISTER_IMAGES``.
+    """
     from merxen.image_registration import RegistrationTuning
     from merxen.nonrigid_registration import NonrigidTuning
 
+    gain = settings.refinement_min_correlation_gain
     return RegistrationTuning(
         refinement_min_window_quality=settings.refinement_min_window_quality,
         refinement_require_moving_tissue=settings.refinement_require_moving_tissue,
+        refinement_min_correlation_gain=(
+            None if gain <= CORRELATION_GAIN_DISABLED else gain
+        ),
         nonrigid=NonrigidTuning(
             highpass_sigma_um=settings.nonrigid_highpass_sigma_um,
             local_correlation_sigma_um=settings.nonrigid_local_correlation_sigma_um,

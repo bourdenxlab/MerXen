@@ -90,6 +90,7 @@ def test_new_setting_defaults() -> None:
     settings = ManualRegistrationSettings()
     assert settings.refinement_min_window_quality == 0.3
     assert settings.refinement_require_moving_tissue is False
+    assert settings.refinement_min_correlation_gain == 0.0
     assert settings.nonrigid_highpass_sigma_um == 25.0
     assert settings.nonrigid_local_correlation_sigma_um == 15.0
     assert settings.nonrigid_local_residual_tiles is True
@@ -111,6 +112,18 @@ def test_new_setting_defaults() -> None:
     assert settings.nucleus_qc is False
     assert settings.nucleus_qc_pixel_size_um == 1.7
     assert settings.nucleus_qc_window_um == 200.0
+
+
+@pytest.mark.parametrize("value", [-2.0, -0.1, 0.0, 0.05, 2.0, "0.1", "-2"])
+def test_correlation_gain_accepts_numbers_in_range(value: float | str) -> None:
+    settings = ManualRegistrationSettings(refinement_min_correlation_gain=value)  # type: ignore[arg-type]
+    assert settings.refinement_min_correlation_gain == float(value)
+
+
+@pytest.mark.parametrize("value", [-2.01, 2.01, float("nan"), float("inf"), "none"])
+def test_correlation_gain_rejects_other_values(value: float | str) -> None:
+    with pytest.raises(ValidationError, match="refinement_min_correlation_gain"):
+        ManualRegistrationSettings(refinement_min_correlation_gain=value)  # type: ignore[arg-type]
 
 
 def test_settings_forbid_unknown_keys() -> None:
