@@ -24,6 +24,7 @@ import pytest
 
 from merxen import privacy
 from merxen.config import ViewerCacheConfig
+from merxen.manual_registration.compare import COMPARISON_COLUMNS
 from merxen.manual_registration.config import (
     ManualRegistrationCompareConfig,
     ManualRegistrationImageInput,
@@ -687,7 +688,7 @@ def test_tiny_end_to_end_through_both_workflows(tmp_path: Path) -> None:
         compared = list(csv.DictReader(handle))
     assert {row["preset"] for row in compared} == set(summaries)
     assert len(compared) == 2
-    assert list(compared[0])[:3] == ["run_id", "preset", "run_label"]
+    assert list(compared[0]) == list(COMPARISON_COLUMNS)
     for suffix in (".json", ".png"):
         assert comparison.with_suffix(suffix).is_file()
     rows = _trace_rows(outdir)

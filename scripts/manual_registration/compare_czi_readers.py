@@ -21,7 +21,9 @@ attempts) until the pylibCZIrw read has at least 50 % non-zero pixels. Both
 readers read each ROI; the maximum absolute difference, the number of differing
 pixels and the milliseconds per read are recorded. ``--converted-dir`` (holding
 ``<alias>_<role>.ome.tif``, as the prepare step writes them) adds the same ROI
-read from level 0 of the converted OME-TIFF. The output is keyed by
+read from level 0 of the converted OME-TIFF, compared with the pylibCZIrw maximum
+over all Z planes (the converter max-projects a Z-stack); the two readers are
+compared on plane Z=0. The output is keyed by
 ``<alias>_<role>`` only; it never holds file names.
 
 Expectation: the pixels are equal (at most 1 DN apart for a JpegXr file). Any
@@ -48,16 +50,24 @@ MAX_ATTEMPTS = 200
 ROLES = ("reference", "moving")
 
 
-def _pylibczi_roi(doc: Any, x: int, y: int, c: int) -> np.ndarray:
-    """One ROI from pylibCZIrw (global coordinates, plane C=c, Z=0, T=0)."""
+def _pylibczi_roi(doc: Any, x: int, y: int, c: int, z: int = 0) -> np.ndarray:
+    """One ROI from pylibCZIrw (global coordinates, plane C=c, Z=z, T=0)."""
     data = doc.read(
         roi=(x, y, ROI_SIZE, ROI_SIZE),
-        plane={"C": c, "Z": 0, "T": 0},
+        plane={"C": c, "Z": z, "T": 0},
         zoom=1.0,
         scene=0,
         background_pixel=(0, 0, 0),
     )
     return np.asarray(data[..., 0])
+
+
+def _pylibczi_roi_max_over_z(
+    doc: Any, x: int, y: int, c: int, z_range: tuple[int, int]
+) -> np.ndarray:
+    """One ROI from pylibCZIrw, maximum over Z as the converter writes it."""
+    planes = [_pylibczi_roi(doc, x, y, c, z) for z in range(*z_range)]
+    return np.maximum.reduce(planes)
 
 
 def _czifile_roi(scene: Any, x: int, y: int, c: int) -> np.ndarray:
@@ -133,6 +143,8 @@ def _compare_file(
             }
         )
         n_channels = len(pixel_types)
+        z_start, z_end = doc.total_bounding_box.get("Z", (0, 1))
+        result["z_planes"] = int(z_end - z_start)
         if thumbnail_dir is not None:
             thumbnail_dir.mkdir(parents=True, exist_ok=True)
             thumb = doc.read(
@@ -179,8 +191,16 @@ def _compare_file(
                     row["ms_ome_tiff"] = (time.perf_counter() - started) * 1000.0
                     padded = np.zeros((ROI_SIZE, ROI_SIZE), dtype=window.dtype)
                     padded[: window.shape[0], : window.shape[1]] = window
+                    # The converter max-projects the Z planes, so the OME-TIFF is
+                    # compared with the pylibCZIrw maximum over Z (plane Z=0 for a
+                    # single-plane file, as read above).
+                    projected = (
+                        _pylibczi_roi_max_over_z(doc, x, y, channel, (z_start, z_end))
+                        if z_end - z_start > 1
+                        else reference
+                    )
                     tiff_diff = np.abs(
-                        reference.astype(np.int64) - padded.astype(np.int64)
+                        projected.astype(np.int64) - padded.astype(np.int64)
                     )
                     row["tiff_max_abs_diff"] = int(tiff_diff.max())
                     row["tiff_n_diff_pixels"] = int((tiff_diff > 0).sum())

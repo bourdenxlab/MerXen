@@ -90,11 +90,24 @@ def _global_scale(element: Any, image_key: str) -> tuple[float, float] | None:
 def _pixel_size(
     element: Any, image_key: str, pixel_size_um: float | None
 ) -> tuple[float, float | None]:
-    """Resolve the pixel size to write and the store's own scale (for the log)."""
-    store_scale = _global_scale(element, image_key)
+    """Resolve the pixel size to write and the store's own scale (for the log).
+
+    A given ``pixel_size_um`` wins: a ``global`` transformation that is not a pure
+    scale is then only logged, never an error.
+    """
     if pixel_size_um is not None:
         if pixel_size_um <= 0 or not math.isfinite(pixel_size_um):
             raise ValueError(f"pixel_size_um must be > 0, got {pixel_size_um}")
+        try:
+            store_scale = _global_scale(element, image_key)
+        except ValueError:
+            logger.info(
+                "the 'global' transformation of %s is not an isotropic pure scale; "
+                "using the given %.6g um/px",
+                image_key,
+                pixel_size_um,
+            )
+            store_scale = None
         if (
             store_scale is not None
             and store_scale[0] != 1.0
@@ -108,6 +121,7 @@ def _pixel_size(
                 pixel_size_um,
             )
         return float(pixel_size_um), None if store_scale is None else store_scale[0]
+    store_scale = _global_scale(element, image_key)
     if store_scale is None or store_scale == (1.0, 1.0):
         raise ValueError(
             f"{image_key} has an identity/pixel-unit 'global' transformation, so "
@@ -146,13 +160,16 @@ def export_channel(
 
     Raises:
         ValueError: If the channel is missing or the pixel size cannot be resolved
-            (no file is written then).
+            (no file is written then). A ``global`` transformation that is not a
+            pure scale is an error only when ``pixel_size_um`` is ``None``.
     """
     sdata = sd.read_zarr(Path(store), selection=("images",))
     element = sdata.images[image_key]
     level0 = _level0(element)
     index = _channel_index(level0, channel)
     pixel_size, store_scale = _pixel_size(element, image_key, pixel_size_um)
+    # The store's own spelling of the channel, not the caller's (case-insensitive) one.
+    store_channel = level0.coords["c"].values[index].item()
     out = Path(out)
     sidecar = out.with_suffix(".export.json")
     height, width = int(level0.sizes["y"]), int(level0.sizes["x"])
@@ -162,7 +179,7 @@ def export_channel(
         "dtype": str(dtype),
         "pixel_size_um": pixel_size,
         "image_key": image_key,
-        "channel": level0.coords["c"].values[index].item(),
+        "channel": store_channel,
     }
     if out.is_file() and sidecar.is_file():
         recorded = json.loads(sidecar.read_text(encoding="utf-8"))
@@ -174,7 +191,7 @@ def export_channel(
     logger.info(
         "exporting %s/%s (%d x %d px, %.6g um/px; store scale %s) to %s",
         image_key,
-        channel,
+        store_channel,
         height,
         width,
         pixel_size,
@@ -191,9 +208,9 @@ def export_channel(
         read_band,
         shape_cyx=(1, height, width),
         dtype=dtype,
-        channel_names=[channel],
+        channel_names=[str(store_channel)],
         pixel_size_um=pixel_size,
-        image_name=image_name or f"{image_key}_{channel}",
+        image_name=image_name or f"{image_key}_{store_channel}",
         output_path=out,
         workers=workers,
         tmp_dir=tmp_dir,

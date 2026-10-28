@@ -22,7 +22,7 @@ import spatialdata as sd
 import xarray as xr
 from skimage.filters import threshold_otsu
 from spatialdata.models import Image2DModel
-from spatialdata.transformations import Identity, Scale
+from spatialdata.transformations import Identity, Scale, Sequence, Translation
 
 from merxen import privacy
 from merxen.image_registration import (
@@ -158,6 +158,76 @@ def test_export_reference_image_identity_transform(tmp_path: Path) -> None:
     assert status == 0 and second.is_file()
 
 
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "transformation",
+    [
+        Translation([10.0, 20.0], axes=("x", "y")),
+        Scale([0.5, 0.25], axes=("x", "y")),
+        Sequence(
+            [
+                Scale([0.5, 0.5], axes=("x", "y")),
+                Translation([3.0, 4.0], axes=("x", "y")),
+            ]
+        ),
+    ],
+    ids=["translation", "anisotropic", "scale_and_translation"],
+)
+def test_export_reference_image_given_pixel_size_beats_a_non_scale_transformation(
+    tmp_path: Path, transformation: Any
+) -> None:
+    store = tmp_path / "store.zarr"
+    data = _write_store(store, transformation)
+    out = tmp_path / "reference.ome.tif"
+
+    with pytest.raises(ValueError, match="--pixel-size-um"):
+        export_script.export_channel(
+            store,
+            image_key="morphology_focus",
+            channel="DAPI",
+            out=out,
+            pixel_size_um=None,
+            workers=1,
+        )
+    assert not out.exists()
+
+    # The transformation is only logged when the pixel size is given.
+    export_script.export_channel(
+        store,
+        image_key="morphology_focus",
+        channel="DAPI",
+        out=out,
+        pixel_size_um=0.2125,
+        workers=1,
+    )
+    info = read_ome_tiff_info(out)
+    assert info.pixel_size_um == pytest.approx((0.2125, 0.2125))
+    np.testing.assert_array_equal(open_ome_tiff_level(info, 0).values[0], data[0])
+
+
+@pytest.mark.integration
+def test_export_reference_image_writes_the_stores_channel_name(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "store.zarr"
+    _write_store(store, Scale([0.5, 0.5], axes=("x", "y")))
+    out = tmp_path / "reference.ome.tif"
+
+    # The channel is matched case-insensitively; the file keeps the store's name.
+    export_script.export_channel(
+        store,
+        image_key="morphology_focus",
+        channel="dapi",
+        out=out,
+        pixel_size_um=None,
+        workers=1,
+    )
+
+    assert read_ome_tiff_info(out).channel_names == ("DAPI",)
+    sidecar = json.loads(out.with_suffix(".export.json").read_text(encoding="utf-8"))
+    assert sidecar["key"]["channel"] == "DAPI"
+
+
 # --------------------------------------------------------------------------
 # HD1 ground truth (real data; never in CI)
 # --------------------------------------------------------------------------
@@ -189,6 +259,46 @@ def _downsampled_dapi(sdata: Any, key: str, channel: str) -> np.ndarray:
         plane.coarsen(y=16, x=16, boundary="trim").mean().data.compute(),
         dtype=np.float64,
     )
+
+
+def _image_pearson(
+    registered: np.ndarray, truth: np.ndarray, reference_dapi: np.ndarray
+) -> float:
+    """Pearson of ``log1p`` DAPI, registered against HD1's, over the Xenium tissue.
+
+    The tissue is the Otsu mask of the downsampled Xenium ``morphology_focus`` DAPI
+    (``reference_dapi``, the same grid as the other two), where both images are
+    positive; the IF image's own tissue would let IF-only structure decide it.
+    """
+    tissue = reference_dapi > threshold_otsu(reference_dapi[reference_dapi > 0])
+    valid = tissue & (registered > 0) & (truth > 0)
+    return float(np.corrcoef(np.log1p(registered[valid]), np.log1p(truth[valid]))[0, 1])
+
+
+def test_image_pearson_takes_its_tissue_from_the_xenium_dapi() -> None:
+    rng = np.random.default_rng(0)
+    yy, xx = np.mgrid[:120, :160]
+    xenium_tissue = (yy - 60) ** 2 + (xx - 40) ** 2 < 35**2
+    if_only_blob = (yy - 60) ** 2 + (xx - 120) ** 2 < 25**2
+    reference_dapi = np.where(xenium_tissue, 800.0, 5.0) + rng.uniform(0, 4, yy.shape)
+    signal = rng.uniform(100.0, 1000.0, yy.shape)
+    truth = np.where(xenium_tissue, signal, 5.0)
+    registered = np.where(xenium_tissue, signal * 1.1, 5.0)
+    # Structure only the IF image has: bright in both, but uncorrelated between them.
+    truth = np.where(if_only_blob, rng.uniform(100.0, 1000.0, yy.shape), truth)
+    registered = np.where(
+        if_only_blob, rng.uniform(100.0, 1000.0, yy.shape), registered
+    )
+
+    value = _image_pearson(registered, truth, reference_dapi)
+
+    assert value > 0.999
+    # The IF image's own tissue mask (the old choice) takes the blob in and fails.
+    own = truth > threshold_otsu(truth[truth > 0])
+    assert own[if_only_blob].any()
+    valid = own & (registered > 0) & (truth > 0)
+    old = np.corrcoef(np.log1p(registered[valid]), np.log1p(truth[valid]))[0, 1]
+    assert old < 0.95
 
 
 @pytest.mark.slow
@@ -487,12 +597,17 @@ def test_hd1_ground_truth(  # noqa: C901
     xenium = sd.read_zarr(source_store, selection=("images",))
     registered = _downsampled_dapi(result_store, "moving_registered", "DAPI")
     truth_image = _downsampled_dapi(xenium, "post_xenium_if", "DAPI")
-    tissue = truth_image > threshold_otsu(truth_image[truth_image > 0])
-    valid = tissue & (registered > 0) & (truth_image > 0)
-    pearson_image = float(
-        np.corrcoef(np.log1p(registered[valid]), np.log1p(truth_image[valid]))[0, 1]
-    )
-    gate("7_image_pearson", pearson_image, pearson_image >= 0.98, ">= 0.98")
+    reference_dapi = _downsampled_dapi(xenium, "morphology_focus", "DAPI")
+    grids = {
+        "registered": registered.shape,
+        "hd1": truth_image.shape,
+        "xenium": reference_dapi.shape,
+    }
+    if len(set(grids.values())) != 1:
+        gate("7_image_pearson", grids, False, "the three images share one grid")
+    else:
+        pearson_image = _image_pearson(registered, truth_image, reference_dapi)
+        gate("7_image_pearson", pearson_image, pearson_image >= 0.98, ">= 0.98")
 
     statuses = []
     for outputs in (full_outputs, crop_outputs):
