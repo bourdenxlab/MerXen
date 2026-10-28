@@ -27,4 +27,7 @@ params {
     // (comma-separated; each is passed to Apptainer as -B <paths>).
     apptainer_container = "file:///path/to/apptainer/merxen_gpu.sif"
     apptainer_bind_paths = "/path/to/data,/path/to/shared"
+    // Python of the CZI runtime of the manual-registration prepare workflow
+    // (envs/environment.czi.yml; docs/stages/manual-registration.md).
+    manual_registration_czi_python = "/path/to/merxen-czi-runtime/bin/python"
 }

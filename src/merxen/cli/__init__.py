@@ -19,6 +19,7 @@ from merxen.cli.run_analysis_layer_validation import (
 from merxen.cli.run_build_spatialdata import build_spatialdata_command
 from merxen.cli.run_clustering_squidpy import clustering_squidpy_command
 from merxen.cli.run_comparison import compare_command
+from merxen.cli.run_convert_czi import convert_czi_command
 from merxen.cli.run_cortical_depth import cortical_depth_command
 from merxen.cli.run_distance_from_object import (
     distance_from_object_cohort_command,
@@ -26,6 +27,14 @@ from merxen.cli.run_distance_from_object import (
 )
 from merxen.cli.run_enrichment import enrich_command
 from merxen.cli.run_image_registration import register_images_command
+from merxen.cli.run_manual_registration_prepare import (
+    manual_registration_prepare_command,
+)
+from merxen.cli.run_manual_registration_register import (
+    manual_registration_compare_command,
+    manual_registration_fit_command,
+    manual_registration_register_command,
+)
 from merxen.cli.run_mapmycells import mapmycells_command
 from merxen.cli.run_mask_image_quantification import (
     mask_image_quantification_command,
@@ -85,3 +94,8 @@ main.add_command(mapmycells_command)
 main.add_command(pciseq_command)
 main.add_command(publish_pciseq_viewer_command)
 main.add_command(prepare_pciseq_reference_command)
+main.add_command(convert_czi_command)
+main.add_command(manual_registration_prepare_command)
+main.add_command(manual_registration_register_command)
+main.add_command(manual_registration_fit_command)
+main.add_command(manual_registration_compare_command)
