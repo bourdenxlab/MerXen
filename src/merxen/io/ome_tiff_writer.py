@@ -401,12 +401,15 @@ def write_pyramidal_ome_tiff(
 ) -> OmeTiffWriteResult:
     """Write a tiled, pyramidal BigTIFF OME-TIFF from row bands.
 
-    Memory use is bounded and independent of the image size: anonymous memory is
-    about one band per channel (the band returned by ``read_band`` plus its
-    reduced copies) plus, when the reduced levels are written, one tile row of
-    the level being written. No file stays mapped: the reduced levels are plain
-    scratch files accessed with ``os.pwrite`` and ``os.preadv``, so their pages
-    are page cache (reclaimable, and not counted as resident memory of the
+    Memory use does not grow with the image height or the channel count (the
+    channels are streamed one at a time); it grows with the image width.
+    Anonymous memory is about two bands of one channel (the band returned by
+    ``read_band`` and its reduced copies) plus up to about 512 MiB of tiles that
+    tifffile holds for encoding (tifffile 2026.4.11); each held tile keeps alive
+    the band, or for a reduced level the tile-row strip read from its scratch
+    file, that it was cut from. No file stays mapped: the reduced levels are
+    plain scratch files accessed with ``os.pwrite`` and ``os.preadv``, so their
+    pages are page cache (reclaimable, and not counted as resident memory of the
     process), unlike memory maps, which keep every touched page resident until
     they are closed. The disk use of the scratch files is the total size of the
     reduced levels, about a third of level 0.
