@@ -591,11 +591,12 @@ Recorded values (final run, `e77c005`; none of these is a gate). All three runs
 the correlation-gain check off (`-2`, as `REGISTER_IMAGES`); the check passed on
 `full` and `crop80` (registration-channel Pearson before and after the
 refinement 0.683 to 0.738 and 0.723 to 0.789; window shift median 1.68 to 0.48 µm
-on `full`), and every gate value above is identical to an earlier run at
-`761ffba`, before the check existed. Against HD1's stored registration: final
+on `full`), and every gate value of checks 1 to 9 is identical to an earlier run
+at `761ffba`, before the check existed (check 10's times and memory differ from
+run to run). Against HD1's stored registration: final
 affine over the tissue grid mean 0.32, max 0.65 µm (`4_vs_stored`); confident
 fraction 0.9450 vs 0.9467 and Pearson after 0.8316 vs 0.8302 (`5_vs_stored`);
-held-out median final error 0.66 µm and affine error mean 0.50, max 0.69 µm
+held-out median final error 0.66 µm and affine error mean 0.504, max 0.686 µm
 (`6_vs_stored`); for the control, final affine mean 0.32, max 0.67 µm and an x16
 Pearson of 0.886 between the two registered DAPI images (`control_vs_stored`;
 `7_vs_stored` is also 0.886). Pearson of the registered DAPI against the Xenium
@@ -608,11 +609,14 @@ Pearson of 0.886 between the two registered DAPI images (`control_vs_stored`;
 | x32 | 0.385 | 0.385 | 0.408 |
 | x64 | 0.373 | 0.373 | 0.378 |
 
-The manual path reproduces the current pipeline exactly: `full` and the control
-agree to the digits shown. The stored registration, written by older flow code,
-matches the Xenium DAPI better at the finest scale (3.4 µm blocks) and equally at
-13.6 µm. That is a difference between two versions of the shared non-rigid code,
-not of the manual path, and a follow-up outside this feature.
+The manual path reproduces the current pipeline: `full` and the control differ by
+at most 0.03 µm in the final affine (check 4), and their Pearson values agree to
+the digits shown. The stored registration, written by older code, has a higher
+Pearson against the Xenium DAPI at the finest scale (0.427 against 0.342 at 3.4 µm
+blocks) and nearly the same at 13.6 µm (0.378 against 0.373). Its final affine also
+differs from the control's (mean 0.32 µm). The gap therefore lies between two
+versions of the shared registration code (refinement and flow), not in the manual
+path; following it up is outside this feature.
 
 Check 6 compares each stage with the control run's: `final` against the control's
 final mapping (its affine plus its flow, pushed through), `affine` against the
@@ -647,7 +651,8 @@ inliers, scale 1.0127, rotation 178.49 deg; search ±200 µm, 577 windows, 83
 confident, 59 inliers, scale 1.0127, rotation 177.75 deg, inlier residual median
 24.6 µm and p90 44.8 µm. The similarity fit of the 16 enabled pairs (all used) has
 scale 1.0132 and rotation 177.76 deg. The moving section is mounted rotated by about
-180 deg relative to the reference.
+180 deg relative to the reference; the coarse search and the landmark fit handle it
+(no mirror).
 
 | Quantity | `same_section` | `serial_section` |
 |---|---|---|
@@ -669,9 +674,9 @@ check is for: `same_section` applied the refinement (DAPI correlation 0.4876 ->
 Pearson went from 0.194 to 0.195, and the flow was rejected (confident fraction
 0.068).
 
-Gates for `serial_section` (the v1 values, kept after one tuning round, see
-below; preset version `serial_section_v2` because the preset now inherits the
-correlation-gain check, no value changed): `n_used >= 0.75 n_enabled`,
+Gates for `serial_section` (the preset runs with its v1 values, kept after one
+tuning round, see below; preset version `serial_section_v2` because it now
+inherits the correlation-gain check, no value changed): `n_used >= 0.75 n_enabled`,
 `|scale_ratio - 1| <= 0.05`, the fitted reflection equals the searched mirror and
 the other class's median is at least twice the chosen class's, `spread_ratio >=
 0.2`; tissue Pearson non-decreasing (within 0.01); held-out final median at most
@@ -704,13 +709,17 @@ were tried:
 | both | applied | 0.002 (rejected) | 19.2 / 44.6 | 0.193 |
 
 The raw TV-L1 flow of the lenient variant has a median displacement of 137 µm and a
-p90 of 239 µm, against a held-out landmark residual of 19 µm: the flow does not
-follow real structure between serial sections. The local DAPI correlation is high
-only at tissue borders, sulci and vessels, and close to 0 in the grey-matter
-interior. Allowing the larger refinement made the held-out median worse (19.2 to
-44.6 µm). Conclusion: keep the v1 values; add the correlation-gain check (preset
-version v2, values unchanged); on serial sections the result is the landmark
-similarity fit, with held-out median 19 µm, p90 35 µm and max 51 µm.
+p90 of 239 µm, against a held-out landmark residual of 19 µm: on this pair the flow
+does not follow real structure. The local DAPI correlation is high only at tissue
+borders, sulci and vessels, and close to 0 in the grey-matter interior. Allowing
+the larger refinement made the held-out median worse (19.2 to 44.6 µm).
+Conclusion: keep the v1 values. The correlation-gain check (preset version v2,
+values unchanged) was added because of the `same_section` run above; the tuning
+runs predate it. On this serial pair both presets end at the landmark similarity
+fit: held-out median 19 µm, p90 35 µm, max 51 µm (8 pairs). The held-out landmarks
+come from window matching, whose own inlier residual median is 25 µm, so these
+figures include landmark error. Other serial pairs are not measured; the guards
+decide per run.
 
 **CZI reader comparison** (one-off, `scripts/manual_registration/compare_czi_readers.py`):
 per file, compression, ROIs compared, maximum absolute difference, mismatching
@@ -731,9 +740,9 @@ Versions: `czifile` 2026.10.14 and `pylibCZIrw` 6.1.0 (run once through `uv`, no
 project dependency; commit `9054957`). All four files are Gray16 with one Z plane
 and 3 channels (DAPI, AF568, AF647, names from the CZI `Name` attribute), so the
 Z projection is not exercised. The readers and the converted OME-TIFF agree on
-every pixel. Reading JPEG-XR tiles is the expensive case: 173 to 193 ms per ROI
+every pixel of the 60 ROIs per file. Reading JPEG-XR tiles is the expensive case: 173 to 193 ms per ROI
 with either reader, against 2.6 to 2.9 ms (`czifile`) and 6.0 to 7.4 ms
-(`pylibCZIrw`) on uncompressed files; the converted OME-TIFF reads in about 25 ms
+(`pylibCZIrw`) on uncompressed files; the converted OME-TIFF reads in 22 to 25 ms
 per ROI whatever the CZI compression.
 
 **Prepare** (both pairs, on the isolated CZI runtime). LCM1: 3 channels kept on
@@ -742,10 +751,11 @@ and moving 77257 x 48135 px, both uncompressed CZI (26 to 28 GB each). LCM2: the
 same channels; reference 71849 x 61012 px, uncompressed; moving 79953 x 48136 px,
 JPEG-XR (6.3 GB). LCM2's moving image has a negative CZI origin (its scene bounding
 box starts at x = -131315) and JPEG-XR tiles; both were handled, and the prepared
-grid is the bounding box. A prepare took about 17 min per pair (the conversion task
-about 16 min, the viewer cache about 1 min) and peaked at about 40 GB (LCM1) and
-42 GB (LCM2) resident memory in the Nextflow trace, well above the 16 GB the
-process declares (see Resources under Workflows and launch); the local executor
+grid is the bounding box. A prepare took about 17 min per pair (the
+`MANUAL_REGISTRATION_PREPARE` task about 16 min, of which the two CZI conversions
+took about 12 min; the viewer-cache task about 1 min). It peaked at 38.3 GB (LCM1)
+and 40.5 GB (LCM2) resident memory in the Nextflow task trace, well above the 16 GB
+the process declares (see Resources under Workflows and launch); the local executor
 does not enforce the directive. Re-running prepare on the unchanged LCM1 pair took
 12 s (status `unchanged`).
 
@@ -755,7 +765,5 @@ images, and strips of edge artefact (duplicated or bright tiles) run along the t
 (see the non-rigid QC overlay). The validation's crops are automatic:
 `derive_test_landmarks.py` proposes each image's tissue bounding box inset by 1 %,
 snapped inward to 64 px. They trim the empty frame but leave those strips inside; a
-crop drawn by hand in the viewer, as intended for real use, is what excludes them.
-The results above therefore include the artefacts. The serial pair's moving section
-is mounted rotated by about 180 deg relative to the reference; the coarse search and
-the landmark fit handle it (no mirror).
+crop drawn by hand in the viewer, as intended for real use, can exclude them (not
+measured here). The LCM1 results above therefore include the artefacts.
