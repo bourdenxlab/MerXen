@@ -514,7 +514,8 @@ shipped the tests and scripts; the runs are a later step).
 
 **HD1 ground truth** (a post-Xenium IF image registered with the Explorer matrix
 and the pipeline's own refinement and flow; the test simulates landmarks from the
-Explorer matrix, plus 1 µm noise and one 40 µm outlier). Test:
+Explorer matrix, plus 1 µm noise and one 40 µm outlier, and compares the result
+with a control run of the current code from the Explorer matrix). Test:
 `tests/test_manual_registration/test_hd1_ground_truth.py::test_hd1_ground_truth`.
 
 | # | Check | Gate | Measured | Result |
@@ -522,20 +523,44 @@ Explorer matrix, plus 1 µm noise and one 40 µm outlier). Test:
 | 1 | Outlier handling: `n_outliers`, pair 3 flagged, `n_used` | 1, pair 3, 11 | | |
 | 2 | Landmark matrix vs Explorer matrix at the 4 tissue corners | <= 3 µm | | |
 | 3 | Refinement status | `applied` | | |
-| 4 | Final affine vs HD1's final affine over the tissue grid | mean <= 0.5, max <= 1.0 µm | | |
-| 5 | Non-rigid: status, confident fraction, Pearson after | `applied`; within 0.05 and 0.01 of HD1's | | |
-| 6 | Held-out pairs 13 to 16: median final error; affine error | <= 1.0 µm; mean <= 0.5, max <= 1.0 µm | | |
-| 7 | Registered DAPI vs HD1's registered DAPI (x16 block mean, log; tissue = Otsu of the downsampled Xenium `morphology_focus` DAPI) | Pearson >= 0.98 | | |
+| 4 | Final affine vs a current-code control run from the Explorer matrix, over the tissue grid | mean <= 0.5, max <= 1.0 µm | | |
+| 5 | Non-rigid: status, confident fraction, Pearson after, vs a current-code control run from the Explorer matrix | `applied`; within 0.05 and 0.01 of the control's | | |
+| 6 | Held-out pairs 13 to 16 vs a current-code control run from the Explorer matrix: median final error; affine error | <= 1.0 µm; mean <= 0.5, max <= 1.0 µm | | |
+| 7 | Registered DAPI vs the registered DAPI of a current-code control run from the Explorer matrix (x16 block mean, log; tissue = Otsu of the downsampled Xenium `morphology_focus` DAPI) | Pearson >= 0.98 | | |
 | 8 | Both matrix CSVs load and pass the scale check | no exception | | |
 | 9 | Crop to the inner 80 % vs full | mean <= 0.5, max <= 1.0 µm | | |
-| 10 | Peak RSS of both runs | <= 48 GB | | |
+| 10 | Peak RSS of the full and crop runs (the control run's wall time and peak RSS are recorded) | <= 48 GB | | |
 
-Check 6 compares each stage against its own truth: `final` against HD1's final
-mapping (its affine plus its stored flow, pushed through), `affine` against HD1's
-final affine. The simulated points come from the Explorer matrix, which carries
-its own error against the image truth, so a comparison against them would
+Why a control run. HD1's stored registration was written by older flow code: its
+recorded settings have no `nonrigid_highpass_sigma_um`,
+`nonrigid_local_correlation_sigma_um` or `nonrigid_local_residual_tiles`, which
+the current code has. Compared with it, the manual path would be measured
+against the difference between two code versions as well as against its own
+accuracy. The control is the current pipeline's own registration from the
+Explorer matrix: a third run, labelled `explorer`, whose 16 landmark pairs are
+the same tissue points as the simulated ones, mapped through the Explorer matrix
+exactly (no noise, no outlier, all enabled), with the same coarse, no crops and
+HD1's recorded row settings, through the shared core as `REGISTER_IMAGES` runs
+it. Checks 4 to 7 compare the `full` run (noisy landmarks and the outlier) with
+it, so they measure what the manual path adds to the pipeline's own result.
+The comparisons with HD1's stored registration are kept in the validation JSON as
+recorded values, never gates: `4_vs_stored`, `5_vs_stored`, `6_vs_stored`,
+`7_vs_stored`, `control_vs_stored` (the control's final affine against HD1's over
+the grid, and the x16 Pearson of the two registered DAPI images) and
+`7_vs_xenium_dapi` (Pearson of the `full`, control and stored registered DAPI
+against the Xenium `morphology_focus` DAPI, over the same tissue mask, on the
+x16 grid and on 2 and 4 times coarser blocks). `stored_registration_note` states
+that HD1's stored registration predates the current non-rigid settings when the
+key `nonrigid_highpass_sigma_um` is absent from its recorded settings, and is
+null otherwise.
+
+Check 6 compares each stage with the control run's: `final` against the control's
+final mapping (its affine plus its flow, pushed through), `affine` against the
+control's final affine. The simulated points come from the Explorer matrix, which
+carries its own error against the image truth, so a comparison against them would
 penalise every micron the flow correctly moves; the residuals against the
-simulated points are recorded only.
+simulated points, and the landmark matrix against HD1's stored final mapping, are
+recorded only.
 
 **Zeiss CZI pair, LCM1** (a serial pair; no ground truth; both presets, run
 through Nextflow, with the documented `same_section:matrix_scale_tolerance=0.05`
