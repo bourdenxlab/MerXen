@@ -525,7 +525,7 @@ with a control run of the current code from the Explorer matrix). Test:
 | 3 | Refinement status | `applied` | | |
 | 4 | Final affine vs a current-code control run from the Explorer matrix, over the tissue grid | mean <= 0.5, max <= 1.0 µm | | |
 | 5 | Non-rigid: status, confident fraction, Pearson after, vs a current-code control run from the Explorer matrix | `applied`; within 0.05 and 0.01 of the control's | | |
-| 6 | Held-out pairs 13 to 16 vs a current-code control run from the Explorer matrix: median final error; affine error | <= 1.0 µm; mean <= 0.5, max <= 1.0 µm | | |
+| 6 | Held-out pairs 13 to 16 vs a current-code control run from the Explorer matrix: flow inversion converged at those pairs in both runs; median final error; affine error | converged; <= 1.0 µm; mean <= 0.5, max <= 1.0 µm | | |
 | 7 | Registered DAPI vs the registered DAPI of a current-code control run from the Explorer matrix (x16 block mean, log; tissue = Otsu of the downsampled Xenium `morphology_focus` DAPI) | Pearson >= 0.98 | | |
 | 8 | Both matrix CSVs load and pass the scale check | no exception | | |
 | 9 | Crop to the inner 80 % vs full | mean <= 0.5, max <= 1.0 µm | | |
@@ -559,8 +559,16 @@ final mapping (its affine plus its flow, pushed through), `affine` against the
 control's final affine. The simulated points come from the Explorer matrix, which
 carries its own error against the image truth, so a comparison against them would
 penalise every micron the flow correctly moves; the residuals against the
-simulated points, and the landmark matrix against HD1's stored final mapping, are
-recorded only.
+simulated points, and the landmark matrix against HD1's stored final affine, are
+recorded only. Only the held-out pairs count, convergence of the flow inversion
+included: the validation JSON lists, per mapping (`full`, `control`), the held-out
+ids it did not converge at (`not_converged_ids`).
+
+The validation JSON is written even when a check raises: a gate whose computation
+raises is recorded as failed with `{"error": ...}` as its value, a recorded-only
+value as `{"error": ...}`, and the later checks still run. Its `runs` entry says,
+per run label, whether the run was `reused` (its inputs were unchanged since an
+earlier run, so it was not registered again, as its task summary records).
 
 **Zeiss CZI pair, LCM1** (a serial pair; no ground truth; both presets, run
 through Nextflow, with the documented `same_section:matrix_scale_tolerance=0.05`
