@@ -210,8 +210,8 @@ processes publish nothing through Nextflow, Python writes these files.
 <id>/prepared/<id>_prepared.zarr                         # the store the viewer edits; written atomically
 <id>/prepared/<id>_reference.ome.tif                     # only when converted (CZI) or normalised
 <id>/prepared/<id>_moving.ome.tif                        # same
-<id>/prepared/<id>_reference.prepare.json                # per-image provenance (conversion skip key)
-<id>/prepared/<id>_moving.prepare.json
+<id>/prepared/<id>_reference.prepare.json                # per-image provenance (conversion skip key); only when converted (CZI) or normalised
+<id>/prepared/<id>_moving.prepare.json                   # same
 <id>/prepared/<id>_prepare_summary.json
 <id>/prepared/viewer_cache/                              # VIEWER_CACHE publishDir (symlink)
 <id>/registered/<run_name>/<run_id>_registered.zarr      # run_name = <preset>[_<run_label>]
