@@ -303,6 +303,13 @@ def test_window_ncc_recovers_a_known_similarity(
     assert result["n_keypoints_reference"] == second["n_windows"]
     assert result["n_ratio_matches"] == result["n_gated"] == second["n_confident"]
     assert second["n_inliers"] == result["n_inliers"]
+    # The pass's residual numbers are the last pass's inlier residuals in um.
+    assert second["inlier_residual_median_um"] == pytest.approx(
+        np.median(residual) * WINDOW_PIXEL_SIZE_UM
+    )
+    assert second["inlier_residual_p90_um"] == pytest.approx(
+        np.percentile(residual, 90.0) * WINDOW_PIXEL_SIZE_UM
+    )
     assert second["inlier_residual_median_um"] <= second["inlier_residual_p90_um"]
     assert json.dumps(result["passes"])  # plain numbers: the diagnostics are JSON
 
@@ -412,6 +419,72 @@ def test_a_peak_on_the_search_border_is_not_confident() -> None:
     )
     assert on_border and peak > 0.3  # it would pass the peak threshold alone
     assert x == 2 * search
+
+
+@pytest.mark.parametrize(("shift_x", "shift_y"), [(10.4, -3.3), (-7.25, 5.6)])
+def test_match_window_recovers_a_fractional_shift(
+    shift_x: float, shift_y: float
+) -> None:
+    search = 20
+    window = _blob(60, (30.0, 30.0), 12.0)
+    # The content sits a fraction of a pixel off the integer correlation maximum: the
+    # parabolic refinement of both axes (its sign included) has to recover it.
+    region = _blob(100, (50.0 + shift_x, 50.0 + shift_y), 12.0)
+
+    peak, _, x, y, on_border = derive_script._match_window(
+        region, window, exclusion_px=8
+    )
+
+    assert not on_border and peak > 0.9
+    assert x - search == pytest.approx(shift_x, abs=0.05)
+    assert y - search == pytest.approx(shift_y, abs=0.05)
+
+
+def test_parabolic_peak_is_the_vertex_of_a_sampled_parabola() -> None:
+    samples = 5.0 - (np.arange(8) - 3.3) ** 2
+
+    assert derive_script._parabolic_peak(samples, 3) == pytest.approx(3.3)
+    # The integer maximum of the mirrored parabola is the other neighbour.
+    assert derive_script._parabolic_peak(samples[::-1], 4) == pytest.approx(7 - 3.3)
+    # No neighbour on one side, or a flat profile: the integer position.
+    assert derive_script._parabolic_peak(samples, 0) == 0.0
+    assert derive_script._parabolic_peak(samples, 7) == 7.0
+    assert derive_script._parabolic_peak(np.ones(5), 2) == 2.0
+
+
+def _single_window_pass(
+    moving_mask: np.ndarray, *, search_px: int = 20, half_px: int = 30
+) -> tuple[int, np.ndarray, np.ndarray]:
+    """One pass over a 101 px image: a single window at its centre, identity warp."""
+    band = np.random.default_rng(0).normal(size=(101, 101)).astype(np.float32)
+    return derive_script._window_pass(
+        band,
+        band,
+        np.ones(band.shape, dtype=bool),
+        moving_mask,
+        np.eye(3),
+        search_px=search_px,
+        half_px=half_px,
+        stride_px=10,
+        exclusion_px=8,
+        min_mask_fraction=0.9,
+        min_peak=0.3,
+        min_peak_margin=0.05,
+    )
+
+
+def test_a_window_needs_tissue_in_the_whole_search_region_of_the_moving_image() -> None:
+    covered = np.ones((101, 101), dtype=bool)
+    n_windows, reference, _ = _single_window_pass(covered)
+    assert n_windows == 1 and len(reference) == 1
+
+    # Tissue over the window (rows and columns 20 to 79) but not over the 100 px
+    # search region around it: the content a shifted window would match is missing.
+    window_only = np.zeros((101, 101), dtype=bool)
+    window_only[20:80, 20:80] = True
+    n_windows, reference, moving = _single_window_pass(window_only)
+    assert n_windows == 0
+    assert reference.shape == moving.shape == (0, 2)
 
 
 # --- derive with the window method ---------------------------------------------
