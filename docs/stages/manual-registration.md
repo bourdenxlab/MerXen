@@ -42,12 +42,14 @@ presets differ in the length scale they trust:
 
 - `same_section`: both images show the same cells (a post-Xenium IF image and
   the Xenium DAPI of the same section). Refinement and the optical flow work at
-  nucleus scale, exactly the `REGISTER_IMAGES` settings with the flow switched
-  on.
+  nucleus scale, the `REGISTER_IMAGES` settings with the flow switched on and
+  one extra guard: the refinement is applied only when it does not lower the
+  registration-channel correlation (`refinement_min_correlation_gain`).
 - `serial_section`: adjacent sections have no 1:1 nuclei. The preset aligns
   tissue-scale structure (layers, vessels, white-matter boundaries) at 6 to
   12 µm per pixel with wider windows, stronger smoothing and tighter Jacobian
-  limits; nucleus-level QC is computed but informative only.
+  limits; nucleus-level QC is computed but informative only. It inherits the
+  `same_section` correlation guard.
 
 For a serial pair, run both: `same_section` then shows what nucleus-scale
 refinement and flow do on serial sections (its guards may reject them; status
@@ -63,7 +65,13 @@ and reason are reported), and the comparison table puts the runs side by side.
    landmark pairs; flag outliers; report the scale against the pixel-size ratio.
 4. Refine with the DAPI affine of the image registration core
    (`refinement_*` settings), then optionally estimate the TV-L1 flow
-   (`nonrigid_*`); both are guarded and fall back with a recorded reason.
+   (`nonrigid_*`); both are guarded and fall back with a recorded reason. The
+   refinement is applied only when it stays inside the shift, rotation and scale
+   limits **and** does not lower the registration-channel correlation of the
+   overlay it was fitted on: a correction whose correlation gain is below
+   `refinement_min_correlation_gain` is rejected as
+   `rejected_no_correlation_gain`, the landmark matrix is kept and the summary
+   records `pearson_before` and `pearson_candidate`.
 5. Warp every moving channel onto the cropped reference grid, place every
    landmark at each stage (landmark, affine, final) and compute tissue-scale
    Pearson correlation, residuals and optional nucleus-scale QC.
@@ -362,7 +370,18 @@ matrix; the main pipeline applies its own refinement.
   Outliers are marked, excluded from the fit and still reported.
 - **Refinement and non-rigid status**: `applied`, `disabled`, `skipped_<reason>`
   or `rejected_<reason>`, with a reason. A rejected guard keeps the previous mapping; the
-  run is still `complete`. The flow reports confident fraction, Pearson before and
+  run is still `complete`. The refinement is `rejected_exceeds_limits` (shift,
+  rotation or scale beyond the limits) or `rejected_no_correlation_gain` (the
+  correction did not raise the registration-channel correlation: the reason starts
+  with the channel's name and reads like
+  `DAPI correlation 0.4876 -> 0.4863 (gain -0.0013 < 0.0)`); in both cases the
+  residual statistics and the QC figure show the unrefined state. With the check on,
+  `refinement.pearson_before` and `refinement.pearson_candidate` give the
+  correlation without and with the correction (null when it cannot be measured,
+  which also rejects). They are present only when the correction passed the
+  limits (status `applied` or `rejected_no_correlation_gain`); otherwise the
+  correlation before is `refinement_qc.before.pearson_log_registration_channel`.
+  The flow reports confident fraction, Pearson before and
   after, displacement and Jacobian statistics.
 - **Tissue Pearson per stage** (`tissue_qc.pearson`: coarse, landmark, affine,
   final): correlation of band-passed tissue-scale intensity. The working image
@@ -431,6 +450,7 @@ and is the set of keys `registration_settings` can override. Defaults are the
 | `max_refinement_scale_change` | 0.02 | Largest accepted scale change |
 | `refinement_min_window_quality` | 0.3 | Window quality threshold |
 | `refinement_require_moving_tissue` | false | Also require tissue in the moving image (holes, laser-microdissection) |
+| `refinement_min_correlation_gain` | 0.0 | Smallest rise of the registration-channel (DAPI) log Pearson correlation a refinement inside the limits must give to be applied; a number in [-2, 2], and `-2` turns the check off (the `REGISTER_IMAGES` behaviour; the override grammar cannot express `None`) |
 | `nonrigid_enabled` | true | Estimate the TV-L1 flow |
 | `nonrigid_pixel_size_um` | 3.4 | Flow grid pixel size |
 | `nonrigid_attachment`, `nonrigid_tightness`, `nonrigid_num_warp`, `nonrigid_num_iter` | 10, 0.3, 5, 10 | TV-L1 parameters |
@@ -454,9 +474,12 @@ and is the set of keys `registration_settings` can override. Defaults are the
 | `nucleus_qc`, `nucleus_qc_pixel_size_um`, `nucleus_qc_window_um` | false, 1.7, 200 | Nucleus-scale QC |
 | `tile_size`, `chunk_size`, `build_viewer_pyramid` | 4096, 4096, true | Writing the result store |
 
-**Presets.** `same_section` is the defaults above. `serial_section` overrides
-(v1 starting values; changing a preset bumps its version, recorded in every
-summary):
+**Presets.** `same_section` is the defaults above. It differs from the
+`REGISTER_IMAGES` defaults in the non-rigid stage being on and in the correlation
+guard (`refinement_min_correlation_gain`, 0.0). `serial_section` overrides
+(v1 starting values, plus the inherited correlation guard since v2; changing a
+preset bumps its version, recorded in every summary), and keeps the
+`same_section` value of every key not listed:
 
 | Field | `same_section` | `serial_section` |
 |---|---|---|
@@ -540,8 +563,10 @@ accuracy. The control is the current pipeline's own registration from the
 Explorer matrix: a third run, labelled `explorer`, whose 16 landmark pairs are
 the same tissue points as the simulated ones, mapped through the Explorer matrix
 exactly (no noise, no outlier, all enabled), with the same coarse, no crops and
-HD1's recorded row settings, through the shared core as `REGISTER_IMAGES` runs
-it. Checks 4 to 7 compare the `full` run (noisy landmarks and the outlier) with
+HD1's recorded row settings, and with the correlation-gain check off
+(`refinement_min_correlation_gain=-2`, as `REGISTER_IMAGES` has none; the `full`
+and crop runs keep the preset's 0.0), through the shared core as `REGISTER_IMAGES`
+runs it. Checks 4 to 7 compare the `full` run (noisy landmarks and the outlier) with
 it, so they measure what the manual path adds to the pipeline's own result.
 The comparisons with HD1's stored registration are kept in the validation JSON as
 recorded values, never gates: `4_vs_stored`, `5_vs_stored`, `6_vs_stored`,

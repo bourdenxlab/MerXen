@@ -396,6 +396,237 @@ def test_window_quality_threshold_is_tunable() -> None:
     assert windows(0.3) == default["n_windows"]
 
 
+# The registration pixel size is 2 um on a 1 um reference grid (see ``_settings``).
+_WORKING_SIZE = 256
+
+
+def _wrong_scale_fit(
+    centers_xy: np.ndarray, shifts_xy: np.ndarray, **_kwargs: Any
+) -> tuple[np.ndarray, np.ndarray]:
+    """A within-limits correction that is wrong: 1 % scale about the image centre."""
+    centre = _WORKING_SIZE / 2.0
+    correction = np.array(
+        [[1.01, 0.0, -0.01 * centre], [0.0, 1.01, -0.01 * centre], [0.0, 0.0, 1.0]]
+    )
+    return correction, np.ones(len(centers_xy), dtype=bool)
+
+
+def _refine_identical_images(
+    monkeypatch: pytest.MonkeyPatch, tuning: RegistrationTuning
+) -> Any:
+    """Refine two identical images (the identity is already the best matrix)."""
+    monkeypatch.setattr(
+        registration_module, "fit_affine_displacement", _wrong_scale_fit
+    )
+    image = _synthetic_dapi()
+    return _refine_registration(
+        reference=_in_memory_reference(image),
+        moving=_in_memory_moving(image),
+        registration_channel="DAPI",
+        matrix=np.eye(3),
+        settings=_settings(),
+        tuning=tuning,
+    )
+
+
+def test_refinement_that_lowers_the_correlation_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    tuning = RegistrationTuning(
+        refinement_min_correlation_gain=0.0, qc_initial_matrix_label="Landmark matrix"
+    )
+
+    with caplog.at_level("WARNING", logger="merxen.image_registration"):
+        refinement = _refine_identical_images(monkeypatch, tuning)
+
+    assert refinement.status == "rejected_no_correlation_gain"
+    np.testing.assert_array_equal(refinement.matrix, np.eye(3))
+    assert refinement.after is refinement.before
+    before = refinement.correction["pearson_before"]
+    candidate = refinement.correction["pearson_candidate"]
+    assert candidate < before
+    assert re.fullmatch(
+        rf"DAPI correlation {before:.4f} -> {candidate:.4f} "
+        rf"\(gain {candidate - before:.4f} < 0\.0\)",
+        refinement.reason,
+    )
+    # The correction itself was inside the limits and is still reported.
+    assert refinement.correction["n_inlier_windows"] > 0
+    assert 0.0 < refinement.correction["scale_change"] < 0.02
+    assert f"keeping the Landmark matrix ({refinement.reason})" in caplog.text, (
+        caplog.text
+    )
+
+
+def test_the_reason_names_the_registration_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        registration_module, "fit_affine_displacement", _wrong_scale_fit
+    )
+    image = _synthetic_dapi()
+    levels = _levels(image)
+    moving = MovingImage(
+        image_key="moving",
+        channel_names=("Hoechst",),
+        pixel_size_um=1.0,
+        level_shapes_yx=tuple(
+            (int(level.sizes["y"]), int(level.sizes["x"])) for level in levels
+        ),
+        open_level=lambda index: levels[index],
+        level0=levels[0].assign_coords(c=["Hoechst"]),
+    )
+
+    refinement = _refine_registration(
+        reference=_in_memory_reference(image),
+        moving=moving,
+        registration_channel="Hoechst",
+        matrix=np.eye(3),
+        settings=_settings(),
+        tuning=RegistrationTuning(refinement_min_correlation_gain=0.0),
+    )
+
+    assert refinement.status == "rejected_no_correlation_gain"
+    assert refinement.reason.startswith("Hoechst correlation ")
+    assert "DAPI" not in refinement.reason
+
+
+def test_a_gain_of_exactly_the_threshold_is_applied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The boundary: ``gain >= min`` applies, so a zero gain passes a 0.0 threshold."""
+
+    def identity_fit(
+        centers_xy: np.ndarray, shifts_xy: np.ndarray, **_kwargs: Any
+    ) -> tuple[np.ndarray, np.ndarray]:
+        return np.eye(3), np.ones(len(centers_xy), dtype=bool)
+
+    monkeypatch.setattr(registration_module, "fit_affine_displacement", identity_fit)
+    image = _synthetic_dapi()
+
+    refinement = _refine_registration(
+        reference=_in_memory_reference(image),
+        moving=_in_memory_moving(image),
+        registration_channel="DAPI",
+        matrix=np.eye(3),
+        settings=_settings(),
+        tuning=RegistrationTuning(refinement_min_correlation_gain=0.0),
+    )
+
+    correction = refinement.correction
+    # The precondition that makes this the boundary: not a hair above or below.
+    assert correction["pearson_candidate"] - correction["pearson_before"] == 0.0
+    assert refinement.status == "applied"
+    assert refinement.reason is None
+    assert refinement.after is not refinement.before
+
+
+def test_refinement_inside_the_limits_applies_without_a_gain_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refinement = _refine_identical_images(monkeypatch, RegistrationTuning())
+
+    # Today's behaviour: the wrong correction is applied, and the summary has no
+    # Pearson keys, so REGISTER_IMAGES summaries are unchanged.
+    assert refinement.status == "applied"
+    assert not np.allclose(refinement.matrix, np.eye(3))
+    assert refinement.after is not refinement.before
+    assert "pearson_before" not in refinement.correction
+    assert "pearson_candidate" not in refinement.correction
+    assert set(refinement.correction) == {
+        "max_shift_um",
+        "rotation_deg",
+        "scale_change",
+        "n_windows",
+        "n_inlier_windows",
+    }
+
+
+def test_a_lenient_gain_threshold_applies_the_correction_and_records_pearson(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refinement = _refine_identical_images(
+        monkeypatch, RegistrationTuning(refinement_min_correlation_gain=-0.5)
+    )
+
+    assert refinement.status == "applied"
+    assert refinement.reason is None
+    correction = refinement.correction
+    assert correction["pearson_candidate"] < correction["pearson_before"]
+    assert refinement.after is not refinement.before
+    assert refinement.after.pearson_log == correction["pearson_candidate"]
+
+
+def test_limit_violations_are_reported_before_the_gain_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        registration_module,
+        "fit_affine_displacement",
+        lambda centers, shifts, **_: (
+            np.array([[1.2, 0.0, 0.0], [0.0, 1.2, 0.0], [0.0, 0.0, 1.0]]),
+            np.ones(len(centers), dtype=bool),
+        ),
+    )
+    image = _synthetic_dapi()
+    limited = _refine_registration(
+        reference=_in_memory_reference(image),
+        moving=_in_memory_moving(image),
+        registration_channel="DAPI",
+        matrix=np.eye(3),
+        settings=_settings(),
+        tuning=RegistrationTuning(refinement_min_correlation_gain=0.0),
+    )
+
+    assert limited.status == "rejected_exceeds_limits"
+    assert "scale change" in limited.reason
+    # The limits come first: the candidate was never measured, so no Pearson keys.
+    assert "pearson_candidate" not in limited.correction
+
+
+def test_a_nan_correlation_fails_the_gain_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        registration_module, "_masked_log_pearson", lambda *a, **k: float("nan")
+    )
+    refinement = _refine_identical_images(
+        monkeypatch, RegistrationTuning(refinement_min_correlation_gain=-2.0)
+    )
+
+    assert refinement.status == "rejected_no_correlation_gain"
+    assert "gain undefined" in refinement.reason
+    np.testing.assert_array_equal(refinement.matrix, np.eye(3))
+    assert math.isnan(refinement.correction["pearson_before"])
+    stats = registration_module._jsonable(refinement.correction)
+    assert stats["pearson_before"] is None and stats["pearson_candidate"] is None
+
+
+def test_a_refinement_that_truly_improves_the_overlay_applies_with_the_gain_check() -> (
+    None
+):
+    reference = _synthetic_dapi()
+    moving = shift(reference, (3, -2), order=1).astype(np.float32)
+
+    refinement = _refine_registration(
+        reference=_in_memory_reference(reference),
+        moving=_in_memory_moving(moving),
+        registration_channel="DAPI",
+        matrix=np.eye(3),
+        settings=_settings(),
+        tuning=RegistrationTuning(refinement_min_correlation_gain=0.0),
+    )
+
+    assert refinement.status == "applied"
+    assert (
+        refinement.correction["pearson_candidate"]
+        > refinement.correction["pearson_before"]
+    )
+    assert refinement.after.pearson_log == refinement.correction["pearson_candidate"]
+    assert refinement.before.pearson_log == refinement.correction["pearson_before"]
+    assert not np.allclose(refinement.matrix, np.eye(3))
+
+
 def test_measure_registration_overlay_returns_stats_keys(tmp_path: Path) -> None:
     reference = _synthetic_dapi()
     moving = shift(reference, (3, -2), order=1)
@@ -786,6 +1017,15 @@ def test_tuning_validation() -> None:
             RegistrationTuning(refinement_min_window_quality=quality)
     with pytest.raises(ValueError, match="qc_moving_label"):
         RegistrationTuning(qc_moving_label="")
+    assert RegistrationTuning().refinement_min_correlation_gain is None
+    for gain in (None, -2.0, 0.0, 0, 0.01, 2.0):
+        tuning = RegistrationTuning(refinement_min_correlation_gain=gain)
+        assert tuning.refinement_min_correlation_gain == gain
+    for bad_gain in (float("nan"), float("inf"), -float("inf"), 2.01, -2.01, True, "0"):
+        with pytest.raises(ValueError, match="refinement_min_correlation_gain"):
+            RegistrationTuning(
+                refinement_min_correlation_gain=bad_gain  # type: ignore[arg-type]
+            )
 
     level0 = _levels(_synthetic_dapi(64))[0]
     shapes = ((64, 64),)

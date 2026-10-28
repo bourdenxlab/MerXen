@@ -340,6 +340,17 @@ def test_same_section_no_crop(
             tolerance=0.02,
         )
     assert summary["nonrigid"]["status"] == "applied"
+    # The default same_section refinement only applies when it raises the
+    # correlation it was fitted on, and the summary records both values.
+    refinement = summary["refinement"]
+    assert refinement["status"] == "applied"
+    assert refinement["pearson_candidate"] >= refinement["pearson_before"]
+    assert summary["refinement_qc"]["before"]["pearson_log_registration_channel"] == (
+        pytest.approx(refinement["pearson_before"])
+    )
+    assert summary["refinement_qc"]["after"]["pearson_log_registration_channel"] == (
+        pytest.approx(refinement["pearson_candidate"])
+    )
 
     held_out = rows[~rows["enabled"]]
     assert len(held_out) == 4
@@ -527,6 +538,53 @@ def test_mirrored_pair_and_rerun_behaviour(pair_mirrored: Prepared) -> None:
     )
     assert siblings == []
     assert read_root_attrs(store)[RESULT_ATTR] == third_summary
+
+
+def test_refinement_that_cannot_raise_the_correlation_is_rejected(
+    pair_mirrored: Prepared,
+) -> None:
+    """A gain no refinement can reach (the correlation is at most 1) rejects it."""
+    # A different row_settings string is a different run: nothing is reused.
+    settings = FAST + ";nonrigid_enabled=false;refinement_min_correlation_gain=1.5"
+    outputs, summary = pair_mirrored.run(
+        "same_section", row_settings=settings, run_label="gain"
+    )
+
+    refinement = summary["refinement"]
+    assert summary["status"] == "complete"
+    assert refinement["status"] == "rejected_no_correlation_gain"
+    assert "DAPI correlation" in refinement["reason"]
+    assert "< 1.5" in refinement["reason"]
+    assert refinement["pearson_candidate"] is not None
+    assert refinement["pearson_before"] is not None
+    assert any(
+        "refinement rejected_no_correlation_gain" in item
+        for item in summary["warnings"]
+    )
+    assert summary["settings"]["refinement_min_correlation_gain"] == 1.5
+    # The unrefined state is what every downstream user sees.
+    assert (
+        summary["matrices"]["final_affine_crop"]
+        == (summary["matrices"]["landmark_crop"])
+    )
+    assert summary["refinement_qc"]["after"] == summary["refinement_qc"]["before"]
+    landmark = load_alignment_matrix(outputs["landmark_matrix_csv"])
+    final = load_alignment_matrix(outputs["final_matrix_csv"])
+    np.testing.assert_array_equal(final, landmark)
+    assert summary["nonrigid"]["status"] == "disabled"
+
+    # -2 disables the check: the same refinement is applied and no Pearson keys
+    # are recorded (the REGISTER_IMAGES summary shape).
+    off, off_summary = pair_mirrored.run(
+        "same_section",
+        row_settings=FAST
+        + ";nonrigid_enabled=false;refinement_min_correlation_gain=-2",
+        run_label="gainoff",
+    )
+    assert off_summary["refinement"]["status"] == "applied"
+    assert "pearson_before" not in off_summary["refinement"]
+    assert "pearson_candidate" not in off_summary["refinement"]
+    assert not np.array_equal(load_alignment_matrix(off["final_matrix_csv"]), landmark)
 
 
 # --------------------------------------------------------------------------
@@ -810,7 +868,14 @@ def test_serial_pair_with_both_presets_and_compare(
     pearson = serial["tissue_qc"]["pearson"]
     assert pearson["final"] >= pearson["landmark"] - 0.01
     assert serial["nucleus_qc"]["status"] == "measured"
-    assert serial["refinement"]["status"] == "applied"
+    # The refinement ran (it was not skipped for lack of windows) behind the
+    # correlation check. The nuclei of this pair are independent, so the gain of the
+    # fitted correction is marginal and its sign is not pinned: the status has to
+    # follow it.
+    refinement = serial["refinement"]
+    assert refinement["status"] in {"applied", "rejected_no_correlation_gain"}
+    gain = refinement["pearson_candidate"] - refinement["pearson_before"]
+    assert (refinement["status"] == "applied") == (gain >= 0.0)
     assert same["refinement"]["status"]  # reported, not gated
     assert same["nonrigid"]["status"]
 

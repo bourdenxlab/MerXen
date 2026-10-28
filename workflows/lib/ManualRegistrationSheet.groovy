@@ -82,6 +82,7 @@ class ManualRegistrationSheet {
         "nucleus_qc_pixel_size_um",
         "nucleus_qc_window_um",
         "refine_affine",
+        "refinement_min_correlation_gain",
         "refinement_min_window_quality",
         "refinement_require_moving_tissue",
         "refinement_window_um",

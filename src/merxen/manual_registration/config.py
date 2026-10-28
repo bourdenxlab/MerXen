@@ -129,7 +129,12 @@ class ManualRegistrationSettings(RegistrationSettings):
     """Settings of one manual-registration run (defaults: the ``same_section`` preset).
 
     Every field is overridable per samplesheet row and via params. The defaults
-    equal the REGISTER_IMAGES defaults except ``nonrigid_enabled = True``.
+    equal the REGISTER_IMAGES defaults except ``nonrigid_enabled = True`` and
+    ``refinement_min_correlation_gain = 0.0`` (``REGISTER_IMAGES`` applies every
+    refinement inside the limits). The gain is a number in [-2, 2], the smallest
+    rise of the registration-channel correlation a refinement must give; the
+    override grammar cannot express ``None``, so ``-2`` (below any possible gain)
+    turns the check off.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -137,6 +142,7 @@ class ManualRegistrationSettings(RegistrationSettings):
     nonrigid_enabled: bool = True  # overrides the base default (False)
     refinement_min_window_quality: float = Field(default=0.3, ge=-1.0, le=1.0)
     refinement_require_moving_tissue: bool = False
+    refinement_min_correlation_gain: float = Field(default=0.0, ge=-2.0, le=2.0)
     nonrigid_highpass_sigma_um: float = Field(default=25.0, gt=0.0)
     nonrigid_local_correlation_sigma_um: float = Field(default=15.0, gt=0.0)
     nonrigid_local_residual_tiles: bool = True
