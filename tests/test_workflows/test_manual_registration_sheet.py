@@ -117,14 +117,20 @@ def _fake_store(
     path: Path,
     *,
     kind: str | None = "prepared",
+    dataset_name: str | None = "DS",
     status: str | None = "finished",
     n_enabled: int = 8,
     n_disabled: int = 0,
     store_version: int = 1,
     fmt: str = "v3",
+    node_type: str = "group",
     drop_enabled_key: bool = False,
 ) -> Path:
-    """A directory with the root attributes of a store (no arrays)."""
+    """A directory with the root attributes of a store (no arrays).
+
+    ``fmt``: ``v3`` (zarr.json), ``v2`` (.zgroup + .zattrs) or ``v2_no_zgroup`` (a
+    .zattrs without the .zgroup that makes the directory a group).
+    """
     path.mkdir(parents=True, exist_ok=True)
     attrs: dict[str, Any] = {}
     if kind is not None:
@@ -133,6 +139,8 @@ def _fake_store(
             "schema_version": store_version,
             "kind": kind,
         }
+        if dataset_name is not None:
+            attrs[STORE_ATTR]["dataset_name"] = dataset_name
     if status is not None:
         pairs: list[dict[str, Any]] = []
         for index in range(n_enabled + n_disabled):
@@ -146,10 +154,12 @@ def _fake_store(
             "landmarks": {"pairs": pairs},
         }
     if fmt == "v3":
-        document = {"zarr_format": 3, "node_type": "group", "attributes": attrs}
+        document = {"zarr_format": 3, "node_type": node_type, "attributes": attrs}
         (path / "zarr.json").write_text(json.dumps(document))
     else:
         (path / ".zarray_placeholder").write_text("")
+        if fmt == "v2":
+            (path / ".zgroup").write_text(json.dumps({"zarr_format": 2}))
         (path / ".zattrs").write_text(json.dumps(attrs))
     return path
 
@@ -389,46 +399,114 @@ def _build_cases(p: _Project) -> None:
         params={"manual_registration_czi_python": None},
     )
 
-    # Register preflight over fake stores.
+    # The CZI check covers every row, also one with other errors.
+    p.add(
+        "czi_unset_and_row_errors",
+        [*HEADER, "reference_pixel_size_um"],
+        [
+            ["X1", img("a.czi"), img("c.ome.tif"), "abc"],
+            ["X2", img("c.ome.tif"), img("d.ome.tiff"), "abc"],
+            ["bad id", img("a.czi"), img("b.czi"), ""],
+            ["X1", img("a.czi"), img("c.ome.tif"), ""],
+        ],
+        params={"manual_registration_czi_python": None},
+    )
+
+    # Row numbers are the physical record numbers: blank lines count.
+    p.add(
+        "blank_lines",
+        [],
+        [],
+        text=(
+            "id,reference_image,moving_image\n\n"
+            f"X1,{img('f.png')},{img('c.ome.tif')}\n\n\n"
+            f"X2,{img('a.czi')},{img('c.ome.tif')}\n"
+            f"X1,{img('a.czi')},{img('c.ome.tif')}\n"
+        ),
+    )
+    p.add(
+        "blank_line_then_open_quote",
+        [],
+        [],
+        text='id,reference_image,moving_image\n\nX1,"abc\n',
+    )
+
+    # --outdir must not be the main pipeline's default results folder.
+    one_row = [["X1", img("a.czi"), img("c.ome.tif")]]
+    for name, value in [
+        ("outdir_default", "./results"),
+        ("outdir_bare", "results"),
+        ("outdir_slash", "./results/"),
+        ("outdir_dots", "./sub/../results"),
+        ("outdir_blank", ""),
+        ("outdir_other_relative", "./results_manual"),
+        ("outdir_absolute_results", str(p.fs / "results")),
+    ]:
+        p.add(name, HEADER, one_row, params={"outdir": value})
+
+    # Register preflight over fake stores (one store per row: a store belongs to one
+    # dataset, and the dataset name must equal the row id).
     stores = p.stores
-    _fake_store(stores / "v2.zarr", fmt="v2")
-    _fake_store(stores / "draft.zarr", status="draft")
-    _fake_store(stores / "result.zarr", kind="result")
-    _fake_store(stores / "newer.zarr", store_version=2)
-    _fake_store(stores / "seven.zarr", n_enabled=8, n_disabled=1)
-    # 8 pairs, one disabled: 7 enabled.
-    shutil.rmtree(stores / "seven.zarr")
-    _fake_store(stores / "seven.zarr", n_enabled=7, n_disabled=1)
-    _fake_store(stores / "six.zarr", n_enabled=6, n_disabled=2)
-    _fake_store(stores / "ok_a.zarr")
-    _fake_store(stores / "ok_b.zarr")
-    _fake_store(stores / "nolabel.zarr", status=None)
-    _fake_store(stores / "unknown_status.zarr", status="weird")
-    _fake_store(stores / "wrong_kind.zarr", kind="other")
-    _fake_store(stores / "absent_kind.zarr", kind=None)
-    rows: list[list[str]] = []
-    for ident, store, settings, label, presets in [
-        ("P_MISSING", "missing.zarr", "", "", ""),
-        ("P_V2", "v2.zarr", "", "", ""),
-        ("P_DRAFT", "draft.zarr", "", "", ""),
-        ("P_RESULT", "result.zarr", "", "", ""),
-        ("P_NEWER", "newer.zarr", "", "", ""),
-        ("P_SEVEN", "seven.zarr", "", "", ""),
-        ("P_SIX", "six.zarr", "landmark_min_pairs=6", "", ""),
+    preflight_rows: list[tuple[str, str, dict[str, Any] | None, str, str, str]] = [
+        # id, store folder, store kwargs (None: the folder is not created),
+        # registration_settings, run_label, presets
+        ("P_MISSING", "missing.zarr", None, "", "", ""),
+        ("P_V2", "v2.zarr", {"fmt": "v2"}, "", "", ""),
+        ("P_DRAFT", "draft.zarr", {"status": "draft"}, "", "", ""),
+        ("P_RESULT", "result.zarr", {"kind": "result"}, "", "", ""),
+        ("P_NEWER", "newer.zarr", {"store_version": 2}, "", "", ""),
+        # 8 pairs, one disabled: 7 enabled.
+        ("P_SEVEN", "seven.zarr", {"n_enabled": 7, "n_disabled": 1}, "", "", ""),
+        (
+            "P_SIX",
+            "six.zarr",
+            {"n_enabled": 6, "n_disabled": 2},
+            "landmark_min_pairs=6",
+            "",
+            "",
+        ),
         (
             "P_SIX_PRESET",
-            "six.zarr",
+            "six_preset.zarr",
+            {"n_enabled": 6, "n_disabled": 2},
             "serial_section:landmark_min_pairs=7",
             "",
             "same_section;serial_section",
         ),
-        ("A", "ok_a.zarr", "", "same_section_x", ""),
-        ("A_same_section", "ok_b.zarr", "", "x", ""),
-        ("P_NOLABEL", "nolabel.zarr", "", "", ""),
-        ("P_UNKNOWN", "unknown_status.zarr", "", "", ""),
-        ("P_WRONG_KIND", "wrong_kind.zarr", "", "", ""),
-        ("P_ABSENT_KIND", "absent_kind.zarr", "", "", ""),
-    ]:
+        ("A", "ok_a.zarr", {}, "", "same_section_x", ""),
+        ("A_same_section", "ok_b.zarr", {}, "", "x", ""),
+        ("P_NOLABEL", "nolabel.zarr", {"status": None}, "", "", ""),
+        ("P_UNKNOWN", "unknown_status.zarr", {"status": "weird"}, "", "", ""),
+        ("P_WRONG_KIND", "wrong_kind.zarr", {"kind": "other"}, "", "", ""),
+        ("P_ABSENT_KIND", "absent_kind.zarr", {"kind": None}, "", "", ""),
+        ("P_OTHER_DS", "other_ds.zarr", {"dataset_name": "SOMEONE_ELSE"}, "", "", ""),
+        ("P_NO_DS", "no_ds.zarr", {"dataset_name": None}, "", "", ""),
+        ("P_NO_GROUP", "no_group.zarr", {"fmt": "v2_no_zgroup"}, "", "", ""),
+        ("P_ARRAY", "array.zarr", {"node_type": "array"}, "", "", ""),
+        # landmark_min_used_pairs (default 6) must not exceed landmark_min_pairs.
+        ("P_PAIRS_LOW", "pairs_low.zarr", {}, "landmark_min_pairs=5", "", ""),
+        (
+            "P_PAIRS_BOTH",
+            "pairs_both.zarr",
+            {"n_enabled": 4},
+            "landmark_min_pairs=4;landmark_min_used_pairs=4",
+            "",
+            "",
+        ),
+        ("P_USED_HIGH", "used_high.zarr", {}, "landmark_min_used_pairs=9", "", ""),
+        (
+            "P_PAIRS_PRESET",
+            "pairs_preset.zarr",
+            {},
+            "serial_section:landmark_min_pairs=5",
+            "",
+            "same_section;serial_section",
+        ),
+    ]
+    rows: list[list[str]] = []
+    for ident, store, kwargs, settings, label, presets in preflight_rows:
+        if kwargs is not None:
+            _fake_store(stores / store, **{"dataset_name": ident, **kwargs})
         rows.append(
             [
                 ident,
@@ -447,23 +525,44 @@ def _build_cases(p: _Project) -> None:
         mode="register",
     )
 
-    ok_rows = [
-        ["Q_OK", img("a.czi"), img("c.ome.tif"), str(stores / "ok_a.zarr"), "", ""],
-        ["Q_V2", img("a.czi"), img("c.ome.tif"), str(stores / "v2.zarr"), "", ""],
-        [
+    ok_rows = []
+    for ident, store, kwargs, settings in [
+        ("Q_OK", "q_ok.zarr", {}, ""),
+        ("Q_V2", "q_v2.zarr", {"fmt": "v2"}, ""),
+        (
             "Q_SIX",
-            img("a.czi"),
-            img("c.ome.tif"),
-            str(stores / "six.zarr"),
+            "q_six.zarr",
+            {"n_enabled": 6, "n_disabled": 2},
             "landmark_min_pairs=6",
-            "",
-        ],
-    ]
+        ),
+    ]:
+        _fake_store(stores / store, dataset_name=ident, **kwargs)
+        ok_rows.append(
+            [ident, img("a.czi"), img("c.ome.tif"), str(stores / store), settings, ""]
+        )
     p.add(
         "register_ok",
         [*HEADER, "prepared_store", "registration_settings", "presets"],
         ok_rows,
         mode="register",
+    )
+
+    # The global param lowers landmark_min_pairs only; a row can lower the other too.
+    global_rows = []
+    for ident, settings in [
+        ("G_LOW", ""),
+        ("G_ROW_FIXES", "landmark_min_used_pairs=5"),
+    ]:
+        store = _fake_store(stores / f"{ident}.zarr", dataset_name=ident)
+        global_rows.append(
+            [ident, img("a.czi"), img("c.ome.tif"), str(store), settings]
+        )
+    p.add(
+        "register_pairs_global",
+        [*HEADER, "prepared_store", "registration_settings"],
+        global_rows,
+        mode="register",
+        params={"manual_registration_settings": "landmark_min_pairs=5"},
     )
 
     p.add(
@@ -487,21 +586,26 @@ def _build_cases(p: _Project) -> None:
     )
 
     # Root attributes of stores.
+    states = p.stores / "states"
     p.stores_cases = {
-        "v3": str(stores / "ok_a.zarr"),
-        "v2": str(stores / "v2.zarr"),
-        "missing": str(stores / "does_not_exist.zarr"),
-        "no_metadata": str(_empty_dir(stores / "empty.zarr")),
-        "malformed": str(_malformed(stores / "malformed.zarr")),
+        "v3": str(_fake_store(states / "v3.zarr")),
+        "v2": str(_fake_store(states / "v2.zarr", fmt="v2")),
+        "v2_no_zgroup": str(
+            _fake_store(states / "v2_no_zgroup.zarr", fmt="v2_no_zgroup")
+        ),
+        "v3_array": str(_fake_store(states / "v3_array.zarr", node_type="array")),
+        "missing": str(states / "does_not_exist.zarr"),
+        "no_metadata": str(_empty_dir(states / "empty.zarr")),
+        "malformed": str(_malformed(states / "malformed.zarr")),
         "enabled_absent": str(
             _fake_store(
-                stores / "absent_enabled.zarr",
+                states / "absent_enabled.zarr",
                 n_enabled=5,
                 n_disabled=2,
                 drop_enabled_key=True,
             )
         ),
-        "draft": str(stores / "draft.zarr"),
+        "draft": str(_fake_store(states / "draft.zarr", status="draft")),
     }
 
 
@@ -536,6 +640,10 @@ SETTINGS_CASES: list[tuple[str, str | None]] = [
     (
         "nucleus_qc=true;nucleus_qc=false",
         "'nucleus_qc' is given twice for scope all presets",
+    ),
+    (
+        "landmark_min_used_pairs=2",
+        "landmark_min_used_pairs must be an integer >= 3 (got '2')",
     ),
 ]
 
@@ -849,6 +957,65 @@ def test_czi_param_value_checks(results: dict[str, Any]) -> None:
     ]
 
 
+def test_czi_check_covers_rows_with_other_errors(results: dict[str, Any]) -> None:
+    errors = _parse(results, "czi_unset_and_row_errors")["errors"]
+    czi_text = (
+        "is a .czi file but --manual_registration_czi_python is not set; set it in "
+        "workflows/conf/site.config"
+    )
+
+    row_errors = [e for e in errors if czi_text not in e]
+    assert row_errors == [
+        "row 2 (X1): reference_pixel_size_um must be a number > 0 (got 'abc')",
+        "row 3 (X2): reference_pixel_size_um must be a number > 0 (got 'abc')",
+        "row 4 (?): id 'bad id' must match ^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+        "row 5 (X1): id 'X1' is also used in row 2",
+    ]
+    # One message per row that names a .czi: rows 2, 4 and 5; row 3 is TIFF only.
+    czi_errors = [e for e in errors if czi_text in e]
+    assert [e.split(":")[0] for e in czi_errors] == [
+        "row 2 (X1)",
+        "row 4 (?)",
+        "row 5 (X1)",
+    ]
+    assert "reference_image is a .czi" in czi_errors[0]
+    assert "reference_image and moving_image is a .czi" in czi_errors[1]
+
+
+def test_row_numbers_are_physical_record_numbers(results: dict[str, Any]) -> None:
+    img = Path(results["_fs"]) / "img"
+
+    assert _parse(results, "blank_lines")["errors"] == [
+        "row 3 (X1): reference_image must end in .czi, .ome.tif, .ome.tiff, .tif or "
+        f".tiff: {img / 'f.png'}",
+        "row 7 (X1): id 'X1' is also used in row 3",
+    ]
+    assert _parse(results, "blank_line_then_open_quote")["errors"] == [
+        "samplesheet: unterminated quoted field starting in row 3"
+    ]
+
+
+@pytest.mark.parametrize(
+    "case", ["outdir_default", "outdir_bare", "outdir_slash", "outdir_dots"]
+)
+def test_the_main_pipelines_results_folder_is_refused(
+    results: dict[str, Any], case: str
+) -> None:
+    errors = _parse(results, case)["errors"]
+
+    assert len(errors) == 1
+    assert errors[0].startswith("--outdir '")
+    assert errors[0].endswith(
+        "pass --outdir with a folder separate from the main pipeline's results"
+    )
+
+
+def test_other_outdirs_are_accepted(results: dict[str, Any]) -> None:
+    assert _parse(results, "outdir_other_relative")["errors"] == []
+    assert _parse(results, "outdir_absolute_results")["errors"] == []
+    assert _parse(results, "outdir_blank")["errors"] == ["--outdir is required"]
+
+
 @pytest.mark.parametrize(
     "case", ["czi_existing", "czi_in_process", "czi_register_mode", "czi_tiff_only"]
 )
@@ -923,14 +1090,61 @@ def test_register_preflight_messages(results: dict[str, Any]) -> None:
     ]
     assert [m for m in messages if m.startswith("P_SIX_PRESET")] == [
         f"P_SIX_PRESET (preset same_section): 6 enabled landmark pairs in "
-        f"{stores / 'six.zarr'}, at least 8 are needed",
+        f"{stores / 'six_preset.zarr'}, at least 8 are needed",
         f"P_SIX_PRESET (preset serial_section): 6 enabled landmark pairs in "
-        f"{stores / 'six.zarr'}, at least 7 are needed",
+        f"{stores / 'six_preset.zarr'}, at least 7 are needed",
     ]
     assert not [m for m in messages if m.startswith("P_V2")]
+    assert one("P_OTHER_DS:") == (
+        f"P_OTHER_DS: {stores / 'other_ds.zarr'} belongs to dataset SOMEONE_ELSE; "
+        "prepared_store must be this id's store"
+    )
+    assert one("P_NO_DS:") == (
+        f"P_NO_DS: {stores / 'no_ds.zarr'} records no dataset name; "
+        "prepared_store must be this id's store"
+    )
+    assert one("P_NO_GROUP:") == (
+        f"P_NO_GROUP: cannot read the root attributes of {stores / 'no_group.zarr'}: "
+        "no zarr.json or .zgroup"
+    )
+    assert one("P_ARRAY:") == (
+        f"P_ARRAY: cannot read the root attributes of {stores / 'array.zarr'}: "
+        "zarr.json is not a Zarr group (node_type array)"
+    )
+    # landmark_min_used_pairs (default 6) must not exceed landmark_min_pairs, with the
+    # precedence of the settings: 5 < 6 and 8 < 9 fail, 4 with 4 passes, and a preset
+    # prefix lowers the floor of its preset only.
+    too_few = (
+        "landmark_min_pairs ({n}) is below landmark_min_used_pairs ({u}); "
+        "landmark_min_used_pairs must not exceed landmark_min_pairs, so lower both "
+        "together (landmark_min_used_pairs is 6 by default)"
+    )
+    assert [m for m in messages if m.startswith("P_PAIRS_LOW")] == [
+        "P_PAIRS_LOW (preset same_section): " + too_few.format(n=5, u=6)
+    ]
+    assert [m for m in messages if m.startswith("P_USED_HIGH")] == [
+        "P_USED_HIGH (preset same_section): " + too_few.format(n=8, u=9)
+    ]
+    assert [m for m in messages if m.startswith("P_PAIRS_PRESET")] == [
+        "P_PAIRS_PRESET (preset serial_section): " + too_few.format(n=5, u=6)
+    ]
+    assert not [m for m in messages if m.startswith("P_PAIRS_BOTH")]
     assert one("run id ") == (
         "run id 'A_same_section_same_section_x' is used twice (rows 10 and 11); set "
         "run_label to tell the runs apart"
+    )
+
+
+def test_pair_counts_resolve_across_the_params_and_the_row(
+    results: dict[str, Any],
+) -> None:
+    parsed = _parse(results, "register_pairs_global")
+
+    assert parsed["errors"] == []
+    (message,) = parsed["preflight"]
+    assert message.startswith(
+        "G_LOW (preset same_section): landmark_min_pairs (5) is below "
+        "landmark_min_used_pairs (6)"
     )
 
 
@@ -957,6 +1171,7 @@ def test_store_states(results: dict[str, Any]) -> None:
     assert store["v3"] == {
         "exists": True,
         "kind": "prepared",
+        "datasetName": "DS",
         "schemaVersion": 1,
         "status": "finished",
         "labellingSchemaVersion": 1,
@@ -966,10 +1181,12 @@ def test_store_states(results: dict[str, Any]) -> None:
     }
     assert store["v2"]["exists"] and store["v2"]["error"] is None
     assert store["v2"]["nEnabledPairs"] == 8 and store["v2"]["kind"] == "prepared"
+    assert store["v2"]["datasetName"] == "DS"
     assert store["draft"]["status"] == "draft"
     assert store["missing"] == {
         "exists": False,
         "kind": None,
+        "datasetName": None,
         "schemaVersion": None,
         "status": None,
         "labellingSchemaVersion": None,
@@ -978,7 +1195,14 @@ def test_store_states(results: dict[str, Any]) -> None:
         "error": None,
     }
     assert store["no_metadata"]["exists"] is True
-    assert store["no_metadata"]["error"] == "no zarr.json or .zattrs"
+    assert store["no_metadata"]["error"] == "no zarr.json or .zgroup"
+    # read_root_attrs refuses both: a v2 directory without .zgroup and a v3 array.
+    assert store["v2_no_zgroup"]["error"] == "no zarr.json or .zgroup"
+    assert store["v2_no_zgroup"]["kind"] is None
+    assert store["v3_array"]["error"] == (
+        "zarr.json is not a Zarr group (node_type array)"
+    )
+    assert store["v3_array"]["kind"] is None
     assert store["malformed"]["exists"] is True and store["malformed"]["error"]
     assert not store["malformed"]["error"].startswith("{")
     assert store["enabled_absent"]["nPairs"] == 7

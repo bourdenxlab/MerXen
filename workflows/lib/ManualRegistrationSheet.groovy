@@ -92,6 +92,8 @@ class ManualRegistrationSheet {
         "tissue_qc_sigma_um",
     ].asImmutable()
     static final int MIN_LANDMARK_PAIRS = 8
+    static final int MIN_USED_PAIRS = 6
+    static final List<String> PAIR_COUNT_KEYS = ["landmark_min_pairs", "landmark_min_used_pairs"].asImmutable()
     static final int SCHEMA_VERSION = 1
     static final String STORE_ATTR = "merxen_manual_registration_store"
     static final String LABELLING_ATTR = "merxen_manual_registration"
@@ -128,6 +130,24 @@ class ManualRegistrationSheet {
         }
         String text = value.toString().trim()
         return text ? text : null
+    }
+
+    /**
+     * Whether --outdir is the main pipeline's default results folder ("./results", also spelled
+     * "results" or "./results/"). The standalone workflows write the same <outdir>/nextflow/
+     * report, timeline and trace files and per-id folders, so they must not share it.
+     */
+    static boolean isMainPipelineOutdir(Object outdir) {
+        String text = outdir?.toString()?.trim()
+        if (!text) {
+            return false
+        }
+        try {
+            Path path = Paths.get(text)
+            return !path.isAbsolute() && path.normalize().toString() == "results"
+        } catch (java.nio.file.InvalidPathException ignored) {
+            return false
+        }
     }
 
     /** Absolute, normalised --outdir without a trailing slash. */
@@ -179,9 +199,11 @@ class ManualRegistrationSheet {
      * semicolons and newlines are literal inside quotes), records end at LF, CRLF or a lone CR.
      * Cells are trimmed; records whose cells are all blank are dropped.
      *
+     * @return [number: physical record number (1-based, blank records counted), cells: List<String>]
+     *         per non-blank record
      * @throws IllegalArgumentException on an unterminated quoted field
      */
-    static List<List<String>> parseCsv(String text) {
+    static List<Map> parseCsv(String text) {
         List<List<String>> records = []
         List<String> row = []
         StringBuilder cell = new StringBuilder()
@@ -241,7 +263,13 @@ class ManualRegistrationSheet {
             row.add(cell.toString().trim())
             records.add(row.any { String v -> v } ? row : [])
         }
-        return records.findAll { List<String> r -> !r.isEmpty() }
+        List<Map> numbered = []
+        records.eachWithIndex { List<String> cells, int index ->
+            if (!cells.isEmpty()) {
+                numbered.add([number: index + 1, cells: cells])
+            }
+        }
+        return numbered
     }
 
     // ------------------------------------------------------------------
@@ -322,13 +350,13 @@ class ManualRegistrationSheet {
                 errors.add("${label}: '${key}' is given twice for scope ${scope}".toString())
                 continue
             }
-            if (key == "landmark_min_pairs") {
+            if (key in PAIR_COUNT_KEYS) {
                 boolean ok = false
                 if (value ==~ '^[0-9]{1,9}$') {
                     ok = Integer.parseInt(value) >= 3
                 }
                 if (!ok) {
-                    errors.add("${label}: landmark_min_pairs must be an integer >= 3 (got '${value}')".toString())
+                    errors.add("${label}: ${key} must be an integer >= 3 (got '${value}')".toString())
                 }
             }
         }
@@ -336,11 +364,12 @@ class ManualRegistrationSheet {
     }
 
     /**
-     * landmark_min_pairs in force for one run: global unprefixed < global preset: < row unprefixed < row
-     * preset: (the order of resolve_settings in Python); the last assignment wins, default 8.
+     * Integer setting `key` in force for one run: global unprefixed < global preset: < row unprefixed <
+     * row preset: (the order of resolve_settings in Python); the last well-formed assignment wins,
+     * otherwise `defaultValue`.
      */
-    static Integer effectiveMinPairs(Map row, String preset, Map params) {
-        Integer result = MIN_LANDMARK_PAIRS
+    static Integer effectiveInt(Map row, String preset, Map params, String key, int defaultValue) {
+        Integer result = defaultValue
         List<String> sources = [
             (params?.manual_registration_settings ?: "").toString(),
             (row?.registration_settings ?: "").toString(),
@@ -349,7 +378,7 @@ class ManualRegistrationSheet {
             List<Map> items = settingsItems(text)
             for (boolean prefixed : [false, true]) {
                 for (Map item : items) {
-                    if (item.malformed || item.key != "landmark_min_pairs") {
+                    if (item.malformed || item.key != key) {
                         continue
                     }
                     boolean isPrefixed = item.preset != null
@@ -364,6 +393,16 @@ class ManualRegistrationSheet {
             }
         }
         return result
+    }
+
+    /** landmark_min_pairs in force for one run (default 8). */
+    static Integer effectiveMinPairs(Map row, String preset, Map params) {
+        return effectiveInt(row, preset, params, "landmark_min_pairs", MIN_LANDMARK_PAIRS)
+    }
+
+    /** landmark_min_used_pairs in force for one run (default 6). */
+    static Integer effectiveMinUsedPairs(Map row, String preset, Map params) {
+        return effectiveInt(row, preset, params, "landmark_min_used_pairs", MIN_USED_PAIRS)
     }
 
     // ------------------------------------------------------------------
@@ -417,6 +456,11 @@ class ManualRegistrationSheet {
         List<String> defaultPresets = ["same_section"]
         if (!(params?.outdir?.toString()?.trim())) {
             errors.add("--outdir is required")
+        } else if (isMainPipelineOutdir(params.outdir)) {
+            errors.add(
+                ("--outdir '${params.outdir.toString().trim()}' is the main pipeline's default results folder: " +
+                "pass --outdir with a folder separate from the main pipeline's results").toString()
+            )
         }
         List presetCheck = parsePresets((params?.manual_registration_presets ?: "").toString(), "--manual_registration_presets")
         errors.addAll((List<String>) presetCheck[1])
@@ -443,7 +487,7 @@ class ManualRegistrationSheet {
         }
 
         // ---- csv ----------------------------------------------------
-        List<List<String>> records
+        List<Map> records
         try {
             String text = new String(Files.readAllBytes(sheet), StandardCharsets.UTF_8)
             if (text.startsWith("﻿")) {
@@ -458,7 +502,7 @@ class ManualRegistrationSheet {
             errors.add("samplesheet: no rows")
             return result
         }
-        List<String> header = records[0]
+        List<String> header = (List<String>) records[0].cells
         Set<String> seenColumns = new LinkedHashSet<String>()
         List<String> duplicated = []
         header.eachWithIndex { String name, int index ->
@@ -489,9 +533,10 @@ class ManualRegistrationSheet {
 
         // ---- rows ---------------------------------------------------
         Map<String, Integer> idRows = [:]
+        List<Map> cziUses = []
         for (int k = 1; k < records.size(); k++) {
-            List<String> cells = records[k]
-            int n = k + 1
+            List<String> cells = (List<String>) records[k].cells
+            int n = (int) records[k].number
             if (cells.size() > header.size() && cells.subList(header.size(), cells.size()).any { String v -> v }) {
                 errors.add("row ${n}: ${cells.size()} cells but the header has ${header.size()}".toString())
                 continue
@@ -501,39 +546,35 @@ class ManualRegistrationSheet {
                 String value = index < cells.size() ? cells[index] : ""
                 r[name] = value
             }
-            Map row = validateRow(r, n, sheet, params, mode, defaultPresets, idRows, errors, warnings)
+            Map row = validateRow(r, n, sheet, params, mode, defaultPresets, idRows, errors, warnings, cziUses)
             if (row != null) {
                 rows.add(row)
             }
         }
 
-        // ---- the CZI runtime is needed by prepare only -------------------
+        // ---- the CZI runtime is needed by prepare only (every row, also one with other errors) ----
         if (mode == "prepare" && czi == null) {
-            for (Map row : rows) {
-                List<String> czisRoles = []
-                for (String role : ["reference", "moving"]) {
-                    if (row[role].path.toString().toLowerCase().endsWith(".czi")) {
-                        czisRoles.add("${role}_image".toString())
-                    }
-                }
-                if (czisRoles) {
-                    errors.add(
-                        ("row ${row.row_number} (${row.id}): ${czisRoles.join(' and ')} is a .czi file but " +
-                        "--manual_registration_czi_python is not set; set it in workflows/conf/site.config to the " +
-                        "python of the CZI runtime (envs/environment.czi.yml; see docs/stages/manual-registration.md), " +
-                        "or to in_process if czifile is installed in the task environment").toString()
-                    )
-                }
+            for (Map use : cziUses) {
+                errors.add(
+                    ("row ${use.row_number} (${use.id}): ${((List<String>) use.roles).join(' and ')} is a .czi file but " +
+                    "--manual_registration_czi_python is not set; set it in workflows/conf/site.config to the " +
+                    "python of the CZI runtime (envs/environment.czi.yml; see docs/stages/manual-registration.md), " +
+                    "or to in_process if czifile is installed in the task environment").toString()
+                )
             }
         }
         return result
     }
 
-    /** Validate one record; returns the normalised row (null when the row has errors). */
+    /**
+     * Validate one record; returns the normalised row (null when the row has errors).
+     * cziUses receives [row_number, id, roles] for every row that names a .czi image, also a row
+     * with other errors, for the prepare-mode CZI runtime check.
+     */
     static Map validateRow(
         Map<String, String> r, int n, Path sheet, Map params, String mode,
         List<String> defaultPresets, Map<String, Integer> idRows,
-        List<String> errors, List<String> warnings
+        List<String> errors, List<String> warnings, List<Map> cziUses
     ) {
         List<String> rowErrors = []
         String id = r.id ?: ""
@@ -576,6 +617,15 @@ class ManualRegistrationSheet {
             } else {
                 rowErrors.add("${column} not found: ${path}".toString())
             }
+        }
+        List<String> cziRoles = []
+        for (String role : ["reference", "moving"]) {
+            if (paths[role] != null && paths[role].getFileName().toString().toLowerCase().endsWith(".czi")) {
+                cziRoles.add("${role}_image".toString())
+            }
+        }
+        if (cziRoles) {
+            cziUses.add([row_number: n, id: idValid ? id : "?", roles: cziRoles])
         }
         if (exists.reference && exists.moving) {
             if (paths.reference.toRealPath() == paths.moving.toRealPath()) {
@@ -690,13 +740,16 @@ class ManualRegistrationSheet {
     // ------------------------------------------------------------------
 
     /**
-     * Root attributes of a store, read without Zarr: zarr.json "attributes" (v3) or .zattrs (v2).
+     * Root attributes of a store, read without Zarr as read_root_attrs does: zarr.json of a group
+     * (v3; "attributes") or .zgroup + .zattrs (v2). A zarr.json that is not a group and a v2
+     * directory without .zgroup are errors, as in Python.
      *
-     * @return [exists, kind, schemaVersion, status, labellingSchemaVersion, nEnabledPairs, nPairs, error]
+     * @return [exists, kind, datasetName, schemaVersion, status, labellingSchemaVersion, nEnabledPairs,
+     *          nPairs, error]
      */
     static Map storeState(String storePath) {
         Map state = [
-            exists: false, kind: null, schemaVersion: null, status: null,
+            exists: false, kind: null, datasetName: null, schemaVersion: null, status: null,
             labellingSchemaVersion: null, nEnabledPairs: 0, nPairs: 0, error: null,
         ]
         Path store = Paths.get(storePath)
@@ -707,20 +760,33 @@ class ManualRegistrationSheet {
         try {
             Map attrs
             Path v3 = store.resolve("zarr.json")
+            Path v2Group = store.resolve(".zgroup")
             Path v2 = store.resolve(".zattrs")
             if (Files.isRegularFile(v3)) {
                 Object doc = new JsonSlurper().parse(v3.toFile())
-                attrs = (doc instanceof Map && doc.attributes instanceof Map) ? (Map) doc.attributes : [:]
-            } else if (Files.isRegularFile(v2)) {
-                Object doc = new JsonSlurper().parse(v2.toFile())
-                attrs = (doc instanceof Map) ? (Map) doc : [:]
+                if (!(doc instanceof Map) || doc.node_type != "group") {
+                    state.error = "zarr.json is not a Zarr group (node_type ${doc instanceof Map ? doc.node_type : 'missing'})".toString()
+                    return state
+                }
+                attrs = (doc.attributes instanceof Map) ? (Map) doc.attributes : [:]
+            } else if (Files.isRegularFile(v2Group)) {
+                attrs = [:]
+                if (Files.isRegularFile(v2)) {
+                    Object doc = new JsonSlurper().parse(v2.toFile())
+                    if (!(doc instanceof Map)) {
+                        state.error = ".zattrs is not a JSON object"
+                        return state
+                    }
+                    attrs = (Map) doc
+                }
             } else {
-                state.error = "no zarr.json or .zattrs"
+                state.error = "no zarr.json or .zgroup"
                 return state
             }
             Object storeAttr = attrs[STORE_ATTR]
             if (storeAttr instanceof Map) {
                 state.kind = storeAttr.kind
+                state.datasetName = storeAttr.dataset_name
                 state.schemaVersion = storeAttr.schema_version
             }
             Object labelling = attrs[LABELLING_ATTR]
@@ -744,6 +810,18 @@ class ManualRegistrationSheet {
         for (Map row : rows) {
             String id = row.id
             String p = row.prepared_store
+            // The settings model needs landmark_min_used_pairs <= landmark_min_pairs, whatever the store holds.
+            for (String preset : (List<String>) row.presets) {
+                int minPairs = effectiveMinPairs(row, preset, params)
+                int minUsed = effectiveMinUsedPairs(row, preset, params)
+                if (minPairs < minUsed) {
+                    errors.add(
+                        ("${id} (preset ${preset}): landmark_min_pairs (${minPairs}) is below landmark_min_used_pairs " +
+                        "(${minUsed}); landmark_min_used_pairs must not exceed landmark_min_pairs, so lower both " +
+                        "together (landmark_min_used_pairs is ${MIN_USED_PAIRS} by default)").toString()
+                    )
+                }
+            }
             Map s = storeState(p)
             if (!s.exists) {
                 errors.add(
@@ -773,6 +851,11 @@ class ManualRegistrationSheet {
                 errors.add(
                     "${id}: ${p} is not a prepared manual-registration store (${STORE_ATTR}.kind = ${s.kind ?: 'missing'})".toString()
                 )
+                continue
+            }
+            if (s.datasetName != id) {
+                String belongs = s.datasetName ? "belongs to dataset ${s.datasetName}" : "records no dataset name"
+                errors.add("${id}: ${p} ${belongs}; prepared_store must be this id's store".toString())
                 continue
             }
             if (s.status == null) {

@@ -276,11 +276,12 @@ def _run(
     tmp_path: Path,
     script: str,
     sheet: Path,
-    outdir: Path,
+    outdir: Path | None,
     *extra: str,
     launch_name: str = "launch",
     timeout: int = 900,
 ) -> subprocess.CompletedProcess[str]:
+    """Launch a workflow; ``outdir=None`` leaves ``--outdir`` at the config default."""
     assert NEXTFLOW is not None
     launch = tmp_path / launch_name
     launch.mkdir(parents=True, exist_ok=True)
@@ -300,8 +301,7 @@ def _run(
             "-without-conda",
             "--samplesheet",
             str(sheet),
-            "--outdir",
-            str(outdir),
+            *([] if outdir is None else ["--outdir", str(outdir)]),
             *extra,
         ],
         cwd=launch,
@@ -326,6 +326,7 @@ def _fake_store(
     path: Path,
     *,
     kind: str = "prepared",
+    dataset_name: str | None = None,
     status: str | None = "finished",
     n_enabled: int = 8,
     n_disabled: int = 0,
@@ -334,7 +335,11 @@ def _fake_store(
     """A directory with the root attributes of a store (no arrays)."""
     path.mkdir(parents=True, exist_ok=True)
     attrs: dict[str, Any] = {
-        STORE_ATTR: {"schema_version": store_version, "kind": kind}
+        STORE_ATTR: {
+            "schema_version": store_version,
+            "kind": kind,
+            "dataset_name": dataset_name or path.name.removesuffix("_prepared.zarr"),
+        }
     }
     if status is not None:
         pairs = [
@@ -497,6 +502,36 @@ def test_prepare_preflight_reports_every_sheet_error(tmp_path: Path) -> None:
     )
     assert text.count("\n - ") == 1
     _no_task_ran(tmp_path, "launch_c", outdir)
+
+
+@needs_nextflow
+@pytest.mark.nextflow
+@pytest.mark.parametrize(
+    "script", ["manual_registration_prepare.nf", "manual_registration_register.nf"]
+)
+def test_the_main_pipelines_default_outdir_is_refused(
+    tmp_path: Path, script: str
+) -> None:
+    _inputs(tmp_path)
+    sheet = _write_sheet(
+        tmp_path / "sheets" / "a.csv",
+        ["id", "reference_image", "moving_image"],
+        [["SYN1", "../img/ref.ome.tif", "../img/mov.ome.tif"]],
+    )
+    in_process = ("--manual_registration_czi_python", "in_process")
+
+    # No --outdir: the config default (the main pipeline's ./results) is in force.
+    completed = _run(tmp_path, script, sheet, None, *in_process)
+
+    text = _preflight_output(completed)
+    assert (
+        "--outdir './results' is the main pipeline's default results folder: pass "
+        "--outdir with a folder separate from the main pipeline's results" in text
+    )
+    launch = tmp_path / "launch"
+    # No task ran and no per-id folder was written into the main results tree.
+    _no_task_ran(tmp_path, "launch", launch / "results")
+    assert not (launch / "results" / "SYN1").exists()
 
 
 def _trace_rows(outdir: Path) -> list[dict[str, str]]:
