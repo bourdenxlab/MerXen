@@ -287,6 +287,15 @@ class RegistrationTuning:
             refinement window to count.
         refinement_require_moving_tissue: Also require tissue in the warped moving
             image for a window to be valid (holes and torn tissue carry no windows).
+        refinement_min_correlation_gain: Smallest rise of the registration-channel
+            log Pearson correlation (after minus before, both measured on the
+            refinement overlay) for a refinement inside the limits to be applied.
+            A refinement that raises the correlation by less (or whose correlation
+            cannot be measured) is rejected as ``rejected_no_correlation_gain`` and
+            the input matrix is kept. None applies every refinement inside the
+            limits, as ``REGISTER_IMAGES`` does, and leaves the summary unchanged;
+            a number also records ``pearson_before`` and ``pearson_candidate`` in
+            the refinement summary.
         nonrigid: Length scales of the guarded TV-L1 flow.
         qc_reference_label: Reference name in the non-rigid QC figure title.
         qc_moving_label: Moving name in the non-rigid QC figure title.
@@ -296,6 +305,7 @@ class RegistrationTuning:
 
     refinement_min_window_quality: float = _MIN_WINDOW_QUALITY
     refinement_require_moving_tissue: bool = False
+    refinement_min_correlation_gain: float | None = None
     nonrigid: NonrigidTuning = field(default_factory=NonrigidTuning)
     qc_reference_label: str = "Xenium DAPI"
     qc_moving_label: str = "IF DAPI"
@@ -311,6 +321,17 @@ class RegistrationTuning:
             raise ValueError(
                 "RegistrationTuning.refinement_min_window_quality must be a finite "
                 f"number in [-1, 1], got {quality!r}"
+            )
+        gain = self.refinement_min_correlation_gain
+        if gain is not None and not (
+            isinstance(gain, int | float)
+            and not isinstance(gain, bool)
+            and math.isfinite(gain)
+            and -2.0 <= gain <= 2.0
+        ):
+            raise ValueError(
+                "RegistrationTuning.refinement_min_correlation_gain must be None or "
+                f"a finite number in [-2, 2], got {gain!r}"
             )
         for name in (
             "qc_reference_label",
@@ -1419,10 +1440,47 @@ def _refine_registration(
 
     to_level0 = reference_work.to_level0
     refined = to_level0 @ correction @ np.linalg.inv(to_level0) @ matrix
+    candidate = overlay(refined)
+    min_gain = tuning.refinement_min_correlation_gain
+    if min_gain is not None:
+        gain = candidate.pearson_log - before.pearson_log
+        result.correction = {
+            **result.correction,
+            "pearson_before": before.pearson_log,
+            "pearson_candidate": candidate.pearson_log,
+        }
+        # "not >=" also fails a NaN: an unmeasurable correlation cannot show a gain.
+        if not gain >= min_gain:
+            result.status = "rejected_no_correlation_gain"
+            result.reason = _correlation_gain_reason(
+                before.pearson_log, candidate.pearson_log, gain, min_gain
+            )
+            logger.warning(
+                "%s: refinement rejected, keeping the %s (%s)",
+                moving.image_key,
+                tuning.qc_initial_matrix_label,
+                result.reason,
+            )
+            return result
     result.matrix = refined
     result.status = "applied"
-    result.after = overlay(refined)
+    result.after = candidate
     return result
+
+
+def _correlation_gain_reason(
+    before: float, candidate: float, gain: float, min_gain: float
+) -> str:
+    """Describe a refinement that did not raise the registration-channel correlation."""
+    if math.isfinite(gain):
+        return (
+            f"DAPI correlation {before:.4f} -> {candidate:.4f} "
+            f"(gain {gain:.4f} < {min_gain})"
+        )
+    return (
+        f"DAPI correlation {before:.4f} -> {candidate:.4f} "
+        f"(gain undefined, required >= {min_gain})"
+    )
 
 
 def _refine_nonrigid_registration(
