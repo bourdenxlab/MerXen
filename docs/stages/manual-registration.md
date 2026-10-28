@@ -476,10 +476,12 @@ and is the set of keys `registration_settings` can override. Defaults are the
 
 **Presets.** `same_section` is the defaults above. It differs from the
 `REGISTER_IMAGES` defaults in the non-rigid stage being on and in the correlation
-guard (`refinement_min_correlation_gain`, 0.0). `serial_section` overrides
-(v1 starting values, plus the inherited correlation guard since v2; changing a
-preset bumps its version, recorded in every summary), and keeps the
-`same_section` value of every key not listed:
+guard (`refinement_min_correlation_gain`, 0.0). `serial_section` overrides the
+values below and keeps the `same_section` value of every key not listed. They are
+the v1 values, kept unchanged after one tuning round on a real serial pair (see
+"serial_section tuning round" under Validation results); the preset is
+`serial_section_v2` only because it inherits the correlation guard. Changing a
+preset bumps its version, recorded in every summary.
 
 | Field | `same_section` | `serial_section` |
 |---|---|---|
@@ -531,9 +533,14 @@ The slow CZI-pair test skips instead when the store holds such a labelling.
 ## Validation results
 
 The validation runs on real data (host only, `pytest -m slow`; never in CI). The
-tables below are filled from `$MERXEN_EVIDENCE_ROOT/manual_registration/runs/`;
-aliases only. **Status: not yet measured** for this revision (the implementation
-shipped the tests and scripts; the runs are a later step).
+tables below are filled from `$MERXEN_EVIDENCE_ROOT/manual_registration/runs/`
+(the reader comparison from `$MERXEN_EVIDENCE_ROOT/manual_registration/`);
+aliases only. **Run date: 2026-10-28.** HD1 and LCM1 ran at the
+integration-branch commit `e77c005` (presets `same_section_v2` and
+`serial_section_v2`). The reader comparison and the prepare of the two CZI pairs
+ran at the earlier commit `9054957` (later prepare launches found the LCM1 store
+unchanged); the code they exercise (the CZI reader and converter, prepare, the
+comparison script) did not change between the two commits.
 
 **HD1 ground truth** (a post-Xenium IF image registered with the Explorer matrix
 and the pipeline's own refinement and flow; the test simulates landmarks from the
@@ -543,16 +550,16 @@ with a control run of the current code from the Explorer matrix). Test:
 
 | # | Check | Gate | Measured | Result |
 |---|---|---|---|---|
-| 1 | Outlier handling: `n_outliers`, pair 3 flagged, `n_used` | 1, pair 3, 11 | | |
-| 2 | Landmark matrix vs Explorer matrix at the 4 tissue corners | <= 3 µm | | |
-| 3 | Refinement status | `applied` | | |
-| 4 | Final affine vs a current-code control run from the Explorer matrix, over the tissue grid | mean <= 0.5, max <= 1.0 µm | | |
-| 5 | Non-rigid: status, confident fraction, Pearson after, vs a current-code control run from the Explorer matrix | `applied`; within 0.05 and 0.01 of the control's | | |
-| 6 | Held-out pairs 13 to 16 vs a current-code control run from the Explorer matrix: flow inversion converged at those pairs in both runs; median final error; affine error | converged; <= 1.0 µm; mean <= 0.5, max <= 1.0 µm | | |
-| 7 | Registered DAPI vs the registered DAPI of a current-code control run from the Explorer matrix (x16 block mean, log; tissue = Otsu of the downsampled Xenium `morphology_focus` DAPI) | Pearson >= 0.98 | | |
-| 8 | Both matrix CSVs load and pass the scale check | no exception | | |
-| 9 | Crop to the inner 80 % vs full | mean <= 0.5, max <= 1.0 µm | | |
-| 10 | Peak RSS of the full and crop runs (the control run's wall time and peak RSS are recorded) | <= 48 GB | | |
+| 1 | Outlier handling: `n_outliers`, pair 3 flagged, `n_used` | 1, pair 3, 11 | `n_outliers` 1, pair 3 flagged and unused, `n_used` 11 | pass |
+| 2 | Landmark matrix vs Explorer matrix at the 4 tissue corners | <= 3 µm | 0.64 µm | pass |
+| 3 | Refinement status | `applied` | `applied` | pass |
+| 4 | Final affine vs a current-code control run from the Explorer matrix, over the tissue grid | mean <= 0.5, max <= 1.0 µm | mean 0.013, max 0.029 µm | pass |
+| 5 | Non-rigid: status, confident fraction, Pearson after, vs a current-code control run from the Explorer matrix | `applied`; within 0.05 and 0.01 of the control's | `applied`; confident fraction 0.94497 vs 0.94497 (difference 2e-6); Pearson after 0.8316 vs 0.8315 (difference 8e-5) | pass |
+| 6 | Held-out pairs 13 to 16 vs a current-code control run from the Explorer matrix: flow inversion converged at those pairs in both runs; median final error; affine error | converged; <= 1.0 µm; mean <= 0.5, max <= 1.0 µm | converged at pairs 13 to 16 in both runs; median final error 0.014 µm; affine error mean 0.015, max 0.021 µm | pass |
+| 7 | Registered DAPI vs the registered DAPI of a current-code control run from the Explorer matrix (x16 block mean, log; tissue = Otsu of the downsampled Xenium `morphology_focus` DAPI) | Pearson >= 0.98 | Pearson 0.99995 | pass |
+| 8 | Both matrix CSVs load and pass the scale check | no exception | 4 CSVs load, scale check passes | pass |
+| 9 | Crop to the inner 80 % vs full | mean <= 0.5, max <= 1.0 µm | mean 0.36, max 0.58 µm | pass |
+| 10 | Peak RSS of the full and crop runs (the control run's wall time and peak RSS are recorded) | <= 48 GB | full 1497 s, 8.8 GB; crop80 946 s, 9.6 GB; control (recorded) 1451 s, 11.5 GB | pass |
 
 Why a control run. HD1's stored registration was written by older flow code: its
 recorded settings have no `nonrigid_highpass_sigma_um`,
@@ -579,6 +586,34 @@ that HD1's stored registration predates the current non-rigid settings when the
 key `nonrigid_highpass_sigma_um` is absent from its recorded settings, and is
 null otherwise.
 
+Recorded values (final run, `e77c005`; none of these is a gate). All three runs
+(`full`, `crop80`, control) were registered afresh, none reused. The control has
+the correlation-gain check off (`-2`, as `REGISTER_IMAGES`); the check passed on
+`full` and `crop80` (registration-channel Pearson before and after the
+refinement 0.683 to 0.738 and 0.723 to 0.789; window shift median 1.68 to 0.48 µm
+on `full`), and every gate value above is identical to an earlier run at
+`761ffba`, before the check existed. Against HD1's stored registration: final
+affine over the tissue grid mean 0.32, max 0.65 µm (`4_vs_stored`); confident
+fraction 0.9450 vs 0.9467 and Pearson after 0.8316 vs 0.8302 (`5_vs_stored`);
+held-out median final error 0.66 µm and affine error mean 0.50, max 0.69 µm
+(`6_vs_stored`); for the control, final affine mean 0.32, max 0.67 µm and an x16
+Pearson of 0.886 between the two registered DAPI images (`control_vs_stored`;
+`7_vs_stored` is also 0.886). Pearson of the registered DAPI against the Xenium
+`morphology_focus` DAPI over the tissue mask (`7_vs_xenium_dapi`; x16 is blocks of
+16 pixels of the 0.2125 µm grid, 3.4 µm, and x64 is 13.6 µm):
+
+| Block size | `full` | control | stored |
+|---|---|---|---|
+| x16 | 0.342 | 0.342 | 0.427 |
+| x32 | 0.385 | 0.385 | 0.408 |
+| x64 | 0.373 | 0.373 | 0.378 |
+
+The manual path reproduces the current pipeline exactly: `full` and the control
+agree to the digits shown. The stored registration, written by older flow code,
+matches the Xenium DAPI better at the finest scale (3.4 µm blocks) and equally at
+13.6 µm. That is a difference between two versions of the shared non-rigid code,
+not of the manual path, and a follow-up outside this feature.
+
 Check 6 compares each stage with the control run's: `final` against the control's
 final mapping (its affine plus its flow, pushed through), `affine` against the
 control's final affine. The simulated points come from the Explorer matrix, which
@@ -597,44 +632,130 @@ earlier run, so it was not registered again, as its task summary records).
 
 **Zeiss CZI pair, LCM1** (a serial pair; no ground truth; both presets, run
 through Nextflow, with the documented `same_section:matrix_scale_tolerance=0.05`
-override). Landmarks from `derive_test_landmarks.py` (24 pairs, 8 held out). SIFT
-fails on serial sections (the nuclei of adjacent sections do not correspond), so
-the script falls back to tissue-scale window matching; the method used is
-recorded in the validation JSON. Test:
+override; final run 2026-10-28 at `e77c005`). Test:
 `tests/test_manual_registration/test_czi_pair.py::test_czi_pair_both_presets`.
+
+Landmark derivation (`derive_test_landmarks.py`; 24 pairs, 16 enabled, 8 held
+out). SIFT fails on serial sections (the nuclei of adjacent sections do not
+correspond), and it did here: retried at 5 µm it found 6957 and 15699 keypoints and
+48 ratio matches, none within the gate of the coarse prediction, so no inliers. The
+script fell back to tissue-scale window matching (`window_ncc`; the method is
+recorded in the validation JSON). The coarse search of the tissue masks chose a
+rotation of 180 deg without mirroring (mask IoU 0.875, 0.819 mirrored). Window
+matching at 11 µm ran two passes: search ±600 µm, 510 windows, 72 confident, 46
+inliers, scale 1.0127, rotation 178.49 deg; search ±200 µm, 577 windows, 83
+confident, 59 inliers, scale 1.0127, rotation 177.75 deg, inlier residual median
+24.6 µm and p90 44.8 µm. The similarity fit of the 16 enabled pairs (all used) has
+scale 1.0132 and rotation 177.76 deg. The moving section is mounted rotated by about
+180 deg relative to the reference.
 
 | Quantity | `same_section` | `serial_section` |
 |---|---|---|
-| Fit: pairs used / enabled, scale ratio, rotation | | |
-| Refinement status / reason | | |
-| Non-rigid status / reason, confident fraction, Jacobian range | | |
-| Tissue Pearson: coarse / landmark / affine / final | | |
-| Held-out median residual: landmark / affine / final (µm) | | |
-| Nucleus QC | | |
-| Wall time, peak RSS | | |
+| Fit: pairs used / enabled, scale ratio, rotation | 16 / 16, 1.0132, 177.76 deg (rms 33.2 µm, median 28.5 µm; spread ratio 0.54; no reflection, the other class's median is 3226 µm) | same fit |
+| Refinement status / reason | `rejected_no_correlation_gain`: DAPI correlation 0.4876 -> 0.4863 (gain -0.0013 < 0.0); the candidate moved the image by up to 40 µm | `rejected_exceeds_limits`: shift 250 µm > 200 µm (scale change -1.3 %) |
+| Non-rigid status / reason, confident fraction, Jacobian range | `rejected`: confident fraction 0.093 < 0.100; Jacobian range - (raw flow: median 26 µm, p90 40 µm, Jacobian p01 to p99 0.26 to 2.18) | `rejected`: confident fraction 0.011 < 0.100; Jacobian range - (raw flow: median 137 µm, p90 239 µm, Jacobian p01 to p99 0.02 to 1.80) |
+| Tissue Pearson: coarse / landmark / affine / final | 0.174 / 0.194 / 0.194 / 0.194 | 0.174 / 0.194 / 0.194 / 0.194 |
+| Held-out median residual: landmark / affine / final (µm) | 19.2 / 19.2 / 19.2 | 19.2 / 19.2 / 19.2 |
+| Nucleus QC | disabled (preset default) | informative only: 325 windows of 200 µm, median 67 µm, p90 100 µm, Pearson 0.53 |
+| Wall time, peak RSS | 50.6 min, 13.6 GB | 18.0 min, 10.6 GB |
 
-Gates for `serial_section` (provisional, v1 values): `n_used >= 0.75 n_enabled`,
+Both presets therefore end at the landmark similarity fit on this serial pair. Its
+held-out residuals (final = landmark fit, 8 pairs): median 19.2, p90 34.6, max
+51.2 µm.
+
+An earlier run at `632df90`, before the correlation-gain check, shows what the
+check is for: `same_section` applied the refinement (DAPI correlation 0.4876 ->
+0.4863, up to 40 µm), the held-out median rose from 19.2 to 23.9 µm, the tissue
+Pearson went from 0.194 to 0.195, and the flow was rejected (confident fraction
+0.068).
+
+Gates for `serial_section` (the v1 values, kept after one tuning round, see
+below; preset version `serial_section_v2` because the preset now inherits the
+correlation-gain check, no value changed): `n_used >= 0.75 n_enabled`,
 `|scale_ratio - 1| <= 0.05`, the fitted reflection equals the searched mirror and
 the other class's median is at least twice the chosen class's, `spread_ratio >=
 0.2`; tissue Pearson non-decreasing (within 0.01); held-out final median at most
 the landmark median plus 5 µm; an applied flow has Jacobian in [0.67, 1.5], a
 skipped one a reason; both result stores, the comparison CSV (2 rows) and PNG
 exist; peak RSS <= 48 GB. `same_section` must reach `complete`; its statuses and
-metrics are recorded, not gated.
+metrics are recorded, not gated. Every gate passed on the final run
+(`LCM1_validation.json`), and both presets reached `complete`.
+
+**serial_section tuning round** (LCM1, commit `632df90`, before the
+correlation-gain check; `serial_section` only, one run per variant). The v1 values
+rejected both the refinement and the flow on the serial pair, so four variants
+were tried:
+
+- refinement limit: `max_refinement_shift_um=400`;
+- lenient flow: `nonrigid_min_local_correlation=0.05;
+  nonrigid_min_confident_fraction=0.05`;
+- coarse flow: `nonrigid_pixel_size_um=24; nonrigid_smoothing_sigma_um=200;
+  nonrigid_highpass_sigma_um=300; nonrigid_local_correlation_sigma_um=200;
+  nonrigid_min_local_correlation=0.08; nonrigid_min_confident_fraction=0.05;
+  nonrigid_max_displacement_um=300`;
+- both: the refinement limit and the coarse flow.
+
+| Variant | Refinement | Flow confident fraction | Held-out median landmark / final (µm) | Tissue Pearson final |
+|---|---|---|---|---|
+| preset v1 | rejected (shift 250 > 200 µm) | 0.011 (rejected) | 19.2 / 19.2 | 0.194 |
+| refinement limit 400 µm | applied (scale change -1.3 %) | 0.004 (rejected) | 19.2 / 44.6 | 0.193 |
+| lenient flow | rejected | 0.030 (rejected) | 19.2 / 19.2 | 0.194 |
+| coarse flow | rejected | 0.005 (rejected) | 19.2 / 19.2 | 0.194 |
+| both | applied | 0.002 (rejected) | 19.2 / 44.6 | 0.193 |
+
+The raw TV-L1 flow of the lenient variant has a median displacement of 137 µm and a
+p90 of 239 µm, against a held-out landmark residual of 19 µm: the flow does not
+follow real structure between serial sections. The local DAPI correlation is high
+only at tissue borders, sulci and vessels, and close to 0 in the grey-matter
+interior. Allowing the larger refinement made the held-out median worse (19.2 to
+44.6 µm). Conclusion: keep the v1 values; add the correlation-gain check (preset
+version v2, values unchanged); on serial sections the result is the landmark
+similarity fit, with held-out median 19 µm, p90 35 µm and max 51 µm.
 
 **CZI reader comparison** (one-off, `scripts/manual_registration/compare_czi_readers.py`):
 per file, compression, ROIs compared, maximum absolute difference, mismatching
 pixel fraction and milliseconds per ROI for `czifile`, `pylibCZIrw` and the
 converted OME-TIFF. The two readers are compared on plane Z=0; the OME-TIFF, which
 the converter max-projects over Z, against the `pylibCZIrw` maximum over all Z
-planes.
+planes. The comparison used 20 ROIs per channel and 3 channels per file; the
+milliseconds are means over the channels.
 
 | File | Compression | ROIs | Max abs diff | Mismatch fraction | ms/ROI czifile | ms/ROI pylibCZIrw | ms/ROI OME-TIFF |
 |---|---|---|---|---|---|---|---|
-| LCM1 reference | | | | | | | |
-| LCM1 moving | | | | | | | |
-| LCM2 reference | | | | | | | |
-| LCM2 moving | | | | | | | |
+| LCM1 reference | uncompressed | 60 | 0 | 0 | 2.9 | 7.2 | 22.5 |
+| LCM1 moving | uncompressed | 60 | 0 | 0 | 2.8 | 7.4 | 25.4 |
+| LCM2 reference | uncompressed | 60 | 0 | 0 | 2.6 | 6.0 | 22.7 |
+| LCM2 moving | JPEG-XR | 60 | 0 | 0 | 192.6 | 172.7 | 25.3 |
 
-Run date and MerXen commit: to be recorded with the results. Notes on tile-seam
-artifacts and crops go here as well.
+Versions: `czifile` 2026.10.14 and `pylibCZIrw` 6.1.0 (run once through `uv`, not a
+project dependency; commit `9054957`). All four files are Gray16 with one Z plane
+and 3 channels (DAPI, AF568, AF647, names from the CZI `Name` attribute), so the
+Z projection is not exercised. The readers and the converted OME-TIFF agree on
+every pixel. Reading JPEG-XR tiles is the expensive case: 173 to 193 ms per ROI
+with either reader, against 2.6 to 2.9 ms (`czifile`) and 6.0 to 7.4 ms
+(`pylibCZIrw`) on uncompressed files; the converted OME-TIFF reads in about 25 ms
+per ROI whatever the CZI compression.
+
+**Prepare** (both pairs, on the isolated CZI runtime). LCM1: 3 channels kept on
+both sides (DAPI, AF568, AF647), 0.3451 µm per pixel, reference 77261 x 53651 px
+and moving 77257 x 48135 px, both uncompressed CZI (26 to 28 GB each). LCM2: the
+same channels; reference 71849 x 61012 px, uncompressed; moving 79953 x 48136 px,
+JPEG-XR (6.3 GB). LCM2's moving image has a negative CZI origin (its scene bounding
+box starts at x = -131315) and JPEG-XR tiles; both were handled, and the prepared
+grid is the bounding box. A prepare took about 17 min per pair (the conversion task
+about 16 min, the viewer cache about 1 min) and peaked at about 40 GB (LCM1) and
+42 GB (LCM2) resident memory in the Nextflow trace, well above the 16 GB the
+process declares (see Resources under Workflows and launch); the local executor
+does not enforce the directive. Re-running prepare on the unchanged LCM1 pair took
+12 s (status `unchanged`).
+
+**Tile seams and crops.** The scanner's tile grid is faintly visible in both LCM1
+images, and strips of edge artefact (duplicated or bright tiles) run along the top
+(moving image) and the bottom (reference) of the overlay in the reference frame
+(see the non-rigid QC overlay). The validation's crops are automatic:
+`derive_test_landmarks.py` proposes each image's tissue bounding box inset by 1 %,
+snapped inward to 64 px. They trim the empty frame but leave those strips inside; a
+crop drawn by hand in the viewer, as intended for real use, is what excludes them.
+The results above therefore include the artefacts. The serial pair's moving section
+is mounted rotated by about 180 deg relative to the reference; the coarse search and
+the landmark fit handle it (no mirror).
