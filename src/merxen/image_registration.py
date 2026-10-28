@@ -1453,7 +1453,11 @@ def _refine_registration(
         if not gain >= min_gain:
             result.status = "rejected_no_correlation_gain"
             result.reason = _correlation_gain_reason(
-                before.pearson_log, candidate.pearson_log, gain, min_gain
+                registration_channel,
+                before.pearson_log,
+                candidate.pearson_log,
+                gain,
+                min_gain,
             )
             logger.warning(
                 "%s: refinement rejected, keeping the %s (%s)",
@@ -1469,16 +1473,27 @@ def _refine_registration(
 
 
 def _correlation_gain_reason(
-    before: float, candidate: float, gain: float, min_gain: float
+    channel: str, before: float, candidate: float, gain: float, min_gain: float
 ) -> str:
-    """Describe a refinement that did not raise the registration-channel correlation."""
+    """Describe a refinement that did not raise the registration-channel correlation.
+
+    Args:
+        channel: Name of the registration channel the correlation was measured on.
+        before: Correlation of the overlay with the input matrix.
+        candidate: Correlation of the overlay with the refined matrix.
+        gain: ``candidate - before``.
+        min_gain: The smallest gain that would have been accepted.
+
+    Returns:
+        The reason text recorded in the refinement summary and the log.
+    """
     if math.isfinite(gain):
         return (
-            f"DAPI correlation {before:.4f} -> {candidate:.4f} "
+            f"{channel} correlation {before:.4f} -> {candidate:.4f} "
             f"(gain {gain:.4f} < {min_gain})"
         )
     return (
-        f"DAPI correlation {before:.4f} -> {candidate:.4f} "
+        f"{channel} correlation {before:.4f} -> {candidate:.4f} "
         f"(gain undefined, required >= {min_gain})"
     )
 

@@ -458,6 +458,69 @@ def test_refinement_that_lowers_the_correlation_is_rejected(
     )
 
 
+def test_the_reason_names_the_registration_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        registration_module, "fit_affine_displacement", _wrong_scale_fit
+    )
+    image = _synthetic_dapi()
+    levels = _levels(image)
+    moving = MovingImage(
+        image_key="moving",
+        channel_names=("Hoechst",),
+        pixel_size_um=1.0,
+        level_shapes_yx=tuple(
+            (int(level.sizes["y"]), int(level.sizes["x"])) for level in levels
+        ),
+        open_level=lambda index: levels[index],
+        level0=levels[0].assign_coords(c=["Hoechst"]),
+    )
+
+    refinement = _refine_registration(
+        reference=_in_memory_reference(image),
+        moving=moving,
+        registration_channel="Hoechst",
+        matrix=np.eye(3),
+        settings=_settings(),
+        tuning=RegistrationTuning(refinement_min_correlation_gain=0.0),
+    )
+
+    assert refinement.status == "rejected_no_correlation_gain"
+    assert refinement.reason.startswith("Hoechst correlation ")
+    assert "DAPI" not in refinement.reason
+
+
+def test_a_gain_of_exactly_the_threshold_is_applied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The boundary: ``gain >= min`` applies, so a zero gain passes a 0.0 threshold."""
+
+    def identity_fit(
+        centers_xy: np.ndarray, shifts_xy: np.ndarray, **_kwargs: Any
+    ) -> tuple[np.ndarray, np.ndarray]:
+        return np.eye(3), np.ones(len(centers_xy), dtype=bool)
+
+    monkeypatch.setattr(registration_module, "fit_affine_displacement", identity_fit)
+    image = _synthetic_dapi()
+
+    refinement = _refine_registration(
+        reference=_in_memory_reference(image),
+        moving=_in_memory_moving(image),
+        registration_channel="DAPI",
+        matrix=np.eye(3),
+        settings=_settings(),
+        tuning=RegistrationTuning(refinement_min_correlation_gain=0.0),
+    )
+
+    correction = refinement.correction
+    # The precondition that makes this the boundary: not a hair above or below.
+    assert correction["pearson_candidate"] - correction["pearson_before"] == 0.0
+    assert refinement.status == "applied"
+    assert refinement.reason is None
+    assert refinement.after is not refinement.before
+
+
 def test_refinement_inside_the_limits_applies_without_a_gain_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
