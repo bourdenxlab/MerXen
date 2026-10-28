@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import csv
 import dataclasses
+import gc
 import json
 import os
 import shutil
 import subprocess
 import sys
+import weakref
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -606,6 +608,42 @@ def test_derive_auto_falls_back_to_window_matching(
     assert derived.coarse.mirror_x is True
     assert _corner_error(derived.matrix_full, pair) <= 4.0
     assert len(derived.pairs) == 12
+
+
+@pytest.mark.integration
+def test_derive_auto_releases_the_sift_state_before_the_window_run(
+    serial_like_store: tuple[SyntheticPair, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, store = serial_like_store
+
+    class WorkingImages:
+        """Stands for the SIFT working images and masks."""
+
+    attempts: list[weakref.ref[WorkingImages]] = []
+
+    def sift_attempt(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        images = WorkingImages()
+        attempts.append(weakref.ref(images))
+        return {"fit": _no_sift(), "q_ref": 8.0, "images": images}
+
+    held_during_window_run: list[bool] = []
+
+    def window_attempt(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        gc.collect()
+        held_during_window_run.extend(ref() is not None for ref in attempts)
+        return {"fit": _no_sift(), "q_ref": 8.0}
+
+    monkeypatch.setattr(derive_script, "_estimate", sift_attempt)
+    monkeypatch.setattr(derive_script, "_estimate_window", window_attempt)
+
+    # Both methods fail; the error still names SIFT's counts.
+    with pytest.raises(
+        RuntimeError, match=r"only 0 RANSAC inliers from SIFT \(keypoints"
+    ):
+        derive_script.derive(store, method="auto")
+
+    assert len(attempts) == 2  # the first attempt and its finer retry
+    assert held_during_window_run == [False, False]
 
 
 @pytest.mark.integration

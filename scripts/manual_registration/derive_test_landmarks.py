@@ -994,11 +994,12 @@ def _usable(state: dict[str, Any], min_inliers: int) -> bool:
     return fit["matrix_working"] is not None and fit["n_inliers"] >= min_inliers
 
 
-def _sift_counts(fit: dict[str, Any]) -> str:
+def _sift_counts(counts: dict[str, Any]) -> str:
+    """SIFT's keypoint and match counts (a fit or its diagnostics: same keys)."""
     return (
-        f"keypoints ref/mov {fit['n_keypoints_reference']}/"
-        f"{fit['n_keypoints_moving']}, ratio matches {fit['n_ratio_matches']}, "
-        f"gated {fit['n_gated']}"
+        f"keypoints ref/mov {counts['n_keypoints_reference']}/"
+        f"{counts['n_keypoints_moving']}, ratio matches {counts['n_ratio_matches']}, "
+        f"gated {counts['n_gated']}"
     )
 
 
@@ -1063,7 +1064,7 @@ def derive(
     shapes = {role: tuple(attrs["images"][role]["shape_yx"]) for role in ROLES}
     used_pixel_size = working_pixel_size_um
     retried_at: float | None = None
-    sift_state: dict[str, Any] | None = None
+    sift_diagnostics: dict[str, Any] | None = None
     state: dict[str, Any] | None = None
     if method in ("auto", "sift"):
         state = _estimate(
@@ -1089,7 +1090,9 @@ def derive(
                     working_pixel_size_um=finer,
                     seed=seed,
                 )
-        sift_state = state
+        # Only SIFT's diagnostics (counts) are kept: on a fallback the SIFT state, with
+        # its working images and masks, is dropped before the window run starts.
+        sift_diagnostics = _sift_diagnostics(state, retried_at)
         if not _usable(state, min_inliers):
             fit = state["fit"]
             if method == "sift":
@@ -1112,13 +1115,13 @@ def derive(
         )
         if not _usable(state, min_inliers):
             window = state["fit"]
-            if sift_state is None:
+            if sift_diagnostics is None:
                 raise RuntimeError(
                     f"only {window['n_inliers']} RANSAC inliers from window matching "
                     f"({_window_counts(window)}); place landmarks by hand in the "
                     "viewer"
                 )
-            sift = sift_state["fit"]
+            sift = sift_diagnostics
             raise RuntimeError(
                 f"only {sift['n_inliers']} RANSAC inliers from SIFT "
                 f"({_sift_counts(sift)}) and {window['n_inliers']} from window "
@@ -1193,9 +1196,7 @@ def derive(
             )
         },
         "method": state["method"],
-        "sift": None
-        if sift_state is None
-        else _sift_diagnostics(sift_state, retried_at),
+        "sift": sift_diagnostics,
         "requested_working_pixel_size_um": (
             window_pixel_size_um
             if state["method"] == "window_ncc"
