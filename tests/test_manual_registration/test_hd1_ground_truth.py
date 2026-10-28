@@ -1103,7 +1103,10 @@ def test_hd1_ground_truth(  # noqa: C901
         if key in allowed and value is not None
     )
 
-    def register(label: str) -> tuple[dict[str, Path], dict[str, Any]]:
+    def register(
+        label: str, extra_settings: str = ""
+    ) -> tuple[dict[str, Path], dict[str, Any]]:
+        settings = "; ".join(part for part in (row_settings, extra_settings) if part)
         outputs = run_manual_registration(
             ManualRegistrationRunConfig(
                 dataset_name="HD1",
@@ -1112,7 +1115,7 @@ def test_hd1_ground_truth(  # noqa: C901
                 prepared_store_path=store,
                 result_dir=work / "registered" / f"same_section_{label}",
                 output_dir=work / f"register_out_{label}",
-                row_settings=row_settings,
+                row_settings=settings,
             )
         )
         # A run whose inputs did not change is not registered again: its task
@@ -1149,14 +1152,18 @@ def test_hd1_ground_truth(  # noqa: C901
     # registration was written by older flow code, so the gates compare with this
     # run (the pipeline's own registration from the Explorer matrix, through the
     # shared core): the same tissue points mapped through the matrix exactly, no
-    # noise, no outlier, every pair enabled, the same coarse and no crops.
+    # noise, no outlier, every pair enabled, the same coarse and no crops. The
+    # control also turns the refinement's correlation-gain check off (-2), as
+    # REGISTER_IMAGES has none; the full and crop80 runs keep the preset default.
     control_pairs = _landmark_pairs(
         moving_points,
         _apply(explorer, moving_points),
         n_enabled=len(moving_points),
     )
     inject_labelling(store, control_pairs, coarse=coarse, crops=None)
-    control_outputs, control = register("explorer")
+    control_outputs, control = register(
+        "explorer", extra_settings="refinement_min_correlation_gain=-2"
+    )
     _record(
         measured,
         "stored_registration_note",
