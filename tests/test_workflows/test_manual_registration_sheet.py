@@ -27,7 +27,7 @@ from merxen.manual_registration.config import (
     ManualRegistrationRunConfig,
     ManualRegistrationSettings,
 )
-from merxen.manual_registration.presets import FORBIDDEN_OVERRIDES
+from merxen.manual_registration.presets import FORBIDDEN_OVERRIDES, PRESETS
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = REPO_ROOT / "workflows"
@@ -73,6 +73,8 @@ class SheetHarness {
             results.store[name] = S.storeState(path as String)
         }
         results.settings_keys = S.SETTINGS_KEYS
+        results.min_landmark_pairs = S.MIN_LANDMARK_PAIRS
+        results.min_used_pairs = S.MIN_USED_PAIRS
         results.allowed_columns = S.ALLOWED_COLUMNS
         results.names = [
             run_name: S.runName("serial_section", "trial"),
@@ -1259,6 +1261,19 @@ def test_settings_keys_equal_the_model(results: dict[str, Any]) -> None:
     )
 
     assert sorted(results["settings_keys"]) == expected
+
+
+def test_pair_count_defaults_equal_the_model(results: dict[str, Any]) -> None:
+    # Groovy resolves landmark_min_pairs / landmark_min_used_pairs for the preflight
+    # from its own defaults plus the settings text; it knows nothing of the presets.
+    # So the defaults must equal the model's, and no preset may set either key.
+    fields = ManualRegistrationSettings.model_fields
+
+    assert results["min_landmark_pairs"] == fields["landmark_min_pairs"].default
+    assert results["min_used_pairs"] == fields["landmark_min_used_pairs"].default
+    for preset, overrides in PRESETS.items():
+        assert "landmark_min_pairs" not in overrides, preset
+        assert "landmark_min_used_pairs" not in overrides, preset
 
 
 def test_allowed_columns(results: dict[str, Any]) -> None:
