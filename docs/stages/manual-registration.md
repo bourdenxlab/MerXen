@@ -209,7 +209,10 @@ preflight error.
 | `manual_registration_force_register` | `false` | Re-run registrations Python would skip |
 | `manual_registration_czi_python` | `null` | Python of the CZI runtime, or `in_process` (site config) |
 
-Resources: `MANUAL_REGISTRATION_PREPARE` 8 CPUs / 16 GB,
+Resources: `MANUAL_REGISTRATION_PREPARE` 8 CPUs / 16 GB (the conversion streams
+one channel band at a time and maps no file; Nextflow trace of the LCM2 pair
+(71849 x 61012 and 79953 x 48136 px, 3 channels): peak RSS 3.8 GB and 358.5 % cpu,
+about 3.6 cores busy),
 `MANUAL_REGISTRATION_REGISTER` 8 CPUs / 48 GB (a full 80k x 61k px Zeiss scan;
 refinement working images are capped at 32767 px per side),
 `MANUAL_REGISTRATION_COMPARE` 1 CPU / 4 GB. The Dwight profile limits the first
@@ -753,11 +756,27 @@ JPEG-XR (6.3 GB). LCM2's moving image has a negative CZI origin (its scene bound
 box starts at x = -131315) and JPEG-XR tiles; both were handled, and the prepared
 grid is the bounding box. A prepare took about 17 min per pair (the
 `MANUAL_REGISTRATION_PREPARE` task about 16 min, of which the two CZI conversions
-took about 12 min; the viewer-cache task about 1 min). It peaked at 38.3 GB (LCM1)
-and 40.5 GB (LCM2) resident memory in the Nextflow task trace, well above the 16 GB
-the process declares (see Resources under Workflows and launch); the local executor
-does not enforce the directive. Re-running prepare on the unchanged LCM1 pair took
-12 s (status `unchanged`).
+took about 12 min; the viewer-cache task about 1 min). At commit `9054957` the
+prepare peaked at 38.3 GB (LCM1) and 40.5 GB (LCM2) resident memory in the Nextflow
+task trace, well above the 16 GB the process declares (see Resources under Workflows
+and launch; the local executor does not enforce the directive). A per-process sampler
+on LCM2 (resident anonymous and file-backed pages) showed that almost all of it was
+file pages kept mapped by the converter. The reference conversion (uncompressed CZI,
+29.6 GB) peaked at 41.9 GB, of which 2.8 GB was anonymous and 39.2 GB file-backed
+(the memory map of the CZI, 30.1 GB: each reader thread mapped the whole file and
+every touched page stayed resident until the handles closed; and the memory maps of
+the reduced pyramid levels, 8.4 GB). The moving conversion (JPEG-XR) peaked at
+21.3 GB, 2.5 GB anonymous and 18.8 GB file-backed. The anonymous memory, which the
+banding bounds, was 2 to 3 GB. Since the conversion no longer maps any file
+(`memmap=False` for the CZI, plain scratch files for the reduced levels), the LCM2
+prepare run through `workflows/manual_registration_prepare.nf` (commit `4062912`)
+peaked at 3.8 GB in the Nextflow trace, against 40.5 GB at `9054957`:
+`MANUAL_REGISTRATION_PREPARE` took 16 min 47 s at 358.5 % cpu (about 3.6 cores, within
+the 8 it declares) and the viewer-cache task 1 min 9 s at 2.8 GB. Both converted
+OME-TIFFs (reference and moving) are byte-identical (`cmp`) to those of the `9054957`
+prepare. The `%cpu` column of a task's `.command.trace` is in tenths of a percent;
+Nextflow's own trace report divides it by 10, and 358.5 % is the report's figure.
+Re-running prepare on the unchanged LCM1 pair took 12 s (status `unchanged`).
 
 **Tile seams and crops.** The scanner's tile grid is faintly visible in both LCM1
 images, and strips of edge artefact (duplicated or bright tiles) run along the top

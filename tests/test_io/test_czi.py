@@ -10,6 +10,7 @@ import sys
 import textwrap
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -342,6 +343,111 @@ def test_bridge_does_not_expose_the_base_site_packages(
         .resolve()
         .is_relative_to(Path(czi.__file__).resolve().parent.parent)
     )
+
+
+def fake_czifile(array: np.ndarray, *, x0: int, y0: int) -> Any:
+    """A ``czifile`` stand-in serving ``array`` (C, Y, X) as one scene.
+
+    ``CziFile`` records the keyword arguments of every open and whether it was
+    closed in ``module.opened``.
+    """
+    n_c, height, width = array.shape
+
+    class Pixels:
+        def __init__(self, plane: np.ndarray) -> None:
+            self.plane = plane
+
+        def asarray(self, **kwargs: Any) -> np.ndarray:
+            assert kwargs == {"fillvalue": 0, "maxworkers": 1}
+            return self.plane.copy()
+
+    class Image:
+        dims = ("C", "Y", "X")
+        start = (0, y0, x0)
+        sizes = {"C": n_c, "Y": height, "X": width}
+        bbox = (x0, y0, width, height)
+        dtype = array.dtype
+        pixeltype = SimpleNamespace(name="GRAY16")
+        compression = SimpleNamespace(name="UNCOMPRESSED")
+        is_upsampled = is_downsampled = False
+        mpp = (0.5, 0.5)
+
+        def __call__(self, roi: tuple[int, int, int, int], C: int) -> Pixels:  # noqa: N803
+            x, y, w, h = roi
+            return Pixels(array[C, y - y0 : y - y0 + h, x - x0 : x - x0 + w])
+
+    class Scenes:
+        def __getitem__(self, key: int) -> Image:
+            assert key == 0
+            return Image()
+
+        def __call__(self) -> Image:
+            return Image()
+
+        def items(self) -> list[tuple[int, Image]]:
+            return [(0, Image())]
+
+    opened: list[dict[str, Any]] = []
+
+    class CziFile:
+        def __init__(self, path: Path, **kwargs: Any) -> None:
+            self.record = {"kwargs": kwargs, "closed": False}
+            opened.append(self.record)
+            self.header = SimpleNamespace(
+                file_part=0, primary_file_guid="guid", file_guid="guid"
+            )
+            self.scenes = Scenes()
+
+        def metadata(self) -> str:
+            return USER_XML
+
+        def close(self) -> None:
+            self.record["closed"] = True
+
+        def __enter__(self) -> CziFile:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            self.close()
+
+    return SimpleNamespace(CziFile=CziFile, __version__="2026.10.14", opened=opened)
+
+
+def test_conversion_reads_the_czi_without_memory_maps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A map keeps every touched page resident until the handle closes, and each
+    reader thread has its own handle: nothing may be opened with ``memmap``."""
+    rng = np.random.default_rng(0)
+    array = rng.integers(0, 65536, size=(3, 80, 96)).astype(np.uint16)
+    module = fake_czifile(array, x0=-131, y0=20)
+    monkeypatch.setattr(czi, "_import_czifile", lambda: module)
+    path = tmp_path / "scan.czi"
+
+    info = czi.read_czi_info(path)
+    assert info.scenes[0].bbox_xywh == (-131, 20, 96, 80)
+    assert len(module.opened) == 1
+
+    out = tmp_path / "out.ome.tif"
+    czi.convert_czi_scene(
+        path,
+        out,
+        scene=0,
+        channel_names=["A", "B", "C"],
+        pixel_size_um=0.5,
+        image_name="x",
+        tile_size=16,
+        band_height=16,
+        min_level_size=16,
+        workers=3,
+    )
+    # One open for the metadata, one for the geometry, one per reader thread.
+    assert len(module.opened) >= 1 + 1 + 1 + 1
+    assert all(item["kwargs"]["memmap"] is False for item in module.opened)
+    assert all(item["kwargs"]["squeeze"] is False for item in module.opened)
+    assert all(item["closed"] for item in module.opened)
+    level0 = open_ome_tiff_level(read_ome_tiff_info(out), 0).values
+    assert np.array_equal(level0, array)
 
 
 # --------------------------------------------------------------------------

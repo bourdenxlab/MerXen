@@ -2,9 +2,12 @@
 
 The image is supplied band by band (``read_band``), so a mosaic of tens of
 gigabytes never has to fit in memory. Level 0 is written tile by tile while
-every reduced level is accumulated in a temporary memory map; the levels are
-exact recursive 2x2 integer means (:func:`downsample_2x2`), stored as SubIFDs
-of the level-0 pages, which is the layout :mod:`merxen.io.ome_tiff` reads.
+every reduced level is accumulated in a plain scratch file (written with
+``os.pwrite``, read back one tile row at a time with ``os.preadv``; nothing is
+memory-mapped, so no page of the scratch files counts as resident memory of the
+process). The levels are exact recursive 2x2 integer means
+(:func:`downsample_2x2`), stored as SubIFDs of the level-0 pages, which is the
+layout :mod:`merxen.io.ome_tiff` reads.
 
 The module imports only the standard library, numpy and tifffile (it also runs
 in the slim CZI reader runtime) and writes byte-identical files for identical
@@ -13,6 +16,7 @@ inputs: the OME UUID is derived from the settings, not from the host.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import json
 import logging
@@ -337,6 +341,46 @@ def _verify_written(
         raise RuntimeError(f"wrote {path.name} but read back " + "; ".join(problems))
 
 
+def _pwrite_all(fd: int, data: np.ndarray, offset: int) -> None:
+    """Write all bytes of ``data`` to ``fd`` at ``offset``, looping on short writes.
+
+    Raises:
+        RuntimeError: If a write makes no progress.
+    """
+    view = memoryview(np.ascontiguousarray(data).reshape(-1).view(np.uint8))
+    done = 0
+    while done < len(view):
+        written = os.pwrite(fd, view[done:], offset + done)
+        if written <= 0:
+            raise RuntimeError(
+                f"short write to a scratch file ({done} of {len(view)} bytes)"
+            )
+        done += written
+
+
+def _pread_exact(
+    fd: int, shape: tuple[int, int], dtype: np.dtype, offset: int
+) -> np.ndarray:
+    """Read a ``shape`` array of ``dtype`` from ``fd`` at ``offset``.
+
+    The bytes are read straight into the new array, looping on short reads.
+
+    Raises:
+        RuntimeError: If a read returns no bytes before the array is complete.
+    """
+    out = np.empty(shape, dtype)
+    view = memoryview(out.reshape(-1).view(np.uint8))
+    done = 0
+    while done < len(view):
+        count = os.preadv(fd, [view[done:]], offset + done)
+        if count <= 0:
+            raise RuntimeError(
+                f"short read from a scratch file ({done} of {len(view)} bytes)"
+            )
+        done += count
+    return out
+
+
 def write_pyramidal_ome_tiff(
     read_band: Callable[[int, int, int], np.ndarray],
     *,
@@ -357,6 +401,19 @@ def write_pyramidal_ome_tiff(
 ) -> OmeTiffWriteResult:
     """Write a tiled, pyramidal BigTIFF OME-TIFF from row bands.
 
+    Memory use does not grow with the image height or the channel count (the
+    channels are streamed one at a time); it grows with the image width.
+    Anonymous memory is about two bands of one channel (the band returned by
+    ``read_band`` and its reduced copies) plus up to about 512 MiB of tiles that
+    tifffile holds for encoding (tifffile 2026.4.11); each held tile keeps alive
+    the band, or for a reduced level the tile-row strip read from its scratch
+    file, that it was cut from. No file stays mapped: the reduced levels are
+    plain scratch files accessed with ``os.pwrite`` and ``os.preadv``, so their
+    pages are page cache (reclaimable, and not counted as resident memory of the
+    process), unlike memory maps, which keep every touched page resident until
+    they are closed. The disk use of the scratch files is the total size of the
+    reduced levels, about a third of level 0.
+
     Args:
         read_band: ``read_band(channel, y0, height)`` returns the ``(height,
             width)`` rows ``[y0, y0 + height)`` of a channel, in ``dtype``. Bands
@@ -376,7 +433,7 @@ def write_pyramidal_ome_tiff(
         compression: ``"zlib"``, ``"zstd"`` or ``"none"``.
         compression_level: Compression level for zlib (0-9) or zstd (1-22).
         workers: Threads used by tifffile for compression.
-        tmp_dir: Directory for the temporary level memory maps (default: next
+        tmp_dir: Directory for the temporary level scratch files (default: next
             to ``output_path``).
         channel_metadata: Optional per-channel ``Fluor`` / ``ExcitationWavelength``
             / ``EmissionWavelength`` written into the OME channels (a key is
@@ -388,8 +445,9 @@ def write_pyramidal_ome_tiff(
     Raises:
         ValueError: On an invalid argument.
         OSError: With ``ENOSPC`` when the disk space check fails.
-        RuntimeError: If ``read_band`` returns the wrong shape or dtype, or the
-            written file does not read back as asked.
+        RuntimeError: If ``read_band`` returns the wrong shape or dtype, a read
+            of a scratch file comes back short, or the written file does not
+            read back as asked.
     """
     np_dtype = np.dtype(dtype)
     output_path = Path(output_path)
@@ -423,17 +481,31 @@ def write_pyramidal_ome_tiff(
     tmp_parent.mkdir(parents=True, exist_ok=True)
     work_dir = Path(tempfile.mkdtemp(prefix=".ome-tiff-levels-", dir=tmp_parent))
     partial = output_path.with_name(f"{output_path.name}.partial-{uuid.uuid4().hex}")
-    levels: list[Any] = []
+    itemsize = np_dtype.itemsize
+    level_fds: list[int] = []  # the scratch file of reduced level k is level_fds[k - 1]
     try:
         for k in range(1, n_sub + 1):
-            levels.append(
-                np.lib.format.open_memmap(
-                    work_dir / f"level{k}.npy",
-                    mode="w+",
-                    dtype=np_dtype,
-                    shape=(n_c, *shapes[k]),
-                )
+            fd = os.open(
+                work_dir / f"level{k}.raw", os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600
             )
+            level_fds.append(fd)
+            os.ftruncate(fd, n_c * shapes[k][0] * shapes[k][1] * itemsize)
+
+        def level_offset(k: int, c: int, row: int) -> int:
+            level_h, level_w = shapes[k]
+            return (c * level_h + row) * level_w * itemsize
+
+        def store_rows(k: int, c: int, row: int, block: np.ndarray) -> None:
+            # A plain file takes any byte range, so (unlike assigning into an
+            # array) a block of the wrong shape would corrupt the next row or
+            # channel silently: check it fits.
+            level_h, level_w = shapes[k]
+            if block.shape[1] != level_w or row + block.shape[0] > level_h:
+                raise RuntimeError(
+                    f"rows {row}:{row + block.shape[0]} of shape {block.shape} do "
+                    f"not fit level {k} of shape ({level_h}, {level_w})"
+                )
+            _pwrite_all(level_fds[k - 1], block, level_offset(k, c, row))
 
         def level0_tiles() -> Iterator[np.ndarray]:
             for c in range(n_c):
@@ -448,19 +520,23 @@ def write_pyramidal_ome_tiff(
                     current, row = band, by
                     for k in range(1, n_sub + 1):
                         current, row = downsample_2x2(current), row // 2
-                        levels[k - 1][c, row : row + current.shape[0], :] = current
+                        store_rows(k, c, row, current)
                     for ty in range(0, bh, tile_size):
                         for tx in range(0, width, tile_size):
                             yield band[ty : ty + tile_size, tx : tx + tile_size]
 
-        def stored_tiles(array: np.ndarray) -> Iterator[np.ndarray]:
-            _, level_h, level_w = array.shape
+        def stored_tiles(k: int) -> Iterator[np.ndarray]:
+            level_h, level_w = shapes[k]
             for c in range(n_c):
                 for ty in range(0, level_h, tile_size):
+                    strip = _pread_exact(
+                        level_fds[k - 1],
+                        (min(tile_size, level_h - ty), level_w),
+                        np_dtype,
+                        level_offset(k, c, ty),
+                    )
                     for tx in range(0, level_w, tile_size):
-                        yield np.asarray(
-                            array[c, ty : ty + tile_size, tx : tx + tile_size]
-                        )
+                        yield strip[:, tx : tx + tile_size]
 
         options: dict[str, Any] = {
             "tile": (tile_size, tile_size),
@@ -493,11 +569,9 @@ def write_pyramidal_ome_tiff(
                 **options,
             )
             for k in range(1, n_sub + 1):
-                level = levels[k - 1]
-                level.flush()
                 tif.write(
-                    stored_tiles(level),
-                    shape=level.shape,
+                    stored_tiles(k),
+                    shape=(n_c, *shapes[k]),
                     dtype=np_dtype,
                     subfiletype=1,
                     metadata=None,
@@ -509,7 +583,9 @@ def write_pyramidal_ome_tiff(
         partial.unlink(missing_ok=True)
         raise
     finally:
-        levels.clear()
+        for fd in level_fds:
+            with contextlib.suppress(OSError):
+                os.close(fd)
         shutil.rmtree(work_dir, ignore_errors=True)
     return OmeTiffWriteResult(
         output_path=output_path,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import mmap
 import os
 import subprocess
 import sys
@@ -174,6 +175,207 @@ def test_single_level(tmp_path: Path) -> None:
     result = small_write(out, array, tile_size=16, band_height=32, min_level_size=64)
     assert result.level_shapes_yx == ((40, 40),)
     assert read_ome_tiff_info(out).is_pyramidal is False
+
+
+def random_array(shape: tuple[int, int, int], dtype: str, seed: int = 0) -> np.ndarray:
+    """Random data over the whole range of an integer dtype (unit range for floats)."""
+    rng = np.random.default_rng(seed)
+    if np.dtype(dtype).kind == "f":
+        return rng.random(shape).astype(dtype)
+    info = np.iinfo(dtype)
+    values = rng.integers(info.min, int(info.max) + 1, size=shape, dtype=np.int64)
+    return values.astype(dtype)
+
+
+def reference_pyramid(array: np.ndarray, n_sub: int) -> list[np.ndarray]:
+    """``downsample_2x2`` applied level by level to the whole array."""
+    levels = [array]
+    for _ in range(n_sub):
+        levels.append(np.stack([downsample_2x2(plane) for plane in levels[-1]]))
+    return levels
+
+
+def levels_by_tifffile(path: Path) -> list[np.ndarray]:
+    with tifffile.TiffFile(path) as tif:
+        return [level.asarray() for level in tif.series[0].levels]
+
+
+@pytest.mark.parametrize("dtype", sorted(ome_tiff_writer.SUPPORTED_DTYPES))
+def test_every_level_equals_the_numpy_reference(tmp_path: Path, dtype: str) -> None:
+    # Two channels, sizes that are no multiple of the tile, bands taller than a
+    # tile, five reduced levels: every reduced level goes through a scratch file.
+    array = random_array((2, 300, 330), dtype)
+    out = tmp_path / "out.ome.tif"
+    result = small_write(
+        out, array, tile_size=64, band_height=128, min_level_size=16, workers=2
+    )
+    assert len(result.level_shapes_yx) == 6
+    expected = reference_pyramid(array, 5)
+    got = levels_by_tifffile(out)
+    assert len(got) == len(expected)
+    for k, (level, want) in enumerate(zip(got, expected, strict=True)):
+        assert level.dtype == want.dtype, k
+        assert np.array_equal(level, want), f"level {k}"
+
+
+def test_a_last_band_shorter_than_a_tile_row_is_stored(tmp_path: Path) -> None:
+    # 70 rows in bands of 64: the second band has 6 rows, and the 35-row first
+    # reduced level is read back as strips of 16, 16 and 3 rows.
+    array = random_array((2, 70, 50), "uint16", seed=5)
+    out = tmp_path / "short.ome.tif"
+    result = small_write(out, array, tile_size=16, band_height=64, min_level_size=16)
+    assert result.level_shapes_yx == ((70, 50), (35, 25), (18, 13), (9, 7))
+    expected = reference_pyramid(array, 3)
+    for k, (level, want) in enumerate(
+        zip(levels_by_tifffile(out), expected, strict=True)
+    ):
+        assert np.array_equal(level, want), f"level {k}"
+
+
+def test_no_memory_map_is_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("the writer must not memory-map a file")
+
+    monkeypatch.setattr(np.lib.format, "open_memmap", forbidden)
+    monkeypatch.setattr(np, "memmap", forbidden)
+    monkeypatch.setattr(mmap, "mmap", forbidden)
+    array = random_array((2, 200, 150), "uint16", seed=2)
+    scratch = tmp_path / "scratch"
+    seen: list[str] = []
+
+    def read_band(c: int, y0: int, h: int) -> np.ndarray:
+        seen.extend(p.suffix for p in scratch.rglob("*") if p.is_file())
+        return array[c, y0 : y0 + h].copy()
+
+    out = tmp_path / "out.ome.tif"
+    write_pyramidal_ome_tiff(
+        read_band,
+        shape_cyx=array.shape,
+        dtype=array.dtype,
+        channel_names=["a", "b"],
+        pixel_size_um=0.5,
+        image_name="x",
+        output_path=out,
+        tile_size=16,
+        band_height=64,
+        min_level_size=16,
+        tmp_dir=scratch,
+    )
+    assert seen and ".npy" not in seen  # scratch files existed, none a .npy
+    for k, (level, want) in enumerate(
+        zip(levels_by_tifffile(out), reference_pyramid(array, 4), strict=True)
+    ):
+        assert np.array_equal(level, want), f"level {k}"
+    assert list(scratch.iterdir()) == []
+
+
+def test_short_reads_and_writes_are_completed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    array = random_array((2, 130, 97), "uint16", seed=4)
+    plain = tmp_path / "plain.ome.tif"
+    small_write(plain, array, tile_size=16, band_height=64, min_level_size=16)
+
+    real_pwrite, real_preadv = os.pwrite, os.preadv
+    calls = {"pwrite": 0, "preadv": 0}
+
+    def short_pwrite(fd: int, data: Any, offset: int) -> int:
+        calls["pwrite"] += 1
+        return real_pwrite(fd, memoryview(data)[:999], offset)  # odd: splits items
+
+    def short_preadv(fd: int, buffers: Any, offset: int) -> int:
+        calls["preadv"] += 1
+        return real_preadv(fd, [memoryview(buffers[0])[:999]], offset)
+
+    monkeypatch.setattr(os, "pwrite", short_pwrite)
+    monkeypatch.setattr(os, "preadv", short_preadv)
+    chopped = tmp_path / "chopped.ome.tif"
+    small_write(chopped, array, tile_size=16, band_height=64, min_level_size=16)
+    assert calls["pwrite"] > 20 and calls["preadv"] > 20
+    assert chopped.read_bytes() == plain.read_bytes()
+
+
+def open_file_descriptors() -> int:
+    try:
+        return len(os.listdir("/proc/self/fd"))
+    except OSError:
+        pytest.skip("needs /proc/self/fd")
+
+
+def test_a_zero_byte_read_is_an_error_and_leaves_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    array = random_array((2, 130, 97), "uint16", seed=4)
+    real_preadv = os.preadv
+    reads = []
+
+    def failing_once(fd: int, buffers: Any, offset: int) -> int:
+        reads.append(offset)
+        return 0 if len(reads) == 1 else real_preadv(fd, buffers, offset)
+
+    monkeypatch.setattr(os, "preadv", failing_once)
+    out = tmp_path / "out.ome.tif"
+    scratch = tmp_path / "scratch"
+    descriptors = open_file_descriptors()
+    with pytest.raises(RuntimeError, match="short read"):
+        small_write(
+            out,
+            array,
+            tile_size=16,
+            band_height=64,
+            min_level_size=16,
+            tmp_dir=scratch,
+        )
+    assert reads
+    assert not out.exists()
+    assert not list(tmp_path.glob("*.partial-*"))
+    assert list(scratch.iterdir()) == []
+    assert open_file_descriptors() == descriptors
+
+
+def test_a_write_that_makes_no_progress_is_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(os, "pwrite", lambda fd, data, offset: 0)
+    out = tmp_path / "out.ome.tif"
+    scratch = tmp_path / "scratch"
+    with pytest.raises(RuntimeError, match="short write"):
+        small_write(
+            out,
+            random_array((1, 100, 100), "uint16"),
+            tile_size=16,
+            band_height=64,
+            min_level_size=16,
+            tmp_dir=scratch,
+        )
+    assert not out.exists()
+    assert not list(tmp_path.glob("*.partial-*"))
+    assert list(scratch.iterdir()) == []
+
+
+def test_a_reduced_block_that_does_not_fit_its_level_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        ome_tiff_writer,
+        "downsample_2x2",
+        lambda array: np.zeros(
+            (array.shape[0] // 2, array.shape[1] // 2 + 1), array.dtype
+        ),
+    )
+    out = tmp_path / "out.ome.tif"
+    with pytest.raises(RuntimeError, match="do not fit level 1"):
+        small_write(
+            out,
+            random_array((1, 100, 100), "uint16"),
+            tile_size=16,
+            band_height=64,
+            min_level_size=16,
+        )
+    assert not out.exists()
+    assert not list(tmp_path.glob(".ome-tiff-levels-*"))
 
 
 def test_deterministic_bytes(tmp_path: Path) -> None:

@@ -124,7 +124,7 @@ def _compare_file(
         converted_levels = zarr.open(tif.series[0].aszarr(level=0), mode="r")
     with (
         pyczi.open_czi(str(path)) as doc,
-        czifile.CziFile(str(path), memmap=True, squeeze=False) as czi,
+        czifile.CziFile(str(path), memmap=False, squeeze=False) as czi,
     ):
         rect = doc.scenes_bounding_rectangle[0]
         bbox_x, bbox_y, bbox_w, bbox_h = rect.x, rect.y, rect.w, rect.h
