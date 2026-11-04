@@ -7,10 +7,11 @@ class CellposeSettings {
     static final String STOCK_SHA256 = '0f1cc3f7ecdd8a037a57c6c48d9d8921391be4cbce3fa9f13c3e3a2e1253c667'
 
     static List channelsForRow(row, platform) {
+        def spec = PlatformSpec.forName(platform)
         def raw = row["${platform.toLowerCase()}_channels"]
         return raw != null && raw.toString().trim()
             ? raw.toString().split(',').collect { it.trim() }.findAll { it }
-            : (platform == 'XENIUM' ? ['DAPI', '18S'] : ['DAPI', 'PolyT'])
+            : spec.defaultChannels
     }
     static Set protectedPaths(Collection roots) {
         def protectedPaths = [] as Set
@@ -84,7 +85,7 @@ class CellposeSettings {
         if (isStock) {
             metadata = [weights_sha256: STOCK_SHA256, cellpose_version: '4.2.1.1',
                 torch_version: identity.torch_version, channels: channels,
-                image_key: platform == 'XENIUM' ? 'morphology_focus' : 'MERSCOPE_z_projection']
+                image_key: PlatformSpec.forName(platform).nativeImageKey]
         }
         def expectedCellpose = [
             pretrained_model: 'cpsam_v2', model_sha256: null, model_metadata_path: null,
@@ -250,7 +251,7 @@ class CellposeSettings {
                 return
             }
             def metadata = new JsonSlurper().parse(new File(selected.cellpose.model_metadata_path))
-            def nativeImage = platform == 'XENIUM' ? 'morphology_focus' : 'MERSCOPE_z_projection'
+            def nativeImage = PlatformSpec.forName(platform).nativeImageKey
             if (metadata.normalization_route != 'A' || metadata.image_key != nativeImage ||
                 !(metadata.pixel_size_um instanceof Number) ||
                 !Double.isFinite(metadata.pixel_size_um as double) || metadata.pixel_size_um <= 0) {

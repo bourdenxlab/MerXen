@@ -13,6 +13,7 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from merxen.config import CellposeConfig, MaskFilterConfig, SegmentationConfig
+from merxen.platforms import platform_spec
 from merxen.segmentation.model_identity import (
     CPSAM_V2_SHA256,
     CellposeInferenceContext,
@@ -52,9 +53,7 @@ class CellposeModelMetadata(BaseModel):
 
     @model_validator(mode="after")
     def _require_native_image_and_unique_channels(self) -> CellposeModelMetadata:
-        expected = (
-            "morphology_focus" if self.platform == "XENIUM" else "MERSCOPE_z_projection"
-        )
+        expected = platform_spec(self.platform).native_image_key
         if self.image_key != expected:
             raise ValueError("Model image_key must name its platform's native image")
         if any(not channel.strip() for channel in self.channels) or len(
@@ -288,11 +287,7 @@ def preflight_stock_arm(
         config.tiling.tile_size_candidates[0] < config.tiling.min_tile_size
     ):
         raise ValueError("Stock controls require a single pinned tile size")
-    native = (
-        "morphology_focus"
-        if config.dataset.platform == "XENIUM"
-        else "MERSCOPE_z_projection"
-    )
+    native = platform_spec(config.dataset.platform).native_image_key
     if image_key != native:
         raise ValueError("Stock controls require the native image")
     matrix = np.linalg.inv(transform_matrix)

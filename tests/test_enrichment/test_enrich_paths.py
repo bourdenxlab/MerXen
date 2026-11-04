@@ -47,6 +47,7 @@ from merxen.io.bead_removal.provenance import (
     write_store_segmentation_sidecar,
 )
 from merxen.io.spatialdata_io import write_spatialdata_metadata
+from merxen.platforms import UnknownPlatformError
 
 
 def test_cellpose_polygon_export_preserves_sparse_mask_labels(
@@ -160,6 +161,22 @@ def test_is_already_enriched_requires_real_xenium_image() -> None:
 
     sdata.images["morphology_focus"] = object()
     assert _is_already_enriched(sdata, "XENIUM")
+
+
+@pytest.mark.parametrize(
+    "check", [_is_already_enriched, _is_enriched_except_nuclei], ids=["full", "nuclei"]
+)
+def test_completeness_checks_reject_an_unknown_platform(check: Any) -> None:
+    """An unregistered platform raises instead of using the Xenium rules."""
+    sdata = SimpleNamespace(shapes={}, tables={}, images={})
+    with pytest.raises(UnknownPlatformError, match="Unknown platform: 'ATERA'"):
+        check(sdata, "ATERA")
+
+
+def test_partial_artifact_paths_reject_an_unknown_platform(tmp_path: Path) -> None:
+    """An unregistered platform raises instead of using the Xenium layers."""
+    with pytest.raises(UnknownPlatformError, match="Supported: MERSCOPE, XENIUM"):
+        _partial_enrichment_artifact_paths(tmp_path, "ATERA")
 
 
 # Characterisation of the platform-dependent completeness rules. The names are

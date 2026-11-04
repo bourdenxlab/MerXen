@@ -343,34 +343,16 @@ def nullableIntOrDefault(rawValue, defaultValue) {
 }
 
 def requirePlatformInput(row, pairId, platform) {
-    if (platform == "MERSCOPE") {
-        def merscopeDir = chooseField(row, ["merscope_dir"])
-        def merscopeSpatialdataPath = chooseField(
-            row,
-            ["merscope_spatialdata_path", "merscope_zarr_path"]
+    def spec = PlatformSpec.forName(platform)
+    def inputDir = chooseField(row, spec.inputDirFields)
+    def spatialdataPath = chooseField(row, spec.spatialdataPathFields)
+    if (!inputDir && !spatialdataPath) {
+        error(
+            "Samplesheet row for ${pairId} must provide " +
+            "${spec.inputDirFields[0]} or ${spec.spatialdataPathFields[0]}"
         )
-        if (!merscopeDir && !merscopeSpatialdataPath) {
-            error(
-                "Samplesheet row for ${pairId} must provide " +
-                "merscope_dir or merscope_spatialdata_path"
-            )
-        }
-        return [inputDir: merscopeDir, spatialdataPath: merscopeSpatialdataPath]
     }
-
-    if (platform == "XENIUM") {
-        def xeniumDir = chooseField(row, ["xenium_dir"])
-        def xeniumSpatialdataPath = chooseField(row, ["xenium_spatialdata_path"])
-        if (!xeniumDir && !xeniumSpatialdataPath) {
-            error(
-                "Samplesheet row for ${pairId} must provide " +
-                "xenium_dir or xenium_spatialdata_path"
-            )
-        }
-        return [inputDir: xeniumDir, spatialdataPath: xeniumSpatialdataPath]
-    }
-
-    throw new IllegalArgumentException("Unknown platform: ${platform}")
+    return [inputDir: inputDir, spatialdataPath: spatialdataPath]
 }
 
 def buildConfigForPlatform(row, pairId, platform) {
@@ -450,7 +432,10 @@ def segmentMetaForPlatform(row, platform, params) {
     def extra = modelSettings ? [cellpose_settings: modelSettings] : [:]
     if (platform == "MERSCOPE") {
         def merscopeMeta = extra + [
-            channels: parseChannels(row.merscope_channels, ["DAPI", "PolyT"]),
+            channels: parseChannels(
+                row.merscope_channels,
+                PlatformSpec.forName(platform).defaultChannels
+            ),
             image_prefix: chooseField(row, ["merscope_image_prefix"]) ?: null,
             z_range: parseRange(row.merscope_z_range, 0, 6),
             transform_path: chooseField(row, ["merscope_transform_path"]) ?: null,
@@ -471,7 +456,10 @@ def segmentMetaForPlatform(row, platform, params) {
 
     if (platform == "XENIUM") {
         return extra + [
-            channels: parseChannels(row.xenium_channels, ["DAPI", "18S"]),
+            channels: parseChannels(
+                row.xenium_channels,
+                PlatformSpec.forName(platform).defaultChannels
+            ),
             image_prefix: null,
             z_range: null,
             transform_path: null,
@@ -502,6 +490,7 @@ def samplesJsonForPlatforms(pairId, platforms, platformPaths = [:]) {
 }
 
 def analysisLayerKeys(platform, segmentation) {
+    def spec = PlatformSpec.forName(platform)
     if (segmentation in ["proseg", "reseg"]) {
         return [
             table_key: "table_MOSAIK_proseg",
@@ -511,9 +500,7 @@ def analysisLayerKeys(platform, segmentation) {
     if (segmentation in ["original", "original_seg"]) {
         return [
             table_key: "table_original",
-            shape_key: platform == "MERSCOPE"
-                ? "merscope_cell_boundaries"
-                : "xenium_cell_boundaries",
+            shape_key: spec.originalCellShapeKey,
         ]
     }
     if (segmentation == "proseg_hybrid") {
@@ -1910,9 +1897,7 @@ def pciseqPublishedH5adPath(pairId, segmentation, platform, params) {
 }
 
 def pciseqSpatialdataPath(row, settings, platform, params) {
-    def fields = platform == "MERSCOPE"
-        ? ["merscope_spatialdata_path", "merscope_zarr_path"]
-        : ["xenium_spatialdata_path"]
+    def fields = PlatformSpec.forName(platform).spatialdataPathFields
     return normalizedPath(chooseField(row, fields) ?: publishedDatasetPath(
         params.outdir,
         settings.pair_id,
@@ -3473,12 +3458,10 @@ workflow {
         } else {
             settings.active_platforms.collect { platform ->
                 def key = "${pairId}|${platform}"
-                def explicitLatestZarr = platform == "MERSCOPE"
-                    ? chooseField(row, [
-                        "merscope_spatialdata_path",
-                        "merscope_zarr_path",
-                    ])
-                    : chooseField(row, ["xenium_spatialdata_path"])
+                def explicitLatestZarr = chooseField(
+                    row,
+                    PlatformSpec.forName(platform).spatialdataPathFields
+                )
                 // Cross-pair restarts may intentionally combine durable latest
                 // zarrs that live under different source pair IDs.
                 def latestZarrPath = isBlankPath(explicitLatestZarr)
@@ -3623,9 +3606,10 @@ workflow {
             []
         } else {
             settings.active_platforms.collect { platform ->
-                def transformPath = platform == "MERSCOPE"
-                    ? chooseField(row, ["merscope_transform_path"])
-                    : chooseField(row, ["xenium_spec_path"])
+                def transformPath = chooseField(
+                    row,
+                    PlatformSpec.forName(platform).transformPathFields
+                )
                 tuple("${pairId}|${platform}", transformPath)
             }
         }

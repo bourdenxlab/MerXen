@@ -150,3 +150,50 @@ def test_groovy_registry_holds_the_samplesheet_fields(
     groovy = groovy_output["registry"]
     for name, fields in _SAMPLESHEET_FIELDS.items():
         assert {field: groovy[name][field] for field in fields} == fields, name
+
+
+_UNKNOWN_SITES = (
+    *(
+        f"analysis_layer_keys/{segmentation}"
+        for segmentation in (
+            "proseg",
+            "reseg",
+            "original",
+            "original_seg",
+            "proseg_hybrid",
+            "cellpose",
+            "proseg_mask",
+            "proseg_geometry_assignment",
+        )
+    ),
+    "pciseq_spatialdata_path",
+    "enrich_restart_field",
+    "viewer_transform_field",
+    "require_platform_input",
+    "build_config",
+    "segment_meta",
+    "channels_for_row",
+    "channels_for_row_override",
+)
+
+
+@pytest.mark.nextflow
+@pytest.mark.parametrize("platform", ["ATERA", "merscope"])
+def test_unknown_platform_raises_at_every_converted_site(
+    groovy_output: dict[str, Any], platform: str
+) -> None:
+    """An unregistered platform raises instead of taking another one's branch.
+
+    Before the registry, ``analysisLayerKeys("ATERA", "original_seg")``
+    returned the Xenium shape key, and the restart, transform and channel
+    lookups silently used Xenium (or MERSCOPE) fields.
+    """
+    unknown = groovy_output["unknown"]
+    for site in _UNKNOWN_SITES:
+        record = unknown[f"{platform}/{site}"]
+        assert record.get("error_class") == "java.lang.IllegalArgumentException", (
+            f"{platform}/{site}: {record}"
+        )
+        assert record["message"].startswith(f"Unknown platform: {platform}"), (
+            f"{platform}/{site}: {record}"
+        )

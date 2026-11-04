@@ -48,6 +48,7 @@ from merxen.io.spatialdata_schema import (
 from merxen.masks import register_missing_mask_branches
 from merxen.memory import force_release, log_status
 from merxen.path_utils import remove_path, stage_existing_output
+from merxen.platforms import platform_spec
 from merxen.segmentation.cellpose import build_cellpose_affine_to_microns
 from merxen.segmentation.mask_geometry import masks_to_labeled_polygons
 from merxen.segmentation.model_identity import (
@@ -60,9 +61,10 @@ logger = logging.getLogger(__name__)
 MOSAIK_PROSEG_SHAPE_NAME = "MOSAIK_proseg"
 MOSAIK_CELLPOSE_SHAPE_NAME = "MOSAIK_cellpose"
 CELLPOSE_NUCLEI_SHAPE_NAME = "cellpose_nuclei"
-MERSCOPE_OLD_SHAPE_NAME = "merscope_cell_boundaries"
-XENIUM_OLD_CELL_SHAPE_NAME = "xenium_cell_boundaries"
-XENIUM_OLD_NUCLEUS_SHAPE_NAME = "xenium_nucleus"
+MERSCOPE_OLD_SHAPE_NAME = platform_spec("MERSCOPE").original_cell_shape_key
+XENIUM_OLD_CELL_SHAPE_NAME, XENIUM_OLD_NUCLEUS_SHAPE_NAME = platform_spec(
+    "XENIUM"
+).original_shape_keys
 ORIGINAL_TABLE_NAME = "table_original"
 
 
@@ -454,7 +456,7 @@ def _copy_xenium_shapes_from_sdata(
     copied = 0
     cell_key = _find_first_existing_key(
         src_sdata.shapes,
-        ["cell_boundaries", "xenium_cell_boundaries"],
+        ["cell_boundaries", XENIUM_OLD_CELL_SHAPE_NAME],
     )
     if cell_key is not None:
         copied += int(
@@ -469,7 +471,7 @@ def _copy_xenium_shapes_from_sdata(
 
     nucleus_key = _find_first_existing_key(
         src_sdata.shapes,
-        ["nucleus_boundaries", "xenium_nucleus"],
+        ["nucleus_boundaries", XENIUM_OLD_NUCLEUS_SHAPE_NAME],
     )
     if nucleus_key is not None:
         copied += int(
@@ -541,12 +543,12 @@ def _is_already_enriched(dst_sdata: Any, platform: str) -> bool:
         CELLPOSE_NUCLEI_SHAPE_NAME,
     }
     req_tables = {ORIGINAL_TABLE_NAME}
-    if platform.upper() == "MERSCOPE":
-        req_shapes.add(MERSCOPE_OLD_SHAPE_NAME)
-        req_images = {MERSCOPE_ZPROJ_IMAGE_NAME}
+    spec = platform_spec(platform)
+    req_shapes.update(spec.original_shape_keys)
+    if spec.family == "MERSCOPE":
+        req_images = {spec.native_image_key}
         has_images = req_images.issubset(set(map(str, dst_sdata.images.keys())))
     else:
-        req_shapes.update({XENIUM_OLD_CELL_SHAPE_NAME, XENIUM_OLD_NUCLEUS_SHAPE_NAME})
         # Viewer-cache label grids and image pyramids require the real Xenium
         # morphology image. Derived cache images alone are not a valid source.
         has_images = _has_non_derived_image(dst_sdata.images)
@@ -562,12 +564,12 @@ def _is_enriched_except_nuclei(dst_sdata: Any, platform: str) -> bool:
         MOSAIK_CELLPOSE_SHAPE_NAME,
     }
     req_tables = {ORIGINAL_TABLE_NAME}
-    if platform.upper() == "MERSCOPE":
-        req_shapes.add(MERSCOPE_OLD_SHAPE_NAME)
-        req_images = {MERSCOPE_ZPROJ_IMAGE_NAME}
+    spec = platform_spec(platform)
+    req_shapes.update(spec.original_shape_keys)
+    if spec.family == "MERSCOPE":
+        req_images = {spec.native_image_key}
         has_images = req_images.issubset(set(map(str, dst_sdata.images.keys())))
     else:
-        req_shapes.update({XENIUM_OLD_CELL_SHAPE_NAME, XENIUM_OLD_NUCLEUS_SHAPE_NAME})
         has_images = _has_non_derived_image(dst_sdata.images)
     has_shapes = req_shapes.issubset(set(map(str, dst_sdata.shapes.keys())))
     has_tables = req_tables.issubset(set(map(str, dst_sdata.tables.keys())))
@@ -613,20 +615,10 @@ def _partial_enrichment_artifact_paths(zarr_path: Path, platform: str) -> set[st
         f"shapes/{CELLPOSE_NUCLEI_SHAPE_NAME}",
         f"tables/{ORIGINAL_TABLE_NAME}",
     }
-    if platform.upper() == "MERSCOPE":
-        rel_paths.update(
-            {
-                f"shapes/{MERSCOPE_OLD_SHAPE_NAME}",
-                f"images/{MERSCOPE_ZPROJ_IMAGE_NAME}",
-            }
-        )
-    else:
-        rel_paths.update(
-            {
-                f"shapes/{XENIUM_OLD_CELL_SHAPE_NAME}",
-                f"shapes/{XENIUM_OLD_NUCLEUS_SHAPE_NAME}",
-            }
-        )
+    spec = platform_spec(platform)
+    rel_paths.update(f"shapes/{key}" for key in spec.original_shape_keys)
+    if spec.family == "MERSCOPE":
+        rel_paths.add(f"images/{spec.native_image_key}")
 
     tables_dir = Path(zarr_path) / "tables"
     if tables_dir.exists():

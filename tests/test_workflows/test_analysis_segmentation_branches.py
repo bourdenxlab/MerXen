@@ -11,6 +11,10 @@ def test_nextflow_exposes_analysis_segmentation_branches() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     main_text = (repo_root / "workflows" / "main.nf").read_text()
     config_text = (repo_root / "workflows" / "nextflow.config").read_text()
+    # Original shape names come from the platform registry.
+    registry_text = (
+        repo_root / "workflows" / "lib" / "PlatformSpec.groovy"
+    ).read_text()
 
     for expected in [
         'analysis_segmentation = "all"',
@@ -26,7 +30,12 @@ def test_nextflow_exposes_analysis_segmentation_branches() -> None:
         '"xenium_cell_boundaries"',
         "samplesJsonForSegmentation",
     ]:
-        assert expected in main_text or expected in config_text
+        assert (
+            expected in main_text
+            or expected in config_text
+            or expected.replace('"', "'") in registry_text
+        )
+    assert "shape_key: spec.originalCellShapeKey" in main_text
 
     assert (
         '"all": ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"]' in main_text
@@ -164,8 +173,12 @@ def test_mask_image_quantification_resume_reuses_published_inputs() -> None:
     ]
     assert "settings.need_enriched_zarrs && !settings.run_enrich" in enrich_resume
     assert '"latest/latest_spatialdata.zarr"' in enrich_resume
-    assert 'chooseField(row, ["xenium_spatialdata_path"])' in enrich_resume
-    assert '"merscope_spatialdata_path"' in enrich_resume
+    assert "PlatformSpec.forName(platform).spatialdataPathFields" in enrich_resume
+    registry_text = (
+        repo_root / "workflows" / "lib" / "PlatformSpec.groovy"
+    ).read_text()
+    assert "['xenium_spatialdata_path']" in registry_text
+    assert "['merscope_spatialdata_path', 'merscope_zarr_path']" in registry_text
     assert "isBlankPath(explicitLatestZarr)" in enrich_resume
     assert "def enrichOut = latestZarr" in enrich_resume
     assert '"enrich/enrich_out"' not in enrich_resume

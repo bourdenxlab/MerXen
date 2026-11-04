@@ -33,6 +33,7 @@ from merxen.io.image_source import (
     MERSCOPE_ZPROJ_IMAGE_NAME,
     image_to_cyx,
 )
+from merxen.platforms import platform_spec
 
 logger = logging.getLogger(__name__)
 
@@ -361,11 +362,7 @@ def _choose_dataset_element(
     schema_shape_key = original.get("shape") if isinstance(original, dict) else None
     preferred_shape_keys = [
         schema_shape_key,
-        (
-            "merscope_cell_boundaries"
-            if str(platform).upper() == "MERSCOPE"
-            else "xenium_cell_boundaries"
-        ),
+        platform_spec(platform).original_cell_shape_key,
     ]
     for key in preferred_shape_keys:
         if key is None or key not in shapes:

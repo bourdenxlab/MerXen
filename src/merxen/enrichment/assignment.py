@@ -38,6 +38,7 @@ from merxen.io.spatialdata_schema import (
 )
 from merxen.io.transcript_io import first_existing_col, iter_points_chunks
 from merxen.memory import enforce_memory_limit, force_release, log_status
+from merxen.platforms import ORIGINAL_CELL_SHAPE_KEYS
 from merxen.segmentation.proseg_hybrid import (
     PROSEG_HYBRID_SHAPE_NAME,
     PROSEG_HYBRID_TABLE_NAME,
@@ -370,7 +371,7 @@ def shape_to_existing_table_source(shape_key: str) -> str | None:
     """Map shape names to reusable existing table sources when possible."""
     if shape_key in {"MOSAIK_proseg", "cell_boundaries"}:
         return "table"
-    if shape_key in {"merscope_cell_boundaries", "xenium_cell_boundaries"}:
+    if shape_key in ORIGINAL_CELL_SHAPE_KEYS:
         return "table_original"
     return None
 
@@ -404,7 +405,7 @@ def _register_assignment_branch(
         background_column = None
         namespace = PROSEG_ID_NAMESPACE
         aliases = ("proseg_mask", "cellpose_mask")
-    elif shape_key in {"merscope_cell_boundaries", "xenium_cell_boundaries"}:
+    elif shape_key in ORIGINAL_CELL_SHAPE_KEYS:
         branch = "original"
         assignment_column = (
             "original_assignment"
