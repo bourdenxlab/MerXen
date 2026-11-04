@@ -116,3 +116,82 @@ def workflow_config_params() -> dict[str, dict[str, str]]:
         relative: parse_config_params((WORKFLOWS_DIR / relative).read_text())
         for relative in PARAM_CONFIG_FILES
     }
+
+
+# Process section labels, as written at four spaces inside a process body.
+_SECTION_LABEL = re.compile(
+    r"^    (input|output|when|script|stub|shell|exec):\s*$", re.MULTILINE
+)
+_PROCESS_START = re.compile(r"^process (\w+) \{\s*$")
+# Sections whose source text Nextflow runs (and hashes, for ``script:``).
+SOURCE_SECTIONS: tuple[str, ...] = ("script", "stub", "shell", "exec")
+
+
+def _toggle_triple_quote(line: str, open_quote: str | None) -> str | None:
+    """Return the triple quote still open after ``line``, or ``None``."""
+    for quote in ('"""', "'''"):
+        if open_quote in (None, quote) and line.count(quote) % 2 == 1:
+            open_quote = None if open_quote == quote else quote
+    return open_quote
+
+
+def parse_process_sections(text: str) -> dict[str, dict[str, str]]:
+    """Return ``process -> section -> exact source text`` of a Nextflow file.
+
+    A process starts at ``process NAME {`` (column 0) and ends at the first
+    line that is exactly ``}`` outside a triple-quoted string (heredocs inside
+    a script may hold a ``}`` at column 0). A section runs from the line after
+    its label up to the next label or the end of the process; labels are only
+    recognised outside triple-quoted strings. The Groovy statements before the
+    opening triple quote belong to the section, as they do to the
+    ``task.source`` Nextflow hashes.
+
+    Args:
+        text: Source of one ``.nf`` file.
+
+    Returns:
+        Process name to section label to section text, in file order.
+
+    Raises:
+        AssertionError: If a process is not closed or is defined twice.
+    """
+    lines = text.splitlines(keepends=True)
+    processes: dict[str, dict[str, str]] = {}
+    index = 0
+    while index < len(lines):
+        match = _PROCESS_START.match(lines[index].rstrip("\n"))
+        if match is None:
+            index += 1
+            continue
+        name = match.group(1)
+        assert name not in processes, f"process {name} defined twice"
+        sections: dict[str, str] = {}
+        current: str | None = None
+        open_quote: str | None = None
+        end = index + 1
+        while True:
+            assert end < len(lines), f"process {name} is not closed"
+            line = lines[end]
+            if open_quote is None:
+                if line.rstrip("\n") == "}":
+                    break
+                label = _SECTION_LABEL.match(line)
+                if label is not None:
+                    current = label.group(1)
+                    assert current not in sections, f"{name}: two {current}: blocks"
+                    sections[current] = ""
+                    end += 1
+                    continue
+            if current is not None:
+                sections[current] += line
+            open_quote = _toggle_triple_quote(line, open_quote)
+            end += 1
+        processes[name] = sections
+        index = end + 1
+    return processes
+
+
+@pytest.fixture(scope="session")
+def process_sections() -> Callable[[str], dict[str, dict[str, str]]]:
+    """Return :func:`parse_process_sections` (a conftest cannot be imported)."""
+    return parse_process_sections

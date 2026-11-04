@@ -524,3 +524,47 @@ def test_independent_nuclei_do_not_inspect_in_progress_cell_cache(
     with pytest.raises(RuntimeError, match="stop before nuclei inference"):
         pipeline.run_cellpose_nuclei_segmentation(custom_config)
     assert np.all(np.load(mask) == 1)
+
+
+_NATIVE_IMAGES = [
+    ("XENIUM", "morphology_focus", "MERSCOPE_z_projection"),
+    ("MERSCOPE", "MERSCOPE_z_projection", "morphology_focus"),
+]
+
+
+@pytest.mark.parametrize(("platform", "native", "foreign"), _NATIVE_IMAGES)
+def test_model_metadata_requires_its_platforms_native_image(
+    custom_config: SegmentationConfig, platform: str, native: str, foreign: str
+) -> None:
+    """model.json must name the native image of its own platform."""
+    path = custom_config.cellpose.model_metadata_path
+    assert path is not None
+    data = json.loads(path.read_text())
+    data.update(platform=platform, image_key=native)
+
+    assert CellposeModelMetadata.model_validate(data).image_key == native
+
+    data["image_key"] = foreign
+    with pytest.raises(ValueError, match="native image"):
+        CellposeModelMetadata.model_validate(data)
+
+
+@pytest.mark.parametrize(("platform", "native", "foreign"), _NATIVE_IMAGES)
+def test_stock_arm_requires_its_platforms_native_image(
+    custom_config: SegmentationConfig, platform: str, native: str, foreign: str
+) -> None:
+    """A stock control runs on the native image of the dataset's platform only."""
+    custom_config.cellpose = CellposeConfig(gpu=False)
+    custom_config.cellpose_model_policy.experimental_arm = True
+    custom_config.dataset.platform = platform  # type: ignore[assignment]
+    matrix = np.diag([1 / 0.2125, 1 / 0.2125, 1])
+
+    identity = preflight_stock_arm(
+        custom_config, transform_matrix=matrix, image_key=native
+    )
+    assert identity.inference_context is not None
+    assert identity.inference_context.image_key == native
+    assert identity.inference_context.platform == platform
+
+    with pytest.raises(ValueError, match="native image"):
+        preflight_stock_arm(custom_config, transform_matrix=matrix, image_key=foreign)

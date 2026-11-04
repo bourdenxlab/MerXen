@@ -230,3 +230,25 @@ def test_build_recovers_partial_existing_base_label(synthetic_store: Path) -> No
 def test_default_viewer_cache_targets_include_hybrid() -> None:
     for platform in ("MERSCOPE", "XENIUM"):
         assert "MOSAIK_proseg_hybrid" in DEFAULT_SHAPE_KEYS[platform]
+
+
+def test_default_shape_keys_are_pinned() -> None:
+    """The source-compatible discovery hint keeps its exact value."""
+    assert build_module.DEFAULT_SHAPE_KEYS == {
+        "MERSCOPE": (
+            "MOSAIK_proseg",
+            "MOSAIK_proseg_hybrid",
+            "MOSAIK_cellpose",
+            "cellpose_nuclei",
+            "merscope_cell_boundaries",
+        ),
+        "XENIUM": (
+            "MOSAIK_proseg",
+            "MOSAIK_proseg_hybrid",
+            "MOSAIK_cellpose",
+            "cellpose_nuclei",
+            "xenium_cell_boundaries",
+            "xenium_nucleus",
+        ),
+    }
+    assert list(build_module.DEFAULT_SHAPE_KEYS) == ["MERSCOPE", "XENIUM"]
