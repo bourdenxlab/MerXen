@@ -147,6 +147,59 @@ TREE: dict[str, str] = {
         "def test():\n    Path('workflows/main.nf').read_text()\n"
     ),
     "tests/test_scripts/test_other.py": "",
+    # Test packages that import each other (pytest puts tests/ on sys.path).
+    "tests/test_pkga/__init__.py": "",
+    "tests/test_pkga/_shared.py": "def helper(): ...\n",
+    "tests/test_pkga/dynhelp.py": "",
+    "tests/test_pkga/test_inner.py": "from ._shared import helper\n",
+    "tests/test_pkgb/__init__.py": "",
+    "tests/test_pkgb/test_cross.py": (
+        "from test_pkga._shared import helper\nfrom test_pkga.test_inner import x\n"
+    ),
+    "tests/test_pkgb/test_dyn_helper.py": (
+        "import importlib\n"
+        "def test(name):\n"
+        "    importlib.import_module('test_pkga.' + name)  # dynhelp\n"
+    ),
+    # A test scanning a package's source tree through the module's __file__.
+    "src/merxen/scan/__init__.py": "",
+    "src/merxen/scan/a.py": "",
+    "tests/test_scan.py": (
+        "from pathlib import Path\n"
+        "import merxen.scan as scan_pkg\n"
+        "PKG = Path(scan_pkg.__file__).resolve().parent\n"
+        "def test():\n    list(PKG.rglob('*.py'))\n"
+    ),
+    # Imports inside code a test runs with python -c, after sys.path.insert.
+    "src/merxen/cs/__init__.py": "",
+    "src/merxen/cs/inner.py": "",
+    "tests/cs_synth.py": "",
+    "tests/test_codestr.py": (
+        "import subprocess, sys\nfrom pathlib import Path\n"
+        "HERE = Path(__file__).resolve().parent\n"
+        "def test():\n"
+        '    code = f"""\nimport sys\nsys.path.insert(0, {str(HERE)!r})\n'
+        "from merxen.cs import inner\nimport cs_synth\nassert {1} == 1\n"
+        '"""\n'
+        "    subprocess.run([sys.executable, '-c', code])\n"
+    ),
+    # A directory added to sys.path by a path expression.
+    "tests/helpers_dir/sp_helper.py": "",
+    "tests/test_syspath/test_sp.py": (
+        "import sys\nfrom pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'helpers_dir'))\n"
+        "import sp_helper\n"
+    ),
+    # A fixture launches Nextflow on the workflow the test names.
+    "tests/test_nfx/conftest.py": (
+        "import pytest, subprocess\n"
+        "@pytest.fixture\ndef run_nf():\n"
+        "    def run(wf):\n        subprocess.run(['nextflow', 'run', wf])\n"
+        "    return run\n"
+    ),
+    "tests/test_nfx/test_via_fixture.py": (
+        "def test(run_nf):\n    run_nf('workflows/main.nf')\n"
+    ),
 }
 GUARDS = ("tests/test_guard.py",)
 ALWAYS = set(GUARDS)
@@ -260,6 +313,77 @@ def test_changed_and_new_test_files_select_themselves(repo: Path) -> None:
         }
     finally:
         (repo / "tests" / "test_brand_new.py").unlink()
+
+
+def test_imports_from_another_test_package(repo: Path) -> None:
+    index = sel.RepoIndex(repo)
+    closure = index.closure("tests/test_pkgb/test_cross.py")
+    assert {
+        "tests/test_pkga/_shared.py",
+        "tests/test_pkga/test_inner.py",
+    } <= closure
+    assert "tests/test_pkgb/test_cross.py" in _tests(repo, "tests/test_pkga/_shared.py")
+    assert "tests/test_pkgb/test_cross.py" in _tests(
+        repo, "tests/test_pkga/test_inner.py"
+    )
+
+
+def test_a_helper_named_but_not_imported_statically_is_selected(repo: Path) -> None:
+    # importlib with a computed name: only the safety net (a file naming the
+    # helper's module stem) links them.
+    index = sel.RepoIndex(repo)
+    assert "tests/test_pkga/dynhelp.py" not in index.closure(
+        "tests/test_pkgb/test_dyn_helper.py"
+    )
+    assert "tests/test_pkgb/test_dyn_helper.py" in _tests(
+        repo, "tests/test_pkga/dynhelp.py"
+    )
+
+
+def test_a_test_package_init_selects_its_tests(repo: Path) -> None:
+    selected = _tests(repo, "tests/test_pkga/__init__.py")
+    assert "tests/test_pkga/test_inner.py" in selected
+    # test_cross imports test_pkga._shared, which imports the package first.
+    assert "tests/test_pkgb/test_cross.py" in selected
+    assert "tests/test_core.py" not in selected
+
+
+def test_a_module_scanned_through_its_package_file(repo: Path) -> None:
+    (repo / "src/merxen/scan/extra.py").write_text("import torch\n")
+    try:
+        assert "tests/test_scan.py" in _tests(
+            repo, "src/merxen/scan/extra.py", status="A"
+        )
+    finally:
+        (repo / "src/merxen/scan/extra.py").unlink()
+    assert "tests/test_scan.py" in _tests(repo, "src/merxen/scan/a.py")
+
+
+def test_imports_in_code_strings(repo: Path) -> None:
+    assert "tests/test_codestr.py" in _tests(repo, "src/merxen/cs/inner.py")
+    assert "tests/test_codestr.py" in _tests(repo, "tests/cs_synth.py")
+    assert "tests/helpers_dir/sp_helper.py" in sel.RepoIndex(repo).closure(
+        "tests/test_syspath/test_sp.py"
+    )
+
+
+def test_code_imports_parses_each_import_line() -> None:
+    code = (
+        "import numpy as np\n"
+        "x = {broken\n"
+        "from merxen.io import (\n    a,\n    b,\n)\n"
+        "import the package first\n"
+    )
+    found = sel._code_imports(code)
+    assert [type(n).__name__ for n in found] == ["Import", "ImportFrom"]
+    assert [a.name for a in found[1].names] == ["a", "b"]
+    assert sel._code_imports("no imports here") == []
+
+
+def test_a_fixture_that_launches_nextflow(repo: Path) -> None:
+    assert "tests/test_nfx/test_via_fixture.py" in _tests(
+        repo, "src/merxen/cli/run_one.py"
+    )
 
 
 def test_test_data_selects_its_directory(repo: Path) -> None:
