@@ -659,11 +659,19 @@ variables, e.g. `$MERXEN_ATERA_RAW_ROOT/<dataset>/outs`.
 | `points/transcripts` | `transcripts.zarr.zip`, QV-filtered; `transcript_id` = vendor ordinal + 1; `original_assignment` = cell row + 1 | `Scale(1/ps)` (z stays in µm) |
 | `tables/table` | cell-feature matrix, gene columns only; per-type control counts and vendor annotations as `vendor_*` in `obs` and `var`; `vendor_filtered` is True for the cells and genes the vendor **kept**; `vendor_nucleus_centroid_x/y` is the centroid of the largest nucleus; `varm["vendor_de"]` holds every `de_*` statistic of the kept genes; `uns["vendor_<column>_colors"]` the vendor category colours (`#rrggbbaa`) | — |
 | `atera/` | vendor metadata files, byte-identical; the metadata members of every vendor zarr zip (`atera/zarr_metadata/`) and the OME-XML of every morphology TIFF (`atera/ome_xml/`) | — |
-| `merxen_atera_points_index.json` | parquet file → tile, bbox, row count, `transcript_id` range | — |
+| `merxen_atera_points_index.json` | parquet file → tile, bbox, row count, `transcript_id` range (see below) | — |
 | `merxen_build_complete.json` | completion marker with `build_fingerprint` | — |
 
 Nucleus IDs are a namespace of their own (nucleus `k` is not cell `k`):
 consumers join nuclei to cells through `cell_instance_id`.
+
+The points index has one entry per parquet file. Its boxes are in µm and in
+**`[xmin, xmax, ymin, ymax]`** order (x range, then y range), not the
+`(x0, y0, x1, y1)` order used elsewhere in MerXen: `bbox_um` is the box of the
+file's rows (`null` for an empty file), and `block_bounds_um` (only for
+`spatial_order: tile_blocks`) is the block the rows were cut by, with `null`
+for an open edge. `transcript_id_range` is inclusive, and `n_rows` is the
+file's row count.
 
 ### QV policy
 
@@ -792,7 +800,9 @@ Measured on the public whole-section dataset (AT-5; plan §6.1), 16 CPUs:
 | Scratch | Two 10.4 GB `.npy` masks beside the target during the build, plus the `.partial` store |
 | Acceptance | `scripts/acceptance/atera_build.py`: 6.5 min, 21 GB peak RSS |
 
-The defaults (64 GB reservation, 48 GB cap) keep about 4× headroom. For a
+The 48 GB cap is about 4× the anonymous peak; the 64 GB reservation is about
+2× the physical footprint (11.7 GB anonymous plus about 21 GB of mapped
+masks). For a
 larger section, raise `atera_build_max_rss_gb` and `atera_build_memory_gb`
 together. Plan for about 40 GB of output and 21 GB of scratch on the results
 volume.

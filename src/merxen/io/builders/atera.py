@@ -803,6 +803,10 @@ def write_points_index(
     edge of its tile is open on that side; JSON has no infinity, so its open
     ``block_bounds_um`` edges are written as ``null``.
 
+    Both boxes are in µm and ordered ``[xmin, xmax, ymin, ymax]`` (x range,
+    then y range), unlike the ``(x0, y0, x1, y1)`` boxes elsewhere in MerXen.
+    ``transcript_id_range`` is ``[min, max]``, inclusive.
+
     Args:
         store: The written store.
         specs: Partition specs in partition order (file ``part.<k>`` holds
