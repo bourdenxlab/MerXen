@@ -72,7 +72,8 @@ From [.pre-commit-config.yaml](../.pre-commit-config.yaml):
 - **On merge and on the commit message** — the privacy check.
 - **On push** — the privacy check of the branch name and every pushed commit,
   then the lockfile-backed local CI checks: lint, format, type check, and
-  the changed test tier.
+  the fast test tier (`MERXEN_CI_TEST_TIER=changed git push` runs only the
+  tests the changes can reach).
 
 The privacy hooks keep host paths and sample names out of the repository
 ([Local configuration and privacy](local-configuration.md)).
@@ -110,9 +111,11 @@ and the longest test (the manual-registration end-to-end workflow test, about
 280 s on CI) sets the floor of whichever shard runs it. Shards spread the rest
 over several runners instead.
 
-A new push to a PR, or a new label, cancels that PR's run in progress. The
-separate [Privacy](../.github/workflows/privacy.yml) workflow checks the branch
-name, PR text and commit messages.
+A new push to a PR, or the `full-ci` label, cancels that PR's run in
+progress; other labels start a run of their own that cancels nothing. Shards
+time out after 30 minutes. The separate
+[Privacy](../.github/workflows/privacy.yml) workflow checks the branch name,
+PR text and commit messages.
 
 ### Sharding
 
@@ -157,20 +160,31 @@ file is in its closure:
 - the `merxen` modules it imports, directly or transitively, including
   imports in functions and under `TYPE_CHECKING`, the parent packages' `__init__`
   files, monkeypatch targets and `import_module` strings, and the imports of
-  every `conftest.py` above it and of the helpers it imports;
+  every `conftest.py` and test package `__init__.py` above it and of the
+  helpers it imports;
+- test helpers and other test modules it imports, also from another test
+  package (`from test_manual_registration._mr_helpers import ...`; pytest puts
+  `tests/` on `sys.path`), from directories it adds to `sys.path`, and from
+  code it runs as a string (`python -c` programs);
 - the repository files it names: string literals, path expressions such as
   `REPO_ROOT / "docs" / "images" / name` (a computed tail means the whole
-  directory), globs, error messages that mention a path, a file's base name,
-  and a script's stem (`load_script("compare_czi_readers")`); a script it
-  names counts with its own imports;
-- for a test that launches Nextflow, the workflow files it runs, their
-  `include` closure, and the `merxen <command>` modules, `python -m merxen.*`
-  modules and scripts those call.
+  directory), globs (also over a package's own directory,
+  `Path(pkg.__file__).parent.rglob("*.py")`, so a new module there selects
+  the test), error messages that mention a path, a file's base name, and a
+  script's stem (`load_script("compare_czi_readers")`); a script it names
+  counts with its own imports;
+- for a test that launches Nextflow (itself or through a helper or fixture),
+  the workflow files it runs, their `include` closure, and the
+  `merxen <command>` modules, `python -m merxen.*` modules and scripts those
+  call.
 
 On top of that, a change under `workflows/` selects all of
 `tests/test_workflows` and every test that launches Nextflow, a change under
 `scripts/` selects `tests/test_scripts`, and a data file under
-`tests/<dir>/` selects every test in that directory. Docs, notebooks, assets,
+`tests/<dir>/` selects every test in that directory. A changed Python file
+under `tests/` also selects every test whose closure has a file that names
+its module stem (a safety net for imports the graph cannot resolve). Docs,
+notebooks, assets,
 licences and the root Markdown files select only the tests that name them.
 
 The guards always run: `tests/test_privacy`, the process script pins, the
@@ -180,8 +194,9 @@ parity and the environment lock sync (about 25 s on four workers).
 The full suite runs instead when:
 
 - the event is a push to `main`, the nightly schedule or `workflow_dispatch`;
-- the PR carries the `full-ci` label (adding it starts a new, full run;
-  re-running an old run reuses its original labels, so add the label instead);
+- the PR carries the `full-ci` label (adding it starts a new, full run; the
+  plan reads the PR's current labels, so re-running a run after adding the
+  label is full too);
 - the PR merges a long-lived integration branch into `main`
   (`INTEGRATION_BRANCHES` in `select_tests.py`, the one place that lists them);
 - a changed file is a `conftest.py`, `pyproject.toml`, `requirements/`,
@@ -195,7 +210,11 @@ The full suite runs instead when:
 
 Static analysis cannot see a path or module name computed at run time from
 data, code reached only through a subprocess other than Nextflow, or package
-data read by `src` code. The selector errs towards selecting more, every
+data read by `src` code. Importing one `merxen.cli.run_*` module (and every
+`merxen` subprocess) runs `merxen/cli/__init__.py`, which imports every
+command; the selector does not follow that, so a change that breaks only at
+import time fails the tests of the changed module but may not run every CLI
+test. The selector errs towards selecting more, every
 push to `main` and the nightly run test everything, and `full-ci` is there
 when a PR needs certainty. All the policy constants (guards, full-suite
 patterns, integration branches, label, shard sizes, cap) are at the top of
@@ -205,7 +224,7 @@ patterns, integration branches, label, shard sizes, cap) are at the top of
 python scripts/ci/select_tests.py --base origin/main --worktree --format json
 ```
 
-Run the same checks locally before pushing (the changed test tier unless you
+Run the same checks locally before pushing (the fast test tier unless you
 ask for another; see [Test tiers](#test-tiers)):
 
 ```bash
@@ -274,14 +293,15 @@ pass (`test` aggregates the plan and the shards).
 
 | Tier | Selection | Used by |
 |------|-----------|---------|
-| `changed` | the `fast` markers, on the tests the branch's changes can reach ([Test selection](#test-selection)), or on every test when the selector says FULL | the pre-push hook (default) |
-| `fast` | `-m "not slow and not nextflow and not store_lock and not integration"` | |
+| `fast` | `-m "not slow and not nextflow and not store_lock and not integration"` | the pre-push hook (default) |
+| `changed` | the `fast` markers, on the tests the branch's changes can reach ([Test selection](#test-selection)), or on every test when the selector says FULL | opt-in: `MERXEN_CI_TEST_TIER=changed git push` |
 | `full` | `-m "not slow"` | CI (sharded, on the full suite or the PR's selection) |
 
 The `changed` tier diffs against the merge base with `MERXEN_CI_BASE_REF`
-(default `origin/main`; a stale one only selects more) up to the commit being
-pushed (`PRE_COMMIT_TO_REF`, else `HEAD`), plus uncommitted and untracked
-files. Without a merge base it falls back to the `fast` tier.
+(default: the remote branch local `main` tracks, else `origin/main`, else
+`upstream/main`; a stale one only selects more) up to the commit being pushed
+(`PRE_COMMIT_TO_REF`, else `HEAD`), plus uncommitted and untracked files.
+Without a merge base it falls back to the `fast` tier.
 
 The `changed` and `fast` tiers miss Nextflow, cross-process lock and
 end-to-end store regressions until CI. Run the full tier locally when a change

@@ -21,11 +21,11 @@ pytest
 # Run tests excluding slow markers
 pytest -m "not slow"
 
-# Pre-push checks: the 'changed' tier runs the fast-tier tests your changes
-# since origin/main (MERXEN_CI_BASE_REF) can reach; 'fast' runs the whole
-# fast tier; 'full' runs everything CI runs
+# Pre-push checks: 'fast' (the default) runs the whole fast tier; 'changed'
+# runs only the fast-tier tests your changes since main's remote
+# (MERXEN_CI_BASE_REF) can reach; 'full' runs everything CI runs
 scripts/run_ci_checks.sh
-MERXEN_CI_TEST_TIER=fast scripts/run_ci_checks.sh
+MERXEN_CI_TEST_TIER=changed scripts/run_ci_checks.sh
 MERXEN_CI_TEST_TIER=full scripts/run_ci_checks.sh
 
 # Which tests CI would run for this branch (FULL or a list; docs/development.md,
