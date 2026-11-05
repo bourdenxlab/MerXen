@@ -15,9 +15,11 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
+import shapely
 
 from merxen.gene_ids import is_ensembl_gene_id
 from merxen.io import atera_reader as ar
+from merxen.segmentation.mask_geometry import masks_to_labeled_polygons
 
 pytestmark = pytest.mark.slow
 
@@ -105,15 +107,59 @@ def test_real_metadata_is_sanitised(bundle: ar.AteraBundle) -> None:
         if bundle.experiment.get(key) not in (None, "")
     ]
     assert identifying
-    sanitized = json.dumps(ar.sanitize_experiment_spatial(bundle.experiment))
+    sanitized_experiment = ar.sanitize_experiment_spatial(bundle.experiment)
+    sanitized = json.dumps(sanitized_experiment)
     assert not [value for value in identifying if value in sanitized]
+    explorer = sanitized_experiment["explorer_files"]
+    assert explorer["transcripts_viz_zarr_filepath"] == "binned_transcripts.zarr.zip"
+    assert explorer["cell_feature_viz_zarr_filepath"] == (
+        "csc_cell_feature_matrix.zarr.zip"
+    )
     metrics = next(p for p in bundle.sidecars if p.name.startswith("metrics_summary"))
     assert ar.neutral_sidecar_name(metrics.name) == "metrics_summary.csv"
     clean = ar.sanitize_metrics_summary(metrics.read_text(encoding="utf-8"))
     header = clean.splitlines()[0].split(",")
-    assert "run_name" not in header and "slide_id" not in header
+    assert "num_cells_detected" in header and "panel_wta_design_id" in header
+    assert not [
+        name
+        for name in header
+        if name.startswith(("run_", "slide_", "reagent_", "instrument_"))
+        or name.endswith("_name")
+    ]
     assert bundle.panel_config_file is not None
     panel = ar.sanitize_panel_config(
         json.loads(bundle.panel_config_file.read_text(encoding="utf-8"))
     )
+    assert set(panel) == {"spec_version", "payloads"}
     assert all("customer" not in payload for payload in panel["payloads"])
+    assert all(
+        payload["designer"] == {"version": payload["designer"]["version"]}
+        for payload in panel["payloads"]
+    )
+
+
+def test_real_default_simplification_keeps_centroids(bundle: ar.AteraBundle) -> None:
+    cells = ar.read_atera_cells(bundle)
+    r0, c0, size = 20000, 30000, 1500
+    crop = np.asarray(
+        ar.read_atera_labels(bundle)["cell_labels"][r0 : r0 + size, c0 : c0 + size]
+    ).astype(np.int64)
+    border = np.unique(np.concatenate([crop[0], crop[-1], crop[:, 0], crop[:, -1]]))
+    interior = np.where(np.isin(crop, border), 0, crop).astype(np.int32)
+    labeled = masks_to_labeled_polygons(interior, n_jobs=1)
+    assert len(labeled) > 20
+    rows = np.asarray([label for label, _ in labeled]) - 1
+    shifted = shapely.transform(
+        np.asarray([geometry for _, geometry in labeled], dtype=object),
+        lambda coords: coords + np.array([c0, r0]),
+    )
+    shapes = ar._pixel_polygons_to_microns(
+        shifted, bundle.pixel_size_um, ar.DEFAULT_SIMPLIFY_PX
+    )
+    centroids = shapely.centroid(shapes)
+    summary = cells.summary
+    error = np.hypot(
+        shapely.get_x(centroids) - summary["cell_centroid_x"].to_numpy()[rows],
+        shapely.get_y(centroids) - summary["cell_centroid_y"].to_numpy()[rows],
+    )
+    assert error.max() < 0.01

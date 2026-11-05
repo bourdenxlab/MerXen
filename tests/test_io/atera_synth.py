@@ -30,11 +30,10 @@ identifying manifest fields hold obviously fake values (:data:`FAKE_IDENTIFIERS`
 from __future__ import annotations
 
 import json
-import shutil
 import tempfile
 import uuid
 import zipfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -130,7 +129,12 @@ FAKE_IDENTIFIERS: Final = {
     "calibration_uuid": "deadbeef-0000-4000-8000-000000000006",
     "customer_email": "synthetic.customer@example.invalid",
     "customer_name": "Synthetic Customer",
+    "designer_email": "synthetic.designer@example.invalid",
+    "designer_name": "Synthetic Designer",
     "dataset_uuid": "deadbeef-0000-4000-8000-000000000007",
+    "run_start_time": "1999-12-31T23:59:58Z",
+    "reagent_lot": "SYNTHLOT0001",
+    "panel_label": "Synthetic customer panel label",
 }
 RUN_SUFFIX: Final = (
     f"{FAKE_IDENTIFIERS['instrument_sn']}_{FAKE_IDENTIFIERS['slide_name']}_"
@@ -1169,7 +1173,14 @@ def _write_small_files(
                     "email": FAKE_IDENTIFIERS["customer_email"],
                     "name": FAKE_IDENTIFIERS["customer_name"],
                 },
-                "designer": {"date_created": "2000-01-01T00:00:00", "version": "1"},
+                "designer": {
+                    "date_created": "2000-01-01T00:00:00",
+                    "designed_by": {
+                        "email": FAKE_IDENTIFIERS["designer_email"],
+                        "name": FAKE_IDENTIFIERS["designer_name"],
+                    },
+                    "version": "1",
+                },
                 "panel": {
                     "identity": {
                         "design_id": "hWTA_v1",
@@ -1187,13 +1198,17 @@ def _write_small_files(
     (root / "panel_config.json").write_text(json.dumps(panel))
     header = (
         "run_name,instrument_sn,slide_name,region_name,slide_type,sample_type,slide_id,"
-        "panel_config_id,num_cells_detected,fraction_transcripts_assigned"
+        "run_start_time,panel_config_id,panel_wta_name,panel_wta_design_id,"
+        "reagent_plate_1,reagent_pouch_1,num_cells_detected,"
+        "fraction_transcripts_assigned,median_genes_per_cell_panel_a"
     )
     values = (
         f"{FAKE_IDENTIFIERS['run_name']},{FAKE_IDENTIFIERS['instrument_sn']},"
         f"{FAKE_IDENTIFIERS['slide_name']},{FAKE_IDENTIFIERS['region_name']},"
-        f"Synthetic glass,Fresh frozen,{FAKE_IDENTIFIERS['slide_id']},hWTA_v1,"
-        f"{n_cells},0.5"
+        f"Synthetic glass,Fresh frozen,{FAKE_IDENTIFIERS['slide_id']},"
+        f"{FAKE_IDENTIFIERS['run_start_time']},hWTA_cfg,"
+        f"{FAKE_IDENTIFIERS['panel_label']},hWTA_v1,{FAKE_IDENTIFIERS['reagent_lot']},"
+        f"424242,{n_cells},0.5,"
     )
     (root / f"metrics_summary_{RUN_SUFFIX}.csv").write_text(f"{header}\n{values}\n")
     (root / analysis_summary).write_text(
@@ -1214,10 +1229,19 @@ def _write_small_files(
     )
 
 
-def remove_bundle_member(synth: AteraSynth, relative: str) -> None:
-    """Delete one file or directory of a written bundle (for failure tests)."""
-    target = synth.root / relative
-    if target.is_dir():
-        shutil.rmtree(target)
-    else:
-        target.unlink()
+def rewrite_zip_store(zip_path: Path, edit: Callable[[zarr.Group], None]) -> None:
+    """Rewrite a zipped zarr v2 store in place after ``edit`` changes its group.
+
+    For failure tests: ``edit`` receives the writable root group of an
+    extracted copy (change attrs or array values), which is then zipped back.
+
+    Args:
+        zip_path: A zipped store of a written bundle.
+        edit: Function that changes the root group.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        workdir = Path(tmp) / "store"
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(workdir)
+        edit(zarr.open_group(zarr.storage.LocalStore(workdir), mode="r+"))
+        _zip_directory(workdir, zip_path)

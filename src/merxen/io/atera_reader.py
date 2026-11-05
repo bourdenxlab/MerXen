@@ -9,8 +9,9 @@ decision below are documented in ``docs/plans/atera-support-plan.md`` (§2, §3)
 
 Conventions the readers rely on, verified on the public dataset:
 
-- Every zip is opened with ``zarr.storage.ZipStore(path, mode="r")``, one store
-  per read task: ``ZipStore`` serialises reads behind a lock.
+- Every zip is opened with ``zarr.storage.ZipStore(path, mode="r")``. Lazy
+  reads keep one store per thread and zip: ``ZipStore`` serialises reads
+  behind a lock, and opening the large transcripts zip costs about 0.3 s.
 - Transcript tiles are sorted by gene; ``gene_offset`` holds end-exclusive
   ``[start, end)`` row ranges, so a row's gene comes from ``gene_offset``
   without decoding ``codeword_identity``.
@@ -35,8 +36,10 @@ import math
 import re
 import threading
 import uuid
+import weakref
 import xml.etree.ElementTree as ET
 from collections.abc import Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -63,7 +66,7 @@ from merxen.io.tenx_cell_ids import (
     cell_id_str_from_prefix_suffix_uint32,
     pack_cell_ids,
 )
-from merxen.segmentation.mask_geometry import MpStartMethod, masks_to_labeled_polygons
+from merxen.segmentation.mask_geometry import masks_to_labeled_polygons
 
 logger = logging.getLogger(__name__)
 
@@ -122,8 +125,17 @@ CODEWORD_INDEX_COLUMN: Final = "codeword_index"
 QV_HISTOGRAM_STEP: Final = 0.25
 QV_HISTOGRAM_BINS: Final = 161
 DENSITY_BIN_UM: Final = 100.0
+#: QV of the per-gene totals recorded whatever ``min_qv`` is (the vendor rule).
+Q20: Final = 20.0
+#: Mask contour simplification in pixels. Below 0.5 px it removes only
+#: collinear staircase vertices, so centroids and areas stay as unsimplified.
+DEFAULT_SIMPLIFY_PX: Final = 0.25
+#: Shapes per ``shapely.simplify`` call when simplifying across threads.
+_SIMPLIFY_CHUNK: Final = 4096
 
 SpatialOrder = Literal["row_range", "tile_blocks"]
+#: Start methods safe after zarr or dask have started threads.
+PolygonStartMethod = Literal["forkserver", "spawn"]
 
 #: ``experiment.spatial`` fields that identify a run, slide, ROI or instrument.
 IDENTIFYING_EXPERIMENT_FIELDS: Final = frozenset(
@@ -177,9 +189,10 @@ _NEUTRAL_NAME_RES: Final = (
     re.compile(r"^(?:.*_)?(he_imagealignment)(\.csv)$"),
     re.compile(r"^(?:.*_)?(keypoints)(\.csv)$"),
     re.compile(r"^(?:.*_)?(he_image)(\.ome\.tif)$"),
+    # Lazy prefix, longer names first: binned_/csc_ belong to the viz stores.
     re.compile(
-        r"^(?:.*_)?(transcripts|binned_transcripts|cells|cell_feature_matrix"
-        r"|csc_cell_feature_matrix)(\.zarr\.zip)$"
+        r"^(?:.*?_)??(binned_transcripts|csc_cell_feature_matrix|transcripts|cells"
+        r"|cell_feature_matrix)(\.zarr\.zip)$"
     ),
 )
 _SIDECAR_GLOBS: Final = (
@@ -190,10 +203,17 @@ _SIDECAR_GLOBS: Final = (
     "*he_imagealignment.csv",
     "*keypoints.csv",
 )
-#: ``metrics_summary`` columns kept only if not identifying.
-_IDENTIFYING_METRIC_COLUMN_RE: Final = re.compile(
-    r"^(run_name|instrument_sn|slide_name|region_name|slide_id|.*uuid.*)$"
+#: ``metrics_summary`` numeric metric columns kept (allow-list, D13).
+_METRIC_COLUMN_RE: Final = re.compile(
+    r"^(num_|number_of_|fraction_|median_|mean_|total_|thickness_|nuclear_"
+    r"|decoded_|adjusted_|negative_control_|genomic_control_|estimated_|cells_per_"
+    r"|segmented_|region_area$|metrics_version$)"
 )
+#: ``metrics_summary`` text columns kept: the panel IDs.
+_METRIC_ID_COLUMN_RE: Final = re.compile(r"^panel_(config_id|[a-z0-9]+_design_id)$")
+#: ``panel_config.json`` keys kept, per level (allow-list, D13).
+_PANEL_CONFIG_KEYS: Final = frozenset({"spec_version", "payloads"})
+_PANEL_PAYLOAD_KEYS: Final = frozenset({"chemistry", "panel", "targets"})
 
 
 class AteraFormatError(ValueError):
@@ -266,6 +286,62 @@ def open_zip_group(path: Path) -> Iterator[Any]:
         store.close()
 
 
+def _close_stores(stores: list[Any], lock: threading.Lock) -> None:
+    with lock:
+        for store in stores:
+            store.close()
+        stores.clear()
+
+
+class _ThreadZipGroups:
+    """Root groups of zipped zarr stores, opened once per thread and zip.
+
+    Opening a ``ZipStore`` parses the zip's central directory in Python
+    (about 0.3 s, GIL-bound, for the 42,797-member transcripts zip), so read
+    tasks reuse one store per thread instead of opening one per task. A store
+    is never shared between threads, because it serialises reads behind a
+    lock. The stores close when this object is garbage collected (or at
+    interpreter exit); a pickled copy starts empty.
+    """
+
+    def __init__(self) -> None:
+        self._start_empty()
+
+    def _start_empty(self) -> None:
+        self._local = threading.local()
+        self._stores: list[Any] = []
+        self._lock = threading.Lock()
+        weakref.finalize(self, _close_stores, self._stores, self._lock)
+
+    def group(self, path: Path) -> Any:
+        """Return this thread's open root group of ``path``.
+
+        Args:
+            path: Zipped zarr store.
+
+        Returns:
+            The read-only root group.
+        """
+        groups: dict[Path, Any] | None = getattr(self._local, "groups", None)
+        if groups is None:
+            groups = {}
+            self._local.groups = groups
+        group = groups.get(path)
+        if group is None:
+            store = zarr.storage.ZipStore(path, mode="r")
+            with self._lock:
+                self._stores.append(store)
+            group = zarr.open_group(store, mode="r")
+            groups[path] = group
+        return group
+
+    def __getstate__(self) -> dict[str, Any]:
+        return {}
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self._start_empty()
+
+
 def resolve_atera_bundle(
     input_path: Path,
     *,
@@ -306,7 +382,7 @@ def resolve_atera_bundle(
     spec_path = (
         Path(spec_override)
         if spec_override is not None
-        else root / ("experiment.spatial")
+        else root / "experiment.spatial"
     )
     if not spec_path.is_file():
         raise FileNotFoundError(f"{spec_path.name} not found in the Atera input")
@@ -449,9 +525,12 @@ def _resolve_member(
     plain = root / default_name
     if plain.is_file():
         return plain
-    prefixed = sorted(root.glob(f"*_{default_name}"))
+    # neutral_sidecar_name tells <dataset>_binned_transcripts apart from
+    # <dataset>_transcripts (and csc_ from the main matrix).
     prefixed = [
-        path for path in prefixed if not path.name.startswith(("csc_", "binned_"))
+        path
+        for path in sorted(root.glob(f"*_{default_name}"))
+        if neutral_sidecar_name(path.name) == default_name
     ]
     if len(prefixed) == 1:
         return prefixed[0]
@@ -589,43 +668,73 @@ def _is_allowed_scalar(key: str, value: object) -> bool:
 
 
 def sanitize_panel_config(panel_config: Mapping[str, Any]) -> dict[str, Any]:
-    """Remove customer and designer contact fields from ``panel_config.json``.
+    """Keep only the panel definition of ``panel_config.json`` (allow-list).
+
+    Kept: ``spec_version`` and, per payload, ``chemistry``, ``panel``,
+    ``targets`` and ``designer.version``. Dropped: ``metadata``, the customer
+    and designer contacts (``customer``, ``designer.designed_by``), the design
+    date and anything not recognised.
 
     Args:
         panel_config: Parsed ``panel_config.json``.
 
     Returns:
-        A deep copy without ``payloads[].customer`` and
-        ``payloads[].designer.designed_by``.
+        A new JSON-serialisable dictionary.
     """
-    sanitized: dict[str, Any] = json.loads(json.dumps(panel_config))
+    copied: dict[str, Any] = json.loads(json.dumps(panel_config))
+    sanitized = {k: v for k, v in copied.items() if k in _PANEL_CONFIG_KEYS}
+    payloads = []
     for payload in sanitized.get("payloads") or []:
         if not isinstance(payload, dict):
             continue
-        payload.pop("customer", None)
+        kept = {k: v for k, v in payload.items() if k in _PANEL_PAYLOAD_KEYS}
         designer = payload.get("designer")
-        if isinstance(designer, dict):
-            designer.pop("designed_by", None)
+        if isinstance(designer, dict) and "version" in designer:
+            kept["designer"] = {"version": designer["version"]}
+        payloads.append(kept)
+    if "payloads" in sanitized:
+        sanitized["payloads"] = payloads
     return sanitized
 
 
+def _is_number_text(value: str) -> bool:
+    try:
+        float(value)
+    except ValueError:
+        return False
+    return True
+
+
 def sanitize_metrics_summary(text: str) -> str:
-    """Drop the identifying columns of a vendor ``metrics_summary`` CSV.
+    """Keep only the metric and panel ID columns of a ``metrics_summary`` CSV.
+
+    An allow-list (D13): numeric metric columns (``num_*``, ``fraction_*``,
+    ``median_*``, ``segmented_*`` and the other metric families, each value a
+    number or empty) and the panel ID columns. Run, instrument, slide, region,
+    reagent lot, stain and free-text columns, and anything not recognised, are
+    dropped.
 
     Args:
         text: The CSV text.
 
     Returns:
-        The CSV text without run, instrument, slide, region and UUID columns.
+        The CSV text with the kept columns only.
     """
     rows = list(csv.reader(io.StringIO(text)))
     if not rows:
         return text
-    keep = [
-        index
-        for index, name in enumerate(rows[0])
-        if not _IDENTIFYING_METRIC_COLUMN_RE.match(name.strip())
-    ]
+
+    def values(index: int) -> list[str]:
+        return [row[index].strip() for row in rows[1:] if index < len(row)]
+
+    keep = []
+    for index, raw_name in enumerate(rows[0]):
+        name = raw_name.strip()
+        if _METRIC_ID_COLUMN_RE.match(name) or (
+            _METRIC_COLUMN_RE.match(name)
+            and all(value == "" or _is_number_text(value) for value in values(index))
+        ):
+            keep.append(index)
     out = io.StringIO()
     writer = csv.writer(out, lineterminator="\n")
     for row in rows:
@@ -1058,8 +1167,8 @@ def read_atera_cells(bundle: AteraBundle) -> AteraCells:
 class _LazyZipArray:
     """Array-like view of one array inside a zipped zarr store.
 
-    Every ``__getitem__`` opens its own ``ZipStore``, because a store
-    serialises reads behind a lock.
+    Reads go through one ``ZipStore`` per thread (:class:`_ThreadZipGroups`),
+    because a store serialises reads behind a lock.
     """
 
     def __init__(self, zip_path: Path, member: str) -> None:
@@ -1069,12 +1178,11 @@ class _LazyZipArray:
             array = group[member]
             self.shape = tuple(int(n) for n in array.shape)
             self.dtype = np.dtype(array.dtype)
-            self.native_chunks = tuple(int(n) for n in array.chunks)
         self.ndim = len(self.shape)
+        self._groups = _ThreadZipGroups()
 
     def __getitem__(self, key: tuple[slice, ...]) -> np.ndarray:
-        with open_zip_group(self.zip_path) as group:
-            return np.asarray(group[self.member][key])
+        return np.asarray(self._groups.group(self.zip_path)[self.member][key])
 
     def __dask_tokenize__(self) -> tuple[str, str, float]:
         return (str(self.zip_path), self.member, self.zip_path.stat().st_mtime)
@@ -1200,11 +1308,32 @@ def atera_nucleus_area_total(
 
 
 def _pixel_polygons_to_microns(
-    geometries: np.ndarray, pixel_size_um: float, simplify_px: float
+    geometries: np.ndarray,
+    pixel_size_um: float,
+    simplify_px: float,
+    *,
+    n_threads: int = 1,
 ) -> np.ndarray:
-    """Simplify pixel-space contours, then map them to microns at ``(c + 0.5) ps``."""
+    """Simplify pixel-space contours, then map them to microns at ``(c + 0.5) ps``.
+
+    ``shapely.simplify`` releases the GIL, so chunks run on ``n_threads``.
+    """
     if simplify_px > 0:
-        geometries = shapely.simplify(geometries, simplify_px, preserve_topology=True)
+        chunks = [
+            geometries[start : start + _SIMPLIFY_CHUNK]
+            for start in range(0, len(geometries), _SIMPLIFY_CHUNK)
+        ]
+        with ThreadPoolExecutor(max_workers=max(1, n_threads)) as pool:
+            simplified = list(
+                pool.map(
+                    lambda chunk: shapely.simplify(
+                        chunk, simplify_px, preserve_topology=True
+                    ),
+                    chunks,
+                )
+            )
+        if simplified:
+            geometries = np.concatenate(simplified)
     shifted: np.ndarray = shapely.transform(
         geometries, lambda coords: (coords + 0.5) * pixel_size_um
     )
@@ -1250,30 +1379,36 @@ def atera_shapes_from_masks(
     *,
     n_jobs: int,
     workdir: Path,
-    simplify_px: float = 0.5,
-    mp_context: MpStartMethod = "forkserver",
+    simplify_px: float = DEFAULT_SIMPLIFY_PX,
+    mp_context: PolygonStartMethod = "forkserver",
 ) -> dict[str, gpd.GeoDataFrame]:
     """Polygonise the vendor masks into cell and nucleus shapes (microns).
 
     Each mask is streamed into a memory-mapped ``.npy`` in ``workdir`` and
     polygonised by a process pool that maps the file (no copies, no silent
     serial fallback). Contours, whose pixel centres sit at integers, are
-    simplified topology-preservingly by ``simplify_px`` pixels and mapped to
-    microns at ``(c + 0.5) * ps``, the vendor's corner convention. A label
-    made of several components becomes a MultiPolygon.
+    simplified topology-preservingly by ``simplify_px`` pixels (on ``n_jobs``
+    threads) and mapped to microns at ``(c + 0.5) * ps``, the vendor's corner
+    convention. A label made of several components becomes a MultiPolygon.
 
-    Call it before any thread pool starts when ``mp_context="fork"``; the
-    default ``forkserver`` starts clean workers, which import the caller's
-    ``__main__``, so a calling script must guard its entry point with
-    ``if __name__ == "__main__":``.
+    The workers start clean (``forkserver`` or ``spawn``; ``fork`` is refused
+    because reading the masks has already started zarr threads), so they
+    import the caller's ``__main__``: a calling script must guard its entry
+    point with ``if __name__ == "__main__":``. Every worker maps the whole
+    ``.npy``, so the pages it touches count in its file-backed RSS (about
+    110 GB summed over 16 workers on a 10 GB mask) although they are shared
+    page cache: a memory watchdog must measure anonymous memory (``RssAnon``,
+    USS or PSS), not ``rss``.
 
     Args:
         bundle: Resolved bundle.
         cells: Cell records.
-        n_jobs: Worker processes for the polygonisation pool.
-        workdir: Directory for the temporary ``.npy`` masks (deleted after).
+        n_jobs: Worker processes for the polygonisation pool, and threads for
+            the simplification.
+        workdir: Directory for the temporary ``.npy`` masks (deleted after,
+            also when the export or the pool fails).
         simplify_px: Simplification tolerance in pixels (0 disables it).
-        mp_context: Multiprocessing start method of the pool.
+        mp_context: ``"forkserver"`` or ``"spawn"``.
 
     Returns:
         ``{"cell_boundaries": ..., "nucleus_boundaries": ...}``. Both carry
@@ -1282,19 +1417,24 @@ def atera_shapes_from_masks(
         ``segmentation_method``; nuclei also carry ``cell_instance_id``.
 
     Raises:
+        ValueError: If ``mp_context`` is not ``forkserver`` or ``spawn``.
         AteraFormatError: If a label yields no polygon or exceeds the record count.
         RuntimeError: If the polygonisation pool fails.
     """
+    if mp_context not in ("forkserver", "spawn"):
+        raise ValueError(
+            f"mp_context must be 'forkserver' or 'spawn', got {mp_context!r}: "
+            "zarr threads are already running, so fork is unsafe"
+        )
     workdir.mkdir(parents=True, exist_ok=True)
     shapes: dict[str, gpd.GeoDataFrame] = {}
     for key, member, n_expected in (
         ("cell_boundaries", "masks/1", cells.n_cells),
         ("nucleus_boundaries", "masks/0", cells.n_nuclei),
     ):
-        npy = export_mask_npy(
-            bundle, member, workdir / f"atera_{member.replace('/', '_')}.npy"
-        )
+        npy = workdir / f"atera_{member.replace('/', '_')}.npy"
         try:
+            export_mask_npy(bundle, member, npy)
             mask = np.load(npy, mmap_mode="r")
             labeled = masks_to_labeled_polygons(
                 mask, n_jobs=n_jobs, serial_fallback=False, mp_context=mp_context
@@ -1318,6 +1458,7 @@ def atera_shapes_from_masks(
             np.asarray([geometry for _, geometry in labeled], dtype=object)[order],
             bundle.pixel_size_um,
             simplify_px,
+            n_threads=n_jobs,
         )
         rows = labels[order] - 1
         columns = (
@@ -1346,13 +1487,22 @@ def atera_shapes_from_vendor_polygons(
 
     Returns:
         The same elements and columns as :func:`atera_shapes_from_masks`.
+
+    Raises:
+        AteraFormatError: If a polygon has 1 to 3 vertices (no closed ring).
     """
     shapes: dict[str, gpd.GeoDataFrame] = {}
     for key, vertices, num_vertices in (
         ("cell_boundaries", cells.cell_vertices, cells.cell_num_vertices),
         ("nucleus_boundaries", cells.nucleus_vertices, cells.nucleus_num_vertices),
     ):
-        rows = np.flatnonzero(num_vertices > 1)
+        degenerate = np.flatnonzero((num_vertices > 0) & (num_vertices < 4))
+        if degenerate.size:
+            raise AteraFormatError(
+                f"{key}: {degenerate.size} vendor polygon(s) with 1-3 vertices, "
+                f"e.g. row {int(degenerate[0])}"
+            )
+        rows = np.flatnonzero(num_vertices > 0)
         rings = [
             vertices[row, : 2 * (int(num_vertices[row]) - 1)]
             .reshape(-1, 2)
@@ -1520,7 +1670,7 @@ def read_atera_table(
         matrix = ad.io.read_elem(group["X"])
         obs_group = group["obs"]
         barcodes = _cfm_index(obs_group)
-        obs_columns = _read_columns(obs_group, ("cell_id", "cell_area", "nucleus_area"))
+        obs_columns = _read_columns(obs_group, ("cell_id",))
         vendor_columns = (
             _read_columns(obs_group, VENDOR_OBS_COLUMNS)
             if keep_vendor_annotations
@@ -1562,11 +1712,13 @@ def read_atera_table(
     obs["nucleus_count"] = summary["nucleus_count"].to_numpy().astype(np.int64)
     if "z_level" in summary:
         obs["vendor_z_level"] = summary["z_level"].to_numpy(np.float64)
-    for column, feature_type in DERIVED_CONTROL_COUNT_COLUMNS.items():
-        selected = np.flatnonzero(feature_types == feature_type)
-        obs[column] = (
-            np.asarray(matrix[:, selected].sum(axis=1)).ravel().astype(np.int64)
-        )
+    # One product sums every control type: X @ (features x types indicator).
+    indicator = np.column_stack(
+        [feature_types == kind for kind in DERIVED_CONTROL_COUNT_COLUMNS.values()]
+    ).astype(np.int64)
+    control_counts = np.asarray(matrix @ indicator, dtype=np.int64)
+    for index, column in enumerate(DERIVED_CONTROL_COUNT_COLUMNS):
+        obs[column] = control_counts[:, index]
     for name, values in vendor_columns.items():
         obs[f"vendor_{name}"] = (
             values.values if isinstance(values, pd.Series) else values
@@ -1595,11 +1747,10 @@ def read_atera_table(
         var["vendor_gene_coverage"] = pd.array(
             [coverage.get(gene_id) for gene_id in var["gene_ids"]], dtype="Int64"
         )
-    table = ad.AnnData(
-        X=matrix[:, keep].astype(np.float32),
-        obs=obs,
-        var=var,
-    )
+    counts = matrix[:, keep] if gex_only else matrix
+    del matrix
+    counts.data = counts.data.astype(np.float32)
+    table = ad.AnnData(X=counts, obs=obs, var=var)
     table.obsm["spatial"] = summary[["cell_centroid_x", "cell_centroid_y"]].to_numpy(
         np.float64
     )
@@ -1738,7 +1889,9 @@ def plan_transcript_partitions(
     ``row_range`` cuts each tile into consecutive row ranges of
     ``partition_rows`` (gene-sorted within a tile). ``tile_blocks`` makes one
     partition per ``block_um`` square of a tile (spatially coherent; each block
-    decodes its whole tile, so the reader bounds concurrent decodes); a tile
+    decodes its whole tile, so a tile is read once per block, 16 times for
+    500 µm blocks of a 2000 µm tile, and the reader bounds concurrent
+    decodes); a tile
     whose average block would hold fewer than ``min_block_rows`` rows stays one
     partition. Empty tiles get no partition.
 
@@ -1892,8 +2045,10 @@ class PartitionStats:
         tile_key: Tile of the partition.
         n_rows_read: Rows read (before the QV filter).
         n_rows_kept: Rows kept by the QV filter.
+        qv_sum: Sum of the QV of the rows read.
         qv_histogram: Rows read per quarter-QV step from 0 to 40.
         gene_counts_all_qv: Rows read per feature.
+        gene_counts_q20: Rows read with QV >= 20 per feature.
         gene_counts_kept: Rows kept per feature.
         bounds_um: ``(x_min, x_max, y_min, y_max, z_min, z_max)`` of rows read.
         density: Rows kept per ``DENSITY_BIN_UM`` bin (``[ny, nx]``).
@@ -1902,8 +2057,10 @@ class PartitionStats:
     tile_key: str
     n_rows_read: int
     n_rows_kept: int
+    qv_sum: float
     qv_histogram: np.ndarray
     gene_counts_all_qv: np.ndarray
+    gene_counts_q20: np.ndarray
     gene_counts_kept: np.ndarray
     bounds_um: tuple[float, ...]
     density: np.ndarray
@@ -1920,8 +2077,11 @@ class TranscriptSummary:
         rows_read_per_tile: Rows read per tile.
         rows_kept_per_tile: Rows kept per tile.
         qv_histogram_per_tile: Rows read per quarter-QV step (0-40) per tile.
+        mean_qv_per_tile: Mean QV of the rows read per tile (``None`` if empty).
         gene_counts_all_qv: Rows read per feature (all QV); equals the vendor
             ``grid.gene_counts`` when every tile is read.
+        gene_counts_q20: Rows read with QV >= 20 per feature, whatever
+            ``min_qv`` is.
         gene_counts_kept: Rows kept per feature.
         bounds_um: Coordinate ranges of the rows read.
         density: Rows kept per ``density_bin_um`` square, ``[ny, nx]``.
@@ -1935,7 +2095,9 @@ class TranscriptSummary:
     rows_read_per_tile: dict[str, int]
     rows_kept_per_tile: dict[str, int]
     qv_histogram_per_tile: dict[str, np.ndarray]
+    mean_qv_per_tile: dict[str, float | None]
     gene_counts_all_qv: np.ndarray
+    gene_counts_q20: np.ndarray
     gene_counts_kept: np.ndarray
     bounds_um: dict[str, float]
     density: np.ndarray
@@ -1955,7 +2117,9 @@ class TranscriptSummary:
                 key: values.tolist()
                 for key, values in self.qv_histogram_per_tile.items()
             },
+            "mean_qv_per_tile": dict(self.mean_qv_per_tile),
             "gene_counts_all_qv": self.gene_counts_all_qv.tolist(),
+            "gene_counts_q20": self.gene_counts_q20.tolist(),
             "gene_counts_kept": self.gene_counts_kept.tolist(),
             "bounds_um": dict(self.bounds_um),
             "density_bin_um": self.density_bin_um,
@@ -2004,8 +2168,9 @@ class _DensityGrid:
 class _TranscriptContext:
     """Everything a partition read needs besides its spec.
 
-    ``tile_semaphore`` bounds concurrent whole-tile decodes (``tile_blocks``);
-    ``token`` names the read in dask task keys.
+    ``tile_semaphore`` bounds concurrent whole-tile reads (``tile_blocks``);
+    ``zip_groups`` holds each thread's open transcripts store; ``token`` names
+    the read in dask task keys.
     """
 
     zip_path: Path
@@ -2017,6 +2182,7 @@ class _TranscriptContext:
     emit_codeword_index: bool
     density_grid: _DensityGrid
     tile_semaphore: threading.BoundedSemaphore | None = None
+    zip_groups: _ThreadZipGroups = field(default_factory=_ThreadZipGroups)
     token: str = field(default="")
 
 
@@ -2026,9 +2192,34 @@ def _read_rows(tile: Any, name: str, rows: slice) -> np.ndarray:
 
 
 def _gene_codes(
-    gene_offset: np.ndarray, start: int, stop: int, n_rows: int
+    gene_offset: np.ndarray,
+    start: int,
+    stop: int,
+    n_rows: int,
+    n_genes: int,
+    selected: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Gene code of rows ``[start, stop)`` from end-exclusive ``gene_offset``."""
+    """Gene code of rows ``[start, stop)`` from end-exclusive ``gene_offset``.
+
+    Args:
+        gene_offset: ``[n_genes, 2]`` row ranges of the tile.
+        start: First row of the range.
+        stop: End of the range (exclusive).
+        n_rows: Rows in the tile.
+        n_genes: Features of the bundle; ``gene_offset`` has one row each.
+        selected: Positions within the range to code (all when ``None``).
+
+    Returns:
+        int32 codes, one per row (or per selected row).
+
+    Raises:
+        AteraFormatError: If ``gene_offset`` is not one contiguous range per
+            feature covering the tile.
+    """
+    if gene_offset.shape != (n_genes, 2):
+        raise AteraFormatError(
+            f"gene_offset has shape {gene_offset.shape}, not ({n_genes}, 2)"
+        )
     starts = gene_offset[:, 0].astype(np.int64)
     ends = gene_offset[:, 1].astype(np.int64)
     contiguous = (
@@ -2040,6 +2231,9 @@ def _gene_codes(
     )
     if not contiguous:
         raise AteraFormatError("gene_offset is not a contiguous [start, end) row cover")
+    if selected is not None:
+        # Row r belongs to the first gene whose end exceeds r.
+        return np.searchsorted(ends, start + selected, side="right").astype(np.int32)
     counts = np.clip(ends, start, stop) - np.clip(starts, start, stop)
     return np.repeat(np.arange(len(starts), dtype=np.int32), counts)
 
@@ -2100,57 +2294,76 @@ def _frame_from_rows(
     return pd.DataFrame(columns)
 
 
+def _block_rows(
+    location: np.ndarray, bounds: tuple[float, float, float, float]
+) -> np.ndarray:
+    """Positions of the rows whose ``(x, y)`` lies in ``[x0, x1) x [y0, y1)``."""
+    x0, x1, y0, y1 = bounds
+    x, y = location[:, 0], location[:, 1]
+    return np.flatnonzero((x >= x0) & (x < x1) & (y >= y0) & (y < y1))
+
+
+def _read_selected(
+    tile: Any, name: str, rows: slice, width: int, selected: np.ndarray | None
+) -> np.ndarray:
+    """Read one tile column range and keep only ``selected`` rows (all if None)."""
+    values = _read_rows(tile, name, rows).reshape(-1, width)
+    if selected is not None:
+        values = values[selected]
+    return values if width > 1 else values.reshape(-1)
+
+
 def _read_partition_with_stats(
     context: _TranscriptContext, spec: PartitionSpec
 ) -> tuple[pd.DataFrame, PartitionStats]:
     rows = slice(spec.row_start, spec.row_stop)
+    n_genes = len(context.gene_dtype.categories)
     semaphore = context.tile_semaphore
     if semaphore is not None:
         semaphore.acquire()
     try:
-        with open_zip_group(context.zip_path) as root:
-            tile = root["grid"][spec.tile_key]
-            n_tile_rows = int(tile["location"].shape[0])
-            location: np.ndarray = _read_rows(tile, "location", rows).reshape(-1, 3)
-            cell_id: np.ndarray = _read_rows(tile, "cell_id", rows).reshape(-1, 2)
-            quality: np.ndarray = _read_rows(tile, "quality_score", rows).reshape(-1)
-            overlaps: np.ndarray = _read_rows(tile, "overlaps_nucleus", rows).ravel()
-            codewords: np.ndarray | None = (
-                _read_rows(tile, "codeword_identity", rows).reshape(-1)
-                if context.emit_codeword_index
-                else None
-            )
-            gene_offset = np.asarray(tile["gene_offset"][:])
+        # Whole-tile columns live only inside this block: each is cut to the
+        # partition's spatial block as soon as it is read, so at most
+        # max_tiles_in_flight whole-tile columns exist at once.
+        tile = context.zip_groups.group(context.zip_path)["grid"][spec.tile_key]
+        n_tile_rows = int(tile["location"].shape[0])
+        gene_offset = np.asarray(tile["gene_offset"][:])
+        location: np.ndarray = _read_rows(tile, "location", rows).reshape(-1, 3)
+        selected = (
+            _block_rows(location, spec.block_bounds_um)
+            if spec.block_bounds_um is not None
+            else None
+        )
+        if selected is not None:
+            location = location[selected]
+        cell_id = _read_selected(tile, "cell_id", rows, 2, selected)
+        quality = _read_selected(tile, "quality_score", rows, 1, selected)
+        overlaps = _read_selected(tile, "overlaps_nucleus", rows, 1, selected)
+        codewords = (
+            _read_selected(tile, "codeword_identity", rows, 1, selected)
+            if context.emit_codeword_index
+            else None
+        )
     finally:
         if semaphore is not None:
             semaphore.release()
-    codes: np.ndarray = _gene_codes(
-        gene_offset, spec.row_start, spec.row_stop, n_tile_rows
+    codes = _gene_codes(
+        gene_offset, spec.row_start, spec.row_stop, n_tile_rows, n_genes, selected
     )
-    ordinals: np.ndarray = spec.global_offset + np.arange(
-        spec.row_start, spec.row_stop, dtype=np.int64
+    positions = (
+        selected
+        if selected is not None
+        else np.arange(spec.row_stop - spec.row_start, dtype=np.int64)
     )
-    if spec.block_bounds_um is not None:
-        x0, x1, y0, y1 = spec.block_bounds_um
-        x, y = location[:, 0], location[:, 1]
-        selected = np.flatnonzero((x >= x0) & (x < x1) & (y >= y0) & (y < y1))
-        location, cell_id, quality, overlaps = (
-            location[selected],
-            cell_id[selected],
-            quality[selected],
-            overlaps[selected],
-        )
-        codes, ordinals = codes[selected], ordinals[selected]
-        codewords = codewords[selected] if codewords is not None else None
+    ordinals = spec.global_offset + spec.row_start + positions.astype(np.int64)
 
-    n_genes = len(context.gene_dtype.categories)
-    quality64 = quality.astype(np.float64)
-    keep = (
-        np.flatnonzero(quality64 >= context.min_qv)
-        if context.min_qv is not None
-        else np.arange(len(codes))
-    )
-    qv_bins = np.clip(np.rint(quality64 / QV_HISTOGRAM_STEP), 0, QV_HISTOGRAM_BINS - 1)
+    q20 = quality >= np.float64(Q20)
+    keep = quality >= np.float64(context.min_qv) if context.min_qv is not None else None
+    qv_bins = np.clip(
+        np.rint(quality.astype(np.float32) / np.float32(QV_HISTOGRAM_STEP)),
+        0,
+        QV_HISTOGRAM_BINS - 1,
+    ).astype(np.intp)
     bounds = (
         tuple(
             float(value)
@@ -2160,16 +2373,25 @@ def _read_partition_with_stats(
         if len(location)
         else ()
     )
-    location, cell_id, overlaps = location[keep], cell_id[keep], overlaps[keep]
-    kept_codes, quality, ordinals = codes[keep], quality[keep], ordinals[keep]
-    codewords = codewords[keep] if codewords is not None else None
+    n_rows_read = len(codes)
+    gene_counts_all_qv = np.bincount(codes, minlength=n_genes)
+    gene_counts_q20 = np.bincount(codes[q20], minlength=n_genes)
+    qv_histogram = np.bincount(qv_bins, minlength=QV_HISTOGRAM_BINS)
+    qv_sum = float(quality.sum(dtype=np.float64))
+    del qv_bins, q20
+    if keep is not None:
+        location, cell_id, overlaps = location[keep], cell_id[keep], overlaps[keep]
+        codes, quality, ordinals = codes[keep], quality[keep], ordinals[keep]
+        codewords = codewords[keep] if codewords is not None else None
     stats = PartitionStats(
         tile_key=spec.tile_key,
-        n_rows_read=len(codes),
-        n_rows_kept=len(kept_codes),
-        qv_histogram=np.bincount(qv_bins.astype(np.int64), minlength=QV_HISTOGRAM_BINS),
-        gene_counts_all_qv=np.bincount(codes, minlength=n_genes),
-        gene_counts_kept=np.bincount(kept_codes, minlength=n_genes),
+        n_rows_read=n_rows_read,
+        n_rows_kept=len(codes),
+        qv_sum=qv_sum,
+        qv_histogram=qv_histogram,
+        gene_counts_all_qv=gene_counts_all_qv,
+        gene_counts_q20=gene_counts_q20,
+        gene_counts_kept=np.bincount(codes, minlength=n_genes),
         bounds_um=bounds,
         density=context.density_grid.counts(
             location[:, 0].astype(np.float64), location[:, 1].astype(np.float64)
@@ -2182,7 +2404,7 @@ def _read_partition_with_stats(
         cell_id=cell_id,
         quality=quality,
         overlaps=overlaps,
-        codes=kept_codes,
+        codes=codes,
         ordinals=ordinals,
         codewords=codewords,
     )
@@ -2192,10 +2414,12 @@ def _read_partition_with_stats(
 class TranscriptAggregates:
     """Transcript statistics recorded by the partition reads themselves.
 
-    Every partition read stores its :class:`PartitionStats` here under its
-    partition number, so whatever computes the points (a parquet write inside
-    spatialdata, or a plain ``compute``) gathers the statistics in the same
-    pass. Recording is idempotent: a re-executed task overwrites its own entry.
+    Every partition read adds its :class:`PartitionStats` to running totals,
+    so whatever computes the points (a parquet write inside spatialdata, or a
+    plain ``compute``) gathers the statistics in the same pass. Recording is
+    idempotent: a re-executed task's partition is counted once (reads are
+    deterministic). The record lives in this process, so the points must be
+    computed by dask's threaded or synchronous scheduler.
     """
 
     def __init__(
@@ -2218,87 +2442,102 @@ class TranscriptAggregates:
         """
         self.n_partitions = n_partitions
         self._tile_keys = tuple(tile_keys)
-        self._n_genes = n_genes
         self._min_qv = min_qv
         self._density_grid = density_grid
-        self._stats: dict[int, PartitionStats] = {}
+        self._recorded: set[int] = set()
+        self._read_per_tile = dict.fromkeys(self._tile_keys, 0)
+        self._kept_per_tile = dict.fromkeys(self._tile_keys, 0)
+        self._qv_sum_per_tile = dict.fromkeys(self._tile_keys, 0.0)
+        self._histograms = {
+            key: np.zeros(QV_HISTOGRAM_BINS, dtype=np.int64) for key in self._tile_keys
+        }
+        self._all_qv = np.zeros(n_genes, dtype=np.int64)
+        self._q20 = np.zeros(n_genes, dtype=np.int64)
+        self._kept = np.zeros(n_genes, dtype=np.int64)
+        self._density = np.zeros((density_grid.n_y, density_grid.n_x), dtype=np.int64)
+        self._bounds = np.array([np.inf, -np.inf] * 3)
         self._lock = threading.Lock()
         # Distinguishes the graphs of two reads with the same parameters, so
         # dask never merges their tasks and fills only one record.
         self.token = uuid.uuid4().hex
 
     def record(self, index: int, stats: PartitionStats) -> None:
-        """Store the statistics of partition ``index``."""
+        """Add the statistics of partition ``index`` (once per index)."""
         with self._lock:
-            self._stats[index] = stats
-
-    @property
-    def n_recorded(self) -> int:
-        """Number of partitions recorded so far."""
-        with self._lock:
-            return len(self._stats)
+            if index in self._recorded:
+                return
+            self._recorded.add(index)
+            key = stats.tile_key
+            self._read_per_tile[key] += stats.n_rows_read
+            self._kept_per_tile[key] += stats.n_rows_kept
+            self._qv_sum_per_tile[key] += stats.qv_sum
+            self._histograms[key] += stats.qv_histogram
+            self._all_qv += stats.gene_counts_all_qv
+            self._q20 += stats.gene_counts_q20
+            self._kept += stats.gene_counts_kept
+            self._density += stats.density
+            if stats.bounds_um:
+                values = np.asarray(stats.bounds_um)
+                self._bounds[0::2] = np.minimum(self._bounds[0::2], values[0::2])
+                self._bounds[1::2] = np.maximum(self._bounds[1::2], values[1::2])
 
     def summary(self) -> TranscriptSummary:
-        """Combine the recorded partitions.
+        """Return the statistics over every partition.
 
         Returns:
-            The statistics over every partition.
+            The combined statistics.
 
         Raises:
             RuntimeError: If some partitions have not been read yet (compute
                 or write the points first).
         """
         with self._lock:
-            stats = [self._stats[i] for i in sorted(self._stats)]
-        if len(stats) != self.n_partitions:
-            raise RuntimeError(
-                f"only {len(stats)} of {self.n_partitions} transcript partitions "
-                "were read; compute or write the points before summarising them"
+            n_recorded = len(self._recorded)
+            if n_recorded != self.n_partitions:
+                raise RuntimeError(
+                    f"only {n_recorded} of {self.n_partitions} transcript "
+                    "partitions were read; compute or write the points before "
+                    "summarising them"
+                )
+            grid = self._density_grid
+            names = ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max")
+            return TranscriptSummary(
+                min_qv=self._min_qv,
+                n_rows_read=int(sum(self._read_per_tile.values())),
+                n_rows_kept=int(sum(self._kept_per_tile.values())),
+                rows_read_per_tile=dict(self._read_per_tile),
+                rows_kept_per_tile=dict(self._kept_per_tile),
+                qv_histogram_per_tile={
+                    key: values.copy() for key, values in self._histograms.items()
+                },
+                mean_qv_per_tile={
+                    key: (total / self._read_per_tile[key])
+                    if self._read_per_tile[key]
+                    else None
+                    for key, total in self._qv_sum_per_tile.items()
+                },
+                gene_counts_all_qv=self._all_qv.copy(),
+                gene_counts_q20=self._q20.copy(),
+                gene_counts_kept=self._kept.copy(),
+                bounds_um={
+                    name: float(value)
+                    for name, value in zip(names, self._bounds, strict=True)
+                    if np.isfinite(value)
+                },
+                density=self._density.copy(),
+                density_origin_um=(grid.origin_x, grid.origin_y),
+                density_bin_um=grid.bin_um,
             )
-        grid = self._density_grid
-        read_per_tile = dict.fromkeys(self._tile_keys, 0)
-        kept_per_tile = dict.fromkeys(self._tile_keys, 0)
-        histograms = {
-            key: np.zeros(QV_HISTOGRAM_BINS, dtype=np.int64) for key in self._tile_keys
-        }
-        all_qv = np.zeros(self._n_genes, dtype=np.int64)
-        kept = np.zeros(self._n_genes, dtype=np.int64)
-        density = np.zeros((grid.n_y, grid.n_x), dtype=np.int64)
-        bounds = np.array([np.inf, -np.inf] * 3)
-        for item in stats:
-            read_per_tile[item.tile_key] += item.n_rows_read
-            kept_per_tile[item.tile_key] += item.n_rows_kept
-            histograms[item.tile_key] += item.qv_histogram
-            all_qv += item.gene_counts_all_qv
-            kept += item.gene_counts_kept
-            density += item.density
-            if item.bounds_um:
-                values = np.asarray(item.bounds_um)
-                bounds[0::2] = np.minimum(bounds[0::2], values[0::2])
-                bounds[1::2] = np.maximum(bounds[1::2], values[1::2])
-        names = ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max")
-        return TranscriptSummary(
-            min_qv=self._min_qv,
-            n_rows_read=int(sum(read_per_tile.values())),
-            n_rows_kept=int(sum(kept_per_tile.values())),
-            rows_read_per_tile=read_per_tile,
-            rows_kept_per_tile=kept_per_tile,
-            qv_histogram_per_tile=histograms,
-            gene_counts_all_qv=all_qv,
-            gene_counts_kept=kept,
-            bounds_um={
-                name: float(value)
-                for name, value in zip(names, bounds, strict=True)
-                if np.isfinite(value)
-            },
-            density=density,
-            density_origin_um=(grid.origin_x, grid.origin_y),
-            density_bin_um=grid.bin_um,
-        )
 
 
 class _PartitionReader:
-    """``from_map`` function: read one partition and record its statistics."""
+    """``from_map`` function: read one partition and record its statistics.
+
+    It holds an in-process record, a tile semaphore and per-thread zip stores,
+    so it refuses to be pickled: dask's ``processes`` scheduler or a
+    distributed cluster would read in other processes, where the statistics
+    and the decode bound are lost. Copies share the original's state.
+    """
 
     def __init__(
         self, context: _TranscriptContext, aggregates: TranscriptAggregates
@@ -2313,6 +2552,19 @@ class _PartitionReader:
 
     def __dask_tokenize__(self) -> tuple[str, str]:
         return (self.context.token, self.aggregates.token)
+
+    def __copy__(self) -> _PartitionReader:
+        return self
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> _PartitionReader:
+        return self
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        raise TypeError(
+            "Atera transcript partitions record their statistics in this process; "
+            "compute them with dask's threaded or synchronous scheduler, not the "
+            "processes scheduler or a distributed cluster"
+        )
 
 
 def _category_column(group: Any, array: str, column: str) -> np.ndarray:
@@ -2424,7 +2676,10 @@ def read_atera_transcripts(
     returned :class:`TranscriptAggregates`, so writing the points once reads
     every tile slice once and gathers the statistics in the same pass. The
     frame's ``meta`` holds the full categorical dtypes, so
-    ``PointsModel.parse(..., sort=True)`` triggers no computation.
+    ``PointsModel.parse(..., sort=True)`` triggers no computation. Compute the
+    points with dask's threaded (or synchronous) scheduler: the statistics and
+    the ``tile_blocks`` decode bound live in this process, so the partition
+    function refuses to be pickled for other processes.
 
     Args:
         bundle: Resolved bundle.
@@ -2433,7 +2688,8 @@ def read_atera_transcripts(
         spatial_order: ``"row_range"`` (default) or ``"tile_blocks"``.
         block_um: Block edge for ``tile_blocks``.
         min_block_rows: See :func:`plan_transcript_partitions`.
-        max_tiles_in_flight: Concurrent whole-tile decodes in ``tile_blocks``.
+        max_tiles_in_flight: Concurrent whole-tile reads in ``tile_blocks``;
+            each is cut to its block before the next read starts.
         emit_codeword_index: Add ``codeword_index``.
         tile_allowlist: Only these tiles.
 
@@ -2526,6 +2782,11 @@ def read_atera_transcripts_for_genes(
                 continue
             group = root["grid"][tile.key]
             gene_offset = np.asarray(group["gene_offset"][:])
+            if gene_offset.shape != (len(categories), 2):
+                raise AteraFormatError(
+                    f"tile {tile.key} gene_offset has shape {gene_offset.shape}, "
+                    f"not ({len(categories)}, 2)"
+                )
             for code in codes:
                 start, stop = (int(v) for v in gene_offset[code])
                 if stop <= start:

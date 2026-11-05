@@ -319,8 +319,6 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
             'obs["nucleus_area"] = summary["nucleus_area"].to_numpy(np.float64)',
             'obs["nucleus_area_total"] = '
             "np.asarray(nucleus_area_total, dtype=np.float64)",
-            "obs_columns = _read_columns("
-            'obs_group, ("cell_id", "cell_area", "nucleus_area"))',
         ),
         "src/merxen/io/spatialdata_io.py": (
             'if "cell" in str(key).lower() and "nucleus" not in str(key).lower()',

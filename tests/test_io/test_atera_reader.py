@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import pickle
+import re
 import shutil
 import threading
 import time
+import weakref
 from collections import Counter
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -19,7 +21,9 @@ import numpy as np
 import pandas as pd
 import psutil
 import pytest
+import shapely
 import spatialdata as sd
+import tifffile
 import zarr
 from spatialdata.models import Image2DModel, PointsModel
 from spatialdata.transformations import Identity, Scale, get_transformation
@@ -33,6 +37,7 @@ from merxen.io.atera_reader import (
 )
 from merxen.segmentation import mask_geometry
 from merxen.segmentation.cellpose import assign_labels_from_masks
+from merxen.segmentation.mask_geometry import masks_to_labeled_polygons
 
 from .atera_synth import (
     EMPTY_POLYGON_CELL,
@@ -42,6 +47,7 @@ from .atera_synth import (
     TWO_NUCLEUS_CELL,
     AteraSynth,
     cell_id_strings,
+    rewrite_zip_store,
     write_atera_bundle,
 )
 
@@ -111,11 +117,22 @@ def test_resolve_from_experiment_spatial(default_bundle: tuple) -> None:
     assert bundle.analysis_summary_file not in bundle.sidecars
 
 
-def test_resolve_globs_prefixed_companions(atera: BundleFactory) -> None:
+def test_resolve_globs_prefixed_companions(
+    atera: BundleFactory, tmp_path: Path
+) -> None:
     synth, bundle = atera(prefixed_companions=True)
     assert bundle.transcripts_zip == synth.zip_path("transcripts")
     assert bundle.cells_zip == synth.zip_path("cells")
     assert bundle.cell_feature_matrix_zip == synth.zip_path("cell_feature_matrix")
+    # The prefixed viz stores never stand in for the primary ones.
+    root = _copy_bundle(synth, tmp_path)
+    prefix = synth.zip_path("transcripts").name.removesuffix("transcripts.zarr.zip")
+    source = root / f"{prefix}transcripts.zarr.zip"
+    for name in ("binned_transcripts", "csc_cell_feature_matrix"):
+        shutil.copy(source, root / f"{prefix}{name}.zarr.zip")
+    copy = ar.resolve_atera_bundle(root)
+    assert copy.transcripts_zip.name == f"{prefix}transcripts.zarr.zip"
+    assert copy.cell_feature_matrix_zip.name == f"{prefix}cell_feature_matrix.zarr.zip"
 
 
 def test_explicit_paths_win(default_bundle: tuple, tmp_path: Path) -> None:
@@ -141,19 +158,57 @@ def test_spec_override_is_metadata_only(default_bundle: tuple, tmp_path: Path) -
     assert bundle.root == synth.root
 
 
+def _edit_experiment(root: Path, **fields: Any) -> None:
+    path = root / "experiment.spatial"
+    experiment = json.loads(path.read_text())
+    experiment.update(fields)
+    path.write_text(json.dumps(experiment))
+
+
+def _set_attrs(**attrs: Any) -> Callable[[zarr.Group], None]:
+    def edit(group: zarr.Group) -> None:
+        group.attrs.update(attrs)
+
+    return edit
+
+
 @pytest.mark.parametrize(
-    ("kwargs", "message"),
+    ("zip_name", "attrs", "message"),
     [
-        ({"rna_major_version": 7}, "RnaDataset major_version 7"),
-        ({"cells_major_version": 5}, "CellSegmentationDataset major_version 5"),
-        ({"analysis_sw_version": "xenium-3.0.0"}, "not an Atera version"),
+        ("transcripts", {"major_version": 7}, "RnaDataset major_version 7"),
+        ("cells", {"major_version": 5}, "CellSegmentationDataset major_version 5"),
+        ("transcripts", {"coordinate_space": "pixels"}, "coordinate_space"),
+        ("transcripts", {"spatial_units": "pixels"}, "transcripts spatial_units"),
+        ("cells", {"spatial_units": "mm"}, "cells spatial_units"),
     ],
 )
-def test_unknown_versions_fail_loudly(
-    atera: BundleFactory, kwargs: dict[str, Any], message: str, tmp_path: Path
+def test_unknown_store_headers_fail_loudly(
+    default_bundle: tuple,
+    tmp_path: Path,
+    zip_name: str,
+    attrs: dict[str, Any],
+    message: str,
 ) -> None:
-    root = tmp_path / "roi"
-    write_atera_bundle(root, **kwargs)
+    synth, _ = default_bundle
+    root = _copy_bundle(synth, tmp_path)
+    rewrite_zip_store(root / f"{zip_name}.zarr.zip", _set_attrs(**attrs))
+    with pytest.raises(AteraFormatError, match=message):
+        ar.resolve_atera_bundle(root)
+
+
+@pytest.mark.parametrize(
+    ("fields", "message"),
+    [
+        ({"analysis_sw_version": "xenium-3.0.0"}, "not an Atera version"),
+        ({"major_version": 2}, "experiment.spatial major_version 2"),
+    ],
+)
+def test_unknown_experiment_versions_fail_loudly(
+    default_bundle: tuple, tmp_path: Path, fields: dict[str, Any], message: str
+) -> None:
+    synth, _ = default_bundle
+    root = _copy_bundle(synth, tmp_path)
+    _edit_experiment(root, **fields)
     with pytest.raises(AteraFormatError, match=message):
         ar.resolve_atera_bundle(root)
 
@@ -380,6 +435,7 @@ def test_aggregates_match_a_direct_count(default_bundle: tuple) -> None:
     np.testing.assert_array_equal(
         summary.gene_counts_kept, np.bincount(kept["gene"], minlength=n_genes)
     )
+    np.testing.assert_array_equal(summary.gene_counts_q20, summary.gene_counts_kept)
     with zarr.storage.ZipStore(bundle.transcripts_zip, mode="r") as store:
         vendor = zarr.open_group(store, mode="r")["grid"].attrs["gene_counts"]
     np.testing.assert_array_equal(summary.gene_counts_all_qv, vendor)
@@ -390,12 +446,37 @@ def test_aggregates_match_a_direct_count(default_bundle: tuple) -> None:
         qv = truth.loc[truth["tile"] == key, "qv"].astype(np.float64)
         expected = np.bincount((qv / 0.25).round().astype(int), minlength=161)
         np.testing.assert_array_equal(histogram, expected)
+        mean = summary.mean_qv_per_tile[key]
+        assert mean == (pytest.approx(qv.mean()) if len(qv) else None)
     assert summary.bounds_um["x_min"] == pytest.approx(float(truth["x"].min()))
     assert summary.bounds_um["y_min"] < 0
     assert int(summary.density.sum()) == len(kept)
     attrs = summary.to_attrs()
     json.dumps(attrs)
     assert attrs["n_points_written"] == len(kept)
+    assert attrs["gene_counts_q20"] == summary.gene_counts_q20.tolist()
+
+
+def test_q20_totals_are_recorded_without_a_filter(default_bundle: tuple) -> None:
+    synth, bundle = default_bundle
+    points, _, aggregates = ar.read_atera_transcripts(
+        bundle, min_qv=None, partition_rows=16
+    )
+    with dask.config.set(scheduler="sync"):
+        points.compute()
+        # A re-executed partition is counted once.
+        points.get_partition(0).compute()
+    summary = aggregates.summary()
+    truth = synth.transcripts
+    q20 = truth[truth["qv"].astype(np.float64) >= 20.0]
+    n_genes = len(synth.gene_names)
+    np.testing.assert_array_equal(
+        summary.gene_counts_q20, np.bincount(q20["gene"], minlength=n_genes)
+    )
+    np.testing.assert_array_equal(
+        summary.gene_counts_kept, np.bincount(truth["gene"], minlength=n_genes)
+    )
+    assert summary.n_rows_read == summary.n_rows_kept == len(truth)
 
 
 def test_reads_for_genes_use_gene_offset_slices(default_bundle: tuple) -> None:
@@ -428,9 +509,18 @@ def test_cell_lookup_handles_shuffled_keys_and_rejects_unknown_ids() -> None:
 
 def test_gene_offset_must_cover_the_tile() -> None:
     with pytest.raises(AteraFormatError, match="contiguous"):
-        ar._gene_codes(np.array([[0, 3], [4, 6]], dtype=np.uint32), 0, 6, 6)
-    codes = ar._gene_codes(np.array([[0, 3], [3, 3], [3, 6]], dtype=np.uint32), 2, 5, 6)
-    assert codes.tolist() == [0, 2, 2]
+        ar._gene_codes(np.array([[0, 3], [4, 6]], dtype=np.uint32), 0, 6, 6, 2)
+    offsets = np.array([[0, 3], [3, 3], [3, 6]], dtype=np.uint32)
+    with pytest.raises(AteraFormatError, match=r"not \(4, 2\)"):
+        ar._gene_codes(offsets, 0, 6, 6, 4)
+    assert ar._gene_codes(offsets, 2, 5, 6, 3).tolist() == [0, 2, 2]
+    # Selected rows (tile_blocks) get the same codes as the full range.
+    full = ar._gene_codes(offsets, 0, 6, 6, 3)
+    selected = np.array([0, 2, 3, 5])
+    assert ar._gene_codes(offsets, 0, 6, 6, 3, selected).tolist() == (
+        full[selected].tolist()
+    )
+    assert ar._gene_codes(offsets, 2, 5, 6, 3, np.array([0, 1])).tolist() == [0, 2]
 
 
 # --------------------------------------------------------------------------- #
@@ -486,26 +576,27 @@ def test_row_range_never_reads_a_whole_tile(
     assert max(synth.tile_rows.values()) > 16
 
 
-def test_tile_blocks_bound_concurrent_tile_decodes(
+def test_tile_blocks_bound_live_whole_tile_columns(
     default_bundle: tuple, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _, bundle = default_bundle
     lock = threading.Lock()
     state = {"now": 0, "peak": 0}
-    original = ar.open_zip_group
+    original = ar._read_rows
 
-    @contextmanager
-    def tracked(path: Path) -> Iterator[Any]:
+    def release() -> None:
+        with lock:
+            state["now"] -= 1
+
+    def tracked(tile: Any, name: str, rows: slice) -> np.ndarray:
+        values = original(tile, name, rows)
         with lock:
             state["now"] += 1
             state["peak"] = max(state["peak"], state["now"])
-        try:
-            time.sleep(0.02)
-            with original(path) as group:
-                yield group
-        finally:
-            with lock:
-                state["now"] -= 1
+        # Counts every whole-tile column until its memory is freed.
+        weakref.finalize(values, release)
+        time.sleep(0.01)
+        return values
 
     points, specs, _ = ar.read_atera_transcripts(
         bundle,
@@ -513,12 +604,47 @@ def test_tile_blocks_bound_concurrent_tile_decodes(
         block_um=2.5,
         min_block_rows=1,
         max_tiles_in_flight=2,
+        tile_allowlist=["0,0", "0,1"],
     )
-    assert sum(spec.block_bounds_um is not None for spec in specs) >= 16
-    monkeypatch.setattr(ar, "open_zip_group", tracked)
+    assert all(spec.block_bounds_um is not None for spec in specs)
+    assert len(specs) == 32
+    monkeypatch.setattr(ar, "_read_rows", tracked)
     with dask.config.set(scheduler="threads", num_workers=8):
         points.compute()
+    # One whole-tile column per tile in flight: each is cut to its block (or
+    # dropped) before the next column of that tile is read.
     assert 1 <= state["peak"] <= 2
+    assert state["now"] == 0
+
+
+def test_transcript_reads_refuse_other_processes(default_bundle: tuple) -> None:
+    _, bundle = default_bundle
+    points, _, _ = ar.read_atera_transcripts(bundle, partition_rows=16)
+    with (
+        pytest.raises(TypeError, match="threaded or synchronous scheduler"),
+        dask.config.set(scheduler="processes", num_workers=2),
+    ):
+        points.compute()
+    reader = ar._PartitionReader(*_reader_parts(bundle))
+    with pytest.raises(TypeError, match="threaded or synchronous scheduler"):
+        pickle.dumps(reader)
+
+
+def _reader_parts(
+    bundle: ar.AteraBundle,
+) -> tuple[Any, ar.TranscriptAggregates]:
+    tiles = ar.read_atera_tile_index(bundle)
+    context = ar._transcript_context(
+        bundle, tiles, min_qv=20.0, emit_codeword_index=False
+    )
+    aggregates = ar.TranscriptAggregates(
+        1,
+        tile_keys=[tile.key for tile in tiles],
+        n_genes=len(context.gene_dtype.categories),
+        min_qv=20.0,
+        density_grid=context.density_grid,
+    )
+    return context, aggregates
 
 
 # --------------------------------------------------------------------------- #
@@ -560,6 +686,85 @@ def test_labels_are_rows_plus_one(default_bundle: tuple) -> None:
     rows, cols = np.nonzero(synth.cell_mask == 2)
     r0, r1, c0, c1 = synth.cell_rects[1][0]
     assert (rows.min(), rows.max() + 1, cols.min(), cols.max() + 1) == (r0, r1, c0, c1)
+
+
+def _bump_nucleus_count(group: zarr.Group) -> None:
+    array = group["cell_summary"]
+    values = np.asarray(array[:])
+    values[0, list(array.attrs["column_names"]).index("nucleus_count")] += 1
+    array[...] = values
+
+
+def _duplicate_first_cell_id(group: zarr.Group) -> None:
+    values = np.asarray(group["cell_id"][:])
+    values[1] = values[0]
+    group["cell_id"][...] = values
+
+
+def _swap_cell_polygon_rows(group: zarr.Group) -> None:
+    array = group["polygon_sets/1/cell_index"]
+    values = np.asarray(array[:])
+    values[[0, 1]] = values[[1, 0]]
+    array[...] = values
+
+
+@pytest.mark.parametrize(
+    ("edit", "message"),
+    [
+        (_bump_nucleus_count, "nucleus_count disagrees"),
+        (_duplicate_first_cell_id, "duplicate cell IDs"),
+        (_swap_cell_polygon_rows, "not the cell row order"),
+    ],
+)
+def test_inconsistent_cell_records_fail(
+    default_bundle: tuple,
+    tmp_path: Path,
+    edit: Callable[[zarr.Group], None],
+    message: str,
+) -> None:
+    synth, _ = default_bundle
+    root = _copy_bundle(synth, tmp_path)
+    rewrite_zip_store(root / "cells.zarr.zip", edit)
+    with pytest.raises(AteraFormatError, match=message):
+        ar.read_atera_cells(ar.resolve_atera_bundle(root))
+
+
+def test_grid_counts_must_match_location_rows(
+    default_bundle: tuple, tmp_path: Path
+) -> None:
+    synth, _ = default_bundle
+    root = _copy_bundle(synth, tmp_path)
+
+    def bump(group: zarr.Group) -> None:
+        counts = list(group["grid"].attrs["grid_number_objects"])
+        counts[0] += 1
+        group["grid"].attrs["grid_number_objects"] = counts
+
+    rewrite_zip_store(root / "transcripts.zarr.zip", bump)
+    bundle = ar.resolve_atera_bundle(root)
+    with pytest.raises(AteraFormatError, match="location rows"):
+        ar.read_atera_tile_index(bundle)
+
+
+def test_morphology_uuid_must_match_tiffdata(
+    default_bundle: tuple, tmp_path: Path
+) -> None:
+    synth, _ = default_bundle
+    root = _copy_bundle(synth, tmp_path)
+    path = root / "morphology_2d" / synth.channel_files[1]
+    xml = tifffile.tiffcomment(path)
+    assert isinstance(xml, str)
+    other = 'UUID="urn:uuid:00000000-0000-4000-8000-0000000000ff"'
+    edited = re.sub(r'UUID="urn:uuid:[^"]*"', other, xml, count=1)
+    tifffile.tiffcomment(path, edited.encode())
+    with pytest.raises(AteraFormatError, match="UUID does not match"):
+        ar.resolve_atera_bundle(root)
+
+
+def test_labels_must_match_the_morphology_shape(default_bundle: tuple) -> None:
+    _, bundle = default_bundle
+    with pytest.raises(AteraFormatError, match="morphology shape"):
+        ar.read_atera_labels(replace(bundle, morphology_shape_yx=(1, 1)))
 
 
 def test_homogeneous_transform_check() -> None:
@@ -650,6 +855,100 @@ def test_mask_shapes_columns_and_ids(mask_shapes: dict[str, Any]) -> None:
     assert stats["n_multipolygons"] == 1
     assert stats["n_shapes"] == cells.n_cells
     assert not list(mask_shapes["workdir"].glob("*.npy"))
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (lambda labeled: labeled[:-1], "without a polygon"),
+        (
+            lambda labeled: [*labeled, (len(labeled) + 1, labeled[0][1])],
+            "exceeds",
+        ),
+    ],
+)
+def test_mask_labels_must_match_the_records(
+    default_bundle: tuple,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: Callable[[list[Any]], list[Any]],
+    message: str,
+) -> None:
+    _, bundle = default_bundle
+    cells = ar.read_atera_cells(bundle)
+
+    def polygonise(*args: Any, **kwargs: Any) -> list[Any]:
+        return change(masks_to_labeled_polygons(*args, **kwargs))
+
+    monkeypatch.setattr(ar, "masks_to_labeled_polygons", polygonise)
+    with pytest.raises(AteraFormatError, match=message):
+        ar.atera_shapes_from_masks(bundle, cells, n_jobs=1, workdir=tmp_path)
+    assert not list(tmp_path.glob("*.npy"))
+
+
+def test_mask_shapes_refuse_fork(default_bundle: tuple, tmp_path: Path) -> None:
+    _, bundle = default_bundle
+    cells = ar.read_atera_cells(bundle)
+    with pytest.raises(ValueError, match="fork is unsafe"):
+        ar.atera_shapes_from_masks(
+            bundle,
+            cells,
+            n_jobs=1,
+            workdir=tmp_path,
+            mp_context="fork",  # type: ignore[arg-type]
+        )
+
+
+def test_failed_mask_export_leaves_no_npy(
+    default_bundle: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, bundle = default_bundle
+    cells = ar.read_atera_cells(bundle)
+
+    def partial_export(bundle: Any, member: str, path: Path, **kwargs: Any) -> Path:
+        path.write_bytes(b"partial")
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(ar, "export_mask_npy", partial_export)
+    with pytest.raises(OSError, match="no space"):
+        ar.atera_shapes_from_masks(bundle, cells, n_jobs=1, workdir=tmp_path)
+    assert not list(tmp_path.glob("*.npy"))
+
+
+def test_default_simplification_keeps_curved_contours() -> None:
+    # An irregular blob: a disc joined to an offset ellipse, unlike the
+    # fixture's rectangles, so simplifying really removes vertices.
+    rows, cols = np.mgrid[0:80, 0:90]
+    blob = ((rows - 35) ** 2 + (cols - 30) ** 2 < 22**2) | (
+        ((rows - 45) / 14.0) ** 2 + ((cols - 60) / 25.0) ** 2 < 1
+    )
+    mask = blob.astype(np.int32)
+    ps = 0.21249222
+    [(_, contour)] = masks_to_labeled_polygons(mask, n_jobs=1)
+    full = ar._pixel_polygons_to_microns(np.array([contour]), ps, 0.0)[0]
+    simple = ar._pixel_polygons_to_microns(
+        np.array([contour]), ps, ar.DEFAULT_SIMPLIFY_PX, n_threads=2
+    )[0]
+    assert ar.DEFAULT_SIMPLIFY_PX == 0.25
+    assert shapely.get_num_coordinates(simple) < shapely.get_num_coordinates(full)
+    # Sub-0.5 px tolerances only drop collinear staircase vertices.
+    assert shapely.hausdorff_distance(simple, full) <= 0.25 * ps + 1e-9
+    r, c = np.nonzero(mask)
+    centroid = ((c.mean() + 0.5) * ps, (r.mean() + 0.5) * ps)
+    assert abs(simple.centroid.x - centroid[0]) < 0.01
+    assert abs(simple.centroid.y - centroid[1]) < 0.01
+    assert simple.area == pytest.approx(mask.sum() * ps**2, rel=0.01)
+
+
+def test_vendor_polygons_with_too_few_vertices_fail(default_bundle: tuple) -> None:
+    _, bundle = default_bundle
+    cells = ar.read_atera_cells(bundle)
+    counts = cells.cell_num_vertices.copy()
+    counts[0] = 3
+    with pytest.raises(AteraFormatError, match="1-3 vertices"):
+        ar.atera_shapes_from_vendor_polygons(
+            replace(cells, cell_num_vertices=counts), bundle.pixel_size_um
+        )
 
 
 def test_vendor_polygon_fallback(default_bundle: tuple) -> None:
@@ -826,6 +1125,25 @@ def test_table_rejects_a_different_cell_order(default_bundle: tuple) -> None:
     reordered = replace(cells, source_cell_id=cells.source_cell_id[::-1].copy())
     with pytest.raises(AteraFormatError, match="barcodes differ"):
         ar.read_atera_table(bundle, reordered, nucleus_area_total=np.zeros(6))
+    packed = cells.vendor_cell_id.copy()
+    packed[0] += 1
+    with pytest.raises(AteraFormatError, match=r"obs\.cell_id differs"):
+        ar.read_atera_table(
+            bundle, replace(cells, vendor_cell_id=packed), nucleus_area_total=None
+        )
+
+
+def test_table_features_must_match_transcript_genes(
+    default_bundle: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, bundle = default_bundle
+    cells = ar.read_atera_cells(bundle)
+    genes = ar.read_atera_gene_names(bundle)
+    monkeypatch.setattr(
+        ar, "read_atera_gene_names", lambda bundle: (*genes[1:], genes[0])
+    )
+    with pytest.raises(AteraFormatError, match="differ from transcripts gene_names"):
+        ar.read_atera_table(bundle, cells)
 
 
 # --------------------------------------------------------------------------- #
@@ -911,15 +1229,28 @@ def test_sanitized_panel_and_metrics(default_bundle: tuple) -> None:
     assert bundle.panel_config_file is not None
     panel = json.loads(bundle.panel_config_file.read_text())
     assert "customer" in panel["payloads"][0]
+    assert "designed_by" in panel["payloads"][0]["designer"]
     clean = ar.sanitize_panel_config(panel)
     _assert_no_identifiers(json.dumps(clean))
-    assert "customer" not in clean["payloads"][0]
-    assert clean["payloads"][0]["targets"] == panel["payloads"][0]["targets"]
+    assert set(clean) == {"spec_version", "payloads"}
+    payload = clean["payloads"][0]
+    assert set(payload) == {"chemistry", "panel", "targets", "designer"}
+    assert payload["designer"] == {"version": "1"}
+    assert payload["targets"] == panel["payloads"][0]["targets"]
     metrics = next(p for p in bundle.sidecars if p.name.startswith("metrics_summary"))
     text = ar.sanitize_metrics_summary(metrics.read_text())
     _assert_no_identifiers(text)
-    header = text.splitlines()[0].split(",")
-    assert "num_cells_detected" in header and "run_name" not in header
+    header, values = (line.split(",") for line in text.splitlines())
+    assert header == [
+        "panel_config_id",
+        "panel_wta_design_id",
+        "num_cells_detected",
+        "fraction_transcripts_assigned",
+        "median_genes_per_cell_panel_a",
+    ]
+    assert values == ["hWTA_cfg", "hWTA_v1", str(synth.n_cells), "0.5", ""]
+    # A metric-named column holding text is dropped too.
+    assert ar.sanitize_metrics_summary("num_x,num_y\n1,abc\n") == "num_x\n1\n"
 
 
 def test_neutral_sidecar_names(default_bundle: tuple) -> None:
@@ -934,10 +1265,21 @@ def test_neutral_sidecar_names(default_bundle: tuple) -> None:
     assert ar.neutral_sidecar_name("Some_dataset_he_imagealignment.csv") == (
         "he_imagealignment.csv"
     )
-    assert ar.neutral_sidecar_name("Some_dataset_transcripts.zarr.zip") == (
-        "transcripts.zarr.zip"
+    for name, neutral in (
+        ("Some_dataset_transcripts.zarr.zip", "transcripts.zarr.zip"),
+        ("binned_transcripts.zarr.zip", "binned_transcripts.zarr.zip"),
+        ("Some_dataset_binned_transcripts.zarr.zip", "binned_transcripts.zarr.zip"),
+        ("csc_cell_feature_matrix.zarr.zip", "csc_cell_feature_matrix.zarr.zip"),
+        ("Some_csc_cell_feature_matrix.zarr.zip", "csc_cell_feature_matrix.zarr.zip"),
+        ("Some_dataset_cell_feature_matrix.zarr.zip", "cell_feature_matrix.zarr.zip"),
+        ("panel_config.json", "panel_config.json"),
+    ):
+        assert ar.neutral_sidecar_name(name) == neutral
+    explorer = ar.sanitize_experiment_spatial(bundle.experiment)["explorer_files"]
+    assert explorer["transcripts_viz_zarr_filepath"] == "binned_transcripts.zarr.zip"
+    assert explorer["cell_feature_viz_zarr_filepath"] == (
+        "csc_cell_feature_matrix.zarr.zip"
     )
-    assert ar.neutral_sidecar_name("panel_config.json") == "panel_config.json"
 
 
 def test_reader_outputs_carry_no_identifiers(default_bundle: tuple) -> None:
