@@ -18,7 +18,7 @@ Then:
 
 - Filter each platform's gene set to retain only panel genes (drops Xenium
   control codes and MERSCOPE blanks).
-- CP10K-style normalization: scale to sum = 10 000.
+- Normalize each vector to fractions of its platform total (sum = 1).
 - Align genes across platforms and emit four DataFrames
   (total, assigned, total-normalized, assigned-normalized).
 - Fit a linear regression in log10 space on the normalized counts to
@@ -39,13 +39,14 @@ Then:
 | Function | File |
 |----------|------|
 | CLI `compare_command` | [cli/run_comparison.py:37](../../src/merxen/cli/run_comparison.py#L37) |
-| `compute_gene_comparison_from_paths` | [qc/gene_comparison.py:187](../../src/merxen/qc/gene_comparison.py#L187) |
-| `compute_gene_comparison` | [qc/gene_comparison.py:123](../../src/merxen/qc/gene_comparison.py#L123) |
-| `gene_totals_from_points` | [qc/gene_comparison.py:29](../../src/merxen/qc/gene_comparison.py#L29) |
-| `gene_totals_from_table` | [qc/gene_comparison.py:18](../../src/merxen/qc/gene_comparison.py#L18) |
-| `apply_dataset_filter` | [qc/gene_comparison.py:76](../../src/merxen/qc/gene_comparison.py#L76) |
-| `normalize_counts` | [qc/gene_comparison.py:92](../../src/merxen/qc/gene_comparison.py#L92) |
-| `fit_linear` | [qc/gene_comparison.py:112](../../src/merxen/qc/gene_comparison.py#L112) |
+| `compute_gene_comparison_from_paths` | [qc/gene_comparison.py:337](../../src/merxen/qc/gene_comparison.py#L337) |
+| `compute_gene_comparison` | [qc/gene_comparison.py:216](../../src/merxen/qc/gene_comparison.py#L216) |
+| `gene_totals_from_points` | [qc/gene_comparison.py:80](../../src/merxen/qc/gene_comparison.py#L80) |
+| `gene_totals_from_table` | [qc/gene_comparison.py:40](../../src/merxen/qc/gene_comparison.py#L40) |
+| `feature_types_from_table` | [qc/gene_comparison.py:56](../../src/merxen/qc/gene_comparison.py#L56) |
+| `apply_dataset_filter` | [qc/gene_comparison.py:147](../../src/merxen/qc/gene_comparison.py#L147) |
+| `normalize_counts` | [qc/gene_comparison.py:185](../../src/merxen/qc/gene_comparison.py#L185) |
+| `fit_linear` | [qc/gene_comparison.py:205](../../src/merxen/qc/gene_comparison.py#L205) |
 
 ## Config schema
 
@@ -66,11 +67,42 @@ Then:
      unassigned transcripts.
    - `x_assigned_all` / `m_assigned_all` — `gene_totals_from_table`, sums
      the `.X` matrix in each platform's primary table.
-3. `apply_dataset_filter` strips platform-specific non-panel genes:
-   - Xenium: drops codeword / control / unassigned patterns.
-   - MERSCOPE: drops `Blank-*` probes.
-4. `normalize_counts` rescales each vector so its entries sum to 10 000,
-   returning the normalized vector and the original total.
+3. `apply_dataset_filter` strips control features with the shared registry
+   in [control_features.py](../../src/merxen/control_features.py). The ProSeg
+   input uses the same name rules, with per-transcript feature types
+   ([segmentation.md](segmentation.md#control-features-in-the-proseg-input));
+   clustering only applies the control tokens.
+   - A gene whose table `var` records a 10x feature type (`feature_types`
+     or `feature_type`) of `Gene Expression` is kept, and one whose type is
+     a 10x control category (`Negative Control Codeword`, `Negative Control
+     Probe`, `Genomic Control`, `Unassigned Codeword`, `Deprecated
+     Codeword`, `Blank Codeword`) is dropped. `feature_types_from_table`
+     reads the types, keyed by the `gene` column, else `feature_name`, else
+     `var_names`; the same types apply to the point totals.
+   - Other genes, including those with another type such as `Protein
+     Expression`, are controls when the name matches the platform's anchored
+     pattern (Xenium: `NegControl`, `Unassigned`, `Deprecated`,
+     `Intergenic`, `GenomicControl`, `BLANK_`, `antisense_`; MERSCOPE:
+     `Blank-<N>`) or contains a control token (`blank`, `control`,
+     `negative`, `negcontrol`, `unassigned`, `deprecated`, `intergenic`,
+     case-insensitive). Every prefix but `antisense_` also contains a token,
+     so the platform only decides whether `antisense_*` is a control.
+
+   Older releases filtered Xenium genes by name only, dropping names
+   containing `UnassignedCodeword`, `NegControlCodeword` or
+   `NegControlProbe`. `DeprecatedCodeword_*`, `Intergenic_Region_*` (Xenium
+   Prime 5K genomic controls), `BLANK_*`, `antisense_*` and
+   `GenomicControl*` features therefore entered the Xenium totals. For
+   Xenium data with any of those features in its transcripts, comparison
+   outputs written by those releases are stale:
+   `<pair_id>_total_normalized_compare.csv` (Xenium column) and
+   `<pair_id>_comparison_metrics.json` (`xenium_total_sum` and the
+   `total_log10` intercept; slope and R² only move when a shared gene has no
+   Xenium transcripts). When the primary table was built from the Xenium
+   `cell_feature_matrix` files instead of the HDF5 matrix, it can hold such
+   features too, so the assigned outputs are stale as well.
+4. `normalize_counts` divides each vector by its total, so its entries sum
+   to 1, and returns the normalized vector and the original total.
 5. `compare_df` joins the two platforms on gene name, keeping only genes
    present in both. Produces one DataFrame per count type.
 6. `fit_linear` fits `log10(merscope) = slope × log10(xenium) + intercept`
@@ -84,8 +116,8 @@ Written under `compare_out/`:
 |------|----------|
 | `<pair_id>_total_counts_compare.csv` | Gene × platform total counts. |
 | `<pair_id>_assigned_counts_compare.csv` | Gene × platform counts from the table. |
-| `<pair_id>_total_normalized_compare.csv` | CP10K-normalized total counts. |
-| `<pair_id>_assigned_normalized_compare.csv` | CP10K-normalized assigned counts. |
+| `<pair_id>_total_normalized_compare.csv` | Total counts as fractions of each platform total. |
+| `<pair_id>_assigned_normalized_compare.csv` | Assigned counts as fractions of each platform total. |
 | `<pair_id>_comparison_metrics.json` | Platform totals plus linear-fit metrics. |
 
 The metrics JSON has the form:
