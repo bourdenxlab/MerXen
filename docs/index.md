@@ -63,6 +63,10 @@ converge at alignment; dashed stations are governed by a parameter. See
 - [Cellpose HITL testing guide](hitl/testing-guide.md) — runtime acceptance and
   the planned custom-model checks.
 
+### Plans
+- [10x Atera support](plans/atera-support-plan.md) — reading Atera
+  whole-transcriptome bundles in the build stage, and the downstream changes.
+
 ## Project files at a glance
 
 | Path | Purpose |

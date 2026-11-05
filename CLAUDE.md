@@ -45,6 +45,7 @@ python scripts/update_env_lock_hash.py
 - Do not install packages with `pip install <package>`. Add to `pyproject.toml` and regenerate the lockfile.
 - Do not commit to `main` directly. Use a feature branch and open a PR.
 - Exception: the robust cell-type annotation effort (`docs/plans/robust-celltype-annotation-plan.md`) uses the long-lived integration branch `feature/robust-celltype-annotation`. Milestone branches `feature/rca-m<N>-<slug>` are cut from it and merged into it by PR. Keep it current by merging `main` into it; never rebase it. Only acceptance-gate PRs merge it into `main`. Data-integrity bugfixes still go to `main` first and are then merged into it.
+- Exception: the 10x Atera support effort (`docs/plans/atera-support-plan.md`) follows the same model on the long-lived integration branch `feature/atera-support`. Its behaviour-neutral milestones (AT-0 to AT-2) merge straight to `main`. Atera work from AT-3 onward goes on work-package branches `feature/atera-<wp>-<slug>`, cut from the integration branch and merged into it by PR. Merge `main` into it; never rebase it. Only acceptance-gate PRs merge it into `main`.
 
 ## Privacy: no host paths, no sample names
 
