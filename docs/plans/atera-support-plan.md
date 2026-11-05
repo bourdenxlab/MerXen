@@ -71,8 +71,13 @@ Segmentation, enrichment and the later stages can open it with only the consumer
      - table IDs = shape IDs.
 3. **Points reproduce the vendor matrix exactly.**
    - Count points per cell × feature, keeping rows with `qv ≥ 20` and an assigned cell.
-   - The result must equal the vendor CFM `X` **over all 24,677 columns**: 638,849,927 counts, of which
-     638,693,512 are gene counts [H, target totals].
+   - The result must equal the vendor CFM `X` over every column whose vendor all-QV `gene_counts` is
+     above 0: 638,849,843 counts, of which 638,693,512 are gene counts [H, target totals].
+   - The CFM excess is asserted to be exactly the 84 counts in the four `DeprecatedCodeword_*` columns that
+     have no transcripts at all (`codeword_counts` = 0, grid `gene_counts` = 0; AT-3 review). It is a
+     vendor matrix quirk, recorded as a vendor difference.
+   - Every sum is taken in int64 (`X.sum(dtype=np.int64)` or the integer CSR data); a float32 sum is off
+     by tens of counts at this size.
    - The count runs as a streaming COO accumulation over all features, so it also checks the control
      mapping.
 4. **Labels match the vendor cell summary exactly.** The full-section streaming pass takes about 85–103 s
@@ -83,8 +88,8 @@ Segmentation, enrichment and the later stages can open it with only the consumer
    - Every `nucleus_labels` pixel lies on its owning cell's `cell_labels` label: 0 violations, mapped via
      `polygon_sets/0/cell_index[label−1]`.
    - The largest labels are 91,431 (cells) and 90,238 (nuclei), and no label is empty.
-   - Mask-derived shape centroids are within 0.01 µm of `cell_summary`. This is the half-pixel check
-     (§3.5).
+   - Mask-derived shape centroids, simplified at the default 0.25 px, are within 0.01 µm of
+     `cell_summary`. This is the half-pixel check (§3.5).
 5. **Downstream code can find the store's metadata.**
    - `sd.read_zarr(store)` succeeds.
    - `platforms.find_um_per_px(store, "ATERA") == 0.21249222`.
@@ -338,7 +343,7 @@ standalone `transcripts.zarr.zip` are the same size (15,627,165,982 B) [H].
 | D3 | Transcript policy | QV ≥ 20 at build; controls kept and flagged; vendor-ordinal `transcript_id`; pre-filter QV histograms recorded | Keep everything; also drop controls/unassigned | Recommended (Q4) |
 | D4 | Transcript storage | Lean numeric/categorical columns; partitions never cross a tile; **`row_range` default**; `tile_blocks` opt-in only with a decode cap | One partition per tile; full spatial re-sort | Recommended; AT-5 may promote `tile_blocks` |
 | D5 | Images | `morphology_focus` = all `morphology_2d` channels in OME order, stored pyramid; no 3D, no H&E | Single-channel elements; 3D included | Recommended |
-| D6 | Segmentation → elements | Labels from masks; shapes polygonised from masks with the **+0.5 px** correction and 0.5 px topology-preserving simplification | Vendor polygons | Recommended (Q5) |
+| D6 | Segmentation → elements | Labels from masks; shapes polygonised from masks with the **+0.5 px** correction and 0.25 px topology-preserving simplification | Vendor polygons | Recommended (Q5) |
 | D7 | Cell IDs | `instance_id` = cell row + 1 = mask label. Nuclei get their own IDs (nucleus row + 1) **plus `cell_instance_id`; nucleus consumers join via `cell_instance_id`** | Nuclei keyed by cell ID | Recommended |
 | D8 | Genes | Symbol `var_names`, `gene_ids` = ENSG; gene-only X; per-type control counts in obs; points keep controls with `is_gene` | ENSG `var_names`; controls in X | Recommended |
 | D9 | Coordinates | `global` = level-0 morphology pixels; µm elements carry `Scale(1/ps)`; vendor transform asserted (rtol 1e-6); **pixel-corner convention, floor lookups** | Use `homogeneous_transform` verbatim | Recommended |
@@ -435,14 +440,18 @@ grow a third arm in every ternary.
 - `min_qv = null` keeps all 1.64e9 rows. The raw `transcripts.zarr.zip` remains the archive for QV QC.
 - **Spatial QV QC survives the filter.** In the same pass as the write, the build records, before
   filtering:
-  - per-tile and per-FOV QV histograms (129 bins) and mean QV;
-  - Q20 per-gene totals;
+  - per-tile and per-FOV QV histograms (161 quarter-QV bins from 0 to 40, stable whatever `min_qv` is)
+    and mean QV;
+  - Q20 per-gene totals (`gene_counts_q20`, recorded whatever `min_qv` is);
   - bounds;
   - a coarse density grid (100 µm).
 
   All go into `attrs["merxen_atera"]`, under unambiguous names: `*_all_qv` for the vendor `gene_counts`,
   `*_q20` for ours. QC and COMPARE never mix the two populations.
 - QV ≥ 20 alone is **not** a substitute for subsampling in the heavy downstream stages (§5).
+- The statistics are recorded by the partition reads themselves, in this process, so the points are
+  computed with dask's threaded (or synchronous) scheduler. The partition function refuses to be pickled,
+  so the `processes` scheduler or a distributed cluster fails loudly instead of losing the statistics.
 
 **Columns of the `transcripts` points element** (about 38 B per row in memory):
 
@@ -492,7 +501,9 @@ grow a third arm in every ternary.
 
   If enabled, it needs one of:
   - **(i)** a process-wide `threading.BoundedSemaphore(max_tiles_in_flight)` around tile decodes in
-    `read_transcript_partition`; or
+    `read_transcript_partition` (AT-3). The semaphore covers the block selection too: each whole-tile
+    column is cut to its block before the next one is read, so at most `max_tiles_in_flight` whole-tile
+    columns are alive. Each block still reads its whole tile, so a tile is read 16 times; or
   - **(ii)** preferred: a per-tile pre-pass that reads only `location` and caches per-block row indices
     as `.npy` (about 0.4 GB per large tile, uint32). Each block task then reads orthogonal selections.
 
@@ -593,13 +604,20 @@ grow a third arm in every ternary.
   - The existing Cellpose branch (`enrich.py:240-266`) has the same −0.5 px bias. That is noted for a
     separate fix, not changed here (cache and output invariance).
 - **Simplification.** Contours are full-resolution (about 100–200 vertices per cell; UNVERIFIED, measured
-  in AT-5). They are simplified with topology-preserving `shapely.simplify` or `coverage_simplify` at
-  0.5 px. Vertex statistics are recorded in attrs.
+  in AT-5). They are simplified with topology-preserving `shapely.simplify` at 0.25 px. Below 0.5 px the
+  simplification removes only collinear staircase vertices: on 379 interior cells of a dense crop
+  centroids and areas equal the unsimplified ones (centroid max 0.0011 µm, median 71 vertices against
+  215), while 0.5 px moves 21% of centroids by more than 0.01 µm (max 0.033 µm; AT-3 review). Vertex
+  statistics are recorded in attrs.
 - **Process safety and cost.**
   - The mask is first written as a memmapped `.npy` in the task work directory (10.4 GB, deleted after).
   - Polygonisation runs in a **subprocess pool started before any dask or zarr thread pool**
     (`forkserver`), with `n_jobs = task.cpus`. Today the default is `os.cpu_count()` = 80 fork workers
-    (`mask_geometry.py:148-156`).
+    (`mask_geometry.py:148-156`). `atera_shapes_from_masks` refuses `fork`: reading the masks has already
+    started zarr threads.
+  - Every worker maps the whole `.npy`, so the pages it touches count as file-backed RSS: 112.7 GB summed
+    over 16 workers on `masks/1`, of which 1.6 GB is anonymous memory (AT-3 review). The watchdog
+    therefore measures anonymous memory (`RssAnon`, or USS/PSS), never `rss`.
   - A new `serial_fallback=False` argument makes a pool failure an error rather than a silent serial loop
     over 91k labels (`:171-178`). The default stays `True` for existing callers.
   - The cell mask is released (`del` + `force_release`) before `masks/0` is loaded.
@@ -883,7 +901,7 @@ def read_atera_transcripts(bundle, *, min_qv, partition_rows, spatial_order, blo
 def read_atera_transcripts_for_genes(bundle, genes: Sequence[str], *, min_qv=None) -> pd.DataFrame
 def read_atera_cells(bundle) -> AteraCells
 def read_atera_labels(bundle) -> dict[str, da.Array]
-def atera_shapes_from_masks(bundle, cells: AteraCells, *, n_jobs: int, simplify_px: float = 0.5,
+def atera_shapes_from_masks(bundle, cells: AteraCells, *, n_jobs: int, simplify_px: float = 0.25,
                             workdir: Path) -> dict[str, gpd.GeoDataFrame]   # subprocess pool, +0.5 px
 def atera_shapes_from_vendor_polygons(cells: AteraCells, pixel_size_um: float) -> dict[str, gpd.GeoDataFrame]
 def read_atera_table(bundle, cells: AteraCells, *, gex_only=True, keep_vendor_annotations=True,
@@ -901,7 +919,7 @@ def _check_cached_atera_build(path: Path, fingerprint: str, *, force_rerun: bool
 def _assemble_atera_sdata(bundle, build_config) -> SpatialData
 def _write_atera_sidecars(bundle, output_path) -> None      # sanitised, neutral names
 def _write_points_index(output_path, specs) -> None
-class RssWatchdog: ...   # psutil process-tree RSS; abort with exit 137 above the limit
+class RssWatchdog: ...   # process-tree anonymous RSS (RssAnon/USS, not rss: §3.5); exit 137 above the limit
 ```
 
 **Build sequence:**
@@ -968,7 +986,7 @@ nucleus_labels: bool = True
 cells_boundaries: bool = True
 nucleus_boundaries: bool = True
 boundary_source: Literal["masks", "vendor_polygons"] = "masks"
-boundary_simplify_px: float = 0.5
+boundary_simplify_px: float = 0.25
 polygon_n_jobs: int | None = None                   # None -> DASK_NUM_WORKERS / task.cpus
 cells_table: bool = True
 table_gex_only: bool = True
@@ -1116,7 +1134,7 @@ The prefix helpers that already build names from `platform.toLowerCase()` (`main
 | Labels | Disk / RAM | 2 × 10.4 GB raw, about 1–3 GB on disk; aligned 4096² chunks; pyramid memory UNVERIFIED | [M] |
 | Mask polygonisation | RAM / CPU / disk | 10.4 GB memmapped `.npy` per mask (temporary) plus a `task.cpus` subprocess pool; minutes to tens of minutes (UNVERIFIED) | [M] |
 | Acceptance streaming checks | RAM / time | About 85–103 s, < 3 GB RSS for both masks | Review run [H] |
-| Table | RAM | +3.2 GB RSS, 6–7 s | [H] |
+| Table | RAM | About 7.8 GB peak process RSS, 12–16 s (AT-3 review; the CFM decode dominates) | [H] |
 | Peak RSS | RAM | About 40–80 GB expected with `row_range` at 16 workers (about 1–1.5 GB per task × 16, plus polygonisation, image, table). **128 GB reservation**, watchdog cap at 120 GB, one retry at ×2 (with atomic writes) | [L] |
 | Staged input | Disk | About 9 GB extracted plus 15.6 + 0.14 + about 0.5 GB of zips | [M] |
 | Source zarr | Disk | About 35–50 GB (plus a transient `.partial` during the write) | [L] |
@@ -1506,7 +1524,7 @@ The remaining questions use their recommended defaults until the user says other
 4. **Transcript QV policy at build.** (a) QV ≥ 20 (1.41e9 rows; reproduces the vendor matrix; pre-filter QV
    maps kept in attrs); (b) keep all (1.64e9); (c) also drop controls and unassigned (about 0.64e9).
    *Recommended: (a).*
-5. **Shape source.** (a) Polygonise the vendor masks (+0.5 px, 0.5 px simplification); (b) vendor polygons
+5. **Shape source.** (a) Polygonise the vendor masks (+0.5 px, 0.25 px simplification); (b) vendor polygons
    (+0.5 px). *Recommended: (a)*, with (b) as a fallback.
 6. **First segmentation route.** (a) `native`, then `cellpose_only`, then ProSeg only if AT-5b passes;
    (b) Cellpose + ProSeg now; (c) ProSeg with the vendor prior only. *Recommended: (a).* Is a multi-day or
