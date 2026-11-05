@@ -14,16 +14,19 @@ on:
 permissions:
   contents: read
 
-# A new push (or label) on a PR cancels that PR's run in progress. Runs for
-# pushes to main, the nightly run and manual runs always finish.
+# A new push (or the full-ci label) on a PR cancels that PR's run in
+# progress. Any other label gets a group of its own, so it cannot cancel the
+# PR's real run (its own run then just repeats the plan). Runs for pushes to
+# main, the nightly run and manual runs always finish.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}${{ (github.event.action == 'labeled' && github.event.label.name != 'full-ci') && format('-label-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Lint, format and type checks run beside the tests, not before them.
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -75,10 +78,20 @@ jobs:
   # changed files can reach. Needs no dependencies: scripts/ci is stdlib-only.
   plan:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # pull-requests/issues: read the PR's current labels (see Select tests).
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
     outputs:
       mode: ${{ steps.select.outputs.mode }}
       shards: ${{ steps.select.outputs.shards }}
       count: ${{ steps.select.outputs.count }}
+      # Names this attempt's shard reports, so a "Re-run all jobs" (which
+      # may plan a different shard count) never mixes in an older attempt's.
+      # "Re-run failed jobs" keeps the plan and therefore this id.
+      plan_id: ${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -110,10 +123,24 @@ jobs:
           HEAD_REF: ${{ github.head_ref }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           REPO: ${{ github.repository }}
-          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PAYLOAD_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          GH_TOKEN: ${{ github.token }}
           PLAN_DIR: ${{ runner.temp }}/plan
         run: |
           mkdir -p "$PLAN_DIR"
+          # The PR's labels now, not the event's: "gh pr create --label
+          # full-ci" fires opened (without the label) then labeled, and a
+          # re-run reuses the old event. The event's labels are the fallback.
+          LABELS="$PAYLOAD_LABELS"
+          if [[ -n "$PR_NUMBER" ]]; then
+            if current=$(gh api "repos/$REPO/issues/$PR_NUMBER/labels" --jq '[.[].name]'); then
+              LABELS="$current"
+            else
+              echo "Could not read the PR's labels; using the event's."
+            fi
+          fi
+          echo "Labels: $LABELS"
           if [[ -s .ci-durations/test-durations.json ]]; then
             cp .ci-durations/test-durations.json "$PLAN_DIR/durations.json"
             echo "Durations: the latest full run on main."
@@ -136,6 +163,7 @@ jobs:
           name: ci-plan
           path: ${{ runner.temp }}/plan
           retention-days: 7
+          overwrite: true
 
   # The plan's shards, each identical to a single full test job: same
   # install, Nextflow, four pytest-xdist workers and one thread per worker.
@@ -144,6 +172,8 @@ jobs:
     needs: plan
     name: test shard ${{ matrix.shard }}/${{ needs.plan.outputs.count }}
     runs-on: ubuntu-latest
+    # One hung test must not hold a runner for the default six hours.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -249,10 +279,11 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: shard-report-${{ matrix.shard }}
+          name: shard-report-${{ needs.plan.outputs.plan_id }}-${{ matrix.shard }}
           path: shard-report/
           if-no-files-found: ignore
           retention-days: 7
+          overwrite: true
 
   # The single pass/fail signal (the check to require on main): green only
   # when the plan and every shard succeeded and the shards together ran each
@@ -261,6 +292,7 @@ jobs:
     needs: [plan, shard]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       # Only full runs on main (push, nightly, manual) refresh the durations.
       SAVE_DURATIONS: ${{ needs.plan.outputs.mode == 'full' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
@@ -281,7 +313,7 @@ jobs:
           python-version: "3.12"
       - uses: actions/download-artifact@v8
         with:
-          pattern: shard-report-*
+          pattern: shard-report-${{ needs.plan.outputs.plan_id }}-*
           path: shard-reports
           merge-multiple: true
       - name: Check that the shards ran every test once
@@ -303,7 +335,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: .ci-durations/test-durations.json
-          key: test-durations-${{ github.run_id }}
+          key: test-durations-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Upload the durations
         if: env.SAVE_DURATIONS == 'true'
         uses: actions/upload-artifact@v7
@@ -311,3 +343,4 @@ jobs:
           name: test-durations
           path: .ci-durations/test-durations.json
           retention-days: 30
+          overwrite: true
