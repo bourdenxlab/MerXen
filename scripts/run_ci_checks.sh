@@ -5,15 +5,15 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 venv_dir="${MERXEN_CI_VENV:-${repo_root}/.ci-venv}"
 install_mode="${MERXEN_CI_INSTALL_MODE:-auto}"
 run_tests="${MERXEN_CI_RUN_TESTS:-auto}"
-test_tier="${MERXEN_CI_TEST_TIER:-changed}"
+test_tier="${MERXEN_CI_TEST_TIER:-fast}"
 
-# Test tiers (docs/development.md). 'changed', the pre-push default, runs the
-# fast tier on the tests the branch's changes can reach
-# (scripts/ci/select_tests.py, as CI does for a PR), or on the whole suite when
-# the selector says FULL. 'fast' leaves out the tests marked nextflow,
-# store_lock and integration (pyproject.toml), which take seconds each. 'full'
-# is what CI runs: everything except the slow tests, which need GPUs, site
-# images or extra environments.
+# Test tiers (docs/development.md). 'fast', the pre-push default, leaves out
+# the tests marked nextflow, store_lock and integration (pyproject.toml), which
+# take seconds each. 'changed' runs the fast tier only on the tests the
+# branch's changes can reach (scripts/ci/select_tests.py, as CI does for a PR),
+# or on the whole suite when the selector says FULL. 'full' is what CI runs:
+# everything except the slow tests, which need GPUs, site images or extra
+# environments.
 fast_markers="not slow and not nextflow and not store_lock and not integration"
 case "${test_tier}" in
     changed | fast)
@@ -98,11 +98,27 @@ fi
 
 # The 'changed' tier: the tests the commits being pushed (pre-commit sets
 # PRE_COMMIT_TO_REF) and the working tree can reach since the merge base with
-# MERXEN_CI_BASE_REF (default origin/main). A stale origin/main only widens the
-# diff. Appends the selection to pytest_args, or leaves the whole suite.
+# MERXEN_CI_BASE_REF (default: the remote branch local main tracks, else
+# origin/main, else upstream/main). A stale remote main only widens the diff.
+# Appends the selection to pytest_args, or leaves the whole suite.
+default_base_ref() {
+    local candidate
+    if candidate="$(git rev-parse --abbrev-ref --symbolic-full-name 'main@{upstream}' 2>/dev/null)"; then
+        echo "${candidate}"
+        return
+    fi
+    for candidate in origin/main upstream/main; do
+        if git rev-parse --verify --quiet "${candidate}^{commit}" >/dev/null; then
+            echo "${candidate}"
+            return
+        fi
+    done
+    echo origin/main
+}
+
 select_changed_tests() {
     local to_ref="${PRE_COMMIT_TO_REF:-HEAD}"
-    local base_ref="${MERXEN_CI_BASE_REF:-origin/main}"
+    local base_ref="${MERXEN_CI_BASE_REF:-$(default_base_ref)}"
     local base
     if ! base="$(git merge-base "${base_ref}" "${to_ref}" 2>/dev/null)"; then
         echo "changed tier: no merge base with ${base_ref}; running the fast tier on every test."
