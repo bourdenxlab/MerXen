@@ -93,7 +93,7 @@ and on demand (`workflow_dispatch`). Its jobs:
 - **plan**: runs [scripts/ci/select_tests.py](../scripts/ci/select_tests.py)
   (stdlib only, no install) and decides between the full suite and the tests
   the PR's changes can reach ([Test selection](#test-selection)), and how many
-  shards to use: 5 for the full suite, 1 to 5 for a selection.
+  shards to use: 7 for the full suite, 1 to 7 for a selection.
 - **test shard i/N**: one job per shard, each set up like the former single
   test job: installs from `requirements/requirements.lock` with `uv`, then
   `pip install -e . --no-deps` (the uv cache keeps the wheels built from Git

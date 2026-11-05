@@ -96,7 +96,7 @@ REFERENCE_ONLY_PATTERNS = (
     "containers/**",
 )
 #: Shards of a full run, and the most a selected run gets.
-FULL_SHARDS = 5
+FULL_SHARDS = 7
 #: Estimated worker-seconds one shard of a selected run takes on (4 workers x
 #: about 150 s).
 SELECTED_SHARD_SECONDS = 600.0

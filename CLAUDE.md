@@ -29,7 +29,7 @@ MERXEN_CI_TEST_TIER=changed scripts/run_ci_checks.sh
 MERXEN_CI_TEST_TIER=full scripts/run_ci_checks.sh
 
 # Which tests CI would run for this branch (FULL or a list; docs/development.md,
-# Test selection). CI shards them over 5 runners (scripts/ci/pytest_shard.py);
+# Test selection). CI shards them over 7 runners (scripts/ci/pytest_shard.py);
 # the PR label full-ci forces the full suite
 python scripts/ci/select_tests.py --base origin/main --worktree --format paths
 
