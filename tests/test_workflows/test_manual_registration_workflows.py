@@ -623,10 +623,25 @@ def test_register_stub_run_fans_out_presets_and_compares(tmp_path: Path) -> None
 # so the prepare launches lower it. The register step's result-store pyramids
 # keep the fixed 1024 px minimum, so they and the comparison's overview overlay
 # (drawn from them) are skipped here; test_register_integration's 2048 px pairs
-# build and check both.
+# build and check both. The non-rigid residual pass no longer applies at this
+# size (it did at 1280 px only by a negligible gain);
+# test_nonrigid_registration's
+# test_residual_pass_improves_an_undercorrected_translation covers that path.
+# The stage statuses this size relies on are asserted from the run summaries.
+#
+# The fitted landmark matrix lands 0.31 px from the true one at the corners
+# (seed 0, the same in every run). The bound is 1.0 px rather than the 2.0 px
+# used at 1280 px: on this smaller field 2.0 px would let through a rotation of
+# 0.37 deg or a scale error of 0.8 %, while 1.0 px fails on 0.15 deg, 0.4 % or a
+# 0.7 px shift and still leaves over 3x headroom.
 E2E_REFERENCE_SHAPE_YX = (384, 384)
 E2E_PREPARE_PARAMS = ("--viewer_cache_min_size", "256")
 E2E_LANDMARK_MARGIN_PX = 64
+E2E_CORNER_ERROR_BOUND_PX = 1.0
+E2E_EXPECTED_STAGE_STATUS = {
+    "same_section": {"refinement": "applied", "nonrigid": "applied"},
+    "serial_section": {"nonrigid": "applied", "nucleus_qc": "measured"},
+}
 
 
 @needs_nextflow
@@ -731,12 +746,19 @@ def test_tiny_end_to_end_through_both_workflows(tmp_path: Path) -> None:
         load_alignment_matrix(folder / f"{run_id}_final_matrix.csv")
         with (folder / f"{run_id}_landmarks.csv").open() as handle:
             assert len(list(csv.DictReader(handle))) == 12
-        assert (folder / f"{run_id}_manual_registration_summary.json").is_file()
+        summary = json.loads(
+            (folder / f"{run_id}_manual_registration_summary.json").read_text()
+        )
+        statuses = {
+            stage: summary[stage]["status"]
+            for stage in E2E_EXPECTED_STAGE_STATUS[preset]
+        }
+        assert statuses == E2E_EXPECTED_STAGE_STATUS[preset], preset
         assert (folder / f"{run_id}_tissue_qc.png").is_file()
         error = np.linalg.norm(
             apply(landmark, corners) - apply(pair.true_matrix, corners), axis=1
         ).max()
-        assert error <= 2.0, (preset, error)
+        assert error <= E2E_CORNER_ERROR_BOUND_PX, (preset, error)
         summaries.append(preset)
     comparison = outdir / "SYN1" / "registered" / "SYN1_run_comparison.csv"
     with comparison.open() as handle:
