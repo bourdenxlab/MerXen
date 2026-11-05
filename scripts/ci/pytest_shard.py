@@ -1,7 +1,9 @@
 """Pytest plugin: run one shard of the suite, balanced by recorded durations.
 
 Load it with ``PYTHONPATH=scripts/ci pytest -p pytest_shard`` and pick the
-shard with ``--shard-count N --shard-index I`` (1-based). Every process that
+shard with ``--shard-count=N --shard-index=I`` (1-based). Write the path
+options as ``--shard-durations=PATH`` (one argument; see
+:func:`_require_joined_path_options`). Every process that
 collects (the plain run, or each pytest-xdist worker) computes the same
 partition from the collected node ids and the durations file, so the xdist
 workers agree on the tests and every collected test lands in exactly one
@@ -153,6 +155,7 @@ class ShardPlugin:
 
     def __init__(self, config: pytest.Config) -> None:
         self.config = config
+        _require_joined_path_options(config.invocation_params.args)
         self.count = int(config.getoption("shard_count"))
         self.index = int(config.getoption("shard_index"))
         if self.count < 1 or not 1 <= self.index <= self.count:
@@ -248,6 +251,24 @@ class ShardPlugin:
         if store:
             Path(store).parent.mkdir(parents=True, exist_ok=True)
             Path(store).write_text(format_durations(self.measured))
+
+
+_PATH_OPTIONS = ("--shard-durations", "--shard-report", "--shard-store-durations")
+
+
+def _require_joined_path_options(args: Sequence[str]) -> None:
+    """Refuse ``--shard-durations PATH`` given as two arguments.
+
+    Pytest picks the rootdir and the config file before it loads ``-p``
+    plugins, so it reads a separate PATH of an existing file as a test path:
+    the rootdir moves up to the common ancestor, pyproject.toml's pytest
+    settings are lost and every node id (and durations key) changes."""
+    for argument in args:
+        if argument in _PATH_OPTIONS:
+            raise pytest.UsageError(
+                f"write {argument}=PATH as one argument; given separately, pytest "
+                "also reads PATH as a test path when it picks the rootdir"
+            )
 
 
 def format_durations(durations: dict[str, float]) -> str:

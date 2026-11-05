@@ -228,9 +228,9 @@ jobs:
         run: |
           set -o pipefail
           args=(-n 4 --dist load -m "not slow" --durations=20
-            -p pytest_shard --shard-count "$SHARDS" --shard-index "$SHARD"
-            --shard-durations "$PLAN_DIR/durations.json"
-            --shard-report "shard-report/shard-$SHARD.json")
+            -p pytest_shard --shard-count="$SHARDS" --shard-index="$SHARD"
+            --shard-durations="$PLAN_DIR/durations.json"
+            --shard-report="shard-report/shard-$SHARD.json")
           if [[ "$MODE" == "selected" ]]; then
             args+=("@$PLAN_DIR/selection.txt")
           fi
