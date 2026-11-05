@@ -44,6 +44,21 @@ def test_control_token_mask_matches_scalar_rule_and_handles_missing() -> None:
     assert control_token_mask([]).tolist() == []
 
 
+def test_control_tokens_miss_genomic_control_names() -> None:
+    """The token rule has no token for 10x genomic controls."""
+    assert not has_control_token("Intergenic_Region_12")
+    assert control_token_mask(["Intergenic_Region_12", "GFAP"]).tolist() == [
+        False,
+        False,
+    ]
+
+
+def test_atera_platform_falls_back_to_every_platform_pattern() -> None:
+    """An unlisted platform name checks every platform's patterns."""
+    assert matches_control_name_pattern("Intergenic_Region_1", "ATERA")
+    assert matches_control_name_pattern("Blank-3", "ATERA")
+
+
 @pytest.mark.parametrize(
     "name",
     [
