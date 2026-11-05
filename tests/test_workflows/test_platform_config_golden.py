@@ -13,7 +13,8 @@ between text anchors) and the QC ``script:`` section, then
 ``workflows/nextflow.config`` (its defaults and their Groovy types). Global
 params need a launch each: L0 runs every case on the defaults, L1 and L2 rerun
 the MERSCOPE BUILD and SEGMENT cases with the bead-removal and transform params
-off their defaults.
+off their defaults, and L3 reruns them with bead removal switched on globally
+(``--merscope_bead_removal true``) instead of per row.
 
 Goldens hold the compact ``JsonOutput.toJson`` text of each case (the task input
 is its deterministic ``prettyPrint``) with the launch directory written as
@@ -77,6 +78,7 @@ LAUNCHES: dict[str, tuple[str, ...]] = {
         "--merscope_bead_mask_veto",
         "false",
     ),
+    "L3": ("--merscope_bead_removal", "true"),
 }
 
 
@@ -184,8 +186,15 @@ def extract_span(main_text: str, span: Span) -> str:
     return text
 
 
-def harness_script(parse: _SourceParser) -> str:
-    """Return the full harness: main.nf helpers, span wrappers and the tail."""
+def workflow_functions() -> list[str]:
+    """Return the Groovy functions of main.nf, then one wrapper per span.
+
+    The registry test (``test_platform_registry_groovy.py``) builds its harness
+    from the same parts.
+
+    Returns:
+        The helper functions above the workflow block, then the span wrappers.
+    """
     main_text = (_WORKFLOWS / "main.nf").read_text()
     helpers = main_text[
         main_text.index("def parseChannels") : main_text.index("\nworkflow {")
@@ -195,9 +204,14 @@ def harness_script(parse: _SourceParser) -> str:
         f"    return {span.result}\n}}\n"
         for span in SPANS
     ]
+    return [helpers, *wrappers]
+
+
+def harness_script(parse: _SourceParser) -> str:
+    """Return the full harness: main.nf helpers, span wrappers and the tail."""
     qc_script = parse((_WORKFLOWS / "modules" / "qc.nf").read_text())["QC"]["script"]
-    wrappers.append(f"def {_QC_SIGNATURE} {{\n{qc_script}}}\n")
-    return "\n".join([helpers, *wrappers, _HARNESS_TAIL.read_text()])
+    qc_wrapper = f"def {_QC_SIGNATURE} {{\n{qc_script}}}\n"
+    return "\n".join([*workflow_functions(), qc_wrapper, _HARNESS_TAIL.read_text()])
 
 
 def _parse_cases(stdout: str, work_dir: Path) -> dict[str, dict[str, str]]:
@@ -216,7 +230,7 @@ def _parse_cases(stdout: str, work_dir: Path) -> dict[str, dict[str, str]]:
     return cases
 
 
-def _hermetic_env() -> dict[str, str]:
+def hermetic_env() -> dict[str, str]:
     """The test environment without MerXen overrides of config defaults.
 
     ``nextflow.config`` reads a few ``MERXEN_*`` variables (model store,
@@ -268,7 +282,7 @@ def _render_all(tmp_root: Path, script: str) -> dict[str, dict[str, str]]:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                env=_hermetic_env(),
+                env=hermetic_env(),
             ),
         )
     merged: dict[str, dict[str, str]] = {name: {} for name in GOLDEN_FILES}

@@ -51,6 +51,12 @@ def xeniumRows() {
             xenium_cellpose_cellprob: "-1.5",
             xenium_cellpose_diameter: "28",
         ]),
+        mask_filter_overrides: pairRow(dir + [
+            xenium_mask_max_eccentricity: "0.95",
+            xenium_cellpose_flow_threshold: "0.6",
+            xenium_cellpose_final_max_area_um2: "900",
+        ]),
+        custom_model: pairRow(dir + [xenium_cellpose_model: "model_bundle"]),
         blank_fields: pairRow(dir + [
             xenium_spatialdata_path: "  ",
             xenium_spec_path: "  ",
@@ -84,6 +90,12 @@ def merscopeRows() {
             merscope_voxel_layers: "5",
         ]),
         mask_eccentricity: pairRow(dir + [merscope_mask_max_eccentricity: "0.9"]),
+        cellpose_overrides: pairRow(dir + [
+            merscope_cellpose_cellprob: "-0.5",
+            merscope_cellpose_diameter: "40",
+            merscope_cellpose_flow_threshold: "0.3",
+            merscope_cellpose_final_max_area_um2: "700",
+        ]),
         bead_removal: pairRow(dir + [merscope_bead_removal: "true"]),
         bead_removal_off: pairRow(dir + [merscope_bead_removal: "false"]),
         blank_fields: pairRow(dir + [
@@ -100,6 +112,17 @@ def merscopeRows() {
         missing_inputs: pairRow([:]),
         blank_inputs: pairRow([merscope_dir: "  ", merscope_zarr_path: " "]),
     ]
+}
+
+// A placeholder custom-model bundle under the launch directory, so the
+// <prefix>_cellpose_model branch of CellposeSettings.settings renders its
+// model fields (the weights are never read here).
+def writeModelBundle() {
+    def bundle = new File("model_bundle")
+    bundle.mkdirs()
+    new File(bundle, "model").text = "placeholder weights"
+    new File(bundle, "model.json").text =
+        groovy.json.JsonOutput.toJson([weights_sha256: "a" * 64])
 }
 
 def rowsFor(String platform) {
@@ -275,9 +298,10 @@ def modeCases(String launch) {
 
 workflow {
     def launch = params.golden_launch?.toString()
-    if (!(launch in ["L0", "L1", "L2"])) {
-        throw new IllegalArgumentException("--golden_launch must be L0, L1 or L2")
+    if (!(launch in ["L0", "L1", "L2", "L3"])) {
+        throw new IllegalArgumentException("--golden_launch must be L0, L1, L2 or L3")
     }
+    writeModelBundle()
     if (launch == "L0") {
         ["MERSCOPE", "XENIUM"].each { platform ->
             buildAndSegmentCases(launch, platform)

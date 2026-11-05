@@ -8,6 +8,10 @@ table below records what each returns for the same layouts today, so that a
 later merge into one platform-registry parser (AT-6) can be measured against
 it. ``None`` means the parser found nothing (enrichment and segmentation raise
 ``FileNotFoundError``; the sanity plots return ``None``).
+
+The module sits at the root of ``tests/`` rather than under one package's test
+directory because it compares parsers from three packages; it moves with them
+when AT-6 merges them into one.
 """
 
 from __future__ import annotations

@@ -54,7 +54,8 @@ workflow {
     def results = cases.collect { entry ->
         try {
             def opts = entry.options
-            def chosen = CellposeSettings.settings(entry.row, 'XENIUM', opts)
+            def platform = entry.platform ?: 'XENIUM'
+            def chosen = CellposeSettings.settings(entry.row, platform, opts)
             def meta = [cellpose_settings: chosen]
             """
         + base
@@ -66,7 +67,7 @@ workflow {
         + """
             if (entry.check_preflight) {
                 CellposeSettings.preflight(entry.row,
-                    [active_platforms: ['XENIUM'], species: 'human', pair_id: 'P1',
+                    [active_platforms: [platform], species: 'human', pair_id: 'P1',
                      run_segment: entry.containsKey('run_segment')
                          ? entry.run_segment : true,
                      stage_order: ['build_spatialdata', 'segment_nuclei',
@@ -446,3 +447,130 @@ def test_downstream_selector_requires_matching_published_identity(
     assert "error" not in results[2], results[2]
     assert "identity mismatch" in results[3]["error"]
     assert (sidecar.read_bytes(), stats.read_bytes()) == before
+
+
+_NATIVE_IMAGE = {"MERSCOPE": "MERSCOPE_z_projection", "XENIUM": "morphology_focus"}
+_DEFAULT_CHANNELS = {"MERSCOPE": ["DAPI", "PolyT"], "XENIUM": ["DAPI", "18S"]}
+_PIXEL_SIZE = {"MERSCOPE": 0.108, "XENIUM": 0.2125}
+
+
+def _other_platform(platform: str) -> str:
+    return "XENIUM" if platform == "MERSCOPE" else "MERSCOPE"
+
+
+def _write_model(bundle: Path, platform: str, image_key: str) -> Path:
+    """Write a candidate model bundle for a platform; return its weights file."""
+    bundle.mkdir(parents=True)
+    model = bundle / "model"
+    model.write_bytes(b"test only")
+    (bundle / "model.json").write_text(
+        json.dumps(
+            {
+                "weights_sha256": hashlib.sha256(model.read_bytes()).hexdigest(),
+                "platform": platform,
+                "species": "human",
+                "channels": _DEFAULT_CHANNELS[platform],
+                "tile_size": 6144,
+                "status": "candidate",
+                "image_key": image_key,
+                "pixel_size_um": _PIXEL_SIZE[platform],
+                "normalization_route": "A",
+            }
+        )
+    )
+    return model
+
+
+@pytest.mark.nextflow
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow unavailable")
+@pytest.mark.parametrize("platform", ["MERSCOPE", "XENIUM"])
+def test_model_metadata_must_name_the_platform_native_image(
+    tmp_path: Path, platform: str
+) -> None:
+    """A custom model passes preflight only with its platform's native image."""
+    prefix = platform.lower()
+    native = _write_model(tmp_path / "native", platform, _NATIVE_IMAGE[platform])
+    foreign = _write_model(
+        tmp_path / "foreign", platform, _NATIVE_IMAGE[_other_platform(platform)]
+    )
+    options = {
+        **_defaults(),
+        "cellpose_protected_output_roots": [str(tmp_path / "published")],
+        "cellpose_tile_size_candidates": [6144],
+        "allow_candidate_model": True,
+        "outdir": str(tmp_path / "arm"),
+    }
+    cases = [
+        {
+            "platform": platform,
+            "options": {**options, f"{prefix}_cellpose_model": str(model.parent)},
+            "row": {},
+            "check_preflight": True,
+        }
+        for model in (native, foreign)
+    ]
+    results = _run_cases(tmp_path, cases)
+    assert "error" not in results[0], results[0]
+    assert "Model requires native image" in results[1]["error"]
+
+
+@pytest.mark.nextflow
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow unavailable")
+@pytest.mark.parametrize("platform", ["MERSCOPE", "XENIUM"])
+def test_published_stock_identity_must_name_the_platform_native_image(
+    tmp_path: Path, platform: str
+) -> None:
+    """A downstream stock arm accepts only masks made from the native image."""
+    prefix = platform.lower()
+    cases = []
+    for name, image_key in (
+        ("native-arm", _NATIVE_IMAGE[platform]),
+        ("foreign-arm", _NATIVE_IMAGE[_other_platform(platform)]),
+    ):
+        arm = tmp_path / name
+        directory = arm / f"P1/{prefix}/segmentation"
+        directory.mkdir(parents=True)
+        (directory / "cellpose_masks_tiled.npy").write_bytes(b"stock artifact")
+        identity = CellposeModelIdentity(
+            status="verified",
+            model_name="cpsam_v2",
+            weights_sha256=CPSAM_V2_SHA256,
+            cellpose_version="4.2.1.1",
+            torch_version="2.14.0+cu130",
+            cellpose_config=CellposeConfig(
+                gpu=False, model_type="cyto3", flow_threshold=0.7, cellprob_threshold=0
+            ),
+            inference_context=CellposeInferenceContext(
+                platform=platform,
+                species="human",
+                channels=_DEFAULT_CHANNELS[platform],
+                image_key=image_key,
+                pixel_size_um=(_PIXEL_SIZE[platform], _PIXEL_SIZE[platform]),
+                mask_filter=MaskFilterConfig(),
+                tiling=TilingConfig(tile_size_candidates=[6144]),
+            ),
+        )
+        (directory / "cellpose_model_identity.json").write_text(
+            identity.model_dump_json()
+        )
+        (directory / "cellpose_stitching_stats.json").write_text(
+            json.dumps({"model_identity": identity.model_dump(mode="json")})
+        )
+        cases.append(
+            {
+                "platform": platform,
+                "options": {
+                    **_defaults(),
+                    f"{prefix}_cellpose_cellprob": 0,
+                    "cellpose_protected_output_roots": [str(tmp_path / "published")],
+                    "cellpose_tile_size_candidates": [6144],
+                    "outdir": str(arm),
+                },
+                "row": {},
+                "check_preflight": True,
+                "run_segment": False,
+            }
+        )
+    results = _run_cases(tmp_path, cases)
+    assert "error" not in results[0], results[0]
+    assert "identity mismatch" in results[1]["error"]

@@ -15,7 +15,15 @@ line that disappeared fails too, so the pin stays an exact inventory.
 The nucleus categories (R6 in the platform-support plan) list every consumer of
 vendor nucleus layers and nucleus masks: each one must be routed through the
 cell/nucleus identity mapping before a platform whose nucleus ids are not cell
-ids can be supported.
+ids can be supported. ``nuclei_mask_consumers`` also lists the files that read
+or write MerXen's own Cellpose nuclei layer (``cellpose_nuclei``), so a new
+nucleus-to-cell join on that layer is a reviewed change too.
+
+``built_shape_names`` catches shape names assembled from a prefix
+(``f"{prefix}_nucleus"``, ``platform.lower() + "_cell_boundaries"``), which the
+literal ``shape_names`` pattern cannot see. ``platform_equality`` covers every
+spelling of a platform dispatch: ``==``/``!=`` in either case, membership in a
+literal tuple, list or set, ``.equals()``, ``case`` labels and ``startswith``.
 """
 
 from __future__ import annotations
@@ -37,6 +45,7 @@ _SCANNED_GLOBS: tuple[str, ...] = (
     "workflows/modules/*.nf",
     "workflows/lib/*.groovy",
     "scripts/**/*.py",
+    "workflows/acceptance/*.nf",
 )
 
 
@@ -61,15 +70,27 @@ CATEGORIES: tuple[SiteCategory, ...] = (
         r"\b(merscope|xenium)_(cell_boundaries|nucleus)(_aligned_nonrigid)?\b"
         r"|lower\(\)\}_cell_boundaries",
     ),
+    SiteCategory(
+        "built_shape_names",
+        r"[\"']_(cell_boundaries|nucleus)[\"']|\}_(cell_boundaries|nucleus)\b",
+    ),
     SiteCategory("vendor_nucleus_names", r"\b(xenium_nucleus|nucleus_boundaries)\b"),
     SiteCategory(
         "nucleus_joins",
         r"_choose_nucleus_shape_key|nucleus_area|\"nucleus\" (not )?in str\(key\)",
     ),
-    SiteCategory("nuclei_mask_consumers", r"nuclei_mask_path|nuclei_labels", True),
+    SiteCategory(
+        "nuclei_mask_consumers", r"nuclei_mask|cellpose_nuclei|nuclei_labels", True
+    ),
     SiteCategory(
         "platform_equality",
-        r"(==|!=)\s*[\"'](MERSCOPE|XENIUM)[\"']|[\"'](MERSCOPE|XENIUM)[\"']\s*(==|!=)",
+        r"(?i)(==|!=)\s*[\"'](MERSCOPE|XENIUM)[\"']"
+        r"|[\"'](MERSCOPE|XENIUM)[\"']\s*(==|!=)"
+        r"|\bin\s*[(\[{][^)\]}]*[\"'](MERSCOPE|XENIUM)[\"']"
+        r"|[\"'](MERSCOPE|XENIUM)[\"']\.equals(IgnoreCase)?\("
+        r"|\.equals(IgnoreCase)?\(\s*[\"'](MERSCOPE|XENIUM)[\"']"
+        r"|\bcase\s+[\"'](MERSCOPE|XENIUM)[\"']"
+        r"|startswith\(\s*[\"'](MERSCOPE|XENIUM)[\"']",
     ),
     SiteCategory("native_image_names", r"morphology_focus|MERSCOPE_z_projection"),
 )
@@ -94,6 +115,11 @@ REASONS: dict[str, dict[str, str]] = {
             "inside the QC script: section; editing it changes task hashes (AT-6)"
         ),
     },
+    "built_shape_names": {
+        "src/merxen/masks.py": (
+            "id namespace of the original nucleus mask branch, not a shape key"
+        ),
+    },
     "vendor_nucleus_names": {
         "src/merxen/analysis/clustering_squidpy.py": (
             "nucleus shape priority list; nucleus consumer for AT-6"
@@ -116,16 +142,26 @@ REASONS: dict[str, dict[str, str]] = {
         ),
     },
     "nuclei_mask_consumers": {
+        "src/merxen/cli/__init__.py": "registers the nuclei segmentation command",
+        "src/merxen/cli/run_segmentation.py": "runs the nuclei segmentation",
         "src/merxen/config.py": "config fields of the nuclei mask",
         "src/merxen/enrichment/enrich.py": "builds the cellpose_nuclei layer (AT-6)",
+        "src/merxen/masks.py": "mask-branch discovery of cellpose_nuclei (AT-6)",
         "src/merxen/registration_quality.py": "reads the nuclei mask (AT-6)",
         "src/merxen/segmentation/pipeline.py": "writes the nuclei mask",
+        "src/merxen/viewer_cache/build.py": "default viewer layer list",
         "workflows/main.nf": "routes the nuclei mask between stages",
         "workflows/modules/enrichment.nf": "passes the nuclei mask to enrichment",
+        "workflows/modules/segmentation.nf": (
+            "produces and forwards the nuclei mask (process script text is pinned)"
+        ),
     },
     "platform_equality": {
         "scripts/acceptance/prepare_hitl1_fixture.py": (
             "acceptance fixture for a Xenium-only gate"
+        ),
+        "scripts/cleanup_assignment_tables_and_outputs.py": (
+            "analysis_mode map, kept in step by test_analysis_mode_parity"
         ),
         "src/merxen/alignment/dapi.py": "pairing role: MERSCOPE is the moving image",
         "src/merxen/alignment/frames.py": (
@@ -138,6 +174,7 @@ REASONS: dict[str, dict[str, str]] = {
         "src/merxen/analysis/clustering_squidpy.py": (
             "MERSCOPE-moving aligned layers (pairing role)"
         ),
+        "src/merxen/analysis/mecr.py": "display order of the paired platforms",
         "src/merxen/config.py": "pairing roles of AlignmentConfig",
         "src/merxen/distance_from_object/pipeline.py": (
             "MERSCOPE-moving aligned layers (pairing role)"
@@ -159,7 +196,8 @@ REASONS: dict[str, dict[str, str]] = {
         ),
         "workflows/main.nf": (
             "builders that raise for an unknown platform, MERSCOPE- or Xenium-only "
-            "features and paired roles"
+            "features, paired roles and the analysis_mode map (kept in step by "
+            "test_analysis_mode_parity)"
         ),
         "workflows/modules/qc.nf": (
             "inside the QC script: section; editing it changes task hashes (AT-6)"
@@ -223,6 +261,9 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
             '? "merscope_cell_boundaries"',
         ),
     },
+    "built_shape_names": {
+        "src/merxen/masks.py": ('else f"{ORIGINAL_ID_NAMESPACE}_nucleus"',),
+    },
     "vendor_nucleus_names": {
         "src/merxen/analysis/clustering_squidpy.py": (
             '"nucleus_boundaries",',
@@ -261,16 +302,25 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         ),
     },
     "nuclei_mask_consumers": {
+        "src/merxen/cli/__init__.py": (),
+        "src/merxen/cli/run_segmentation.py": (),
         "src/merxen/config.py": (),
         "src/merxen/enrichment/enrich.py": (),
+        "src/merxen/masks.py": (),
         "src/merxen/registration_quality.py": (),
         "src/merxen/segmentation/pipeline.py": (),
+        "src/merxen/viewer_cache/build.py": (),
         "workflows/main.nf": (),
         "workflows/modules/enrichment.nf": (),
+        "workflows/modules/segmentation.nf": (),
     },
     "platform_equality": {
         "scripts/acceptance/prepare_hitl1_fixture.py": (
             'if config.dataset.platform != "XENIUM":',
+        ),
+        "scripts/cleanup_assignment_tables_and_outputs.py": (
+            'if mode == "xenium":',
+            'if mode in {"merscope", "merfish"}:',
         ),
         "src/merxen/alignment/dapi.py": (
             'if str(platform or "").strip().upper() != "MERSCOPE":',
@@ -291,6 +341,9 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         "src/merxen/analysis/clustering_squidpy.py": (
             'if platform.upper() == "MERSCOPE" and aligned_preferred in sdata_obj.shapes:',  # noqa: E501
             'if platform.upper() == "MERSCOPE" and aligned_region in sdata_obj.shapes:',
+        ),
+        "src/merxen/analysis/mecr.py": (
+            'platform for platform in ("MERSCOPE", "XENIUM") if platform in platforms',
         ),
         "src/merxen/config.py": (
             'self.fixed_platform != "XENIUM" or self.moving_platform != "MERSCOPE"',
@@ -341,6 +394,8 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
             '!(settings.run_register_images && platform == "XENIUM")',
             '.filter { _key, _pairId, platform, _zarrPath -> platform == "MERSCOPE" }',
             '.filter { _key, _pairId, platform, _zarrPath -> platform == "XENIUM" }',
+            'if (analysisMode == "merscope") {',
+            'if (analysisMode == "xenium") {',
             'if (platform == "MERSCOPE") {',
             'if (platform == "MERSCOPE") {',
             'if (platform == "XENIUM") {',
@@ -443,6 +498,7 @@ def test_scan_covers_the_workflow_and_package() -> None:
         "workflows/main.nf",
         "workflows/modules/qc.nf",
         "workflows/lib/CellposeSettings.groovy",
+        "workflows/acceptance/hitl0_tile_check.nf",
     ):
         assert expected in scanned
     assert not scanned & _REGISTRY_FILES

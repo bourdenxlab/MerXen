@@ -51,7 +51,11 @@ _SAMPLESHEET_FIELDS: dict[str, dict[str, list[str]]] = {
 
 
 def _golden_module() -> ModuleType:
-    """Load the golden test module for its span anchors (no sibling import)."""
+    """Load the golden test module for its harness parts (no sibling import).
+
+    It is loaded under a private name, so its module code runs a second time;
+    pytest still collects (and runs) its tests once, from the file itself.
+    """
     name = "_merxen_platform_config_golden"
     if name in sys.modules:
         return sys.modules[name]
@@ -67,17 +71,8 @@ def _golden_module() -> ModuleType:
 
 def _harness_script() -> str:
     """Return main.nf helpers, the span wrappers and the registry tail."""
-    golden = _golden_module()
-    main_text = (_WORKFLOWS / "main.nf").read_text()
-    helpers = main_text[
-        main_text.index("def parseChannels") : main_text.index("\nworkflow {")
-    ]
-    wrappers = [
-        f"def {span.signature} {{\n{golden.extract_span(main_text, span)}\n"
-        f"    return {span.result}\n}}\n"
-        for span in golden.SPANS
-    ]
-    return "\n".join([helpers, *wrappers, _HARNESS_TAIL.read_text()])
+    parts: list[str] = _golden_module().workflow_functions()
+    return "\n".join([*parts, _HARNESS_TAIL.read_text()])
 
 
 @pytest.fixture(scope="module")
@@ -105,7 +100,7 @@ def groovy_output(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
         cwd=work_dir,
         capture_output=True,
         text=True,
-        env=golden._hermetic_env(),
+        env=golden.hermetic_env(),
         timeout=300,
         check=False,
     )
