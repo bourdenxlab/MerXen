@@ -8,7 +8,10 @@
 > keeps all vendor metadata verbatim; privacy rules apply only to what is committed to git and to
 > human-facing output (§3.11 D13, Appendix A). **AT-4 (2026-11-05):** the builder and BUILD plumbing are
 > implemented; the deviations from this plan are listed in Appendix A ("AT-4 implementation notes"), and
-> the AT-4 review decisions in Appendix A ("AT-4 review").
+> the AT-4 review decisions in Appendix A ("AT-4 review"). **AT-5a (2026-11-05):** the public dataset
+> builds through Nextflow in 8.5 minutes at 11.7 GB peak anonymous memory and passes every §1.1
+> criterion (status after §1.1 item 7; measured numbers in §6.1; decisions in Appendix A, "AT-5 pilot").
+> Milestone 1 is met. AT-5b (the ProSeg crop benchmark) has not run.
 
 *Names and paths (2026-11-04).* The only dataset used here is the public 10x Atera whole-transcriptome
 dataset of a human hippocampus section (atera-1.1.1, fresh frozen); its name is not written here, and the
@@ -117,6 +120,21 @@ Segmentation, enrichment and the later stages can open it with only the consumer
 7. **Existing platforms are unaffected.**
    - Rendered XENIUM and MERSCOPE build JSON is byte-identical to `main`.
    - Every existing process `script:` text matches its pinned copy, so task hashes are unchanged.
+
+**Status (AT-5a, 2026-11-05): all seven items hold on the public dataset.** The Nextflow task built the
+store, then `scripts/acceptance/atera_build.py` checked it as re-read from disk. Its report is
+`$MERXEN_EVIDENCE_ROOT/atera_at5/full/acceptance_full.json`, with the trace, report, timeline and logs
+beside it.
+
+| Item | Result |
+|---|---|
+| 1. Build | `BUILD_SPATIALDATA`, one ATERA row with `stop_stage=build_spatialdata`, 16 CPUs: 8 min 24 s; watchdog peak 11.7 GB anonymous RSS (cap then 120 GB). Sizes in §6.1. A crop build killed with SIGKILL after it had written its points, images and labels exited 137. Nextflow retried it once (256 GB reservation): the retry removed the partial store and its mask folder, built from scratch and passed acceptance |
+| 2. Schema | Shallow schema passes. Streaming deep check: 1,409,601,228 points rows = raw QV ≥ 20 rows; IDs unique per tile; every per-tile count reconciles over 34 non-empty tiles and 409 files |
+| 3. Matrix | Points total 638,849,843 = vendor total on the columns with transcripts; 638,693,512 gene counts; 0 mismatched entries. The vendor total is 638,849,927; the excess is exactly 84 counts, all in four `DeprecatedCodeword_*` columns without transcripts (24 + 21 + 14 + 25) |
+| 4. Labels | 91,431 cells and 90,238 nuclei, no empty label; largest area difference 7.2e-5 µm²; largest label centroid difference 0.0014 µm; 0 containment violations; shape centroids within 0.0046 µm (median 0.00035 µm) |
+| 5. Metadata lookups | `sd.read_zarr` opens every element; `find_um_per_px(store, "ATERA") == 0.21249222` |
+| 6. Vendor metadata | 10 byte-identical sidecars, 5,167 vendor zarr metadata members, 5 OME-XML headers, 49 `experiment.spatial` fields and 103 metrics columns in attrs; the fingerprint recomputed from the bundle matches the marker |
+| 7. Existing platforms | The XENIUM and MERSCOPE goldens and process script pins are unchanged; only the ATERA build JSON goldens follow the AT-5 cap change (§6.1) |
 
 ### 1.2 Out of scope for milestone 1
 
@@ -524,6 +542,26 @@ grow a third arm in every ternary.
     as `.npy` (about 0.4 GB per large tile, uint32). Each block task then reads orthogonal selections.
 
   Blocks under about 1 M rows merge into a tile-level partition.
+
+  **AT-5 decision: `row_range` stays the default; `tile_blocks` stays opt-in.** The measurements
+  (`scripts/acceptance/atera_partition_bench.py`, pyarrow reads of `x`, `y`, `feature_name` and
+  `original_assignment`, warm page cache; reports under `$MERXEN_EVIDENCE_ROOT/atera_at5/bench/`):
+  - **Full store, `row_range`:** a 1 mm² window (8 windows, median 23 M rows) reads in a median 0.71 s
+    (0.08–1.56 s). Index pruning keeps a median 44 of 409 files (154 M rows). With no pruning, the same
+    window reads in 0.95 s, because pyarrow skips row groups by their `x`/`y` statistics. A per-gene read
+    over all 409 files takes 5.5–5.9 s, from 5,643 to 5.7 M rows; a `row_range` file is gene-sorted, so
+    the `feature_name` statistics skip most row groups.
+  - **Crop, both orders, the same windows and genes:** `tile_blocks` reads fewer rows per window (16 M
+    against 28 M) but is no faster: 0.17 s against 0.13 s warm per window, and 0.22 s against 0.17 s per
+    gene. It writes 5% less (645 against 679 MB).
+  - **Build cost:** the crop build took 69 s with `tile_blocks` against 48 s with `row_range`, although
+    only one of its tiles is split. Each split tile is decoded once per block, about 20× the decode time
+    (AT-4). On the full section that adds tens of minutes to an 8.5-minute build.
+  - **Bug found:** a `tile_blocks` build that split any tile failed at the end, because the points index
+    held infinite block edges (fixed in AT-5; open edges are now `null`).
+
+  Sub-second window reads already serve QC, plots and the viewer cache, so nothing downstream needs
+  `tile_blocks`. Revisit it only if a consumer needs many small windows per second.
 - **Concurrency is explicit.** `write_atera_spatialdata` calls
   `dask.config.set(scheduler="threads", num_workers=int(os.environ.get("DASK_NUM_WORKERS", cpus)))`, and
   zarr `threading.max_workers` gets the same value. Both are asserted in the fast tier.
@@ -1201,6 +1239,27 @@ The prefix helpers that already build names from `platform.toLowerCase()` (`main
 | Source zarr | Disk | About 35–50 GB (plus a transient `.partial` during the write) | [L] |
 | BUILD wall time | Time | About 1.5–3 h | [L]; the pilot measures it |
 
+**Measured on the public dataset (AT-5a, 2026-11-05).** These numbers replace the estimates above.
+Nextflow `BUILD_SPATIALDATA`, 16 CPUs, shared host at load 15–30. The page-cache state of the bundle is
+unknown: the crop had been cut from it earlier that day.
+
+| Item | Measured |
+|---|---|
+| BUILD wall time | **8 min 24 s** task (8 min 36 s for the whole `nextflow run`); 852% mean CPU |
+| Phases (from file times) | Masks, polygonisation and table: 2 min 27 s. Image write: 2 min 14 s. Labels (both pyramids): 31 s. Points: 2 min 43 s (1.41e9 rows, about 8.6 M rows/s). Shapes, table, sidecars, index and marker: 17 s |
+| Peak memory | Watchdog: **11.7 GB anonymous RSS**, during the points write. The trace's `peak_rss` of 103.6 GB counts the two memory-mapped 10.4 GB masks once per polygonisation worker; it is page cache, not process memory. The largest anonymous level in the polygonisation phase was 11.4 GB |
+| Label pyramids alone | 65 s and 4.75 GB anonymous RSS for both masks (5 levels, 16 threads); level shapes equal the morphology TIFF pyramid (42,548 × 61,369 down to 2,659 × 3,835) |
+| Polygons (0.25 px) | Cells: 13 / 61 / 278 vertices (min / median / max), 3 MultiPolygons. Nuclei: 10 / 47 / 332, none |
+| Store size | **38.8 GB** in all. Points 24.1 GB (17.1 B/row; the dask index column `__null_dask_index__` and `transcript_id` take about a quarter each). Image 14.0 GB. Table 493 MB. Shapes 56 + 41 MB. Labels 38 + 28 MB. Vendor sidecars and metadata 67 MB |
+| Reads and writes | 23.7 GB read, 36.2 GB written (`rchar` / `wchar`) |
+| Acceptance script | 6 min 26 s, 21.1 GB peak RSS (the int64 matrix comparison over 258 M nonzeros; the streaming schema check takes 4 min 46 s at 5.3 GB) |
+
+**Resource defaults after AT-5:** `atera_build_memory_gb = 64` (128 GB on the one retry) and
+`atera_build_max_rss_gb = 48`, about 4× the measured anonymous peak. Together with the memory-mapped
+masks, the build's physical footprint is about 33 GB. `atera_build_cpus` stays 16. A section several
+times larger scales the table and the masks; raise both values together if the watchdog stops the build
+(exit 99).
+
 ### 6.2 Per section, downstream
 
 | Item | Estimate | Basis |
@@ -1486,6 +1545,8 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
     lookups) and QV ≥ 20 parquet. It measures peak RSS, time per iteration at 18k genes, and neuropil
     absorption. The result decides AT-9.
 - **Exit:** all §1.1 criteria met and recorded. **This is milestone 1.**
+- **Status (2026-11-05):** (a) is done: crop pilot, full build, acceptance, atomicity check, resource
+  tuning and the `tile_blocks` decision (§1.1 status, §3.3, §6.1). (b) has not run.
 
 ### AT-6 `[feature]`: native segmentation route end to end (11 d)
 
@@ -1555,12 +1616,8 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
 | R20 | External napari viewer needs an ATERA branch | M / L | Track outside the repo | AT-6 |
 
 **Unverified items to resolve first:**
-- ZipStore parallel throughput, cold disk.
-- BUILD peak RSS and wall time.
-- Polygonisation time and vertex counts on a 2.6 Gpx mask.
-- `tile_blocks` cost.
-- Label-pyramid memory and level-shape rounding versus the TIFF pyramid.
-- Points parquet size with spatialdata's writer.
+- ZipStore parallel throughput, cold disk. The warm-or-unknown full build decodes 1.41e9 rows in under
+  3 minutes, so it no longer limits the build.
 - `dd.read_parquet` adaptive splitting at these file sizes.
 - Whether stub `-resume` hashes `stub:` text.
 - `containerOptions` hashing after the GPU-closure change.
@@ -1571,6 +1628,10 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
 *Resolved since revision 3:* `obs.filtered` threshold (< 10 observed); negative coordinates in label
 lookups (bounds-checked; use floor); multi-component labels (MultiPolygon); `cell_index` order
 (non-decreasing).
+
+*Resolved in AT-5 (§6.1):* BUILD peak RSS and wall time; polygonisation time and vertex counts; `tile_blocks`
+cost (§3.3); label-pyramid memory and level shapes (equal to the TIFF pyramid); points parquet size with
+spatialdata's writer.
 
 ---
 
@@ -1788,3 +1849,17 @@ opt-in with its cost documented (AT-5 decides); the zarr event-loop ceiling and 
 zip opens are seconds per build (AT-5 measures); the watchdog cap is the same on the retry on purpose
 (the retry is for external memory pressure); the ATERA arms of the enrichment and viewer-cache lookups
 move to AT-6 (§1.1 item 5).
+
+**AT-5 pilot (2026-11-05).** Crop pilot, full public build and milestone-1 acceptance (§1.1 status).
+
+| Finding | Change or decision |
+|---|---|
+| The crop's label check peaked at 6.7 GB | The acceptance label statistics are counted in row strips; the crop run peaks at 4.2 GB and the full run spends 37 s on both masks |
+| A `tile_blocks` build that split a tile failed while writing the points index (infinite block edges with `allow_nan=False`) | Open edges are written as `null`; a unit test and an end-to-end `tile_blocks` build test cover it |
+| Peak memory is 11.7 GB anonymous, not the 40–80 GB estimate; the build takes 8.5 minutes, not 1.5–3 h | `atera_build_memory_gb` 128 → 64 and `atera_build_max_rss_gb` 120 → 48 (§6.1). Only the ATERA build JSON goldens change |
+| `row_range` or `tile_blocks` | `row_range` stays the default (§3.3) |
+| Points take 17.1 B/row against the 11.7–12.1 B/row probe; the dask index column `__null_dask_index__` is about a quarter of the bytes | Not changed here: dropping it means writing parquet outside spatialdata's writer, the later optimisation §3.3 already lists |
+| The trace's `peak_rss` (103.6 GB) far exceeds the watchdog's peak (11.7 GB) | Expected: the trace counts the shared memory-mapped masks once per worker. The watchdog's anonymous measure is the one to size against (§6.1) |
+
+Not measured in AT-5: `emit_codeword_index` (left off), and the zarr event-loop ceiling and repeated zip
+opens on their own. The whole build is 8.5 minutes, so neither is worth separate work now.

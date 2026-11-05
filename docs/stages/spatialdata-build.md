@@ -731,7 +731,7 @@ the rest keep their defaults):
 |---|---|---|
 | `min_qv` | `20.0` | QV filter; `null` keeps every transcript. |
 | `transcript_partition_rows` | `4194304` | Rows per points partition (a multiple of 1,048,576). |
-| `spatial_order` | `row_range` | `tile_blocks` gives spatially coherent partitions but decodes each tile once per block: about 20× the decode time (368 s against 18 s for the largest public tile). Opt-in until AT-5. |
+| `spatial_order` | `row_range` | `tile_blocks` gives spatially coherent partitions but decodes each tile once per block: about 20× the decode time (368 s against 18 s for the largest public tile). It stays opt-in (AT-5): a 1 mm² window of a `row_range` store reads in about 0.7 s, and on the crop `tile_blocks` was no faster to read. |
 | `emit_codeword_index` | `false` | Adds each transcript's vendor codeword (`codeword_index`, uint32) for codeword-level QC. |
 | `boundary_source` | `masks` | `vendor_polygons` is the fast fallback (display polygons; a cell without one fails a build with the table). |
 | `boundary_simplify_px` | `0.25` | Mask contour simplification. |
@@ -763,20 +763,39 @@ sizes and modification times, and the builder format version.
 
 `max_rss_gb` and `polygon_n_jobs` are not part of the fingerprint.
 
+AT-5 checked this on the real crop. A build was killed with SIGKILL after it
+had written its points, images and labels. The task exited 137, and its retry
+removed the leftover folders, rebuilt from scratch and passed acceptance.
+
 ### Resources
 
 `BUILD_SPATIALDATA` asks for `atera_build_cpus` (16) and
-`atera_build_memory_gb` (128 GB) for ATERA tasks only; other platforms keep 8
+`atera_build_memory_gb` (64 GB) for ATERA tasks only; other platforms keep 8
 CPUs and 80 GB. The local executor schedules memory but does not cap it, so the
 build runs a watchdog on the anonymous RSS of its process tree (not `rss`,
 which counts the memory-mapped masks once per polygonisation worker) and exits
-with status 99 above `atera_build_max_rss_gb` (120 GB). An external kill
+with status 99 above `atera_build_max_rss_gb` (48 GB). An external kill
 (exit 137 or 140) is retried once with twice the memory reservation; the
 atomic write makes the retry a clean rebuild. A watchdog stop is not retried:
 raise `atera_build_max_rss_gb` and `atera_build_memory_gb` together. The build
 sets dask's threaded scheduler and zarr's decode pool to `DASK_NUM_WORKERS`
-(`task.cpus`). Expected cost on the public dataset (plan §6.1, measured in
-AT-5): about 1.5–3 h, 40–80 GB peak, a 35–50 GB store.
+(`task.cpus`).
+
+Measured on the public whole-section dataset (AT-5; plan §6.1), 16 CPUs:
+
+| | |
+|---|---|
+| Wall time | 8 min 24 s (masks, polygons and table 2.5 min; image 2.2 min; labels 0.5 min; points 2.7 min) |
+| Peak memory | 11.7 GB anonymous (watchdog), during the points write; the label pyramids alone take 4.75 GB |
+| Shared memory | About 21 GB of memory-mapped masks during polygonisation. The trace's `peak_rss` (103.6 GB) counts them once per worker, so size the task by the watchdog's figure, not the trace's |
+| Store | 38.8 GB: points 24.1 GB (1.41e9 rows, 17.1 B/row), image 14.0 GB, table 0.49 GB, shapes 0.10 GB, labels 0.07 GB, vendor metadata 0.07 GB |
+| Scratch | Two 10.4 GB `.npy` masks beside the target during the build, plus the `.partial` store |
+| Acceptance | `scripts/acceptance/atera_build.py`: 6.5 min, 21 GB peak RSS |
+
+The defaults (64 GB reservation, 48 GB cap) keep about 4× headroom. For a
+larger section, raise `atera_build_max_rss_gb` and `atera_build_memory_gb`
+together. Plan for about 40 GB of output and 21 GB of scratch on the results
+volume.
 
 ### What is skipped
 
