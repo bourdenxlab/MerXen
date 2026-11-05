@@ -5,22 +5,26 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 venv_dir="${MERXEN_CI_VENV:-${repo_root}/.ci-venv}"
 install_mode="${MERXEN_CI_INSTALL_MODE:-auto}"
 run_tests="${MERXEN_CI_RUN_TESTS:-auto}"
-test_tier="${MERXEN_CI_TEST_TIER:-fast}"
+test_tier="${MERXEN_CI_TEST_TIER:-changed}"
 
-# Test tiers. 'fast', the pre-push default, leaves out the tests marked
-# nextflow, store_lock and integration (pyproject.toml), which take seconds
-# each. 'full' is what CI runs: everything except the slow tests, which need
-# GPUs, site images or extra environments.
+# Test tiers (docs/development.md). 'changed', the pre-push default, runs the
+# fast tier on the tests the branch's changes can reach
+# (scripts/ci/select_tests.py, as CI does for a PR), or on the whole suite when
+# the selector says FULL. 'fast' leaves out the tests marked nextflow,
+# store_lock and integration (pyproject.toml), which take seconds each. 'full'
+# is what CI runs: everything except the slow tests, which need GPUs, site
+# images or extra environments.
+fast_markers="not slow and not nextflow and not store_lock and not integration"
 case "${test_tier}" in
-    fast)
-        tier_markers="not slow and not nextflow and not store_lock and not integration"
+    changed | fast)
+        tier_markers="${fast_markers}"
         ;;
     full)
         tier_markers="not slow"
         ;;
     *)
         echo "Unknown MERXEN_CI_TEST_TIER=${test_tier}" >&2
-        echo "Expected one of: fast, full" >&2
+        echo "Expected one of: changed, fast, full" >&2
         exit 2
         ;;
 esac
@@ -92,6 +96,33 @@ if [[ -x "${venv_dir}/bin/nf-metro" ]]; then
     "${venv_dir}/bin/nf-metro" validate assets/metro_map.mmd
 fi
 
+# The 'changed' tier: the tests the commits being pushed (pre-commit sets
+# PRE_COMMIT_TO_REF) and the working tree can reach since the merge base with
+# MERXEN_CI_BASE_REF (default origin/main). A stale origin/main only widens the
+# diff. Appends the selection to pytest_args, or leaves the whole suite.
+select_changed_tests() {
+    local to_ref="${PRE_COMMIT_TO_REF:-HEAD}"
+    local base_ref="${MERXEN_CI_BASE_REF:-origin/main}"
+    local base
+    if ! base="$(git merge-base "${base_ref}" "${to_ref}" 2>/dev/null)"; then
+        echo "changed tier: no merge base with ${base_ref}; running the fast tier on every test."
+        return
+    fi
+    changed_selection="$(mktemp)"
+    trap 'rm -f "${changed_selection}"' EXIT
+    if ! "${venv_dir}/bin/python" scripts/ci/select_tests.py \
+        --base "${base}" --head "${to_ref}" --worktree --format paths > "${changed_selection}"; then
+        echo "changed tier: the selector failed; running the fast tier on every test."
+        return
+    fi
+    if [[ "$(head -n 1 "${changed_selection}")" == "FULL" ]]; then
+        echo "changed tier: the changes need every test; running the fast tier on all of them."
+        return
+    fi
+    echo "changed tier: $(wc -l < "${changed_selection}") test path(s) reachable from the changes since ${base_ref}."
+    pytest_args+=("@${changed_selection}")
+}
+
 case "${run_tests}" in
     true | 1 | yes)
         # Tests run on parallel pytest-xdist workers (0 runs them in this
@@ -112,8 +143,11 @@ case "${run_tests}" in
             eval "pytest_args+=(${quoted_args})"
         else
             pytest_args+=(-m "${tier_markers}")
+            if [[ "${test_tier}" == "changed" ]]; then
+                select_changed_tests
+            fi
             echo "pytest: ${test_tier} tier (-m \"${tier_markers}\")."
-            if [[ "${test_tier}" == "fast" ]]; then
+            if [[ "${test_tier}" != "full" ]]; then
                 echo "CI also runs the nextflow, store_lock and integration tests;" \
                     "MERXEN_CI_TEST_TIER=full runs them here."
             fi
