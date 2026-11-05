@@ -72,7 +72,7 @@ From [.pre-commit-config.yaml](../.pre-commit-config.yaml):
 - **On merge and on the commit message** — the privacy check.
 - **On push** — the privacy check of the branch name and every pushed commit,
   then the lockfile-backed local CI checks: lint, format, type check, and
-  the fast test tier.
+  the changed test tier.
 
 The privacy hooks keep host paths and sample names out of the repository
 ([Local configuration and privacy](local-configuration.md)).
@@ -84,23 +84,127 @@ and intend to fix it before the PR is reviewed.
 ## Continuous integration
 
 [.github/workflows/ci.yml](../.github/workflows/ci.yml) runs on every push
-to `main` and every PR, as two jobs in parallel. Each installs from
-`requirements/requirements.lock` with `uv`, then `pip install -e . --no-deps`;
-the uv cache keeps the wheels built from Git sources between runs.
+to `main`, every PR (opened, pushed, reopened or labelled), nightly on `main`
+and on demand (`workflow_dispatch`). Its jobs:
 
 - **lint**: `ruff check .`, `ruff format --check .` and `mypy src/`. mypy
   starts from the cache saved by the latest push to `main`.
-- **test**: checks the locked Cellpose runtime, installs Nextflow, then runs
-  the full test tier, `pytest -n 4 --dist load -m "not slow"` (four
-  pytest-xdist workers, one BLAS/OpenMP/numba thread each). The job summary
-  lists the 20 slowest tests.
+- **plan**: runs [scripts/ci/select_tests.py](../scripts/ci/select_tests.py)
+  (stdlib only, no install) and decides between the full suite and the tests
+  the PR's changes can reach ([Test selection](#test-selection)), and how many
+  shards to use: 5 for the full suite, 1 to 5 for a selection.
+- **test shard i/N**: one job per shard, each set up like the former single
+  test job: installs from `requirements/requirements.lock` with `uv`, then
+  `pip install -e . --no-deps` (the uv cache keeps the wheels built from Git
+  sources between runs), checks the locked Cellpose runtime, installs
+  Nextflow, and runs `pytest -n 4 --dist load -m "not slow"` (four
+  pytest-xdist workers, one BLAS/OpenMP/numba thread each) on its share of
+  the tests. The job summary lists the shard's 20 slowest tests.
+- **test**: the single pass/fail signal. It fails unless the plan and every
+  shard succeeded, and checks the shard reports
+  ([scripts/ci/check_shards.py](../scripts/ci/check_shards.py)): every shard
+  collected the same tests, and together they ran each one exactly once.
 
-A new push to a PR cancels that PR's run in progress. The separate
-[Privacy](../.github/workflows/privacy.yml) workflow checks the branch name,
-PR text and commit messages.
+More xdist workers per runner do not help: the 4-vCPU runner is already busy,
+and the longest test (the manual-registration end-to-end workflow test, about
+280 s on CI) sets the floor of whichever shard runs it. Shards spread the rest
+over several runners instead.
 
-Run the same checks locally before pushing (the fast test tier unless you ask
-for the full one; see [Test tiers](#test-tiers)):
+A new push to a PR, or a new label, cancels that PR's run in progress. The
+separate [Privacy](../.github/workflows/privacy.yml) workflow checks the branch
+name, PR text and commit messages.
+
+### Sharding
+
+[scripts/ci/pytest_shard.py](../scripts/ci/pytest_shard.py) is a pytest
+plugin (`PYTHONPATH=scripts/ci pytest -p pytest_shard --shard-count N
+--shard-index I --shard-durations FILE --shard-report OUT.json`). It
+partitions the collected tests (after `-m`) by recorded duration: whole test
+files, longest first, onto the least loaded shard; a file heavier than half a
+shard's share is split into single tests; inside a shard the tests of 10 s or
+more start first. Tests without a recorded duration weigh their file's (or
+the suite's) median, so new tests are always assigned. Every pytest-xdist
+worker computes the same partition.
+
+The durations come from the latest full run on `main`: the `test` job of a
+green push, nightly or manual run merges the shards' measured durations and
+saves them to the Actions cache (and as the `test-durations` artifact). The
+plan job restores the newest one, or falls back to the committed
+[scripts/ci/test_durations.json](../scripts/ci/test_durations.json), and hands
+the same file to every shard. Its keys are digests of each test's file and
+id (some test ids are the privacy checker's own inputs, so the file does not
+spell them out). Stale durations only unbalance the shards; they never drop a
+test. Refresh the committed file now and then, from the latest
+green full run on `main`:
+
+```bash
+gh run list --workflow CI --branch main --event push --status success --limit 1
+gh run download <run id> -n test-durations -D /tmp/test-durations
+cp /tmp/test-durations/test-durations.json scripts/ci/test_durations.json
+git commit -m "[chore]: refresh the recorded test durations" scripts/ci/test_durations.json
+```
+
+### Test selection
+
+On an ordinary PR the shards run only the tests the PR's changes
+(`git diff base...head`) can reach, plus a set of cheap repository-wide
+guards. `select_tests.py` builds a static dependency graph of `src/merxen`,
+`tests`, `scripts` and `workflows` and selects a test file when a changed
+file is in its closure:
+
+- the `merxen` modules it imports, directly or transitively, including
+  imports in functions and under `TYPE_CHECKING`, the parent packages' `__init__`
+  files, monkeypatch targets and `import_module` strings, and the imports of
+  every `conftest.py` above it and of the helpers it imports;
+- the repository files it names: string literals, path expressions such as
+  `REPO_ROOT / "docs" / "images" / name` (a computed tail means the whole
+  directory), globs, error messages that mention a path, a file's base name,
+  and a script's stem (`load_script("compare_czi_readers")`); a script it
+  names counts with its own imports;
+- for a test that launches Nextflow, the workflow files it runs, their
+  `include` closure, and the `merxen <command>` modules, `python -m merxen.*`
+  modules and scripts those call.
+
+On top of that, a change under `workflows/` selects all of
+`tests/test_workflows` and every test that launches Nextflow, a change under
+`scripts/` selects `tests/test_scripts`, and a data file under
+`tests/<dir>/` selects every test in that directory. Docs, notebooks, assets,
+licences and the root Markdown files select only the tests that name them.
+
+The guards always run: `tests/test_privacy`, the process script pins, the
+platform golden configs, the platform sites, the metro map, analysis-mode
+parity and the environment lock sync (about 25 s on four workers).
+
+The full suite runs instead when:
+
+- the event is a push to `main`, the nightly schedule or `workflow_dispatch`;
+- the PR carries the `full-ci` label (adding it starts a new, full run;
+  re-running an old run reuses its original labels, so add the label instead);
+- the PR merges a long-lived integration branch into `main`
+  (`INTEGRATION_BRANCHES` in `select_tests.py`, the one place that lists them);
+- a changed file is a `conftest.py`, `pyproject.toml`, `requirements/`,
+  `envs/`, `.github/`, `.pre-commit-config.yaml`, `scripts/run_ci_checks.sh`,
+  `scripts/ci/`, or one of the modules nearly every test imports
+  (`merxen/__init__.py`, `config.py`, `io/spatialdata_io.py`,
+  `io/spatialdata_schema.py`);
+- a module or test helper is deleted, a non-Python file under `src/` changes,
+  or any changed path has no rule;
+- the selection is estimated at more than 60 % of the suite's test time.
+
+Static analysis cannot see a path or module name computed at run time from
+data, code reached only through a subprocess other than Nextflow, or package
+data read by `src` code. The selector errs towards selecting more, every
+push to `main` and the nightly run test everything, and `full-ci` is there
+when a PR needs certainty. All the policy constants (guards, full-suite
+patterns, integration branches, label, shard sizes, cap) are at the top of
+`select_tests.py`. To see what a branch would run:
+
+```bash
+python scripts/ci/select_tests.py --base origin/main --worktree --format json
+```
+
+Run the same checks locally before pushing (the changed test tier unless you
+ask for another; see [Test tiers](#test-tiers)):
 
 ```bash
 scripts/run_ci_checks.sh
@@ -159,8 +263,8 @@ MERXEN_CI_PYTEST_ARGS="tests/test_cortical_depth -q" \
 scripts/run_ci_checks.sh
 ```
 
-Branch protection on `main` should require both CI jobs, `lint` and `test`, to
-pass.
+Branch protection on `main` should require the `lint` and `test` checks to
+pass (`test` aggregates the plan and the shards).
 
 ### Test tiers
 
@@ -168,13 +272,19 @@ pass.
 
 | Tier | Selection | Used by |
 |------|-----------|---------|
-| `fast` | `-m "not slow and not nextflow and not store_lock and not integration"` | the pre-push hook (default) |
-| `full` | `-m "not slow"` | CI on every PR and every push to `main` |
+| `changed` | the `fast` markers, on the tests the branch's changes can reach ([Test selection](#test-selection)), or on every test when the selector says FULL | the pre-push hook (default) |
+| `fast` | `-m "not slow and not nextflow and not store_lock and not integration"` | |
+| `full` | `-m "not slow"` | CI (sharded, on the full suite or the PR's selection) |
 
-The fast tier misses Nextflow, cross-process lock and end-to-end store
-regressions until CI. Run the full tier locally when a change touches the
-workflows, store locking or a stage's store writes, or before asking for a
-review:
+The `changed` tier diffs against the merge base with `MERXEN_CI_BASE_REF`
+(default `origin/main`; a stale one only selects more) up to the commit being
+pushed (`PRE_COMMIT_TO_REF`, else `HEAD`), plus uncommitted and untracked
+files. Without a merge base it falls back to the `fast` tier.
+
+The `changed` and `fast` tiers miss Nextflow, cross-process lock and
+end-to-end store regressions until CI. Run the full tier locally when a change
+touches the workflows, store locking or a stage's store writes, or before
+asking for a review:
 
 ```bash
 MERXEN_CI_TEST_TIER=full git push
