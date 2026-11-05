@@ -13,8 +13,10 @@ between text anchors) and the QC ``script:`` section, then
 ``workflows/nextflow.config`` (its defaults and their Groovy types). Global
 params need a launch each: L0 runs every case on the defaults, L1 and L2 rerun
 the MERSCOPE BUILD and SEGMENT cases with the bead-removal and transform params
-off their defaults, and L3 reruns them with bead removal switched on globally
-(``--merscope_bead_removal true``) instead of per row.
+off their defaults, L3 reruns them with bead removal switched on globally
+(``--merscope_bead_removal true``) instead of per row, and L4 reruns the ATERA
+BUILD cases with the ATERA params off their defaults (AT-4 added the ATERA
+cases; the XENIUM and MERSCOPE cases are unchanged).
 
 Goldens hold the compact ``JsonOutput.toJson`` text of each case (the task input
 is its deterministic ``prettyPrint``) with the launch directory written as
@@ -79,6 +81,14 @@ LAUNCHES: dict[str, tuple[str, ...]] = {
         "false",
     ),
     "L3": ("--merscope_bead_removal", "true"),
+    "L4": (
+        "--atera_min_qv",
+        "30",
+        "--atera_build_max_rss_gb",
+        "64",
+        "--species",
+        "mouse",
+    ),
 }
 
 
