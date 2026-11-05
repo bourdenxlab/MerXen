@@ -297,3 +297,30 @@ def test_cli_writes_the_report_and_sets_the_exit_status(
         )
         == 1
     )
+
+
+def test_label_statistics_do_not_depend_on_blocks_and_strips(
+    acceptance: ModuleType, built: Built
+) -> None:
+    synth = built.synth
+    whole = acceptance.stream_label_stats(
+        built.store,
+        n_cells=synth.n_cells,
+        nucleus_owner=synth.nucleus_cell_index,
+        n_workers=1,
+    )
+    pieces = acceptance.stream_label_stats(
+        built.store,
+        n_cells=synth.n_cells,
+        nucleus_owner=synth.nucleus_cell_index,
+        n_workers=3,
+        block=(13, 11),
+        strip_rows=5,
+    )
+    rows, cols = np.nonzero(synth.cell_mask == 1)
+    assert whole.cell_counts[1] == len(rows)
+    assert whole.cell_row_sums[1] == rows.sum()
+    assert whole.cell_col_sums[1] == cols.sum()
+    for name in ("cell_counts", "cell_row_sums", "cell_col_sums", "nucleus_counts"):
+        np.testing.assert_array_equal(getattr(whole, name), getattr(pieces, name))
+    assert whole.containment_violations == pieces.containment_violations == 0

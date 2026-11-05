@@ -608,6 +608,7 @@ def stream_label_stats(
     nucleus_owner: np.ndarray,
     n_workers: int,
     block: tuple[int, int] | None = None,
+    strip_rows: int = 512,
 ) -> LabelStats:
     """One pass over both level-0 label images, block by block.
 
@@ -617,6 +618,8 @@ def stream_label_stats(
         nucleus_owner: Owning cell row of each nucleus row.
         n_workers: Blocks processed at once.
         block: Block shape; defaults to the cell labels' chunk shape.
+        strip_rows: Rows of a block counted at once (bounds the working
+            copies to about 40 B per pixel of a strip).
 
     Returns:
         Per-label pixel counts and index sums, nucleus pixel counts and the
@@ -635,30 +638,40 @@ def stream_label_stats(
     expected_cell = np.concatenate([[0], nucleus_owner.astype(np.int64) + 1])
 
     def one(window: tuple[slice, slice]) -> tuple[np.ndarray, ...]:
-        cells = np.asarray(cell_array[window]).astype(np.int64, copy=False)
-        nuclei = np.asarray(nucleus_array[window]).astype(np.int64, copy=False)
-        rows, cols = np.indices(cells.shape)
-        rows += window[0].start
-        cols += window[1].start
-        flat = cells.ravel()
-        top_cell = int(flat.max(initial=0))
-        top_nucleus = int(nuclei.max(initial=0))
+        cell_block = np.asarray(cell_array[window])
+        nucleus_block = np.asarray(nucleus_array[window])
+        top_cell = int(cell_block.max(initial=0))
+        top_nucleus = int(nucleus_block.max(initial=0))
         size = max(n_cells, top_cell) + 1
-        counts = np.bincount(flat, minlength=size)
-        row_sums = np.bincount(flat, weights=rows.ravel(), minlength=size)
-        col_sums = np.bincount(flat, weights=cols.ravel(), minlength=size)
-        nucleus_flat = nuclei.ravel()
-        nucleus_counts = np.bincount(
-            nucleus_flat, minlength=max(n_nuclei, top_nucleus) + 1
-        )
-        on_nucleus = nucleus_flat > 0
-        labels = nucleus_flat[on_nucleus]
-        valid = labels <= n_nuclei
-        owner = np.zeros(labels.shape, dtype=np.int64)
-        owner[valid] = expected_cell[labels[valid]]
-        violations = int(
-            np.count_nonzero(flat[on_nucleus] != owner) + np.count_nonzero(~valid)
-        )
+        counts = np.zeros(size, dtype=np.int64)
+        row_sums = np.zeros(size)
+        col_sums = np.zeros(size)
+        nucleus_counts = np.zeros(max(n_nuclei, top_nucleus) + 1, dtype=np.int64)
+        violations = 0
+        width = cell_block.shape[1]
+        cols = np.arange(window[1].start, window[1].start + width, dtype=np.float64)
+        # Row strips keep the int64 and float64 working copies small.
+        for start in range(0, cell_block.shape[0], strip_rows):
+            cells = cell_block[start : start + strip_rows].astype(np.int64).ravel()
+            nuclei = nucleus_block[start : start + strip_rows].astype(np.int64).ravel()
+            height = len(cells) // max(1, width)
+            rows = np.repeat(
+                np.arange(height, dtype=np.float64) + window[0].start + start, width
+            )
+            counts += np.bincount(cells, minlength=size)
+            row_sums += np.bincount(cells, weights=rows, minlength=size)
+            col_sums += np.bincount(
+                cells, weights=np.tile(cols, height), minlength=size
+            )
+            nucleus_counts += np.bincount(nuclei, minlength=len(nucleus_counts))
+            on_nucleus = nuclei > 0
+            labels = nuclei[on_nucleus]
+            valid = labels <= n_nuclei
+            owner = np.zeros(labels.shape, dtype=np.int64)
+            owner[valid] = expected_cell[labels[valid]]
+            violations += int(
+                np.count_nonzero(cells[on_nucleus] != owner) + np.count_nonzero(~valid)
+            )
         return (
             counts,
             row_sums,
