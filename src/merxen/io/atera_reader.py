@@ -1263,7 +1263,9 @@ def atera_shapes_from_masks(
     made of several components becomes a MultiPolygon.
 
     Call it before any thread pool starts when ``mp_context="fork"``; the
-    default ``forkserver`` starts clean workers.
+    default ``forkserver`` starts clean workers, which import the caller's
+    ``__main__``, so a calling script must guard its entry point with
+    ``if __name__ == "__main__":``.
 
     Args:
         bundle: Resolved bundle.
