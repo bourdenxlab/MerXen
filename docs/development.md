@@ -307,6 +307,35 @@ pip install -e . --no-deps
 See [Python API → Adding a new stage](python-api.md#adding-a-new-stage) for
 the concrete checklist.
 
+## Platform registry
+
+Values that differ between platforms live in two registries that must agree:
+[src/merxen/platforms.py](../src/merxen/platforms.py) for the Python package and
+[workflows/lib/PlatformSpec.groovy](../workflows/lib/PlatformSpec.groovy) for
+the Nextflow workflow (which adds the samplesheet fields of each platform). Both
+raise for a platform they do not know. Look values up there rather than writing
+a new `MERSCOPE`/`XENIUM` ternary or else-arm.
+
+Tests that guard them:
+
+- `tests/test_platforms.py` pins every registry value.
+- `tests/test_workflows/test_platform_registry_groovy.py` (Nextflow tier) checks
+  that the Groovy registry matches the Python one and that every converted
+  workflow site raises for an unknown platform.
+- `tests/test_platform_sites.py` pins, by line text, the code that still names
+  original shape layers, nucleus layers, native images or a platform in an
+  equality test. A new site fails it: use the registry, or add the line to the
+  pin with the reason.
+- `tests/test_workflows/test_platform_config_golden.py` and
+  `test_process_script_pins.py` pin the rendered task configs and every process
+  `script:` section, so a refactor that changes Nextflow task hashes fails. Only
+  regenerate them (`MERXEN_UPDATE_GOLDEN=1`) for an announced change.
+
+Adding a platform means an entry in both registries, the platform's arms in the
+dispatch code that already raises for an unknown platform (builders,
+enrichment, segmentation), and its analysis-mode alias in all three mode maps
+(`tests/test_workflows/test_analysis_mode_parity.py`).
+
 ## Writing docs
 
 - Docs live here in `docs/` as plain markdown.

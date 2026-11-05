@@ -12,6 +12,7 @@ authoritative reference.
 merxen/
 ├── config.py            # Pydantic configs (pipeline contract)
 ├── control_features.py  # registry of platform control features
+├── platforms.py         # registry of supported platforms (MERSCOPE, XENIUM)
 ├── memory.py            # RAM monitoring helpers
 ├── _typing.py           # shared small types
 ├── cli/                 # Click entry points (one per stage)
@@ -57,6 +58,28 @@ configs against these.
 - `load_config_from_json(path, cls)` — helper every CLI uses.
 
 Reference: [Configuration → Pydantic config models](configuration.md#pydantic-config-models).
+
+## `merxen.platforms` — [platforms.py](../src/merxen/platforms.py)
+
+The registry of supported platforms. Each `PlatformSpec` holds the values that
+differ between platforms: the native morphology image (`native_image_key`), the
+original vendor shape layers (`original_cell_shape_key`,
+`original_nucleus_shape_key`, `original_shape_keys`), the default Cellpose
+channels, the quality-score column alias and the pixel-size fallback.
+
+- `platform_spec(name)` returns the entry and raises `UnknownPlatformError` (a
+  `ValueError`) for a platform that is not registered. Pipeline code uses it
+  instead of `if platform == "MERSCOPE" … else …`, so a new platform cannot fall
+  into another platform's branch.
+- `find_platform_spec(name)` returns `None` instead; it is for display code that
+  also handles labels which are not platforms.
+- `PLATFORM_SPECS`, `ORIGINAL_CELL_SHAPE_KEYS`, `ORIGINAL_NUCLEUS_SHAPE_KEYS`
+  and `supported_platforms()` expose the whole registry.
+
+The workflow has a twin in
+[workflows/lib/PlatformSpec.groovy](../workflows/lib/PlatformSpec.groovy)
+(`PlatformSpec.forName(platform)`, which also holds the samplesheet fields of
+each platform). See [Development → Platform registry](development.md#platform-registry).
 
 ## `merxen.io`
 

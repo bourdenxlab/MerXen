@@ -23,6 +23,11 @@ from shapely.geometry import box as shapely_box
 
 from merxen.io.spatialdata_schema import choose_primary_points_key
 from merxen.io.transcript_io import assignment_mask_from_points
+from merxen.platforms import (
+    ORIGINAL_CELL_SHAPE_KEYS,
+    find_platform_spec,
+    platform_spec,
+)
 from merxen.plotting import prepare_plot_output, save_figure
 
 SANITY_CROP_SIZE_UM = 250.0
@@ -771,22 +776,20 @@ def _ordered_sanity_shape_keys(
 ) -> list[str]:
     available: dict[str, str] = {}
     suffix = "_aligned_nonrigid"
+    dataset_spec = find_platform_spec(dataset_name)
     for key_obj in sdata_obj.shapes:
         key = str(key_obj)
         canonical = _canonical_shape_key(key)
         if canonical not in SANITY_SHAPE_STYLES:
             continue
-        if canonical.endswith("cell_boundaries"):
-            if (
-                dataset_name.upper() == "MERSCOPE"
-                and canonical != "merscope_cell_boundaries"
-            ):
-                continue
-            if (
-                dataset_name.upper() == "XENIUM"
-                and canonical != "xenium_cell_boundaries"
-            ):
-                continue
+        # Keep only this platform's original layer; labels that are not a
+        # registered platform keep every original layer.
+        if (
+            canonical in ORIGINAL_CELL_SHAPE_KEYS
+            and dataset_spec is not None
+            and canonical != dataset_spec.original_cell_shape_key
+        ):
+            continue
         is_aligned = key.endswith(suffix)
         if prefer_aligned != is_aligned:
             continue
@@ -1393,13 +1396,14 @@ def _resolve_dataset_mask_affine(
         matrix = _load_merscope_transform_matrix(zarr_path)
         if matrix is not None:
             return _matrix_pixel_to_micron_affine(matrix)
-        return (0.108, 0.0, 0.0), (0.0, 0.108, 0.0)
+        mpp = platform_spec(dataset).fallback_um_per_px
+        return (mpp, 0.0, 0.0), (0.0, mpp, 0.0)
 
     if dataset == "XENIUM":
-        mpp = _find_xenium_microns_per_pixel(zarr_path)
-        if mpp is None:
-            mpp = 0.2125
-        return (float(mpp), 0.0, 0.0), (0.0, float(mpp), 0.0)
+        xenium_mpp = _find_xenium_microns_per_pixel(zarr_path)
+        if xenium_mpp is None:
+            xenium_mpp = platform_spec(dataset).fallback_um_per_px
+        return (float(xenium_mpp), 0.0, 0.0), (0.0, float(xenium_mpp), 0.0)
 
     raise ValueError(f"Unknown dataset: {dataset_name}")
 

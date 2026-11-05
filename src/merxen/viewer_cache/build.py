@@ -32,6 +32,7 @@ from merxen.io.spatialdata_io import (
 )
 from merxen.masks import discover_masks, register_missing_mask_branches
 from merxen.memory import force_release, log_status
+from merxen.platforms import PLATFORM_SPECS
 from merxen.viewer_cache.format import (
     DERIVED_CACHE_ATTR,
     LABEL_CACHE_ATTR,
@@ -67,24 +68,17 @@ from merxen.viewer_cache.transform import resolve_mask_affine
 
 logger = logging.getLogger(__name__)
 
+_BASE_SHAPE_KEYS: tuple[str, ...] = (
+    "MOSAIK_proseg",
+    "MOSAIK_proseg_hybrid",
+    "MOSAIK_cellpose",
+    "cellpose_nuclei",
+)
 # Retained as a source-compatible discovery hint for callers that imported the
 # old constant. Runtime defaults now come exclusively from ``discover_masks``.
 DEFAULT_SHAPE_KEYS: dict[str, tuple[str, ...]] = {
-    "MERSCOPE": (
-        "MOSAIK_proseg",
-        "MOSAIK_proseg_hybrid",
-        "MOSAIK_cellpose",
-        "cellpose_nuclei",
-        "merscope_cell_boundaries",
-    ),
-    "XENIUM": (
-        "MOSAIK_proseg",
-        "MOSAIK_proseg_hybrid",
-        "MOSAIK_cellpose",
-        "cellpose_nuclei",
-        "xenium_cell_boundaries",
-        "xenium_nucleus",
-    ),
+    name: _BASE_SHAPE_KEYS + spec.original_shape_keys
+    for name, spec in PLATFORM_SPECS.items()
 }
 
 

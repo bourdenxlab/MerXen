@@ -40,6 +40,7 @@ from merxen.io.spatialdata_schema import choose_primary_points_key
 from merxen.io.transcript_io import resolve_col, write_proseg_csv_from_points
 from merxen.memory import force_release, log_status
 from merxen.path_utils import remove_path, stage_existing_output
+from merxen.platforms import platform_spec
 from merxen.segmentation.bead_mask_veto import (
     apply_bead_mask_veto,
     bead_mask_veto_identity,
@@ -558,11 +559,7 @@ def _preflight_model_selection(
     require_safe_custom_outputs(config)
     if not is_experimental_arm(config):
         return None
-    native_key = (
-        "morphology_focus"
-        if config.dataset.platform == "XENIUM"
-        else MERSCOPE_ZPROJ_IMAGE_NAME
-    )
+    native_key = platform_spec(config.dataset.platform).native_image_key
     if config.dataset.image_key not in (None, native_key):
         raise ValueError("Custom models require the native image element")
     if has_custom_model(config):
@@ -575,11 +572,7 @@ def _preflight_model_selection(
             if not path.is_file():
                 raise FileNotFoundError(path)
     sdata, _fetch, _height, _width, matrix, _points = _load_dataset_sdata(config)
-    image_key = (
-        "morphology_focus"
-        if config.dataset.platform == "XENIUM"
-        else MERSCOPE_ZPROJ_IMAGE_NAME
-    )
+    image_key = platform_spec(config.dataset.platform).native_image_key
     preflight = (
         preflight_custom_model if has_custom_model(config) else preflight_stock_arm
     )
@@ -1169,11 +1162,9 @@ def run_proseg_segmentation(
         upgraded = (
             upgrade_spatialdata_contract(
                 latest_output,
-                quality_column_alias=(
-                    "transcript_score"
-                    if dataset.platform.upper() == "MERSCOPE"
-                    else None
-                ),
+                quality_column_alias=platform_spec(
+                    dataset.platform
+                ).quality_column_alias,
                 platform=dataset.platform,
             )
             if is_spatialdata_store
@@ -1216,9 +1207,7 @@ def run_proseg_segmentation(
         convert_to_latest_zarr(
             raw_output,
             latest_output,
-            quality_column_alias=(
-                "transcript_score" if dataset.platform.upper() == "MERSCOPE" else None
-            ),
+            quality_column_alias=platform_spec(dataset.platform).quality_column_alias,
             platform=dataset.platform,
         )
         remove_path(raw_output)
@@ -1284,9 +1273,7 @@ def run_proseg_segmentation(
     latest_out = convert_to_latest_zarr(
         raw_out,
         latest_output,
-        quality_column_alias=(
-            "transcript_score" if dataset.platform.upper() == "MERSCOPE" else None
-        ),
+        quality_column_alias=platform_spec(dataset.platform).quality_column_alias,
         platform=dataset.platform,
     )
     write_store_segmentation_sidecar(latest_out, source_preprocessing)
