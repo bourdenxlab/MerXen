@@ -24,6 +24,12 @@ def check(String id, Map row) {
     println "CASE\t${id}\t" + groovy.json.JsonOutput.toJson(value)
 }
 
+def checkStages(String id, Map settings) {
+    def errors = []
+    appendAteraStagePreflightChecks(errors, settings)
+    println "CASE\t${id}\t" + groovy.json.JsonOutput.toJson([errors: errors])
+}
+
 workflow {
     def atera = [pair_id: "PAIR_A", analysis_mode: "atera", atera_dir: "raw/atera"]
     check("atera/stop_build", atera + [stop_stage: "build_spatialdata"])
@@ -42,5 +48,10 @@ workflow {
     )
     check("mixed/atera", atera + [pair_id: "PAIR_C"])
     check("mixed/atera_stop_build", atera + [pair_id: "PAIR_D", stop_stage: "build_spatialdata"])
+    // A row whose stage selection is empty (no stage at all) is refused too.
+    checkStages(
+        "atera/no_stage",
+        [pair_id: "PAIR_E", active_platforms: ["ATERA"], selected_stages: []],
+    )
     println "DONE"
 }

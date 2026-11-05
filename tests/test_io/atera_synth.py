@@ -143,6 +143,28 @@ RUN_SUFFIX: Final = (
     f"{FAKE_IDENTIFIERS['region_name']}"
 )
 COMPANION_PREFIX: Final = "Synthetic_Atera_dataset"
+#: Matrix ``var`` differential-expression statistics, as the vendor names them.
+DE_STATISTICS: Final = ("logfc", "pval", "pval_adj", "score", "rank")
+#: Categorical ``obs`` columns that carry a vendor ``color`` array.
+AZIMUTH_COLOR_COLUMNS: Final = (
+    "azimuth_broad",
+    "azimuth_coarse",
+    "azimuth_fine",
+    "azimuth_full_hierarchy",
+)
+#: Packed 0xRRGGBBAA colours; the second one has the sign bit set as int32.
+VENDOR_COLORS: Final = np.asarray([0x008456FF, 0x8E00F8FF, 0x7F7F7FFF], dtype=np.uint32)
+#: Root attributes of the fixture's cell-feature matrix (vendor keys).
+CFM_ROOT_ATTRS: Final = {
+    "cell_annotations": [
+        {"annotation_method": "Azimuth", "cell_annotation_levels": ["broad"]}
+    ],
+    "clusterings": [{"clustering_method": "leiden", "resolution": 1.0}],
+    "matrix_properties": {"synthetic": True},
+    "version": "Synthetic matrix 1",
+}
+#: Length of a list attribute that is too large to inline in the store attrs.
+LARGE_ATTR_LENGTH: Final = 10_000
 
 CHANNELS_2: Final = (("DAPI", "dapi"), ("18S", "18s"))
 CHANNELS_4: Final = (
@@ -403,6 +425,7 @@ def write_atera_bundle(
         cell_suffix=cell_suffix,
         with_is_sketch=with_is_sketch,
     )
+    _write_viz_store(root / f"{zip_prefix}binned_transcripts.zarr.zip")
     channels = CHANNELS_2 if n_channels == 2 else CHANNELS_4
     channel_files, channel_level0 = _write_morphology(
         root / "morphology_2d",
@@ -971,7 +994,12 @@ def _write_cfm_zip(
             "highly_variable": np.arange(len(FEATURES)) % 2 == 0,
             "feature_type": _categorical(feature_types),
             "genome": _categorical(["GRCh38"] * len(FEATURES)),
-            "de_leiden_res_1.0_c0_logfc": rng.normal(size=len(FEATURES)),
+            **{
+                f"de_leiden_res_1.0_c0_{stat}": rng.normal(size=len(FEATURES)).astype(
+                    np.float32
+                )
+                for stat in DE_STATISTICS
+            },
         },
         index=pd.Index([feature[3] for feature in FEATURES], name="feature_id"),
     )
@@ -983,6 +1011,33 @@ def _write_cfm_zip(
     with tempfile.TemporaryDirectory() as tmp:
         group = _new_v2_group(Path(tmp))
         ad.io.write_elem(group, "/", adata)
+        # The vendor stores a packed 0xRRGGBBAA colour per category beside the
+        # codes and categories; anndata ignores the extra array.
+        for column in AZIMUTH_COLOR_COLUMNS:
+            n_categories = len(adata.obs[column].cat.categories)
+            packed = (VENDOR_COLORS[:n_categories].astype(np.int64)).astype(np.int32)
+            _create(group[f"obs/{column}"], "color", packed, chunks=packed.shape)
+        # Reopen: the handle's attrs predate those write_elem stored.
+        zarr.open_group(zarr.storage.LocalStore(tmp), mode="r+").attrs.update(
+            CFM_ROOT_ATTRS
+        )
+        _zip_directory(Path(tmp), path)
+
+
+def _write_viz_store(path: Path) -> None:
+    """A minimal ``binned_transcripts`` zip: only its metadata is kept."""
+    with tempfile.TemporaryDirectory() as tmp:
+        group = _new_v2_group(Path(tmp))
+        gene = group.require_group("gene")
+        gene.attrs.update({"column_names": ["gene_index"]})
+        group.attrs.update(
+            {
+                "name": "Synthetic binned transcripts",
+                "dataset_uuid": FAKE_IDENTIFIERS["dataset_uuid"],
+                # Over ROOT_ATTR_INLINE_MAX_BYTES: kept in the sidecar only.
+                "bin_counts": list(range(LARGE_ATTR_LENGTH)),
+            }
+        )
         _zip_directory(Path(tmp), path)
 
 
@@ -1002,16 +1057,54 @@ def _ome_xml(
         f'<UUID FileName="{name}">{uid}</UUID></TiffData>'
         for k, (name, uid) in enumerate(zip(files, uuids, strict=True))
     )
+    refs = "".join(
+        f'<AnnotationRef ID="Annotation:{k}"/>' for k in range(len(channels))
+    )
+    annotations = "".join(
+        f'<MapAnnotation ID="Annotation:{k}"><Value>'
+        + "".join(
+            f'<M K="{key}">{value}</M>' if value else f'<M K="{key}"/>'
+            for key, value in ome_map_annotation(k, name).items()
+        )
+        + "</Value></MapAnnotation>"
+        for k, (name, _) in enumerate(channels)
+    )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06" '
-        f'UUID="{uuids[own]}"><Image ID="Image:0" Name="Baseline">'
+        f'UUID="{uuids[own]}"><Instrument ID="Instrument:0">'
+        '<Microscope Manufacturer="Synthetic" Model="Synthetic Atera"/></Instrument>'
+        '<Image ID="Image:0" Name="Baseline"><InstrumentRef ID="Instrument:0"/>'
         '<Pixels ID="Pixels:0" DimensionOrder="XYZCT" Type="uint16" '
         f'SizeX="{shape[1]}" SizeY="{shape[0]}" SizeZ="1" SizeC="{len(channels)}" '
         f'SizeT="1" PhysicalSizeX="{PIXEL_SIZE_UM}" PhysicalSizeXUnit="µm" '
         f'PhysicalSizeY="{PIXEL_SIZE_UM}" PhysicalSizeYUnit="µm">'
-        f"{channel_xml}{tiff_data}</Pixels></Image></OME>"
+        f"{channel_xml}{tiff_data}</Pixels>{refs}</Image>"
+        f"<StructuredAnnotations>{annotations}</StructuredAnnotations></OME>"
     ).encode()
+
+
+def ome_map_annotation(channel: int, name: str) -> dict[str, str]:
+    """The fixture's OME map annotation of one channel (empty values allowed).
+
+    Args:
+        channel: Channel position.
+        name: Channel name.
+
+    Returns:
+        Key-value pairs in vendor key order.
+    """
+    return {
+        "Cycle": "1",
+        "Channel": f"Synthetic band {channel}",
+        "Long name": name if channel == 0 else "",
+        "Purpose": "Nuclear" if channel == 0 else "Boundary",
+        "Observed min": "3",
+        "Observed max": str(16000 + channel),
+        "Suggested LUT max": "3000",
+        "Suggested LUT min": "5",
+        "Pixel value offset": str(channel),
+    }
 
 
 def write_ome_channel(

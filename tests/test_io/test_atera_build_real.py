@@ -2,8 +2,9 @@
 
 A small build (one small transcript tile, points and metadata only) checks on
 the real bundle what the synthetic one cannot: the vendor files are copied byte
-for byte, the full header reaches the attrs, the points reconcile with the
-vendor tile counts, and the label pyramid has the stored image levels. The
+for byte, the full header and the metadata inside the vendor stores and TIFFs
+reach the store, the points reconcile with the vendor tile counts, and the
+label pyramid has the stored image levels. The
 data under ``$MERXEN_ATERA_RAW_ROOT`` is only read; no manifest value is
 printed.
 """
@@ -25,19 +26,17 @@ from merxen.io.builders import atera as atera_builder
 from merxen.io.spatialdata_schema import validate_merxen_schema_streaming
 from merxen.platforms import find_um_per_px
 
+from .atera_real import extracted_outs
+
 pytestmark = pytest.mark.slow
 
-PUBLIC_DATASET = "Atera_v1_WTA_S4A_Brain_Hippocampus_ND_FF"
 SMALL_TILE = "5,4"
 
 
 @pytest.fixture
 def outs(real_path: Callable[[str], Path]) -> Path:
     """The extracted public dataset folder."""
-    folder = real_path("MERXEN_ATERA_RAW_ROOT") / PUBLIC_DATASET / "outs"
-    if not (folder / ".extract_complete").exists():
-        pytest.skip("the public Atera bundle is not extracted on this host")
-    return folder
+    return extracted_outs(real_path("MERXEN_ATERA_RAW_ROOT"))
 
 
 def test_small_real_build_keeps_the_metadata_whole(outs: Path, tmp_path: Path) -> None:
@@ -81,6 +80,22 @@ def test_small_real_build_keeps_the_metadata_whole(outs: Path, tmp_path: Path) -
         data = sidecar.source.read_bytes()
         assert (store / record["path"]).read_bytes() == data
         assert record["sha256"] == hashlib.sha256(data).hexdigest()
+
+    # The metadata inside the vendor stores and TIFFs is kept too.
+    stores = header["vendor_store_attrs"]
+    assert {"dataset_uuid", "kit_info"} <= set(stores["transcripts"]["attrs"])
+    assert "codeword_gene_mapping" in stores["transcripts"]["attrs_in_sidecar_only"]
+    assert {"segmentation_methods", "polygon_set_descriptions"} <= set(
+        stores["cells"]["attrs"]
+    )
+    assert {"cell_annotations", "clusterings", "matrix_properties"} <= set(
+        stores["cell_feature_matrix"]["attrs"]
+    )
+    for record in header["embedded_metadata"]:
+        data = (store / record["path"]).read_bytes()
+        assert record["sha256"] == hashlib.sha256(data).hexdigest()
+    keys = set(header["morphology_2d_annotations"][0]["values"])
+    assert {"Purpose", "Observed max", "Pixel value offset"} <= keys
 
     tiles = {tile.key: tile for tile in ar.read_atera_tile_index(bundle)}
     transcripts = header["transcripts"]

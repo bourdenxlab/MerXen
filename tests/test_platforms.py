@@ -91,7 +91,11 @@ def test_atera_fields() -> None:
         quality_column_alias=None,
         fallback_um_per_px=0.21249222,
         nucleus_ids_are_cell_ids=False,
-        spec_sidecar_names=("atera/experiment.spatial", "experiment.spatial"),
+        spec_sidecar_names=(
+            "atera/experiment_override.spatial",
+            "atera/experiment.spatial",
+            "experiment.spatial",
+        ),
         mask_pixel_convention="corner",
     )
     assert spec.original_shape_keys == ("atera_cell_boundaries", "atera_nucleus")

@@ -148,6 +148,10 @@ REASONS: dict[str, dict[str, str]] = {
             "Atera table reads the largest-nucleus area and sums all nuclei per cell "
             "through polygon_sets/0/cell_index (D7)"
         ),
+        "src/merxen/io/builders/atera.py": (
+            "Atera builder passes the nucleus areas counted during the masks/0 "
+            "export to the table (D7)"
+        ),
         "src/merxen/io/spatialdata_io.py": "cell layer selection excludes nuclei",
         "src/merxen/visualization/sanity_plots.py": (
             "display layer selection excludes nuclei"
@@ -330,6 +334,16 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
             'obs["nucleus_area"] = summary["nucleus_area"].to_numpy(np.float64)',
             'obs["nucleus_area_total"] = '
             "np.asarray(nucleus_area_total, dtype=np.float64)",
+            "def nucleus_area_total_from_counts(",
+            "exported (for :func:`nucleus_area_total_from_counts`).",
+            "return nucleus_area_total_from_counts(counter.counts, cells, "
+            "bundle.pixel_size_um)",
+            '{"cell_centroid_x", "cell_centroid_y", "cell_area", "nucleus_area", '
+            '"nucleus_count"}',
+        ),
+        "src/merxen/io/builders/atera.py": (
+            "ar.nucleus_area_total_from_counts(",
+            "nucleus_area_total=(",
         ),
         "src/merxen/io/spatialdata_io.py": (
             'if "cell" in str(key).lower() and "nucleus" not in str(key).lower()',

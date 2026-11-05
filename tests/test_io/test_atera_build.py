@@ -11,7 +11,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
+import subprocess
+import sys
+import textwrap
+import time
+import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,11 +34,11 @@ from pydantic import ValidationError
 from spatialdata.transformations import Identity, Scale, get_transformation
 
 from merxen import privacy
-from merxen.config import AteraBuildConfig, SpatialDataBuildConfig
+from merxen.config import AteraBuildConfig, SpatialDataBuildConfig, XeniumBuildConfig
 from merxen.io import atera_reader as ar
 from merxen.io.builders import atera as atera_builder
 from merxen.io.builders.pipeline import build_spatialdata_artifact
-from merxen.io.builders.xenium import check_not_atera_preview
+from merxen.io.builders.xenium import check_not_atera_preview, write_xenium_spatialdata
 from merxen.io.spatialdata_schema import (
     MERXEN_SCHEMA_ATTR,
     validate_merxen_schema,
@@ -41,6 +47,7 @@ from merxen.io.spatialdata_schema import (
 from merxen.platforms import find_um_per_px
 
 from .atera_synth import (
+    CFM_ROOT_ATTRS,
     EMPTY_POLYGON_CELL,
     FAKE_IDENTIFIERS,
     AteraSynth,
@@ -54,6 +61,7 @@ FAST_OPTIONS: dict[str, Any] = {
     "morphology_levels": 3,
 }
 _HERE = Path(__file__).parent
+_NEXTFLOW_CONFIG = _HERE.parents[1] / "workflows" / "nextflow.config"
 
 
 @dataclass(frozen=True)
@@ -261,6 +269,98 @@ def test_process_tree_rss_counts_anonymous_memory() -> None:
     del block
 
 
+def test_process_tree_rss_counts_child_processes() -> None:
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys, numpy as np; block = np.ones(256 << 20, dtype=np.uint8); "
+            "print('ready', flush=True); sys.stdin.read()",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None and child.stdout.readline() == "ready\n"
+        own = atera_builder._anonymous_rss_bytes(atera_builder.psutil.Process())
+        tree = atera_builder.process_tree_anonymous_rss_bytes()
+        assert tree - own > 200 << 20
+    finally:
+        child.communicate("")
+
+
+def test_process_tree_rss_ignores_file_backed_pages(tmp_path: Path) -> None:
+    path = tmp_path / "mask.npy"
+    np.save(path, np.ones(128 << 20, dtype=np.uint8))
+    before = atera_builder.process_tree_anonymous_rss_bytes()
+    mapped = np.load(path, mmap_mode="r")
+    assert int(mapped.sum(dtype=np.int64)) == 128 << 20
+    after = atera_builder.process_tree_anonymous_rss_bytes()
+    assert after - before < 32 << 20
+    del mapped
+
+
+def test_watchdog_keeps_polling_after_a_failed_reading(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    readings: list[int] = []
+
+    def flaky() -> int:
+        readings.append(1)
+        if len(readings) == 2:
+            raise OSError("proc read failed")
+        return 1
+
+    watchdog = atera_builder.RssWatchdog(None, interval_s=0.001, measure=flaky)
+    with caplog.at_level(logging.ERROR, logger="merxen"):
+        watchdog.start()
+        deadline = time.monotonic() + 10
+        while len(readings) < 5 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        watchdog.stop()
+    assert len(readings) >= 5
+    assert "Memory watchdog reading failed" in caplog.text
+
+
+def test_watchdog_exit_code_is_never_retried_by_the_workflow() -> None:
+    code = atera_builder.RSS_LIMIT_EXIT_CODE
+    assert code not in (137, 140)
+    # The BUILD retry rule lists exactly the external kills.
+    assert "task.exitStatus in [137, 140]" in _NEXTFLOW_CONFIG.read_text()
+
+
+def test_watchdog_stop_exits_with_its_code_and_removes_the_partials(
+    tmp_path: Path,
+) -> None:
+    partial = tmp_path / "store.zarr.partial-abc"
+    scratch = tmp_path / "store.zarr.partial-abc.work"
+    for folder in (partial, scratch):
+        folder.mkdir()
+        (folder / "data.bin").write_bytes(b"x")
+    script = textwrap.dedent(
+        f"""
+        import time
+        from pathlib import Path
+        from merxen.io.builders.atera import RssWatchdog
+        watchdog = RssWatchdog(1e-9, interval_s=0.01)
+        watchdog.cleanup[:] = [Path({str(partial)!r}), Path({str(scratch)!r})]
+        watchdog.start()
+        time.sleep(30)
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+        check=False,
+    )
+    assert result.returncode == atera_builder.RSS_LIMIT_EXIT_CODE, result.stderr
+    assert not partial.exists() and not scratch.exists()
+
+
 # --------------------------------------------------------------------------- #
 # Store contents and the contract
 # --------------------------------------------------------------------------- #
@@ -380,6 +480,53 @@ def test_attrs_carry_the_full_vendor_header(built: Built) -> None:
     assert build["morphology_channels"] == list(built.synth.channel_names)
     assert build["options"]["min_qv"] == 20.0
     assert set(header["shapes"]) == {"cell_boundaries", "nucleus_boundaries"}
+    assert header["experiment_source"] == "bundle"
+    stores = header["vendor_store_attrs"]
+    assert (
+        stores["transcripts"]["attrs"]["dataset_uuid"]
+        == (FAKE_IDENTIFIERS["dataset_uuid"])
+    )
+    assert (
+        stores["cell_feature_matrix"]["attrs"]["cell_annotations"]
+        == (CFM_ROOT_ATTRS["cell_annotations"])
+    )
+    assert header["morphology_2d_annotations"][0]["values"]["Purpose"] == "Nuclear"
+
+
+def test_store_keeps_the_metadata_inside_the_vendor_stores(built: Built) -> None:
+    header = _attrs(built.store)["merxen_atera"]
+    records = {record["path"]: record for record in header["embedded_metadata"]}
+    bundle = ar.resolve_atera_bundle(built.synth.root)
+    for store, path in ar.vendor_zarr_stores(bundle).items():
+        record = records[f"atera/zarr_metadata/{store}.json"]
+        data = (built.store / record["path"]).read_bytes()
+        assert record["sha256"] == hashlib.sha256(data).hexdigest()
+        members = json.loads(data)["members"]
+        with zipfile.ZipFile(path) as archive:
+            for name, text in members.items():
+                assert archive.read(name) == text.encode("utf-8")
+    for name in built.synth.channel_files:
+        assert (
+            built.store / "atera" / "ome_xml" / "morphology_2d" / f"{name}.xml"
+        ).is_file()
+
+
+def test_table_carries_the_vendor_de_colours_and_nucleus_centroids(
+    built: Built,
+) -> None:
+    table = sd.read_zarr(built.store).tables["table"]
+    assert table.varm["vendor_de"].shape[0] == table.n_vars
+    assert table.uns["vendor_azimuth_broad_colors"][0].startswith("#")
+    assert table.obs["vendor_nucleus_centroid_x"].notna().any()
+    # The nucleus areas were counted while masks/0 was exported.
+    bundle = ar.resolve_atera_bundle(built.synth.root)
+    cells = ar.read_atera_cells(bundle)
+    np.testing.assert_allclose(
+        table.obs["nucleus_area_total"].to_numpy(),
+        ar.atera_nucleus_area_total(bundle, cells)[
+            table.obs["instance_id"].to_numpy(np.int64) - 1
+        ],
+    )
 
 
 def test_transcript_statistics_reach_the_attrs(built: Built) -> None:
@@ -441,6 +588,78 @@ def test_fingerprint_ignores_runtime_options_only(built: Built) -> None:
     assert atera_builder.atera_build_fingerprint(bundle, other) != fingerprint
 
 
+def _bundle_copy(built: Built, tmp_path: Path) -> Path:
+    root = tmp_path / "roi"
+    shutil.copytree(built.synth.root, root)
+    return root
+
+
+def test_fingerprint_follows_the_input_files_and_format(
+    built: Built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _bundle_copy(built, tmp_path)
+    config = AteraBuildConfig(**FAST_OPTIONS)
+
+    def fingerprint(**kwargs: Any) -> str:
+        bundle = atera_builder.resolve_atera_input(root, config, **kwargs)
+        return atera_builder.atera_build_fingerprint(bundle, config)
+
+    base = fingerprint()
+    # copytree keeps sizes and times, and names are bundle-relative.
+    assert base == atera_builder.atera_build_fingerprint(
+        ar.resolve_atera_bundle(built.synth.root), config
+    )
+    zip_stat = (root / "transcripts.zarr.zip").stat()
+    os.utime(
+        root / "transcripts.zarr.zip",
+        ns=(zip_stat.st_atime_ns, zip_stat.st_mtime_ns + 1_000_000_000),
+    )
+    touched = fingerprint()
+    assert touched != base
+    experiment = json.loads((root / "experiment.spatial").read_text())
+    experiment["run_name"] = "SYNTH_RUN_EDITED"
+    (root / "experiment.spatial").write_text(json.dumps(experiment))
+    edited = fingerprint()
+    assert edited not in (base, touched)
+    override = tmp_path / "override.spatial"
+    override.write_text(json.dumps(experiment, indent=4))
+    with_override = fingerprint(atera_spec_path=override)
+    assert with_override != edited
+    override.write_text(json.dumps(experiment, indent=2))
+    assert fingerprint(atera_spec_path=override) != with_override
+    monkeypatch.setattr(atera_builder, "ATERA_BUILD_FORMAT_VERSION", 999)
+    assert fingerprint() != edited
+
+
+def test_changed_bundle_refuses_the_cached_store(built: Built, tmp_path: Path) -> None:
+    root = _bundle_copy(built, tmp_path)
+    persistent = tmp_path / "cache" / "source.zarr"
+    shutil.copytree(built.store, persistent)
+    config = _config(root, tmp_path / "stage" / "source.zarr", persistent=persistent)
+    assert build_spatialdata_artifact(config) == config.output_path
+    stat = (root / "cells.zarr.zip").stat()
+    os.utime(root / "cells.zarr.zip", ns=(stat.st_atime_ns, stat.st_mtime_ns + 10**9))
+    with pytest.raises(ValueError, match="build_fingerprint mismatch"):
+        build_spatialdata_artifact(config)
+
+
+def test_input_paths_stay_out_of_the_options_and_fingerprint(built: Built) -> None:
+    bundle = ar.resolve_atera_bundle(built.synth.root)
+    base = AteraBuildConfig(**FAST_OPTIONS)
+    explicit = base.model_copy(
+        update={
+            "transcripts_path": bundle.transcripts_zip,
+            "cells_path": bundle.cells_zip,
+        }
+    )
+    assert not set(atera_builder.build_options(explicit)) & (
+        atera_builder.INPUT_PATH_FIELDS
+    )
+    assert atera_builder.atera_build_fingerprint(
+        bundle, explicit
+    ) == atera_builder.atera_build_fingerprint(bundle, base)
+
+
 def test_logs_name_the_alias_and_no_manifest_value(built: Built) -> None:
     """Human-facing output names the dataset by alias (plan §3.11)."""
     assert "SYN1_ATERA" in built.log_text
@@ -486,12 +705,25 @@ def test_incomplete_store_is_rebuilt_and_stale_partials_removed(
     (persistent / "points").rename(persistent / "points_half_written")
     stale = tmp_path / "cache" / "source.zarr.partial-0123"
     stale.mkdir()
+    scratch = tmp_path / "cache" / "source.zarr.partial-0123.work"
+    scratch.mkdir()
+    (scratch / "atera_masks_1.npy").write_bytes(b"left by a killed build")
     config = _config(built.synth.root, tmp_path / "out.zarr", persistent=persistent)
-    build_spatialdata_artifact(config)
+    handler = _Collect()
+    logging.getLogger("merxen").addHandler(handler)
+    try:
+        build_spatialdata_artifact(config)
+    finally:
+        logging.getLogger("merxen").removeHandler(handler)
     assert atera_builder.read_build_marker(persistent) is not None
     assert (persistent / "points").is_dir()
     assert not (persistent / "points_half_written").exists()
-    assert not stale.exists()
+    assert not stale.exists() and not scratch.exists()
+    assert sorted(path.name for path in persistent.parent.iterdir()) == ["source.zarr"]
+    # The log counts the folders; it names neither them nor the target.
+    text = "\n".join(handler.lines)
+    assert "2 incomplete earlier build folder(s)" in text
+    assert "partial-0123" not in text
 
 
 def test_complete_matching_store_is_reused_without_a_build(
@@ -594,6 +826,134 @@ def test_vendor_polygon_fallback_builds_and_needs_a_shape_per_cell(
         atera_builder._check_table_cells_have_shapes(partial, cells)
 
 
+def test_builder_refuses_a_cell_without_a_vendor_polygon(
+    built: Built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = ar.resolve_atera_bundle(built.synth.root)
+    vendor_shapes = ar.atera_shapes_from_vendor_polygons
+
+    def drop_first_cell(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        shapes = vendor_shapes(*args, **kwargs)
+        shapes["cell_boundaries"] = shapes["cell_boundaries"].iloc[1:]
+        return shapes
+
+    monkeypatch.setattr(ar, "atera_shapes_from_vendor_polygons", drop_first_cell)
+    config = AteraBuildConfig(boundary_source="vendor_polygons", **FAST_OPTIONS)
+    with pytest.raises(ar.AteraFormatError, match="no cell polygon"):
+        atera_builder.assemble_atera_sdata(bundle, config, n_jobs=1, workdir=tmp_path)
+
+
+def test_builder_refuses_labels_off_the_image_pyramid(
+    built: Built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = ar.resolve_atera_bundle(built.synth.root)
+    read_labels = ar.read_atera_labels
+
+    def cropped(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {key: array[:-1] for key, array in read_labels(*args, **kwargs).items()}
+
+    monkeypatch.setattr(ar, "read_atera_labels", cropped)
+    config = AteraBuildConfig(
+        transcripts=False,
+        cells_table=False,
+        cells_boundaries=False,
+        nucleus_boundaries=False,
+        **FAST_OPTIONS,
+    )
+    with pytest.raises(ar.AteraFormatError, match="pyramid levels"):
+        atera_builder.assemble_atera_sdata(bundle, config, n_jobs=1, workdir=tmp_path)
+
+
+def test_builder_drops_the_vendor_annotations_on_request(
+    built: Built, tmp_path: Path
+) -> None:
+    bundle = ar.resolve_atera_bundle(built.synth.root)
+    config = AteraBuildConfig(
+        keep_vendor_annotations=False,
+        transcripts=False,
+        morphology_2d=False,
+        cells_labels=False,
+        nucleus_labels=False,
+        **FAST_OPTIONS,
+    )
+    table = atera_builder.assemble_atera_sdata(
+        bundle, config, n_jobs=1, workdir=tmp_path
+    ).sdata.tables["table"]
+    assert "vendor_azimuth_broad" not in table.obs
+    assert "X_pca_vendor" not in table.obsm
+    assert "vendor_de" not in table.varm
+
+
+def test_spec_override_is_kept_and_wins_the_pixel_size_lookup(
+    built: Built, tmp_path: Path
+) -> None:
+    experiment = json.loads((built.synth.root / "experiment.spatial").read_text())
+    experiment["run_name"] = "SYNTH_RUN_OVERRIDE"
+    override = tmp_path / "override.spatial"
+    override.write_text(json.dumps(experiment))
+    config = AteraBuildConfig(
+        transcripts=False,
+        morphology_2d=False,
+        cells_labels=False,
+        nucleus_labels=False,
+        cells_table=False,
+        cells_boundaries=False,
+        nucleus_boundaries=False,
+        **FAST_OPTIONS,
+    )
+    store = atera_builder.write_atera_spatialdata(
+        input_path=built.synth.root,
+        output_path=tmp_path / "override.zarr",
+        build_config=config,
+        atera_spec_path=override,
+        n_workers=2,
+    )
+    header = _attrs(store)["merxen_atera"]
+    assert header["experiment_source"] == "override"
+    assert header["experiment"]["run_name"] == "SYNTH_RUN_OVERRIDE"
+    assert (store / "atera" / "experiment_override.spatial").read_bytes() == (
+        override.read_bytes()
+    )
+    assert (store / "atera" / "experiment.spatial").read_bytes() == (
+        built.synth.root / "experiment.spatial"
+    ).read_bytes()
+    assert find_um_per_px(store, "ATERA") == built.synth.pixel_size_um
+
+
+def test_transcripts_are_decoded_once_per_partition(
+    built: Built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan §7.2 pass budget: the write is the only pass over the transcripts."""
+    reads: list[ar.PartitionSpec] = []
+    read_partition = ar._read_partition_with_stats
+
+    def counting(context: Any, spec: ar.PartitionSpec) -> Any:
+        reads.append(spec)
+        return read_partition(context, spec)
+
+    monkeypatch.setattr(ar, "_read_partition_with_stats", counting)
+    config = AteraBuildConfig(
+        morphology_2d=False,
+        cells_labels=False,
+        nucleus_labels=False,
+        cells_table=False,
+        cells_boundaries=False,
+        nucleus_boundaries=False,
+        **FAST_OPTIONS,
+    )
+    store = atera_builder.write_atera_spatialdata(
+        input_path=built.synth.root,
+        output_path=tmp_path / "points.zarr",
+        build_config=config,
+        n_workers=2,
+    )
+    index = json.loads((store / atera_builder.POINTS_INDEX_NAME).read_text())
+    n_files = index["points"]["transcripts"]["fingerprint"]["n_files"]
+    assert n_files > 1
+    assert len(reads) == n_files
+    assert len(set(reads)) == n_files
+
+
 def test_elements_can_be_switched_off(built: Built, tmp_path: Path) -> None:
     bundle = ar.resolve_atera_bundle(built.synth.root)
     config = AteraBuildConfig(
@@ -650,6 +1010,74 @@ def test_xenium_builder_refuses_atera_preview_bundles(
     else:
         check_not_atera_preview(tmp_path)
     check_not_atera_preview(tmp_path / "no_experiment_here")
+
+
+def test_points_index_orders_files_numerically(tmp_path: Path) -> None:
+    directory = tmp_path / "points" / "transcripts" / "points.parquet"
+    directory.mkdir(parents=True)
+    specs = []
+    for k in range(12):
+        frame = pd.DataFrame(
+            {
+                "x": [float(k), float(k) + 0.5],
+                "y": [0.0, 1.0],
+                "transcript_id": np.asarray([2 * k + 1, 2 * k + 2], dtype=np.uint64),
+            }
+        )
+        frame.to_parquet(directory / f"part.{k}.parquet")
+        specs.append(ar.PartitionSpec(f"{k},0", 0, 2, 2 * k))
+    index = atera_builder.write_points_index(tmp_path, specs)
+    files = index["points"]["transcripts"]["files"]
+    assert [item["file"] for item in files] == [f"part.{k}.parquet" for k in range(12)]
+    for k, item in enumerate(files):
+        assert item["tile"] == f"{k},0"
+        assert item["transcript_id_range"] == [2 * k + 1, 2 * k + 2]
+        assert item["bbox_um"][0] == float(k)
+
+
+def test_xenium_build_refuses_a_preview_before_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import spatialdata_io
+
+    def never(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("the preview bundle must be refused before reading")
+
+    monkeypatch.setattr(spatialdata_io, "xenium", never)
+    (tmp_path / "experiment.xenium").write_text(
+        json.dumps({"analysis_sw_version": "atera-1.1.1.0"})
+    )
+    with pytest.raises(ValueError, match="Atera run"):
+        write_xenium_spatialdata(
+            input_path=tmp_path,
+            output_path=tmp_path / "out.zarr",
+            build_config=XeniumBuildConfig(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("targets", "refused"),
+    [
+        ({"panel_num_targets_predesigned": 10_000}, False),
+        ({"panel_num_targets_predesigned": 10_001}, True),
+        ({"panel_num_targets_custom": 10_001}, True),
+        (
+            {"panel_num_targets_predesigned": 5_000, "panel_num_targets_custom": 5_000},
+            False,
+        ),
+    ],
+)
+def test_preview_refusal_threshold(
+    tmp_path: Path, targets: dict[str, int], refused: bool
+) -> None:
+    (tmp_path / "experiment.xenium").write_text(
+        json.dumps({"analysis_sw_version": "xenium-4.0.0", **targets})
+    )
+    if refused:
+        with pytest.raises(ValueError, match="Atera run"):
+            check_not_atera_preview(tmp_path)
+    else:
+        check_not_atera_preview(tmp_path)
 
 
 def test_fixture_identifiers_are_obviously_fake() -> None:

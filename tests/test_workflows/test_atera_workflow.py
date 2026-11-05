@@ -187,6 +187,8 @@ def test_atera_rows_must_stop_at_the_build(tmp_path: Path) -> None:
     assert cases["mixed/xenium"]["result"] == "OK"
     assert cases["mixed/xenium"]["active_platforms"] == ["XENIUM"]
     assert "PAIR_C" in cases["mixed/atera"]["message"]
+    (empty,) = cases["atera/no_stage"]["errors"]
+    assert "this row selects no stage" in empty
 
 
 @pytest.mark.nextflow
