@@ -14,6 +14,7 @@ from merxen.qc.gene_comparison import (
     compare_df,
     compute_gene_comparison,
     compute_gene_summary,
+    feature_types_from_table,
     fit_linear,
     gene_totals_from_points,
     normalize_counts,
@@ -60,7 +61,7 @@ TOKEN_LIKE_GENES = [
 ]
 
 
-@pytest.mark.parametrize("dataset_name", ["XENIUM", "MERSCOPE"])
+@pytest.mark.parametrize("dataset_name", ["XENIUM", "ATERA", "MERSCOPE"])
 def test_apply_dataset_filter_keeps_token_like_gene_names(dataset_name: str) -> None:
     """Gene names that only contain control-like fragments are kept."""
     counts = pd.Series(np.arange(len(TOKEN_LIKE_GENES)), index=TOKEN_LIKE_GENES)
@@ -70,20 +71,29 @@ def test_apply_dataset_filter_keeps_token_like_gene_names(dataset_name: str) -> 
     assert out.index.tolist() == TOKEN_LIKE_GENES
 
 
-def test_apply_dataset_filter_merscope_keeps_xenium_style_names() -> None:
-    """The MERSCOPE rule drops only ``Blank`` codewords."""
+def test_apply_dataset_filter_merscope_applies_control_tokens() -> None:
+    """MERSCOPE drops ``Blank-*`` and, by token, other control-like names."""
     counts = pd.Series(
-        [1, 2, 3, 4],
-        index=["Gad1", "Blank-7", "Intergenic_Region_1", "DeprecatedCodeword_1"],
+        [1, 2, 3, 4, 5],
+        index=[
+            "Gad1",
+            "Blank-7",
+            "Nkx6-1",
+            "Intergenic_Region_1",
+            "DeprecatedCodeword_1",
+        ],
     )
 
     out = apply_dataset_filter(counts, "MERSCOPE")
 
-    assert out.index.tolist() == ["Gad1", "Intergenic_Region_1", "DeprecatedCodeword_1"]
+    assert out.index.tolist() == ["Gad1", "Nkx6-1"]
 
 
-def test_apply_dataset_filter_xenium_keeps_unlisted_control_prefixes() -> None:
-    """The Xenium filter lists three prefixes and misses the other controls."""
+@pytest.mark.parametrize("dataset_name", ["XENIUM", "ATERA"])
+def test_apply_dataset_filter_drops_every_10x_control_prefix(
+    dataset_name: str,
+) -> None:
+    """Every documented Xenium and Atera control prefix is dropped."""
     counts = pd.Series(
         [10, 1, 2, 3, 4, 5],
         index=[
@@ -96,28 +106,86 @@ def test_apply_dataset_filter_xenium_keeps_unlisted_control_prefixes() -> None:
         ],
     )
 
-    out = apply_dataset_filter(counts, "XENIUM")
+    out = apply_dataset_filter(counts, dataset_name)
 
-    assert out.index.tolist() == [
-        "GAD1",
-        "DeprecatedCodeword_0001",
-        "Intergenic_Region_12",
-        "BLANK_0006",
-        "antisense_PROKR2",
-    ]
+    assert out.index.tolist() == ["GAD1"]
+    assert out.loc["GAD1"] == 10
 
 
-def test_apply_dataset_filter_unknown_platform_is_unfiltered() -> None:
-    """Platforms without a rule are returned as they are."""
-    counts = pd.Series([1, 2], index=["GAD1", "NegControlProbe_00001"])
+def test_apply_dataset_filter_unknown_platform_checks_every_rule() -> None:
+    """Without a known platform every platform's control rules apply."""
+    counts = pd.Series(
+        [1, 2, 3, 4], index=["GAD1", "NegControlProbe_00001", "Blank-3", "Nkx6-1"]
+    )
 
-    out = apply_dataset_filter(counts, "ATERA")
+    out = apply_dataset_filter(counts, "OTHER")
 
-    assert out.index.tolist() == ["GAD1", "NegControlProbe_00001"]
+    assert out.index.tolist() == ["GAD1", "Nkx6-1"]
 
 
-def test_compute_gene_summary_xenium_keeps_unlisted_controls_in_totals() -> None:
-    """Deprecated and genomic-control features enter the Xenium totals."""
+def test_apply_dataset_filter_feature_types_decide_known_genes() -> None:
+    """A recorded feature type wins; genes without one fall back to names."""
+    counts = pd.Series(
+        [5, 4, 3, 2, 1],
+        index=[
+            "GAD1",
+            "antisense_PROKR2",
+            "Odd_1",
+            "NegControlProbe_00001",
+            "Intergenic_Region_3",
+        ],
+    )
+    feature_types = pd.Series(
+        {
+            "GAD1": "Gene Expression",
+            "antisense_PROKR2": "Gene Expression",
+            "Odd_1": "Genomic Control",
+            "Unrelated": "Gene Expression",
+        },
+        dtype="string",
+    )
+
+    out = apply_dataset_filter(counts, "XENIUM", feature_types=feature_types)
+
+    assert out.index.tolist() == ["GAD1", "antisense_PROKR2"]
+
+
+def test_feature_types_from_table_reads_either_column_by_gene_label() -> None:
+    """Both 10x column spellings work; names follow the table's gene label."""
+    xenium_style = ad.AnnData(
+        X=np.zeros((1, 2)),
+        var=pd.DataFrame(
+            {"feature_types": ["Gene Expression", "Gene Expression"]},
+            index=["A", "B"],
+        ),
+    )
+    atera_style = ad.AnnData(
+        X=np.zeros((1, 3)),
+        var=pd.DataFrame(
+            {
+                "gene": ["A", "Intergenic_Region_1", "A"],
+                "feature_type": [None, "Genomic Control", "Gene Expression"],
+            },
+            index=["ENSG1", "Intergenic_Region_1", "ENSG2"],
+        ),
+    )
+    untyped = ad.AnnData(X=np.zeros((1, 1)), var=pd.DataFrame(index=["A"]))
+
+    xenium_types = feature_types_from_table(xenium_style)
+    atera_types = feature_types_from_table(atera_style)
+
+    assert xenium_types is not None
+    assert xenium_types.to_dict() == {"A": "Gene Expression", "B": "Gene Expression"}
+    assert atera_types is not None
+    assert atera_types.to_dict() == {
+        "A": "Gene Expression",
+        "Intergenic_Region_1": "Genomic Control",
+    }
+    assert feature_types_from_table(untyped) is None
+
+
+def test_compute_gene_summary_xenium_drops_every_control_from_totals() -> None:
+    """Deprecated and genomic-control features stay out of the Xenium totals."""
     table = ad.AnnData(
         X=np.array([[4, 1]], dtype=np.int64),
         var=pd.DataFrame(
@@ -141,13 +209,36 @@ def test_compute_gene_summary_xenium_keeps_unlisted_controls_in_totals() -> None
 
     out = compute_gene_summary(sdata_obj, "XENIUM")
 
-    assert out["total_counts_df"]["gene"].tolist() == [
-        "A",
-        "B",
-        "DeprecatedCodeword_0001",
-        "Intergenic_Region_12",
-    ]
-    assert out["totals"] == {"total_sum": 5.0, "assigned_sum": 5.0}
+    assert out["total_counts_df"]["gene"].tolist() == ["A", "B"]
+    assert out["totals"] == {"total_sum": 3.0, "assigned_sum": 5.0}
+
+
+def test_compute_gene_summary_uses_table_feature_types() -> None:
+    """Table feature types drop typed controls and keep typed genes."""
+    table = ad.AnnData(
+        X=np.array([[4, 2, 7, 3]], dtype=np.int64),
+        var=pd.DataFrame(
+            {
+                "feature_type": [
+                    "Gene Expression",
+                    "Gene Expression",
+                    "Negative Control Codeword",
+                    "Deprecated Codeword",
+                ]
+            },
+            index=["A", "antisense_B", "Odd_1", "DeprecatedCodeword_1"],
+        ),
+    )
+    points = pd.DataFrame(
+        {"feature_name": ["A", "antisense_B", "Odd_1", "UnassignedCodeword_1"]}
+    )
+    sdata_obj = SimpleNamespace(tables={"table": table}, points={"transcripts": points})
+
+    out = compute_gene_summary(sdata_obj, "ATERA")
+
+    assert out["total_counts_df"]["gene"].tolist() == ["A", "antisense_B"]
+    assert out["assigned_counts_df"]["gene"].tolist() == ["A", "antisense_B"]
+    assert out["totals"] == {"total_sum": 2.0, "assigned_sum": 6.0}
 
 
 def test_compute_gene_comparison_excludes_controls_from_totals() -> None:

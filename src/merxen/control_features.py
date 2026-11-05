@@ -1,8 +1,8 @@
 """Registry of platform control features (negative controls, blanks, codewords).
 
-Xenium and MERSCOPE report control features alongside real genes. This module
-is the single place that recognises them, so segmentation inputs, clustering
-and transcript analyses drop the same features.
+Xenium, Atera and MERSCOPE report control features alongside real genes. This
+module is the single place that recognises them, so segmentation inputs,
+clustering, QC gene summaries and transcript analyses drop the same features.
 
 Sources for the names and categories below:
 
@@ -18,13 +18,19 @@ Sources for the names and categories below:
   rename in early XOA releases), ``DeprecatedCodeword_`` and, for the Xenium
   Prime 5K genomic controls, ``Intergenic_Region_``. Pre-release datasets name
   some negative control probes ``antisense_<GENE>``.
+* Atera (10x Genomics) follows the Xenium conventions: its cell-feature
+  matrix ``var.feature_type`` uses the same six categories and its control
+  names start with ``NegControlCodeword_``, ``UnassignedCodeword_``,
+  ``NegControlProbe_``, ``Intergenic_Region_`` (``Genomic Control``) and
+  ``DeprecatedCodeword_``.
 * MERSCOPE (Vizgen): blank codewords are listed in the codebook next to the
   genes and appear in ``detected_transcripts`` as ``Blank-<N>``. MERSCOPE
   transcript tables carry no feature-type column.
 
-When a transcript has a usable feature type (``is_gene`` or
-``codeword_category``), that type alone decides whether it is a control; the
-name rules apply only to transcripts without one. So a name rule can never
+When a transcript or feature has a usable feature type (``is_gene``,
+``codeword_category`` or a cell-feature-matrix ``feature_type``), that type
+alone decides whether it is a control; the name rules apply only where none
+is known. So a name rule can never
 drop a feature the platform labels as a gene. This matters most for
 ``antisense_``: it is kept as a name rule for pre-release Xenium data, which
 has no feature-type column, and a custom-panel gene with that prefix is kept
@@ -50,6 +56,7 @@ CONTROL_TOKENS: tuple[str, ...] = (
     "negcontrol",
     "unassigned",
     "deprecated",
+    "intergenic",
 )
 
 # ``codeword_category`` values of real genes in Xenium ``transcripts.parquet``.
@@ -57,6 +64,11 @@ CONTROL_TOKENS: tuple[str, ...] = (
 XENIUM_GENE_CODEWORD_CATEGORIES: frozenset[str] = frozenset(
     {"predesigned_gene", "custom_gene"}
 )
+
+# The 10x cell-feature-matrix feature type of real genes (``feature_types`` in
+# the Xenium HDF5 matrix, ``feature_type`` in the Atera zarr matrix). Every
+# other non-empty type is a control.
+GENE_FEATURE_TYPE = "Gene Expression"
 
 # Anchored, case-sensitive name rules, used for transcripts without a feature
 # type. The Xenium rule keeps ProSeg's own Xenium preset prefixes
@@ -68,8 +80,10 @@ XENIUM_CONTROL_NAME_PATTERN: re.Pattern[str] = re.compile(
 )
 MERSCOPE_CONTROL_NAME_PATTERN: re.Pattern[str] = re.compile(r"^Blank-\d+$")
 
+# Keyed by upper-case platform name. Atera control names follow Xenium.
 _CONTROL_NAME_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
     "XENIUM": (XENIUM_CONTROL_NAME_PATTERN,),
+    "ATERA": (XENIUM_CONTROL_NAME_PATTERN,),
     "MERSCOPE": (MERSCOPE_CONTROL_NAME_PATTERN,),
 }
 _ALL_CONTROL_NAME_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -92,8 +106,9 @@ def matches_control_name_pattern(name: str, platform: str | None = None) -> bool
 
     Args:
         name: Feature name as reported by the platform.
-        platform: ``"XENIUM"`` or ``"MERSCOPE"`` (case-insensitive). ``None`` or
-            an unknown platform checks the rules of every platform.
+        platform: ``"XENIUM"``, ``"ATERA"`` or ``"MERSCOPE"``
+            (case-insensitive). ``None`` or an unknown platform checks the
+            rules of every platform.
 
     Returns:
         ``True`` when an anchored platform control-name pattern matches.
@@ -169,21 +184,28 @@ def classify_control_transcripts(
     platform: str | None = None,
     is_gene: Sequence[Any] | np.ndarray | pd.Series | None = None,
     codeword_category: Sequence[Any] | np.ndarray | pd.Series | None = None,
+    feature_type: Sequence[Any] | np.ndarray | pd.Series | None = None,
 ) -> ControlTranscriptFlags:
     """Flag control transcripts, preferring the platform's feature-type columns.
 
-    A transcript with a usable feature type is a control when that type says
-    it is not a gene: ``is_gene`` false, else a ``codeword_category`` outside
-    :data:`XENIUM_GENE_CODEWORD_CATEGORIES`. A transcript without one is a
-    control when its name matches the platform's anchored control-name
-    pattern or contains one of :data:`CONTROL_TOKENS`.
+    Works on transcripts or on features (one row per gene). A row with a
+    usable feature type is a control when that type says it is not a gene:
+    ``is_gene`` false, else a ``codeword_category`` outside
+    :data:`XENIUM_GENE_CODEWORD_CATEGORIES`, else a ``feature_type`` other
+    than :data:`GENE_FEATURE_TYPE`. A row without one is a control when its
+    name matches the platform's anchored control-name pattern or contains
+    one of :data:`CONTROL_TOKENS`.
 
     Args:
         feature_names: Per-transcript feature names.
-        platform: ``"XENIUM"`` or ``"MERSCOPE"``; selects the name patterns.
+        platform: ``"XENIUM"``, ``"ATERA"`` or ``"MERSCOPE"``; selects the
+            name patterns.
         is_gene: Optional per-transcript Xenium ``is_gene`` values.
         codeword_category: Optional per-transcript Xenium
             ``codeword_category`` values, used where ``is_gene`` is missing.
+        feature_type: Optional per-row 10x cell-feature-matrix feature types
+            (``Gene Expression``, ``Negative Control Probe``, ...), used where
+            the two columns above are missing.
 
     Returns:
         The control flags, plus the transcripts kept only because their
@@ -229,6 +251,19 @@ def classify_control_transcripts(
         )
         type_is_control[use] = ~is_gene_category[use]
         has_type |= use
+    if feature_type is not None:
+        if len(feature_type) != n_rows:
+            raise ValueError("feature_type must have one value per feature name")
+        types = pd.Series(feature_type).astype("string").str.strip()
+        known = (types.notna() & (types != "")).to_numpy(dtype=bool)
+        use = known & ~has_type
+        is_gene_type = (
+            (types.str.casefold() == GENE_FEATURE_TYPE.casefold())
+            .fillna(False)
+            .to_numpy(dtype=bool)
+        )
+        type_is_control[use] = ~is_gene_type[use]
+        has_type |= use
 
     return ControlTranscriptFlags(
         control=np.asarray(np.where(has_type, type_is_control, name_rows), dtype=bool),
@@ -244,15 +279,19 @@ def control_transcript_mask(
     platform: str | None = None,
     is_gene: Sequence[Any] | np.ndarray | pd.Series | None = None,
     codeword_category: Sequence[Any] | np.ndarray | pd.Series | None = None,
+    feature_type: Sequence[Any] | np.ndarray | pd.Series | None = None,
 ) -> np.ndarray:
     """Return the control flags of :func:`classify_control_transcripts`.
 
     Args:
         feature_names: Per-transcript feature names.
-        platform: ``"XENIUM"`` or ``"MERSCOPE"``; selects the name patterns.
+        platform: ``"XENIUM"``, ``"ATERA"`` or ``"MERSCOPE"``; selects the
+            name patterns.
         is_gene: Optional per-transcript Xenium ``is_gene`` values.
         codeword_category: Optional per-transcript Xenium
             ``codeword_category`` values, used where ``is_gene`` is missing.
+        feature_type: Optional per-row 10x cell-feature-matrix feature types,
+            used where the two columns above are missing.
 
     Returns:
         Boolean array, ``True`` for control transcripts.
@@ -266,6 +305,7 @@ def control_transcript_mask(
         platform=platform,
         is_gene=is_gene,
         codeword_category=codeword_category,
+        feature_type=feature_type,
     ).control
 
 
@@ -277,7 +317,8 @@ def is_registered_control_name(name: str, platform: str | None = None) -> bool:
 
     Args:
         name: Feature name.
-        platform: ``"XENIUM"`` or ``"MERSCOPE"``; selects the name patterns.
+        platform: ``"XENIUM"``, ``"ATERA"`` or ``"MERSCOPE"``; selects the
+            name patterns.
 
     Returns:
         ``True`` when the anchored pattern or a control token matches.

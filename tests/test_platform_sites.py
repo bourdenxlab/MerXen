@@ -186,7 +186,6 @@ REASONS: dict[str, dict[str, str]] = {
         "src/merxen/io/builders/pipeline.py": (
             "builder dispatch that raises for an unknown platform"
         ),
-        "src/merxen/qc/gene_comparison.py": "control-feature rules (AT-2)",
         "src/merxen/segmentation/pipeline.py": (
             "dispatch that raises for an unknown platform; Literals guard the rest"
         ),
@@ -369,10 +368,6 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
             'if cached is None or config.platform.upper() != "MERSCOPE":',
             'if platform == "MERSCOPE":',
             'platform.upper() == "MERSCOPE"',
-        ),
-        "src/merxen/qc/gene_comparison.py": (
-            'elif dataset_name.upper() == "MERSCOPE":',
-            'if dataset_name.upper() == "XENIUM":',
         ),
         "src/merxen/segmentation/pipeline.py": (
             'elif platform == "MERSCOPE":',

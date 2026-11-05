@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import spatialdata as sd
 
+from merxen.control_features import control_transcript_mask
 from merxen.io.spatialdata_schema import choose_primary_points_key
 from merxen.io.transcript_io import (
     assignment_mask_from_points,
@@ -19,16 +20,47 @@ from merxen.io.transcript_io import (
 
 logger = logging.getLogger(__name__)
 
+# 10x cell-feature-matrix feature-type columns: ``feature_types`` in the
+# Xenium HDF5 matrix (as read by spatialdata-io), ``feature_type`` in the
+# Atera zarr matrix.
+FEATURE_TYPE_COLUMNS: tuple[str, ...] = ("feature_types", "feature_type")
+
+
+def _table_gene_labels(adata: Any, gene_label: str) -> pd.Index:
+    if gene_label in adata.var.columns:
+        return pd.Index(adata.var[gene_label].astype(str))
+    return pd.Index(adata.var_names.astype(str))
+
 
 def gene_totals_from_table(adata: Any, gene_label: str = "gene") -> pd.Series:
     """Aggregate per-gene totals from an AnnData table."""
-    if gene_label in adata.var.columns:
-        genes = adata.var[gene_label].astype(str)
-    else:
-        genes = adata.var_names.astype(str)
-
+    genes = _table_gene_labels(adata, gene_label)
     totals = np.asarray(adata.X.sum(axis=0)).ravel()
     return pd.Series(totals, index=genes).groupby(level=0).sum().astype(float)
+
+
+def feature_types_from_table(adata: Any, gene_label: str = "gene") -> pd.Series | None:
+    """Return the platform feature type of each gene in a table, if recorded.
+
+    Args:
+        adata: AnnData table.
+        gene_label: ``var`` column holding gene names; ``var_names`` when absent,
+            as in :func:`gene_totals_from_table`.
+
+    Returns:
+        Feature types indexed by unique gene name (the first non-missing type
+        of a repeated name), or ``None`` when ``var`` has no column from
+        :data:`FEATURE_TYPE_COLUMNS`.
+    """
+    column = next((c for c in FEATURE_TYPE_COLUMNS if c in adata.var.columns), None)
+    if column is None:
+        return None
+    types = pd.Series(
+        adata.var[column].astype("string").to_numpy(),
+        index=_table_gene_labels(adata, gene_label),
+        dtype="string",
+    )
+    return types.groupby(level=0).first()
 
 
 def gene_totals_from_points(
@@ -98,33 +130,36 @@ def gene_totals_from_points(
     return counts.groupby(level=0).sum().astype(float)
 
 
-def apply_dataset_filter(gene_counts: pd.Series, dataset_name: str) -> pd.Series:
-    """Remove platform-specific control probes from gene counts.
+def apply_dataset_filter(
+    gene_counts: pd.Series,
+    dataset_name: str,
+    *,
+    feature_types: pd.Series | None = None,
+) -> pd.Series:
+    """Remove platform control features from gene counts.
 
-    Xenium controls are the ``NegControlProbe`` / ``NegControlCodeword`` /
-    ``UnassignedCodeword`` features; MERSCOPE controls are the ``Blank-*``
-    codewords.
+    Uses the shared rules of :mod:`merxen.control_features`: a gene with a
+    known feature type is a control unless the type is ``Gene Expression``;
+    any other gene is a control when its name matches the platform's
+    control-name pattern or contains a control token.
 
     Args:
-        gene_counts: Per-gene counts indexed by gene name.
-        dataset_name: Platform name (``XENIUM`` or ``MERSCOPE``, any case).
-            Other names are returned unfiltered.
+        gene_counts: Per-gene counts indexed by unique gene name.
+        dataset_name: Platform name (any case); selects the name patterns.
+            An unknown name checks every platform's patterns.
+        feature_types: Optional feature types indexed by unique gene name, as
+            returned by :func:`feature_types_from_table`. Genes missing from it
+            fall back to the name rules.
 
     Returns:
         A copy of ``gene_counts`` without the platform's control features.
     """
-    idx = gene_counts.index.astype(str)
-    if dataset_name.upper() == "XENIUM":
-        keep = ~idx.str.contains(
-            "UnassignedCodeword|NegControlCodeword|NegControlProbe",
-            regex=True,
-            na=False,
-        )
-    elif dataset_name.upper() == "MERSCOPE":
-        keep = ~idx.str.contains("Blank", na=False)
-    else:
-        keep = pd.Series(True, index=gene_counts.index)
-    return gene_counts.loc[keep].copy()
+    names = gene_counts.index.astype(str)
+    types = None if feature_types is None else feature_types.reindex(names)
+    controls = control_transcript_mask(
+        names.to_numpy(dtype=object), platform=dataset_name, feature_type=types
+    )
+    return gene_counts.loc[~controls].copy()
 
 
 def normalize_counts(gene_counts: pd.Series) -> tuple[pd.Series, float]:
@@ -178,10 +213,12 @@ def compute_gene_comparison(
     x_assigned_all = gene_totals_from_table(xenium_table)
     m_assigned_all = gene_totals_from_table(merscope_table)
 
-    x_total = apply_dataset_filter(x_total_all, "XENIUM")
-    m_total = apply_dataset_filter(m_total_all, "MERSCOPE")
-    x_assigned = apply_dataset_filter(x_assigned_all, "XENIUM")
-    m_assigned = apply_dataset_filter(m_assigned_all, "MERSCOPE")
+    x_types = feature_types_from_table(xenium_table)
+    m_types = feature_types_from_table(merscope_table)
+    x_total = apply_dataset_filter(x_total_all, "XENIUM", feature_types=x_types)
+    m_total = apply_dataset_filter(m_total_all, "MERSCOPE", feature_types=m_types)
+    x_assigned = apply_dataset_filter(x_assigned_all, "XENIUM", feature_types=x_types)
+    m_assigned = apply_dataset_filter(m_assigned_all, "MERSCOPE", feature_types=m_types)
 
     x_total_norm, x_total_sum = normalize_counts(x_total)
     m_total_norm, m_total_sum = normalize_counts(m_total)
@@ -257,8 +294,11 @@ def compute_gene_summary(
     total_all = gene_totals_from_points(sdata_obj, assigned_only=False)
     assigned_all = gene_totals_from_table(table)
 
-    total = apply_dataset_filter(total_all, dataset_name)
-    assigned = apply_dataset_filter(assigned_all, dataset_name)
+    feature_types = feature_types_from_table(table)
+    total = apply_dataset_filter(total_all, dataset_name, feature_types=feature_types)
+    assigned = apply_dataset_filter(
+        assigned_all, dataset_name, feature_types=feature_types
+    )
 
     total_norm, total_sum = normalize_counts(total)
     assigned_norm, assigned_sum = normalize_counts(assigned)
