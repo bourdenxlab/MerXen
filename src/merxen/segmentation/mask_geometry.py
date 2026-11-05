@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import mmap
 import multiprocessing as mp
 import os
 from collections.abc import Iterable
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
@@ -64,10 +67,74 @@ def _polygon_from_bbox_with_mask(
     return None
 
 
-def _pool_init(seg_masks: np.ndarray) -> None:
+@dataclass(frozen=True)
+class _MemmapSpec:
+    """Location of a memory-mapped mask, sent to workers instead of its data."""
+
+    filename: str
+    dtype: np.dtype
+    shape: tuple[int, ...]
+    offset: int
+    order: Literal["C", "F"]
+
+
+def _pool_mask_argument(
+    seg_masks: np.ndarray, mp_context: MpStartMethod
+) -> np.ndarray | _MemmapSpec:
+    """Return what the pool initializer receives in place of ``seg_masks``.
+
+    ``fork`` workers inherit the parent's memory, so they get the array
+    itself. Other start methods pickle the initializer arguments to every
+    worker, and numpy pickles a memmap as a full copy of its data, so a mask
+    mapped directly from a file (``np.load(..., mmap_mode="r")``) is sent as
+    its file location and mapped again in each worker. Views of a memmap and
+    copy-on-write maps (whose changes the file does not hold) are sent as
+    arrays.
+
+    Args:
+        seg_masks: Two-dimensional labeled mask array.
+        mp_context: Multiprocessing start method of the pool.
+
+    Returns:
+        The mask array, or the location of its memory-mapped file.
+    """
+    if (
+        mp_context == "fork"
+        or not isinstance(seg_masks, np.memmap)
+        or seg_masks.filename is None
+        or seg_masks.mode == "c"
+        or not isinstance(seg_masks.base, mmap.mmap)
+    ):
+        return seg_masks
+    if seg_masks.flags.c_contiguous:
+        order: Literal["C", "F"] = "C"
+    elif seg_masks.flags.f_contiguous:
+        order = "F"
+    else:
+        return seg_masks
+    return _MemmapSpec(
+        filename=str(seg_masks.filename),
+        dtype=seg_masks.dtype,
+        shape=tuple(seg_masks.shape),
+        offset=int(seg_masks.offset),
+        order=order,
+    )
+
+
+def _pool_init(seg_masks: np.ndarray | _MemmapSpec) -> None:
     """Set process-local segmentation mask for worker processes."""
     global _POOL_SEG_MASKS
-    _POOL_SEG_MASKS = seg_masks
+    if isinstance(seg_masks, _MemmapSpec):
+        _POOL_SEG_MASKS = np.memmap(
+            seg_masks.filename,
+            dtype=seg_masks.dtype,
+            mode="r",
+            offset=seg_masks.offset,
+            shape=seg_masks.shape,
+            order=seg_masks.order,
+        )
+    else:
+        _POOL_SEG_MASKS = seg_masks
 
 
 def _polygon_from_bbox_pool(
@@ -77,6 +144,52 @@ def _polygon_from_bbox_pool(
     if _POOL_SEG_MASKS is None:
         return None
     return _polygon_from_bbox_with_mask(_POOL_SEG_MASKS, label_and_slice)
+
+
+def _polygonise_in_pool(
+    seg_masks: np.ndarray,
+    label_slices: list[tuple[int, tuple[slice, slice]]],
+    *,
+    n_jobs: int,
+    mp_context: MpStartMethod,
+    show_progress: bool,
+) -> list[tuple[int, BaseGeometry]]:
+    """Polygonise labels in a process pool, keeping the input order.
+
+    Args:
+        seg_masks: Two-dimensional labeled mask array.
+        label_slices: Label ID and bounding-box slices of each label.
+        n_jobs: Number of worker processes.
+        mp_context: Multiprocessing start method of the pool.
+        show_progress: Whether to display a progress bar.
+
+    Returns:
+        Pairs of label ID and valid polygon.
+
+    Raises:
+        concurrent.futures.process.BrokenProcessPool: If a worker dies, for
+            example when it is killed for running out of memory.
+        Exception: Any error raised while starting the pool or in a worker.
+    """
+    executor = ProcessPoolExecutor(
+        max_workers=n_jobs,
+        mp_context=mp.get_context(mp_context),
+        initializer=_pool_init,
+        initargs=(_pool_mask_argument(seg_masks, mp_context),),
+    )
+    try:
+        results: Iterable[BaseGeometry | None] = executor.map(
+            _polygon_from_bbox_pool, label_slices, chunksize=16
+        )
+        if show_progress:
+            results = tqdm(results, total=len(label_slices), desc="masks_to_polygons")
+        return [
+            (label_id, polygon)
+            for (label_id, _), polygon in zip(label_slices, results, strict=True)
+            if polygon is not None
+        ]
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 def _iter_polygons_serial(
@@ -147,12 +260,18 @@ def masks_to_labeled_polygons(
         n_jobs: Number of worker processes. ``None`` uses all CPUs.
         show_progress: Whether to display progress bars.
         serial_fallback: Whether a failure of the process pool is retried
-            with a serial loop over all labels. ``False`` raises instead, for
-            masks where a serial pass would take hours.
+            with a serial loop over all labels. A failure is an error raised
+            while starting the pool or in a worker, or a worker dying (for
+            example killed for running out of memory). ``False`` raises
+            instead, for masks where a serial pass would take hours.
         mp_context: Multiprocessing start method of the pool. ``"fork"``
             copies the parent cheaply but is unsafe once the parent runs
-            threads (dask, zarr); ``"forkserver"`` and ``"spawn"`` start clean
-            workers and pickle ``seg_masks`` to each of them.
+            threads (dask, zarr). ``"forkserver"`` and ``"spawn"`` start clean
+            workers and send ``seg_masks`` to each of them: a mask mapped
+            directly from a file (``np.load(path, mmap_mode="r")``) is mapped
+            again in each worker, while any other array, including a view of
+            a memmap, is copied into every worker, so it must be small enough
+            to hold ``n_jobs`` times.
 
     Returns:
         Pairs of original positive label ID and valid polygon.
@@ -180,26 +299,13 @@ def masks_to_labeled_polygons(
 
     if use_parallel:
         try:
-            ctx = mp.get_context(mp_context)
-            with ctx.Pool(
-                processes=n_jobs, initializer=_pool_init, initargs=(seg_masks,)
-            ) as pool:
-                results = pool.imap(_polygon_from_bbox_pool, label_slices, chunksize=16)
-                if show_progress:
-                    results = tqdm(
-                        results,
-                        total=len(label_slices),
-                        desc="masks_to_polygons",
-                    )
-                labeled_polygons = [
-                    (label_id, polygon)
-                    for (label_id, _), polygon in zip(
-                        label_slices,
-                        results,
-                        strict=True,
-                    )
-                    if polygon is not None
-                ]
+            labeled_polygons = _polygonise_in_pool(
+                seg_masks,
+                label_slices,
+                n_jobs=n_jobs,
+                mp_context=mp_context,
+                show_progress=show_progress,
+            )
         except Exception as exc:
             if not serial_fallback:
                 raise RuntimeError(
