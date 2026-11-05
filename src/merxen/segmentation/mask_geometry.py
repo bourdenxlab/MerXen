@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import multiprocessing as mp
 import os
 from collections.abc import Iterable
+from typing import Literal
 
 import numpy as np
 from scipy.ndimage import find_objects
@@ -13,6 +15,11 @@ from shapely.geometry import Polygon
 from shapely.geometry.base import BaseGeometry
 from skimage.measure import find_contours
 from tqdm.auto import tqdm
+
+logger = logging.getLogger(__name__)
+
+MpStartMethod = Literal["fork", "forkserver", "spawn"]
+_MP_START_METHODS: tuple[str, ...] = ("fork", "forkserver", "spawn")
 
 _POOL_SEG_MASKS: np.ndarray | None = None
 
@@ -125,18 +132,40 @@ def masks_to_labeled_polygons(
     factor_rescale: float = 0.0,
     n_jobs: int | None = None,
     show_progress: bool = False,
+    *,
+    serial_fallback: bool = True,
+    mp_context: MpStartMethod = "fork",
 ) -> list[tuple[int, BaseGeometry]]:
     """Convert a label image to polygons without losing label identity.
+
+    Masks with at least 64 labels are polygonised in a process pool when
+    ``n_jobs > 1``; smaller masks, and ``n_jobs=1``, run serially.
 
     Args:
         seg_masks: Two-dimensional labeled mask array.
         factor_rescale: Optional isotropic polygon scaling factor.
         n_jobs: Number of worker processes. ``None`` uses all CPUs.
         show_progress: Whether to display progress bars.
+        serial_fallback: Whether a failure of the process pool is retried
+            with a serial loop over all labels. ``False`` raises instead, for
+            masks where a serial pass would take hours.
+        mp_context: Multiprocessing start method of the pool. ``"fork"``
+            copies the parent cheaply but is unsafe once the parent runs
+            threads (dask, zarr); ``"forkserver"`` and ``"spawn"`` start clean
+            workers and pickle ``seg_masks`` to each of them.
 
     Returns:
         Pairs of original positive label ID and valid polygon.
+
+    Raises:
+        ValueError: If ``mp_context`` is not a known start method.
+        RuntimeError: If the process pool fails and ``serial_fallback`` is
+            ``False``.
     """
+    if mp_context not in _MP_START_METHODS:
+        raise ValueError(
+            f"mp_context must be one of {_MP_START_METHODS}, got {mp_context!r}"
+        )
     label_slices = [
         (label_id, slc)
         for label_id, slc in enumerate(find_objects(seg_masks), start=1)
@@ -151,7 +180,7 @@ def masks_to_labeled_polygons(
 
     if use_parallel:
         try:
-            ctx = mp.get_context("fork")
+            ctx = mp.get_context(mp_context)
             with ctx.Pool(
                 processes=n_jobs, initializer=_pool_init, initargs=(seg_masks,)
             ) as pool:
@@ -171,7 +200,17 @@ def masks_to_labeled_polygons(
                     )
                     if polygon is not None
                 ]
-        except Exception:
+        except Exception as exc:
+            if not serial_fallback:
+                raise RuntimeError(
+                    f"Polygonisation pool ({mp_context}, {n_jobs} workers) failed "
+                    f"for {len(label_slices)} labels"
+                ) from exc
+            logger.warning(
+                "Polygonisation pool failed (%s); retrying %d labels serially",
+                exc,
+                len(label_slices),
+            )
             labeled_polygons = []
             for label_id, label_slice in label_slices:
                 polygon = _polygon_from_bbox_with_mask(

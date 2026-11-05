@@ -105,3 +105,84 @@ def test_masks_to_labeled_polygons_falls_back_to_serial_by_default(
     pooled = masks_to_labeled_polygons(masks, n_jobs=2)
 
     assert _wkb_pairs(pooled) == _wkb_pairs(serial)
+
+
+def test_masks_to_labeled_polygons_raises_on_pool_failure_without_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``serial_fallback=False`` turns a pool failure into an error."""
+    monkeypatch.setattr(
+        mask_geometry.mp, "get_context", lambda method: _FailingPoolContext()
+    )
+
+    with pytest.raises(RuntimeError, match="Polygonisation pool") as excinfo:
+        masks_to_labeled_polygons(_grid_mask(), n_jobs=2, serial_fallback=False)
+
+    assert isinstance(excinfo.value.__cause__, OSError)
+
+
+def test_masks_to_labeled_polygons_without_fallback_matches_serial() -> None:
+    """A healthy pool is unaffected by ``serial_fallback=False``."""
+    masks = _grid_mask()
+
+    pooled = masks_to_labeled_polygons(masks, n_jobs=2, serial_fallback=False)
+
+    assert _wkb_pairs(pooled) == _wkb_pairs(masks_to_labeled_polygons(masks, n_jobs=1))
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_method"),
+    [({}, "fork"), ({"mp_context": "forkserver"}, "forkserver")],
+)
+def test_masks_to_labeled_polygons_passes_the_start_method(
+    monkeypatch: pytest.MonkeyPatch,
+    kwargs: dict[str, str],
+    expected_method: str,
+) -> None:
+    """The pool is created from the requested start method, ``fork`` by default."""
+    requested: list[str] = []
+
+    def _recording_context(method: str) -> _FailingPoolContext:
+        requested.append(method)
+        return _FailingPoolContext()
+
+    monkeypatch.setattr(mask_geometry.mp, "get_context", _recording_context)
+
+    with pytest.raises(RuntimeError):
+        masks_to_labeled_polygons(
+            _grid_mask(), n_jobs=2, serial_fallback=False, **kwargs
+        )
+
+    assert requested == [expected_method]
+
+
+def test_masks_to_labeled_polygons_spawn_pool_matches_serial() -> None:
+    """Workers started with ``spawn`` receive the mask and return the same output."""
+    masks = _grid_mask()
+
+    pooled = masks_to_labeled_polygons(
+        masks, n_jobs=2, serial_fallback=False, mp_context="spawn"
+    )
+
+    assert _wkb_pairs(pooled) == _wkb_pairs(masks_to_labeled_polygons(masks, n_jobs=1))
+
+
+def test_masks_to_labeled_polygons_rejects_an_unknown_start_method() -> None:
+    """A misspelt start method fails even when the serial fallback is on."""
+    with pytest.raises(ValueError, match="mp_context"):
+        masks_to_labeled_polygons(_grid_mask(), n_jobs=2, mp_context="threads")
+
+
+def test_masks_to_labeled_polygons_small_masks_do_not_start_a_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fewer than 64 labels run serially, so no pool can fail."""
+    monkeypatch.setattr(
+        mask_geometry.mp, "get_context", lambda method: _FailingPoolContext()
+    )
+
+    labeled = masks_to_labeled_polygons(
+        _grid_mask(n_side=7), n_jobs=2, serial_fallback=False
+    )
+
+    assert len(labeled) == 49
