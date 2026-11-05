@@ -4,15 +4,18 @@
 > *Recommended* in §3 and §10 are the defaults the plan adopts until the user overrides them. Milestone 1
 > (§1) covers the build stage. Everything after it in §8 is sequenced but has not started. Revision 4
 > applies the fidelity, scale, docs-conformance and completeness reviews. Each accepted or rejected point
-> is listed in the Review log (Appendix A).
+> is listed in the Review log (Appendix A). **User decision 2026-11-05 (metadata retention):** the store
+> keeps all vendor metadata verbatim; privacy rules apply only to what is committed to git and to
+> human-facing output (§3.11 D13, Appendix A).
 
 *Names and paths (2026-11-04).* The only dataset named here is the public 10x dataset
 `Atera_v1_WTA_S4A_Brain_Hippocampus_ND_FF` (atera-1.1.1, human hippocampus, fresh frozen). Data locations
 are written as `.env` variables. `$MERXEN_ATERA_RAW_ROOT` is new (AT-0); `$MERXEN_EVIDENCE_ROOT` already
 exists. Earlier MerXen runs used as scale baselines are anonymised as Xenium A/B and MERSCOPE C–G.
 
-Two kinds of Atera text identify samples and must never appear in committed text, test fixtures, PR
-bodies, published attrs, logs or plot titles unless passed through `merxen.privacy.to_alias`:
+Two kinds of Atera text identify samples. They must never appear in committed text (code, test fixtures,
+docs, commit messages, PR titles and bodies), and logs and plot titles print them only through
+`merxen.privacy.to_alias`. The data products are different: the built store keeps them verbatim (D13):
 
 - Run directory names: `<INST_SN>__<SLIDE>__<ROI>__<date>__<time>`, plus the parent
   `<USER_ID>/<date>__<time>__<RUN_NAME>`.
@@ -71,8 +74,13 @@ Segmentation, enrichment and the later stages can open it with only the consumer
      - table IDs = shape IDs.
 3. **Points reproduce the vendor matrix exactly.**
    - Count points per cell × feature, keeping rows with `qv ≥ 20` and an assigned cell.
-   - The result must equal the vendor CFM `X` **over all 24,677 columns**: 638,849,927 counts, of which
-     638,693,512 are gene counts [H, target totals].
+   - The result must equal the vendor CFM `X` over every column whose vendor all-QV `gene_counts` is
+     above 0: 638,849,843 counts, of which 638,693,512 are gene counts [H, target totals].
+   - The CFM excess is asserted to be exactly the 84 counts in the four `DeprecatedCodeword_*` columns that
+     have no transcripts at all (`codeword_counts` = 0, grid `gene_counts` = 0; AT-3 review). It is a
+     vendor matrix quirk, recorded as a vendor difference.
+   - Every sum is taken in int64 (`X.sum(dtype=np.int64)` or the integer CSR data); a float32 sum is off
+     by tens of counts at this size.
    - The count runs as a streaming COO accumulation over all features, so it also checks the control
      mapping.
 4. **Labels match the vendor cell summary exactly.** The full-section streaming pass takes about 85–103 s
@@ -83,16 +91,21 @@ Segmentation, enrichment and the later stages can open it with only the consumer
    - Every `nucleus_labels` pixel lies on its owning cell's `cell_labels` label: 0 violations, mapped via
      `polygon_sets/0/cell_index[label−1]`.
    - The largest labels are 91,431 (cells) and 90,238 (nuclei), and no label is empty.
-   - Mask-derived shape centroids are within 0.01 µm of `cell_summary`. This is the half-pixel check
-     (§3.5).
+   - Mask-derived shape centroids, simplified at the default 0.25 px, are within 0.01 µm of
+     `cell_summary`. This is the half-pixel check (§3.5).
 5. **Downstream code can find the store's metadata.**
    - `sd.read_zarr(store)` succeeds.
    - `platforms.find_um_per_px(store, "ATERA") == 0.21249222`.
    - The enrichment and viewer-cache transform lookups resolve through the same helper.
    - The segmentation loader arm (`DatasetConfig` Literal) is not in milestone 1; it lands in AT-6.
-6. **No identifying metadata leaks.** A fast test and the acceptance script assert that:
-   - `attrs`, sidecar file names and logs contain no run, slide, ROI, serial, UUID or customer field;
-   - copied sidecars carry neutral names.
+6. **The store keeps the vendor metadata complete** (user decision 2026-11-05, D13). A fast test and the
+   acceptance script assert that:
+   - every vendor metadata and report file is a byte-identical sidecar under `atera/`, with a stable name,
+     and its original file name, size and SHA-256 are recorded in attrs;
+   - `attrs["merxen_atera"]` carries the full `experiment.spatial` (run, slide, region, instrument, UUIDs,
+     versions, panels, counts), every metrics summary column and the `panel_config.json` header;
+   - nothing committed (fixture, tests, evidence names) holds a real sample, run, slide or instrument
+     name, and logs name the sample by its alias.
 7. **Existing platforms are unaffected.**
    - Rendered XENIUM and MERSCOPE build JSON is byte-identical to `main`.
    - Every existing process `script:` text matches its pinned copy, so task hashes are unchanged.
@@ -119,7 +132,7 @@ Each item is sequenced in §8:
 | 4 | **Vendor matrix rule.**<br>• The CFM counts only features with QV ≥ 20 that are assigned to a cell (official docs).<br>• No transcript with QV < 20 is assigned among 1.40 B rows checked.<br>• A QV ≥ 20 filter therefore reproduces the matrix. | [H] |
 | 5 | **The masks are the true segmentation; the polygons are display simplifications** (official docs).<br>• Cell mask label = cell index + 1 (official docs; exhaustively verified).<br>• Nucleus mask label = nucleus-polygon row + 1 (empirical, exhaustively verified on 90,238 nuclei). The docs state the label rule for cell masks only.<br>• Nucleus pixels are 100% inside their owning cell. | [H] |
 | 6 | **Near-whole-transcriptome panel.**<br>• 18,049 genes and 6,628 control features.<br>• Several downstream stages densify or loop per gene and break or run for many hours at this size (§5). | [H]/[M] |
-| 7 | **Sample-identifying metadata.** `experiment.spatial`, the `metrics_summary_*.csv` header and file name, `analysis_summary_*.html` and `panel_config.customer` all carry run, slide, ROI or serial identifiers, or customer PII. | [H] |
+| 7 | **Sample-identifying metadata.** `experiment.spatial`, the `metrics_summary_*.csv` header and file name, `analysis_summary_*.html` and `panel_config.customer` all carry run, slide, ROI or serial identifiers, or customer PII. The store keeps them verbatim; committed text and human-facing output never show them (D13). | [H] |
 
 ---
 
@@ -288,7 +301,7 @@ standalone `transcripts.zarr.zip` are the same size (15,627,165,982 B) [H].
 
 | Atera file | Xenium analogue | Consequence for MerXen |
 |---|---|---|
-| `experiment.spatial` | `experiment.xenium` | • The first line of spatialdata-io `xenium()` fails.<br>• Three duplicate pixel-size parsers know only `experiment.xenium` / `specs.json`: `segmentation/pipeline.py:183-223`, `enrichment/enrich.py:317-349`, `visualization/sanity_plots.py:1418-1446`.<br>• Write a **sanitised** `experiment.spatial` into the zarr root (§3.11) and add a shared lookup. |
+| `experiment.spatial` | `experiment.xenium` | • The first line of spatialdata-io `xenium()` fails.<br>• Three duplicate pixel-size parsers know only `experiment.xenium` / `specs.json`: `segmentation/pipeline.py:183-223`, `enrichment/enrich.py:317-349`, `visualization/sanity_plots.py:1418-1446`.<br>• Copy `experiment.spatial` **verbatim** into the store's `atera/` sidecar folder (§3.11) and add a shared lookup. |
 | `transcripts.zarr.zip` (35 gene-sorted tiles) | `transcripts.parquet` | • A new streaming reader is needed.<br>• Rows are not spatially ordered, so spatial queries scan whole tiles.<br>• 1.6e9 rows rule out any pandas materialisation. |
 | `quality_score` (f2) | `qv` | • MerXen resolves only `qv \| quality \| quality_value` (`segmentation/pipeline.py:875-879`; `enrichment/assignment.py:66-69`).<br>• The builder must emit `qv`. |
 | Unassigned `(0xFFFFFFFF, 0xFFFFFFFF)` | `"UNASSIGNED"` | • Not in MerXen's unassigned tokens (`io/spatialdata_io.py:620-623`).<br>• The builder maps it to NA. |
@@ -298,7 +311,7 @@ standalone `transcripts.zarr.zip` are the same size (15,627,165,982 B) [H].
 | `morphology_2d/` | `morphology_focus/` (`chNNNN_<name>.ome.tif`) | • 2 or 4 channels.<br>• Opening one file of the series **zero-fills** siblings it cannot find.<br>• Map file → channel from OME `TiffData`.<br>• Store as `morphology_focus`. |
 | `morphology_3d/` | `morphology.ome.tif` | 21 GB; z mapping UNVERIFIED. Not ingested by default. |
 | No parquet or CSV anywhere | Xenium has both | No CSV fallbacks apply (`enrich.py:110-217`). |
-| `panel_config.json` (`payloads` list) | `gene_panel.json` (`payload` dict) | Sidecar with `customer` redacted; `gene_coverage` joined into `var`. |
+| `panel_config.json` (`payloads` list) | `gene_panel.json` (`payload` dict) | Verbatim sidecar (customer and designer included); `gene_coverage` joined into `var`. |
 | H&E + 3×3 alignment | Xenium Explorer `*_imagealignment.csv` | Same convention (H&E px → morphology px), verified with keypoints; fits `REGISTER_IMAGES` (§5). |
 | 18,049 genes | 300–5,000 genes | Several downstream stages break or slow down (§5). |
 
@@ -338,14 +351,14 @@ standalone `transcripts.zarr.zip` are the same size (15,627,165,982 B) [H].
 | D3 | Transcript policy | QV ≥ 20 at build; controls kept and flagged; vendor-ordinal `transcript_id`; pre-filter QV histograms recorded | Keep everything; also drop controls/unassigned | Recommended (Q4) |
 | D4 | Transcript storage | Lean numeric/categorical columns; partitions never cross a tile; **`row_range` default**; `tile_blocks` opt-in only with a decode cap | One partition per tile; full spatial re-sort | Recommended; AT-5 may promote `tile_blocks` |
 | D5 | Images | `morphology_focus` = all `morphology_2d` channels in OME order, stored pyramid; no 3D, no H&E | Single-channel elements; 3D included | Recommended |
-| D6 | Segmentation → elements | Labels from masks; shapes polygonised from masks with the **+0.5 px** correction and 0.5 px topology-preserving simplification | Vendor polygons | Recommended (Q5) |
+| D6 | Segmentation → elements | Labels from masks; shapes polygonised from masks with the **+0.5 px** correction and 0.25 px topology-preserving simplification | Vendor polygons | Recommended (Q5) |
 | D7 | Cell IDs | `instance_id` = cell row + 1 = mask label. Nuclei get their own IDs (nucleus row + 1) **plus `cell_instance_id`; nucleus consumers join via `cell_instance_id`** | Nuclei keyed by cell ID | Recommended |
 | D8 | Genes | Symbol `var_names`, `gene_ids` = ENSG; gene-only X; per-type control counts in obs; points keep controls with `is_gene` | ENSG `var_names`; controls in X | Recommended |
 | D9 | Coordinates | `global` = level-0 morphology pixels; µm elements carry `Scale(1/ps)`; vendor transform asserted (rtol 1e-6); **pixel-corner convention, floor lookups** | Use `homogeneous_transform` verbatim | Recommended |
 | D10 | H&E | Not in the build; later via `REGISTER_IMAGES` | Build-time element | Recommended |
 | D11 | Original-segmentation names | `atera_cell_boundaries` / `atera_nucleus` through the schema registry and `PlatformSpec` | Reuse `xenium_*` | Recommended (Q2) |
 | D12 | First downstream route | `segmentation_source=native`, then `cellpose_only`, then ProSeg if the benchmark allows | Cellpose + ProSeg now | Recommended (Q6) |
-| D13 | Identifying metadata | Sanitised sidecars with neutral names; field allow-list for attrs; `to_alias` for anything printed | Copy verbatim | Recommended |
+| D13 | Vendor metadata and privacy | **Store keeps everything:** verbatim sidecars under stable names, full header in attrs. Privacy applies to committed text and human-facing output only (`to_alias` for anything printed) | Sanitised sidecars and an attrs allow-list (revision 4; superseded) | **User decision 2026-11-05** |
 | D14 | Build atomicity and cache | Write to a temp sibling, then atomic rename with a completion marker; reuse only marked stores whose `build_fingerprint` matches | Current reuse-if-exists | Recommended (Q19) |
 
 ### 3.1 D1: reader strategy
@@ -435,14 +448,18 @@ grow a third arm in every ternary.
 - `min_qv = null` keeps all 1.64e9 rows. The raw `transcripts.zarr.zip` remains the archive for QV QC.
 - **Spatial QV QC survives the filter.** In the same pass as the write, the build records, before
   filtering:
-  - per-tile and per-FOV QV histograms (129 bins) and mean QV;
-  - Q20 per-gene totals;
+  - per-tile and per-FOV QV histograms (161 quarter-QV bins from 0 to 40, stable whatever `min_qv` is)
+    and mean QV;
+  - Q20 per-gene totals (`gene_counts_q20`, recorded whatever `min_qv` is);
   - bounds;
   - a coarse density grid (100 µm).
 
   All go into `attrs["merxen_atera"]`, under unambiguous names: `*_all_qv` for the vendor `gene_counts`,
   `*_q20` for ours. QC and COMPARE never mix the two populations.
 - QV ≥ 20 alone is **not** a substitute for subsampling in the heavy downstream stages (§5).
+- The statistics are recorded by the partition reads themselves, in this process, so the points are
+  computed with dask's threaded (or synchronous) scheduler. The partition function refuses to be pickled,
+  so the `processes` scheduler or a distributed cluster fails loudly instead of losing the statistics.
 
 **Columns of the `transcripts` points element** (about 38 B per row in memory):
 
@@ -492,7 +509,9 @@ grow a third arm in every ternary.
 
   If enabled, it needs one of:
   - **(i)** a process-wide `threading.BoundedSemaphore(max_tiles_in_flight)` around tile decodes in
-    `read_transcript_partition`; or
+    `read_transcript_partition` (AT-3). The semaphore covers the block selection too: each whole-tile
+    column is cut to its block before the next one is read, so at most `max_tiles_in_flight` whole-tile
+    columns are alive. Each block still reads its whole tile, so a tile is read 16 times; or
   - **(ii)** preferred: a per-tile pre-pass that reads only `location` and caches per-block row indices
     as `.npy` (about 0.4 GB per large tile, uint32). Each block task then reads orthogonal selections.
 
@@ -593,13 +612,20 @@ grow a third arm in every ternary.
   - The existing Cellpose branch (`enrich.py:240-266`) has the same −0.5 px bias. That is noted for a
     separate fix, not changed here (cache and output invariance).
 - **Simplification.** Contours are full-resolution (about 100–200 vertices per cell; UNVERIFIED, measured
-  in AT-5). They are simplified with topology-preserving `shapely.simplify` or `coverage_simplify` at
-  0.5 px. Vertex statistics are recorded in attrs.
+  in AT-5). They are simplified with topology-preserving `shapely.simplify` at 0.25 px. Below 0.5 px the
+  simplification removes only collinear staircase vertices: on 379 interior cells of a dense crop
+  centroids and areas equal the unsimplified ones (centroid max 0.0011 µm, median 71 vertices against
+  215), while 0.5 px moves 21% of centroids by more than 0.01 µm (max 0.033 µm; AT-3 review). Vertex
+  statistics are recorded in attrs.
 - **Process safety and cost.**
   - The mask is first written as a memmapped `.npy` in the task work directory (10.4 GB, deleted after).
   - Polygonisation runs in a **subprocess pool started before any dask or zarr thread pool**
     (`forkserver`), with `n_jobs = task.cpus`. Today the default is `os.cpu_count()` = 80 fork workers
-    (`mask_geometry.py:148-156`).
+    (`mask_geometry.py:148-156`). `atera_shapes_from_masks` refuses `fork`: reading the masks has already
+    started zarr threads.
+  - Every worker maps the whole `.npy`, so the pages it touches count as file-backed RSS: 112.7 GB summed
+    over 16 workers on `masks/1`, of which 1.6 GB is anonymous memory (AT-3 review). The watchdog
+    therefore measures anonymous memory (`RssAnon`, or USS/PSS), never `rss`.
   - A new `serial_fallback=False` argument makes a pool failure an error rather than a silent serial loop
     over 91k labels (`:171-178`). The default stays `True` for existing callers.
   - The cell mask is released (`del` + `force_release`) before `masks/0` is loaded.
@@ -762,23 +788,43 @@ grow a third arm in every ternary.
 - **Multi-ROI.** Each ROI is its own samplesheet row with an unrelated µm frame. Any `dataset_name` or
   `pair_id` derived from ROI or slide fields must be an alias (D13).
 
-### 3.11 D13: identifying metadata (privacy)
+### 3.11 D13: vendor metadata (complete) and privacy (committed text only)
 
-- **Sidecars are written under neutral names:**
-  - `experiment.spatial` — **sanitised** via an allow-list: versions, `pixel_size`, `z_step_size`, panel
-    IDs and organism, `segmentation_stain`, counts and metrics, and file paths with the run-directory
-    component stripped;
-  - `metrics_summary.csv` — identifying columns dropped;
-  - `panel_config.json` — `customer` removed;
-  - `analysis_summary.html` — not copied by default (it embeds identifiers; opt-in only);
-  - `morphology_fov_locations.json`, `diffexp_genes/*.csv`, `he_imagealignment.csv`, `keypoints.csv`.
-- **`attrs["merxen_atera"]` uses a field allow-list** and never carries run, slide, region, serial, UUID or
-  customer fields. Multi-kit fields (`kit_info`, `payloads`) are stored as lists of panel IDs and names
-  only.
-- **Logs and plot titles** use `dataset_name` (already an alias), never manifest fields. Any manifest
-  field that must be printed passes through `merxen.privacy.to_alias`.
-- **The synthetic fixture** uses obviously fake values for these fields. A fast test asserts the absence
-  of every listed key in attrs and sidecars.
+**User decision 2026-11-05.** The metadata stored with each run must be as complete as possible. Privacy
+rules apply only to what is committed to git (code, tests, fixtures, docs, commit messages, PR text) and to
+human-facing output, never to the data products written to storage. This replaces revision 4's sanitised
+sidecars and attrs allow-list, which would have removed run, slide, instrument, reagent and customer fields
+from the store.
+
+- **Sidecars are byte-identical copies** under the store's `atera/` folder (`copy_atera_sidecars`), with
+  stable names so code can find them whatever the run (`stable_sidecar_name`):
+  - `experiment.spatial`; with `atera_spec_path`, the override is kept too, as
+    `experiment_override.spatial`;
+  - `metrics_summary.csv` (from `metrics_summary_<…>.csv`);
+  - `analysis_summary.html` (from `analysis_summary_<…>.html`) and `qc_images.html`;
+  - `panel_config.json`, including `customer` and `designer`;
+  - `morphology_fov_locations.json`, `overview_scan_fov_locations.json`, `overview_scan.png`;
+  - `diffexp_genes/*.csv`;
+  - `he_imagealignment.csv` and `keypoints.csv` when present.
+
+  Two bundle files with the same stable name fail the build loudly instead of dropping one. The `atera/`
+  folder sits at the zarr root, so store rewrites keep it (`_copy_non_spatialdata_sidecars`).
+- **`attrs["merxen_atera"]` carries the full header** (`atera_metadata_attrs`), as JSON-serialisable
+  structures with no field dropped:
+  - `experiment`: the whole `experiment.spatial` (run name, slide, region, instrument serial, UUIDs,
+    versions, panels, counts and metrics);
+  - `metrics_summary`: every column of every row, numbers parsed, empty cells `null`;
+  - `panel_config`: the whole `panel_config.json` except the per-target list (18,196 targets, 11 MB),
+    which is replaced by `num_targets` and stays in the sidecar;
+  - `bundle_files`: the file names of the zips and morphology files;
+  - `sidecars`: per sidecar, its store path, **original file name**, size and SHA-256.
+- **Committed text** never holds a real sample, run, slide or instrument name or a host path. The
+  synthetic fixture uses obviously fake values; real-data tests are `slow`, read `MERXEN_ATERA_RAW_ROOT`
+  and never print manifest values.
+- **Human-facing output** (log lines, error messages, plot titles, report file names) names the sample
+  by its `dataset_name` (already an alias). Any manifest field it prints passes through
+  `merxen.privacy.to_alias`, as the Xenium and MERSCOPE code does. Evidence files written by the
+  acceptance script use aliases in their names and text.
 - **Aliases.** In-house Atera samples need an alias family (Q15). CLAUDE.md lists only the HD, HM and MS
   families, and `privacy.py` detects only host paths, `P\d{4}` and alias-table literals (`:61-80`).
 
@@ -815,12 +861,12 @@ grow a third arm in every ternary.
 | `masks/0` polygonised, `polygon_sets/0/{cell_index,method}` | `shapes/nucleus_boundaries` (`instance_id` column = index per nucleus; `cell_instance_id`, `source_cell_id`) | `Scale(1/ps)` | Registered later as `original_nucleus` (`masks.py:43-46, 63-92`) |
 | `transcripts.zarr.zip/grid/*` + root attrs | `points/transcripts` (§3.3 columns); instance key `original_assignment`; feature key `feature_name` | `Scale(1/ps)` | Primary points |
 | CFM + `cells.zarr.zip/cell_summary`, `cell_id`, `masks/0` bincount | `tables/table`: region `cell_boundaries`, `region_key="region"`, `instance_key="instance_id"` | — | Gene-only X; per-type control counts; `vendor_*` |
-| Sanitised `experiment.spatial`, `metrics_summary.csv`, redacted `panel_config.json`, `morphology_fov_locations.json`, `diffexp_genes/*.csv`, H&E alignment + keypoints (if present) | Zarr-root sidecars under neutral names | — | Survive rewrites (`spatialdata_io.py:1626-1639`) |
+| `experiment.spatial`, `metrics_summary_*.csv`, `analysis_summary_*.html`, `qc_images.html`, `panel_config.json`, `morphology_fov_locations.json`, `overview_scan_fov_locations.json`, `overview_scan.png`, `diffexp_genes/*.csv`, H&E alignment + keypoints (if present) | Byte-identical sidecars in the zarr-root `atera/` folder, under stable names; original names, sizes and SHA-256 in attrs | — | Survive rewrites (`spatialdata_io.py:1626-1639`); nothing redacted (D13) |
 | Computed in the points pass | `merxen_atera_points_index.json` (root) | — | Keyed by parquet file + fingerprint |
 | Build state | `merxen_build_complete.json` (root) | — | Completion marker + `build_fingerprint` |
-| Header facts | `attrs["merxen_atera"]`, allow-listed | — | Keys:<br>• versions, `pixel_size_um`, `z_step_size`, `chemistry`, `panel_design_ids[]`, `num_gene_targets`<br>• `number_rnas`, `min_qv`, `n_points_written`<br>• `spatial_order`, `boundary_source`, polygon vertex stats<br>• `gene_counts_all_qv`, `gene_counts_q20`, QV histograms per tile and FOV, bounds, density grid<br>• `feature_categories`, `build_fingerprint` |
+| Header facts | `attrs["merxen_atera"]`, complete (D13) | — | Keys:<br>• `experiment` (all of `experiment.spatial`), `metrics_summary` (every column), `panel_config` (all but the target list), `bundle_files`, `sidecars`<br>• `pixel_size_um`, `chemistry`, `panel_design_ids[]`, `num_gene_targets`<br>• `number_rnas`, `min_qv`, `n_points_written`<br>• `spatial_order`, `boundary_source`, polygon vertex stats<br>• `gene_counts_all_qv`, `gene_counts_q20`, QV histograms per tile and FOV, bounds, density grid<br>• `feature_categories`, `build_fingerprint` |
 | `attrs["merxen_schema"]` | `platform="ATERA"`, `primary_points="transcripts"`, `segmentations.original` = {points `transcripts`, assignment `original_assignment`, shape `cell_boundaries`, table `table`, id_namespace `source_segmentation_v1`} | — | Via `stamp_merxen_schema` / `register_segmentation_branch` (`spatialdata_schema.py:70-154`) |
-| Not ingested | `morphology_3d`, `binned_transcripts`, `csc_cell_feature_matrix`, `gridded_polygon_sets`, `overview_scan*`, `qc_images.html` | — | 3D opt-in only |
+| Not ingested as elements | `morphology_3d`, `binned_transcripts`, `csc_cell_feature_matrix`, `gridded_polygon_sets` | — | 3D opt-in only; the overview scan and `qc_images.html` are sidecars |
 
 ### 4.2 New files
 
@@ -862,14 +908,16 @@ class AteraBundle:
     morphology_2d_files: tuple[Path, ...]   # ordered by OME TiffData FirstC
     morphology_channel_names: tuple[str, ...]
     morphology_3d_file: Path | None
-    sidecars: tuple[Path, ...]
+    sidecars: tuple[AteraSidecar, ...]      # source, stored_path (stable), original_name
 
 def resolve_atera_bundle(input_path: Path, *, spec_override: Path | None = None,
                          transcripts_path: Path | None = None, cells_path: Path | None = None,
                          cfm_path: Path | None = None) -> AteraBundle
     # analysis_sw_version startswith "atera-"; RnaDataset major 6, coordinate_space, spatial_units;
     # CellSegmentationDataset major 6; species check; fails loudly on unknown majors
-def sanitize_experiment_spatial(experiment: dict) -> dict          # allow-list (D13)
+def stable_sidecar_name(name: str) -> str                         # metrics_summary_<…>.csv -> metrics_summary.csv
+def copy_atera_sidecars(bundle, store_root: Path) -> list[dict]   # verbatim into atera/ (D13)
+def atera_metadata_attrs(bundle, sidecars) -> dict                # full header for attrs (D13)
 def read_atera_tile_index(bundle) -> list[AteraTile]   # key (parsed via grid_key_names), n_rows, global_offset in attr order
 def plan_transcript_partitions(tiles, *, partition_rows: int, spatial_order: str,
                                block_um: float, min_block_rows: int,
@@ -883,7 +931,7 @@ def read_atera_transcripts(bundle, *, min_qv, partition_rows, spatial_order, blo
 def read_atera_transcripts_for_genes(bundle, genes: Sequence[str], *, min_qv=None) -> pd.DataFrame
 def read_atera_cells(bundle) -> AteraCells
 def read_atera_labels(bundle) -> dict[str, da.Array]
-def atera_shapes_from_masks(bundle, cells: AteraCells, *, n_jobs: int, simplify_px: float = 0.5,
+def atera_shapes_from_masks(bundle, cells: AteraCells, *, n_jobs: int, simplify_px: float = 0.25,
                             workdir: Path) -> dict[str, gpd.GeoDataFrame]   # subprocess pool, +0.5 px
 def atera_shapes_from_vendor_polygons(cells: AteraCells, pixel_size_um: float) -> dict[str, gpd.GeoDataFrame]
 def read_atera_table(bundle, cells: AteraCells, *, gex_only=True, keep_vendor_annotations=True,
@@ -899,9 +947,9 @@ def write_atera_spatialdata(*, input_path: Path, output_path: Path,
                             n_workers: int | None = None) -> Path
 def _check_cached_atera_build(path: Path, fingerprint: str, *, force_rerun: bool) -> bool
 def _assemble_atera_sdata(bundle, build_config) -> SpatialData
-def _write_atera_sidecars(bundle, output_path) -> None      # sanitised, neutral names
+# sidecars: copy_atera_sidecars + atera_metadata_attrs (verbatim, stable names, original names recorded)
 def _write_points_index(output_path, specs) -> None
-class RssWatchdog: ...   # psutil process-tree RSS; abort with exit 137 above the limit
+class RssWatchdog: ...   # process-tree anonymous RSS (RssAnon/USS, not rss: §3.5); exit 137 above the limit
 ```
 
 **Build sequence:**
@@ -968,12 +1016,11 @@ nucleus_labels: bool = True
 cells_boundaries: bool = True
 nucleus_boundaries: bool = True
 boundary_source: Literal["masks", "vendor_polygons"] = "masks"
-boundary_simplify_px: float = 0.5
+boundary_simplify_px: float = 0.25
 polygon_n_jobs: int | None = None                   # None -> DASK_NUM_WORKERS / task.cpus
 cells_table: bool = True
 table_gex_only: bool = True
 keep_vendor_annotations: bool = True
-copy_analysis_summary: bool = False                 # embeds identifiers
 morphology_2d: bool = True
 morphology_3d: bool = False
 max_rss_gb: float | None = None                     # watchdog; set from task memory
@@ -1116,7 +1163,7 @@ The prefix helpers that already build names from `platform.toLowerCase()` (`main
 | Labels | Disk / RAM | 2 × 10.4 GB raw, about 1–3 GB on disk; aligned 4096² chunks; pyramid memory UNVERIFIED | [M] |
 | Mask polygonisation | RAM / CPU / disk | 10.4 GB memmapped `.npy` per mask (temporary) plus a `task.cpus` subprocess pool; minutes to tens of minutes (UNVERIFIED) | [M] |
 | Acceptance streaming checks | RAM / time | About 85–103 s, < 3 GB RSS for both masks | Review run [H] |
-| Table | RAM | +3.2 GB RSS, 6–7 s | [H] |
+| Table | RAM | About 7.8 GB peak process RSS, 12–16 s (AT-3 review; the CFM decode dominates) | [H] |
 | Peak RSS | RAM | About 40–80 GB expected with `row_range` at 16 workers (about 1–1.5 GB per task × 16, plus polygonisation, image, table). **128 GB reservation**, watchdog cap at 120 GB, one retry at ×2 (with atomic writes) | [L] |
 | Staged input | Disk | About 9 GB extracted plus 15.6 + 0.14 + about 0.5 GB of zips | [M] |
 | Source zarr | Disk | About 35–50 GB (plus a transient `.partial` during the write) | [L] |
@@ -1184,7 +1231,10 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
   - One ENSG-shaped symbol; Azimuth and Leiden columns; `X_pca` / `X_umap`.
   - `is_sketch` absent by default; control columns in X (including deprecated); `total_counts` including
     deprecated.
-- **`panel_config.json`:** a `customer{email,name}` stub (fake values) and `gene_coverage`.
+- **`panel_config.json`:** `customer{email,name}` and `designer.designed_by` stubs (fake values) and
+  `gene_coverage`.
+- **Reports and companions:** `analysis_summary_<fake>.html`, `qc_images.html`, both FOV JSONs, a fake
+  `overview_scan.png`, `diffexp_genes/`, and prefixed H&E alignment and keypoints CSVs.
 - **Morphology:**
   - 2 single-channel pyramidal JPEG-2000 OME-TIFFs, with odd level shapes.
   - Variants: `n_channels=4`; `file_order_differs=True`, where OME `TiffData` maps files to channels in a
@@ -1239,8 +1289,10 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
   - Stored levels are used; level transforms come from shape ratios; image and label level shapes are
     equal.
   - A missing sibling is an error.
-- **Privacy:** `attrs["merxen_atera"]`, sidecar names and sidecar contents carry none of the identifying
-  fields; `panel_config.customer` is removed.
+- **Metadata (D13):** every sidecar is a byte-identical copy under its stable name, with its original
+  name, size and SHA-256 recorded; `attrs["merxen_atera"]` carries the full `experiment.spatial`, every
+  metrics column and the `panel_config.json` header (customer and designer included), all checked against
+  the fixture's fake values; two files with one stable name fail.
 - **Atomicity:** kill the writer mid-write (monkeypatched exception), rerun, and assert a rebuild. A
   fingerprint mismatch refuses without `--force-rerun`.
 - **Contract and config:**
@@ -1265,7 +1317,7 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
 - **`integration`:** build an on-disk store from the fixture with `write_atera_spatialdata`, re-read it with
   `sd.read_zarr`, and check:
   - elements, transforms and attrs;
-  - sidecars (sanitised);
+  - sidecars (byte-identical, stable names) and the full header in attrs;
   - the points index matches the parquet files;
   - the pixel size resolves via the shared helper;
   - the lost-known-categories behaviour on re-read is handled by consumers.
@@ -1295,7 +1347,8 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
      0 violations, max labels, no empty label.
   3. Shape centroids vs `cell_summary` within 0.01 µm; vertex statistics.
   4. Points row count = number of zarr transcripts with QV ≥ 20; per-tile reconciliation.
-  5. Privacy scan of attrs and sidecars.
+  5. Metadata completeness: sidecars byte-identical to the bundle, attrs header equal to
+     `experiment.spatial`; evidence written under aliases only.
   6. Peak RSS, wall time and per-element size from `trace.tsv` and the watchdog log.
   7. `row_range` vs `tile_blocks` timing and memory on the crop bundle.
 - **Crop bundle (AT-5a):** a 2–3-tile real-data bundle under `$MERXEN_ATERA_RAW_ROOT`, cropped from tiles,
@@ -1371,8 +1424,8 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
 ### AT-3 `[feature]`: fixture and Atera readers (5 d)
 
 - **Scope:** `atera_synth.py`, `io/atera_reader.py` (including OME `TiffData` mapping, mask polygonisation
-  with +0.5 px, and sanitisation).
-- **Tests:** §7.2 reader, shape, pixel-convention, privacy and pass-budget tests.
+  with +0.5 px, and the verbatim metadata sidecars and full header of D13).
+- **Tests:** §7.2 reader, shape, pixel-convention, metadata and pass-budget tests.
 - **Exit:** fast tier green on the lock env and a fresh conda env.
 
 ### AT-4 `[feature]`: builder and BUILD plumbing (6.5 d)
@@ -1385,7 +1438,7 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
   - `main.nf` mode, input, build arms and preflight.
   - Directive closures; params, including the six Cellpose names.
   - Samplesheet example, metro map, docs.
-- **Tests:** §7.2 contract, config, atomicity and privacy tests; §7.3 integration and nextflow.
+- **Tests:** §7.2 contract, config, atomicity and metadata tests; §7.3 integration and nextflow.
 - **Exit:** a fixture build validates; existing configs and scripts are byte-identical.
 
 ### AT-5 `[test]` / ops: real-data pilot and milestone-1 acceptance (4 d)
@@ -1451,7 +1504,7 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
 | R4 | Mask polygonisation is slow, deadlocks after fork, or drops labels | M / M | Subprocess pool before thread pools; `n_jobs = task.cpus`; no silent serial fallback; `vendor_polygons` fallback; build fails on missing shapes | AT-3, AT-4 |
 | R5 | Half-pixel or rounding misregistration (shapes, lookups, pyramid levels) | M / M | +0.5 px; floor lookups; shape-ratio level transforms; centroid acceptance checks | AT-3–AT-5 |
 | R6 | Nucleus/cell ID namespace confusion corrupts per-cell metrics silently | M / H | `cell_instance_id` joins; grep test; two-nucleus fixture | AT-6 |
-| R7 | Sample-identifying metadata leaks into published stores, logs or evidence | M / H | Sanitised sidecars; attrs allow-list; `to_alias`; privacy tests | AT-3, AT-4 |
+| R7 | Sample-identifying metadata leaks into committed text, logs, plot titles or evidence (the store keeps it on purpose, D13) | M / H | Fake fixture values; slow real-data tests that print no manifest value; `to_alias` for printed fields; privacy hooks on commits and PR text | AT-3, AT-4 |
 | R8 | ZipStore lock serialises reads; parallel throughput not better than serial | M / M | Budget assumes serial; benchmark; unzip the transcripts zip (+15.6 GB) if needed | AT-5 |
 | R9 | ProSeg infeasible at this scale (proseg#162) | H / M | Native and `cellpose_only` routes do not depend on it; crop benchmark; tiling | AT-5b, AT-9 |
 | R10 | Format churn across Atera versions; preview bundles in Xenium layout | M / M | Version checks; preview refusal in the XENIUM builder; parity test | AT-3, AT-4 |
@@ -1495,6 +1548,11 @@ lookups (bounds-checked; use floor); multi-component labels (MultiPolygon); `cel
 - Q13: the `feature/atera-support` integration branch.
 - Pairing: Atera runs single-sample for now. The role-based pairing rewrite stays optional (AT-10).
 
+**Decided 2026-11-05:**
+
+- Metadata retention: the store keeps all vendor metadata unredacted (verbatim sidecars, full header in
+  attrs); privacy rules cover only committed text and human-facing output (D13).
+
 The remaining questions use their recommended defaults until the user says otherwise.
 
 1. **Platform identity.** (a) New `ATERA` value plus `PlatformSpec`; (b) a Xenium flavour.
@@ -1506,7 +1564,7 @@ The remaining questions use their recommended defaults until the user says other
 4. **Transcript QV policy at build.** (a) QV ≥ 20 (1.41e9 rows; reproduces the vendor matrix; pre-filter QV
    maps kept in attrs); (b) keep all (1.64e9); (c) also drop controls and unassigned (about 0.64e9).
    *Recommended: (a).*
-5. **Shape source.** (a) Polygonise the vendor masks (+0.5 px, 0.5 px simplification); (b) vendor polygons
+5. **Shape source.** (a) Polygonise the vendor masks (+0.5 px, 0.25 px simplification); (b) vendor polygons
    (+0.5 px). *Recommended: (a)*, with (b) as a fallback.
 6. **First segmentation route.** (a) `native`, then `cellpose_only`, then ProSeg only if AT-5b passes;
    (b) Cellpose + ProSeg now; (c) ProSeg with the vendor prior only. *Recommended: (a).* Is a multi-day or
@@ -1648,3 +1706,9 @@ scripts' full-section results.
 | ENSG-shaped symbols | Accepted |
 | Bind paths | Accepted |
 | Missing open questions | Added as Q15–Q22 (the cache-path and rebuild questions merged into Q19) |
+
+**User decisions after revision 4.**
+
+| Date | Decision | Effect |
+|---|---|---|
+| 2026-11-05 | Metadata retention: the metadata stored with each run must be as complete as possible; only commits to the repo (and human-facing output) must never show sample names | D13 rewritten (§3.11). The AT-3 sanitisers (`sanitize_experiment_spatial`, `sanitize_panel_config`, `sanitize_metrics_summary`) and their absence tests are removed; `copy_atera_sidecars` and `atera_metadata_attrs` keep everything, with original file names recorded. §1.1 item 6, §2.5, §4.1, §4.2, §7, R7 and Q-list updated |
