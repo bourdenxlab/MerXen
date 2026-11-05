@@ -7,10 +7,12 @@
 > is listed in the Review log (Appendix A). **User decision 2026-11-05 (metadata retention):** the store
 > keeps all vendor metadata verbatim; privacy rules apply only to what is committed to git and to
 > human-facing output (§3.11 D13, Appendix A). **AT-4 (2026-11-05):** the builder and BUILD plumbing are
-> implemented; the deviations from this plan are listed in Appendix A ("AT-4 implementation notes").
+> implemented; the deviations from this plan are listed in Appendix A ("AT-4 implementation notes"), and
+> the AT-4 review decisions in Appendix A ("AT-4 review").
 
-*Names and paths (2026-11-04).* The only dataset named here is the public 10x dataset
-`Atera_v1_WTA_S4A_Brain_Hippocampus_ND_FF` (atera-1.1.1, human hippocampus, fresh frozen). Data locations
+*Names and paths (2026-11-04).* The only dataset used here is the public 10x Atera whole-transcriptome
+dataset of a human hippocampus section (atera-1.1.1, fresh frozen); its name is not written here, and the
+slow tests find it as the one extracted bundle under `$MERXEN_ATERA_RAW_ROOT`. Data locations
 are written as `.env` variables. `$MERXEN_ATERA_RAW_ROOT` is new (AT-0); `$MERXEN_EVIDENCE_ROOT` already
 exists. Earlier MerXen runs used as scale baselines are anonymised as Xenium A/B and MERSCOPE C–G.
 
@@ -97,7 +99,9 @@ Segmentation, enrichment and the later stages can open it with only the consumer
 5. **Downstream code can find the store's metadata.**
    - `sd.read_zarr(store)` succeeds.
    - `platforms.find_um_per_px(store, "ATERA") == 0.21249222`.
-   - The enrichment and viewer-cache transform lookups resolve through the same helper.
+   - The enrichment and viewer-cache transform lookups gain their ATERA arm with the native route in
+     AT-6, not in milestone 1: they map Cellpose mask pixels to microns, and the ATERA pixel convention
+     of those masks is decided there (AT-4 review).
    - The segmentation loader arm (`DatasetConfig` Literal) is not in milestone 1; it lands in AT-6.
 6. **The store keeps the vendor metadata complete** (user decision 2026-11-05, D13). A fast test and the
    acceptance script assert that:
@@ -105,6 +109,9 @@ Segmentation, enrichment and the later stages can open it with only the consumer
      and its original file name, size and SHA-256 are recorded in attrs;
    - `attrs["merxen_atera"]` carries the full `experiment.spatial` (run, slide, region, instrument, UUIDs,
      versions, panels, counts), every metrics summary column and the `panel_config.json` header;
+   - the metadata inside the vendor zarr stores (every `.zattrs`/`.zgroup`/`.zarray` member) and the
+     OME-XML of every morphology TIFF are kept verbatim under `atera/`, and the vendor table data the
+     table has room for is kept (nucleus centroids, `de_*` statistics, category colours);
    - nothing committed (fixture, tests, evidence names) holds a real sample, run, slide or instrument
      name, and logs name the sample by its alias.
 7. **Existing platforms are unaffected.**
@@ -810,6 +817,20 @@ from the store.
 
   Two bundle files with the same stable name fail the build loudly instead of dropping one. The `atera/`
   folder sits at the zarr root, so store rewrites keep it (`_copy_non_spatialdata_sidecars`).
+- **Metadata inside the vendor files is kept verbatim too** (`write_atera_embedded_metadata`, AT-4
+  review):
+  - `atera/zarr_metadata/<store>.json` for `transcripts`, `cells`, `cell_feature_matrix` and, when
+    present, `binned_transcripts` and `csc_cell_feature_matrix`: the exact text of every `.zattrs`,
+    `.zgroup`, `.zarray`, `.zmetadata` and `zarr.json` member (dataset UUID, kit, codeword maps,
+    segmentation methods, polygon set descriptions, cell annotations, clusterings, matrix properties,
+    column descriptions);
+  - `atera/ome_xml/<relative path>.xml`: the OME-XML header of every `morphology_2d` file and of the 3D
+    stack (instrument, channels, map annotations with observed and suggested intensity ranges and the
+    pixel value offset).
+- **The table keeps the vendor table data it has room for:** the `cell_summary` columns without a named
+  place (`vendor_nucleus_centroid_x/y`, the centroid of the largest nucleus; `vendor_z_level`), the CFM
+  `centroid_column/row`, the `de_*` statistics of the kept features (`varm["vendor_de"]`) and the vendor
+  category colours (`uns["vendor_<column>_colors"]`, `#rrggbbaa`).
 - **`attrs["merxen_atera"]` carries the full header** (`atera_metadata_attrs`), as JSON-serialisable
   structures with no field dropped:
   - `experiment`: the whole `experiment.spatial` (run name, slide, region, instrument serial, UUIDs,
@@ -818,7 +839,14 @@ from the store.
   - `panel_config`: the whole `panel_config.json` except the per-target list (18,196 targets, 11 MB),
     which is replaced by `num_targets` and stays in the sidecar;
   - `bundle_files`: the file names of the zips and morphology files;
-  - `sidecars`: per sidecar, its store path, **original file name**, size and SHA-256.
+  - `sidecars` and `embedded_metadata`: per sidecar, its store path, **original file name**, size and
+    SHA-256;
+  - `experiment_source`: `bundle`, or `override` when `atera_spec_path` replaced the manifest (the
+    override's sidecar then comes first in the pixel-size lookup);
+  - `vendor_store_attrs`: the root attributes of every vendor store; a value over 32 KiB of JSON (the
+    codeword and gene maps, 2.4 MB in all) is named under `attrs_in_sidecar_only` and kept in its
+    sidecar, so the store's root attrs stay small enough to read on every open;
+  - `morphology_2d_annotations`: the OME map annotations, one per channel.
 - **Committed text** never holds a real sample, run, slide or instrument name or a host path. The
   synthetic fixture uses obviously fake values; real-data tests are `slow`, read `MERXEN_ATERA_RAW_ROOT`
   and never print manifest values.
@@ -863,6 +891,7 @@ from the store.
 | `transcripts.zarr.zip/grid/*` + root attrs | `points/transcripts` (§3.3 columns); instance key `original_assignment`; feature key `feature_name` | `Scale(1/ps)` | Primary points |
 | CFM + `cells.zarr.zip/cell_summary`, `cell_id`, `masks/0` bincount | `tables/table`: region `cell_boundaries`, `region_key="region"`, `instance_key="instance_id"` | — | Gene-only X; per-type control counts; `vendor_*` |
 | `experiment.spatial`, `metrics_summary_*.csv`, `analysis_summary_*.html`, `qc_images.html`, `panel_config.json`, `morphology_fov_locations.json`, `overview_scan_fov_locations.json`, `overview_scan.png`, `diffexp_genes/*.csv`, H&E alignment + keypoints (if present) | Byte-identical sidecars in the zarr-root `atera/` folder, under stable names; original names, sizes and SHA-256 in attrs | — | Survive rewrites (`spatialdata_io.py:1626-1639`); nothing redacted (D13) |
+| Zarr metadata members of every vendor zip; OME-XML of every morphology TIFF | `atera/zarr_metadata/<store>.json`, `atera/ome_xml/<path>.xml` (verbatim text); root attrs and map annotations parsed into attrs | — | D13 (AT-4 review) |
 | Computed in the points pass | `merxen_atera_points_index.json` (root) | — | Keyed by parquet file + fingerprint |
 | Build state | `merxen_build_complete.json` (root) | — | Completion marker + `build_fingerprint` |
 | Header facts | `attrs["merxen_atera"]`, complete (D13) | — | Keys:<br>• `experiment` (all of `experiment.spatial`), `metrics_summary` (every column), `panel_config` (all but the target list), `bundle_files`, `sidecars`<br>• `pixel_size_um`, `chemistry`, `panel_design_ids[]`, `num_gene_targets`<br>• `number_rnas`, `min_qv`, `n_points_written`<br>• `spatial_order`, `boundary_source`, polygon vertex stats<br>• `gene_counts_all_qv`, `gene_counts_q20`, QV histograms per tile and FOV, bounds, density grid<br>• `feature_categories`, `build_fingerprint` |
@@ -918,7 +947,9 @@ def resolve_atera_bundle(input_path: Path, *, spec_override: Path | None = None,
     # CellSegmentationDataset major 6; species check; fails loudly on unknown majors
 def stable_sidecar_name(name: str) -> str                         # metrics_summary_<…>.csv -> metrics_summary.csv
 def copy_atera_sidecars(bundle, store_root: Path) -> list[dict]   # verbatim into atera/ (D13)
-def atera_metadata_attrs(bundle, sidecars) -> dict                # full header for attrs (D13)
+def write_atera_embedded_metadata(bundle, store_root: Path) -> list[dict]
+    # zarr metadata members and OME-XML headers, verbatim into atera/ (D13)
+def atera_metadata_attrs(bundle, sidecars, embedded=()) -> dict   # full header for attrs (D13)
 def read_atera_tile_index(bundle) -> list[AteraTile]   # key (parsed via grid_key_names), n_rows, global_offset in attr order
 def plan_transcript_partitions(tiles, *, partition_rows: int, spatial_order: str,
                                block_um: float, min_block_rows: int,
@@ -1293,7 +1324,9 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
 - **Metadata (D13):** every sidecar is a byte-identical copy under its stable name, with its original
   name, size and SHA-256 recorded; `attrs["merxen_atera"]` carries the full `experiment.spatial`, every
   metrics column and the `panel_config.json` header (customer and designer included), all checked against
-  the fixture's fake values; two files with one stable name fail.
+  the fixture's fake values; two files with one stable name fail. The zarr metadata sidecars hold the
+  zips' members byte for byte, the OME-XML sidecars equal the TIFF headers, and the vendor store attrs,
+  map annotations, `de_*` statistics and colours reach the store.
 - **Atomicity:** kill the writer mid-write (monkeypatched exception), rerun, and assert a rebuild. A
   fingerprint mismatch refuses without `--force-rerun`.
 - **Contract and config:**
@@ -1435,7 +1468,8 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
   - `io/builders/atera.py` and `AteraBuildConfig`.
   - Atomic write, fingerprint and reuse guard; RSS watchdog.
   - Dispatch, sidecars, points index, aggregates.
-  - `find_um_per_px` consumers; preview-bundle refusal; licence notices.
+  - `find_um_per_px` consumers (the ATERA arms of the enrichment and viewer-cache lookups are AT-6);
+    preview-bundle refusal; licence notices.
   - `main.nf` mode, input, build arms and preflight.
   - Directive closures; params, including the six Cellpose names.
   - Samplesheet example, metro map, docs.
@@ -1730,3 +1764,27 @@ scripts' full-section results.
 | §3.12 "refuse unless `--force-rerun`" | Also: a store without the marker is rebuilt (not refused); with no raw folder a complete store is reused without a fingerprint and an incomplete one fails | A half-written store is never reused, and a store given alone (no `atera_dir`) cannot be fingerprinted |
 
 AT-4 also moves the tests that used `ATERA` as an example of an unregistered platform to `COSMX`.
+
+**AT-4 review (2026-11-05).** Three reviews (fidelity, scale, tests) of the AT-4 branch. Fixed:
+
+| Finding | Change |
+|---|---|
+| Vendor metadata inside the zarr zips and the OME-TIFF headers never reached the store | `write_atera_embedded_metadata` keeps every zarr metadata member and every OME-XML header verbatim; the root attrs and map annotations are parsed into attrs (D13) |
+| `nucleus_centroid_x/y`, the `de_*` statistics and the category colours were dropped | Kept as `vendor_*` obs columns, `varm["vendor_de"]` and `uns["vendor_<column>_colors"]` |
+| A killed build left the dot-prefixed mask scratch folder (about 21 GB) | Scratch is `<target>.partial-<uuid>.work`; the next build removes it with the partial store; the watchdog removes both before it exits |
+| Labels read in square chunks decoded each vendor chunk about twice | Reads follow the vendor chunk grid and are rechunked once |
+| `masks/0` was decoded a third time for the total nucleus area | Counted while it is exported for polygonisation (`MaskPixelCounter`) |
+| A failed watchdog reading ended the watchdog thread | The thread logs once and keeps polling |
+| The pipeline resolved the bundle twice | The resolved bundle is passed to the builder |
+| Metric text such as `00123` became a number | Kept as text |
+| Reader errors printed input paths; the stale-build log printed a folder name | Path-free messages; the log counts the folders |
+| The spec override was not marked and lost the pixel-size lookup to the original | `experiment_source` in attrs; `atera/experiment_override.spatial` first in `spec_sidecar_names` |
+| The public dataset's name was written in tests and here | The slow tests take the one extracted bundle under `$MERXEN_ATERA_RAW_ROOT` |
+| Untested paths (fingerprint inputs, pass budget, watchdog contract, guards through the build, points-index order, XENIUM preview wiring, `keep_vendor_annotations`, spec override, empty-stage preflight, input paths out of the fingerprint) | Tests added; a slow test checks one tile's interior cells against the vendor values |
+
+Not changed: `emit_codeword_index` stays off (it is per-row data, not metadata; about 6.5 GB uncompressed
+on the public dataset and in every downstream points load; AT-5 measures it); `tile_blocks` stays
+opt-in with its cost documented (AT-5 decides); the zarr event-loop ceiling and the remaining repeated
+zip opens are seconds per build (AT-5 measures); the watchdog cap is the same on the retry on purpose
+(the retry is for external memory pressure); the ATERA arms of the enrichment and viewer-cache lookups
+move to AT-6 (§1.1 item 5).
