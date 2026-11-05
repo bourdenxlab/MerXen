@@ -66,14 +66,14 @@ from merxen.viewer_cache.transform import resolve_mask_affine
 
 logger = logging.getLogger(__name__)
 
-# Retained as a source-compatible discovery hint for callers that imported the
-# old constant. Runtime defaults now come exclusively from ``discover_masks``.
 _BASE_SHAPE_KEYS: tuple[str, ...] = (
     "MOSAIK_proseg",
     "MOSAIK_proseg_hybrid",
     "MOSAIK_cellpose",
     "cellpose_nuclei",
 )
+# Retained as a source-compatible discovery hint for callers that imported the
+# old constant. Runtime defaults now come exclusively from ``discover_masks``.
 DEFAULT_SHAPE_KEYS: dict[str, tuple[str, ...]] = {
     name: _BASE_SHAPE_KEYS + spec.original_shape_keys
     for name, spec in PLATFORM_SPECS.items()

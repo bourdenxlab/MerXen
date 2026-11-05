@@ -85,11 +85,6 @@ class PlatformSpec {
         return spec
     }
 
-    /** Names of the registered platforms, in registry order. */
-    static List<String> supportedPlatforms() {
-        return new ArrayList<String>(REGISTRY.keySet())
-    }
-
     /** A fresh, mutable copy, so callers never alias the registry list. */
     List<String> getDefaultChannels() {
         return new ArrayList<String>(defaultChannels)
