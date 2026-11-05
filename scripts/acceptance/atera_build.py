@@ -2,8 +2,15 @@
 """Milestone-1 acceptance checks of an Atera SpatialData store (plan §1.1, §7.4).
 
 The store is re-read from disk and checked against the raw bundle it was built
-from, one criterion at a time, each streamed so memory stays bounded:
+from, one criterion at a time. The streamed checks (schema, labels) hold
+bounded memory; the matrix and table checks hold the vendor matrix and the
+points counts in memory, which grows with the matrix nonzeros (about 21 GB on
+the public dataset).
 
+``build_options``
+    The store's recorded build options are the §1.1 ones: ``min_qv`` 20,
+    ``boundary_simplify_px`` 0.25 and no ``tile_allowlist`` (each can be
+    changed on the command line for a deliberate non-§1.1 build).
 ``schema``
     ``validate_merxen_schema(deep=False)`` and the streaming deep check
     (``validate_merxen_schema_streaming``): unique ``transcript_id``,
@@ -16,35 +23,49 @@ from, one criterion at a time, each streamed so memory stays bounded:
     column with transcripts (vendor all-QV ``gene_counts`` above 0). The only
     excess allowed is on columns with no transcripts at all, and every such
     column must be a ``DeprecatedCodeword_*`` one (the vendor quirk recorded in
-    the plan); ``--expected-vendor-excess`` pins its total.
+    the plan); ``--expected-vendor-excess`` pins its total and is required
+    unless ``--allow-unpinned-excess`` is given.
 ``labels_vs_cell_summary``
     ``cell_labels`` pixel count x ps² against ``cell_summary.cell_area``
     (largest difference at most 1e-4 µm²), label centroids at
     ``(mean index + 0.5) * ps`` against the vendor centroids (0.005 µm), the
-    largest label equal to the cell count and no empty label.
+    largest label equal to the cell count, no empty label, and every pixel
+    equal to the vendor ``masks/1``.
 ``nucleus_containment``
     Every ``nucleus_labels`` pixel lies on its owning cell's label
     (``polygon_sets/0/cell_index[label - 1] + 1``); the largest nucleus label
-    equals the nucleus count and no nucleus label is empty.
+    equals the nucleus count, no nucleus label is empty, and every pixel equals
+    the vendor ``masks/0``.
 ``shape_centroids``
-    Area-weighted centroids of ``cell_boundaries`` within 0.01 µm of
-    ``cell_summary`` (the half-pixel check), with the vertex statistics.
+    Exactly one ``cell_boundaries`` shape per cell, indexed by its label, with
+    the area-weighted centroid within 0.01 µm of ``cell_summary`` (the
+    half-pixel check); nucleus shapes indexed by nucleus row + 1 and owned by
+    ``cell_instance_id`` = owning cell row + 1; the vertex statistics.
 ``reopen``, ``um_per_px``
     ``sd.read_zarr`` opens the store and ``find_um_per_px(store, "ATERA")``
     returns the bundle's pixel size.
+``table_vs_vendor``
+    The table against the raw matrix and ``cell_summary``, read here straight
+    from the zips: ``instance_id`` = vendor row + 1, ``X`` equal to the vendor
+    gene columns, every vendor ``obs`` column (``vendor_<name>``), the
+    ``cell_summary`` values (areas, ``obsm["spatial"]``, nucleus centroids as
+    ``vendor_<name>``), ``obsm["X_pca_vendor"/"X_umap_vendor"]``,
+    ``varm["vendor_de"]`` and the category colours.
 ``metadata``
     Every vendor sidecar byte-identical to the bundle file with its SHA-256
-    recorded; the full header (``experiment.spatial``, every metrics column,
-    the ``panel_config.json`` header, the vendor zarr root attributes, the map
-    annotations) in ``attrs["merxen_atera"]``; the zarr metadata members and
-    the OME-XML kept verbatim.
+    recorded; the full header (``experiment.spatial``, every metrics column
+    against the CSV text, the ``panel_config.json`` header, the vendor zarr root
+    attributes, the map annotations) in ``attrs["merxen_atera"]``; the zarr
+    metadata members (listed here from the zip) and the OME-XML kept verbatim.
 ``build_marker``
-    The completion marker exists and its fingerprint equals the header's and
-    one recomputed from the bundle and the recorded options.
+    The completion marker exists, its fingerprint equals the header's and
+    one recomputed from the bundle and the recorded options, and no
+    ``.partial-*`` build folder is left beside the store.
 
-The JSON report holds pass/fail, details, wall time and the process peak RSS
-after each criterion; it names the dataset only by ``--alias`` and holds no
-host path or vendor manifest value. Exit status 0 when every criterion passed.
+The JSON report holds pass/fail, details, wall time, the process peak RSS
+after each criterion and the git revision of this checkout; it names the
+dataset only by ``--alias`` and holds no host path or vendor manifest value.
+Exit status 0 when every criterion passed.
 
 Example::
 
@@ -58,14 +79,17 @@ Example::
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import math
 import os
 import resource
+import subprocess
 import sys
 import time
 import traceback
+import zipfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -106,8 +130,27 @@ DEPRECATED_CODEWORD_PREFIX = "DeprecatedCodeword_"
 DEFAULT_MERGE_ROWS = 1 << 26
 #: Mismatching entries listed in a report (the counts are always complete).
 MAX_LISTED = 20
+#: Build options of plan §1.1 (as amended: 0.25 px simplification).
+EXPECTED_MIN_QV = 20.0
+EXPECTED_BOUNDARY_SIMPLIFY_PX = 0.25
+#: Zarr metadata member names (v2 and v3), listed independently of the reader.
+ZARR_METADATA_NAMES = frozenset(
+    {".zattrs", ".zgroup", ".zarray", ".zmetadata", "zarr.json"}
+)
+#: Vendor ``obs`` columns the table does not copy: the index and the float32
+#: areas (the table's areas come from ``cell_summary``).
+VENDOR_OBS_NOT_COPIED = frozenset({"cell_area", "nucleus_area"})
+#: ``cell_summary`` columns with a named place in the table.
+SUMMARY_NAMED_COLUMNS = {
+    "cell_area": "cell_area",
+    "nucleus_area": "nucleus_area",
+    "nucleus_count": "nucleus_count",
+}
+#: Matrix rows compared at once in the table check.
+TABLE_ROW_BLOCK = 16_384
 
 CRITERIA = (
+    "build_options",
     "reopen",
     "schema",
     "points_vs_matrix",
@@ -115,6 +158,7 @@ CRITERIA = (
     "nucleus_containment",
     "shape_centroids",
     "um_per_px",
+    "table_vs_vendor",
     "metadata",
     "build_marker",
 )
@@ -225,6 +269,55 @@ def raw_matrix(bundle: ar.AteraBundle) -> tuple[sparse.csr_matrix, np.ndarray]:
 # --------------------------------------------------------------------------- #
 # Criterion: schema and per-tile reconciliation
 # --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class ExpectedOptions:
+    """Build options the store must have been built with (plan §1.1)."""
+
+    min_qv: float | None = EXPECTED_MIN_QV
+    boundary_simplify_px: float = EXPECTED_BOUNDARY_SIMPLIFY_PX
+    allow_tile_allowlist: bool = False
+
+
+def check_build_options(ctx: Context, expected: ExpectedOptions) -> dict[str, Any]:
+    """The recorded build options are the §1.1 ones.
+
+    The other checks take the options from the store's own header, so a store
+    simplified at another tolerance or built from a tile subset would pass
+    them; this check pins the options.
+    """
+    recorded = dict(ctx.header.get("build", {}).get("options") or {})
+    config = ctx.build_config
+    details = {
+        "recorded": {
+            "min_qv": recorded.get("min_qv"),
+            "boundary_simplify_px": recorded.get("boundary_simplify_px"),
+            "tile_allowlist": recorded.get("tile_allowlist"),
+        },
+        "expected": {
+            "min_qv": expected.min_qv,
+            "boundary_simplify_px": expected.boundary_simplify_px,
+            "tile_allowlist_allowed": expected.allow_tile_allowlist,
+        },
+    }
+    failures = []
+    if not recorded:
+        failures.append("the store records no build options")
+    if config.min_qv != expected.min_qv:
+        failures.append(f"min_qv is {config.min_qv}, not {expected.min_qv}")
+    if not math.isclose(
+        config.boundary_simplify_px, expected.boundary_simplify_px, abs_tol=1e-12
+    ):
+        failures.append(
+            f"boundary_simplify_px is {config.boundary_simplify_px}, "
+            f"not {expected.boundary_simplify_px}"
+        )
+    if config.tile_allowlist is not None and not expected.allow_tile_allowlist:
+        failures.append("the store was built from a tile allow-list")
+    if failures:
+        raise CheckFailedError("; ".join(failures), details)
+    return details
 
 
 def check_reopen(ctx: Context) -> dict[str, Any]:
@@ -526,9 +619,16 @@ def table_instance_rows(sdata: Any, barcodes: np.ndarray) -> np.ndarray:
 
 
 def check_points_vs_matrix(
-    ctx: Context, expected_excess: int | None = None
+    ctx: Context,
+    expected_excess: int | None = None,
+    *,
+    allow_unpinned_excess: bool = False,
 ) -> dict[str, Any]:
-    """Points (QV filter, assigned, all features) reproduce the vendor matrix."""
+    """Points (QV filter, assigned, all features) reproduce the vendor matrix.
+
+    The deprecated-codeword excess must be pinned (``expected_excess``) unless
+    ``allow_unpinned_excess``; an unpinned run fails after reporting it.
+    """
     features = ar.read_atera_features(ctx.bundle)
     feature_names = features["feature_name"].astype(str).tolist()
     feature_index = pd.Index(feature_names)
@@ -559,6 +659,12 @@ def check_points_vs_matrix(
     if not comparison.passed:
         raise CheckFailedError(
             "points do not reproduce the vendor matrix", comparison.details
+        )
+    if expected_excess is None and not allow_unpinned_excess:
+        raise CheckFailedError(
+            "the vendor excess is not pinned: pass --expected-vendor-excess "
+            "(or --allow-unpinned-excess)",
+            comparison.details,
         )
     return comparison.details
 
@@ -599,6 +705,10 @@ class LabelStats:
     containment_violations: int
     max_cell_label: int
     max_nucleus_label: int
+    #: Pixels that differ from the vendor ``masks/1`` / ``masks/0`` (``None``
+    #: when the masks were not compared).
+    cell_vendor_mismatch: int | None = None
+    nucleus_vendor_mismatch: int | None = None
 
 
 def stream_label_stats(
@@ -609,6 +719,7 @@ def stream_label_stats(
     n_workers: int,
     block: tuple[int, int] | None = None,
     strip_rows: int = 512,
+    vendor_cells_zip: Path | None = None,
 ) -> LabelStats:
     """One pass over both level-0 label images, block by block.
 
@@ -620,10 +731,14 @@ def stream_label_stats(
         block: Block shape; defaults to the cell labels' chunk shape.
         strip_rows: Rows of a block counted at once (bounds the working
             copies to about 40 B per pixel of a strip).
+        vendor_cells_zip: The bundle's ``cells.zarr.zip``; when given, every
+            block is also compared pixel by pixel with the vendor ``masks/1``
+            (cells) and ``masks/0`` (nuclei).
 
     Returns:
-        Per-label pixel counts and index sums, nucleus pixel counts and the
-        number of nucleus pixels off their owning cell's label.
+        Per-label pixel counts and index sums, nucleus pixel counts, the
+        number of nucleus pixels off their owning cell's label and, with
+        ``vendor_cells_zip``, the pixels that differ from the vendor masks.
     """
     cell_array = _level0_array(store, "cell_labels")
     nucleus_array = _level0_array(store, "nucleus_labels")
@@ -636,10 +751,35 @@ def stream_label_stats(
     step = block or (int(cell_array.chunks[0]), int(cell_array.chunks[1]))
     n_nuclei = len(nucleus_owner)
     expected_cell = np.concatenate([[0], nucleus_owner.astype(np.int64) + 1])
+    if vendor_cells_zip is not None:
+        with ar.open_zip_group(vendor_cells_zip) as group:
+            vendor_shapes = {
+                tuple(int(n) for n in group[f"masks/{key}"].shape) for key in "01"
+            }
+        if vendor_shapes != {shape}:
+            raise CheckFailedError(
+                "the vendor masks differ in shape from the labels",
+                {"labels": list(shape), "vendor": sorted(map(list, vendor_shapes))},
+            )
+
+    def vendor_mismatch(
+        window: tuple[slice, slice], cells: Any, nuclei: Any
+    ) -> list[int]:
+        # Each block opens its own zip store (no shared store lock).
+        with ar.open_zip_group(vendor_cells_zip) as group:
+            return [
+                int(np.count_nonzero(np.asarray(group[member][window]) != ours))
+                for member, ours in (("masks/1", cells), ("masks/0", nuclei))
+            ]
 
     def one(window: tuple[slice, slice]) -> tuple[np.ndarray, ...]:
         cell_block = np.asarray(cell_array[window])
         nucleus_block = np.asarray(nucleus_array[window])
+        mismatch = (
+            vendor_mismatch(window, cell_block, nucleus_block)
+            if vendor_cells_zip is not None
+            else [0, 0]
+        )
         top_cell = int(cell_block.max(initial=0))
         top_nucleus = int(nucleus_block.max(initial=0))
         size = max(n_cells, top_cell) + 1
@@ -677,14 +817,14 @@ def stream_label_stats(
             row_sums,
             col_sums,
             nucleus_counts,
-            np.asarray([violations, top_cell, top_nucleus]),
+            np.asarray([violations, top_cell, top_nucleus, *mismatch]),
         )
 
     cell_counts = np.zeros(n_cells + 1, dtype=np.int64)
     row_sums = np.zeros(n_cells + 1)
     col_sums = np.zeros(n_cells + 1)
     nucleus_counts = np.zeros(n_nuclei + 1, dtype=np.int64)
-    violations = top_cell = top_nucleus = 0
+    violations = top_cell = top_nucleus = cell_mismatch = nucleus_mismatch = 0
 
     def grow(values: np.ndarray, size: int) -> np.ndarray:
         return (
@@ -704,6 +844,9 @@ def stream_label_stats(
             violations += int(scalars[0])
             top_cell = max(top_cell, int(scalars[1]))
             top_nucleus = max(top_nucleus, int(scalars[2]))
+            cell_mismatch += int(scalars[3])
+            nucleus_mismatch += int(scalars[4])
+    compared = vendor_cells_zip is not None
     return LabelStats(
         cell_counts=cell_counts,
         cell_row_sums=row_sums,
@@ -712,6 +855,8 @@ def stream_label_stats(
         containment_violations=violations,
         max_cell_label=top_cell,
         max_nucleus_label=top_nucleus,
+        cell_vendor_mismatch=cell_mismatch if compared else None,
+        nucleus_vendor_mismatch=nucleus_mismatch if compared else None,
     )
 
 
@@ -722,6 +867,7 @@ def _label_stats(ctx: Context, cache: dict[str, Any]) -> LabelStats:
             n_cells=ctx.cells.n_cells,
             nucleus_owner=ctx.cells.nucleus_cell_index,
             n_workers=ctx.n_workers,
+            vendor_cells_zip=ctx.bundle.cells_zip,
         )
     stats: LabelStats = cache["labels"]
     return stats
@@ -760,8 +906,11 @@ def check_labels(ctx: Context, cache: dict[str, Any]) -> dict[str, Any]:
         ),
         "area_tolerance_um2": AREA_TOLERANCE_UM2,
         "centroid_tolerance_um": LABEL_CENTROID_TOLERANCE_UM,
+        "pixels_differing_from_vendor_mask": stats.cell_vendor_mismatch,
     }
     failures = []
+    if stats.cell_vendor_mismatch:
+        failures.append("cell labels differ from the vendor masks/1")
     if stats.max_cell_label != n_cells:
         failures.append("the largest cell label is not the cell count")
     if empty:
@@ -787,8 +936,11 @@ def check_nucleus_containment(ctx: Context, cache: dict[str, Any]) -> dict[str, 
         "empty_nucleus_labels": empty,
         "nucleus_pixels": int(counts.sum()),
         "containment_violations": stats.containment_violations,
+        "pixels_differing_from_vendor_mask": stats.nucleus_vendor_mismatch,
     }
     failures = []
+    if stats.nucleus_vendor_mismatch:
+        failures.append("nucleus labels differ from the vendor masks/0")
     if stats.containment_violations:
         failures.append("nucleus pixels lie off their owning cell")
     if stats.max_nucleus_label != n_nuclei:
@@ -800,8 +952,21 @@ def check_nucleus_containment(ctx: Context, cache: dict[str, Any]) -> dict[str, 
     return details
 
 
+def _int_index(frame: Any) -> np.ndarray | None:
+    """A shapes index as int64, or ``None`` when it is not integral."""
+    try:
+        return np.asarray(frame.index).astype(np.int64)
+    except (TypeError, ValueError):
+        return None
+
+
 def check_shape_centroids(ctx: Context) -> dict[str, Any]:
-    """Cell shape centroids within 0.01 µm of ``cell_summary`` (half-pixel check)."""
+    """One shape per cell, indexed by its label, centroid within 0.01 µm.
+
+    The centroid tolerance is the half-pixel check against ``cell_summary``;
+    nucleus shapes must be indexed by nucleus row + 1 and owned by
+    ``cell_instance_id`` = owning cell row + 1.
+    """
     cells = ctx.cells
     shapes = ctx.sdata.shapes[atera_builder.CELL_SHAPES_KEY]
     position = pd.Index(cells.source_cell_id).get_indexer(
@@ -844,10 +1009,27 @@ def check_shape_centroids(ctx: Context) -> dict[str, Any]:
             )
             details["single_nucleus_centroid_max_diff_um"] = float(np.nanmax(ndiff))
     failures = []
-    if len(np.unique(position)) != cells.n_cells:
+    if len(shapes) != cells.n_cells or len(np.unique(position)) != cells.n_cells:
         failures.append("not every cell has exactly one shape")
+    index = _int_index(shapes)
+    if index is None or not np.array_equal(index, position + 1):
+        failures.append("cell shapes are not indexed by their label (row + 1)")
     if details["over_tolerance"]:
         failures.append("cell shape centroids differ from cell_summary")
+    if nucleus_key in ctx.sdata.shapes:
+        nuclei = ctx.sdata.shapes[nucleus_key]
+        nucleus_index = _int_index(nuclei)
+        owner_expected = cells.nucleus_cell_index.astype(np.int64) + 1
+        details["n_nucleus_shapes"] = int(len(nuclei))
+        if nucleus_index is None or not np.array_equal(
+            np.sort(nucleus_index), np.arange(1, cells.n_nuclei + 1)
+        ):
+            failures.append("nucleus shapes are not one per nucleus row + 1")
+        elif not np.array_equal(
+            nuclei["cell_instance_id"].to_numpy(np.int64),
+            owner_expected[nucleus_index - 1],
+        ):
+            failures.append("nucleus shapes name the wrong owning cell")
     if failures:
         raise CheckFailedError("; ".join(failures), details)
     return details
@@ -856,6 +1038,202 @@ def check_shape_centroids(ctx: Context) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Criteria: pixel size, metadata, completion marker
 # --------------------------------------------------------------------------- #
+
+
+def _same_values(ours: Any, vendor: Any) -> bool:
+    """Equal values, NaN-aware for floats; categories compared as text."""
+    if isinstance(ours, pd.Series):
+        ours = ours.to_numpy()
+    if isinstance(vendor, pd.Series):
+        vendor = vendor.to_numpy()
+    a = np.asarray(ours.astype(object) if isinstance(ours, pd.Categorical) else ours)
+    b = np.asarray(
+        vendor.astype(object) if isinstance(vendor, pd.Categorical) else vendor
+    )
+    if a.shape != b.shape:
+        return False
+    if a.dtype.kind in "fiub" and b.dtype.kind in "fiub":
+        return bool(
+            np.array_equal(a.astype(np.float64), b.astype(np.float64), equal_nan=True)
+        )
+    return bool(np.array_equal(a.astype(str), b.astype(str)))
+
+
+def _read_elem(group: Any, name: str) -> Any:
+    value = ad.io.read_elem(group[name])
+    if isinstance(value, np.ndarray) and value.dtype.kind == "T":
+        return value.astype(object)
+    return value
+
+
+def read_vendor_table_parts(bundle: ar.AteraBundle) -> dict[str, Any]:
+    """The raw matrix pieces the table must keep, read straight from the zips."""
+    parts: dict[str, Any] = {}
+    with ar.open_zip_group(bundle.cell_feature_matrix_zip) as group:
+        matrix = sparse.csr_matrix(ad.io.read_elem(group["X"]))
+        obs = group["obs"]
+        index_name = obs.attrs["_index"]
+        parts["barcodes"] = np.asarray(_read_elem(obs, index_name), dtype=object)
+        parts["obs"] = {
+            name: _read_elem(obs, name)
+            for name in obs.attrs.get("column-order", [])
+            if name != index_name
+        }
+        parts["colors"] = {
+            name: [
+                f"#{int(value) & 0xFFFFFFFF:08x}"
+                for value in np.asarray(obs[name]["color"][:]).astype(np.int64)
+            ]
+            for name in obs.attrs.get("column-order", [])
+            if name in obs and hasattr(obs[name], "keys") and "color" in obs[name]
+        }
+        var = group["var"]
+        parts["var"] = {
+            name: _read_elem(var, name) for name in var.attrs.get("column-order", [])
+        }
+        parts["obsm"] = (
+            {
+                name: np.asarray(_read_elem(group["obsm"], name))
+                for name in group["obsm"]
+            }
+            if "obsm" in group
+            else {}
+        )
+    matrix.data = matrix.data.astype(np.int64, copy=False)
+    parts["X"] = matrix
+    with ar.open_zip_group(bundle.cells_zip) as group:
+        summary = group["cell_summary"]
+        parts["summary"] = pd.DataFrame(
+            np.asarray(summary[:]), columns=list(summary.attrs["column_names"])
+        )
+    return parts
+
+
+def check_table_vs_vendor(ctx: Context) -> dict[str, Any]:
+    """The table keeps the vendor matrix, ``obs``, ``obsm``, DE and colours."""
+    table = ctx.sdata.tables["table"]
+    raw = read_vendor_table_parts(ctx.bundle)
+    failures: list[str] = []
+    n_vendor = len(raw["barcodes"])
+    position = pd.Index(raw["barcodes"]).get_indexer(
+        table.obs[SOURCE_CELL_ID_COLUMN].astype(str)
+    )
+    instance_ids = table.obs[INSTANCE_ID_COLUMN].to_numpy(np.int64)
+    details: dict[str, Any] = {"n_cells": int(table.n_obs), "n_vendor_cells": n_vendor}
+    if table.n_obs != n_vendor or (position < 0).any():
+        raise CheckFailedError(
+            "table cells differ from the vendor matrix rows", details
+        )
+    if not np.array_equal(instance_ids, position + 1):
+        failures.append("table instance_id is not the vendor matrix row + 1")
+    if not np.array_equal(
+        table.obs_names.to_numpy().astype(str), instance_ids.astype(str)
+    ):
+        failures.append("table obs_names are not the instance_id text")
+
+    # X: the vendor gene columns, row block by row block.
+    feature_type = np.asarray(raw["var"]["feature_type"]).astype(str)
+    feature_name = np.asarray(raw["var"]["feature_name"]).astype(str)
+    genes = np.flatnonzero(feature_type == ar.GENE_EXPRESSION_TYPE)
+    if not np.array_equal(table.var_names.to_numpy().astype(str), feature_name[genes]):
+        failures.append("table var_names are not the vendor gene features")
+    ours = sparse.csr_matrix(table.X)
+    vendor = raw.pop("X")
+    differing = 0
+    vendor_total = table_total = 0
+    for start in range(0, n_vendor, TABLE_ROW_BLOCK):
+        rows = position[start : start + TABLE_ROW_BLOCK]
+        expected = vendor[rows][:, genes]
+        got = ours[start : start + TABLE_ROW_BLOCK]
+        if not np.array_equal(got.data, np.round(got.data)):
+            failures.append("table X holds non-integer counts")
+            break
+        diff = expected - got.astype(np.int64)
+        diff.eliminate_zeros()
+        differing += int(diff.nnz)
+        vendor_total += int(expected.sum())
+        table_total += int(got.astype(np.int64).sum())
+    del vendor, ours
+    details.update(
+        x_differing_entries=differing,
+        x_vendor_gene_total=vendor_total,
+        x_table_total=table_total,
+    )
+    if differing:
+        failures.append("table X differs from the vendor gene columns")
+
+    # Vendor obs columns, as vendor_<name>.
+    obs_checked = []
+    for name, values in raw["obs"].items():
+        if name in VENDOR_OBS_NOT_COPIED:
+            continue
+        column = f"vendor_{name}"
+        if column not in table.obs:
+            failures.append(f"vendor obs column {name} is not kept")
+            continue
+        vendor_values = (
+            values[position]
+            if not isinstance(values, pd.Categorical)
+            else values.take(position)
+        )
+        if not _same_values(table.obs[column], vendor_values):
+            failures.append(f"vendor obs column {name} differs")
+        obs_checked.append(name)
+    details["vendor_obs_columns_checked"] = obs_checked
+
+    # cell_summary: named columns, centroids in obsm["spatial"], others vendor_<name>.
+    summary = raw["summary"].iloc[position].reset_index(drop=True)
+    summary_checked = []
+    for name in summary.columns:
+        if name in ("cell_centroid_x", "cell_centroid_y"):
+            continue
+        column = SUMMARY_NAMED_COLUMNS.get(name, f"vendor_{name}")
+        if column not in table.obs:
+            failures.append(f"cell_summary column {name} is not kept")
+        elif not _same_values(table.obs[column], summary[name]):
+            failures.append(f"cell_summary column {name} differs from obs {column}")
+        else:
+            summary_checked.append(name)
+    if not _same_values(
+        np.asarray(table.obsm["spatial"]),
+        summary[["cell_centroid_x", "cell_centroid_y"]].to_numpy(),
+    ):
+        failures.append("obsm spatial differs from the cell_summary centroids")
+    details["cell_summary_columns_checked"] = summary_checked
+
+    # obsm, varm DE statistics and category colours.
+    for name, values in raw["obsm"].items():
+        key = f"{name}_vendor"
+        if key not in table.obsm:
+            failures.append(f"vendor obsm {name} is not kept")
+        elif not _same_values(np.asarray(table.obsm[key]), values[position]):
+            failures.append(f"vendor obsm {name} differs")
+    de_names = [name for name in raw["var"] if name.startswith("de_")]
+    if de_names:
+        de = table.varm.get("vendor_de")
+        if de is None or sorted(map(str, de.columns)) != sorted(de_names):
+            failures.append("varm vendor_de does not hold every de_* column")
+        else:
+            bad = [
+                name
+                for name in de_names
+                if not _same_values(de[name], np.asarray(raw["var"][name])[genes])
+            ]
+            if bad:
+                failures.append(f"varm vendor_de columns differ: {bad[:MAX_LISTED]}")
+    for name, colors in raw["colors"].items():
+        kept = table.uns.get(f"vendor_{name}_colors")
+        if kept is None or [str(value) for value in kept] != colors:
+            failures.append(f"vendor colours of {name} differ")
+    details.update(
+        n_de_columns=len(de_names),
+        obsm_checked=sorted(raw["obsm"]),
+        colors_checked=sorted(raw["colors"]),
+        failures=failures,
+    )
+    if failures:
+        raise CheckFailedError("the table does not keep the vendor data", details)
+    return details
 
 
 def check_um_per_px(ctx: Context) -> dict[str, Any]:
@@ -868,6 +1246,83 @@ def check_um_per_px(ctx: Context) -> dict[str, Any]:
             "find_um_per_px differs from the bundle pixel size", details
         )
     return details
+
+
+def zip_metadata_members(zip_path: Path) -> dict[str, str]:
+    """Every zarr metadata member of a zip as text, listed from its name list."""
+    with zipfile.ZipFile(zip_path) as archive:
+        return {
+            name: archive.read(name).decode("utf-8")
+            for name in archive.namelist()
+            if name.rsplit("/", 1)[-1] in ZARR_METADATA_NAMES
+        }
+
+
+def zip_root_attrs(members: Mapping[str, str]) -> dict[str, Any]:
+    """Root attributes of a zipped zarr store (v2 ``.zattrs`` or v3 ``zarr.json``)."""
+    if ".zattrs" in members:
+        attrs = json.loads(members[".zattrs"])
+    elif "zarr.json" in members:
+        attrs = json.loads(members["zarr.json"]).get("attributes") or {}
+    else:
+        attrs = {}
+    return attrs if isinstance(attrs, dict) else {}
+
+
+def metric_matches(stored: Any, text: str) -> bool:
+    """Whether a stored metrics value is the CSV cell ``text``.
+
+    Empty cells are ``None``; numbers must equal the number the text spells;
+    anything else must be the text itself.
+    """
+    value = text.strip()
+    if not value:
+        return stored is None
+    if isinstance(stored, bool) or stored is None:
+        return False
+    if isinstance(stored, int):
+        try:
+            return int(value) == stored
+        except ValueError:
+            return False
+    if isinstance(stored, float):
+        try:
+            return float(value) == stored
+        except ValueError:
+            return False
+    return bool(stored == value)
+
+
+def compare_metrics(stored: Any, csv_path: Path) -> list[str]:
+    """Differences between ``attrs`` metrics rows and the raw CSV text."""
+    with csv_path.open(newline="", encoding="utf-8") as handle:
+        rows = [row for row in csv.reader(handle)]
+    header = [name.strip() for name in rows[0]] if rows else []
+    data = [row for row in rows[1:] if any(cell.strip() for cell in row)]
+    if not isinstance(stored, list) or len(stored) != len(data):
+        return ["metrics rows differ in number from the CSV"]
+    problems = []
+    for index, (record, row) in enumerate(zip(stored, data, strict=True)):
+        if list(record) != header[: len(row)]:
+            problems.append(f"metrics row {index} columns differ from the CSV header")
+            continue
+        bad = [
+            name
+            for name, text in zip(header, row, strict=False)
+            if not metric_matches(record[name], text)
+        ]
+        if bad:
+            problems.append(f"metrics row {index} values differ: {bad[:MAX_LISTED]}")
+    return problems
+
+
+def panel_header(panel: Mapping[str, Any]) -> dict[str, Any]:
+    """``panel_config.json`` with each ``targets`` list replaced by its length."""
+    header: dict[str, Any] = json.loads(json.dumps(panel))
+    for payload in header.get("payloads") or []:
+        if isinstance(payload, dict) and isinstance(payload.get("targets"), list):
+            payload["num_targets"] = len(payload.pop("targets"))
+    return header
 
 
 def check_metadata(ctx: Context) -> dict[str, Any]:
@@ -895,11 +1350,16 @@ def check_metadata(ctx: Context) -> dict[str, Any]:
         failures.append("attrs experiment differs from experiment.spatial")
     stored_paths = {sidecar.stored_path: sidecar.source for sidecar in bundle.sidecars}
     metrics = stored_paths.get("metrics_summary.csv")
-    expected_metrics = ar.read_metrics_summary(metrics) if metrics else []
-    if header.get("metrics_summary") != json.loads(json.dumps(expected_metrics)):
-        failures.append("attrs metrics_summary differs from the metrics CSV")
+    n_metrics_columns = 0
+    if metrics is not None:
+        problems = compare_metrics(header.get("metrics_summary"), metrics)
+        failures.extend(f"attrs metrics_summary: {item}" for item in problems)
+        with metrics.open(newline="", encoding="utf-8") as handle:
+            n_metrics_columns = len(next(csv.reader(handle), []))
+    elif header.get("metrics_summary"):
+        failures.append("attrs metrics_summary without a metrics CSV")
     panel = stored_paths.get("panel_config.json")
-    if panel is not None and header.get("panel_config") != ar._panel_config_header(
+    if panel is not None and header.get("panel_config") != panel_header(
         json.loads(panel.read_text(encoding="utf-8"))
     ):
         failures.append("attrs panel_config differs from panel_config.json")
@@ -920,11 +1380,11 @@ def check_metadata(ctx: Context) -> dict[str, Any]:
             failures.append(f"zarr metadata of {store_name} is not recorded")
             continue
         kept = json.loads((ctx.store / record["path"]).read_text(encoding="utf-8"))
-        members = ar._zarr_metadata_members(zip_path)
+        members = zip_metadata_members(zip_path)
         n_zarr_members += len(members)
         if kept.get("members") != members:
             failures.append(f"zarr metadata of {store_name} differs from the zip")
-        root_attrs = ar._root_attrs(members)
+        root_attrs = zip_root_attrs(members)
         vendor = header.get("vendor_store_attrs", {}).get(store_name, {})
         inline = vendor.get("attrs", {})
         if set(inline) | set(vendor.get("attrs_in_sidecar_only", [])) != set(
@@ -953,7 +1413,7 @@ def check_metadata(ctx: Context) -> dict[str, Any]:
         "n_zarr_metadata_members": n_zarr_members,
         "n_ome_xml": len(images),
         "n_experiment_fields": len(bundle.experiment),
-        "n_metrics_columns": len(expected_metrics[0]) if expected_metrics else 0,
+        "n_metrics_columns": n_metrics_columns,
         "failures": failures,
     }
     if failures:
@@ -984,6 +1444,10 @@ def check_build_marker(ctx: Context, atera_spec: Path | None = None) -> dict[str
         raise CheckFailedError("the build fingerprints disagree", details)
     partials = sorted(ctx.store.parent.glob(f"{ctx.store.name}.partial-*"))
     details["leftover_partials"] = len(partials)
+    if partials:
+        raise CheckFailedError(
+            "partial build folders are left beside the store", details
+        )
     return details
 
 
@@ -1012,6 +1476,30 @@ def _folder_bytes(folder: Path) -> int:
     return sum(path.stat().st_size for path in folder.rglob("*") if path.is_file())
 
 
+def code_revision() -> dict[str, Any]:
+    """Git revision of this script's checkout, and whether it had local changes."""
+    here = Path(__file__).resolve().parent
+
+    def git(*args: str) -> str | None:
+        try:
+            done = subprocess.run(
+                ["git", "-C", str(here), *args],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return done.stdout.strip()
+
+    status = git("status", "--porcelain", "--untracked-files=no")
+    return {
+        "commit": git("rev-parse", "HEAD"),
+        "dirty": None if status is None else bool(status),
+    }
+
+
 def build_config_from_header(
     header: Mapping[str, Any], overrides: Mapping[str, Any] | None = None
 ) -> AteraBuildConfig:
@@ -1028,6 +1516,8 @@ def run_acceptance(
     alias: str,
     n_workers: int = 8,
     expected_vendor_excess: int | None = None,
+    allow_unpinned_excess: bool = False,
+    expected_options: ExpectedOptions | None = None,
     atera_spec: Path | None = None,
     input_overrides: Mapping[str, Any] | None = None,
     criteria: Sequence[str] = CRITERIA,
@@ -1041,7 +1531,11 @@ def run_acceptance(
         alias: Dataset alias for the report.
         n_workers: Threads for the streamed reads.
         expected_vendor_excess: Expected vendor matrix count on columns with no
-            transcripts (84 on the public dataset); unchecked when ``None``.
+            transcripts (84 on the public dataset).
+        allow_unpinned_excess: Pass ``points_vs_matrix`` without
+            ``expected_vendor_excess`` (any deprecated-codeword excess).
+        expected_options: The build options the store must record (the §1.1
+            ones by default).
         atera_spec: The ``experiment.spatial`` override the build used, if any.
         input_overrides: Explicit input paths the build used
             (``transcripts_path`` etc.), as ``AteraBuildConfig`` fields.
@@ -1068,14 +1562,19 @@ def run_acceptance(
         merge_rows=merge_rows,
     )
     cache: dict[str, Any] = {}
+    options = expected_options or ExpectedOptions()
     checks: dict[str, Callable[[], dict[str, Any]]] = {
+        "build_options": lambda: check_build_options(ctx, options),
         "reopen": lambda: check_reopen(ctx),
         "schema": lambda: check_schema(ctx),
-        "points_vs_matrix": lambda: check_points_vs_matrix(ctx, expected_vendor_excess),
+        "points_vs_matrix": lambda: check_points_vs_matrix(
+            ctx, expected_vendor_excess, allow_unpinned_excess=allow_unpinned_excess
+        ),
         "labels_vs_cell_summary": lambda: check_labels(ctx, cache),
         "nucleus_containment": lambda: check_nucleus_containment(ctx, cache),
         "shape_centroids": lambda: check_shape_centroids(ctx),
         "um_per_px": lambda: check_um_per_px(ctx),
+        "table_vs_vendor": lambda: check_table_vs_vendor(ctx),
         "metadata": lambda: check_metadata(ctx),
         "build_marker": lambda: check_build_marker(ctx, atera_spec),
     }
@@ -1113,6 +1612,7 @@ def run_acceptance(
     return {
         "alias": alias,
         "store_name": store.name,
+        "code_revision": code_revision(),
         "passed": all(entry["passed"] for entry in results.values()),
         "criteria": results,
         "build_options": atera_builder.build_options(build_config),
@@ -1158,7 +1658,29 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=int,
         default=None,
         help="Vendor matrix counts on columns without transcripts (84 on the "
-        "public dataset)",
+        "public dataset); required by points_vs_matrix",
+    )
+    parser.add_argument(
+        "--allow-unpinned-excess",
+        action="store_true",
+        help="Accept any deprecated-codeword excess without --expected-vendor-excess",
+    )
+    parser.add_argument(
+        "--expect-min-qv",
+        type=float,
+        default=EXPECTED_MIN_QV,
+        help="min_qv the store must record (plan §1.1: 20)",
+    )
+    parser.add_argument(
+        "--expect-boundary-simplify-px",
+        type=float,
+        default=EXPECTED_BOUNDARY_SIMPLIFY_PX,
+        help="boundary_simplify_px the store must record (plan §1.1: 0.25)",
+    )
+    parser.add_argument(
+        "--allow-tile-allowlist",
+        action="store_true",
+        help="Accept a store built from a tile allow-list",
     )
     parser.add_argument("--atera-spec", type=Path, default=None)
     parser.add_argument("--transcripts-path", type=Path, default=None)
@@ -1167,7 +1689,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--criteria", nargs="+", default=list(CRITERIA), choices=list(CRITERIA)
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if (
+        "points_vs_matrix" in args.criteria
+        and args.expected_vendor_excess is None
+        and not args.allow_unpinned_excess
+    ):
+        parser.error(
+            "points_vs_matrix needs --expected-vendor-excess "
+            "(or --allow-unpinned-excess)"
+        )
+    return args
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1189,6 +1721,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         alias=args.alias,
         n_workers=args.workers,
         expected_vendor_excess=args.expected_vendor_excess,
+        allow_unpinned_excess=args.allow_unpinned_excess,
+        expected_options=ExpectedOptions(
+            min_qv=args.expect_min_qv,
+            boundary_simplify_px=args.expect_boundary_simplify_px,
+            allow_tile_allowlist=args.allow_tile_allowlist,
+        ),
         atera_spec=args.atera_spec,
         input_overrides=overrides,
         criteria=args.criteria,
