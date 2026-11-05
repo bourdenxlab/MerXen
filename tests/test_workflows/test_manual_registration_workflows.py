@@ -611,6 +611,23 @@ def test_register_stub_run_fans_out_presets_and_compares(tmp_path: Path) -> None
 
 # --- tiny end to end through both workflows --------------------------------
 
+# The smallest synthetic pair that still takes every path this test checks:
+# 384 px at 2.0 um (768 um of tissue field; the moving image is 480 px at
+# 1.6 um). Run time is mostly the non-rigid flow of same_section at 2 um, so it
+# scales with the pixel count. At this size same_section still applies its
+# refinement (26 windows of 200 um, minimum 20; 352 px leaves 22 and saves under
+# a second), the non-rigid stage applies in both presets, serial_section measures
+# its nucleus QC and all 20 landmark grid points lie 64 px inside the reference
+# (at 320 px only 11 do). The images are smaller than the default
+# viewer_cache_min_size (1024 px), which would leave them without a ds4 level,
+# so the prepare launches lower it. The register step's result-store pyramids
+# keep the fixed 1024 px minimum, so they and the comparison's overview overlay
+# (drawn from them) are skipped here; test_register_integration's 2048 px pairs
+# build and check both.
+E2E_REFERENCE_SHAPE_YX = (384, 384)
+E2E_PREPARE_PARAMS = ("--viewer_cache_min_size", "256")
+E2E_LANDMARK_MARGIN_PX = 64
+
 
 @needs_nextflow
 @pytest.mark.nextflow
@@ -629,7 +646,7 @@ def test_tiny_end_to_end_through_both_workflows(tmp_path: Path) -> None:
     )
 
     pair = make_synthetic_pair(
-        tmp_path / "data", reference_shape_yx=(1280, 1280), seed=0
+        tmp_path / "data", reference_shape_yx=E2E_REFERENCE_SHAPE_YX, seed=0
     )
     outdir = tmp_path / "out"
     sheet = _write_sheet(
@@ -649,6 +666,7 @@ def test_tiny_end_to_end_through_both_workflows(tmp_path: Path) -> None:
         "manual_registration_prepare.nf",
         sheet,
         outdir,
+        *E2E_PREPARE_PARAMS,
         launch_name="launch_prepare",
     )
     assert first.returncode == 0, first.stdout + first.stderr
@@ -670,14 +688,16 @@ def test_tiny_end_to_end_through_both_workflows(tmp_path: Path) -> None:
     ys = np.linspace(0.2 * height, 0.8 * height, 4)
     points = np.array([(x, y) for y in ys for x in xs])
     mapped = pair.moving_to_reference(points)
-    inside = np.all((mapped >= 64) & (mapped < 1280 - 64), axis=1)
+    margin = E2E_LANDMARK_MARGIN_PX
+    limit = np.array(pair.reference_shape_yx[::-1]) - margin
+    inside = np.all((mapped >= margin) & (mapped < limit), axis=1)
     points = points[inside][:12]
     assert len(points) == 12
     landmarks = simulate_landmark_pairs(
         points,
         pair.moving_to_reference,
         noise_um=0.5,
-        reference_pixel_size_um=2.0,
+        reference_pixel_size_um=pair.reference_pixel_size_um,
         seed=0,
         disabled=[11, 12],
     )
@@ -735,6 +755,7 @@ def test_tiny_end_to_end_through_both_workflows(tmp_path: Path) -> None:
         "manual_registration_prepare.nf",
         sheet,
         outdir,
+        *E2E_PREPARE_PARAMS,
         launch_name="launch_prepare_again",
     )
     assert third.returncode == 0, third.stdout + third.stderr
