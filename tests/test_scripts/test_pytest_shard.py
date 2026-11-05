@@ -169,7 +169,7 @@ def test_shards_reproduce_the_unsharded_selection(suite: pytest.Pytester) -> Non
         result = suite.runpytest(
             "-p", "pytest_shard", "-m", "not slow",
             "--shard-count", "3", "--shard-index", str(index),
-            "--shard-durations", str(durations), "--shard-report", str(report),
+            f"--shard-durations={durations}", f"--shard-report={report}",
         )  # fmt: skip
         assert result.ret == 0
         reports.append(report)
@@ -186,14 +186,12 @@ def test_xdist_workers_agree_with_a_plain_run(suite: pytest.Pytester) -> None:
     common = ("-p", "pytest_shard", "--shard-count", "2", "--shard-index", "2")
     assert (
         suite.runpytest_subprocess(
-            *common, "-p", "no:xdist", "--shard-report", str(plain)
+            *common, "-p", "no:xdist", f"--shard-report={plain}"
         ).ret
         == 0
     )
     assert (
-        suite.runpytest_subprocess(
-            *common, "-n", "2", "--shard-report", str(workers)
-        ).ret
+        suite.runpytest_subprocess(*common, "-n", "2", f"--shard-report={workers}").ret
         == 0
     )
     plain_report = json.loads(plain.read_text())
@@ -223,8 +221,7 @@ def test_empty_shard_passes_but_an_empty_suite_fails(suite: pytest.Pytester) -> 
 def test_store_durations(suite: pytest.Pytester) -> None:
     out = suite.path / "measured.json"
     assert (
-        suite.runpytest("-p", "pytest_shard", "--shard-store-durations", str(out)).ret
-        == 0
+        suite.runpytest("-p", "pytest_shard", f"--shard-store-durations={out}").ret == 0
     )
     measured = json.loads(out.read_text())
     assert shard.duration_key("test_one.py::test_slow") in measured
@@ -236,3 +233,13 @@ def test_bad_index_is_a_usage_error(suite: pytest.Pytester) -> None:
         "-p", "pytest_shard", "--shard-count", "2", "--shard-index", "3"
     )
     assert result.ret == pytest.ExitCode.USAGE_ERROR
+
+
+def test_separate_path_option_is_a_usage_error(suite: pytest.Pytester) -> None:
+    # Given separately, an existing file is also read as a test path: the
+    # rootdir moves and the node ids change. The plugin refuses that form.
+    durations = suite.path / "durations.json"
+    durations.write_text("{}")
+    result = suite.runpytest("-p", "pytest_shard", "--shard-durations", str(durations))
+    assert result.ret == pytest.ExitCode.USAGE_ERROR
+    assert "--shard-durations=PATH" in "\n".join(result.errlines + result.outlines)
