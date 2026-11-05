@@ -22,18 +22,23 @@ Conventions the readers rely on, verified on the public dataset:
 - Pixel ``i`` covers ``[i * ps, (i + 1) * ps)`` microns (corner convention), so
   contour coordinates with pixel centres at integers map to microns as
   ``(c + 0.5) * ps``.
-- Identifying manifest fields (run, slide, region, serial, UUIDs, customer)
-  never leave this module unsanitised: see :func:`sanitize_experiment_spatial`.
+- Vendor metadata is kept whole (plan §3.11): :func:`copy_atera_sidecars`
+  copies the manifest, metrics, panel, reports and FOV files byte for byte
+  under stable names and :func:`atera_metadata_attrs` returns the full header
+  for the store attrs. Run, slide and instrument values in it are sample
+  names, so human-facing text (logs, errors, plot titles) never prints them
+  unless through :func:`merxen.privacy.to_alias`.
 """
 
 from __future__ import annotations
 
 import csv
-import io
+import hashlib
 import json
 import logging
 import math
 import re
+import shutil
 import threading
 import uuid
 import weakref
@@ -137,53 +142,8 @@ SpatialOrder = Literal["row_range", "tile_blocks"]
 #: Start methods safe after zarr or dask have started threads.
 PolygonStartMethod = Literal["forkserver", "spawn"]
 
-#: ``experiment.spatial`` fields that identify a run, slide, ROI or instrument.
-IDENTIFYING_EXPERIMENT_FIELDS: Final = frozenset(
-    {
-        "run_name",
-        "run_start_time",
-        "slide_name",
-        "slide_id",
-        "region_name",
-        "instrument_sn",
-        "analysis_uuid",
-        "experiment_uuid",
-        "cassette_uuid",
-        "roi_uuid",
-        "well_uuid",
-        "calibration_uuid",
-        "dataset_uuid",
-    }
-)
-_EXPERIMENT_TEXT_FIELDS: Final = frozenset(
-    {
-        "analysis_sw_version",
-        "instrument_sw_version",
-        "chemistry_version",
-        "segmentation_stain",
-        "sample_type",
-    }
-)
-_EXPERIMENT_NUMBER_FIELDS: Final = frozenset(
-    {"major_version", "minor_version", "pixel_size", "z_step_size", "total_num_targets"}
-)
-# Summary metrics: numeric values under these name prefixes are kept.
-_EXPERIMENT_METRIC_RE: Final = re.compile(
-    r"^(num_|transcripts_per|genes_per|nuclear_transcripts|region_area|total_cell_area"
-    r"|thickness_|non_zero_|fraction_|segmented_|imported_)"
-)
-_PANEL_FIELDS: Final = frozenset(
-    {
-        "panel_name",
-        "panel_design_id",
-        "panel_num_targets",
-        "panel_organism",
-        "panel_tissue_type",
-    }
-)
-_PATH_GROUPS: Final = ("images", "explorer_files")
-#: Sidecar name patterns; the first group of each is the neutral name.
-_NEUTRAL_NAME_RES: Final = (
+#: Bundle file name patterns; the groups of each make the stable name.
+_STABLE_NAME_RES: Final = (
     re.compile(r"^(metrics_summary)(?:_.*)?(\.csv)$"),
     re.compile(r"^(analysis_summary)(?:_.*)?(\.html)$"),
     re.compile(r"^(?:.*_)?(he_imagealignment)(\.csv)$"),
@@ -195,25 +155,25 @@ _NEUTRAL_NAME_RES: Final = (
         r"|cell_feature_matrix)(\.zarr\.zip)$"
     ),
 )
+#: Vendor metadata and report files copied verbatim into the store (§3.11).
 _SIDECAR_GLOBS: Final = (
-    "panel_config.json",
+    "experiment.spatial",
     "metrics_summary*.csv",
+    "analysis_summary*.html",
+    "qc_images.html",
+    "panel_config.json",
     "morphology_fov_locations.json",
+    "overview_scan_fov_locations.json",
+    "overview_scan.png",
     "diffexp_genes/*.csv",
     "*he_imagealignment.csv",
     "*keypoints.csv",
 )
-#: ``metrics_summary`` numeric metric columns kept (allow-list, D13).
-_METRIC_COLUMN_RE: Final = re.compile(
-    r"^(num_|number_of_|fraction_|median_|mean_|total_|thickness_|nuclear_"
-    r"|decoded_|adjusted_|negative_control_|genomic_control_|estimated_|cells_per_"
-    r"|segmented_|region_area$|metrics_version$)"
-)
-#: ``metrics_summary`` text columns kept: the panel IDs.
-_METRIC_ID_COLUMN_RE: Final = re.compile(r"^panel_(config_id|[a-z0-9]+_design_id)$")
-#: ``panel_config.json`` keys kept, per level (allow-list, D13).
-_PANEL_CONFIG_KEYS: Final = frozenset({"spec_version", "payloads"})
-_PANEL_PAYLOAD_KEYS: Final = frozenset({"chemistry", "panel", "targets"})
+#: Sidecar folder at the store root; it survives store rewrites.
+ATERA_SIDECAR_DIR: Final = "atera"
+#: Stable sidecar name of a ``spec_override`` manifest (the bundle's own
+#: ``experiment.spatial`` keeps its name).
+EXPERIMENT_OVERRIDE_SIDECAR: Final = "experiment_override.spatial"
 
 
 class AteraFormatError(ValueError):
@@ -231,9 +191,8 @@ class AteraBundle:
 
     Attributes:
         root: The ROI directory.
-        experiment: Parsed ``experiment.spatial`` (or the metadata override).
-            It holds identifying fields; publish only
-            :func:`sanitize_experiment_spatial` of it.
+        experiment: Parsed ``experiment.spatial`` (or the metadata override),
+            complete; :func:`atera_metadata_attrs` stores all of it.
         pixel_size_um: Microns per level-0 morphology pixel.
         analysis_sw_version: Onboard analysis version, ``atera-...``.
         transcripts_zip: ``transcripts.zarr.zip``.
@@ -244,9 +203,8 @@ class AteraBundle:
         morphology_shape_yx: Level-0 ``(y, x)`` shape of the morphology image.
         morphology_3d_file: The 3D DAPI stack, if present (not ingested).
         panel_config_file: ``panel_config.json``, if present.
-        analysis_summary_file: The vendor HTML report, if present; it embeds
-            identifiers, so it is copied only on request.
-        sidecars: Other small files worth keeping (sanitised before copying).
+        sidecars: Every vendor metadata and report file, copied verbatim into
+            the store by :func:`copy_atera_sidecars`.
     """
 
     root: Path
@@ -261,8 +219,7 @@ class AteraBundle:
     morphology_shape_yx: tuple[int, int]
     morphology_3d_file: Path | None
     panel_config_file: Path | None
-    analysis_summary_file: Path | None
-    sidecars: tuple[Path, ...]
+    sidecars: tuple[AteraSidecar, ...]
 
 
 @contextmanager
@@ -427,10 +384,6 @@ def resolve_atera_bundle(
     images = experiment.get("images") or {}
     morphology_3d = _relative_member(root, images.get("morphology_3d_filepath"))
     panel_config = root / "panel_config.json"
-    analysis_summary = sorted(root.glob("analysis_summary*.html"))
-    sidecars: list[Path] = []
-    for pattern in _SIDECAR_GLOBS:
-        sidecars.extend(path for path in sorted(root.glob(pattern)) if path.is_file())
     return AteraBundle(
         root=root,
         experiment=experiment,
@@ -444,8 +397,9 @@ def resolve_atera_bundle(
         morphology_shape_yx=shape_yx,
         morphology_3d_file=morphology_3d,
         panel_config_file=panel_config if panel_config.is_file() else None,
-        analysis_summary_file=analysis_summary[0] if analysis_summary else None,
-        sidecars=tuple(dict.fromkeys(sidecars)),
+        sidecars=_bundle_sidecars(
+            root, Path(spec_override) if spec_override is not None else None
+        ),
     )
 
 
@@ -525,12 +479,12 @@ def _resolve_member(
     plain = root / default_name
     if plain.is_file():
         return plain
-    # neutral_sidecar_name tells <dataset>_binned_transcripts apart from
+    # stable_sidecar_name tells <dataset>_binned_transcripts apart from
     # <dataset>_transcripts (and csc_ from the main matrix).
     prefixed = [
         path
         for path in sorted(root.glob(f"*_{default_name}"))
-        if neutral_sidecar_name(path.name) == default_name
+        if stable_sidecar_name(path.name) == default_name
     ]
     if len(prefixed) == 1:
         return prefixed[0]
@@ -589,157 +543,206 @@ def _check_cell_feature_matrix(path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Privacy: sanitised metadata and neutral names
+# Vendor metadata: verbatim sidecars and the full header
 # --------------------------------------------------------------------------- #
 
 
-def neutral_sidecar_name(name: str) -> str:
-    """Return a bundle file name without run, slide or dataset identifiers.
+def stable_sidecar_name(name: str) -> str:
+    """Return the stable name of a bundle file, without its run or dataset part.
 
     ``metrics_summary_<run>.csv`` becomes ``metrics_summary.csv``,
     ``<dataset>_he_imagealignment.csv`` becomes ``he_imagealignment.csv`` and so
-    on; names that carry no identifier are returned unchanged.
+    on, so code finds a sidecar under one name whatever the run; names without
+    such a part are returned unchanged. The original name is recorded with
+    each copied sidecar.
 
     Args:
         name: A file name (no directory).
 
     Returns:
-        The neutral name.
+        The stable name.
     """
-    for pattern in _NEUTRAL_NAME_RES:
+    for pattern in _STABLE_NAME_RES:
         match = pattern.match(name)
         if match:
             return f"{match.group(1)}{match.group(2)}"
     return name
 
 
-def _neutral_relative_path(value: object) -> str | None:
-    if not isinstance(value, str) or not value:
+@dataclass(frozen=True)
+class AteraSidecar:
+    """One vendor file to copy byte for byte into the store.
+
+    Attributes:
+        source: The file in the bundle (or the ``spec_override`` manifest).
+        stored_path: POSIX path under the store's ``atera/`` folder, a stable
+            name (:func:`stable_sidecar_name`) that keeps any subfolder.
+        original_name: POSIX path of the file relative to the bundle (its
+            file name for a ``spec_override`` outside the bundle).
+    """
+
+    source: Path
+    stored_path: str
+    original_name: str
+
+
+def _bundle_sidecars(
+    root: Path, spec_override: Path | None
+) -> tuple[AteraSidecar, ...]:
+    sidecars: dict[str, AteraSidecar] = {}
+
+    def add(sidecar: AteraSidecar) -> None:
+        if sidecar.stored_path in sidecars:
+            raise AteraFormatError(
+                f"several bundle files map to the sidecar {sidecar.stored_path}; "
+                "keep one per ROI directory"
+            )
+        sidecars[sidecar.stored_path] = sidecar
+
+    for pattern in _SIDECAR_GLOBS:
+        for path in sorted(root.glob(pattern)):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(root)
+            stored = relative.with_name(stable_sidecar_name(path.name)).as_posix()
+            add(AteraSidecar(path, stored, relative.as_posix()))
+    if spec_override is not None and spec_override.resolve() != (
+        (root / "experiment.spatial").resolve()
+    ):
+        name = spec_override.name
+        add(AteraSidecar(spec_override, EXPERIMENT_OVERRIDE_SIDECAR, name))
+    return tuple(sidecars.values())
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def copy_atera_sidecars(bundle: AteraBundle, store_root: Path) -> list[dict[str, Any]]:
+    """Copy every vendor metadata file verbatim into ``<store_root>/atera/``.
+
+    Nothing is redacted: ``experiment.spatial``, the metrics summary,
+    ``panel_config.json`` (customer and designer included), the vendor HTML
+    reports, the FOV files, ``diffexp_genes/`` and the H&E alignment are copied
+    byte for byte under stable names (:func:`stable_sidecar_name`). The
+    returned records keep each file's original name; store them with
+    :func:`atera_metadata_attrs`.
+
+    Args:
+        bundle: The resolved bundle.
+        store_root: Root of the SpatialData zarr store being written.
+
+    Returns:
+        One JSON-serialisable record per sidecar: ``path`` (relative to the
+        store root), ``original_name``, ``size_bytes`` and ``sha256``.
+    """
+    records: list[dict[str, Any]] = []
+    for sidecar in bundle.sidecars:
+        target = Path(store_root, ATERA_SIDECAR_DIR, *sidecar.stored_path.split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(sidecar.source, target)
+        records.append(
+            {
+                "path": f"{ATERA_SIDECAR_DIR}/{sidecar.stored_path}",
+                "original_name": sidecar.original_name,
+                "size_bytes": target.stat().st_size,
+                "sha256": _file_sha256(target),
+            }
+        )
+    return records
+
+
+def _metric_value(text: str) -> int | float | str | None:
+    value = text.strip()
+    if not value:
         return None
-    parts = PurePosixPath(value).parts
-    name = neutral_sidecar_name(parts[-1])
-    if len(parts) > 1 and parts[-2] in ("morphology_2d", "morphology_3d"):
-        return f"{parts[-2]}/{name}"
-    return name
-
-
-def sanitize_experiment_spatial(experiment: Mapping[str, Any]) -> dict[str, Any]:
-    """Keep only the non-identifying fields of ``experiment.spatial``.
-
-    The result is an allow-list: versions, pixel and z-step sizes, panel IDs,
-    names, sizes and organisms, the segmentation stain, the numeric summary
-    metrics, and the file paths with identifiers removed from file names. Run,
-    slide, region, instrument and UUID fields, and anything not recognised,
-    are dropped.
-
-    Args:
-        experiment: Parsed ``experiment.spatial``.
-
-    Returns:
-        A new JSON-serialisable dictionary.
-    """
-    sanitized: dict[str, Any] = {}
-    for key, value in experiment.items():
-        if key in IDENTIFYING_EXPERIMENT_FIELDS:
+    for parse in (int, float):
+        try:
+            number = parse(value)
+        except ValueError:
             continue
-        if _is_allowed_scalar(key, value):
-            sanitized[key] = value
-        elif key == "panel_config" and isinstance(value, dict):
-            if "panel_config_id" in value:
-                sanitized[key] = {"panel_config_id": value["panel_config_id"]}
-        elif key.startswith("panel_") and isinstance(value, dict):
-            sanitized[key] = {k: v for k, v in value.items() if k in _PANEL_FIELDS}
-        elif key in _PATH_GROUPS and isinstance(value, dict):
-            paths = {k: _neutral_relative_path(v) for k, v in value.items()}
-            sanitized[key] = {k: v for k, v in paths.items() if v is not None}
-    return sanitized
+        # NaN and infinities are not JSON; keep their text.
+        return number if math.isfinite(number) else value
+    return value
 
 
-def _is_number(value: object) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool)
-
-
-def _is_allowed_scalar(key: str, value: object) -> bool:
-    if key in _EXPERIMENT_TEXT_FIELDS:
-        return isinstance(value, str)
-    if key in _EXPERIMENT_NUMBER_FIELDS or _EXPERIMENT_METRIC_RE.match(key):
-        return _is_number(value)
-    return False
-
-
-def sanitize_panel_config(panel_config: Mapping[str, Any]) -> dict[str, Any]:
-    """Keep only the panel definition of ``panel_config.json`` (allow-list).
-
-    Kept: ``spec_version`` and, per payload, ``chemistry``, ``panel``,
-    ``targets`` and ``designer.version``. Dropped: ``metadata``, the customer
-    and designer contacts (``customer``, ``designer.designed_by``), the design
-    date and anything not recognised.
+def read_metrics_summary(path: Path) -> list[dict[str, int | float | str | None]]:
+    """Read every column of a ``metrics_summary`` CSV as structured values.
 
     Args:
-        panel_config: Parsed ``panel_config.json``.
+        path: The CSV file.
 
     Returns:
-        A new JSON-serialisable dictionary.
+        One dictionary per data row, in column order: integers and finite
+        floats as numbers, empty cells as ``None``, all other text verbatim.
     """
-    copied: dict[str, Any] = json.loads(json.dumps(panel_config))
-    sanitized = {k: v for k, v in copied.items() if k in _PANEL_CONFIG_KEYS}
-    payloads = []
-    for payload in sanitized.get("payloads") or []:
-        if not isinstance(payload, dict):
-            continue
-        kept = {k: v for k, v in payload.items() if k in _PANEL_PAYLOAD_KEYS}
-        designer = payload.get("designer")
-        if isinstance(designer, dict) and "version" in designer:
-            kept["designer"] = {"version": designer["version"]}
-        payloads.append(kept)
-    if "payloads" in sanitized:
-        sanitized["payloads"] = payloads
-    return sanitized
-
-
-def _is_number_text(value: str) -> bool:
-    try:
-        float(value)
-    except ValueError:
-        return False
-    return True
-
-
-def sanitize_metrics_summary(text: str) -> str:
-    """Keep only the metric and panel ID columns of a ``metrics_summary`` CSV.
-
-    An allow-list (D13): numeric metric columns (``num_*``, ``fraction_*``,
-    ``median_*``, ``segmented_*`` and the other metric families, each value a
-    number or empty) and the panel ID columns. Run, instrument, slide, region,
-    reagent lot, stain and free-text columns, and anything not recognised, are
-    dropped.
-
-    Args:
-        text: The CSV text.
-
-    Returns:
-        The CSV text with the kept columns only.
-    """
-    rows = list(csv.reader(io.StringIO(text)))
+    with path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.reader(handle))
     if not rows:
-        return text
+        return []
+    header = [name.strip() for name in rows[0]]
+    return [
+        {name: _metric_value(value) for name, value in zip(header, row, strict=False)}
+        for row in rows[1:]
+        if any(value.strip() for value in row)
+    ]
 
-    def values(index: int) -> list[str]:
-        return [row[index].strip() for row in rows[1:] if index < len(row)]
 
-    keep = []
-    for index, raw_name in enumerate(rows[0]):
-        name = raw_name.strip()
-        if _METRIC_ID_COLUMN_RE.match(name) or (
-            _METRIC_COLUMN_RE.match(name)
-            and all(value == "" or _is_number_text(value) for value in values(index))
-        ):
-            keep.append(index)
-    out = io.StringIO()
-    writer = csv.writer(out, lineterminator="\n")
-    for row in rows:
-        writer.writerow([row[index] for index in keep if index < len(row)])
-    return out.getvalue()
+def _panel_config_header(panel_config: Mapping[str, Any]) -> dict[str, Any]:
+    """Return ``panel_config.json`` without its per-target list (in the sidecar)."""
+    header: dict[str, Any] = json.loads(json.dumps(panel_config))
+    for payload in header.get("payloads") or []:
+        if isinstance(payload, dict) and isinstance(payload.get("targets"), list):
+            payload["num_targets"] = len(payload.pop("targets"))
+    return header
+
+
+def atera_metadata_attrs(
+    bundle: AteraBundle, sidecars: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """Return the full vendor header for ``attrs["merxen_atera"]``.
+
+    No field is dropped: the whole ``experiment.spatial`` (run, slide, region,
+    instrument, UUIDs, versions, panels, counts), every metrics summary column,
+    the ``panel_config.json`` header (all but its per-target list, which stays
+    in the verbatim sidecar), the bundle's store file names and the sidecar
+    records. Human-facing text that prints any of these values passes it
+    through :func:`merxen.privacy.to_alias` first.
+
+    Args:
+        bundle: The resolved bundle.
+        sidecars: Records from :func:`copy_atera_sidecars`.
+
+    Returns:
+        A new JSON-serialisable dictionary.
+    """
+    stored = {sidecar.stored_path: sidecar.source for sidecar in bundle.sidecars}
+    metrics = stored.get("metrics_summary.csv")
+    panel = stored.get("panel_config.json")
+    attrs: dict[str, Any] = {
+        "experiment": json.loads(json.dumps(bundle.experiment)),
+        "metrics_summary": read_metrics_summary(metrics) if metrics else [],
+        "panel_config": (
+            _panel_config_header(json.loads(panel.read_text(encoding="utf-8")))
+            if panel
+            else None
+        ),
+        "bundle_files": {
+            "transcripts": bundle.transcripts_zip.name,
+            "cells": bundle.cells_zip.name,
+            "cell_feature_matrix": bundle.cell_feature_matrix_zip.name,
+            "morphology_2d": [path.name for path in bundle.morphology_2d_files],
+            "morphology_3d": (
+                bundle.morphology_3d_file.name if bundle.morphology_3d_file else None
+            ),
+        },
+        "sidecars": [dict(record) for record in sidecars],
+    }
+    return attrs
 
 
 # --------------------------------------------------------------------------- #

@@ -1,7 +1,8 @@
-"""Atera readers on the synthetic bundle (plan §7.2: readers, shapes, privacy)."""
+"""Atera readers on the synthetic bundle (plan §7.2: readers, shapes, metadata)."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import pickle
 import re
@@ -40,10 +41,12 @@ from merxen.segmentation.cellpose import assign_labels_from_masks
 from merxen.segmentation.mask_geometry import masks_to_labeled_polygons
 
 from .atera_synth import (
+    COMPANION_PREFIX,
     EMPTY_POLYGON_CELL,
     FAKE_IDENTIFIERS,
     MULTI_COMPONENT_CELL,
     NUCLEUS_LESS_CELL,
+    RUN_SUFFIX,
     TWO_NUCLEUS_CELL,
     AteraSynth,
     cell_id_strings,
@@ -52,6 +55,23 @@ from .atera_synth import (
 )
 
 BundleFactory = Callable[..., tuple[AteraSynth, ar.AteraBundle]]
+
+#: Stored sidecar path (under ``atera/``) -> original bundle path, default bundle.
+EXPECTED_SIDECARS = {
+    "experiment.spatial": "experiment.spatial",
+    "metrics_summary.csv": f"metrics_summary_{RUN_SUFFIX}.csv",
+    "analysis_summary.html": f"analysis_summary_{RUN_SUFFIX}.html",
+    "qc_images.html": "qc_images.html",
+    "panel_config.json": "panel_config.json",
+    "morphology_fov_locations.json": "morphology_fov_locations.json",
+    "overview_scan_fov_locations.json": "overview_scan_fov_locations.json",
+    "overview_scan.png": "overview_scan.png",
+    "diffexp_genes/gene_expression_graphclust.csv": (
+        "diffexp_genes/gene_expression_graphclust.csv"
+    ),
+    "he_imagealignment.csv": f"{COMPANION_PREFIX}_he_imagealignment.csv",
+    "keypoints.csv": f"{COMPANION_PREFIX}_keypoints.csv",
+}
 
 
 @pytest.fixture(scope="module")
@@ -110,11 +130,9 @@ def test_resolve_from_experiment_spatial(default_bundle: tuple) -> None:
     assert bundle.morphology_shape_yx == synth.cell_mask.shape
     assert bundle.morphology_3d_file is None
     assert bundle.panel_config_file == synth.root / "panel_config.json"
-    assert bundle.analysis_summary_file is not None
-    names = {path.name for path in bundle.sidecars}
-    assert "morphology_fov_locations.json" in names
-    assert "gene_expression_graphclust.csv" in names
-    assert bundle.analysis_summary_file not in bundle.sidecars
+    assert {sidecar.stored_path for sidecar in bundle.sidecars} == set(
+        EXPECTED_SIDECARS
+    )
 
 
 def test_resolve_globs_prefixed_companions(
@@ -156,6 +174,11 @@ def test_spec_override_is_metadata_only(default_bundle: tuple, tmp_path: Path) -
     assert bundle.experiment["panel_wta"]["panel_organism"] == "Mouse"
     assert bundle.cells_zip == synth.root / "cells.zarr.zip"
     assert bundle.root == synth.root
+    # Both manifests are kept: the bundle's own and the override.
+    stored = {sidecar.stored_path: sidecar for sidecar in bundle.sidecars}
+    assert stored["experiment.spatial"].source == synth.root / "experiment.spatial"
+    assert stored[ar.EXPERIMENT_OVERRIDE_SIDECAR].source == override
+    assert stored[ar.EXPERIMENT_OVERRIDE_SIDECAR].original_name == "override.spatial"
 
 
 def _edit_experiment(root: Path, **fields: Any) -> None:
@@ -1197,75 +1220,108 @@ def test_morphology_reads_leave_no_open_tiff(default_bundle: tuple) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Privacy
+# Vendor metadata: verbatim sidecars and the full header
 # --------------------------------------------------------------------------- #
 
 
-def _assert_no_identifiers(text: str) -> None:
-    for name, value in FAKE_IDENTIFIERS.items():
-        assert value not in text, f"{name} leaked"
-
-
-def test_sanitized_experiment_keeps_only_allowed_fields(default_bundle: tuple) -> None:
-    _, bundle = default_bundle
-    sanitized = ar.sanitize_experiment_spatial(bundle.experiment)
-    text = json.dumps(sanitized)
-    _assert_no_identifiers(text)
-    assert not set(sanitized) & ar.IDENTIFYING_EXPERIMENT_FIELDS
-    assert sanitized["pixel_size"] == bundle.pixel_size_um
-    assert sanitized["analysis_sw_version"] == "atera-1.1.1.0"
-    assert sanitized["panel_wta"]["panel_organism"] == "Human"
-    assert sanitized["explorer_files"]["analysis_summary_filepath"] == (
-        "analysis_summary.html"
-    )
-    assert sanitized["images"]["morphology_2d_filepath"] == (
-        "morphology_2d/ch0000_dapi.ome.tif"
-    )
-    assert "slide_type" not in sanitized
-
-
-def test_sanitized_panel_and_metrics(default_bundle: tuple) -> None:
+def test_sidecars_are_byte_identical_copies(
+    default_bundle: tuple, tmp_path: Path
+) -> None:
     synth, bundle = default_bundle
-    assert bundle.panel_config_file is not None
-    panel = json.loads(bundle.panel_config_file.read_text())
-    assert "customer" in panel["payloads"][0]
-    assert "designed_by" in panel["payloads"][0]["designer"]
-    clean = ar.sanitize_panel_config(panel)
-    _assert_no_identifiers(json.dumps(clean))
-    assert set(clean) == {"spec_version", "payloads"}
-    payload = clean["payloads"][0]
-    assert set(payload) == {"chemistry", "panel", "targets", "designer"}
-    assert payload["designer"] == {"version": "1"}
-    assert payload["targets"] == panel["payloads"][0]["targets"]
-    metrics = next(p for p in bundle.sidecars if p.name.startswith("metrics_summary"))
-    text = ar.sanitize_metrics_summary(metrics.read_text())
-    _assert_no_identifiers(text)
-    header, values = (line.split(",") for line in text.splitlines())
-    assert header == [
-        "panel_config_id",
-        "panel_wta_design_id",
-        "num_cells_detected",
-        "fraction_transcripts_assigned",
-        "median_genes_per_cell_panel_a",
-    ]
-    assert values == ["hWTA_cfg", "hWTA_v1", str(synth.n_cells), "0.5", ""]
-    # A metric-named column holding text is dropped too.
-    assert ar.sanitize_metrics_summary("num_x,num_y\n1,abc\n") == "num_x\n1\n"
+    store = tmp_path / "store.zarr"
+    records = ar.copy_atera_sidecars(bundle, store)
+    by_path = {record["path"]: record for record in records}
+    assert set(by_path) == {f"atera/{name}" for name in EXPECTED_SIDECARS}
+    for stored, original in EXPECTED_SIDECARS.items():
+        record = by_path[f"atera/{stored}"]
+        assert record["original_name"] == original
+        source = (synth.root / original).read_bytes()
+        assert (store / "atera" / stored).read_bytes() == source
+        assert record["size_bytes"] == len(source)
+        assert record["sha256"] == hashlib.sha256(source).hexdigest()
+    # Nothing is redacted: customer, designer and run fields are all there.
+    panel = (store / "atera" / "panel_config.json").read_text()
+    metrics = (store / "atera" / "metrics_summary.csv").read_text()
+    report = (store / "atera" / "analysis_summary.html").read_text()
+    for value in (
+        FAKE_IDENTIFIERS["customer_email"],
+        FAKE_IDENTIFIERS["designer_name"],
+    ):
+        assert value in panel
+    for value in (FAKE_IDENTIFIERS["run_name"], FAKE_IDENTIFIERS["reagent_lot"]):
+        assert value in metrics
+    assert FAKE_IDENTIFIERS["run_name"] in report
 
 
-def test_neutral_sidecar_names(default_bundle: tuple) -> None:
-    _, bundle = default_bundle
-    assert bundle.analysis_summary_file is not None
-    names = [
-        ar.neutral_sidecar_name(path.name)
-        for path in (*bundle.sidecars, bundle.analysis_summary_file)
-    ]
-    _assert_no_identifiers(" ".join(names))
-    assert "metrics_summary.csv" in names and "analysis_summary.html" in names
-    assert ar.neutral_sidecar_name("Some_dataset_he_imagealignment.csv") == (
-        "he_imagealignment.csv"
+def test_metadata_attrs_carry_the_full_header(default_bundle: tuple) -> None:
+    synth, bundle = default_bundle
+    records = [{"path": "atera/experiment.spatial", "original_name": "x"}]
+    attrs = ar.atera_metadata_attrs(bundle, records)
+    assert json.loads(json.dumps(attrs, allow_nan=False)) == attrs
+    experiment = json.loads((synth.root / "experiment.spatial").read_text())
+    assert attrs["experiment"] == experiment
+    for key in (
+        "run_name",
+        "slide_name",
+        "slide_id",
+        "region_name",
+        "instrument_sn",
+        "analysis_uuid",
+        "roi_uuid",
+    ):
+        assert attrs["experiment"][key] == experiment[key]
+    assert attrs["experiment"]["instrument_sn"] == FAKE_IDENTIFIERS["instrument_sn"]
+    (metrics,) = attrs["metrics_summary"]
+    assert metrics["run_name"] == FAKE_IDENTIFIERS["run_name"]
+    assert metrics["region_name"] == FAKE_IDENTIFIERS["region_name"]
+    assert metrics["run_start_time"] == FAKE_IDENTIFIERS["run_start_time"]
+    assert metrics["reagent_plate_1"] == FAKE_IDENTIFIERS["reagent_lot"]
+    assert metrics["reagent_pouch_1"] == 424242
+    assert metrics["num_cells_detected"] == synth.n_cells
+    assert metrics["fraction_transcripts_assigned"] == 0.5
+    assert metrics["median_genes_per_cell_panel_a"] is None
+    (payload,) = attrs["panel_config"]["payloads"]
+    assert payload["customer"]["email"] == FAKE_IDENTIFIERS["customer_email"]
+    assert (
+        payload["designer"]["designed_by"]["name"]
+        == (FAKE_IDENTIFIERS["designer_name"])
     )
-    for name, neutral in (
+    assert payload["panel"]["identity"]["design_id"] == "hWTA_v1"
+    assert "targets" not in payload
+    panel = json.loads((synth.root / "panel_config.json").read_text())
+    assert payload["num_targets"] == len(panel["payloads"][0]["targets"])
+    assert attrs["panel_config"]["metadata"] == {
+        "ui_props": {"visible": True, "display_name": ""}
+    }
+    assert attrs["bundle_files"]["transcripts"] == "transcripts.zarr.zip"
+    assert attrs["bundle_files"]["morphology_2d"] == list(synth.channel_files)
+    assert attrs["sidecars"] == records
+
+
+def test_metrics_summary_values_are_structured(tmp_path: Path) -> None:
+    path = tmp_path / "metrics_summary.csv"
+    path.write_text("a,b,c,d,e\n7,0.25,,NaN,text\n,,,,\n")
+    assert ar.read_metrics_summary(path) == [
+        {"a": 7, "b": 0.25, "c": None, "d": "NaN", "e": "text"}
+    ]
+
+
+def test_duplicate_sidecar_names_fail_loudly(
+    default_bundle: tuple, tmp_path: Path
+) -> None:
+    synth, _ = default_bundle
+    root = _copy_bundle(synth, tmp_path)
+    (root / "metrics_summary_second_run.csv").write_text("num_cells\n1\n")
+    with pytest.raises(AteraFormatError, match="metrics_summary.csv"):
+        ar.resolve_atera_bundle(root)
+
+
+def test_stable_sidecar_names() -> None:
+    for name, stable in (
+        ("metrics_summary_SN_SLIDE_ROI.csv", "metrics_summary.csv"),
+        ("analysis_summary_SN_SLIDE_ROI.html", "analysis_summary.html"),
+        ("Some_dataset_he_imagealignment.csv", "he_imagealignment.csv"),
+        ("Some_dataset_keypoints.csv", "keypoints.csv"),
         ("Some_dataset_transcripts.zarr.zip", "transcripts.zarr.zip"),
         ("binned_transcripts.zarr.zip", "binned_transcripts.zarr.zip"),
         ("Some_dataset_binned_transcripts.zarr.zip", "binned_transcripts.zarr.zip"),
@@ -1274,22 +1330,4 @@ def test_neutral_sidecar_names(default_bundle: tuple) -> None:
         ("Some_dataset_cell_feature_matrix.zarr.zip", "cell_feature_matrix.zarr.zip"),
         ("panel_config.json", "panel_config.json"),
     ):
-        assert ar.neutral_sidecar_name(name) == neutral
-    explorer = ar.sanitize_experiment_spatial(bundle.experiment)["explorer_files"]
-    assert explorer["transcripts_viz_zarr_filepath"] == "binned_transcripts.zarr.zip"
-    assert explorer["cell_feature_viz_zarr_filepath"] == (
-        "csc_cell_feature_matrix.zarr.zip"
-    )
-
-
-def test_reader_outputs_carry_no_identifiers(default_bundle: tuple) -> None:
-    _, bundle = default_bundle
-    cells = ar.read_atera_cells(bundle)
-    table = ar.read_atera_table(bundle, cells)
-    points, _, aggregates = ar.read_atera_transcripts(bundle)
-    with dask.config.set(scheduler="sync"):
-        points.compute()
-    attrs = aggregates.summary().to_attrs()
-    _assert_no_identifiers(json.dumps(attrs))
-    _assert_no_identifiers(json.dumps({k: str(v) for k, v in table.uns.items()}))
-    _assert_no_identifiers(" ".join(map(str, table.obs.columns)))
+        assert ar.stable_sidecar_name(name) == stable

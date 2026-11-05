@@ -100,41 +100,39 @@ def test_real_features_and_cell_order(bundle: ar.AteraBundle) -> None:
     np.testing.assert_array_equal(barcodes, cells.source_cell_id)
 
 
-def test_real_metadata_is_sanitised(bundle: ar.AteraBundle) -> None:
-    identifying = [
-        str(bundle.experiment[key])
-        for key in ar.IDENTIFYING_EXPERIMENT_FIELDS
-        if bundle.experiment.get(key) not in (None, "")
-    ]
-    assert identifying
-    sanitized_experiment = ar.sanitize_experiment_spatial(bundle.experiment)
-    sanitized = json.dumps(sanitized_experiment)
-    assert not [value for value in identifying if value in sanitized]
-    explorer = sanitized_experiment["explorer_files"]
-    assert explorer["transcripts_viz_zarr_filepath"] == "binned_transcripts.zarr.zip"
-    assert explorer["cell_feature_viz_zarr_filepath"] == (
+def test_real_metadata_is_kept_whole(bundle: ar.AteraBundle, tmp_path: Path) -> None:
+    stored = {sidecar.stored_path: sidecar for sidecar in bundle.sidecars}
+    assert {
+        "experiment.spatial",
+        "metrics_summary.csv",
+        "analysis_summary.html",
+        "qc_images.html",
+        "panel_config.json",
+        "morphology_fov_locations.json",
+        "overview_scan_fov_locations.json",
+        "overview_scan.png",
+        "diffexp_genes/gene_expression_graphclust.csv",
+    } <= set(stored)
+    records = ar.copy_atera_sidecars(bundle, tmp_path)
+    assert len(records) == len(bundle.sidecars)
+    for sidecar in bundle.sidecars:
+        copied = tmp_path / ar.ATERA_SIDECAR_DIR / sidecar.stored_path
+        assert copied.read_bytes() == sidecar.source.read_bytes()
+    attrs = ar.atera_metadata_attrs(bundle, records)
+    json.dumps(attrs, allow_nan=False)
+    assert attrs["experiment"] == json.loads(
+        (bundle.root / "experiment.spatial").read_text(encoding="utf-8")
+    )
+    metrics = stored["metrics_summary.csv"].source
+    header = metrics.read_text(encoding="utf-8").splitlines()[0].split(",")
+    assert list(attrs["metrics_summary"][0]) == header
+    assert attrs["panel_config"]["payloads"][0]["num_targets"] > 18000
+    explorer = attrs["experiment"]["explorer_files"]
+    assert ar.stable_sidecar_name(explorer["transcripts_viz_zarr_filepath"]) == (
+        "binned_transcripts.zarr.zip"
+    )
+    assert ar.stable_sidecar_name(explorer["cell_feature_viz_zarr_filepath"]) == (
         "csc_cell_feature_matrix.zarr.zip"
-    )
-    metrics = next(p for p in bundle.sidecars if p.name.startswith("metrics_summary"))
-    assert ar.neutral_sidecar_name(metrics.name) == "metrics_summary.csv"
-    clean = ar.sanitize_metrics_summary(metrics.read_text(encoding="utf-8"))
-    header = clean.splitlines()[0].split(",")
-    assert "num_cells_detected" in header and "panel_wta_design_id" in header
-    assert not [
-        name
-        for name in header
-        if name.startswith(("run_", "slide_", "reagent_", "instrument_"))
-        or name.endswith("_name")
-    ]
-    assert bundle.panel_config_file is not None
-    panel = ar.sanitize_panel_config(
-        json.loads(bundle.panel_config_file.read_text(encoding="utf-8"))
-    )
-    assert set(panel) == {"spec_version", "payloads"}
-    assert all("customer" not in payload for payload in panel["payloads"])
-    assert all(
-        payload["designer"] == {"version": payload["designer"]["version"]}
-        for payload in panel["payloads"]
     )
 
 

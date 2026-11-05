@@ -5,7 +5,8 @@ zipped zarr v2 stores (``transcripts.zarr.zip``, ``cells.zarr.zip``,
 ``cell_feature_matrix.zarr.zip``; every member STORED), a multi-file pyramidal
 JPEG-2000 OME-TIFF ``morphology_2d/`` with OME ``TiffData`` file-to-channel
 mapping, ``experiment.spatial``, ``panel_config.json``, a metrics summary, the
-FOV locations and a vendor DE table. Nothing binary is committed.
+vendor reports, the FOV locations, a vendor DE table and the H&E alignment
+companions. Nothing binary is committed.
 
 The geometry is fixed and small (97 x 67 pixels at the real pixel size). The
 first five cells cover the special cases of the real data:
@@ -114,7 +115,8 @@ FEATURES: Final = (
     ),
 )
 
-#: Identifying manifest values of the fixture; none may reach attrs or sidecars.
+#: Identifying manifest values of the fixture, obviously fake: the store keeps
+#: them verbatim, so tests can check the metadata is complete.
 FAKE_IDENTIFIERS: Final = {
     "run_name": "SYNTH_RUN_ZZ",
     "slide_name": "SYNTHSLIDE",
@@ -1222,6 +1224,22 @@ def _write_small_files(
         },
     }
     (root / "morphology_fov_locations.json").write_text(json.dumps(fovs))
+    overview_fovs = {
+        "units": "pixel",
+        "fov_locations": {"AA1": {"x": 3, "y": 4, "width": 50, "height": 50}},
+    }
+    (root / "overview_scan_fov_locations.json").write_text(json.dumps(overview_fovs))
+    # Copied verbatim, never decoded: the PNG signature plus fake bytes is enough.
+    (root / "overview_scan.png").write_bytes(b"\x89PNG\r\n\x1a\n" + bytes(range(256)))
+    (root / "qc_images.html").write_text(
+        f"<html><body>{FAKE_IDENTIFIERS['slide_name']}</body></html>"
+    )
+    (root / f"{COMPANION_PREFIX}_he_imagealignment.csv").write_text(
+        "1.0,0.0,2.5\n0.0,1.0,-1.5\n0.0,0.0,1.0\n"
+    )
+    (root / f"{COMPANION_PREFIX}_keypoints.csv").write_text(
+        "fixedX,fixedY,alignmentX,alignmentY\n1.0,2.0,3.5,0.5\n"
+    )
     diffexp = root / "diffexp_genes"
     diffexp.mkdir(exist_ok=True)
     (diffexp / "gene_expression_graphclust.csv").write_text(
