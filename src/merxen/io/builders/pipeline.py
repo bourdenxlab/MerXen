@@ -156,15 +156,15 @@ def _build_atera_artifact(
             "point atera_dir at the ROI folder."
         )
     raw_input_path = _resolve_raw_input_path(input_path, platform=config.platform)
-    fingerprint = (
-        atera_build_fingerprint(
-            resolve_atera_input(
-                raw_input_path, config.atera, atera_spec_path=config.atera_spec_path
-            ),
-            config.atera,
+    bundle = (
+        resolve_atera_input(
+            raw_input_path, config.atera, atera_spec_path=config.atera_spec_path
         )
         if raw_input_path is not None
         else None
+    )
+    fingerprint = (
+        atera_build_fingerprint(bundle, config.atera) if bundle is not None else None
     )
     candidates = [
         path
@@ -214,6 +214,7 @@ def _build_atera_artifact(
         build_config=config.atera,
         atera_spec_path=config.atera_spec_path,
         dataset_name=name,
+        bundle=bundle,
     )
     if target_path != output_path:
         stage_existing_output(target_path, output_path)

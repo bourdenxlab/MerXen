@@ -137,7 +137,13 @@ PLATFORM_SPECS: Final[Mapping[str, PlatformSpec]] = MappingProxyType(
             quality_column_alias=None,
             fallback_um_per_px=0.21249222,
             nucleus_ids_are_cell_ids=False,
-            spec_sidecar_names=("atera/experiment.spatial", "experiment.spatial"),
+            # A spec override (kept beside the bundle's manifest) set the pixel
+            # size the build used, so it wins over the original.
+            spec_sidecar_names=(
+                "atera/experiment_override.spatial",
+                "atera/experiment.spatial",
+                "experiment.spatial",
+            ),
             mask_pixel_convention="corner",
         ),
     }

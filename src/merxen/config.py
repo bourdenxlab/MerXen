@@ -416,6 +416,9 @@ class AteraBuildConfig(BaseModel):
     transcripts: bool = True
     min_qv: float | None = Field(default=20.0, ge=0.0)
     transcript_partition_rows: int = Field(default=4_194_304, gt=0)
+    # tile_blocks decodes each tile once per block it is split into: about 20x
+    # the decode time of row_range on the public dataset (368 s against 18 s
+    # for its largest tile), so it stays opt-in until AT-5 decides its fate.
     spatial_order: Literal["row_range", "tile_blocks"] = "row_range"
     spatial_block_um: float = Field(default=500.0, gt=0.0)
     min_block_rows: int = Field(default=1_048_576, ge=1)

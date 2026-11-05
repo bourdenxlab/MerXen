@@ -12,9 +12,11 @@
 7. apply the source contract with ``points_canonical=True``;
 8. write the store to ``<target>.partial-<uuid>``; the transcript statistics
    are recorded by the partition reads of that same write;
-9. copy the vendor metadata files verbatim under ``atera/``, write the points
-   index, the full header in ``attrs["merxen_atera"]`` and the completion
-   marker ``merxen_build_complete.json`` with the build fingerprint;
+9. copy the vendor metadata files verbatim under ``atera/`` (with the
+   metadata inside the vendor zarr stores and the OME-XML headers), write
+   the points index, the full header in ``attrs["merxen_atera"]`` and the
+   completion marker ``merxen_build_complete.json`` with the build
+   fingerprint;
 10. rename the partial store onto the target;
 11. release memory.
 
@@ -33,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import signal
 import threading
@@ -145,8 +148,13 @@ def process_tree_anonymous_rss_bytes(pid: int | None = None) -> int:
     return total
 
 
-def _stop_build(used_gb: float, limit_gb: float) -> None:
-    """Kill the process tree of a build that exceeded its memory cap."""
+def _stop_build(used_gb: float, limit_gb: float, cleanup: Sequence[Path]) -> None:
+    """Kill the process tree of a build over its memory cap and exit.
+
+    The exit skips ``finally`` blocks, so the partial store and the mask
+    scratch folder (``cleanup``) are removed here, after the workers that map
+    the masks are gone.
+    """
     logger.error(
         "[ATERA] Build stopped by the memory watchdog: %.1f GB anonymous RSS "
         "> %.1f GB cap (atera max_rss_gb). Raise the cap and the task memory.",
@@ -159,6 +167,11 @@ def _stop_build(used_gb: float, limit_gb: float) -> None:
         try:
             child.send_signal(signal.SIGKILL)
         except psutil.Error:
+            continue
+    for path in cleanup:
+        try:
+            remove_path(path)
+        except OSError:
             continue
     os._exit(RSS_LIMIT_EXIT_CODE)
 
@@ -174,6 +187,10 @@ class RssWatchdog:
     session's process. With no cap it only records the peak.
 
     Use it as a context manager, or call :meth:`start` and :meth:`stop`.
+
+    Attributes:
+        cleanup: Paths the default action removes before it exits (the
+            build's partial store and mask scratch folder).
     """
 
     def __init__(
@@ -190,14 +207,19 @@ class RssWatchdog:
             limit_gb: Cap in GiB; ``None`` only records the peak.
             interval_s: Seconds between two measurements.
             on_exceed: Called with ``(used_gb, limit_gb)`` when the cap is
-                exceeded; the default logs, kills the child processes and
-                exits with :data:`RSS_LIMIT_EXIT_CODE`.
+                exceeded; the default logs, kills the child processes,
+                removes :attr:`cleanup` and exits with
+                :data:`RSS_LIMIT_EXIT_CODE`.
             measure: Returns the bytes to compare with the cap.
         """
         self.limit_gb = limit_gb
         self.interval_s = interval_s
-        self._on_exceed = on_exceed or _stop_build
+        self.cleanup: list[Path] = []
+        self._on_exceed = on_exceed or (
+            lambda used, limit: _stop_build(used, limit, self.cleanup)
+        )
         self._measure = measure
+        self._failed = False
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self.peak_gb = 0.0
@@ -216,7 +238,13 @@ class RssWatchdog:
 
     def _run(self) -> None:
         while not self._stop_event.wait(self.interval_s):
-            self.check()
+            try:
+                self.check()
+            except Exception:
+                # A failed reading must not end the thread and lift the cap.
+                if not self._failed:
+                    logger.exception("[ATERA] Memory watchdog reading failed")
+                    self._failed = True
 
     def start(self) -> RssWatchdog:
         """Start polling in a daemon thread.
@@ -354,20 +382,13 @@ def build_options(build_config: AteraBuildConfig) -> dict[str, Any]:
 
 def _input_files(bundle: ar.AteraBundle) -> list[Path]:
     files = {
-        bundle.transcripts_zip,
-        bundle.cells_zip,
-        bundle.cell_feature_matrix_zip,
+        *ar.vendor_zarr_stores(bundle).values(),
         *bundle.morphology_2d_files,
         *(sidecar.source for sidecar in bundle.sidecars),
     }
+    if bundle.morphology_3d_file is not None:
+        files.add(bundle.morphology_3d_file)
     return sorted(files)
-
-
-def _file_label(path: Path, root: Path) -> str:
-    try:
-        return path.relative_to(root).as_posix()
-    except ValueError:
-        return path.name
 
 
 def atera_build_fingerprint(
@@ -391,7 +412,7 @@ def atera_build_fingerprint(
         stat = path.stat()
         files.append(
             {
-                "name": _file_label(path, bundle.root),
+                "name": ar.bundle_relative_name(path, bundle.root),
                 "size": stat.st_size,
                 "mtime_ns": stat.st_mtime_ns,
             }
@@ -464,11 +485,26 @@ def _write_json(path: Path, data: Mapping[str, Any]) -> None:
     path.write_text(json.dumps(data, indent=1, allow_nan=False) + "\n")
 
 
-def _remove_stale_partials(target: Path) -> None:
-    """Remove partial stores a killed build left beside ``target``."""
-    for stale in target.parent.glob(f"{target.name}.partial-*"):
-        logger.warning("[ATERA] Removing an incomplete earlier build: %s", stale.name)
-        remove_path(stale)
+def _remove_stale_partials(
+    target: Path, *, workdir: Path | None, dataset_name: str
+) -> None:
+    """Remove partial stores and mask scratch folders of killed builds.
+
+    Both are named ``<target>.partial-<id>[.work]``: beside the target, and
+    in ``workdir`` for the scratch folder when one is set.
+    """
+    folders = {target.parent, *([Path(workdir)] if workdir is not None else [])}
+    stale = sorted(
+        path for folder in folders for path in folder.glob(f"{target.name}.partial-*")
+    )
+    if stale:
+        logger.warning(
+            "[%s] Removing %d incomplete earlier build folder(s)",
+            dataset_name,
+            len(stale),
+        )
+    for path in stale:
+        remove_path(path)
 
 
 # --------------------------------------------------------------------------- #
@@ -507,6 +543,7 @@ def _atera_shapes(
     *,
     n_jobs: int,
     workdir: Path,
+    nucleus_counter: ar.MaskPixelCounter | None = None,
 ) -> dict[str, gpd.GeoDataFrame]:
     wanted = {
         CELL_SHAPES_KEY: build_config.cells_boundaries,
@@ -521,6 +558,7 @@ def _atera_shapes(
             n_jobs=n_jobs,
             workdir=workdir,
             simplify_px=build_config.boundary_simplify_px,
+            nucleus_counter=nucleus_counter,
         )
     else:
         shapes = ar.atera_shapes_from_vendor_polygons(cells, bundle.pixel_size_um)
@@ -643,7 +681,17 @@ def assemble_atera_sdata(
             levels, cell and feature order).
     """
     cells = ar.read_atera_cells(bundle)
-    shapes = _atera_shapes(bundle, cells, build_config, n_jobs=n_jobs, workdir=workdir)
+    # The mask route decodes masks/0 anyway; the table's nucleus areas are
+    # counted during that pass instead of a second decode.
+    nucleus_counter = ar.MaskPixelCounter(cells.n_nuclei)
+    shapes = _atera_shapes(
+        bundle,
+        cells,
+        build_config,
+        n_jobs=n_jobs,
+        workdir=workdir,
+        nucleus_counter=nucleus_counter,
+    )
     transform = _microns_to_pixels(bundle.pixel_size_um)
     shape_elements = {
         key: ShapesModel.parse(frame, transformations={"global": transform})
@@ -665,11 +713,19 @@ def assemble_atera_sdata(
     tables: dict[str, Any] = {}
     if build_config.cells_table:
         _check_table_cells_have_shapes(shapes[CELL_SHAPES_KEY], cells)
+        counted = nucleus_counter.n_pixels == math.prod(cells.mask_shape)
         table = ar.read_atera_table(
             bundle,
             cells,
             gex_only=build_config.table_gex_only,
             keep_vendor_annotations=build_config.keep_vendor_annotations,
+            nucleus_area_total=(
+                ar.nucleus_area_total_from_counts(
+                    nucleus_counter.counts, cells, bundle.pixel_size_um
+                )
+                if counted
+                else None
+            ),
         )
         table.obs["region"] = pd.Categorical(
             np.repeat(CELL_SHAPES_KEY, table.n_obs), categories=[CELL_SHAPES_KEY]
@@ -828,12 +884,16 @@ def write_atera_spatialdata(
     n_workers: int | None = None,
     dataset_name: str = "ATERA",
     workdir: Path | None = None,
+    bundle: ar.AteraBundle | None = None,
 ) -> Path:
     """Build an Atera SpatialData store from one extracted ROI folder.
 
     The store is written beside the target as ``<name>.partial-<uuid>`` and
     renamed onto it once complete, so the target is either absent or whole.
-    An existing target is replaced.
+    An existing target is replaced. The temporary masks go to
+    ``<name>.partial-<uuid>.work``; both folders are removed when the build
+    fails or its watchdog stops it, and a later build removes those of a
+    build that was killed.
 
     Args:
         input_path: The extracted ROI folder.
@@ -846,6 +906,8 @@ def write_atera_spatialdata(
         dataset_name: Alias of the dataset, used in log lines.
         workdir: Directory for the temporary masks (default: beside the
             target).
+        bundle: The bundle already resolved from ``input_path`` with the same
+            options (saves a second resolution); resolved here when ``None``.
 
     Returns:
         ``output_path``.
@@ -858,9 +920,10 @@ def write_atera_spatialdata(
         RssWatchdog(build_config.max_rss_gb) as watchdog,
         atera_build_concurrency(workers),
     ):
-        bundle = resolve_atera_input(
-            input_path, build_config, atera_spec_path=atera_spec_path
-        )
+        if bundle is None:
+            bundle = resolve_atera_input(
+                input_path, build_config, atera_spec_path=atera_spec_path
+            )
         fingerprint = atera_build_fingerprint(bundle, build_config)
         logger.info(
             "[%s] Building Atera SpatialData (%d workers, min_qv=%s, %d channels)",
@@ -869,11 +932,12 @@ def write_atera_spatialdata(
             build_config.min_qv,
             len(bundle.morphology_channel_names),
         )
-        _remove_stale_partials(output_path)
+        _remove_stale_partials(output_path, workdir=workdir, dataset_name=dataset_name)
         partial = output_path.with_name(
             f"{output_path.name}.partial-{uuid.uuid4().hex}"
         )
-        scratch = Path(workdir or output_path.parent) / f".{partial.name}.work"
+        scratch = Path(workdir or output_path.parent) / f"{partial.name}.work"
+        watchdog.cleanup[:] = [partial, scratch]
         try:
             assembly = assemble_atera_sdata(
                 bundle,
@@ -899,6 +963,7 @@ def write_atera_spatialdata(
             remove_path(scratch)
         remove_path(output_path)
         os.replace(partial, output_path)
+        watchdog.cleanup.clear()
         del assembly
     force_release("atera build")
     logger.info(
@@ -922,7 +987,8 @@ def _finish_store(
 ) -> None:
     """Add sidecars, the index, the header attrs and the completion marker."""
     sidecars = ar.copy_atera_sidecars(bundle, store)
-    header = ar.atera_metadata_attrs(bundle, sidecars)
+    embedded = ar.write_atera_embedded_metadata(bundle, store)
+    header = ar.atera_metadata_attrs(bundle, sidecars, embedded)
     header["build"] = {
         "format_version": ATERA_BUILD_FORMAT_VERSION,
         "build_fingerprint": fingerprint,
