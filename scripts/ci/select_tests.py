@@ -33,7 +33,7 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -239,12 +239,33 @@ class FileFacts:
 
 
 class _PathResolver:
-    """Resolve ``Path(__file__)``-based expressions to repository paths."""
+    """Resolve ``Path(__file__)``-based expressions to repository paths.
 
-    def __init__(self, relpath: str, tree: ast.AST) -> None:
+    ``module_path`` maps a dotted ``merxen`` module name to its file, so that
+    ``<imported module>.__file__`` resolves too (a test scanning a package's
+    source tree)."""
+
+    def __init__(
+        self,
+        relpath: str,
+        tree: ast.AST,
+        module_path: Callable[[str], str | None] | None = None,
+    ) -> None:
         self.relpath = relpath
+        self.module_path = module_path or (lambda _dotted: None)
         self.bindings: dict[str, list[ast.expr]] = {}
+        #: Local names bound to an imported module (``import a.b as x``).
+        self.modules: dict[str, str] = {}
         for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.asname:
+                        self.modules[alias.asname] = alias.name
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                for alias in node.names:
+                    self.modules[alias.asname or alias.name] = (
+                        f"{node.module}.{alias.name}"
+                    )
             targets: list[ast.expr] = []
             value: ast.expr | None = None
             if isinstance(node, ast.Assign):
@@ -274,6 +295,10 @@ class _PathResolver:
                 return out
             finally:
                 self._active.discard(node.id)
+        if isinstance(node, ast.Attribute) and node.attr == "__file__":
+            dotted = self._dotted(node.value)
+            found = self.module_path(dotted) if dotted else None
+            return [(found, False)] if found else []
         if isinstance(node, ast.Call):
             func = node.func
             if isinstance(func, ast.Name) and func.id in (
@@ -282,6 +307,11 @@ class _PathResolver:
                 "PosixPath",
             ):
                 return self._join_args(node.args)
+            if (
+                (isinstance(func, ast.Name) and func.id in ("str", "fspath"))
+                or (isinstance(func, ast.Attribute) and func.attr == "fspath")
+            ) and len(node.args) == 1:
+                return self.resolve(node.args[0])
             if isinstance(func, ast.Attribute):
                 if (
                     func.attr in ("Path", "PurePath", "PosixPath")
@@ -323,6 +353,16 @@ class _PathResolver:
             return self._join(self.resolve(node.left), [node.right])
         return []
 
+    def _dotted(self, node: ast.expr) -> str | None:
+        """The module name an expression such as ``pkg`` or ``merxen.io``
+        stands for, through the file's imports."""
+        if isinstance(node, ast.Name):
+            return self.modules.get(node.id, node.id)
+        if isinstance(node, ast.Attribute):
+            head = self._dotted(node.value)
+            return f"{head}.{node.attr}" if head else None
+        return None
+
     def _join_args(self, args: Sequence[ast.expr]) -> list[tuple[str, bool]]:
         if not args:
             return []
@@ -353,12 +393,29 @@ class _PathResolver:
 class _Context:
     """One parsed file and what the analysis of any part of it needs."""
 
-    def __init__(self, path: str, tree: ast.AST, *, is_test_side: bool) -> None:
+    def __init__(
+        self,
+        path: str,
+        tree: ast.AST,
+        *,
+        is_test_side: bool,
+        module_path: Callable[[str], str | None] | None = None,
+    ) -> None:
         self.path = path
         self.tree = tree
         self.is_test_side = is_test_side
         self.read = _read_only_nodes(tree) if is_test_side else set()
-        self.resolver = _PathResolver(path, tree)
+        self.resolver = _PathResolver(path, tree, module_path)
+        #: Directories a plain ``import x`` may resolve against (see
+        #: :meth:`RepoIndex._local_import`): the repository root, every
+        #: directory from the file's own up to ``tests/`` (pytest puts the
+        #: first one without an ``__init__.py`` on ``sys.path``), and the
+        #: directories the file adds to ``sys.path``.
+        self.import_bases = _import_bases(path)
+        if is_test_side:
+            for extra in _sys_path_entries(tree, self.resolver):
+                if extra not in self.import_bases:
+                    self.import_bases.append(extra)
         # Only whole ``a / "b" / "c"`` chains count: their left parts name
         # directories the code does not read as a whole.
         self.inner = {
@@ -477,6 +534,84 @@ def _fstring_head(node: ast.JoinedStr) -> str:
     return head
 
 
+def _import_bases(path: str) -> list[str]:
+    """The repository root and every directory from ``path``'s up to its
+    top-level directory (``tests/`` for a test file)."""
+    bases = [""]
+    directory = PurePosixPath(path).parent
+    while directory.as_posix() not in (".", ""):
+        bases.append(directory.as_posix())
+        directory = directory.parent
+    return bases
+
+
+def _sys_path_entries(tree: ast.AST, resolver: _PathResolver) -> list[str]:
+    """Repository directories the code adds to ``sys.path`` (``insert`` or
+    ``append``), also inside code strings run with ``python -c``."""
+    out: list[str] = []
+    for node in ast.walk(tree):
+        arguments: list[ast.expr] = []
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("insert", "append")
+            and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr == "path"
+            and node.args
+        ):
+            arguments = [node.args[-1]]
+        elif isinstance(node, ast.JoinedStr) and "sys.path" in _fstring_text(node):
+            arguments = [
+                v.value for v in node.values if isinstance(v, ast.FormattedValue)
+            ]
+        for argument in arguments:
+            for resolved, _prefix_only in resolver.resolve(argument):
+                normalised = _normalise(resolved)
+                if normalised is not None and normalised not in out:
+                    out.append(normalised)
+    return out
+
+
+def _fstring_text(node: ast.JoinedStr, placeholder: str = "None") -> str:
+    """An f-string's text with each formatted value replaced by ``placeholder``."""
+    return "".join(
+        v.value
+        if isinstance(v, ast.Constant) and isinstance(v.value, str)
+        else placeholder
+        for v in node.values
+    )
+
+
+_CODE_IMPORT_LINE = re.compile(r"^\s*(?:import\s+[\w.]|from\s+[\w.]+\s+import\b)", re.M)
+
+
+def _code_imports(text: str) -> list[ast.Import | ast.ImportFrom]:
+    """The import statements of Python code held in a string (a ``python -c``
+    program or a script a test writes): each ``import``/``from`` line,
+    parsed on its own so the rest of the code need not parse."""
+    if "import" not in text or not _CODE_IMPORT_LINE.search(text):
+        return []
+    out: list[ast.Import | ast.ImportFrom] = []
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        index += 1
+        if not _CODE_IMPORT_LINE.match(line):
+            continue
+        # A parenthesised import continues to its closing parenthesis.
+        while "(" in line and ")" not in line and index < len(lines):
+            line += " " + lines[index].strip()
+            index += 1
+        statement = line.split(";", 1)[0].split("#", 1)[0].strip()
+        try:
+            parsed = ast.parse(statement)
+        except SyntaxError:
+            continue
+        out.extend(n for n in parsed.body if isinstance(n, ast.Import | ast.ImportFrom))
+    return out
+
+
 def _path_from_literal(text: str, top_level: frozenset[str]) -> str | None:
     """A repository path spelled as a whole string literal, if it is one."""
     if not text or len(text) > 300 or any(c.isspace() for c in text):
@@ -510,6 +645,9 @@ class RepoIndex:
         self.command_modules = self._command_modules()
         self.facts: dict[str, FileFacts] = {}
         self.fixtures: dict[str, dict[str, str]] = {}
+        #: Identifiers in each Python file under tests/ (fixture links and
+        #: the helper-name safety net in :func:`select`).
+        self.words: dict[str, frozenset[str]] = {}
         for path in self.files:
             self.facts[path] = self._analyse(path)
         self._link_fixtures()
@@ -606,7 +744,15 @@ class RepoIndex:
             facts = FileFacts()
             facts.references.add("src/merxen")
             return facts
-        context = _Context(path, tree, is_test_side=not path.startswith("src/"))
+        context = _Context(
+            path,
+            tree,
+            is_test_side=not path.startswith("src/"),
+            module_path=self.module_files.get,
+        )
+        if not context.is_test_side:
+            # Package code imports only merxen modules and siblings.
+            context.import_bases = ["", PurePosixPath(path).parent.as_posix()]
         if PurePosixPath(path).name == "conftest.py" and path.startswith("tests/"):
             facts = self._analyse_conftest(context)
         else:
@@ -616,7 +762,21 @@ class RepoIndex:
         if path.startswith("tests/"):
             for conftest in self._ancestor_conftests(path):
                 facts.add_edge(conftest)
+            # pytest imports every package __init__ above a test module first.
+            for init in self._ancestor_inits(path):
+                facts.add_edge(init)
         return facts
+
+    def _ancestor_inits(self, path: str) -> list[str]:
+        """The package ``__init__.py`` files above ``path`` (not itself)."""
+        out = []
+        directory = PurePosixPath(path).parent
+        while directory.as_posix() not in (".", ""):
+            init = f"{directory.as_posix()}/__init__.py"
+            if init != path and init in self.file_set:
+                out.append(init)
+            directory = directory.parent
+        return out
 
     def _ancestor_conftests(self, path: str) -> list[str]:
         """The ``conftest.py`` files whose fixtures ``path`` can use (not itself)."""
@@ -691,7 +851,6 @@ class RepoIndex:
         self, facts: FileFacts, context: _Context, roots: Sequence[ast.AST]
     ) -> None:
         """Add the imports, strings and path expressions under ``roots``."""
-        path = context.path
         seen: set[int] = set()
         for root in roots:
             for node in ast.walk(root):
@@ -699,16 +858,18 @@ class RepoIndex:
                     continue
                 seen.add(id(node))
                 in_read = id(node) in context.read
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        self._absolute_import(facts, path, alias.name)
-                elif isinstance(node, ast.ImportFrom):
-                    self._from_import(facts, path, node)
+                if isinstance(node, ast.Import | ast.ImportFrom):
+                    self._import(facts, context, node)
                 elif isinstance(node, ast.Constant) and isinstance(node.value, str):
                     self._string(
                         facts, node.value, context.is_test_side, in_read=in_read
                     )
+                    # Code run as ``python -c`` or written to a script.
+                    for statement in _code_imports(node.value):
+                        self._import(facts, context, statement)
                 elif isinstance(node, ast.JoinedStr):
+                    for statement in _code_imports(_fstring_text(node)):
+                        self._import(facts, context, statement)
                     head = _fstring_head(node)
                     match = re.fullmatch(r"(merxen(?:\.\w+)*)\.?", head)
                     if match:
@@ -733,11 +894,11 @@ class RepoIndex:
         for path in self.files:
             if not (path.startswith("tests/") and path.endswith(".py")):
                 continue
+            self.words[path] = frozenset(re.findall(r"[A-Za-z_]\w*", self._read(path)))
             ancestors = self._ancestor_conftests(path)
             if not ancestors:
                 continue
-            text = self._read(path)
-            words = set(re.findall(r"[A-Za-z_]\w*", text))
+            words = self.words[path]
             for conftest in ancestors:
                 for fixture, node in self.fixtures.get(conftest, {}).items():
                     if fixture in words:
@@ -805,13 +966,22 @@ class RepoIndex:
         for resolved, _prefix_only in resolver.resolve(node):  # type: ignore[arg-type]
             self._reference(facts, _normalise(resolved), in_read=in_read)
 
-    def _absolute_import(self, facts: FileFacts, path: str, name: str) -> None:
-        if name == "merxen" or name.startswith("merxen."):
-            self._module_edges(facts, name)
+    def _import(
+        self, facts: FileFacts, context: _Context, node: ast.Import | ast.ImportFrom
+    ) -> None:
+        if isinstance(node, ast.ImportFrom):
+            self._from_import(facts, context, node)
             return
-        self._local_import(facts, path, name, None)
+        for alias in node.names:
+            if alias.name == "merxen" or alias.name.startswith("merxen."):
+                self._module_edges(facts, alias.name)
+            else:
+                self._local_import(facts, context, alias.name, None)
 
-    def _from_import(self, facts: FileFacts, path: str, node: ast.ImportFrom) -> None:
+    def _from_import(
+        self, facts: FileFacts, context: _Context, node: ast.ImportFrom
+    ) -> None:
+        path = context.path
         module = node.module or ""
         if node.level == 0 and (module == "merxen" or module.startswith("merxen.")):
             for alias in node.names:
@@ -825,7 +995,7 @@ class RepoIndex:
             return
         if node.level == 0:
             for alias in node.names:
-                self._local_import(facts, path, module, alias.name)
+                self._local_import(facts, context, module, alias.name)
             return
         base = PurePosixPath(path).parent
         for _ in range(node.level - 1):
@@ -849,13 +1019,15 @@ class RepoIndex:
             facts.references.add(target.as_posix())
 
     def _local_import(
-        self, facts: FileFacts, path: str, module: str, name: str | None
+        self, facts: FileFacts, context: _Context, module: str, name: str | None
     ) -> None:
-        """Imports of repository files outside the package (``tests.x``, siblings)."""
+        """Imports of repository files outside the package (``tests.x``,
+        siblings, ``test_pkg.helper`` from another test package), resolved
+        against every directory in ``context.import_bases``."""
+        path = context.path
         dotted = f"{module}.{name}" if name else module
         parts = dotted.split(".")
-        parent = PurePosixPath(path).parent.as_posix()
-        for base in ("", parent):
+        for base in context.import_bases:
             for end in range(len(parts), 0, -1):
                 stem = "/".join(parts[:end])
                 rel = f"{base}/{stem}" if base else stem
@@ -913,7 +1085,8 @@ class RepoIndex:
             if path.endswith(".py"):
                 by_stem.setdefault(pure.stem, []).append(path)
         for path, facts in self.facts.items():
-            if path.startswith("src/") or not path.endswith(".py"):
+            # Python files outside the package and conftest fixture nodes.
+            if path.startswith("src/") or not (path.endswith(".py") or "::" in path):
                 continue
             for token in facts.tokens:
                 if token in self.command_modules:
@@ -937,6 +1110,23 @@ class RepoIndex:
                 for target in runs:
                     if target.endswith(".nf"):
                         facts.add_edge(target)
+        # A test whose helper or fixture launches Nextflow runs the workflow
+        # files named anywhere in its closure (the test may name the file and
+        # leave the launch to the helper).
+        for test in [p for p in self.files if _is_test_file(p)]:
+            closure = self.closure(test)
+            side = [c for c in closure if not c.startswith("src/") and c in self.facts]
+            if not any(self.facts[c].launches_nextflow for c in side):
+                continue
+            references: set[str] = set()
+            tokens: set[str] = set()
+            for c in side:
+                references |= self.facts[c].run_references
+                tokens |= self.facts[c].run_tokens
+            for target in self._named_files(references, tokens, by_basename, by_stem):
+                if target.endswith(".nf"):
+                    self.facts[test].add_edge(target)
+        self._closures.clear()
 
     def _named_files(
         self,
@@ -1194,6 +1384,19 @@ def select(
             mapped = True
         if not mapped:
             return full(f"{path} has no mapping to tests")
+
+        if path.startswith("tests/") and path.endswith(".py"):
+            # Safety net for imports the graph cannot resolve (a helper loaded
+            # by a computed path, from another test package or a subprocess):
+            # every test whose closure has a file naming the module's stem.
+            stem = pure.stem
+            if stem not in ("__init__", "conftest") and len(stem) >= _MIN_NAME_LENGTH:
+                naming = {
+                    f for f, words in index.words.items() if stem in words and f != path
+                }
+                for test, profile in profiles.items():
+                    if test in naming or not naming.isdisjoint(profile[0]):
+                        hit(test, path)
 
         name_hit = (
             len(pure.name) >= _MIN_NAME_LENGTH and pure.name not in _GENERIC_BASENAMES
