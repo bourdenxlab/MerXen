@@ -107,6 +107,8 @@ def normalizeAnalysisMode(rawValue) {
         "m": "merscope",
         "xenium": "xenium",
         "x": "xenium",
+        "atera": "atera",
+        "a": "atera",
     ]
     if (!aliases.containsKey(key)) {
         throw new IllegalArgumentException(
@@ -162,6 +164,9 @@ def activePlatformsForMode(analysisMode) {
     }
     if (analysisMode == "xenium") {
         return ["XENIUM"]
+    }
+    if (analysisMode == "atera") {
+        return ["ATERA"]
     }
     throw new IllegalArgumentException("Unknown analysis mode: ${analysisMode}")
 }
@@ -424,7 +429,35 @@ def buildConfigForPlatform(row, pairId, platform) {
         ]
     }
 
+    // ATERA writes the only build JSON with atera_* keys, so the XENIUM and
+    // MERSCOPE configs (and their task hashes) are unchanged.
+    if (platform == "ATERA") {
+        return [
+            dataset_name: "${pairId}_ATERA",
+            platform: "ATERA",
+            input_path: input.inputDir ?: input.spatialdataPath,
+            output_path: "spatialdata_out/source_spatialdata.zarr",
+            persistent_output_path: input.spatialdataPath ?: null,
+            atera_spec_path: chooseField(row, ["atera_spec_path"]) ?: null,
+            merscope: [:],
+            xenium: [:],
+            atera: ateraBuildOptions(params),
+        ]
+    }
+
     throw new IllegalArgumentException("Unknown platform: ${platform}")
+}
+
+def ateraBuildOptions(params) {
+    def options = [
+        min_qv: params.atera_min_qv == null ? null : (params.atera_min_qv as double),
+        species: normalizeSpecies(params.species),
+    ]
+    // The watchdog cap of the build (the local executor does not cap memory).
+    if (params.atera_build_max_rss_gb != null) {
+        options.max_rss_gb = params.atera_build_max_rss_gb as double
+    }
+    return options
 }
 
 def segmentMetaForPlatform(row, platform, params) {
@@ -2122,7 +2155,39 @@ def pciseqConfigJson(pairId, segmentation, platform, sampleId, spatialdataPath, 
     ]))
 }
 
+// Stages implemented for ATERA rows; later stages land with the native
+// segmentation route (plan AT-6).
+def ateraImplementedStages() {
+    return ["build_spatialdata"]
+}
+
+def appendAteraStagePreflightChecks(errors, settings) {
+    if (!("ATERA" in settings.active_platforms)) {
+        return
+    }
+    def unsupported = settings.selected_stages.findAll { stage ->
+        !(stage in ateraImplementedStages())
+    }
+    if (!settings.selected_stages || unsupported) {
+        errors.add(
+            "ATERA rows run only ${ateraImplementedStages().join(', ')} for now; " +
+            "this row selects ${settings.selected_stages.join(' -> ') ?: 'no stage'}. " +
+            "Set stop_stage=build_spatialdata in the samplesheet row of " +
+            "${settings.pair_id} (a start_stage or only_stage there must select " +
+            "build_spatialdata too)."
+        )
+    }
+}
+
 def runPreflightChecks(row, settings, params) {
+    def ateraErrors = []
+    appendAteraStagePreflightChecks(ateraErrors, settings)
+    if (ateraErrors) {
+        throw new IllegalArgumentException(
+            "Preflight checks failed for sample ${settings.pair_id}:\n" +
+            ateraErrors.collect { errorMessage -> " - ${errorMessage}" }.join("\n")
+        )
+    }
     CellposeSettings.preflight(row, settings, params)
     def errors = []
     appendRegisterImagesPreflightChecks(errors, settings)
