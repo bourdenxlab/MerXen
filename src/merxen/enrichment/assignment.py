@@ -13,7 +13,6 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import spatialdata as sd
-from scipy import sparse
 from spatialdata.models import ShapesModel, TableModel
 from spatialdata.transformations import get_transformation
 from tqdm.auto import tqdm
@@ -43,6 +42,7 @@ from merxen.segmentation.proseg_hybrid import (
     PROSEG_HYBRID_SHAPE_NAME,
     PROSEG_HYBRID_TABLE_NAME,
 )
+from merxen.sparse_counts import SparseCountAccumulator
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +203,31 @@ def clone_table_for_region(table_obj: ad.AnnData, region_name: str) -> ad.AnnDat
     )
 
 
+def _lookup_positions(values: np.ndarray, positions: dict[Any, int]) -> np.ndarray:
+    """Map each value to its position, or -1 when it has none.
+
+    Each distinct value is looked up once, so a chunk of many transcripts
+    costs one dictionary lookup per distinct cell or gene.
+
+    Args:
+        values: Values to look up (cell IDs or gene names).
+        positions: Position of each known value.
+
+    Returns:
+        int64 positions aligned with ``values``.
+    """
+    codes, uniques = pd.factorize(values)
+    unique_positions = np.fromiter(
+        (positions.get(value, -1) for value in uniques.tolist()),
+        dtype=np.int64,
+        count=len(uniques),
+    )
+    looked_up = np.full(len(codes), -1, dtype=np.int64)
+    known = codes >= 0
+    looked_up[known] = unique_positions[codes[known]]
+    return looked_up
+
+
 def compute_table_from_points_for_shape(
     dataset_name: str,
     points_obj: Any,
@@ -235,7 +260,7 @@ def compute_table_from_points_for_shape(
     gene_to_idx = {gene: i for i, gene in enumerate(genes)}
 
     _ = gdf_shapes.sindex
-    counts_csr = sparse.csr_matrix((len(cell_ids), len(genes)), dtype=np.int64)
+    counts = SparseCountAccumulator(len(cell_ids), len(genes))
 
     n_input = 0
     n_used = 0
@@ -292,24 +317,11 @@ def compute_table_from_points_for_shape(
                     joined.loc[assigned_mask, "gene"].astype(str).to_numpy(dtype=object)
                 )
 
-                cidx = np.fromiter(
-                    (cell_to_idx.get(int(cell), -1) for cell in assigned_cells),
-                    dtype=np.int64,
-                    count=len(assigned_cells),
-                )
-                gidx = np.fromiter(
-                    (gene_to_idx.get(gene, -1) for gene in assigned_genes),
-                    dtype=np.int64,
-                    count=len(assigned_genes),
-                )
+                cidx = _lookup_positions(assigned_cells, cell_to_idx)
+                gidx = _lookup_positions(assigned_genes, gene_to_idx)
                 keep = (cidx >= 0) & (gidx >= 0)
                 if np.any(keep):
-                    data = np.ones(int(np.sum(keep)), dtype=np.int64)
-                    chunk_mat = sparse.coo_matrix(
-                        (data, (cidx[keep], gidx[keep])),
-                        shape=(len(cell_ids), len(genes)),
-                    ).tocsr()
-                    counts_csr = counts_csr + chunk_mat
+                    counts.add(cidx[keep], gidx[keep])
                     n_assigned += int(np.sum(keep))
 
             n_used += len(x_valid)
@@ -346,7 +358,7 @@ def compute_table_from_points_for_shape(
     var = pd.DataFrame(index=pd.Index(genes, dtype=str, name="gene"))
     var["gene"] = var.index.astype(str)
 
-    adata = ad.AnnData(X=counts_csr, obs=obs, var=var)
+    adata = ad.AnnData(X=counts.to_csr(), obs=obs, var=var)
     table = TableModel.parse(
         adata,
         region=shape_key,

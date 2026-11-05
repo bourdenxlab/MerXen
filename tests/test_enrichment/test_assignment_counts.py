@@ -133,6 +133,7 @@ def _table_for(
     points: pd.DataFrame | dd.DataFrame,
     shapes: gpd.GeoDataFrame,
     chunk_rows: int,
+    gene_list: list[str] = _GENES,
 ) -> ad.AnnData:
     table, _ = compute_table_from_points_for_shape(
         dataset_name="S1_XENIUM",
@@ -140,7 +141,7 @@ def _table_for(
         shape_gdf=shapes,
         shape_id_col="instance_id",
         shape_key="MOSAIK_proseg",
-        gene_list=_GENES,
+        gene_list=gene_list,
         chunk_rows=chunk_rows,
     )
     return table
@@ -156,6 +157,27 @@ def test_counts_match_the_reference_accumulation(chunk_rows: int) -> None:
 
     _assert_same_csr(table.X, _reference_counts(points, shapes, _GENES, chunk_rows))
     assert table.X.nnz > 0
+
+
+def test_counts_match_the_reference_for_a_whole_transcriptome_panel() -> None:
+    """Thousands of genes over many chunks give the original matrix."""
+    gene_list = [f"Gene{index:05d}" for index in range(20_000)]
+    rng = np.random.default_rng(6)
+    shapes = _grid_shapes(6)
+    points = pd.DataFrame(
+        {
+            "x": rng.uniform(0.0, 12.0, 3000),
+            "y": rng.uniform(0.0, 12.0, 3000),
+            "gene": rng.choice(np.asarray([*gene_list[::7], "Unlisted"]), 3000),
+        }
+    )
+
+    table = _table_for(points, shapes, chunk_rows=250, gene_list=gene_list)
+
+    _assert_same_csr(
+        table.X, _reference_counts(points, shapes, gene_list, chunk_rows=250)
+    )
+    assert table.n_vars == 20_000
 
 
 def test_counts_match_the_reference_with_overlapping_shapes() -> None:
