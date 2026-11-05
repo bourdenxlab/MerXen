@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +26,7 @@ from merxen.platforms import (
     ORIGINAL_CELL_SHAPE_KEYS,
     find_platform_spec,
     platform_spec,
+    spec_file_pixel_size,
 )
 from merxen.plotting import prepare_plot_output, save_figure
 
@@ -1439,14 +1439,9 @@ def _find_xenium_microns_per_pixel(zarr_path: Path | str | None) -> float | None
             matrix = np.loadtxt(candidate)
             if matrix.shape == (3, 3) and float(matrix[0, 0]) != 0.0:
                 return 1.0 / float(matrix[0, 0])
-        try:
-            data = json.loads(candidate.read_text())
-        except Exception:  # noqa: BLE001
-            continue
-        if "pixel_size" in data:
-            return float(data["pixel_size"])
-        if "microns_per_pixel" in data:
-            return float(data["microns_per_pixel"])
+        pixel_size = spec_file_pixel_size(candidate)
+        if pixel_size is not None:
+            return pixel_size
     return None
 
 

@@ -14,6 +14,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
+from merxen.platforms import PlatformName
+
 
 class CellposeConfig(BaseModel):
     """Parameters for Cellpose segmentation."""
@@ -396,18 +398,82 @@ class XeniumBuildConfig(BaseModel):
     cells_table: bool = True
 
 
+#: Rows per ``row_range`` transcript partition must be a multiple of this, the
+#: vendor's chunk rows, so partition edges cost no extra chunk decode.
+ATERA_PARTITION_ROW_ALIGNMENT = 1_048_576
+
+
+class AteraBuildConfig(BaseModel):
+    """Options for constructing an Atera SpatialData object (plan §4.3).
+
+    The build options select and shape the elements; ``max_rss_gb`` and
+    ``polygon_n_jobs`` only govern how the build runs, so they are left out
+    of its reuse fingerprint.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    transcripts: bool = True
+    min_qv: float | None = Field(default=20.0, ge=0.0)
+    transcript_partition_rows: int = Field(default=4_194_304, gt=0)
+    spatial_order: Literal["row_range", "tile_blocks"] = "row_range"
+    spatial_block_um: float = Field(default=500.0, gt=0.0)
+    min_block_rows: int = Field(default=1_048_576, ge=1)
+    max_tiles_in_flight: int = Field(default=4, ge=1)
+    emit_codeword_index: bool = False
+    tile_allowlist: list[str] | None = None
+    cells_labels: bool = True
+    nucleus_labels: bool = True
+    cells_boundaries: bool = True
+    nucleus_boundaries: bool = True
+    boundary_source: Literal["masks", "vendor_polygons"] = "masks"
+    boundary_simplify_px: float = Field(default=0.25, ge=0.0)
+    polygon_n_jobs: int | None = Field(default=None, ge=1)
+    cells_table: bool = True
+    table_gex_only: bool = True
+    keep_vendor_annotations: bool = True
+    morphology_2d: bool = True
+    morphology_levels: int = Field(default=5, ge=1)
+    species: Literal["human", "mouse"] | None = None
+    max_rss_gb: float | None = Field(default=None, gt=0.0)
+    transcripts_path: Path | None = None
+    cells_path: Path | None = None
+    cell_feature_matrix_path: Path | None = None
+
+    @field_validator("transcript_partition_rows")
+    @classmethod
+    def _aligned_partition_rows(cls: type[AteraBuildConfig], value: int) -> int:
+        if value % ATERA_PARTITION_ROW_ALIGNMENT:
+            raise ValueError(
+                "transcript_partition_rows must be a multiple of "
+                f"{ATERA_PARTITION_ROW_ALIGNMENT:,} (the vendor chunk rows)"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _table_needs_cell_shapes(self: AteraBuildConfig) -> AteraBuildConfig:
+        if self.cells_table and not self.cells_boundaries:
+            raise ValueError(
+                "cells_table needs cells_boundaries: the table is annotated by "
+                "the cell shapes"
+            )
+        return self
+
+
 class SpatialDataBuildConfig(BaseModel):
     """Configuration for the raw-input to SpatialData build step."""
 
     dataset_name: str
-    platform: Literal["MERSCOPE", "XENIUM"]
+    platform: PlatformName
     input_path: Path
     output_path: Path
     persistent_output_path: Path | None = None
     merscope_transform_path: Path | None = None
     xenium_spec_path: Path | None = None
+    atera_spec_path: Path | None = None
     merscope: MerscopeBuildConfig = MerscopeBuildConfig()
     xenium: XeniumBuildConfig = XeniumBuildConfig()
+    atera: AteraBuildConfig = AteraBuildConfig()
 
 
 class DatasetConfig(BaseModel):

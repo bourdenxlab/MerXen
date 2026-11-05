@@ -20,13 +20,26 @@ This module imports the standard library only, so every MerXen module
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal
 
-PlatformName = Literal["MERSCOPE", "XENIUM"]
-"""Names of the supported platforms (the configuration Literals use the same set)."""
+PlatformName = Literal["MERSCOPE", "XENIUM", "ATERA"]
+"""Names of the registered platforms.
+
+Each configuration ``platform`` Literal is widened to this set only when its
+stage handles every platform; until then it lists the platforms it supports.
+"""
+
+PixelConvention = Literal["center", "corner"]
+"""How a micron coordinate maps to a vendor mask pixel.
+
+``"center"`` rounds to the nearest pixel centre (``rint``), ``"corner"`` takes
+the pixel whose ``[i * ps, (i + 1) * ps)`` interval holds it (``floor``).
+"""
 
 PlatformFamily = Literal["10X", "MERSCOPE"]
 """Vendor family of a platform; members of a family share readers and layouts."""
@@ -58,6 +71,13 @@ class PlatformSpec:
             column of the latest store, or ``None`` when no alias is needed.
         fallback_um_per_px: Isotropic microns per morphology pixel used when no
             transform or spec file can be found.
+        nucleus_ids_are_cell_ids: Whether the vendor nucleus layer is keyed by
+            cell IDs. When False (ATERA: one row per nucleus), nucleus
+            consumers join through ``cell_instance_id``.
+        spec_sidecar_names: Spec files holding ``pixel_size``, relative to a
+            built store or raw folder, in lookup order (``find_um_per_px``).
+        mask_pixel_convention: Pixel convention of micron lookups into the
+            vendor masks.
     """
 
     name: str
@@ -68,6 +88,9 @@ class PlatformSpec:
     default_channels: tuple[str, ...]
     quality_column_alias: str | None
     fallback_um_per_px: float
+    nucleus_ids_are_cell_ids: bool = True
+    spec_sidecar_names: tuple[str, ...] = ()
+    mask_pixel_convention: PixelConvention = "center"
 
     @property
     def original_shape_keys(self) -> tuple[str, ...]:
@@ -98,10 +121,28 @@ PLATFORM_SPECS: Final[Mapping[str, PlatformSpec]] = MappingProxyType(
             default_channels=("DAPI", "18S"),
             quality_column_alias=None,
             fallback_um_per_px=0.2125,
+            spec_sidecar_names=(
+                "experiment.xenium",
+                "specs.json",
+                "specs/specs.json",
+            ),
+        ),
+        "ATERA": PlatformSpec(
+            name="ATERA",
+            family="10X",
+            native_image_key="morphology_focus",
+            original_cell_shape_key="atera_cell_boundaries",
+            original_nucleus_shape_key="atera_nucleus",
+            default_channels=("DAPI", "18S"),
+            quality_column_alias=None,
+            fallback_um_per_px=0.21249222,
+            nucleus_ids_are_cell_ids=False,
+            spec_sidecar_names=("atera/experiment.spatial", "experiment.spatial"),
+            mask_pixel_convention="corner",
         ),
     }
 )
-"""Every supported platform by canonical name, in the order MERSCOPE, XENIUM."""
+"""Every registered platform by canonical name: MERSCOPE, XENIUM, ATERA."""
 
 ORIGINAL_CELL_SHAPE_KEYS: Final[frozenset[str]] = frozenset(
     spec.original_cell_shape_key for spec in PLATFORM_SPECS.values()
@@ -120,7 +161,7 @@ def supported_platforms() -> tuple[str, ...]:
     """Return the canonical names of the supported platforms in registry order.
 
     Returns:
-        The platform names, e.g. ``("MERSCOPE", "XENIUM")``.
+        The platform names, e.g. ``("MERSCOPE", "XENIUM", "ATERA")``.
     """
     return tuple(PLATFORM_SPECS)
 
@@ -167,3 +208,58 @@ def find_platform_spec(platform: str | None) -> PlatformSpec | None:
     if platform is None:
         return None
     return PLATFORM_SPECS.get(_canonical_name(platform))
+
+
+def spec_file_pixel_size(path: Path) -> float | None:
+    """Read the microns per pixel from a JSON spec file.
+
+    Args:
+        path: A spec file such as ``experiment.xenium`` or ``experiment.spatial``.
+
+    Returns:
+        Its ``pixel_size`` (else ``microns_per_pixel``) as a float, or ``None``
+        when the file is missing, is not a JSON object or holds neither key.
+    """
+    try:
+        data = json.loads(Path(path).read_text())
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    for key in ("pixel_size", "microns_per_pixel"):
+        if key in data:
+            try:
+                return float(data[key])
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def find_um_per_px(root: Path, platform: str) -> float:
+    """Return the microns per morphology pixel recorded under a store or folder.
+
+    The platform's ``spec_sidecar_names`` are tried in order under ``root``
+    (a built SpatialData store or a raw output folder); the first file that
+    yields a pixel size (:func:`spec_file_pixel_size`) wins.
+
+    Args:
+        root: Built store or raw folder.
+        platform: Registered platform name.
+
+    Returns:
+        Microns per level-0 morphology pixel.
+
+    Raises:
+        UnknownPlatformError: If the platform is not registered.
+        FileNotFoundError: If no spec file under ``root`` gives a pixel size
+            (MERSCOPE stores record a transform matrix instead).
+    """
+    spec = platform_spec(platform)
+    for name in spec.spec_sidecar_names:
+        value = spec_file_pixel_size(Path(root, *name.split("/")))
+        if value is not None:
+            return value
+    raise FileNotFoundError(
+        f"No {spec.name} pixel size under the store: looked for "
+        f"{', '.join(spec.spec_sidecar_names) or 'no spec file'}"
+    )

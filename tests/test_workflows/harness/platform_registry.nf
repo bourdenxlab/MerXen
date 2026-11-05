@@ -7,9 +7,9 @@
 //
 // The REGISTRY line feeds the parity test with src/merxen/platforms.py. The
 // UNKNOWN lines call every site converted to a registry lookup with a platform
-// that is not registered (ATERA is not supported before AT-4, and lookups are
-// exact, so "merscope" is not either); each must raise instead of falling into
-// another platform's branch.
+// that is not registered ("COSMX" is no MerXen platform, and lookups are exact,
+// so "merscope" is not either); each must raise instead of falling into another
+// platform's branch.
 //
 // Nextflow strict syntax: only top-level functions may be called by name.
 
@@ -72,7 +72,7 @@ def unknownPlatformCases(String platform) {
     recordUnknown("${platform}/channels_for_row_override") {
         // The row overrides the channels, so no platform default is needed.
         CellposeSettings.channelsForRow(
-            row + [atera_channels: "DAPI,18S", merscope_channels: "DAPI,18S"],
+            row + [cosmx_channels: "DAPI,18S", merscope_channels: "DAPI,18S"],
             platform,
         )
     }
@@ -80,7 +80,7 @@ def unknownPlatformCases(String platform) {
 
 workflow {
     printRegistry()
-    unknownPlatformCases("ATERA")
+    unknownPlatformCases("COSMX")
     unknownPlatformCases("merscope")
     println "DONE"
 }

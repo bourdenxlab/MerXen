@@ -48,7 +48,7 @@ from merxen.io.spatialdata_schema import (
 from merxen.masks import register_missing_mask_branches
 from merxen.memory import force_release, log_status
 from merxen.path_utils import remove_path, stage_existing_output
-from merxen.platforms import platform_spec
+from merxen.platforms import find_um_per_px, platform_spec, spec_file_pixel_size
 from merxen.segmentation.cellpose import build_cellpose_affine_to_microns
 from merxen.segmentation.mask_geometry import masks_to_labeled_polygons
 from merxen.segmentation.model_identity import (
@@ -317,38 +317,31 @@ def _load_merscope_transform(config: EnrichmentConfig | _TransformInputs) -> np.
 
 
 def _find_xenium_pixel_size(config: EnrichmentConfig | _TransformInputs) -> float:
-    """Find Xenium micron-per-pixel value from config transform sources."""
-    candidates: list[Path] = []
+    """Find Xenium micron-per-pixel value from config transform sources.
+
+    An explicit ``transform_path`` (a micron->pixel matrix or a spec file) comes
+    first; then the platform's spec sidecars (``find_um_per_px``).
+    """
     if config.transform_path is not None:
-        candidates.append(Path(config.transform_path))
-    candidates.extend(
-        [
-            Path(config.original_data_path) / "experiment.xenium",
-            Path(config.original_data_path) / "specs.json",
-            Path(config.original_data_path) / "specs" / "specs.json",
-        ]
-    )
-    for candidate in candidates:
-        if not candidate.exists():
-            continue
-        if candidate.suffix.lower() in {".txt", ".csv"}:
-            matrix = np.loadtxt(candidate)
-            if matrix.shape == (3, 3):
-                # candidate stores micron->pixel, derive mpp from inverse scale.
-                sx = float(matrix[0, 0])
-                if sx != 0:
-                    return 1.0 / sx
-        try:
-            data = json.loads(candidate.read_text())
-            if "pixel_size" in data:
-                return float(data["pixel_size"])
-            if "microns_per_pixel" in data:
-                return float(data["microns_per_pixel"])
-        except Exception:  # noqa: BLE001
-            continue
-    raise FileNotFoundError(
-        "Could not determine Xenium pixel_size from transform_path/original_data_path."
-    )
+        candidate = Path(config.transform_path)
+        if candidate.exists():
+            if candidate.suffix.lower() in {".txt", ".csv"}:
+                matrix = np.loadtxt(candidate)
+                if matrix.shape == (3, 3):
+                    # candidate stores micron->pixel, derive mpp from inverse scale.
+                    sx = float(matrix[0, 0])
+                    if sx != 0:
+                        return 1.0 / sx
+            pixel_size = spec_file_pixel_size(candidate)
+            if pixel_size is not None:
+                return pixel_size
+    try:
+        return find_um_per_px(Path(config.original_data_path), "XENIUM")
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            "Could not determine Xenium pixel_size from "
+            "transform_path/original_data_path."
+        ) from None
 
 
 @dataclass(frozen=True)
