@@ -891,7 +891,9 @@ def assign_labels_from_masks(
             convention of the Cellpose masks written by MerXen. ``"corner"``
             takes the floor, so pixel ``i`` covers ``[i, i + 1)``; this matches
             10x vendor masks, where pixel ``i`` covers ``[i * ps, (i + 1) * ps)``
-            microns.
+            microns. A point exactly on a pixel edge can land on either side
+            when ``ps`` is not exactly representable in binary, because the
+            affine is applied in floating point.
 
     Returns:
         Array of cell labels (0 = unassigned).
