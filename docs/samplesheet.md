@@ -7,9 +7,11 @@ object-distance settings, MENDER and GASTON settings, `--start_stage`,
 `--stop_stage`, and `--only_stage`
 from the Nextflow command or config, but each row can override those settings
 with optional columns. In the default `analysis_mode=paired`, a row must contain
-one MERSCOPE and one Xenium dataset. In `analysis_mode=merscope` or
-`analysis_mode=xenium`, only the selected platform's source/cache columns are
-required. A template lives at
+one MERSCOPE and one Xenium dataset. In `analysis_mode=merscope`,
+`analysis_mode=xenium` or `analysis_mode=atera`, only the selected platform's
+source/cache columns are required. An `atera` row is one 10x Atera ROI and, for
+now, must set `stop_stage=build_spatialdata` (see
+[Atera rows](#atera-rows)). A template lives at
 [workflows/samplesheet.example.csv](../workflows/samplesheet.example.csv).
 
 > [!WARNING]
@@ -31,7 +33,7 @@ required. A template lives at
 | Column | Required | Description |
 |--------|----------|-------------|
 | `pair_id` | **yes** | Unique identifier for this row. Used as the top-level output directory name. |
-| `analysis_mode` | no | Row-level mode: `paired`, `merscope`, or `xenium`. Blank inherits `--analysis_mode`. |
+| `analysis_mode` | no | Row-level mode: `paired`, `merscope`, `xenium` or `atera`. Blank inherits `--analysis_mode`. |
 | `enable_alignment` | no | Row-level alignment switch: `true` or `false`. Blank inherits `--enable_alignment`; only paired rows can run alignment. |
 | `analysis_segmentation` | no | Row-level downstream branch set: `all`, `both`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, `proseg_hybrid`, or comma-separated combinations. `all` expands to all four branches and is the global default; `both` restricts analysis to `reseg,original_seg`; blank inherits `--analysis_segmentation`. |
 | `start_stage` | no | Row-level first stage. Blank inherits `--start_stage` unless `only_stage` applies. |
@@ -81,6 +83,9 @@ required. A template lives at
 | `xenium_min_qv` | no | Minimum transcript quality value to retain. Defaults to `20`. |
 | `xenium_voxel_layers` | no | ProSeg voxel layer count for Xenium. Defaults to `2`. |
 | `xenium_spec_path` | no | Override path to `experiment.xenium` or `specs.json` used to derive the micron→pixel transform. |
+| `atera_dir` | required for Atera rows if no cache | One **extracted** Atera ROI folder (`experiment.spatial`, `morphology_2d/`, the three zarr zips); see [staging](stages/spatialdata-build.md#required-files-and-staging). |
+| `atera_spatialdata_path` | required for Atera rows if no raw dir | Persistent target of the Atera build. Reused only when it is complete and was built from the same inputs and options; a store built with other settings is refused unless `--force_spatialdata_build true`. |
+| `atera_spec_path` | no | Replacement `experiment.spatial` for metadata only; the files still resolve against `atera_dir`. |
 | `xenium_registered_images_csv` | no | CSV listing post-Xenium images (e.g. IF) of this section to register onto the Xenium mask grid, one row per image with its Xenium Explorer matrix. Enables the `register_images` stage for the row. See [Registered-image CSV](#registered-image-csv). |
 
 ### Registered-image CSV
@@ -155,6 +160,11 @@ From [workflows/main.nf](../workflows/main.nf):
 - In `analysis_mode=merscope`, only MERSCOPE source/cache columns are
   required.
 - In `analysis_mode=xenium`, only Xenium source/cache columns are required.
+- In `analysis_mode=atera`, the row must provide `atera_dir` or
+  `atera_spatialdata_path`, and its stages must be `build_spatialdata` only
+  (set `stop_stage=build_spatialdata` in the row). Preflight checks every row
+  before any task starts, so one ATERA row without it stops the whole run,
+  including the other rows of a mixed samplesheet.
 - Blank row-level analysis, alignment, optional-analysis, or stage settings inherit the matching Nextflow
   parameter. Row-level `only_stage` overrides row-level `start_stage` and
   `stop_stage`; when a row sets either start/stop column, the global
@@ -164,6 +174,22 @@ The Python-side parser lives in
 [src/merxen/io/samplesheet.py:52](../src/merxen/io/samplesheet.py#L52). It is
 used by unit tests and can be invoked directly by scripts, but the Nextflow
 workflow parses the CSV itself.
+
+## Atera rows
+
+One row per ROI: each Atera ROI has its own micron frame, so two ROIs of one
+slide are unrelated datasets. Name the row by an alias, never by the run,
+slide, region or instrument names of the ROI folder. Until the native
+segmentation route lands, an Atera row stops after the build:
+
+```csv
+pair_id,analysis_mode,stop_stage,atera_dir,atera_spatialdata_path
+EXAMPLE02,atera,build_spatialdata,$MERXEN_ATERA_RAW_ROOT/<dataset>/outs,/path/to/cache/EXAMPLE02_atera_source.zarr
+```
+
+(Write real paths in the samplesheet; `$MERXEN_ATERA_RAW_ROOT` stands for the
+`.env` location here.) The build's options and the store it writes are
+described in [Stage 1 — Atera](stages/spatialdata-build.md#atera).
 
 ## Minimal example
 

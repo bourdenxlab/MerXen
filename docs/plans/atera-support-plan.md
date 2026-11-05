@@ -6,7 +6,8 @@
 > applies the fidelity, scale, docs-conformance and completeness reviews. Each accepted or rejected point
 > is listed in the Review log (Appendix A). **User decision 2026-11-05 (metadata retention):** the store
 > keeps all vendor metadata verbatim; privacy rules apply only to what is committed to git and to
-> human-facing output (§3.11 D13, Appendix A).
+> human-facing output (§3.11 D13, Appendix A). **AT-4 (2026-11-05):** the builder and BUILD plumbing are
+> implemented; the deviations from this plan are listed in Appendix A ("AT-4 implementation notes").
 
 *Names and paths (2026-11-04).* The only dataset named here is the public 10x dataset
 `Atera_v1_WTA_S4A_Brain_Hippocampus_ND_FF` (atera-1.1.1, human hippocampus, fresh frozen). Data locations
@@ -1712,3 +1713,20 @@ scripts' full-section results.
 | Date | Decision | Effect |
 |---|---|---|
 | 2026-11-05 | Metadata retention: the metadata stored with each run must be as complete as possible; only commits to the repo (and human-facing output) must never show sample names | D13 rewritten (§3.11). The AT-3 sanitisers (`sanitize_experiment_spatial`, `sanitize_panel_config`, `sanitize_metrics_summary`) and their absence tests are removed; `copy_atera_sidecars` and `atera_metadata_attrs` keep everything, with original file names recorded. §1.1 item 6, §2.5, §4.1, §4.2, §7, R7 and Q-list updated |
+
+**AT-4 implementation notes (2026-11-05).** Where the code departs from the text above, and why:
+
+| Plan text | Implementation | Reason |
+|---|---|---|
+| §4.2 `RssWatchdog`: "exit 137 above the limit"; §6.1 "watchdog cap at 120 GB, one retry at ×2" | The watchdog exits **99**; the task retries only exit 137/140 (external kills), with twice the memory reservation | The build JSON is part of the task hash and cannot carry `task.attempt`, so a retry would run with the same cap and stop at the same point. An external kill is retried; a watchdog stop asks the user to raise `atera_build_max_rss_gb` and `atera_build_memory_gb` |
+| §4.4 params | Adds `atera_build_cpus` (16) and `atera_build_max_rss_gb` (120) beside `atera_build_memory_gb` | Tests and small hosts can run the real BUILD task; the cap is explicit |
+| §3.10 preview refusal: "more than 5,000 gene features" | `analysis_sw_version` starting `atera-`, or more than **10,000** panel targets in `experiment.xenium` | Xenium Prime 5K panels have about 5,000 genes plus add-ons and must keep building as XENIUM (Q22 counts them as large Xenium panels) |
+| §4.4 `normalizeAnalysisMode`: update the error text | `atera` and `a` are accepted; the error text is unchanged | The text is in the `modes` golden; the goldens stay byte-identical (new ATERA cases only) |
+| §4.3 `samplesheet.py`: delete (Q14) or add `atera_*` fields | `atera` mode and `atera_dir` / `atera_spatialdata_path` / `atera_spec_path` added | Deleting the module is Q14's separate `[chore]` PR; the mode-parity test needs all three maps to agree now |
+| §4.3 `AteraBuildConfig.morphology_3d` | Not added; `morphology_levels` (default 5) added | 3D ingestion is out of milestone 1, so the flag would only raise; the level count lets the fixture build stay small |
+| §4.3 `find_um_per_px` consumers | The enrichment and sanity-plot Xenium parsers read spec files through `spec_file_pixel_size` / `find_um_per_px`, with unchanged results; the segmentation parser (reads `pixel_size` only) is unchanged | Its behaviour differs from the others (pinned in `tests/test_xenium_pixel_size_parsers.py`); merging it and adding the ATERA arms of all three is AT-6 |
+| §4.4 BUILD GPU closures "require `platform == 'MERSCOPE'`" | They require `platform != 'ATERA'` | Keeps the XENIUM queue exactly as it was |
+| §4.2 build sequence step 8: "aggregates computed in one `dask.compute`" | The aggregates are recorded by the partition reads of spatialdata's points write (one read per partition) and summarised after it | Same single pass, without a second graph |
+| §3.12 "refuse unless `--force-rerun`" | Also: a store without the marker is rebuilt (not refused); with no raw folder a complete store is reused without a fingerprint and an incomplete one fails | A half-written store is never reused, and a store given alone (no `atera_dir`) cannot be fingerprinted |
+
+AT-4 also moves the tests that used `ATERA` as an example of an unregistered platform to `COSMX`.

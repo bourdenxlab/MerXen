@@ -38,7 +38,8 @@ algorithm and adds input validation and type hints. The Atera readers in
 `src/merxen/io/atera_reader.py` follow the I/O patterns of the open
 spatialdata-io pull request for Atera bundles (per-task `ZipStore`, tile
 row-range partitions, `gene_offset` decoding, stored-pyramid reads) but contain
-no further copied code. No endorsement by scverse or the spatialdata-io
+no further copied code; the same holds for the Atera builder
+(`src/merxen/io/builders/atera.py`), which assembles their elements. No endorsement by scverse or the spatialdata-io
 contributors is implied.
 
 ## GASTON

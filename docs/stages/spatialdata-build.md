@@ -1,7 +1,7 @@
 # Stage 1 — SpatialData build
 
 Converts platform-specific raw exports (MERSCOPE region folder or `.vzg2`
-archive, Xenium export folder) into a standard
+archive, Xenium export folder, extracted 10x Atera ROI folder) into a standard
 [SpatialData](https://spatialdata.scverse.org/) zarr archive. All downstream
 stages consume this zarr.
 
@@ -17,6 +17,9 @@ stages consume this zarr.
   optionally subtract the fiducial beads from the PolyT and DAPI planes before
   the max projection. This is off by default; see
   [MERSCOPE bead removal](#merscope-bead-removal-optional).
+- For 10x Atera (whole-transcriptome) ROI folders, writes the store atomically
+  with a completion marker and keeps the vendor metadata whole; see
+  [Atera](#atera).
 
 ## Nextflow process
 
@@ -38,23 +41,28 @@ single-platform mode creates one task per samplesheet row.
 - MERSCOPE builder:
   [`write_merscope_spatialdata`](../../src/merxen/io/builders/merscope.py#L61)
 - Xenium builder:
-  [`write_xenium_spatialdata`](../../src/merxen/io/builders/xenium.py#L15)
+  [`write_xenium_spatialdata`](../../src/merxen/io/builders/xenium.py)
+- Atera builder:
+  [`write_atera_spatialdata`](../../src/merxen/io/builders/atera.py), on the
+  readers in [`atera_reader.py`](../../src/merxen/io/atera_reader.py)
 
 ## Config schema
 
-`SpatialDataBuildConfig` — [config.py:112](../../src/merxen/config.py#L112).
+`SpatialDataBuildConfig` — [config.py](../../src/merxen/config.py).
 
 | Field | Type | Purpose |
 |-------|------|---------|
 | `dataset_name` | `str` | Identifier like `EXAMPLE01_MERSCOPE`. |
-| `platform` | `"MERSCOPE"` \| `"XENIUM"` | Dispatch key. |
+| `platform` | `"MERSCOPE"` \| `"XENIUM"` \| `"ATERA"` | Dispatch key. |
 | `input_path` | `Path` | Raw folder, direct MERSCOPE `.vzg2`, **or** existing SpatialData zarr. |
 | `output_path` | `Path` | Destination inside the Nextflow work dir. |
 | `persistent_output_path` | `Path \| None` | Samplesheet-provided reusable zarr. |
 | `merscope_transform_path` | `Path \| None` | Override for the micron-to-mosaic transform CSV. |
 | `xenium_spec_path` | `Path \| None` | Override for the Xenium experiment / specs JSON. |
+| `atera_spec_path` | `Path \| None` | Metadata-only replacement of the Atera `experiment.spatial`. |
 | `merscope` | `MerscopeBuildConfig` | `z_layers`, `region_name`, `slide_name`, `allow_transform_override_mismatch`, and the optional `bead_removal` block ([below](#configuration)). |
 | `xenium` | `XeniumBuildConfig` | Boundary / label / transcripts toggles. |
+| `atera` | `AteraBuildConfig` | QV filter, partitioning, element toggles, shape source, species check, watchdog cap ([below](#atera-build-options)). |
 
 ## Walkthrough
 
@@ -92,7 +100,9 @@ A paired row with `pair_id=EXAMPLE01` fans out to **two**
 | Neither `<platform>_dir` nor an existing zarr | any | Fails at samplesheet validation. |
 
 A reused MERSCOPE zarr must also agree with the requested bead-removal setting;
-see [Caching and how to rebuild](#caching-and-how-to-rebuild).
+see [Caching and how to rebuild](#caching-and-how-to-rebuild). An Atera store is
+reused only when it is complete and was built from the same inputs and options;
+see [Atera atomicity and reuse](#atomicity-and-reuse).
 
 ## MERSCOPE bead removal (optional)
 
@@ -606,6 +616,159 @@ When the source is bead-corrected, the mask image quantification table
 `bead_removal_version` and `bead_removal_fill`, and its summary JSON gains a
 `bead_removal` entry. A stored table that does not match the store's record is
 re-quantified. Tables of uncorrected samples are unchanged.
+
+## Atera
+
+10x Atera is a near-whole-transcriptome platform (18,049 genes; about 1.6
+billion transcripts per section). MerXen builds one ROI per samplesheet row
+with `analysis_mode=atera`; until the native segmentation route lands (plan
+AT-6) an ATERA row runs **only** `build_spatialdata`, and preflight stops the
+run unless the row sets `stop_stage=build_spatialdata`. The format, decisions
+and their evidence are in the
+[Atera support plan](../plans/atera-support-plan.md).
+
+### Required files and staging
+
+`atera_dir` points at one **extracted** ROI folder. The build needs:
+
+- `experiment.spatial`, `panel_config.json`, `metrics_summary_*.csv` and the
+  other small JSON, CSV and HTML files;
+- `morphology_2d/` with all its `chNNNN_<name>.ome.tif` siblings under their
+  original names (a missing sibling is an error, never a zero-filled channel);
+- `transcripts.zarr.zip`, `cells.zarr.zip` and `cell_feature_matrix.zarr.zip`.
+  Paths come from `experiment.spatial`, then the plain names, then the
+  prefixed names of the public companion downloads
+  (`<dataset>_transcripts.zarr.zip`).
+
+Extract the small files and `morphology_2d/` (about 9 GB) from the outs zip;
+skip `morphology_3d/` (21 GB), `binned_transcripts.zarr.zip` and the CSC
+matrix. The zips nested inside the outs zip cannot be read in place: use the
+standalone downloads next to them. A zip given as `atera_dir` is refused with
+an "extract the outs bundle" message. Under apptainer, the folder must lie
+inside `apptainer_bind_paths`. Data locations are written as `.env`
+variables, e.g. `$MERXEN_ATERA_RAW_ROOT/<dataset>/outs`.
+
+### What the store holds
+
+| Element | Source | Transform to `global` |
+|---|---|---|
+| `images/morphology_focus` (`c, y, x`, uint16; first image) | `morphology_2d/`, channels in OME `TiffData` order, stored pyramid levels | Identity |
+| `labels/cell_labels`, `labels/nucleus_labels` | `cells.zarr.zip` `masks/1` and `masks/0`; label = cell row + 1 and nucleus row + 1 | Identity |
+| `shapes/cell_boundaries` | `masks/1` polygonised at `(c + 0.5) * ps`, simplified at 0.25 px; `instance_id` column and index | `Scale(1/ps)` |
+| `shapes/nucleus_boundaries` | `masks/0` polygonised; one row per nucleus with `cell_instance_id` of its cell | `Scale(1/ps)` |
+| `points/transcripts` | `transcripts.zarr.zip`, QV-filtered; `transcript_id` = vendor ordinal + 1; `original_assignment` = cell row + 1 | `Scale(1/ps)` (z stays in µm) |
+| `tables/table` | cell-feature matrix, gene columns only; per-type control counts and vendor annotations as `vendor_*` | — |
+| `atera/` | vendor metadata files, byte-identical | — |
+| `merxen_atera_points_index.json` | parquet file → tile, bbox, row count, `transcript_id` range | — |
+| `merxen_build_complete.json` | completion marker with `build_fingerprint` | — |
+
+Nucleus IDs are a namespace of their own (nucleus `k` is not cell `k`):
+consumers join nuclei to cells through `cell_instance_id`.
+
+### QV policy
+
+`atera_min_qv` (default `20`) keeps transcripts with QV ≥ 20, which reproduces
+the vendor matrix rule (the matrix counts only QV ≥ 20 transcripts assigned to
+a cell); `null` keeps every row. The QV statistics are recorded **before** the
+filter, in the same pass as the write, under `attrs["merxen_atera"]
+["transcripts"]`: per-tile QV histograms in quarter-QV steps, per-tile mean QV,
+per-gene totals over all QV (`gene_counts_all_qv`, equal to the vendor counts)
+and at QV ≥ 20 (`gene_counts_q20`), bounds and a 100 µm density grid. The raw
+`transcripts.zarr.zip` stays the archive for QV QC.
+
+### Pixel convention
+
+Pixel `i` covers `[i * ps, (i + 1) * ps)` µm, with `ps` the `pixel_size` of
+`experiment.spatial` (0.21249222 µm on the public dataset; the OME pixel size
+and the vendor `homogeneous_transform` must agree). A micron → vendor-mask
+lookup uses `floor(µm / ps)` (the registry's `mask_pixel_convention` is
+`corner` for ATERA). `platforms.find_um_per_px(store, "ATERA")` reads the
+pixel size back from the store's `atera/experiment.spatial`.
+
+### Vendor metadata and privacy
+
+The store keeps the vendor metadata **whole**:
+
+- every metadata and report file (`experiment.spatial`, `metrics_summary`,
+  `analysis_summary`, `qc_images.html`, `panel_config.json` with customer and
+  designer, the FOV files, `overview_scan.png`, `diffexp_genes/*.csv`, the H&E
+  alignment and keypoints when present) is copied byte for byte into `atera/`
+  under a stable name, e.g. `atera/metrics_summary.csv`;
+- `attrs["merxen_atera"]["sidecars"]` records each copy's original file name,
+  size and SHA-256;
+- `attrs["merxen_atera"]` carries the full `experiment.spatial`, every metrics
+  column, the `panel_config.json` header (its per-target list stays in the
+  file), the bundle file names and a `build` record (fingerprint, options,
+  pixel size, channels, elements).
+
+Run, slide, region and instrument values are sample names. They live only in
+the data products: nothing committed may hold them, and log lines, error
+messages and plot titles name the sample by its `dataset_name` alias (any
+printed manifest field goes through `merxen.privacy.to_alias`). The builder
+never logs an input path, because ROI folders are named after the instrument
+and slide.
+
+### Atera build options
+
+`AteraBuildConfig` (the workflow writes `min_qv`, `species` and `max_rss_gb`;
+the rest keep their defaults):
+
+| Field | Default | Purpose |
+|---|---|---|
+| `min_qv` | `20.0` | QV filter; `null` keeps every transcript. |
+| `transcript_partition_rows` | `4194304` | Rows per points partition (a multiple of 1,048,576). |
+| `spatial_order` | `row_range` | `tile_blocks` gives spatially coherent partitions at a higher read cost (opt-in). |
+| `boundary_source` | `masks` | `vendor_polygons` is the fast fallback (display polygons; a cell without one fails a build with the table). |
+| `boundary_simplify_px` | `0.25` | Mask contour simplification. |
+| `cells_labels`, `nucleus_labels`, `cells_boundaries`, `nucleus_boundaries`, `cells_table`, `transcripts`, `morphology_2d` | `true` | Element toggles; the table needs the cell shapes. |
+| `morphology_levels` | `5` | Stored pyramid levels read (labels get the same levels). |
+| `species` | `null` | Checked against `panel_organism` when set (the workflow sets `--species`). |
+| `max_rss_gb` | `null` | Watchdog cap on the build's anonymous memory. |
+| `polygon_n_jobs` | `null` | Polygonisation processes (default: the worker count). |
+
+### Atomicity and reuse
+
+The build writes `<target>.partial-<uuid>` and renames it onto the target only
+after the completion marker `merxen_build_complete.json` is written, so a
+killed build leaves no store that looks complete (leftover `.partial-*`
+folders are removed by the next build). The marker holds a
+`build_fingerprint`: a hash of the build options, the input files' names,
+sizes and modification times, and the builder format version.
+
+| Existing store | Raw folder | `force_spatialdata_build` | Result |
+|---|---|---|---|
+| none, or no marker | yes | any | Build (an incomplete store is replaced). |
+| marker, same fingerprint | yes | `false` | Reuse. |
+| marker, other fingerprint | yes | `false` | **Refused**: rebuild with `--force_spatialdata_build true` or use a new `atera_spatialdata_path`. |
+| marker | yes | `true` | Rebuild. |
+| marker | no | `false` | Reuse as it is. |
+| no marker | no | any | Fails. |
+
+`max_rss_gb` and `polygon_n_jobs` are not part of the fingerprint.
+
+### Resources
+
+`BUILD_SPATIALDATA` asks for `atera_build_cpus` (16) and
+`atera_build_memory_gb` (128 GB) for ATERA tasks only; other platforms keep 8
+CPUs and 80 GB. The local executor schedules memory but does not cap it, so the
+build runs a watchdog on the anonymous RSS of its process tree (not `rss`,
+which counts the memory-mapped masks once per polygonisation worker) and exits
+with status 99 above `atera_build_max_rss_gb` (120 GB). An external kill
+(exit 137 or 140) is retried once with twice the memory reservation; the
+atomic write makes the retry a clean rebuild. A watchdog stop is not retried:
+raise `atera_build_max_rss_gb` and `atera_build_memory_gb` together. The build
+sets dask's threaded scheduler and zarr's decode pool to `DASK_NUM_WORKERS`
+(`task.cpus`). Expected cost on the public dataset (plan §6.1, measured in
+AT-5): about 1.5–3 h, 40–80 GB peak, a 35–50 GB store.
+
+### What is skipped
+
+`morphology_3d/` (its z mapping is unverified), the H&E image (registered later
+through `register_images`), `binned_transcripts.zarr.zip`, the CSC matrix, the
+vendor's `gridded_polygon_sets` and the `de_*` columns of the matrix
+(`diffexp_genes/*.csv` are kept as sidecars). Atera "preview" bundles in Xenium
+layout (`experiment.xenium` with an `atera-` version or a whole-transcriptome
+panel) are refused by the XENIUM builder.
 
 ## Common pitfalls
 
