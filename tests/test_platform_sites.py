@@ -141,6 +141,10 @@ REASONS: dict[str, dict[str, str]] = {
         "src/merxen/segmentation/pipeline.py": "Xenium reader option",
     },
     "nucleus_joins": {
+        "scripts/acceptance/atera_build.py": (
+            "Atera acceptance compares the table's nucleus_area with "
+            "cell_summary and skips the vendor float32 copy (AT-5)"
+        ),
         "scripts/acceptance/make_atera_crop.py": (
             "Atera crop keeps a cell only when its largest nucleus "
             "(cell_summary.nucleus_area) lies whole in the window (AT-5)"
@@ -319,6 +323,10 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         "src/merxen/segmentation/pipeline.py": ("nucleus_boundaries=False,",),
     },
     "nucleus_joins": {
+        "scripts/acceptance/atera_build.py": (
+            'VENDOR_OBS_NOT_COPIED = frozenset({"cell_area", "nucleus_area"})',
+            '"nucleus_area": "nucleus_area",',
+        ),
         "scripts/acceptance/make_atera_crop.py": (
             'nucleus_area = cells.summary["nucleus_area"].to_numpy(np.float64)',
             "nucleus_ok = ~has_nucleus | (largest == np.rint(nucleus_area / "
