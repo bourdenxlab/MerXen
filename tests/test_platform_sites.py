@@ -124,13 +124,17 @@ REASONS: dict[str, dict[str, str]] = {
         "src/merxen/analysis/clustering_squidpy.py": (
             "nucleus shape priority list; nucleus consumer for AT-6"
         ),
-        "src/merxen/config.py": "Xenium reader option (build config field)",
+        "src/merxen/config.py": "Xenium and Atera reader options (build config fields)",
         "src/merxen/enrichment/enrich.py": (
             "raw Xenium reader inputs and source layer names; nucleus consumer for AT-6"
         ),
         "src/merxen/io/atera_reader.py": (
             "Atera reader produces per-nucleus shapes keyed by nucleus id with "
             "cell_instance_id (D7)"
+        ),
+        "src/merxen/io/builders/atera.py": (
+            "Atera builder writes the per-nucleus source shapes element (D7); "
+            "registered as atera_nucleus only in AT-6"
         ),
         "src/merxen/io/builders/xenium.py": "Xenium reader option",
         "src/merxen/masks.py": "ordered mask-branch discovery list (AT-6)",
@@ -279,7 +283,10 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
             '"nucleus_boundaries",',
             '"xenium_nucleus",',
         ),
-        "src/merxen/config.py": ("nucleus_boundaries: bool = True",),
+        "src/merxen/config.py": (
+            "nucleus_boundaries: bool = True",
+            "nucleus_boundaries: bool = True",
+        ),
         "src/merxen/enrichment/enrich.py": (
             '["nucleus_boundaries", XENIUM_OLD_NUCLEUS_SHAPE_NAME],',
             'csv_path = xenium_dir / "nucleus_boundaries.csv.gz"',
@@ -290,6 +297,10 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
             '("nucleus_boundaries", cells.nucleus_vertices, '
             "cells.nucleus_num_vertices),",
             '``{"cell_boundaries": ..., "nucleus_boundaries": ...}``. Both carry',
+        ),
+        "src/merxen/io/builders/atera.py": (
+            'NUCLEUS_SHAPES_KEY: Final = "nucleus_boundaries"',
+            "NUCLEUS_SHAPES_KEY: build_config.nucleus_boundaries,",
         ),
         "src/merxen/io/builders/xenium.py": (
             "nucleus_boundaries=build_config.nucleus_boundaries,",
