@@ -8,7 +8,12 @@
 > keeps all vendor metadata verbatim; privacy rules apply only to what is committed to git and to
 > human-facing output (§3.11 D13, Appendix A). **AT-4 (2026-11-05):** the builder and BUILD plumbing are
 > implemented; the deviations from this plan are listed in Appendix A ("AT-4 implementation notes"), and
-> the AT-4 review decisions in Appendix A ("AT-4 review").
+> the AT-4 review decisions in Appendix A ("AT-4 review"). **AT-5a (2026-11-05):** the public dataset
+> builds through Nextflow in 8.5 minutes at 11.7 GB peak anonymous memory and passes every §1.1
+> criterion (status after §1.1 item 7; measured numbers in §6.1; decisions in Appendix A, "AT-5 pilot").
+> Milestone 1 is met. **AT-5b (2026-11-05):** the ProSeg benchmark ran on the crop and on the densest
+> 2 mm tile; AT-9 goes ahead as an opt-in tiled route, and a single whole-section run is ruled out
+> (§8 AT-5 and AT-9, Appendix A "AT-5b ProSeg benchmark").
 
 *Names and paths (2026-11-04).* The only dataset used here is the public 10x Atera whole-transcriptome
 dataset of a human hippocampus section (atera-1.1.1, fresh frozen); its name is not written here, and the
@@ -118,13 +123,30 @@ Segmentation, enrichment and the later stages can open it with only the consumer
    - Rendered XENIUM and MERSCOPE build JSON is byte-identical to `main`.
    - Every existing process `script:` text matches its pinned copy, so task hashes are unchanged.
 
+**Status (AT-5a, 2026-11-05): all seven items hold on the public dataset.** The Nextflow task built the
+store, then `scripts/acceptance/atera_build.py` checked it as re-read from disk. Its report is
+`$MERXEN_EVIDENCE_ROOT/atera_at5/full/acceptance_full.json`, with the trace, report, timeline and logs
+beside it. After the AT-5 review the acceptance script gained checks (Appendix A, "AT-5 review"); the
+store passes all eleven criteria (`atera_at5/rerun/acceptance_full_v2.json`), and so does a rebuild at
+the reviewed revision with the new resource defaults (`atera_at5/full_r2/`).
+
+| Item | Result |
+|---|---|
+| 1. Build | `BUILD_SPATIALDATA`, one ATERA row with `stop_stage=build_spatialdata`, 16 CPUs: 8 min 24 s; watchdog peak 11.7 GB anonymous RSS (cap then 120 GB). Sizes in §6.1. A crop build killed with SIGKILL after it had written its points, images and labels exited 137. Nextflow retried it once (256 GB reservation): the retry removed the partial store and its mask folder, built from scratch and passed acceptance. Rebuilt after the review with the 64 GB reservation and 48 GB cap: 9 min 22 s, 11.65 GB peak anonymous RSS, the same build fingerprint |
+| 2. Schema | Shallow schema passes. Streaming deep check: 1,409,601,228 points rows = raw QV ≥ 20 rows; IDs unique per tile; every per-tile count reconciles over 34 non-empty tiles and 409 files |
+| 3. Matrix | Points total 638,849,843 = vendor total on the columns with transcripts; 638,693,512 gene counts; 0 mismatched entries. The vendor total is 638,849,927; the excess is exactly 84 counts, all in four `DeprecatedCodeword_*` columns without transcripts (24 + 21 + 14 + 25) |
+| 4. Labels | 91,431 cells and 90,238 nuclei, no empty label; largest area difference 7.2e-5 µm²; largest label centroid difference 0.0014 µm; 0 containment violations; every label pixel equals the vendor `masks/1` / `masks/0`; one shape per cell, indexed by its label; shape centroids within 0.0046 µm (median 0.00035 µm) |
+| 5. Metadata lookups | `sd.read_zarr` opens every element; `find_um_per_px(store, "ATERA") == 0.21249222` |
+| 6. Vendor metadata | 10 byte-identical sidecars, 5,167 vendor zarr metadata members, 5 OME-XML headers, 49 `experiment.spatial` fields and 103 metrics columns in attrs; the fingerprint recomputed from the bundle matches the marker. The table has `instance_id` = vendor row + 1, X equal to the vendor gene columns (638,693,512 counts), every vendor `obs` column, the `cell_summary` values (nucleus centroids included), the vendor PCA/UMAP, 270 `de_*` columns and 4 colour lists |
+| 7. Existing platforms | The XENIUM and MERSCOPE goldens and process script pins are unchanged; only the ATERA build JSON goldens follow the AT-5 cap change (§6.1) |
+
 ### 1.2 Out of scope for milestone 1
 
 Each item is sequenced in §8:
 
 - Running SEGMENT, ENRICH, QC, VISUALIZE or the analysis stages on Atera. The "native segmentation"
   route that lets them run is AT-6, the next milestone. §5 lists every downstream change.
-- ProSeg on Atera. It is conditional on a crop benchmark (AT-5b).
+- ProSeg on Atera. The AT-5b benchmark has run; ProSeg comes in AT-9 as an opt-in tiled route.
 - H&E registration.
 - Pairing Atera with XENIUM or MERSCOPE.
 - Ingesting the 3D DAPI stack.
@@ -524,6 +546,26 @@ grow a third arm in every ternary.
     as `.npy` (about 0.4 GB per large tile, uint32). Each block task then reads orthogonal selections.
 
   Blocks under about 1 M rows merge into a tile-level partition.
+
+  **AT-5 decision: `row_range` stays the default; `tile_blocks` stays opt-in.** The measurements
+  (`scripts/acceptance/atera_partition_bench.py`, pyarrow reads of `x`, `y`, `feature_name` and
+  `original_assignment`, warm page cache; reports under `$MERXEN_EVIDENCE_ROOT/atera_at5/bench/`):
+  - **Full store, `row_range`:** a 1 mm² window (8 windows, median 23 M rows) reads in a median 0.71 s
+    (0.08–1.56 s). Index pruning keeps a median 44 of 409 files (154 M rows). With no pruning, the same
+    window reads in 0.95 s, because pyarrow skips row groups by their `x`/`y` statistics. A per-gene read
+    over all 409 files takes 5.5–5.9 s, from 5,643 to 5.7 M rows; a `row_range` file is gene-sorted, so
+    the `feature_name` statistics skip most row groups.
+  - **Crop, both orders, the same windows and genes:** `tile_blocks` reads fewer rows per window (16 M
+    against 28 M) but is no faster: 0.17 s against 0.13 s warm per window, and 0.22 s against 0.17 s per
+    gene. It writes 5% less (645 against 679 MB).
+  - **Build cost:** the crop build took 69 s with `tile_blocks` against 48 s with `row_range`, although
+    only one of its tiles is split. Each split tile is decoded once per block, about 20× the decode time
+    (AT-4). On the full section that adds tens of minutes to an 8.5-minute build.
+  - **Bug found:** a `tile_blocks` build that split any tile failed at the end, because the points index
+    held infinite block edges (fixed in AT-5; open edges are now `null`).
+
+  Sub-second window reads already serve QC, plots and the viewer cache, so nothing downstream needs
+  `tile_blocks`. Revisit it only if a consumer needs many small windows per second.
 - **Concurrency is explicit.** `write_atera_spatialdata` calls
   `dask.config.set(scheduler="threads", num_workers=int(os.environ.get("DASK_NUM_WORKERS", cpus)))`, and
   zarr `threading.max_workers` gets the same value. Both are asserted in the fast tier.
@@ -1146,7 +1188,7 @@ The prefix helpers that already build names from `platform.toLowerCase()` (`main
 |---|---|---|---|---|
 | **Segmentation, native (new `NATIVE_LATEST` process)** | • New CPU process. It builds `latest_spatialdata.zarr` by **hardlinking only data payloads** (chunk files, `points.parquet/*`) and **copying every `zarr.json`, `.zattrs`, `.zgroup`, `.zmetadata`**. ENRICH's `_prune_zarr_consolidated_metadata` writes those in place (`enrich.py:669, 682-692`), which would otherwise corrupt the source through the shared inode.<br>• Registers `original` (shape `atera_cell_boundaries`, table `table_original`, assignment `original_assignment`) and `original_nucleus` (`atera_nucleus`).<br>• Never calls `convert_to_latest` or `upgrade_spatialdata_contract`.<br>• Explicit `NO_FILE` placeholders in the SEGMENT output tuple (`segmentation.nf:70`).<br>• Test: source inodes and bytes unchanged after ENRICH and its partial cleanup | Export vendor `masks/1` once to `.npy` (+10.4 GB; +10.4 GB if a cell-keyed nucleus mask is also exported) for MIQ and as a future ProSeg prior | ENRICH today requires Cellpose masks and turns the first shape into `MOSAIK_proseg` (`enrich.py:930-994`) | 4.5 |
 | **Segmentation, Cellpose** (`cellpose_only`) | • ATERA in `DatasetConfig` and `hitl/registry.py:36`.<br>• Transform via the spec (`pipeline.py:225-236`).<br>• Zarr-only loader, never `xenium_reader` (`:474-522`).<br>• Explicit `image_key=morphology_focus` (`main.nf:3246-3267`); native key via the spec (`:561-582, 1047-1048`).<br>• Channels `["DAPI","18S"]`.<br>• Partial channel mismatch is an error (`image_source.py:388-394`) | • Evaluate `["DAPI","ATP1A1/CD45/E-Cadherin","18S"]` (vendor used 18S for 91% of cells).<br>• Per-channel normalisation behind a flag | Image 2.61 Gpx, about 1.5 h per Cellpose task [M] | 2 |
-| **ProSeg** | • QV branch takes ATERA → `qv`, `min_qv` 20 (`pipeline.py:863-886`).<br>• ATERA-specific `PROSEG_SEGMENT` memory and time.<br>• `convert_to_latest` fast paths (§3.3) | • **Benchmark first** (AT-5b).<br>• Parquet input in Xenium layout (`proseg_src/src/sampler/transcripts.rs:459-573`).<br>• Controls excluded.<br>• Vendor masks as prior (floor lookups).<br>• 2 mm tiles with a ≥ 60 µm halo and label-owned stitching; explicit `--prior-weight`.<br>• Optional gene subset plus back-assignment.<br>• CSV export out of the GPU lock; delete the CSV after success | • Whole section: 1.5–3 days, 170–250 GB [M/L].<br>• proseg#162: OOM at 256 GB with 1.04e9 transcripts.<br>• CSV about 77 GB.<br>• Neuropil absorption: 55% of transcripts are outside vendor cells | 8–12 |
+| **ProSeg** | • QV branch takes ATERA → `qv`, `min_qv` 20 (`pipeline.py:863-886`).<br>• ATERA-specific `PROSEG_SEGMENT` memory and time.<br>• `convert_to_latest` fast paths (§3.3) | • Benchmarked in AT-5b (§8).<br>• Parquet input in Xenium layout (`proseg_src/src/sampler/transcripts.rs:459-573`).<br>• Controls excluded.<br>• Vendor masks as prior (floor lookups).<br>• 2 mm tiles with a ≥ 60 µm halo and label-owned stitching; explicit `--prior-weight`.<br>• Optional gene subset plus back-assignment.<br>• CSV export out of the GPU lock; delete the CSV after success | • Measured in AT-5b [H]: one whole-section run would need about 300 GB and 32–37 h at the default schedule (no-go); a 2 mm tile peaks at 21.7 GB.<br>• proseg#162: OOM at 256 GB with 1.04e9 transcripts.<br>• CSV about 73 GB (52 B/row) against about 12 GB of parquet.<br>• Neuropil: 47% of QV ≥ 20 gene transcripts are outside vendor cells on the dense tile; ProSeg takes in 15–18% of them under the vendor prior | 8–12 |
 | **ProSeg hybrid** | Off for ATERA | Vectorise (`proseg_hybrid.py:983-1031`), `n_jobs > 1` (`:798`), COO (`:1246-1256`) | 10–26 h single-threaded [M] | 3 |
 | **Enrichment** | • Native mode with optional masks; no `MOSAIK_proseg` alias; no fake Cellpose provenance (`enrich.py:816-836`).<br>• ATERA arm in the copy step (`:999-1102`), `_is_already_enriched` (`:536-571`) and partial artifacts (`:608-635`).<br>• Original shape → `table_original` clone (`assignment.py:369-375, 407-419`).<br>• Nucleus shapes excluded from per-shape assignment (`:510-516`).<br>• Image copy by hardlink or allow-list (`:520-533`) | • Label-mask lookup (corner convention) instead of `gpd.sjoin` (`assignment.py:205-367`), with COO accumulation and parallel partitions.<br>• Nucleus attribution via remapped `masks/0`.<br>• `max_ram_gb` from task memory (`assignment.py:450-455`) | • sjoin about 1.3–1.5 h per shape × 3 [M benchmark, 25-vertex polygons].<br>• Mask-derived polygons have more vertices, so simplification (§3.5) or the mask lookup is needed | 4 |
 | **QC** | • `apply_dataset_filter` via `control_features` (`qc/gene_comparison.py:101-127`).<br>• No `to_pandas` fallback for large dask points (`qc/metrics.py:107-110`) | • Cached aggregates.<br>• Fewer or subsampled registration windows (`qc/registration.py:165-222`).<br>• `control_features` instead of the local regex (`:42`).<br>• Controls dropped from `original` table metrics, or both reported.<br>• Spatial mean-QV map from build attrs | The 6,628 controls enter gene summaries today | 1.5 |
@@ -1200,6 +1242,29 @@ The prefix helpers that already build names from `platform.toLowerCase()` (`main
 | Staged input | Disk | About 9 GB extracted plus 15.6 + 0.14 + about 0.5 GB of zips | [M] |
 | Source zarr | Disk | About 35–50 GB (plus a transient `.partial` during the write) | [L] |
 | BUILD wall time | Time | About 1.5–3 h | [L]; the pilot measures it |
+
+**Measured on the public dataset (AT-5a, 2026-11-05).** These numbers replace the estimates above.
+Nextflow `BUILD_SPATIALDATA`, 16 CPUs, shared host at load 15–30. The page-cache state of the bundle is
+unknown: the crop had been cut from it earlier that day.
+
+| Item | Measured |
+|---|---|
+| BUILD wall time | **8 min 24 s** task (8 min 36 s for the whole `nextflow run`); 852% mean CPU |
+| Phases (from file times) | Masks, polygonisation and table: 2 min 27 s. Image write: 2 min 14 s. Labels (both pyramids): 31 s. Points: 2 min 43 s (1.41e9 rows, about 8.6 M rows/s). Shapes, table, sidecars, index and marker: 17 s |
+| Peak memory | Watchdog: **11.7 GB anonymous RSS**, during the points write. The trace's `peak_rss` of 103.6 GB counts the two memory-mapped 10.4 GB masks once per polygonisation worker; it is page cache, not process memory. The largest anonymous level in the polygonisation phase was 11.4 GB |
+| Label pyramids alone | 65 s and 4.75 GB anonymous RSS for both masks (5 levels, 16 threads); level shapes equal the morphology TIFF pyramid (42,548 × 61,369 down to 2,659 × 3,835) |
+| Polygons (0.25 px) | Cells: 13 / 61 / 278 vertices (min / median / max), 3 MultiPolygons. Nuclei: 10 / 47 / 332, none |
+| Store size | **38.8 GB** in all. Points 24.1 GB (17.1 B/row; the dask index column `__null_dask_index__` and `transcript_id` take about a quarter each). Image 14.0 GB. Table 493 MB. Shapes 56 + 41 MB. Labels 38 + 28 MB. Vendor sidecars and metadata 67 MB |
+| Reads and writes | 23.7 GB read, 36.2 GB written (`rchar` / `wchar`) |
+| Acceptance script | 6 min 26 s, 21.1 GB peak RSS (the int64 matrix comparison over 258 M nonzeros; the streaming schema check takes 4 min 46 s at 5.3 GB). With the checks added after the review: 7 min 37 s, 20.9 GB (vendor-mask pixel comparison 31 s, table check 39 s) |
+
+**Resource defaults after AT-5:** `atera_build_memory_gb = 64` (128 GB on the one retry) and
+`atera_build_max_rss_gb = 48`. The cap is about 4× the measured anonymous peak. Together with the
+memory-mapped masks, the build's physical footprint is about 33 GB, so the reservation is about 2× it.
+The full section was rebuilt with these defaults after the review: 9 min 22 s task time, 11.65 GB peak
+anonymous RSS, 724% mean CPU (host load 6–10). `atera_build_cpus` stays 16. A section several
+times larger scales the table and the masks; raise both values together if the watchdog stops the build
+(exit 99).
 
 ### 6.2 Per section, downstream
 
@@ -1375,14 +1440,22 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
     ENSG-shaped symbols vs `gene_ids` helpers.
 - **`scripts/acceptance/atera_build.py`** runs on the built store re-read from disk and records results under
   `$MERXEN_EVIDENCE_ROOT` (aliases only):
-  1. Streaming per-cell × feature counts (QV ≥ 20, assigned, **all features**) vs CFM X: exact, 638,849,927
-     total.
+  1. Streaming per-cell × feature counts (QV ≥ 20, assigned, **all features**) vs CFM X: exact on every
+     column with transcripts (638,849,843 counts). The vendor total, 638,849,927, also holds 84 counts in
+     four `DeprecatedCodeword_*` columns without any transcript (§1.1 item 3); `--expected-vendor-excess`
+     pins that number and is required.
   2. Exhaustive mask checks: area equality, centroids at (i + 0.5)·ps within 0.005 µm, nucleus containment
      0 violations, max labels, no empty label.
   3. Shape centroids vs `cell_summary` within 0.01 µm; vertex statistics.
   4. Points row count = number of zarr transcripts with QV ≥ 20; per-tile reconciliation.
   5. Metadata completeness: sidecars byte-identical to the bundle, attrs header equal to
-     `experiment.spatial`; evidence written under aliases only.
+     `experiment.spatial`, metrics equal to the CSV text, zarr metadata members listed from the zips;
+     evidence written under aliases only.
+  - Added after the AT-5 review: the recorded build options must be the §1.1 ones (`min_qv` 20,
+    0.25 px, no allow-list); every label pixel equals the vendor `masks/1` / `masks/0`; one shape per
+    cell indexed by its label; the table keeps `instance_id` = vendor row + 1, the vendor gene counts,
+    every vendor `obs` column, the `cell_summary` values, the vendor PCA/UMAP, `varm["vendor_de"]` and
+    the category colours; no `.partial-*` folder is left; the report records the git revision.
   6. Peak RSS, wall time and per-element size from `trace.tsv` and the watchdog log.
   7. `row_range` vs `tile_blocks` timing and memory on the crop bundle.
 - **Crop bundle (AT-5a):** a 2–3-tile real-data bundle under `$MERXEN_ATERA_RAW_ROOT`, cropped from tiles,
@@ -1486,6 +1559,42 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
     lookups) and QV ≥ 20 parquet. It measures peak RSS, time per iteration at 18k genes, and neuropil
     absorption. The result decides AT-9.
 - **Exit:** all §1.1 criteria met and recorded. **This is milestone 1.**
+- **Status (2026-11-05):** (a) is done: crop pilot, full build, acceptance, atomicity check, resource
+  tuning and the `tile_blocks` decision (§1.1 status, §3.3, §6.1). (b) is done; evidence in
+  `$MERXEN_EVIDENCE_ROOT/atera_at5/proseg_benchmark/`.
+- **AT-5(b) result.** ProSeg 3.2.0 (the pinned binary), vendor cell mask as the prior, MerXen SEGMENT
+  settings, 32 threads, one run at a time. Besides the crop (a sparse corner: 3,013 cells in 8 mm²) it
+  ran on the densest 2 mm tile of the full section with a 100 µm halo, because the crop is a poor basis
+  for extrapolation.
+
+  | Run | Transcripts | Schedule (burn-in + samples + final) | Wall | Burn-in / sampling s per iteration | Peak RSS |
+  |---|---|---|---|---|---|
+  | Crop | 40.5 M | 100 + 200 + 20 | 15 m 29 s | 0.91 / 2.53 | 8.8 GB |
+  | Crop, repeat | 40.5 M | 100 + 200 + 20 | 15 m 50 s | 0.90 / 2.62 | 8.8 GB |
+  | Crop, MerXen default | 40.5 M | 200 + 1200 + 50 | 1 h 04 m 47 s | 0.90 / 2.73 | 8.9 GB |
+  | Crop, weak prior (effective weight 1) | 40.5 M | 100 + 200 + 20 | 15 m 54 s | 0.96 / 2.57 | 8.8 GB |
+  | Dense tile | 102.4 M | 100 + 200 + 20 | 37 m 42 s | 1.76 / 5.83 | 21.7 GB |
+
+  - Time and memory are linear in transcripts (about 227 B per transcript). Calibrated on the dense
+    tile (about 15% optimistic against the crop), the full section costs:
+
+    | Scenario | MerXen default schedule | Short schedule (100 + 200) |
+    |---|---|---|
+    | 32 tiles of 2 mm, one at a time | about 39–45 h | about 10–12 h |
+    | 3–4 tiles at once (UNVERIFIED) | about 12–15 h | about 3–4 h |
+    | Whole section in one run | about 32–37 h, about 300 GB | about 9 h, about 300 GB |
+
+  - Neuropil absorption stays small under the vendor prior (R15). At the automatic prior weight
+    (134–146 here) ProSeg takes 15–18% of the vendor-unassigned transcripts into cells, half of them
+    within 1.7–2.4 µm of a vendor cell, and releases 20–25% of the vendor-assigned ones: median area
+    ratio 0.80–0.86 against the vendor masks, total cell area −2.5% to +1.8%. Only a prior weakened to
+    weight 1 grows cells (median 1.22×, total area +36%). On the dense tile 74 of 6,877 cells end with
+    no transcripts.
+  - The 1200-sample default bought nothing measurable on the crop: it agrees with a 200-sample run on
+    79.2% of per-transcript assignments, as two 200-sample runs agree with each other (79.6%). About 20%
+    of boundary assignments flip between runs whatever the schedule.
+  - Whether ProSeg improves on the vendor segmentation is untested: there is no ground truth here.
+- **AT-9 decision (from AT-5b): go, with tiling, as an opt-in route** (AT-9 below).
 
 ### AT-6 `[feature]`: native segmentation route end to end (11 d)
 
@@ -1517,6 +1626,22 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
 
 ### AT-9 `[feature]`: ProSeg for Atera, conditional on AT-5b (8–12 d)
 
+- **Decision (AT-5b, 2026-11-05): go, as an opt-in route.** The native route stays the default. No
+  single whole-section run (about 300 GB, 32–37 h, no checkpoint).
+- **Requirements from the benchmark:**
+  - Tiles of 2 mm with a halo (100 µm benchmarked); cells at tile borders go to the tile that owns
+    their label.
+  - Input as parquet in **Xenium layout** (plain-string `feature_name` and `cell_id`, uint64
+    `transcript_id`, uint8 `overlaps_nucleus`, string `fov_name`, float32 x/y/z/qv). A plain parquet
+    makes ProSeg 3.2.0 stop with "No parquet file format specified"; CSV is 52 B/row (about 73 GB and
+    about 2 h to write for the section) against 8.8 B/row. The Xenium layout also turns on ProSeg's
+    nucleus-compartment model, which the CSV route does not use.
+  - An explicit `--prior-weight`, not the automatic value.
+  - Mask transforms `[ps, 0, col0·ps]` and `[0, ps, row0·ps]`: ProSeg samples pixel centres, which
+    matches the floor convention of the vendor masks.
+  - The short schedule (100 burn-in + 200 samples) by default, after checking it on one dense tile.
+  - Report the number of cells left with no transcripts.
+
 ### AT-10 optional, on request
 
 - H&E via `REGISTER_IMAGES` (1.5 d).
@@ -1541,13 +1666,13 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
 | R6 | Nucleus/cell ID namespace confusion corrupts per-cell metrics silently | M / H | `cell_instance_id` joins; grep test; two-nucleus fixture | AT-6 |
 | R7 | Sample-identifying metadata leaks into committed text, logs, plot titles or evidence (the store keeps it on purpose, D13) | M / H | Fake fixture values; slow real-data tests that print no manifest value; `to_alias` for printed fields; privacy hooks on commits and PR text | AT-3, AT-4 |
 | R8 | ZipStore lock serialises reads; parallel throughput not better than serial | M / M | Budget assumes serial; benchmark; unzip the transcripts zip (+15.6 GB) if needed | AT-5 |
-| R9 | ProSeg infeasible at this scale (proseg#162) | H / M | Native and `cellpose_only` routes do not depend on it; crop benchmark; tiling | AT-5b, AT-9 |
+| R9 | ProSeg infeasible at this scale (proseg#162) | H / M | Native and `cellpose_only` routes do not depend on it. AT-5b confirmed one whole-section run is infeasible (about 300 GB) and 2 mm tiles fit in 22 GB; AT-9 tiles | AT-5b, AT-9 |
 | R10 | Format churn across Atera versions; preview bundles in Xenium layout | M / M | Version checks; preview refusal in the XENIUM builder; parity test | AT-3, AT-4 |
 | R11 | Variable channel sets and file-order ≠ channel-order | M / M | OME `TiffData` mapping; partial-mismatch error | AT-3, AT-7 |
 | R12 | Cache-invalidating edit to existing processes | M / H | Script-text pins + golden JSON (stub runs do not prove hashes); announced QC re-run only | AT-1 onward |
 | R13 | Merge conflicts with manual-registration and RCA | H / M | Sequencing in §8 | AT-1, AT-8 |
 | R14 | Silent Xenium fall-through (`else` arms) | H / H | Registry raising on unknown platforms; grep test | AT-1 |
-| R15 | Neuropil absorption by ProSeg or Cellpose (55% unassigned by the vendor) | M / M | Absorption report vs vendor masks | AT-5b, AT-7 |
+| R15 | Neuropil absorption by ProSeg or Cellpose (55% unassigned by the vendor) | M / M | Absorption report vs vendor masks. AT-5b: under the vendor prior ProSeg absorbs 15–18% of the unassigned transcripts, mostly within a few µm of a cell; a weak prior grows cell area by 36% | AT-5b, AT-7 |
 | R16 | Disk: worst case about 270 GB per section plus ProSeg intermediates | L / M | Hardlinked `latest`; partial extraction; CSV deletion | AT-6 |
 | R17 | Misleading vendor Azimuth labels (pan-human) | M / L | `vendor_` prefix; cross-check only | AT-4 |
 | R18 | Partition index stale or misaligned on read | M / L | File-keyed index with fingerprint and full-scan fallback | AT-4 |
@@ -1555,12 +1680,8 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
 | R20 | External napari viewer needs an ATERA branch | M / L | Track outside the repo | AT-6 |
 
 **Unverified items to resolve first:**
-- ZipStore parallel throughput, cold disk.
-- BUILD peak RSS and wall time.
-- Polygonisation time and vertex counts on a 2.6 Gpx mask.
-- `tile_blocks` cost.
-- Label-pyramid memory and level-shape rounding versus the TIFF pyramid.
-- Points parquet size with spatialdata's writer.
+- ZipStore parallel throughput, cold disk. The warm-or-unknown full build decodes 1.41e9 rows in under
+  3 minutes, so it no longer limits the build.
 - `dd.read_parquet` adaptive splitting at these file sizes.
 - Whether stub `-resume` hashes `stub:` text.
 - `containerOptions` hashing after the GPU-closure change.
@@ -1571,6 +1692,10 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
 *Resolved since revision 3:* `obs.filtered` threshold (< 10 observed); negative coordinates in label
 lookups (bounds-checked; use floor); multi-component labels (MultiPolygon); `cell_index` order
 (non-decreasing).
+
+*Resolved in AT-5 (§6.1):* BUILD peak RSS and wall time; polygonisation time and vertex counts; `tile_blocks`
+cost (§3.3); label-pyramid memory and level shapes (equal to the TIFF pyramid); points parquet size with
+spatialdata's writer.
 
 ---
 
@@ -1788,3 +1913,42 @@ opt-in with its cost documented (AT-5 decides); the zarr event-loop ceiling and 
 zip opens are seconds per build (AT-5 measures); the watchdog cap is the same on the retry on purpose
 (the retry is for external memory pressure); the ATERA arms of the enrichment and viewer-cache lookups
 move to AT-6 (§1.1 item 5).
+
+**AT-5 pilot (2026-11-05).** Crop pilot, full public build and milestone-1 acceptance (§1.1 status).
+
+| Finding | Change or decision |
+|---|---|
+| The crop's label check peaked at 6.7 GB | The acceptance label statistics are counted in row strips; the crop run peaks at 4.2 GB and the full run spends 37 s on both masks |
+| A `tile_blocks` build that split a tile failed while writing the points index (infinite block edges with `allow_nan=False`) | Open edges are written as `null`; a unit test and an end-to-end `tile_blocks` build test cover it |
+| Peak memory is 11.7 GB anonymous, not the 40–80 GB estimate; the build takes 8.5 minutes, not 1.5–3 h | `atera_build_memory_gb` 128 → 64 and `atera_build_max_rss_gb` 120 → 48 (§6.1). Only the ATERA build JSON goldens change |
+| `row_range` or `tile_blocks` | `row_range` stays the default (§3.3) |
+| Points take 17.1 B/row against the 11.7–12.1 B/row probe; the dask index column `__null_dask_index__` is about a quarter of the bytes | Not changed here: dropping it means writing parquet outside spatialdata's writer, the later optimisation §3.3 already lists |
+| The trace's `peak_rss` (103.6 GB) far exceeds the watchdog's peak (11.7 GB) | Expected: the trace counts the shared memory-mapped masks once per worker. The watchdog's anonymous measure is the one to size against (§6.1) |
+
+Not measured in AT-5: `emit_codeword_index` (left off), and the zarr event-loop ceiling and repeated zip
+opens on their own. The whole build is 8.5 minutes, so neither is worth separate work now.
+
+**AT-5 review (2026-11-05).** Two reviews of the AT-5 branch re-checked the full store with their own
+code (raw zips, `zipfile` and `tifffile`, not the Atera reader) and found no failing criterion. Their
+findings and what was done:
+
+| Finding | Change or decision |
+|---|---|
+| The acceptance script did not check the vendor table data of §1.1 item 6 (nucleus centroids, `de_*` statistics, colours) | New `table_vs_vendor` criterion, read straight from the zips: `instance_id` = vendor row + 1, X against the vendor gene columns, every vendor `obs` column, the `cell_summary` values, the vendor PCA/UMAP, `varm["vendor_de"]` (270 columns) and the colours |
+| Labels were matched to rows by assumption, never compared with the vendor masks | Every label pixel is compared with `masks/1` and `masks/0` (0 differing pixels on the full section, 31 s more) |
+| The build options came from the store's own header | New `build_options` criterion: `min_qv` 20, 0.25 px and no allow-list, unless overridden on the command line |
+| `--expected-vendor-excess` was optional | Required for `points_vs_matrix` unless `--allow-unpinned-excess` |
+| One shape per cell was checked by unique positions only; leftover `.partial-*` folders were reported, not failed | Shape count must equal the cell count, shapes are indexed by their label, nucleus shapes by nucleus row + 1 with the right owner; a leftover partial fails `build_marker` |
+| The metadata check reused the reader's helpers for zip members, metrics and panel header | Members are listed from the zip name list, metrics are compared with the CSV text and the panel header is rebuilt in the script |
+| The module docstring claimed bounded memory | It now says the matrix and table checks grow with the nonzeros (about 21 GB) |
+| Missing negative tests | Tests for a per-tile row mismatch, an off-tolerance shape centroid, a duplicate shape, other build options, an unpinned excess, a leftover partial, table edits, a metrics edit and a pixel swap that keeps every area |
+| §7.4 item 1 still said "exact, 638,849,927" | States the 84-count deprecated-codeword excess |
+| "4× headroom on both" | The cap is about 4× the anonymous peak; the reservation is about 2× the physical footprint |
+| The new 64 / 48 GB defaults had not run on the full section; no code revision in the evidence | The full section was rebuilt at the reviewed revision with the defaults (§6.1) and both stores pass the new acceptance; the report records the git revision; the task's `.command.run` / `.command.sh` and the scratch scripts are copied into the evidence |
+| The points index box order was undocumented | Documented as `[xmin, xmax, ymin, ymax]` µm in the builder and `docs/stages/spatialdata-build.md`; `block_bounds_um` edges can be `null` |
+| The plan said AT-5b had not run | §8 AT-5 and AT-9 record the benchmark and the decision |
+| Commit messages carry `Claude-Session` lines | Not rewritten here: rewriting both stacked branches is the maintainer's call before any push |
+
+**AT-5b ProSeg benchmark (2026-11-05).** Experiment only; no code change. The numbers and the AT-9
+decision are in §8 (AT-5, AT-9); R9 and R15 are updated. The crop is a sparse corner, so the densest
+2 mm tile of the full section was run as well and the extrapolation is calibrated on it.

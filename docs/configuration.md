@@ -367,8 +367,8 @@ install paths trigger a `sudo` prompt.
 | `xenium_min_qv` | `20.0` | Minimum transcript QV to retain. |
 | `atera_min_qv` | `20.0` | Minimum transcript QV the Atera build keeps (`null` keeps all); 20 reproduces the vendor matrix. |
 | `atera_build_cpus` | `16` | CPUs of an ATERA `BUILD_SPATIALDATA` task (other platforms keep 8). |
-| `atera_build_memory_gb` | `128` | Memory reservation of an ATERA build task, doubled on its one retry after an external kill (exit 137 or 140). Other platforms keep 80 GB. |
-| `atera_build_max_rss_gb` | `120` | Watchdog cap on the ATERA build's anonymous memory; above it the build exits with status 99 (not retried). Raise it together with `atera_build_memory_gb`. |
+| `atera_build_memory_gb` | `64` | Memory reservation of an ATERA build task, doubled on its one retry after an external kill (exit 137 or 140). Other platforms keep 80 GB. |
+| `atera_build_max_rss_gb` | `48` | Watchdog cap on the ATERA build's anonymous memory; above it the build exits with status 99 (not retried). Raise it together with `atera_build_memory_gb`. |
 | `default_atera_voxel_layers` | `2` | ProSeg voxel layers for ATERA (used once ProSeg supports ATERA). |
 | `atera_cellpose_model`, `atera_cellpose_cellprob`, `atera_cellpose_flow_threshold`, `atera_cellpose_diameter`, `atera_cellpose_final_max_area_um2`, `atera_mask_max_eccentricity` | `null` | The ATERA twins of the per-platform Cellpose overrides. They are declared because Cellpose preflight reads them for every active platform; ATERA rows do not segment yet. |
 
