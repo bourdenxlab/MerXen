@@ -125,16 +125,46 @@ def test_empty_accumulator_returns_an_empty_int64_matrix(
     )
 
 
-def test_accumulator_keeps_counting_after_a_result_is_taken() -> None:
-    """``to_csr`` is a snapshot; later additions extend the totals."""
+def test_accumulator_is_finished_once_its_result_is_taken() -> None:
+    """``to_csr`` hands the counts over, so later use is an error."""
     accumulator = SparseCountAccumulator(2, 2)
-    accumulator.add(np.array([0, 0]), np.array([1, 1]))
-    first = accumulator.to_csr()
-    accumulator.add(np.array([0, 1]), np.array([1, 0]))
-    second = accumulator.to_csr()
+    accumulator.add(np.array([0, 0, 1]), np.array([1, 1, 0]))
 
-    np.testing.assert_array_equal(first.toarray(), [[0, 2], [0, 0]])
-    np.testing.assert_array_equal(second.toarray(), [[0, 3], [1, 0]])
+    result = accumulator.to_csr()
+
+    np.testing.assert_array_equal(result.toarray(), [[0, 2], [1, 0]])
+    with pytest.raises(RuntimeError, match="already taken"):
+        accumulator.add(np.array([0]), np.array([0]))
+    with pytest.raises(RuntimeError, match="already taken"):
+        accumulator.to_csr()
+
+
+def test_accumulator_merges_a_logarithmic_number_of_times(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pending entries stay below half the totals, merged in growing batches."""
+    merge_threshold = 100
+    accumulator = SparseCountAccumulator(1000, 100, merge_threshold=merge_threshold)
+    merge = SparseCountAccumulator._merge_pending
+    n_merges = 0
+
+    def _counting_merge(self: SparseCountAccumulator) -> None:
+        nonlocal n_merges
+        n_merges += 1
+        merge(self)
+
+    monkeypatch.setattr(SparseCountAccumulator, "_merge_pending", _counting_merge)
+    keys = np.random.default_rng(3).permutation(1000 * 100)
+    for chunk in np.array_split(keys, 500):
+        accumulator.add(*np.divmod(chunk, 100))
+        assert accumulator._n_pending < max(
+            merge_threshold, accumulator._keys.size // 2
+        )
+
+    # 500 chunks of 200 new pairs merge whenever the pending pairs reach half
+    # the totals: about log(500) / log(1.5) times, not once per chunk.
+    assert n_merges <= 20
+    assert accumulator.to_csr().nnz == keys.size
 
 
 @pytest.mark.parametrize(

@@ -6,23 +6,32 @@ import numpy as np
 from scipy import sparse
 
 _MAX_LINEAR_INDEX = np.iinfo(np.int64).max
+_MAX_INT32 = np.iinfo(np.int32).max
 
 
 class SparseCountAccumulator:
     """Count (row, column) pairs streamed in chunks and return a CSR matrix.
 
     Each chunk is reduced to its unique linear indices ``row * n_cols + col``
-    with their counts. Reduced chunks wait until they hold as many entries as
-    the sorted totals (and at least ``merge_threshold``), and are then merged
-    into them in one linear pass, so the totals are rewritten a logarithmic
-    number of times rather than once per chunk, and memory stays bounded by
-    the number of distinct pairs rather than the number of rows added.
-    Summing one CSR matrix per chunk instead rewrites the whole running
-    matrix on every chunk.
+    with their counts. Reduced chunks wait until they hold half as many
+    entries as the sorted totals (and at least ``merge_threshold``), and are
+    then merged into them in one linear pass, so each stored count is
+    rewritten a bounded number of times on average rather than once per
+    chunk. Summing one CSR matrix per chunk instead rewrites the whole
+    running matrix on every chunk.
+
+    Memory: the totals take 16 bytes per distinct (row, column) pair, and the
+    pending entries 16 bytes each for at most ``max(merge_threshold,
+    nnz / 2)`` entries plus one chunk. The peak, during a merge, is about 28
+    bytes per stored count, a little above the 24 bytes of summing CSR
+    matrices. :meth:`to_csr` hands the totals over to the result instead of
+    copying them, so only the result (12 bytes per stored count with int32
+    indices) is left once it returns.
 
     The matrix from :meth:`to_csr` equals summing one ``coo_matrix.tocsr()``
     per chunk into an empty ``csr_matrix`` of dtype int64: same data dtype,
-    same index dtype, sorted column indices and no explicit zeros.
+    same index dtype (int32 unless a dimension or the number of stored counts
+    exceeds the int32 range), sorted column indices and no explicit zeros.
 
     Attributes:
         shape: ``(n_rows, n_cols)`` of the result.
@@ -65,6 +74,7 @@ class SparseCountAccumulator:
         self._pending_keys: list[np.ndarray] = []
         self._pending_counts: list[np.ndarray] = []
         self._n_pending = 0
+        self._finished = False
 
     def add(self, rows: np.ndarray, cols: np.ndarray) -> None:
         """Add one count for each ``(rows[i], cols[i])`` pair.
@@ -77,7 +87,9 @@ class SparseCountAccumulator:
         Raises:
             ValueError: If the arrays differ in length or an index lies
                 outside the matrix.
+            RuntimeError: If :meth:`to_csr` has already been called.
         """
+        self._check_not_finished()
         row_index = np.asarray(rows, dtype=np.int64).ravel()
         col_index = np.asarray(cols, dtype=np.int64).ravel()
         if row_index.shape != col_index.shape:
@@ -98,66 +110,114 @@ class SparseCountAccumulator:
         self._pending_keys.append(keys)
         self._pending_counts.append(counts.astype(np.int64, copy=False))
         self._n_pending += int(keys.size)
-        if self._n_pending >= max(self._merge_threshold, int(self._keys.size)):
+        if self._n_pending >= max(self._merge_threshold, int(self._keys.size) // 2):
             self._merge_pending()
 
     def to_csr(self) -> sparse.csr_matrix:
         """Return the accumulated counts as an int64 CSR matrix.
 
+        The accumulator hands its buffers to the result, so it can be called
+        once and the accumulator takes no counts afterwards.
+
         Returns:
             The ``shape`` CSR matrix of counts in canonical form.
+
+        Raises:
+            RuntimeError: If :meth:`to_csr` has already been called.
         """
+        self._check_not_finished()
         self._merge_pending()
+        self._finished = True
+        keys, counts = self._keys, self._counts
+        self._keys = np.zeros(0, dtype=np.int64)
+        self._counts = np.zeros(0, dtype=np.int64)
         n_rows, n_cols = self.shape
-        if self._keys.size == 0:
+        if keys.size == 0:
             return sparse.csr_matrix(self.shape, dtype=np.int64)
-        rows, cols = np.divmod(self._keys, n_cols)
-        indptr = np.zeros(n_rows + 1, dtype=np.int64)
-        np.cumsum(np.bincount(rows, minlength=n_rows), out=indptr[1:])
-        del rows
-        return sparse.csr_matrix(
-            (self._counts.copy(), cols, indptr),
-            shape=self.shape,
+        # scipy keeps int32 indices exactly when both dimensions and the
+        # number of stored counts fit; building them in that dtype avoids an
+        # int64 copy that the constructor would narrow again.
+        index_dtype = (
+            np.int32 if max(n_rows, n_cols, int(keys.size)) <= _MAX_INT32 else np.int64
         )
+        row_starts = np.arange(n_rows + 1, dtype=np.int64) * n_cols
+        indptr = np.searchsorted(keys, row_starts).astype(index_dtype, copy=False)
+        del row_starts
+        np.remainder(keys, n_cols, out=keys)
+        cols = keys.astype(index_dtype, copy=False)
+        del keys
+        return sparse.csr_matrix((counts, cols, indptr), shape=self.shape)
+
+    def _check_not_finished(self) -> None:
+        """Raise once :meth:`to_csr` has taken the counts.
+
+        Raises:
+            RuntimeError: If :meth:`to_csr` has already been called.
+        """
+        if self._finished:
+            raise RuntimeError("The counts were already taken by to_csr()")
 
     def _merge_pending(self) -> None:
         """Fold the pending reduced chunks into the sorted running totals."""
         if not self._pending_keys:
             return
-        pending_keys, pending_counts = _sum_duplicate_keys(
-            np.concatenate(self._pending_keys),
-            np.concatenate(self._pending_counts),
-        )
+        # Temporaries are released as soon as they are used, because a merge
+        # can hold half as many entries as the totals.
+        keys = np.concatenate(self._pending_keys)
         self._pending_keys.clear()
+        order = np.argsort(keys)
+        keys = keys[order]
+        counts = np.concatenate(self._pending_counts)
         self._pending_counts.clear()
+        counts = counts[order]
+        del order
         self._n_pending = 0
-        # Both sides are sorted and unique, so known keys are summed in place
-        # and new keys are inserted at their sorted positions without
-        # re-sorting the totals.
-        positions = np.searchsorted(self._keys, pending_keys)
+        starts = np.flatnonzero(np.r_[True, keys[1:] != keys[:-1]])
+        keys = keys[starts]
+        counts = np.add.reduceat(counts, starts)
+        del starts
+        # Both sides are sorted and unique: known keys are summed in place,
+        # and new keys are placed at their sorted positions among the totals
+        # without re-sorting them.
+        positions = np.searchsorted(self._keys, keys)
         is_known = positions < self._keys.size
-        is_known[is_known] = self._keys[positions[is_known]] == pending_keys[is_known]
-        self._counts[positions[is_known]] += pending_counts[is_known]
+        is_known[is_known] = self._keys[positions[is_known]] == keys[is_known]
+        self._counts[positions[is_known]] += counts[is_known]
         is_new = ~is_known
-        self._keys = np.insert(self._keys, positions[is_new], pending_keys[is_new])
-        self._counts = np.insert(
-            self._counts, positions[is_new], pending_counts[is_new]
-        )
+        del is_known
+        new_keys = keys[is_new]
+        del keys
+        new_counts = counts[is_new]
+        del counts
+        destinations = positions[is_new]
+        del positions, is_new
+        destinations += np.arange(destinations.size, dtype=destinations.dtype)
+        is_old = np.ones(self._keys.size + destinations.size, dtype=bool)
+        is_old[destinations] = False
+        self._keys = _interleave(self._keys, new_keys, is_old, destinations)
+        del new_keys
+        self._counts = _interleave(self._counts, new_counts, is_old, destinations)
 
 
-def _sum_duplicate_keys(
-    keys: np.ndarray, counts: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return the sorted unique keys and the summed counts of each.
+def _interleave(
+    old: np.ndarray,
+    new: np.ndarray,
+    is_old: np.ndarray,
+    destinations: np.ndarray,
+) -> np.ndarray:
+    """Return ``old`` and ``new`` combined into one array.
 
     Args:
-        keys: int64 linear indices, possibly repeated and unsorted.
-        counts: int64 count of each entry of ``keys``.
+        old: Values kept in their order where ``is_old`` is true.
+        new: Values written at ``destinations``.
+        is_old: Boolean mask over the result, false exactly at
+            ``destinations``.
+        destinations: Positions of ``new`` in the result.
 
     Returns:
-        A tuple of (unique sorted keys, summed counts).
+        An array of ``old``'s dtype and ``is_old``'s length.
     """
-    order = np.argsort(keys, kind="stable")
-    sorted_keys = keys[order]
-    starts = np.flatnonzero(np.r_[True, sorted_keys[1:] != sorted_keys[:-1]])
-    return sorted_keys[starts], np.add.reduceat(counts[order], starts)
+    merged = np.empty(is_old.size, dtype=old.dtype)
+    merged[is_old] = old
+    merged[destinations] = new
+    return merged

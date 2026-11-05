@@ -13,7 +13,10 @@ import pytest
 from scipy import sparse
 from shapely.geometry import box
 
-from merxen.enrichment.assignment import compute_table_from_points_for_shape
+from merxen.enrichment.assignment import (
+    _lookup_positions,
+    compute_table_from_points_for_shape,
+)
 
 _GENES = ["GeneA", "GeneB", "GeneC", "GeneD", "GeneE"]
 
@@ -90,7 +93,7 @@ def _reference_counts(
 
 
 def _grid_shapes(n_side: int, *, ids: list[int] | None = None) -> gpd.GeoDataFrame:
-    """Return unit squares on a grid with a gap between neighbours."""
+    """Return 1.5 x 1.5 squares on a grid of pitch 2, so neighbours do not touch."""
     geometries = [
         box(col * 2.0, row * 2.0, col * 2.0 + 1.5, row * 2.0 + 1.5)
         for row in range(n_side)
@@ -260,3 +263,26 @@ def test_written_count_matrix_is_byte_identical(tmp_path: Path) -> None:
         assert (tmp_path / "streamed.zarr" / relative).read_bytes() == (
             tmp_path / "reference.zarr" / relative
         ).read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        (
+            np.array(["GeneB", None, "GeneA", np.nan, "GeneB", "Other"], dtype=object),
+            [1, -1, 0, -1, 1, -1],
+        ),
+        (np.array([7, 3, 7, 9], dtype=np.uint64), [-1, 0, -1, 2]),
+        (np.array([], dtype=object), []),
+    ],
+)
+def test_lookup_positions_maps_unknown_and_missing_values_to_minus_one(
+    values: np.ndarray, expected: list[int]
+) -> None:
+    """Missing values are unknown values, never the position of another one."""
+    positions = {"GeneA": 0, "GeneB": 1, 3: 0, 9: 2}
+
+    looked_up = _lookup_positions(values, positions)
+
+    assert looked_up.dtype == np.int64
+    np.testing.assert_array_equal(looked_up, expected)

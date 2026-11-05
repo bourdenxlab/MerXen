@@ -207,7 +207,9 @@ def _lookup_positions(values: np.ndarray, positions: dict[Any, int]) -> np.ndarr
     """Map each value to its position, or -1 when it has none.
 
     Each distinct value is looked up once, so a chunk of many transcripts
-    costs one dictionary lookup per distinct cell or gene.
+    costs one dictionary lookup per distinct cell or gene. Missing values are
+    kept as their own distinct value, so they map to -1 like any other
+    unknown value.
 
     Args:
         values: Values to look up (cell IDs or gene names).
@@ -216,15 +218,13 @@ def _lookup_positions(values: np.ndarray, positions: dict[Any, int]) -> np.ndarr
     Returns:
         int64 positions aligned with ``values``.
     """
-    codes, uniques = pd.factorize(values)
+    codes, uniques = pd.factorize(values, use_na_sentinel=False)
     unique_positions = np.fromiter(
         (positions.get(value, -1) for value in uniques.tolist()),
         dtype=np.int64,
         count=len(uniques),
     )
-    looked_up = np.full(len(codes), -1, dtype=np.int64)
-    known = codes >= 0
-    looked_up[known] = unique_positions[codes[known]]
+    looked_up: np.ndarray = unique_positions[codes]
     return looked_up
 
 
