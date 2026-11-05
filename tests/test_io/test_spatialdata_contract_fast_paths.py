@@ -7,6 +7,7 @@ equivalence tests show that the opt-in fast paths give the same outputs.
 
 from __future__ import annotations
 
+import ast
 from collections.abc import Callable
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from shapely.geometry import box
 from spatialdata.models import PointsModel, ShapesModel, TableModel
 from spatialdata.transformations import get_transformation
 
+import merxen
 from merxen.io.spatialdata_io import (
     normalize_points_for_latest_write,
     prepare_source_spatialdata_contract,
@@ -573,3 +575,47 @@ def test_stable_transcript_ids_known_length_for_pandas() -> None:
     assert result["transcript_id"].tolist() == list(range(1, N_ROWS + 1))
     with pytest.raises(ValueError, match="does not match"):
         with_stable_transcript_ids(frame, partition_lengths=[len(frame) + 1])
+
+
+def _parse_calls_without_sort(source: str) -> list[int]:
+    """Return lines of ``PointsModel.parse`` calls that do not pass ``sort``.
+
+    A call passes it with a ``sort=`` keyword, or through ``**kwargs`` built
+    in the same function with a ``"sort"`` key.
+    """
+    tree = ast.parse(source)
+    missing: list[int] = []
+    for function in ast.walk(tree):
+        if not isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        sort_keys = {
+            node.value
+            for node in ast.walk(function)
+            if isinstance(node, ast.Constant) and node.value == "sort"
+        }
+        for call in ast.walk(function):
+            if not (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "parse"
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "PointsModel"
+            ):
+                continue
+            keywords = {keyword.arg for keyword in call.keywords}
+            if "sort" in keywords or (None in keywords and sort_keys):
+                continue
+            missing.append(call.lineno)
+    return missing
+
+
+def test_every_points_parse_passes_sort() -> None:
+    """Without ``sort`` spatialdata scans every partition's index (a full pass)."""
+    source_root = Path(merxen.__file__).parent
+    missing = {
+        str(path.relative_to(source_root)): lines
+        for path in sorted(source_root.rglob("*.py"))
+        if (lines := _parse_calls_without_sort(path.read_text(encoding="utf-8")))
+    }
+
+    assert missing == {}
