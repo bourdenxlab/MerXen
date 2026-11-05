@@ -1546,6 +1546,7 @@ def run_acceptance(
         The JSON-serialisable report.
     """
     started = time.monotonic()
+    revision = code_revision()
     store = Path(store)
     root_attrs: dict[str, Any] = dict(zarr.open_group(store, mode="r").attrs)
     header: dict[str, Any] = dict(root_attrs.get(atera_builder.ATERA_ATTRS_KEY) or {})
@@ -1612,7 +1613,7 @@ def run_acceptance(
     return {
         "alias": alias,
         "store_name": store.name,
-        "code_revision": code_revision(),
+        "code_revision": revision,
         "passed": all(entry["passed"] for entry in results.values()),
         "criteria": results,
         "build_options": atera_builder.build_options(build_config),
