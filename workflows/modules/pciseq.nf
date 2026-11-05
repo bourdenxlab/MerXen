@@ -113,7 +113,10 @@ process PCISEQ_COMPUTE {
     export LOKY_MAX_CPU_COUNT="${task.cpus}"
     python -m merxen.pciseq_compute \
         --prepared-dir "${prepared_dir}" \
-        --output-dir pciseq_computed
+        --output-dir pciseq_computed \
+        --memory-mode '${params.pciseq_memory_mode}' \
+        --cell-batch-size ${params.pciseq_cell_batch_size} \
+        --spot-batch-size ${params.pciseq_spot_batch_size}
     """
 
     stub:

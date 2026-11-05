@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import anndata as ad
@@ -18,8 +20,11 @@ import numpy as np
 import pandas as pd
 from pandas.api.types import is_bool_dtype, is_float_dtype, is_integer_dtype
 
+from merxen.analysis.pciseq_streaming import assert_unique_sorted, mapped_array
 from merxen.config import PciSeqConfig
 from merxen.io.spatialdata_schema import MERXEN_SCHEMA_ATTR
+
+logger = logging.getLogger(__name__)
 
 _BRANCHES = {
     "reseg": "proseg",
@@ -40,10 +45,21 @@ _CHUNK_ROWS = 500_000
 
 @dataclass(frozen=True)
 class _SpotIndex:
-    transcript_ids: np.ndarray
-    assignments: np.ndarray
-    gene_codes: np.ndarray
+    directory: Path
+    count: int
     genes: tuple[str, ...]
+
+    def arrays(self) -> tuple[np.memmap, np.memmap, np.memmap]:
+        """Open contiguous arrays without embedding their bytes in Dask tasks."""
+        ids, assignments, genes = (
+            np.memmap(self.directory / name, mode="r", dtype=dtype, shape=(self.count,))
+            for name, dtype in [
+                ("index_ids", "uint64"),
+                ("index_assignments", "uint64"),
+                ("index_genes", "uint32"),
+            ]
+        )
+        return ids, assignments, genes
 
 
 def _ids(
@@ -103,7 +119,9 @@ def _matches(
     return positions, matched
 
 
-def _spot_index(path: Path, frame: pd.DataFrame | None) -> _SpotIndex:
+def _spot_index(
+    path: Path, frame: pd.DataFrame | None, directory: Path, count: int
+) -> _SpotIndex:
     columns = ["transcript_id", "instance_id", "gene_name"]
     if frame is None:
         chunks = pd.read_csv(
@@ -121,8 +139,16 @@ def _spot_index(path: Path, frame: pd.DataFrame | None) -> _SpotIndex:
             frame.iloc[start : start + _CHUNK_ROWS][columns]
             for start in range(0, len(frame), _CHUNK_ROWS)
         )
-    ids, assignments, gene_codes = [], [], []
+    if count <= 0:
+        raise ValueError("pciSeq viewer publication requires modeled transcripts")
+    records = np.memmap(
+        directory / "index_records",
+        mode="w+",
+        dtype=[("transcript_id", "u8"), ("assignment", "u8"), ("gene_code", "u4")],
+        shape=(count,),
+    )
     genes: dict[str, int] = {}
+    position = 0
     for chunk in chunks:
         transcript_ids, _ = _ids(chunk.transcript_id, "spot assignment transcript_id")
         cell_ids, _ = _ids(
@@ -134,19 +160,64 @@ def _spot_index(path: Path, frame: pd.DataFrame | None) -> _SpotIndex:
         for name in names.unique():
             if name not in genes:
                 genes[name] = len(genes)
-        ids.append(transcript_ids)
-        assignments.append(cell_ids)
-        gene_codes.append(names.map(genes).to_numpy(dtype=np.uint32))
-    if not ids:
-        raise ValueError("pciSeq viewer publication requires modeled transcripts")
-    transcript_ids = np.concatenate(ids)
-    cell_ids = np.concatenate(assignments)
-    codes = np.concatenate(gene_codes)
-    order = np.argsort(transcript_ids)
-    transcript_ids = transcript_ids[order]
-    if len(transcript_ids) > 1 and np.any(transcript_ids[1:] == transcript_ids[:-1]):
-        raise ValueError("Spot assignments contain duplicate transcript identifiers")
-    return _SpotIndex(transcript_ids, cell_ids[order], codes[order], tuple(genes))
+        if position + len(chunk) > count:
+            raise ValueError("Modeled transcript count differs from prepared metadata")
+        records["transcript_id"][position : position + len(chunk)] = transcript_ids
+        records["assignment"][position : position + len(chunk)] = cell_ids
+        records["gene_code"][position : position + len(chunk)] = names.map(
+            genes
+        ).to_numpy(dtype=np.uint32)
+        position += len(chunk)
+    if position != count:
+        raise ValueError("Modeled transcript count differs from prepared metadata")
+    # In-place quicksort requires no full-sized argsort or concatenated arrays.
+    records.sort(order="transcript_id", kind="quicksort")
+    assert_unique_sorted(records["transcript_id"], "Spot assignments", _CHUNK_ROWS)
+    arrays = [
+        mapped_array(directory, name, dtype, count)
+        for name, dtype in [
+            ("index_ids", "uint64"),
+            ("index_assignments", "uint64"),
+            ("index_genes", "uint32"),
+        ]
+    ]
+    for start in range(0, count, _CHUNK_ROWS):
+        end = start + _CHUNK_ROWS
+        for target, name in zip(
+            arrays, ["transcript_id", "assignment", "gene_code"], strict=True
+        ):
+            target[start:end] = records[name][start:end]
+    for target in arrays:
+        target.flush()
+    del records, arrays
+    (directory / "index_records").unlink()
+    return _SpotIndex(directory, count, tuple(genes))
+
+
+def _validate_native_ids(native: Any, index: _SpotIndex) -> int:
+    """Check exact native uniqueness and modeled coverage one partition at a time."""
+    path = index.directory / "native_ids"
+    count = 0
+    with path.open("wb") as stream:
+        for partition in native["transcript_id"].to_delayed():
+            values, _ = _ids(
+                partition.compute(scheduler="synchronous"), "native transcript_id"
+            )
+            values.tofile(stream)
+            count += len(values)
+    if not count:
+        raise ValueError("Modeled transcripts are absent from native points")
+    native_ids = np.memmap(path, mode="r+", dtype="uint64", shape=(count,))
+    native_ids.sort(kind="quicksort")
+    assert_unique_sorted(native_ids, "native transcript_id", _CHUNK_ROWS)
+    model_ids, _, _ = index.arrays()
+    for start in range(0, index.count, _CHUNK_ROWS):
+        _, present = _matches(native_ids, model_ids[start : start + _CHUNK_ROWS])
+        if not present.all():
+            raise ValueError("Modeled transcripts are absent from native points")
+    del native_ids, model_ids
+    path.unlink()
+    return count
 
 
 def _join_partition(
@@ -154,15 +225,16 @@ def _join_partition(
 ) -> pd.DataFrame:
     result = part.copy()
     native_ids, _ = _ids(result.transcript_id, "native transcript_id")
-    positions, matched = _matches(index.transcript_ids, native_ids)
+    transcript_ids, assignments, gene_codes = index.arrays()
+    positions, matched = _matches(transcript_ids, native_ids)
     selected = positions[matched]
-    names = np.asarray(index.genes, dtype=object)[index.gene_codes[selected]]
+    names = np.asarray(index.genes, dtype=object)[gene_codes[selected]]
     if not np.array_equal(
-        result.loc[matched, gene_column].astype(str).to_numpy(), names
+        result.loc[matched, gene_column].astype(str).str.strip().to_numpy(), names
     ):
         raise ValueError("pciSeq transcript IDs resolve to different native genes")
     values = np.zeros(len(result), dtype=np.uint64)
-    values[matched] = index.assignments[selected]
+    values[matched] = assignments[selected]
     background = matched & (values == 0)
     result["transcript_id"] = native_ids
     result["assignment"] = pd.arrays.IntegerArray(values, values == 0)
@@ -264,6 +336,7 @@ def _write_elements(
 
     path = Path(sdata.path)
     token = uuid.uuid4().hex
+    backup_root = path.parent / f".{path.name}.pciseq-backup-{token}"
     root_attrs = deepcopy(sdata.attrs)
     originals = {
         (group, key): getattr(sdata, group).get(key) for group, key, _ in elements
@@ -289,7 +362,10 @@ def _write_elements(
         for group, key, temporary, value in staged:
             target = path / group / key
             if target.exists():
-                backup = target.with_name(f".{key}.pciseq-backup-{token}")
+                # Keep backups on the same filesystem but outside the Zarr tree:
+                # discovery/consolidation must never publish their stale metadata.
+                backup = backup_root / group / key
+                backup.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(target, backup)
                 backups.append((target, backup))
             os.replace(path / group / temporary, target)
@@ -302,6 +378,7 @@ def _write_elements(
         sdata.attrs[MERXEN_SCHEMA_ATTR] = schema
         # Commit registry only after every referenced element has been written.
         write_spatialdata_metadata(sdata)
+        sdata.write_consolidated_metadata()
     except Exception:
         for target in reversed(published):
             shutil.rmtree(target)
@@ -320,11 +397,25 @@ def _write_elements(
         sdata.attrs.clear()
         sdata.attrs.update(root_attrs)
         write_spatialdata_metadata(sdata)
+        sdata.write_consolidated_metadata()
+        _cleanup_publication_backup(backup_root)
         raise
-    for _, backup in backups:
-        shutil.rmtree(backup)
-    # Remove backup groups from consolidated discovery metadata after cleanup.
-    sdata.write_consolidated_metadata()
+    _cleanup_publication_backup(backup_root)
+
+
+def _cleanup_publication_backup(path: Path) -> None:
+    """Do not turn a committed publication into a failure over backup cleanup."""
+    if not path.exists():
+        return
+    try:
+        shutil.rmtree(path)
+    except OSError as error:
+        logger.warning(
+            "pciSeq publication is consistent; recoverable backup cleanup failed "
+            "for %s: %s",
+            path,
+            error,
+        )
 
 
 def publish_pciseq_viewer(
@@ -386,7 +477,10 @@ def publish_pciseq_viewer(
     branch = _BRANCHES[config.segmentation]
     source_key = f"pciseq_{branch}"
     points_key = f"transcripts_pciseq_{branch}"
-    with spatialdata_write_lock(config.spatialdata_path):
+    with (
+        spatialdata_write_lock(config.spatialdata_path),
+        TemporaryDirectory(prefix=".pciseq-viewer-", dir=output_dir) as temporary,
+    ):
         sdata = sd.read_zarr(config.spatialdata_path)
         shape_key, native_key, native_table = _resolve_native_keys(sdata, config)
         if shape_key != metadata.get("shape_key") or native_key != metadata.get(
@@ -457,27 +551,13 @@ def publish_pciseq_viewer(
                 "coverage": previous.get("coverage", {}),
             }
         else:
-            index = _spot_index(output_dir / "spot_assignments.csv", spot_assignments)
-            if len(index.transcript_ids) != metadata.get(
-                "spot_count", len(index.transcript_ids)
-            ):
-                raise ValueError(
-                    "Modeled transcript count differs from prepared metadata"
-                )
-            native_series = native["transcript_id"].compute()
-            native_ids, _ = _ids(native_series, "native transcript_id")
-            native_count = len(native_ids)
-            ordered_native = _unique(native_ids, "native transcript_id")
-            _, present = _matches(ordered_native, index.transcript_ids)
-            if not present.all():
-                raise ValueError("Modeled transcripts are absent from native points")
-            del native_series, native_ids, ordered_native
-            assigned = index.assignments[index.assignments != 0]
-            _, known = _matches(np.sort(shape_ids), assigned)
-            if not known.all():
-                raise ValueError(
-                    "Transcript assignments reference unknown native cell IDs"
-                )
+            index = _spot_index(
+                output_dir / "spot_assignments.csv",
+                spot_assignments,
+                Path(temporary),
+                metadata["spot_count"],
+            )
+            native_count = _validate_native_ids(native, index)
             cells = cell_assignments
             if cells is None:
                 cells = pd.read_csv(
@@ -490,10 +570,23 @@ def publish_pciseq_viewer(
             excluded_ids = all_cells.obs.loc[
                 all_cells.obs.pciseq_status.eq("excluded_overlap"), "instance_id"
             ].to_numpy(dtype=np.uint64)
-            if len(excluded_ids) and np.isin(assigned, excluded_ids).any():
-                raise ValueError(
-                    "Transcripts cannot be assigned to cells excluded from fitting"
-                )
+            _, indexed_assignments, _ = index.arrays()
+            ordered_shapes = np.sort(shape_ids)
+            background_count = 0
+            for start in range(0, index.count, _CHUNK_ROWS):
+                part = indexed_assignments[start : start + _CHUNK_ROWS]
+                background_count += int(np.count_nonzero(part == 0))
+                assigned = part[part != 0]
+                _, known = _matches(ordered_shapes, assigned)
+                if not known.all():
+                    raise ValueError(
+                        "Transcript assignments reference unknown native cell IDs"
+                    )
+                if len(excluded_ids) and np.isin(assigned, excluded_ids).any():
+                    raise ValueError(
+                        "Transcripts cannot be assigned to cells excluded from fitting"
+                    )
+            del indexed_assignments
             marker = {"analysis_id": analysis_id, "source_key": source_key}
             all_cells.uns[_MARKER] = marker
             gene_column = str(
@@ -572,13 +665,12 @@ def publish_pciseq_viewer(
             )
             embedding.uns[_MARKER] = marker
             elements.append(("tables", embedding_key, embedding))
-            background_count = int(np.count_nonzero(index.assignments == 0))
             coverage = {
                 "native_transcripts": native_count,
-                "modelled_transcripts": len(index.transcript_ids),
-                "assigned_transcripts": len(index.transcript_ids) - background_count,
+                "modelled_transcripts": index.count,
+                "assigned_transcripts": index.count - background_count,
                 "background_transcripts": background_count,
-                "not_modelled_transcripts": native_count - len(index.transcript_ids),
+                "not_modelled_transcripts": native_count - index.count,
                 "native_cells": len(shape_ids),
                 "excluded_cells": int(
                     all_cells.obs.pciseq_status.eq("excluded_overlap").sum()
@@ -613,7 +705,7 @@ def publish_pciseq_viewer(
                 "integrity": provenance,
             }
     target = output_dir / "viewer_publication.json"
-    temporary = target.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(publication, indent=2) + "\n")
-    os.replace(temporary, target)
+    publication_temporary = target.with_suffix(".json.tmp")
+    publication_temporary.write_text(json.dumps(publication, indent=2) + "\n")
+    os.replace(publication_temporary, target)
     return publication

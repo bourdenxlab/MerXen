@@ -800,7 +800,8 @@ def test_finalize_adds_separate_table_with_aligned_region(
     assert captured["annotated"].uns["spatialdata_attrs"]["region"] == aligned
     assert captured["annotated"].obs.pciseq_cell_type.tolist() == ["type_b"]
     assert captured["cell_assignments"].instance_id.is_unique
-    assert captured["spot_assignments"].transcript_id.is_unique
+    assert "spot_assignments" not in captured
+    assert pd.read_csv(paths["spot_assignments"]).transcript_id.is_unique
     summary = json.loads(paths["summary"].read_text())
     assert summary["spatialdata_table_key"] == "table_proseg_pciseq"
 

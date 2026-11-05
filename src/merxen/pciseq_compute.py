@@ -7,6 +7,8 @@ import hashlib
 import importlib
 import json
 import logging
+import uuid
+from collections.abc import Iterable, Iterator
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from scipy import sparse
+
+from merxen.pciseq_records import write_json_frames
 
 UPSTREAM_COMMIT = "5e2c0fd1841f8a4022a2fa341ece965687e343dd"
 _CELL_COLUMNS = {"Cell_Num", "ClassName", "Prob"}
@@ -141,10 +145,7 @@ def _validate_results(
         raise ValueError("pciSeq returned malformed cellData columns")
     if not isinstance(genes, pd.DataFrame) or not _SPOT_COLUMNS.issubset(genes):
         raise ValueError("pciSeq returned malformed geneData columns")
-    if cells["Cell_Num"].duplicated().any() or set(cells["Cell_Num"]) != set(
-        range(1, cell_count + 1)
-    ):
-        raise ValueError("pciSeq changed the prepared segmentation cell identifiers")
+    _validate_cells(cells, cell_count=cell_count, class_names=class_names)
     if genes["spot_id"].duplicated().any() or set(genes["spot_id"]) != set(
         range(len(spots))
     ):
@@ -154,6 +155,18 @@ def _validate_results(
     by_id = genes.set_index("spot_id")["gene_name"].reindex(spots.index)
     if not np.array_equal(by_id.to_numpy(), spots["gene_name"].to_numpy()):
         raise ValueError("pciSeq changed the prepared transcript gene mapping")
+
+
+def _validate_cells(
+    cells: pd.DataFrame, *, cell_count: int, class_names: pd.Index
+) -> None:
+    """Validate cell records independently of the number of transcript records."""
+    if not isinstance(cells, pd.DataFrame) or not _CELL_COLUMNS.issubset(cells):
+        raise ValueError("pciSeq returned malformed cellData columns")
+    if cells["Cell_Num"].duplicated().any() or set(cells["Cell_Num"]) != set(
+        range(1, cell_count + 1)
+    ):
+        raise ValueError("pciSeq changed the prepared segmentation cell identifiers")
     allowed_classes = set(class_names) | {"Zero"}
     for names, probabilities in zip(cells["ClassName"], cells["Prob"], strict=True):
         if (
@@ -166,6 +179,31 @@ def _validate_results(
         values = np.asarray(probabilities, dtype=float)
         if not np.isfinite(values).all() or (values < 0).any() or (values > 1).any():
             raise ValueError("pciSeq returned invalid class probability values")
+
+
+def _validated_spot_frames(
+    frames: Iterable[pd.DataFrame], *, spots: pd.DataFrame, cell_count: int
+) -> Iterator[pd.DataFrame]:
+    """Check every streamed transcript against the dense prepared row contract."""
+    position = 0
+    for frame in frames:
+        if not isinstance(frame, pd.DataFrame) or not _SPOT_COLUMNS.issubset(frame):
+            raise ValueError("pciSeq returned malformed geneData columns")
+        stop = position + len(frame)
+        if stop > len(spots) or not np.array_equal(
+            frame.spot_id.to_numpy(), np.arange(position, stop)
+        ):
+            raise ValueError("pciSeq changed the prepared transcript identifiers")
+        if not frame.neighbour.isin(range(cell_count + 1)).all():
+            raise ValueError("pciSeq returned unknown parent-cell identifiers")
+        if not np.array_equal(
+            frame.gene_name.to_numpy(), spots.gene_name.iloc[position:stop].to_numpy()
+        ):
+            raise ValueError("pciSeq changed the prepared transcript gene mapping")
+        position = stop
+        yield frame
+    if position != len(spots):
+        raise ValueError("pciSeq changed the prepared transcript identifiers")
 
 
 def _encode_class_names(
@@ -225,7 +263,15 @@ def _restore_class_names(
     return cells
 
 
-def run_pciseq_compute(prepared_dir: Path, output_dir: Path) -> Path:
+def run_pciseq_compute(
+    prepared_dir: Path,
+    output_dir: Path,
+    *,
+    memory_mode: str = "standard",
+    cell_batch_size: int = 128,
+    spot_batch_size: int = 20_000,
+    scratch_dir: Path | None = None,
+) -> Path:
     """Fit pciSeq to validated prepared input and write its reported results.
 
     Args:
@@ -239,6 +285,10 @@ def run_pciseq_compute(prepared_dir: Path, output_dir: Path) -> Path:
         ValueError: Prepared input or returned identifier contracts are invalid.
         ImportError: The isolated pciSeq runtime has not been installed.
     """
+    if memory_mode not in {"standard", "batched"}:
+        raise ValueError("pciSeq memory_mode must be standard or batched")
+    if min(cell_batch_size, spot_batch_size) < 1:
+        raise ValueError("pciSeq batch sizes must be positive")
     manifest, spots, reference, planes = _load_prepared(prepared_dir)
     count, options = _validate_prepared(manifest, spots, reference, planes)
     requested_options = deepcopy(options)
@@ -262,23 +312,48 @@ def run_pciseq_compute(prepared_dir: Path, output_dir: Path) -> Path:
     encoded_reference, upstream_options, token_map, ignored_weights = (
         _encode_class_names(reference, options)
     )
-    # fit mutates its inputs. Only task-local copies cross this boundary.
-    cells, genes = pciseq.fit(
-        spots=spots.copy(),
-        coo=[plane.copy() for plane in planes],
-        scRNAseq=encoded_reference,
-        opts=deepcopy(upstream_options),
-    )
-    cells = _restore_class_names(cells, token_map)
-    _validate_results(
-        cells,
-        genes,
-        cell_count=count,
-        spots=spots,
-        class_names=reference.columns,
-    )
-    cells.to_json(output_dir / "cell_data.json", orient="records", double_precision=15)
-    genes.to_json(output_dir / "gene_data.json", orient="records", double_precision=15)
+    execution: dict[str, Any] = {"memory_mode": memory_mode}
+    if memory_mode == "batched":
+        from merxen.pciseq_batched import fit_batched
+
+        with fit_batched(
+            spots=spots.copy(),
+            planes=[plane.copy() for plane in planes],
+            reference=encoded_reference,
+            options=deepcopy(upstream_options),
+            expected_commit=UPSTREAM_COMMIT,
+            scratch_dir=scratch_dir
+            or output_dir.parent / f".pciseq-batched-{uuid.uuid4().hex}",
+            cell_batch_size=cell_batch_size,
+            spot_batch_size=spot_batch_size,
+        ) as (cells, gene_frames, execution):
+            cells = _restore_class_names(cells, token_map)
+            _validate_cells(cells, cell_count=count, class_names=reference.columns)
+            cells.to_json(
+                output_dir / "cell_data.json", orient="records", double_precision=15
+            )
+            write_json_frames(
+                output_dir / "gene_data.json",
+                _validated_spot_frames(gene_frames, spots=spots, cell_count=count),
+            )
+    else:
+        # fit mutates its inputs. Only task-local copies cross this boundary.
+        cells, genes = pciseq.fit(
+            spots=spots.copy(),
+            coo=[plane.copy() for plane in planes],
+            scRNAseq=encoded_reference,
+            opts=deepcopy(upstream_options),
+        )
+        cells = _restore_class_names(cells, token_map)
+        _validate_results(
+            cells, genes, cell_count=count, spots=spots, class_names=reference.columns
+        )
+        cells.to_json(
+            output_dir / "cell_data.json", orient="records", double_precision=15
+        )
+        genes.to_json(
+            output_dir / "gene_data.json", orient="records", double_precision=15
+        )
     metadata = {
         "prepared_manifest_sha256": hashlib.sha256(
             (prepared_dir / "manifest.json").read_bytes()
@@ -295,8 +370,13 @@ def run_pciseq_compute(prepared_dir: Path, output_dir: Path) -> Path:
         "upstream_options": upstream_options,
         "class_token_map": token_map,
         "ignored_cell_type_weight_names": ignored_weights,
-        "has_converged": None,
-        "convergence_status": "not_exposed_by_fit",
+        "execution": execution,
+        "has_converged": execution.get("has_converged"),
+        "convergence_status": (
+            "exposed_by_pinned_model"
+            if memory_mode == "batched"
+            else "not_exposed_by_fit"
+        ),
         "probability_semantics": (
             "Upstream reported summaries: classes with probability >0.001 retained; "
             "probabilities truncated to three decimals. Missing entries are not "
@@ -317,8 +397,21 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prepared-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--memory-mode", choices=("standard", "batched"), default="standard"
+    )
+    parser.add_argument("--cell-batch-size", type=int, default=128)
+    parser.add_argument("--spot-batch-size", type=int, default=20_000)
+    parser.add_argument("--scratch-dir", type=Path)
     arguments = parser.parse_args()
-    run_pciseq_compute(arguments.prepared_dir, arguments.output_dir)
+    run_pciseq_compute(
+        arguments.prepared_dir,
+        arguments.output_dir,
+        memory_mode=arguments.memory_mode,
+        cell_batch_size=arguments.cell_batch_size,
+        spot_batch_size=arguments.spot_batch_size,
+        scratch_dir=arguments.scratch_dir,
+    )
 
 
 if __name__ == "__main__":

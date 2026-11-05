@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import inspect
 import json
 from copy import deepcopy
 from pathlib import Path
@@ -28,7 +29,9 @@ CELL_IDS = np.array([17, 2**53 + 7, 2**63 + 29, 2**64 - 5], dtype=np.uint64)
 SPOT_IDS = np.array([2**63 + 91, 3, 2**53 + 17, 2**64 - 7, 7], dtype=np.uint64)
 
 
-def _fixture(tmp_path: Path) -> tuple[PciSeqConfig, Path, pd.DataFrame]:
+def _fixture(
+    tmp_path: Path, *, native_genes: list[str] | None = None
+) -> tuple[PciSeqConfig, Path, pd.DataFrame]:
     from shapely.geometry import box
 
     config = PciSeqConfig(
@@ -44,7 +47,9 @@ def _fixture(tmp_path: Path) -> tuple[PciSeqConfig, Path, pd.DataFrame]:
         {
             "x": [1001.5, 1003.5, 1005.5, 1007.5, 1009.5],
             "y": [2001.25, 2003.25, 2005.25, 2007.25, 2009.25],
-            "gene": ["A", "B", "A", "Blank-1", "other"],
+            "gene": native_genes
+            if native_genes is not None
+            else ["A", "B", "A", "Blank-1", "other"],
             "transcript_id": SPOT_IDS,
             "assignment": pd.array([17] * 5, dtype="UInt64"),
             "background": [False] * 5,
@@ -385,6 +390,101 @@ def test_failed_refresh_restores_previous_elements_and_registry(
         for group in [restored.points, restored.tables]
         for key in group
     )
+
+
+def test_final_consolidation_failure_restores_previous_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Old elements remain recoverable through the final metadata operation."""
+    config, output, _ = _fixture(tmp_path)
+    first = publish_pciseq_viewer(config, output)
+    previous = sd.read_zarr(config.spatialdata_path)
+    previous_attrs = deepcopy(previous.attrs)
+    previous_points = previous.points[first["points"]].compute()
+    annotated = ad.read_h5ad(output / "annotated.h5ad")
+    annotated.obsm["X_umap"][:] = [2.0, 3.0]
+    annotated.write_h5ad(output / "annotated.h5ad")
+    original = sd.SpatialData.write_consolidated_metadata
+    fail = [True]
+
+    def broken(sdata: Any, *args: Any, **kwargs: Any) -> Any:
+        caller = inspect.currentframe().f_back
+        if caller.f_code.co_name == "_write_elements" and fail[0]:
+            fail[0] = False
+            raise OSError("Final consolidation failed")
+        return original(sdata, *args, **kwargs)
+
+    monkeypatch.setattr(sd.SpatialData, "write_consolidated_metadata", broken)
+    with pytest.raises(OSError, match="Final consolidation failed"):
+        publish_pciseq_viewer(config, output)
+    restored = sd.read_zarr(config.spatialdata_path)
+    assert restored.attrs == previous_attrs
+    pd.testing.assert_frame_equal(
+        restored.points[first["points"]].compute(), previous_points
+    )
+    np.testing.assert_array_equal(
+        restored.tables[first["embedding_table"]].obsm["X_umap"], [[8.0, 9.0]]
+    )
+    assert not list(tmp_path.glob(".native.zarr.pciseq-backup-*"))
+    assert not any(
+        "_pciseq_stage_" in key or "pciseq-backup" in key
+        for group in [restored.points, restored.tables]
+        for key in group
+    )
+
+
+def test_committed_refresh_retains_backup_if_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A cleanup error leaves a usable new source and a recoverable old backup."""
+    import shutil
+
+    config, output, _ = _fixture(tmp_path)
+    publish_pciseq_viewer(config, output)
+    annotated = ad.read_h5ad(output / "annotated.h5ad")
+    annotated.obsm["X_umap"][:] = [2.0, 3.0]
+    annotated.write_h5ad(output / "annotated.h5ad")
+    original = shutil.rmtree
+
+    def broken(path: Any, *args: Any, **kwargs: Any) -> Any:
+        if Path(path).name.startswith(".native.zarr.pciseq-backup-"):
+            raise OSError("Cleanup failed")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", broken)
+    result = publish_pciseq_viewer(config, output)
+    assert not result["reused"]
+    restored = sd.read_zarr(config.spatialdata_path)
+    np.testing.assert_array_equal(
+        restored.tables[result["embedding_table"]].obsm["X_umap"], [[2.0, 3.0]]
+    )
+    backups = list(tmp_path.glob(".native.zarr.pciseq-backup-*"))
+    assert len(backups) == 1
+    assert (backups[0] / "tables" / result["embedding_table"]).is_dir()
+    assert "recoverable backup cleanup failed" in caplog.text
+
+
+def test_prepare_gene_normalization_preserves_literal_native_genes(
+    tmp_path: Path,
+) -> None:
+    """The prepared gene match strips whitespace without changing native points."""
+    config, output, native = _fixture(
+        tmp_path, native_genes=[" A ", " B ", " A\t", "Blank-1", "other"]
+    )
+    result = publish_pciseq_viewer(config, output)
+    restored = sd.read_zarr(config.spatialdata_path)
+    actual = restored.points[result["points"]].compute()
+    assert actual.gene.tolist() == native.gene.tolist()
+    assert (
+        restored.points["transcripts"].compute().gene.tolist() == native.gene.tolist()
+    )
+    assert actual.pciseq_assignment_status.tolist() == [
+        "background",
+        "assigned",
+        "assigned",
+        "not_modelled",
+        "not_modelled",
+    ]
 
 
 @pytest.mark.parametrize("variant", ["legacy", "registered", "unrelated"])
