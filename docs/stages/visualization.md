@@ -10,7 +10,9 @@ single-platform mode it writes one-dataset alternatives for the paired plots.
 1. In paired mode, rerun the gene comparison internally (re-opens the enriched zarrs) and
    plot log-log scatter plots of MERSCOPE vs Xenium normalized counts.
    In single-platform mode, plot top gene abundance for total and assigned
-   normalized counts.
+   normalized counts. Both modes drop control features with
+   `apply_dataset_filter` before normalising
+   ([comparison.md](comparison.md#walkthrough)).
 2. Recompute per-dataset QC metrics and plot either combined paired QC plots
    or one-platform geometry/cell-metric plots.
 3. Plot a paired 3x2 or single-platform 3x1 transcript overview with density

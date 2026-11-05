@@ -379,8 +379,8 @@ only to transcripts without one:
    control probes in pre-release data, which has no feature-type column).
    MERSCOPE names matching `^Blank-\d+$`.
 3. **Substring fallback** (rows without a feature type): names containing
-   `blank`, `control`, `negative`, `negcontrol`, `unassigned` or `deprecated`,
-   case-insensitive. These are the tokens clustering already uses to remove
+   `blank`, `control`, `negative`, `negcontrol`, `unassigned`, `deprecated`
+   or `intergenic`, case-insensitive. These are the tokens clustering already uses to remove
    control variables, so ProSeg and clustering drop the same features.
 
 Because the feature type decides, a custom-panel gene whose name starts with

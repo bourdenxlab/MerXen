@@ -164,9 +164,10 @@ never the correction code, and the package imports no GPU code. Configured by `M
 ### `merxen.control_features` — [control_features.py](../src/merxen/control_features.py)
 - `CONTROL_TOKENS` — case-insensitive control substrings shared by
   clustering and transcript analyses.
-- `classify_control_transcripts(names, platform=..., is_gene=..., codeword_category=...)`
-  — flag control transcripts: a Xenium feature type decides where present,
-  name rules apply elsewhere. Also flags rows kept because their feature
+- `classify_control_transcripts(names, platform=..., is_gene=..., codeword_category=..., feature_type=...)`
+  — flag control transcripts or features: a 10x feature type (`is_gene`,
+  `codeword_category`, or a cell-feature-matrix `feature_type`) decides
+  where present, name rules apply elsewhere. Also flags rows kept because their feature
   type says gene although a control-name rule matches.
 - `control_transcript_mask(...)` — the control flags alone.
 - `matches_control_name_pattern(name, platform)` /
@@ -340,7 +341,8 @@ Standalone manual landmark registration of an image pair
 - `compute_gene_summary(sdata_obj, dataset_name)`.
 - `compute_gene_summary_from_path(zarr_path, dataset_name)`.
 - `gene_totals_from_points`, `gene_totals_from_table`,
-  `apply_dataset_filter`, `normalize_counts`, `compare_df`, `fit_linear`.
+  `feature_types_from_table`, `apply_dataset_filter` (control features via
+  `merxen.control_features`), `normalize_counts`, `compare_df`, `fit_linear`.
 
 ## `merxen.visualization`
 

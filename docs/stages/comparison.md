@@ -39,13 +39,14 @@ Then:
 | Function | File |
 |----------|------|
 | CLI `compare_command` | [cli/run_comparison.py:37](../../src/merxen/cli/run_comparison.py#L37) |
-| `compute_gene_comparison_from_paths` | [qc/gene_comparison.py:187](../../src/merxen/qc/gene_comparison.py#L187) |
-| `compute_gene_comparison` | [qc/gene_comparison.py:123](../../src/merxen/qc/gene_comparison.py#L123) |
-| `gene_totals_from_points` | [qc/gene_comparison.py:29](../../src/merxen/qc/gene_comparison.py#L29) |
-| `gene_totals_from_table` | [qc/gene_comparison.py:18](../../src/merxen/qc/gene_comparison.py#L18) |
-| `apply_dataset_filter` | [qc/gene_comparison.py:76](../../src/merxen/qc/gene_comparison.py#L76) |
-| `normalize_counts` | [qc/gene_comparison.py:92](../../src/merxen/qc/gene_comparison.py#L92) |
-| `fit_linear` | [qc/gene_comparison.py:112](../../src/merxen/qc/gene_comparison.py#L112) |
+| `compute_gene_comparison_from_paths` | [qc/gene_comparison.py:317](../../src/merxen/qc/gene_comparison.py#L317) |
+| `compute_gene_comparison` | [qc/gene_comparison.py:196](../../src/merxen/qc/gene_comparison.py#L196) |
+| `gene_totals_from_points` | [qc/gene_comparison.py:66](../../src/merxen/qc/gene_comparison.py#L66) |
+| `gene_totals_from_table` | [qc/gene_comparison.py:35](../../src/merxen/qc/gene_comparison.py#L35) |
+| `feature_types_from_table` | [qc/gene_comparison.py:42](../../src/merxen/qc/gene_comparison.py#L42) |
+| `apply_dataset_filter` | [qc/gene_comparison.py:133](../../src/merxen/qc/gene_comparison.py#L133) |
+| `normalize_counts` | [qc/gene_comparison.py:165](../../src/merxen/qc/gene_comparison.py#L165) |
+| `fit_linear` | [qc/gene_comparison.py:185](../../src/merxen/qc/gene_comparison.py#L185) |
 
 ## Config schema
 
@@ -66,9 +67,27 @@ Then:
      unassigned transcripts.
    - `x_assigned_all` / `m_assigned_all` — `gene_totals_from_table`, sums
      the `.X` matrix in each platform's primary table.
-3. `apply_dataset_filter` strips platform-specific non-panel genes:
-   - Xenium: drops codeword / control / unassigned patterns.
-   - MERSCOPE: drops `Blank-*` probes.
+3. `apply_dataset_filter` strips control features with the shared registry
+   in [control_features.py](../../src/merxen/control_features.py), the same
+   rules the ProSeg input and clustering use
+   ([segmentation.md](segmentation.md#control-features-in-the-proseg-input)):
+   - A gene whose table `var` records a 10x feature type (`feature_types`
+     or `feature_type`) is a control unless the type is `Gene Expression`.
+     `feature_types_from_table` reads it, and the same types apply to the
+     point totals.
+   - Other genes are controls when the name matches the platform's anchored
+     pattern (Xenium: `NegControl`, `Unassigned`, `Deprecated`,
+     `Intergenic`, `GenomicControl`, `BLANK_`, `antisense_`; MERSCOPE:
+     `Blank-<N>`) or contains a control token (`blank`, `control`,
+     `negative`, `negcontrol`, `unassigned`, `deprecated`, `intergenic`,
+     case-insensitive).
+
+   Until AT-2 the Xenium filter only dropped names containing
+   `UnassignedCodeword`, `NegControlCodeword` or `NegControlProbe`, so
+   `DeprecatedCodeword_*` and the Xenium Prime 5K genomic controls
+   (`Intergenic_Region_*`) entered the Xenium totals and normalisation.
+   Comparison outputs written before that fix are stale for Xenium data
+   with those features.
 4. `normalize_counts` rescales each vector so its entries sum to 10 000,
    returning the normalized vector and the original total.
 5. `compare_df` joins the two platforms on gene name, keeping only genes
