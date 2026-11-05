@@ -11,7 +11,7 @@ import re
 import shutil
 import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 import spatialdata as sd
 import zarr
+from pandas.api.types import is_unsigned_integer_dtype
 from spatialdata.models import PointsModel, ShapesModel, TableModel
 from spatialdata.transformations import get_transformation
 
@@ -39,6 +40,7 @@ from merxen.io.spatialdata_schema import (
     PROSEG_INTERNAL_ID_COLUMN,
     SOURCE_CELL_ID_COLUMN,
     TRANSCRIPT_ID_COLUMN,
+    SpatialDataContractError,
     canonical_instance_series,
     choose_primary_points_key,
     register_segmentation_branch,
@@ -444,6 +446,9 @@ def _can_retry_element_overwrite(exc: ValueError) -> bool:
 def normalize_points_for_latest_write(
     points_obj: Any,
     points_key: str = "points",
+    *,
+    points_canonical: bool = False,
+    feature_categories: Sequence[str] | None = None,
 ) -> Any:
     """Normalize point-table dtypes so all Dask partitions share one pyarrow schema.
 
@@ -451,9 +456,31 @@ def normalize_points_for_latest_write(
     plain string types. Mixed integer/float/string identifiers are coerced to
     consistent types.
 
+    With ``points_canonical`` the columns that are already in their canonical
+    form are kept as they are, so no later step has to rebuild them with a
+    pass over every partition:
+
+    - A gene column that is categorical with known categories keeps its
+      dtype and category order (the default casts it to strings, and the
+      caller later recomputes and sorts the categories).
+    - ``transcript_id``, ``cell`` and ``assignment`` keep an unsigned integer
+      dtype (the default goes through ``float64`` and narrows ``assignment``
+      to ``UInt32``).
+
+    A Dask Parquet round trip returns categoricals with *unknown* categories.
+    Those are not canonical: with ``feature_categories`` they are restored
+    lazily, and each partition raises if a value is missing from the list;
+    without it the column falls back to the default string cast. Every other
+    column is normalized as by default.
+
     Args:
         points_obj: A Dask or pandas DataFrame of transcript points.
         points_key: Name of the points element (for logging).
+        points_canonical: Keep columns that are already canonical (see above).
+            Off by default; the default output is unchanged.
+        feature_categories: Known gene categories, in the order to keep, used
+            only with ``points_canonical`` for gene columns whose categories are
+            unknown or differ.
 
     Returns:
         The DataFrame with normalized column types.
@@ -470,6 +497,17 @@ def normalize_points_for_latest_write(
     # Gene columns: force to plain string to avoid categorical overflow
     for gene_col in ("gene", "feature_name", "target"):
         if gene_col in cols:
+            if points_canonical:
+                canonical_genes = _canonical_feature_column(
+                    df[gene_col], feature_categories
+                )
+                if canonical_genes is not None:
+                    df[gene_col] = canonical_genes
+                    continue
+                log_status(
+                    f"'{points_key}'.{gene_col} has no known categories; "
+                    "casting it to strings"
+                )
             try:
                 df[gene_col] = df[gene_col].astype("string")
             except Exception:  # noqa: BLE001
@@ -481,6 +519,8 @@ def normalize_points_for_latest_write(
     int_casts: dict[str, str] = {"cell": "uint32"}
     for c, target_dtype in int_casts.items():
         if c in cols:
+            if points_canonical and is_unsigned_integer_dtype(df[c].dtype):
+                continue
             try:
                 df[c] = df[c].astype("float64").fillna(0).astype(target_dtype)
             except Exception:  # noqa: BLE001
@@ -489,7 +529,9 @@ def normalize_points_for_latest_write(
                 except Exception:  # noqa: BLE001
                     df[c] = df[c].astype("string")
 
-    if TRANSCRIPT_ID_COLUMN in cols:
+    if TRANSCRIPT_ID_COLUMN in cols and not (
+        points_canonical and is_unsigned_integer_dtype(df[TRANSCRIPT_ID_COLUMN].dtype)
+    ):
         try:
             df[TRANSCRIPT_ID_COLUMN] = (
                 df[TRANSCRIPT_ID_COLUMN].astype("float64").astype("UInt64")
@@ -497,7 +539,9 @@ def normalize_points_for_latest_write(
         except Exception:  # noqa: BLE001
             df[TRANSCRIPT_ID_COLUMN] = df[TRANSCRIPT_ID_COLUMN].astype("string")
 
-    if "assignment" in cols:
+    if "assignment" in cols and not (
+        points_canonical and is_unsigned_integer_dtype(df["assignment"].dtype)
+    ):
         try:
             df["assignment"] = df["assignment"].astype("float64").astype("UInt32")
         except Exception:  # noqa: BLE001
@@ -539,6 +583,57 @@ def _preserve_observed_transcript_coordinates(df: Any, cols: set[str]) -> Any:
             cols.add(moved_col)
         df[coord] = df[observed_col]
     return df
+
+
+def _canonical_feature_column(
+    values: Any,
+    feature_categories: Sequence[str] | None,
+) -> Any | None:
+    """Return a gene column with known categories without a pass, if possible.
+
+    Args:
+        values: The Dask or pandas gene column.
+        feature_categories: Categories to restore, in order, or None.
+
+    Returns:
+        ``values`` when it already has known categories (equal to
+        ``feature_categories`` when given), a lazily recategorized column when
+        ``feature_categories`` is given, or None when neither applies.
+    """
+    dtype = values.dtype
+    is_known = isinstance(dtype, pd.CategoricalDtype) and (
+        not isinstance(values, dd.Series) or bool(values.cat.known)
+    )
+    if feature_categories is None:
+        return values if is_known else None
+    target = pd.CategoricalDtype(categories=list(feature_categories))
+    # Unordered dtypes compare equal whatever their category order; the order
+    # is part of the canonical form, so compare the lists.
+    if is_known and list(dtype.categories) == list(target.categories):
+        return values
+    if isinstance(values, dd.Series):
+        return values.map_partitions(
+            _recategorize_checked,
+            target,
+            meta=pd.Series(pd.Categorical([], dtype=target), name=values.name),
+        )
+    return _recategorize_checked(values, target)
+
+
+def _recategorize_checked(values: pd.Series, dtype: pd.CategoricalDtype) -> pd.Series:
+    """Cast one partition to ``dtype``, refusing values outside its categories."""
+    if isinstance(values.dtype, pd.CategoricalDtype):
+        # ``astype`` keeps the old order when only the order differs.
+        result = values.cat.set_categories(dtype.categories)
+    else:
+        result = values.astype(dtype)
+    lost = result.isna() & values.notna()
+    if bool(lost.any()):
+        examples = values.loc[lost].astype(str).unique()[:5].tolist()
+        raise ValueError(
+            f"Gene values are missing from the known categories: {examples}"
+        )
+    return result
 
 
 def _set_known_feature_categories(points_obj: Any, feature_key: str) -> Any:
@@ -639,12 +734,108 @@ def _canonicalize_source_points_partition(
     return result
 
 
+def _require_canonical_points(points_obj: Any, points_key: str) -> None:
+    """Check, from the Dask metadata only, that points are already canonical.
+
+    Nothing is computed. The value-level preconditions (unique IDs,
+    assignments that exist as shapes) are left to
+    ``validate_merxen_schema_streaming``.
+
+    Args:
+        points_obj: The points element.
+        points_key: Its name, for error messages.
+
+    Raises:
+        SpatialDataContractError: If the columns, dtypes or attrs are not the
+            canonical ones ``prepare_source_spatialdata_contract`` would write.
+    """
+    prefix = f"points_canonical: {points_key!r}"
+    if not isinstance(points_obj, dd.DataFrame):
+        raise SpatialDataContractError(f"{prefix} is not a Dask DataFrame")
+    try:
+        PointsModel.validate(points_obj)
+    except ValueError as error:
+        raise SpatialDataContractError(
+            f"{prefix} is not parsed points: {error}"
+        ) from error
+    point_attrs = dict(points_obj.attrs.get("spatialdata_attrs", {}))
+    feature_key = point_attrs.get("feature_key")
+    if feature_key not in points_obj.columns:
+        raise SpatialDataContractError(f"{prefix} has no feature_key column")
+    feature = points_obj[feature_key]
+    if not isinstance(feature.dtype, pd.CategoricalDtype) or not feature.cat.known:
+        raise SpatialDataContractError(
+            f"{prefix}.{feature_key} must be categorical with known categories"
+        )
+    if TRANSCRIPT_ID_COLUMN not in points_obj.columns or points_obj[
+        TRANSCRIPT_ID_COLUMN
+    ].dtype != np.dtype(np.uint64):
+        raise SpatialDataContractError(f"{prefix} needs a uint64 transcript_id")
+    instance_key = point_attrs.get("instance_key")
+    if "original_assignment" in points_obj.columns:
+        if instance_key != "original_assignment":
+            raise SpatialDataContractError(
+                f"{prefix} must use 'original_assignment' as instance_key"
+            )
+        if points_obj["original_assignment"].dtype != pd.UInt64Dtype():
+            raise SpatialDataContractError(
+                f"{prefix}.original_assignment must be UInt64"
+            )
+    elif instance_key is not None or first_existing_col(
+        points_obj, ["cell_id", "EntityID"]
+    ):
+        raise SpatialDataContractError(
+            f"{prefix} has a source assignment column that still needs mapping"
+        )
+
+
 def prepare_source_spatialdata_contract(
     sdata_obj: Any,
     *,
     platform: str,
+    points_canonical: bool = False,
 ) -> None:
-    """Canonicalize an instrument-reader SpatialData object before first write."""
+    """Canonicalize an instrument-reader SpatialData object before first write.
+
+    By default every points element is rewritten: source assignments are mapped
+    to canonical instance IDs, ``transcript_id`` is renumbered (the source IDs
+    move to ``source_transcript_id``), the gene categories are recomputed and
+    sorted, and the points are re-parsed. That takes two full passes over the
+    points (a row count per partition and the category scan) before the write.
+
+    ``points_canonical=True`` is for readers that already emit canonical
+    points. It skips all of the above for every points element and checks only
+    the Dask metadata, so nothing is computed here. Shapes, tables, the schema
+    stamp and the segmentation registry are handled as by default. The caller
+    guarantees, for every points element:
+
+    - it was built with ``PointsModel.parse(..., sort=True)`` and carries its
+      transformations;
+    - the feature column is categorical with *known* categories, in the order
+      to keep (they are not re-sorted, unlike the default);
+    - ``transcript_id`` is ``uint64``, positive and unique, and is kept as is
+      (no ``source_transcript_id`` is added);
+    - with a cell table, assignments are already canonical instance IDs in a
+      nullable ``UInt64`` ``original_assignment`` column registered as the
+      points ``instance_key`` (the IDs the table's mapping gives, e.g. the cell
+      label values), and no source column (``cell_id``, ``EntityID``) is left
+      to map; points without assignments carry no ``instance_key``;
+    - partitions carry a default RangeIndex, as ``reset_index(drop=True)``
+      leaves them.
+
+    The metadata checks raise on a wrong column, dtype or attr. The value-level
+    guarantees (IDs unique, assignments present as shapes) are checked by
+    ``validate_merxen_schema_streaming`` after the write.
+
+    Args:
+        sdata_obj: SpatialData object straight from an instrument reader.
+        platform: Platform name recorded in the schema stamp.
+        points_canonical: Trust the canonical points described above.
+
+    Raises:
+        SpatialDataContractError: With ``points_canonical``, if a points element
+            is not canonical according to its metadata.
+    """
     primary_points = choose_primary_points_key(sdata_obj)
     stamp_merxen_schema(
         sdata_obj,
@@ -658,6 +849,9 @@ def prepare_source_spatialdata_contract(
     table_obj = tables.get(table_key) if table_key is not None else None
     if table_obj is None:
         for points_key in list(points):
+            if points_canonical:
+                _require_canonical_points(points[points_key], str(points_key))
+                continue
             points[points_key] = with_stable_transcript_ids(
                 points[points_key],
                 preserve_existing=True,
@@ -808,6 +1002,9 @@ def prepare_source_spatialdata_contract(
 
     for points_key in list(sdata_obj.points):
         points_obj = sdata_obj.points[points_key]
+        if points_canonical:
+            _require_canonical_points(points_obj, str(points_key))
+            continue
         transformations = get_transformation(points_obj, get_all=True)
         point_attrs = dict(points_obj.attrs.get("spatialdata_attrs", {}))
         source_assignment_col = point_attrs.get("instance_key")
@@ -1024,10 +1221,35 @@ def _canonicalize_proseg_points(
     *,
     mapping: dict[int, int],
     quality_column_alias: str | None,
+    points_canonical: bool = False,
+    feature_categories: Sequence[str] | None = None,
 ) -> Any:
-    """Canonicalize and reparse one ProSeg transcript points element."""
+    """Canonicalize and reparse one ProSeg transcript points element.
+
+    Args:
+        points_obj: The ProSeg points element.
+        mapping: ProSeg-internal to canonical instance IDs.
+        quality_column_alias: Optional name under which to keep ``qv``.
+        points_canonical: Skip the full passes for columns that are already
+            canonical: keep a ``uint64`` ``transcript_id`` (the caller
+            guarantees it is positive and unique, e.g. carried through from
+            canonical source points) instead of counting every partition to
+            renumber it, and keep known gene categories (restored lazily from
+            ``feature_categories`` after a Parquet round trip) instead of
+            recomputing and sorting them. Assignment mapping is unchanged; it
+            is lazy.
+        feature_categories: Known gene categories, see
+            ``normalize_points_for_latest_write``.
+
+    Returns:
+        The parsed, canonical points element.
+    """
     transformations = get_transformation(points_obj, get_all=True)
-    points_obj = normalize_points_for_latest_write(points_obj)
+    points_obj = normalize_points_for_latest_write(
+        points_obj,
+        points_canonical=points_canonical,
+        feature_categories=feature_categories,
+    )
     if isinstance(points_obj, dd.DataFrame):
         meta = _canonicalize_proseg_points_partition(
             points_obj._meta,
@@ -1046,7 +1268,13 @@ def _canonicalize_proseg_points(
             mapping=mapping,
             quality_column_alias=quality_column_alias,
         )
-    points_obj = with_stable_transcript_ids(points_obj)
+    keep_transcript_ids = (
+        points_canonical
+        and TRANSCRIPT_ID_COLUMN in points_obj.columns
+        and points_obj[TRANSCRIPT_ID_COLUMN].dtype == np.dtype(np.uint64)
+    )
+    if not keep_transcript_ids:
+        points_obj = with_stable_transcript_ids(points_obj)
     points_obj = points_obj.reset_index(drop=True)
 
     x_col = first_existing_col(
@@ -1066,7 +1294,10 @@ def _canonicalize_proseg_points(
         raise KeyError(
             "Could not resolve coordinates and gene column for ProSeg points"
         )
-    if isinstance(points_obj, dd.DataFrame):
+    has_known_genes = points_canonical and (
+        _canonical_feature_column(points_obj[gene_col], None) is not None
+    )
+    if isinstance(points_obj, dd.DataFrame) and not has_known_genes:
         points_obj = _set_known_feature_categories(points_obj, gene_col)
 
     coordinates = {"x": x_col, "y": y_col}
@@ -1348,8 +1579,24 @@ def upgrade_spatialdata_contract_in_memory(
     *,
     quality_column_alias: str | None = None,
     platform: str | None = None,
+    points_canonical: bool = False,
+    feature_categories: Sequence[str] | None = None,
 ) -> bool:
-    """Upgrade an in-memory ProSeg SpatialData object to the current contract."""
+    """Upgrade an in-memory ProSeg SpatialData object to the current contract.
+
+    Args:
+        sdata_obj: SpatialData object read from a ProSeg output.
+        quality_column_alias: Optional name under which to keep ProSeg's ``qv``.
+        platform: Optional platform recorded in the schema stamp.
+        points_canonical: Opt-in fast path for points whose transcript IDs and
+            gene categories are already canonical; see
+            ``_canonicalize_proseg_points``. Off by default.
+        feature_categories: Known gene categories for every points element,
+            used with ``points_canonical`` after a Parquet round trip.
+
+    Returns:
+        True when the object was upgraded, False when it was already current.
+    """
     current = dict(getattr(sdata_obj, "attrs", {}).get(MERXEN_SCHEMA_ATTR, {}))
     if current.get("schema_version") == MERXEN_SCHEMA_VERSION:
         return False
@@ -1361,6 +1608,8 @@ def upgrade_spatialdata_contract_in_memory(
             sdata_obj.points[points_key],
             mapping=mapping,
             quality_column_alias=quality_column_alias,
+            points_canonical=points_canonical,
+            feature_categories=feature_categories,
         )
 
     proseg_shape_keys = [

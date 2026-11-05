@@ -14,6 +14,7 @@ import uuid
 from collections import Counter
 
 import anndata as ad
+import dask
 import dask.dataframe as dd
 import geopandas as gpd
 import numpy as np
@@ -89,13 +90,19 @@ class PartitionReads:
             self.peak_in_flight = 0
 
     def dataframe(self) -> dd.DataFrame:
-        """Return a lazy Dask frame with one partition per stored frame."""
-        return dd.from_map(
-            self,
-            range(len(self.frames)),
-            meta=self.frames[0].iloc[:0],
-            enforce_metadata=False,
-        )
+        """Return a lazy Dask frame with one partition per stored frame.
+
+        String dtypes are served as stored (Dask would otherwise convert them
+        to pyarrow strings), so a frame computed from a store compares equal
+        to the same frame served again.
+        """
+        with dask.config.set({"dataframe.convert-string": False}):
+            return dd.from_map(
+                self,
+                range(len(self.frames)),
+                meta=self.frames[0].iloc[:0],
+                enforce_metadata=False,
+            )
 
 
 def split_frame(frame: pd.DataFrame, n_partitions: int) -> list[pd.DataFrame]:
@@ -274,26 +281,32 @@ def canonical_spatialdata_like(
     reference: sd.SpatialData,
     raw: sd.SpatialData,
     *,
+    frame: pd.DataFrame | None = None,
     points_key: str = "transcripts",
+    read_delay_s: float = 0.0,
 ) -> tuple[sd.SpatialData, PartitionReads]:
     """Rebuild ``raw`` with points already in the canonical MerXen form.
 
-    The points are the computed default-contract points of ``reference``,
-    served again partition by partition with their known categories, as a
-    reader that emits canonical points directly would serve them.
+    The points are the computed default-contract points of ``reference`` (or
+    an edited copy of them), served again partition by partition with their
+    known categories, as a reader that emits canonical points directly would
+    serve them.
 
     Args:
         reference: A store that went through the default contract.
         raw: The raw store the reference was made from (shapes and tables
             are taken from it, untouched).
+        frame: Points to serve instead of the computed reference points.
         points_key: Points element to rebuild.
+        read_delay_s: Sleep per partition read.
 
     Returns:
         The rebuilt store and the read counter of its points.
     """
     reference_points = reference.points[points_key]
-    frame = reference_points.compute().reset_index(drop=True)
-    reads = PartitionReads(split_frame(frame, N_PARTITIONS))
+    if frame is None:
+        frame = reference_points.compute().reset_index(drop=True)
+    reads = PartitionReads(split_frame(frame, N_PARTITIONS), read_delay_s=read_delay_s)
     point_attrs = dict(reference_points.attrs.get("spatialdata_attrs", {}))
     coordinates = {axis: axis for axis in ("x", "y", "z") if axis in frame.columns}
     points = PointsModel.parse(

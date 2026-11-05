@@ -7,22 +7,32 @@ equivalence tests show that the opt-in fast paths give the same outputs.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from pathlib import Path
+
 import anndata as ad
 import dask.dataframe as dd
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import pytest
 import spatialdata as sd
 from scipy import sparse
 from shapely.geometry import box
 from spatialdata.models import PointsModel, ShapesModel, TableModel
+from spatialdata.transformations import get_transformation
 
 from merxen.io.spatialdata_io import (
     normalize_points_for_latest_write,
     prepare_source_spatialdata_contract,
     upgrade_spatialdata_contract_in_memory,
+    write_spatialdata_zarr,
 )
-from merxen.io.spatialdata_schema import with_stable_transcript_ids
+from merxen.io.spatialdata_schema import (
+    SpatialDataContractError,
+    validate_merxen_schema,
+    with_stable_transcript_ids,
+)
 
 from .contract_synth import (
     MERSCOPE_CELLS,
@@ -31,6 +41,7 @@ from .contract_synth import (
     XENIUM_CELLS,
     XENIUM_LABELS,
     PartitionReads,
+    canonical_spatialdata_like,
     merscope_raw_spatialdata,
     split_frame,
     xenium_raw_points_frame,
@@ -224,3 +235,325 @@ def test_default_stable_transcript_ids_count_every_partition() -> None:
 
     assert reads.reads == dict.fromkeys(range(N_PARTITIONS), 1)
     assert result.compute()["transcript_id"].tolist() == list(range(1, N_ROWS + 1))
+
+
+# --- Opt-in fast paths ----------------------------------------------------------
+
+
+RAW_BUILDERS = {
+    "XENIUM": xenium_raw_spatialdata,
+    "MERSCOPE": merscope_raw_spatialdata,
+}
+
+
+def _default_and_canonical(
+    platform: str,
+) -> tuple[sd.SpatialData, sd.SpatialData, PartitionReads]:
+    """Return a default-contract store and its raw store with canonical points."""
+    reference, _ = RAW_BUILDERS[platform]()
+    prepare_source_spatialdata_contract(reference, platform=platform)
+    raw, _ = RAW_BUILDERS[platform]()
+    canonical, reads = canonical_spatialdata_like(reference, raw)
+    return reference, canonical, reads
+
+
+@pytest.mark.parametrize("platform", sorted(RAW_BUILDERS))
+def test_points_canonical_matches_default_without_a_pass(platform: str) -> None:
+    """Canonical points give the default outputs and are never read."""
+    reference, canonical, reads = _default_and_canonical(platform)
+
+    prepare_source_spatialdata_contract(
+        canonical, platform=platform, points_canonical=True
+    )
+
+    assert reads.total == 0
+    expected_points = reference.points["transcripts"]
+    points = canonical.points["transcripts"]
+    assert (
+        points.attrs["spatialdata_attrs"] == expected_points.attrs["spatialdata_attrs"]
+    )
+    assert get_transformation(points, get_all=True) == get_transformation(
+        expected_points, get_all=True
+    )
+    pd.testing.assert_frame_equal(points.compute(), expected_points.compute())
+    assert reads.reads == dict.fromkeys(range(N_PARTITIONS), 1)
+    assert canonical.attrs == reference.attrs
+    assert set(canonical.shapes) == set(reference.shapes)
+    for key in reference.shapes:
+        pd.testing.assert_frame_equal(
+            pd.DataFrame(canonical.shapes[key]),
+            pd.DataFrame(reference.shapes[key]),
+        )
+    pd.testing.assert_frame_equal(
+        canonical.tables["table"].obs, reference.tables["table"].obs
+    )
+    assert (
+        canonical.tables["table"].uns["spatialdata_attrs"]
+        == reference.tables["table"].uns["spatialdata_attrs"]
+    )
+    validate_merxen_schema(canonical, deep=True)
+
+
+def test_points_canonical_keeps_the_reader_category_order() -> None:
+    """The category skip is keyed on the flag: known categories stay unsorted."""
+    reference, _ = merscope_raw_spatialdata()
+    prepare_source_spatialdata_contract(reference, platform="MERSCOPE")
+    frame = reference.points["transcripts"].compute().reset_index(drop=True)
+    frame["gene"] = frame["gene"].cat.reorder_categories(["Zeb2", "Actb", "Gad1"])
+    raw, _ = merscope_raw_spatialdata()
+    canonical, reads = canonical_spatialdata_like(reference, raw, frame=frame)
+
+    prepare_source_spatialdata_contract(
+        canonical, platform="MERSCOPE", points_canonical=True
+    )
+
+    assert reads.total == 0
+    genes = canonical.points["transcripts"].compute()["gene"]
+    assert genes.cat.categories.tolist() == ["Zeb2", "Actb", "Gad1"]
+    assert genes.astype(str).tolist() == frame["gene"].astype(str).tolist()
+
+
+def test_points_canonical_without_a_table_leaves_points_untouched() -> None:
+    """Without a cell table canonical points keep their own IDs, unread."""
+    _, canonical, reads = _default_and_canonical("MERSCOPE")
+    del canonical.tables["table"]
+    before = canonical.points["transcripts"]
+
+    prepare_source_spatialdata_contract(
+        canonical, platform="MERSCOPE", points_canonical=True
+    )
+
+    assert canonical.points["transcripts"] is before
+    assert reads.total == 0
+
+
+@pytest.mark.parametrize(
+    ("edit", "message"),
+    [
+        (lambda frame: frame.astype({"transcript_id": "int64"}), "uint64"),
+        (
+            lambda frame: frame.astype({"original_assignment": "float64"}),
+            "UInt64",
+        ),
+    ],
+)
+def test_points_canonical_rejects_non_canonical_metadata(
+    edit: Callable[[pd.DataFrame], pd.DataFrame],
+    message: str,
+) -> None:
+    """The flag checks dtypes from the metadata and refuses raw points."""
+    reference, _ = merscope_raw_spatialdata()
+    prepare_source_spatialdata_contract(reference, platform="MERSCOPE")
+    frame = edit(reference.points["transcripts"].compute().reset_index(drop=True))
+    raw, _ = merscope_raw_spatialdata()
+    canonical, reads = canonical_spatialdata_like(reference, raw, frame=frame)
+
+    with pytest.raises(SpatialDataContractError, match=message):
+        prepare_source_spatialdata_contract(
+            canonical, platform="MERSCOPE", points_canonical=True
+        )
+    assert reads.total == 0
+
+
+def test_points_canonical_rejects_unknown_categories(tmp_path: Path) -> None:
+    """Points read back from Parquet have unknown categories: not canonical."""
+    reference, _ = merscope_raw_spatialdata()
+    prepare_source_spatialdata_contract(reference, platform="MERSCOPE")
+    write_spatialdata_zarr(reference, tmp_path / "source.zarr")
+    written = sd.read_zarr(tmp_path / "source.zarr")
+    assert not written.points["transcripts"]["gene"].cat.known
+
+    with pytest.raises(SpatialDataContractError, match="known categories"):
+        prepare_source_spatialdata_contract(
+            written, platform="MERSCOPE", points_canonical=True
+        )
+
+
+def test_points_canonical_rejects_unmapped_source_assignments() -> None:
+    """Raw reader points with opaque cell IDs are not canonical."""
+    raw, reads = xenium_raw_spatialdata()
+
+    with pytest.raises(SpatialDataContractError, match="needs mapping"):
+        prepare_source_spatialdata_contract(
+            raw, platform="XENIUM", points_canonical=True
+        )
+    assert reads.total == 0
+
+
+def test_normalize_points_canonical_keeps_canonical_dtypes() -> None:
+    """The opt-in keeps known genes and unsigned IDs with the default values."""
+    frame = pd.DataFrame(
+        {
+            "x": [1.0, 2.0],
+            "y": [3.0, 4.0],
+            "gene": pd.Categorical(["B", "A"], categories=["B", "A"]),
+            "transcript_id": np.asarray([5, 6], dtype=np.uint64),
+            "assignment": pd.Series([7, pd.NA], dtype="UInt64"),
+            "cell": np.asarray([1, 2], dtype=np.uint64),
+        }
+    )
+    points = dd.from_pandas(frame, npartitions=2)
+
+    # The normaliser assigns columns in place, so each call gets its own copy.
+    default = normalize_points_for_latest_write(points.copy()).compute()
+    fast = normalize_points_for_latest_write(points.copy(), points_canonical=True)
+
+    assert fast["gene"].cat.known
+    assert fast["gene"].cat.categories.tolist() == ["B", "A"]
+    assert fast["transcript_id"].dtype == np.uint64
+    assert fast["assignment"].dtype == "UInt64"
+    assert fast["cell"].dtype == np.uint64
+    computed = fast.compute()
+    assert computed["gene"].astype(str).tolist() == default["gene"].tolist()
+    for column in ("transcript_id", "assignment", "cell"):
+        assert (
+            computed[column].astype("Int64").tolist()
+            == default[column].astype("Int64").tolist()
+        )
+
+
+def test_normalize_points_canonical_restores_categories_after_parquet(
+    tmp_path: Path,
+) -> None:
+    """A Parquet round trip loses known categories; the list restores them."""
+    frame = pd.DataFrame(
+        {
+            "x": np.arange(6, dtype=np.float64),
+            "y": np.arange(6, dtype=np.float64),
+            "feature_name": pd.Categorical(
+                ["C", "A", "B", "C", "B", "A"], categories=["C", "A", "B"]
+            ),
+        }
+    )
+    dd.from_pandas(frame, npartitions=3).to_parquet(tmp_path / "points.parquet")
+    round_tripped = dd.read_parquet(tmp_path / "points.parquet")
+    assert not round_tripped["feature_name"].cat.known
+
+    fallback = normalize_points_for_latest_write(
+        round_tripped.copy(), points_canonical=True
+    )
+    restored = normalize_points_for_latest_write(
+        round_tripped.copy(),
+        points_canonical=True,
+        feature_categories=["C", "A", "B"],
+    )
+
+    assert fallback["feature_name"].dtype == "string"
+    assert restored["feature_name"].cat.known
+    computed = restored.compute()["feature_name"]
+    assert computed.cat.categories.tolist() == ["C", "A", "B"]
+    assert computed.cat.codes.tolist() == [0, 1, 2, 0, 2, 1]
+
+    reordered = normalize_points_for_latest_write(
+        dd.from_pandas(frame, npartitions=3),
+        points_canonical=True,
+        feature_categories=["A", "B", "C"],
+    )
+    assert reordered.compute()["feature_name"].cat.categories.tolist() == [
+        "A",
+        "B",
+        "C",
+    ]
+
+    missing = normalize_points_for_latest_write(
+        round_tripped.copy(),
+        points_canonical=True,
+        feature_categories=["A", "B"],
+    )
+    with pytest.raises(ValueError, match="missing from the known categories"):
+        missing.compute()
+
+
+def test_proseg_upgrade_fast_path_matches_default_without_a_pass() -> None:
+    """ProSeg points with canonical IDs and genes skip both passes."""
+    default_sdata, _ = _raw_proseg_spatialdata()
+    upgrade_spatialdata_contract_in_memory(default_sdata, platform="MERSCOPE")
+    fast_sdata, reads = _raw_proseg_spatialdata()
+
+    assert upgrade_spatialdata_contract_in_memory(
+        fast_sdata, platform="MERSCOPE", points_canonical=True
+    )
+
+    assert reads.total == 0
+    default = default_sdata.points["transcripts"].compute()
+    fast = fast_sdata.points["transcripts"].compute()
+    assert fast["gene"].cat.categories.tolist() == list(PROSEG_GENES)
+    pd.testing.assert_frame_equal(
+        fast.assign(gene=fast["gene"].astype(str)),
+        default.assign(gene=default["gene"].astype(str)),
+    )
+    assert reads.reads == dict.fromkeys(range(N_PARTITIONS), 1)
+    validate_merxen_schema(fast_sdata, deep=True)
+
+
+def test_proseg_upgrade_fast_path_regenerates_non_canonical_ids() -> None:
+    """IDs that are not uint64 are renumbered even on the fast path."""
+    sdata, reads = _raw_proseg_spatialdata()
+    frames = [
+        frame.astype({"transcript_id": "int64"}).assign(transcript_id=0)
+        for frame in reads.frames
+    ]
+    reads.frames[:] = frames
+    sdata.points["transcripts"] = PointsModel.parse(
+        reads.dataframe(),
+        coordinates={"x": "x", "y": "y", "z": "z"},
+        feature_key="gene",
+        sort=True,
+    )
+    reads.reset()
+
+    upgrade_spatialdata_contract_in_memory(
+        sdata, platform="MERSCOPE", points_canonical=True
+    )
+
+    assert reads.reads == dict.fromkeys(range(N_PARTITIONS), 1)
+    frame = sdata.points["transcripts"].compute()
+    assert frame["transcript_id"].tolist() == list(range(1, N_ROWS + 1))
+
+
+def test_stable_transcript_ids_from_known_lengths_match_counted_ids() -> None:
+    """Known partition lengths give the counted IDs without the counting pass."""
+    reads = PartitionReads(split_frame(xenium_raw_points_frame(), N_PARTITIONS))
+    counted = with_stable_transcript_ids(
+        reads.dataframe(), preserve_existing=True
+    ).compute()
+    reads.reset()
+
+    result = with_stable_transcript_ids(
+        reads.dataframe(),
+        preserve_existing=True,
+        partition_lengths=[len(frame) for frame in reads.frames],
+    )
+
+    assert reads.total == 0
+    pd.testing.assert_frame_equal(result.compute(), counted)
+    assert reads.reads == dict.fromkeys(range(N_PARTITIONS), 1)
+
+
+def test_stable_transcript_ids_refuse_wrong_partition_lengths() -> None:
+    """Wrong lengths fail up front or when the partition is computed."""
+    reads = PartitionReads(split_frame(xenium_raw_points_frame(), N_PARTITIONS))
+    lengths = [len(frame) for frame in reads.frames]
+
+    with pytest.raises(ValueError, match="entries"):
+        with_stable_transcript_ids(reads.dataframe(), partition_lengths=lengths[:-1])
+    with pytest.raises(ValueError, match="negative"):
+        with_stable_transcript_ids(
+            reads.dataframe(), partition_lengths=[-1, *lengths[1:]]
+        )
+    shifted = with_stable_transcript_ids(
+        reads.dataframe(), partition_lengths=[lengths[0] - 1, *lengths[1:]]
+    )
+    with pytest.raises(ValueError, match="partition_lengths gave"):
+        shifted.compute()
+
+
+def test_stable_transcript_ids_known_length_for_pandas() -> None:
+    """A pandas frame is one partition."""
+    frame = xenium_raw_points_frame()
+
+    result = with_stable_transcript_ids(frame, partition_lengths=[len(frame)])
+
+    assert result["transcript_id"].tolist() == list(range(1, N_ROWS + 1))
+    with pytest.raises(ValueError, match="does not match"):
+        with_stable_transcript_ids(frame, partition_lengths=[len(frame) + 1])

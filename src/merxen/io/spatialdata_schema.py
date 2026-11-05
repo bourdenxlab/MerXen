@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from copy import deepcopy
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
@@ -282,20 +283,44 @@ def with_stable_transcript_ids(
     points_obj: Any,
     *,
     preserve_existing: bool = False,
+    partition_lengths: Sequence[int] | None = None,
 ) -> Any:
     """Assign deterministic, positive, partition-order transcript identifiers.
 
     The IDs describe rows in the persisted MerXen points element. They are
     regenerated when ingesting or converting a source object so missing or
     silently duplicated source identifiers cannot corrupt later joins.
+
+    Args:
+        points_obj: A Dask or pandas DataFrame of transcript points.
+        preserve_existing: Keep an existing ``transcript_id`` column as
+            ``source_transcript_id``.
+        partition_lengths: Row count of every Dask partition, in partition
+            order, when the caller already knows them (for example from the
+            reader's metadata). The IDs are then assigned without the
+            counting pass over every partition. Each partition checks its own
+            length when it is computed, so a wrong count raises instead of
+            producing overlapping IDs. For a pandas DataFrame it must be
+            ``[len(points_obj)]``.
+
+    Returns:
+        The frame with a ``uint64`` ``transcript_id`` column numbered from 1.
+
+    Raises:
+        ValueError: If ``partition_lengths`` does not match the partitions.
     """
     if hasattr(points_obj, "npartitions") and hasattr(points_obj, "map_partitions"):
-        lengths = (
-            points_obj.map_partitions(len)
-            .compute()
-            .astype(np.int64, copy=False)
-            .tolist()
-        )
+        if partition_lengths is None:
+            lengths = (
+                points_obj.map_partitions(len)
+                .compute()
+                .astype(np.int64, copy=False)
+                .tolist()
+            )
+        else:
+            lengths = _checked_partition_lengths(
+                partition_lengths, int(points_obj.npartitions)
+            )
         offsets: list[int] = []
         next_id = 1
         for length in lengths:
@@ -319,6 +344,11 @@ def with_stable_transcript_ids(
         ) -> pd.DataFrame:
             number = 0 if partition_info is None else int(partition_info["number"])
             start = offsets[number]
+            if partition_lengths is not None and len(partition) != lengths[number]:
+                raise ValueError(
+                    f"Partition {number} has {len(partition)} rows; "
+                    f"partition_lengths gave {lengths[number]}"
+                )
             result = partition.copy()
             if preserve_source:
                 result[SOURCE_TRANSCRIPT_ID_COLUMN] = result[TRANSCRIPT_ID_COLUMN]
@@ -335,6 +365,13 @@ def with_stable_transcript_ids(
             partition_info=True,
         )
 
+    if partition_lengths is not None and _checked_partition_lengths(
+        partition_lengths, 1
+    ) != [len(points_obj)]:
+        raise ValueError(
+            f"partition_lengths {list(partition_lengths)} does not match "
+            f"{len(points_obj)} rows"
+        )
     result = points_obj.copy()
     if (
         preserve_existing
@@ -348,6 +385,22 @@ def with_stable_transcript_ids(
         dtype=np.uint64,
     )
     return result
+
+
+def _checked_partition_lengths(
+    partition_lengths: Sequence[int],
+    n_partitions: int,
+) -> list[int]:
+    """Return caller-supplied partition lengths after checking their shape."""
+    lengths = [int(length) for length in partition_lengths]
+    if len(lengths) != n_partitions:
+        raise ValueError(
+            f"partition_lengths has {len(lengths)} entries for "
+            f"{n_partitions} partitions"
+        )
+    if any(length < 0 for length in lengths):
+        raise ValueError("partition_lengths must not be negative")
+    return lengths
 
 
 def validate_merxen_schema(
