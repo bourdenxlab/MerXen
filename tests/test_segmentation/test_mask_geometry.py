@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
+from shapely.geometry.base import BaseGeometry
 
+import merxen.segmentation.mask_geometry as mask_geometry
 from merxen.segmentation.mask_geometry import (
     masks_to_labeled_polygons,
     masks_to_polygons,
@@ -56,3 +59,49 @@ def test_masks_to_labeled_polygons_preserves_disconnected_label_components() -> 
     assert label_id == 5
     assert geometry.geom_type == "MultiPolygon"
     assert len(geometry.geoms) == 2
+
+
+def _grid_mask(n_side: int = 9, block: int = 4) -> np.ndarray:
+    """Return a mask of ``n_side**2`` square labels separated by background."""
+    size = n_side * block
+    rows, cols = np.indices((size, size))
+    labels = (rows // block) * n_side + (cols // block) + 1
+    inside = (rows % block != 0) & (cols % block != 0)
+    return np.where(inside, labels, 0).astype(np.int32)
+
+
+class _FailingPoolContext:
+    """Multiprocessing context stand-in whose pool cannot start."""
+
+    def Pool(self, *args: object, **kwargs: object) -> None:  # noqa: N802
+        raise OSError("simulated pool start failure")
+
+
+def _wkb_pairs(labeled: list[tuple[int, BaseGeometry]]) -> list[tuple[int, bytes]]:
+    return [(label_id, polygon.wkb) for label_id, polygon in labeled]
+
+
+def test_masks_to_labeled_polygons_pool_matches_serial() -> None:
+    """The default fork pool returns the same labels and polygons as serial."""
+    masks = _grid_mask()
+
+    serial = masks_to_labeled_polygons(masks, n_jobs=1)
+    pooled = masks_to_labeled_polygons(masks, n_jobs=2)
+
+    assert len(serial) == 81
+    assert _wkb_pairs(pooled) == _wkb_pairs(serial)
+
+
+def test_masks_to_labeled_polygons_falls_back_to_serial_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pool failure falls back to the serial loop when nothing is requested."""
+    masks = _grid_mask()
+    serial = masks_to_labeled_polygons(masks, n_jobs=1)
+    monkeypatch.setattr(
+        mask_geometry.mp, "get_context", lambda method: _FailingPoolContext()
+    )
+
+    pooled = masks_to_labeled_polygons(masks, n_jobs=2)
+
+    assert _wkb_pairs(pooled) == _wkb_pairs(serial)
