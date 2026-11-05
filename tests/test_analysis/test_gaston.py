@@ -20,6 +20,7 @@ from shapely.geometry import box
 
 from merxen.analysis.gaston import (
     GASTON_OWNED_COLUMNS,
+    _control_feature_mask,
     import_gaston_annotations,
     postprocess_gaston,
     prepare_gaston_input,
@@ -199,6 +200,27 @@ def test_prepare_refuses_noninteger_counts(
 
     with pytest.raises(ValueError, match="non-integer"):
         prepare_gaston_input(config, tmp_path / "bundle")
+
+
+def test_control_feature_mask_uses_the_shared_control_tokens() -> None:
+    """GASTON drops the same control-like genes as clustering."""
+    adata = ad.AnnData(
+        X=np.zeros((1, 5)),
+        var=pd.DataFrame(
+            {
+                "feature_types": [
+                    "Gene Expression",
+                    "Gene Expression",
+                    "Gene Expression",
+                    "Gene Expression",
+                    "Negative Control Codeword",
+                ]
+            },
+            index=["GFAP", "Intergenic_Region_1", "Blank-3", "BLNK", "Odd_1"],
+        ),
+    )
+
+    assert _control_feature_mask(adata).tolist() == [False, True, True, False, True]
 
 
 def test_glmpca_loads_sparse_bundle_and_records_convergence(
