@@ -73,6 +73,7 @@ STATION_ALIASES = {
 NON_PROCESS_STATIONS = {
     "merscope_in",
     "xenium_in",
+    "atera_in",
     "mecr_out",
     "compare_out",
     "mapmycells_out",

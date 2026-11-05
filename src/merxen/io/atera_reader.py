@@ -24,10 +24,12 @@ Conventions the readers rely on, verified on the public dataset:
   ``(c + 0.5) * ps``.
 - Vendor metadata is kept whole (plan §3.11): :func:`copy_atera_sidecars`
   copies the manifest, metrics, panel, reports and FOV files byte for byte
-  under stable names and :func:`atera_metadata_attrs` returns the full header
-  for the store attrs. Run, slide and instrument values in it are sample
-  names, so human-facing text (logs, errors, plot titles) never prints them
-  unless through :func:`merxen.privacy.to_alias`.
+  under stable names, :func:`write_atera_embedded_metadata` keeps the metadata
+  held inside the zipped zarr stores and the OME-TIFF headers verbatim, and
+  :func:`atera_metadata_attrs` returns the full header for the store attrs.
+  Run, slide and instrument values in it are sample names, so human-facing
+  text (logs, errors, plot titles) never prints them unless through
+  :func:`merxen.privacy.to_alias`.
 """
 
 from __future__ import annotations
@@ -43,7 +45,8 @@ import threading
 import uuid
 import weakref
 import xml.etree.ElementTree as ET
-from collections.abc import Iterator, Mapping, Sequence
+import zipfile
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -99,6 +102,8 @@ DERIVED_CONTROL_COUNT_COLUMNS: Final = {
 #: Vendor ``obs`` columns copied with a ``vendor_`` prefix when present.
 VENDOR_OBS_COLUMNS: Final = (
     "leiden_res_1.0",
+    "centroid_column",
+    "centroid_row",
     "azimuth_broad",
     "azimuth_coarse",
     "azimuth_fine",
@@ -171,6 +176,30 @@ _SIDECAR_GLOBS: Final = (
 )
 #: Sidecar folder at the store root; it survives store rewrites.
 ATERA_SIDECAR_DIR: Final = "atera"
+#: Subfolder of ``atera/`` with the metadata members of each vendor zarr zip.
+ZARR_METADATA_DIR: Final = "zarr_metadata"
+#: Subfolder of ``atera/`` with the OME-XML header of each morphology TIFF.
+OME_XML_DIR: Final = "ome_xml"
+#: Zarr metadata member names (v2 and v3) kept from every vendor zip.
+ZARR_METADATA_MEMBERS: Final = frozenset(
+    {".zattrs", ".zgroup", ".zarray", ".zmetadata", "zarr.json"}
+)
+#: Vendor zarr root attributes larger than this (JSON bytes) stay in their
+#: sidecar only, so the store's root attrs stay small enough to read on open.
+ROOT_ATTR_INLINE_MAX_BYTES: Final = 32 << 10
+#: Vendor visualisation stores that are not ingested; only their metadata is
+#: kept, as ``(explorer_files key, stable name)``.
+_VIZ_STORES: Final = (
+    ("transcripts_viz_zarr_filepath", "binned_transcripts.zarr.zip"),
+    ("cell_feature_viz_zarr_filepath", "csc_cell_feature_matrix.zarr.zip"),
+)
+#: Prefix of the differential-expression columns of the matrix ``var``.
+DE_COLUMN_PREFIX: Final = "de_"
+#: ``cell_summary`` columns the table maps to named obs columns or ``obsm``;
+#: every other column is copied as ``vendor_<name>``.
+_MAPPED_SUMMARY_COLUMNS: Final = frozenset(
+    {"cell_centroid_x", "cell_centroid_y", "cell_area", "nucleus_area", "nucleus_count"}
+)
 #: Stable sidecar name of a ``spec_override`` manifest (the bundle's own
 #: ``experiment.spatial`` keeps its name).
 EXPERIMENT_OVERRIDE_SIDECAR: Final = "experiment_override.spatial"
@@ -205,6 +234,12 @@ class AteraBundle:
         panel_config_file: ``panel_config.json``, if present.
         sidecars: Every vendor metadata and report file, copied verbatim into
             the store by :func:`copy_atera_sidecars`.
+        viz_stores: The vendor visualisation zips (binned transcripts, CSC
+            matrix) found in the bundle; not ingested, but their metadata is
+            kept by :func:`write_atera_embedded_metadata`.
+        morphology_2d_annotations: The OME ``MapAnnotation`` key-value pairs
+            of the morphology image (cycle, channel, purpose, observed and
+            suggested intensity ranges, pixel value offset), in order.
     """
 
     root: Path
@@ -220,6 +255,8 @@ class AteraBundle:
     morphology_3d_file: Path | None
     panel_config_file: Path | None
     sidecars: tuple[AteraSidecar, ...]
+    viz_stores: tuple[Path, ...] = ()
+    morphology_2d_annotations: tuple[Mapping[str, Any], ...] = ()
 
 
 @contextmanager
@@ -334,7 +371,7 @@ def resolve_atera_bundle(
     root = Path(input_path)
     if not root.is_dir():
         raise FileNotFoundError(
-            f"Atera input {root} is not a directory; extract the outs bundle first"
+            "the Atera input is not a directory; extract the outs bundle first"
         )
     spec_path = (
         Path(spec_override)
@@ -373,7 +410,9 @@ def resolve_atera_bundle(
     _check_cell_feature_matrix(cfm_zip)
 
     morphology_dir = _morphology_2d_dir(root, experiment)
-    files, names, shape_yx, ome_pixel_size = _morphology_2d_channels(morphology_dir)
+    files, names, shape_yx, ome_pixel_size, annotations = _morphology_2d_channels(
+        morphology_dir
+    )
     if ome_pixel_size is not None and not math.isclose(
         ome_pixel_size, pixel_size_um, rel_tol=PIXEL_SIZE_RTOL
     ):
@@ -400,6 +439,12 @@ def resolve_atera_bundle(
         sidecars=_bundle_sidecars(
             root, Path(spec_override) if spec_override is not None else None
         ),
+        viz_stores=tuple(
+            path
+            for key, name in _VIZ_STORES
+            if (path := _optional_member(root, experiment, key, name)) is not None
+        ),
+        morphology_2d_annotations=annotations,
     )
 
 
@@ -470,7 +515,7 @@ def _resolve_member(
     if explicit is not None:
         path = Path(explicit)
         if not path.is_file():
-            raise FileNotFoundError(f"{default_name} override {path} does not exist")
+            raise FileNotFoundError(f"the {default_name} override does not exist")
         return path
     explorer = experiment.get("explorer_files") or {}
     named = _relative_member(root, explorer.get(explorer_key))
@@ -490,10 +535,19 @@ def _resolve_member(
         return prefixed[0]
     if len(prefixed) > 1:
         raise AteraFormatError(
-            f"several *_{default_name} files in the Atera input: "
-            f"{[path.name for path in prefixed]}"
+            f"{len(prefixed)} *_{default_name} files in the Atera input; keep one"
         )
     raise FileNotFoundError(f"{default_name} not found in the Atera input")
+
+
+def _optional_member(
+    root: Path, experiment: Mapping[str, Any], explorer_key: str, default_name: str
+) -> Path | None:
+    """Like :func:`_resolve_member`, but ``None`` when the store is absent."""
+    try:
+        return _resolve_member(root, None, experiment, explorer_key, default_name)
+    except FileNotFoundError:
+        return None
 
 
 def _check_units(value: object, what: str) -> None:
@@ -505,7 +559,9 @@ def _check_rna_dataset(path: Path) -> None:
     with open_zip_group(path) as group:
         attrs = group.attrs.asdict()
     if attrs.get("name") != RNA_DATASET_NAME:
-        raise AteraFormatError(f"{path.name} is not an {RNA_DATASET_NAME}")
+        raise AteraFormatError(
+            f"{stable_sidecar_name(path.name)} is not an {RNA_DATASET_NAME}"
+        )
     major = attrs.get("major_version")
     if major not in SUPPORTED_RNA_MAJOR_VERSIONS:
         raise AteraFormatError(
@@ -524,7 +580,9 @@ def _check_cells_dataset(path: Path) -> None:
     with open_zip_group(path) as group:
         attrs = group.attrs.asdict()
     if attrs.get("name") != CELLS_DATASET_NAME:
-        raise AteraFormatError(f"{path.name} is not a {CELLS_DATASET_NAME}")
+        raise AteraFormatError(
+            f"{stable_sidecar_name(path.name)} is not a {CELLS_DATASET_NAME}"
+        )
     major = attrs.get("major_version")
     if major not in SUPPORTED_CELLS_MAJOR_VERSIONS:
         raise AteraFormatError(
@@ -539,7 +597,9 @@ def _check_cell_feature_matrix(path: Path) -> None:
         encoding = group.attrs.get("encoding-type")
         members = set(group.keys())
     if encoding != "anndata" or not {"X", "obs", "var"} <= members:
-        raise AteraFormatError(f"{path.name} is not an AnnData zarr store")
+        raise AteraFormatError(
+            f"{stable_sidecar_name(path.name)} is not an AnnData zarr store"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -656,10 +716,178 @@ def copy_atera_sidecars(bundle: AteraBundle, store_root: Path) -> list[dict[str,
     return records
 
 
+#: A leading zero before another digit marks an identifier ("00123"), not a number.
+_LEADING_ZERO_RE: Final = re.compile(r"^[+-]?0\d")
+
+
+def _zarr_metadata_members(zip_path: Path) -> dict[str, str]:
+    """Return the text of every zarr metadata member of a zip, in zip order."""
+    members: dict[str, str] = {}
+    with zipfile.ZipFile(zip_path) as archive:
+        for info in archive.infolist():
+            if PurePosixPath(info.filename).name not in ZARR_METADATA_MEMBERS:
+                continue
+            try:
+                members[info.filename] = archive.read(info).decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise AteraFormatError(
+                    f"{stable_sidecar_name(zip_path.name)} member {info.filename} "
+                    "is not UTF-8 text"
+                ) from exc
+    return members
+
+
+def _root_attrs(members: Mapping[str, str]) -> dict[str, Any]:
+    if ".zattrs" in members:
+        attrs = json.loads(members[".zattrs"])
+    elif "zarr.json" in members:
+        attrs = json.loads(members["zarr.json"]).get("attributes") or {}
+    else:
+        attrs = {}
+    return attrs if isinstance(attrs, dict) else {}
+
+
+def vendor_zarr_stores(bundle: AteraBundle) -> dict[str, Path]:
+    """Return every vendor zarr zip of the bundle by its stable store name.
+
+    Args:
+        bundle: The resolved bundle.
+
+    Returns:
+        ``{"transcripts": ..., "cells": ..., "cell_feature_matrix": ...}`` plus
+        ``binned_transcripts`` and ``csc_cell_feature_matrix`` when present.
+    """
+    paths = (
+        bundle.transcripts_zip,
+        bundle.cells_zip,
+        bundle.cell_feature_matrix_zip,
+        *bundle.viz_stores,
+    )
+    return {
+        stable_sidecar_name(path.name).removesuffix(".zarr.zip"): path for path in paths
+    }
+
+
+def _write_text_sidecar(store_root: Path, relative: str, text: str) -> Path:
+    target = Path(store_root, ATERA_SIDECAR_DIR, *relative.split("/"))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(text.encode("utf-8"))
+    return target
+
+
+def write_atera_embedded_metadata(
+    bundle: AteraBundle, store_root: Path
+) -> list[dict[str, Any]]:
+    """Keep the metadata held inside the vendor stores and images verbatim.
+
+    Two kinds of sidecar are written under ``<store_root>/atera/``:
+
+    - ``zarr_metadata/<store>.json`` for every vendor zarr zip (the ingested
+      stores and the visualisation stores): ``{"original_name", "members"}``,
+      where ``members`` maps each ``.zattrs``/``.zgroup``/``.zarray``/
+      ``.zmetadata``/``zarr.json`` member path to its exact text. This keeps
+      the root attributes (dataset UUID, kit, codeword maps, segmentation
+      methods, cell annotations, clusterings, matrix properties) and every
+      array's attributes (column names and descriptions).
+    - ``ome_xml/<relative path>.xml`` for every ``morphology_2d`` file and
+      the 3D stack: the file's OME-XML header, exactly as stored (instrument,
+      plate, channels, map annotations with intensity ranges and offsets).
+
+    Args:
+        bundle: The resolved bundle.
+        store_root: Root of the SpatialData zarr store being written.
+
+    Returns:
+        One record per sidecar: ``kind`` (``zarr_metadata`` or ``ome_xml``),
+        ``path`` (relative to the store root), ``original_name`` (bundle-relative
+        source), ``size_bytes`` and ``sha256``; zarr records add ``store``,
+        ``n_members`` and ``root_attrs`` (the parsed root attributes, for
+        :func:`atera_metadata_attrs`).
+    """
+    records: list[dict[str, Any]] = []
+    for store, zip_path in vendor_zarr_stores(bundle).items():
+        members = _zarr_metadata_members(zip_path)
+        original = bundle_relative_name(zip_path, bundle.root)
+        text = json.dumps(
+            {"original_name": original, "members": members}, ensure_ascii=False
+        )
+        target = _write_text_sidecar(
+            store_root, f"{ZARR_METADATA_DIR}/{store}.json", text
+        )
+        records.append(
+            {
+                "kind": "zarr_metadata",
+                "store": store,
+                "path": f"{ATERA_SIDECAR_DIR}/{ZARR_METADATA_DIR}/{store}.json",
+                "original_name": original,
+                "n_members": len(members),
+                "size_bytes": target.stat().st_size,
+                "sha256": _file_sha256(target),
+                "root_attrs": _root_attrs(members),
+            }
+        )
+    images = [*bundle.morphology_2d_files]
+    if bundle.morphology_3d_file is not None:
+        images.append(bundle.morphology_3d_file)
+    for path in images:
+        with tifffile.TiffFile(path, _multifile=False) as tif:
+            xml = tif.ome_metadata or ""
+        if not xml:
+            continue
+        original = bundle_relative_name(path, bundle.root)
+        relative = f"{OME_XML_DIR}/{original}.xml"
+        target = _write_text_sidecar(store_root, relative, xml)
+        records.append(
+            {
+                "kind": "ome_xml",
+                "path": f"{ATERA_SIDECAR_DIR}/{relative}",
+                "original_name": original,
+                "size_bytes": target.stat().st_size,
+                "sha256": _file_sha256(target),
+            }
+        )
+    return records
+
+
+def bundle_relative_name(path: Path, root: Path) -> str:
+    """Return ``path`` relative to the bundle root, else its file name.
+
+    Args:
+        path: A bundle file (or an explicit override outside the bundle).
+        root: The ROI directory.
+
+    Returns:
+        A POSIX path that names no host directory.
+    """
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return path.name
+
+
+def _vendor_store_attrs(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Split a store's root attributes into inline values and sidecar-only keys."""
+    inline: dict[str, Any] = {}
+    sidecar_only: list[str] = []
+    for key, value in record["root_attrs"].items():
+        size = len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+        if size > ROOT_ATTR_INLINE_MAX_BYTES:
+            sidecar_only.append(key)
+        else:
+            inline[key] = value
+    return {
+        "sidecar": record["path"],
+        "attrs": inline,
+        "attrs_in_sidecar_only": sidecar_only,
+    }
+
+
 def _metric_value(text: str) -> int | float | str | None:
     value = text.strip()
     if not value:
         return None
+    if _LEADING_ZERO_RE.match(value):
+        return value
     for parse in (int, float):
         try:
             number = parse(value)
@@ -702,20 +930,27 @@ def _panel_config_header(panel_config: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def atera_metadata_attrs(
-    bundle: AteraBundle, sidecars: Sequence[Mapping[str, Any]]
+    bundle: AteraBundle,
+    sidecars: Sequence[Mapping[str, Any]],
+    embedded: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Return the full vendor header for ``attrs["merxen_atera"]``.
 
     No field is dropped: the whole ``experiment.spatial`` (run, slide, region,
     instrument, UUIDs, versions, panels, counts), every metrics summary column,
     the ``panel_config.json`` header (all but its per-target list, which stays
-    in the verbatim sidecar), the bundle's store file names and the sidecar
-    records. Human-facing text that prints any of these values passes it
-    through :func:`merxen.privacy.to_alias` first.
+    in the verbatim sidecar), the root attributes of every vendor zarr store
+    (values over :data:`ROOT_ATTR_INLINE_MAX_BYTES`, such as the codeword
+    maps, are named and kept in their sidecar only), the morphology map
+    annotations, the bundle's store file names and the sidecar records.
+    ``experiment_source`` says whether ``experiment`` is the bundle's own
+    manifest or a ``spec_override``. Human-facing text that prints any of
+    these values passes it through :func:`merxen.privacy.to_alias` first.
 
     Args:
         bundle: The resolved bundle.
         sidecars: Records from :func:`copy_atera_sidecars`.
+        embedded: Records from :func:`write_atera_embedded_metadata`.
 
     Returns:
         A new JSON-serialisable dictionary.
@@ -741,6 +976,26 @@ def atera_metadata_attrs(
             ),
         },
         "sidecars": [dict(record) for record in sidecars],
+        "experiment_source": (
+            "override"
+            if any(
+                sidecar.stored_path == EXPERIMENT_OVERRIDE_SIDECAR
+                for sidecar in bundle.sidecars
+            )
+            else "bundle"
+        ),
+        "morphology_2d_annotations": json.loads(
+            json.dumps(list(bundle.morphology_2d_annotations))
+        ),
+        "embedded_metadata": [
+            {key: value for key, value in record.items() if key != "root_attrs"}
+            for record in embedded
+        ],
+        "vendor_store_attrs": {
+            record["store"]: _vendor_store_attrs(record)
+            for record in embedded
+            if record.get("kind") == "zarr_metadata"
+        },
     }
     return attrs
 
@@ -773,6 +1028,23 @@ class _OmeHeader:
     channel_names: tuple[str, ...]
     files_by_channel: tuple[tuple[str, str | None], ...]
     pixel_size_um: float | None
+    annotations: tuple[Mapping[str, Any], ...]
+
+
+def _map_annotations(
+    root: ET.Element, ns: Mapping[str, str]
+) -> tuple[dict[str, Any], ...]:
+    """Return every OME ``MapAnnotation`` as ``{"id", "values": {key: text}}``."""
+    annotations = []
+    for block in _ome_find(root, "StructuredAnnotations", ns):
+        for annotation in _ome_find(block, "MapAnnotation", ns):
+            values = {
+                str(item.get("K", "")): item.text or ""
+                for value in _ome_find(annotation, "Value", ns)
+                for item in _ome_find(value, "M", ns)
+            }
+            annotations.append({"id": annotation.get("ID"), "values": values})
+    return tuple(annotations)
 
 
 def _parse_ome_header(xml: str, path: Path) -> _OmeHeader:
@@ -828,6 +1100,7 @@ def _parse_ome_header(xml: str, path: Path) -> _OmeHeader:
         channel_names=names,
         files_by_channel=tuple(mapping[c] for c in range(size_c)),
         pixel_size_um=pixel_size,
+        annotations=_map_annotations(root, ns),
     )
 
 
@@ -847,8 +1120,18 @@ def _single_plane_levels(path: Path) -> tuple[str, tuple[tuple[int, int], ...], 
 
 def _morphology_2d_channels(
     directory: Path,
-) -> tuple[tuple[Path, ...], tuple[str, ...], tuple[int, int], float | None]:
-    """Map ``morphology_2d`` files to channels from the OME ``TiffData``."""
+) -> tuple[
+    tuple[Path, ...],
+    tuple[str, ...],
+    tuple[int, int],
+    float | None,
+    tuple[Mapping[str, Any], ...],
+]:
+    """Map ``morphology_2d`` files to channels from the OME ``TiffData``.
+
+    Also returns the pixel size and the ``MapAnnotation`` entries of the first
+    file's OME-XML, which every sibling repeats.
+    """
     candidates = sorted(directory.glob("*.ome.tif")) + sorted(
         directory.glob("*.ome.tiff")
     )
@@ -891,6 +1174,7 @@ def _morphology_2d_channels(
         reference.channel_names,
         level_shapes[files[0].name][0],
         reference.pixel_size_um,
+        reference.annotations,
     )
 
 
@@ -1181,6 +1465,7 @@ class _LazyZipArray:
             array = group[member]
             self.shape = tuple(int(n) for n in array.shape)
             self.dtype = np.dtype(array.dtype)
+            self.chunks = tuple(int(n) for n in array.chunks)
         self.ndim = len(self.shape)
         self._groups = _ThreadZipGroups()
 
@@ -1191,18 +1476,33 @@ class _LazyZipArray:
         return (str(self.zip_path), self.member, self.zip_path.stat().st_mtime)
 
 
-def _zip_dask_array(zip_path: Path, member: str, chunks: tuple[int, ...]) -> da.Array:
+def _vendor_aligned_dask_array(
+    zip_path: Path, member: str, chunks: tuple[int, ...]
+) -> da.Array:
+    """Read an array in whole vendor chunks, then rechunk to ``chunks``.
+
+    Each read task covers a whole number of the vendor's chunks (the multiple
+    closest to ``chunks``), so no vendor chunk is decoded twice; the rechunk
+    only moves decoded blocks.
+    """
     source = _LazyZipArray(zip_path, member)
-    chunks = tuple(min(c, n) for c, n in zip(chunks, source.shape, strict=True))
+    read_chunks = tuple(
+        min(n, vendor * max(1, round(wanted / vendor)))
+        for wanted, vendor, n in zip(chunks, source.chunks, source.shape, strict=True)
+    )
     array: da.Array = da.from_array(
         source,
-        chunks=chunks,
+        chunks=read_chunks,
         lock=False,
         asarray=True,
         fancy=False,
-        name=f"atera-{member.replace('/', '-')}-{dask.base.tokenize(source)}",
+        name=f"atera-{member.replace('/', '-')}-"
+        + dask.base.tokenize(source, read_chunks),
     )
-    return array
+    rechunked: da.Array = array.rechunk(
+        tuple(min(c, n) for c, n in zip(chunks, source.shape, strict=True))
+    )
+    return rechunked
 
 
 def read_atera_labels(
@@ -1210,10 +1510,14 @@ def read_atera_labels(
 ) -> dict[str, da.Array]:
     """Read the vendor masks as lazy label arrays.
 
+    The reads follow the vendor chunk grid (``(665, 1918)`` on the public
+    dataset) and are rechunked once, which halves the decode work against
+    reading square chunks straight from the zip.
+
     Args:
         bundle: Resolved bundle.
-        chunks: ``(y, x)`` chunk size; aligned square chunks halve cleanly
-            when the builder writes a label pyramid.
+        chunks: ``(y, x)`` chunk size of the result; aligned square chunks
+            halve cleanly when the builder writes a label pyramid.
 
     Returns:
         ``{"cell_labels": masks/1, "nucleus_labels": masks/0}`` (uint32).
@@ -1222,8 +1526,10 @@ def read_atera_labels(
         AteraFormatError: If a mask's shape differs from the morphology image.
     """
     labels = {
-        "cell_labels": _zip_dask_array(bundle.cells_zip, "masks/1", chunks),
-        "nucleus_labels": _zip_dask_array(bundle.cells_zip, "masks/0", chunks),
+        "cell_labels": _vendor_aligned_dask_array(bundle.cells_zip, "masks/1", chunks),
+        "nucleus_labels": _vendor_aligned_dask_array(
+            bundle.cells_zip, "masks/0", chunks
+        ),
     }
     for key, array in labels.items():
         if tuple(array.shape) != tuple(bundle.morphology_shape_yx):
@@ -1245,7 +1551,12 @@ def _mask_row_slabs(
 
 
 def export_mask_npy(
-    bundle: AteraBundle, member: str, path: Path, *, slab_bytes: int = 256 << 20
+    bundle: AteraBundle,
+    member: str,
+    path: Path,
+    *,
+    slab_bytes: int = 256 << 20,
+    on_slab: Callable[[np.ndarray], None] | None = None,
 ) -> Path:
     """Stream one vendor mask into an ``.npy`` file without holding it in memory.
 
@@ -1254,6 +1565,8 @@ def export_mask_npy(
         member: ``"masks/0"`` (nuclei) or ``"masks/1"`` (cells).
         path: Output ``.npy`` file.
         slab_bytes: Approximate size of each row slab read from the zip.
+        on_slab: Called with every decoded row slab, so a statistic (such as
+            :class:`MaskPixelCounter`) needs no second decode of the mask.
 
     Returns:
         ``path``.
@@ -1266,11 +1579,70 @@ def export_mask_npy(
         )
         try:
             for rows in _mask_row_slabs(shape, int(source.chunks[0]), slab_bytes):
-                out[rows] = source[rows]
+                slab = np.asarray(source[rows])
+                out[rows] = slab
+                if on_slab is not None:
+                    on_slab(slab)
             out.flush()
         finally:
             del out
     return path
+
+
+class MaskPixelCounter:
+    """Count the pixels of every label of one mask from its streamed row slabs.
+
+    Attributes:
+        counts: int64 pixels per label value (index 0 is the background).
+        n_pixels: Pixels counted so far.
+    """
+
+    def __init__(self, n_labels: int) -> None:
+        """Start with zero counts.
+
+        Args:
+            n_labels: Largest valid label (the record count).
+        """
+        self.n_labels = n_labels
+        self.counts = np.zeros(n_labels + 1, dtype=np.int64)
+        self.n_pixels = 0
+
+    def __call__(self, slab: np.ndarray) -> None:
+        """Add one slab of the mask.
+
+        Args:
+            slab: Mask pixels (any shape).
+
+        Raises:
+            AteraFormatError: If the slab holds a label above ``n_labels``.
+        """
+        values = np.asarray(slab).ravel()
+        if values.size and int(values.max()) > self.n_labels:
+            raise AteraFormatError(
+                f"mask label {int(values.max())} exceeds {self.n_labels} records"
+            )
+        self.counts += np.bincount(values, minlength=self.n_labels + 1)
+        self.n_pixels += int(values.size)
+
+
+def nucleus_area_total_from_counts(
+    counts: np.ndarray, cells: AteraCells, pixel_size_um: float
+) -> np.ndarray:
+    """Sum the nucleus pixel counts of each cell into an area.
+
+    Args:
+        counts: Pixels per nucleus label (index 0 the background).
+        cells: Cell records.
+        pixel_size_um: Microns per pixel.
+
+    Returns:
+        float64 area in µm² per cell, NaN for cells without a nucleus.
+    """
+    per_cell = np.bincount(
+        cells.nucleus_cell_index, weights=counts[1:], minlength=cells.n_cells
+    ) * (pixel_size_um**2)
+    has_nucleus = np.bincount(cells.nucleus_cell_index, minlength=cells.n_cells) > 0
+    return np.where(has_nucleus, per_cell, np.nan)
 
 
 def atera_nucleus_area_total(
@@ -1279,7 +1651,9 @@ def atera_nucleus_area_total(
     """Sum the mask area of every nucleus of each cell, streaming ``masks/0``.
 
     ``cell_summary.nucleus_area`` describes only the largest nucleus of a
-    multinucleate cell; this is the total.
+    multinucleate cell; this is the total. The builder counts the pixels
+    while it exports ``masks/0`` for polygonisation instead, so this second
+    decode only runs without that export.
 
     Args:
         bundle: Resolved bundle.
@@ -1292,22 +1666,13 @@ def atera_nucleus_area_total(
     Raises:
         AteraFormatError: If ``masks/0`` holds a label without a nucleus row.
     """
-    counts = np.zeros(cells.n_nuclei + 1, dtype=np.int64)
+    counter = MaskPixelCounter(cells.n_nuclei)
     with open_zip_group(bundle.cells_zip) as group:
         source = group["masks/0"]
         shape = tuple(int(n) for n in source.shape)
         for rows in _mask_row_slabs(shape, int(source.chunks[0]), slab_bytes):
-            slab = np.asarray(source[rows]).ravel()
-            if slab.size and int(slab.max()) > cells.n_nuclei:
-                raise AteraFormatError(
-                    f"masks/0 label {int(slab.max())} exceeds {cells.n_nuclei} nuclei"
-                )
-            counts += np.bincount(slab, minlength=cells.n_nuclei + 1)
-    per_cell = np.bincount(
-        cells.nucleus_cell_index, weights=counts[1:], minlength=cells.n_cells
-    ) * (bundle.pixel_size_um**2)
-    has_nucleus = np.bincount(cells.nucleus_cell_index, minlength=cells.n_cells) > 0
-    return np.where(has_nucleus, per_cell, np.nan)
+            counter(np.asarray(source[rows]))
+    return nucleus_area_total_from_counts(counter.counts, cells, bundle.pixel_size_um)
 
 
 def _pixel_polygons_to_microns(
@@ -1384,6 +1749,7 @@ def atera_shapes_from_masks(
     workdir: Path,
     simplify_px: float = DEFAULT_SIMPLIFY_PX,
     mp_context: PolygonStartMethod = "forkserver",
+    nucleus_counter: MaskPixelCounter | None = None,
 ) -> dict[str, gpd.GeoDataFrame]:
     """Polygonise the vendor masks into cell and nucleus shapes (microns).
 
@@ -1412,6 +1778,8 @@ def atera_shapes_from_masks(
             also when the export or the pool fails).
         simplify_px: Simplification tolerance in pixels (0 disables it).
         mp_context: ``"forkserver"`` or ``"spawn"``.
+        nucleus_counter: Counts the nucleus pixels while ``masks/0`` is
+            exported (for :func:`nucleus_area_total_from_counts`).
 
     Returns:
         ``{"cell_boundaries": ..., "nucleus_boundaries": ...}``. Both carry
@@ -1437,7 +1805,12 @@ def atera_shapes_from_masks(
     ):
         npy = workdir / f"atera_{member.replace('/', '_')}.npy"
         try:
-            export_mask_npy(bundle, member, npy)
+            export_mask_npy(
+                bundle,
+                member,
+                npy,
+                on_slab=nucleus_counter if member == "masks/0" else None,
+            )
             mask = np.load(npy, mmap_mode="r")
             labeled = masks_to_labeled_polygons(
                 mask, n_jobs=n_jobs, serial_fallback=False, mp_context=mp_context
@@ -1643,15 +2016,22 @@ def read_atera_table(
     Per-cell control counts are derived from the control columns before X is
     reduced to genes. ``var_names`` are the gene symbols (unique), with the
     Ensembl IDs in ``var["gene_ids"]``; vendor columns take a ``vendor_``
-    prefix and are each optional; ``de_*`` columns are dropped. The vendor's
-    ``filtered`` flags (True = kept) are copied, not applied.
+    prefix and are each optional. ``cell_summary`` columns without a named
+    place (``nucleus_centroid_x/y``, the centroid of the largest nucleus, and
+    ``z_level``) become ``vendor_<name>``. With ``keep_vendor_annotations``,
+    the ``de_*`` statistics of the kept features go to
+    ``varm["vendor_de"]`` and the vendor category colours (``#rrggbbaa``) to
+    ``uns["vendor_<column>_colors"]``. The vendor's ``filtered`` flags
+    (True = kept by the vendor) are copied as ``vendor_filtered``, not
+    applied.
 
     Args:
         bundle: Resolved bundle.
         cells: Cell records (row order must match the matrix).
         gex_only: Keep only ``Gene Expression`` columns in X.
-        keep_vendor_annotations: Copy Leiden, Azimuth, filtered flags, vendor
-            counts and the vendor PCA/UMAP.
+        keep_vendor_annotations: Copy Leiden, Azimuth (with colours), filtered
+            flags, vendor counts and centroids, the vendor PCA/UMAP and the
+            differential-expression statistics.
         nucleus_area_total: Total nucleus area per cell; computed from
             ``masks/0`` (one streaming pass) when ``None``.
 
@@ -1684,6 +2064,21 @@ def read_atera_table(
             if keep_vendor_annotations and "obsm" in group
             else {}
         )
+        colors = (
+            _vendor_colors(obs_group, vendor_columns) if keep_vendor_annotations else {}
+        )
+        de_columns = (
+            _read_columns(
+                group["var"],
+                [
+                    name
+                    for name in group["var"].attrs.get("column-order", [])
+                    if str(name).startswith(DE_COLUMN_PREFIX)
+                ],
+            )
+            if keep_vendor_annotations
+            else {}
+        )
     matrix = sparse.csr_matrix(matrix)
     if matrix.shape != (cells.n_cells, len(features)):
         raise AteraFormatError(
@@ -1713,8 +2108,9 @@ def read_atera_table(
         nucleus_area_total = atera_nucleus_area_total(bundle, cells)
     obs["nucleus_area_total"] = np.asarray(nucleus_area_total, dtype=np.float64)
     obs["nucleus_count"] = summary["nucleus_count"].to_numpy().astype(np.int64)
-    if "z_level" in summary:
-        obs["vendor_z_level"] = summary["z_level"].to_numpy(np.float64)
+    for name in summary.columns:
+        if name not in _MAPPED_SUMMARY_COLUMNS:
+            obs[f"vendor_{name}"] = summary[name].to_numpy(np.float64)
     # One product sums every control type: X @ (features x types indicator).
     indicator = np.column_stack(
         [feature_types == kind for kind in DERIVED_CONTROL_COUNT_COLUMNS.values()]
@@ -1759,7 +2155,48 @@ def read_atera_table(
     )
     for name, values in obsm.items():
         table.obsm[f"{name}_vendor"] = np.asarray(values)
+    for name, values in colors.items():
+        table.uns[f"vendor_{name}_colors"] = values
+    if de_columns:
+        table.varm["vendor_de"] = pd.DataFrame(
+            {name: np.asarray(values)[keep] for name, values in de_columns.items()},
+            index=table.var_names,
+        )
     return table
+
+
+def _vendor_colors(obs_group: Any, columns: Mapping[str, Any]) -> dict[str, list[str]]:
+    """Read the ``color`` arrays of the vendor categorical columns.
+
+    The vendor stores one packed ``0xRRGGBBAA`` integer per category beside
+    ``codes`` and ``categories`` (``ad.io.read_elem`` ignores it).
+
+    Args:
+        obs_group: The matrix ``obs`` group.
+        columns: The vendor columns that were read.
+
+    Returns:
+        ``#rrggbbaa`` strings per column, in category order.
+
+    Raises:
+        AteraFormatError: If a colour array does not match its categories.
+    """
+    colors: dict[str, list[str]] = {}
+    for name, values in columns.items():
+        if not isinstance(values, pd.Categorical) or name not in obs_group:
+            continue
+        member = obs_group[name]
+        if not hasattr(member, "keys") or "color" not in member:
+            continue
+        packed = np.asarray(member["color"][:]).astype(np.int64) & 0xFFFFFFFF
+        categories = values.categories
+        if packed.shape != (len(categories),):
+            raise AteraFormatError(
+                f"obs/{name}/color has {packed.size} entries for "
+                f"{len(categories)} categories"
+            )
+        colors[name] = [f"#{int(value):08x}" for value in packed]
+    return colors
 
 
 # --------------------------------------------------------------------------- #

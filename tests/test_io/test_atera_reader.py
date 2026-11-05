@@ -10,6 +10,7 @@ import shutil
 import threading
 import time
 import weakref
+import zipfile
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import replace
@@ -41,15 +42,19 @@ from merxen.segmentation.cellpose import assign_labels_from_masks
 from merxen.segmentation.mask_geometry import masks_to_labeled_polygons
 
 from .atera_synth import (
+    CFM_ROOT_ATTRS,
     COMPANION_PREFIX,
+    DE_STATISTICS,
     EMPTY_POLYGON_CELL,
     FAKE_IDENTIFIERS,
     MULTI_COMPONENT_CELL,
     NUCLEUS_LESS_CELL,
     RUN_SUFFIX,
     TWO_NUCLEUS_CELL,
+    VENDOR_COLORS,
     AteraSynth,
     cell_id_strings,
+    ome_map_annotation,
     rewrite_zip_store,
     write_atera_bundle,
 )
@@ -1331,3 +1336,236 @@ def test_stable_sidecar_names() -> None:
         ("panel_config.json", "panel_config.json"),
     ):
         assert ar.stable_sidecar_name(name) == stable
+
+
+# --------------------------------------------------------------------------- #
+# Vendor metadata inside the stores and images (plan §3.11)
+# --------------------------------------------------------------------------- #
+
+
+def _zip_metadata(path: Path) -> dict[str, bytes]:
+    with zipfile.ZipFile(path) as archive:
+        return {
+            name: archive.read(name)
+            for name in archive.namelist()
+            if name.rsplit("/", 1)[-1] in ar.ZARR_METADATA_MEMBERS
+        }
+
+
+def test_embedded_metadata_keeps_every_store_member_verbatim(
+    default_bundle: tuple, tmp_path: Path
+) -> None:
+    synth, bundle = default_bundle
+    records = ar.write_atera_embedded_metadata(bundle, tmp_path)
+    stores = {r["store"]: r for r in records if r["kind"] == "zarr_metadata"}
+    assert set(stores) == {
+        "transcripts",
+        "cells",
+        "cell_feature_matrix",
+        "binned_transcripts",
+    }
+    for store, path in ar.vendor_zarr_stores(bundle).items():
+        record = stores[store]
+        written = tmp_path / record["path"]
+        data = written.read_bytes()
+        assert record["sha256"] == hashlib.sha256(data).hexdigest()
+        assert record["size_bytes"] == len(data)
+        sidecar = json.loads(data)
+        assert sidecar["original_name"] == path.name == record["original_name"]
+        expected = _zip_metadata(path)
+        assert {k: v.encode() for k, v in sidecar["members"].items()} == expected
+        assert record["n_members"] == len(expected)
+        assert record["root_attrs"] == json.loads(expected[".zattrs"])
+    assert (
+        stores["transcripts"]["root_attrs"]["dataset_uuid"]
+        == (FAKE_IDENTIFIERS["dataset_uuid"])
+    )
+    assert stores["transcripts"]["root_attrs"]["kit_info"]
+    assert stores["cells"]["root_attrs"]["segmentation_methods"]
+    for key, value in CFM_ROOT_ATTRS.items():
+        assert stores["cell_feature_matrix"]["root_attrs"][key] == value
+    # Array attributes (column names) are kept with the root ones.
+    cells = json.loads((tmp_path / stores["cells"]["path"]).read_text())
+    assert "column_names" in json.loads(cells["members"]["cell_summary/.zattrs"])
+
+
+def test_embedded_metadata_keeps_the_ome_xml_of_every_channel(
+    default_bundle: tuple, tmp_path: Path
+) -> None:
+    synth, bundle = default_bundle
+    records = ar.write_atera_embedded_metadata(bundle, tmp_path)
+    ome = {r["original_name"]: r for r in records if r["kind"] == "ome_xml"}
+    assert set(ome) == {f"morphology_2d/{name}" for name in synth.channel_files}
+    for name, record in ome.items():
+        assert record["path"] == f"atera/ome_xml/{name}.xml"
+        with tifffile.TiffFile(synth.root / name, _multifile=False) as tif:
+            xml = tif.ome_metadata
+        assert (tmp_path / record["path"]).read_text(encoding="utf-8") == xml
+        assert "Pixel value offset" in xml
+
+
+def test_bundle_carries_the_morphology_map_annotations(default_bundle: tuple) -> None:
+    synth, bundle = default_bundle
+    assert [item["values"] for item in bundle.morphology_2d_annotations] == [
+        ome_map_annotation(k, name) for k, name in enumerate(synth.channel_names)
+    ]
+    assert bundle.morphology_2d_annotations[0]["id"] == "Annotation:0"
+
+
+def test_metadata_attrs_carry_the_store_attrs_and_annotations(
+    default_bundle: tuple, tmp_path: Path
+) -> None:
+    synth, bundle = default_bundle
+    embedded = ar.write_atera_embedded_metadata(bundle, tmp_path)
+    attrs = ar.atera_metadata_attrs(bundle, [], embedded)
+    assert json.loads(json.dumps(attrs, allow_nan=False)) == attrs
+    assert attrs["experiment_source"] == "bundle"
+    stores = attrs["vendor_store_attrs"]
+    assert (
+        stores["transcripts"]["attrs"]["dataset_uuid"]
+        == (FAKE_IDENTIFIERS["dataset_uuid"])
+    )
+    assert (
+        stores["cell_feature_matrix"]["attrs"]["clusterings"]
+        == (CFM_ROOT_ATTRS["clusterings"])
+    )
+    # A large value stays in its sidecar only, and is named.
+    binned = stores["binned_transcripts"]
+    assert binned["attrs_in_sidecar_only"] == ["bin_counts"]
+    assert "bin_counts" not in binned["attrs"]
+    assert binned["sidecar"] == "atera/zarr_metadata/binned_transcripts.json"
+    assert all("root_attrs" not in record for record in attrs["embedded_metadata"])
+    assert len(attrs["embedded_metadata"]) == len(embedded)
+    assert attrs["morphology_2d_annotations"][1]["values"]["Pixel value offset"] == "1"
+
+
+def test_override_experiment_is_marked_in_the_attrs(
+    default_bundle: tuple, tmp_path: Path
+) -> None:
+    synth, _ = default_bundle
+    override = tmp_path / "override.spatial"
+    shutil.copyfile(synth.root / "experiment.spatial", override)
+    bundle = ar.resolve_atera_bundle(synth.root, spec_override=override)
+    assert ar.atera_metadata_attrs(bundle, [])["experiment_source"] == "override"
+
+
+def test_metrics_values_keep_identifier_text(tmp_path: Path) -> None:
+    path = tmp_path / "metrics_summary.csv"
+    path.write_text("a,b,c,d,e,f\n00123,0.5,0,-0.25,+007,0012.5\n")
+    assert ar.read_metrics_summary(path) == [
+        {"a": "00123", "b": 0.5, "c": 0, "d": -0.25, "e": "+007", "f": "0012.5"}
+    ]
+
+
+def test_table_keeps_the_vendor_summary_de_and_colours(default_bundle: tuple) -> None:
+    synth, bundle = default_bundle
+    cells = ar.read_atera_cells(bundle)
+    table = ar.read_atera_table(bundle, cells)
+    summary = cells.summary
+    for column in ("nucleus_centroid_x", "nucleus_centroid_y", "z_level"):
+        np.testing.assert_array_equal(
+            table.obs[f"vendor_{column}"], summary[column].to_numpy(np.float64)
+        )
+    assert {"vendor_centroid_column", "vendor_centroid_row"} <= set(table.obs)
+    de = table.varm["vendor_de"]
+    assert list(de.columns) == [
+        f"de_leiden_res_1.0_c0_{stat}" for stat in DE_STATISTICS
+    ]
+    assert list(de.index) == list(table.var_names)
+    with ar.open_zip_group(bundle.cell_feature_matrix_zip) as group:
+        logfc = np.asarray(group["var/de_leiden_res_1.0_c0_logfc"][:])
+    genes = [
+        i for i, kind in enumerate(synth.feature_types) if kind == "Gene Expression"
+    ]
+    np.testing.assert_array_equal(de["de_leiden_res_1.0_c0_logfc"], logfc[genes])
+    for column in ("azimuth_broad", "azimuth_full_hierarchy"):
+        n_categories = len(table.obs[f"vendor_{column}"].cat.categories)
+        assert table.uns[f"vendor_{column}_colors"] == [
+            f"#{int(value):08x}" for value in VENDOR_COLORS[:n_categories]
+        ]
+    bare = ar.read_atera_table(bundle, cells, keep_vendor_annotations=False)
+    assert "vendor_de" not in bare.varm
+    assert not [key for key in bare.uns if key.startswith("vendor_")]
+    assert "vendor_azimuth_broad" not in bare.obs
+    assert "vendor_nucleus_centroid_x" in bare.obs
+
+
+def test_colour_array_must_match_its_categories(
+    default_bundle: tuple, tmp_path: Path
+) -> None:
+    synth, _ = default_bundle
+    root = _copy_bundle(synth, tmp_path)
+
+    def shorten(group: zarr.Group) -> None:
+        del group["obs/azimuth_broad/color"]
+        group["obs/azimuth_broad"].create_array(
+            "color", data=np.zeros(7, dtype=np.int32)
+        )
+
+    rewrite_zip_store(root / "cell_feature_matrix.zarr.zip", shorten)
+    bundle = ar.resolve_atera_bundle(root)
+    with pytest.raises(AteraFormatError, match="color"):
+        ar.read_atera_table(bundle, ar.read_atera_cells(bundle))
+
+
+def test_labels_decode_each_vendor_chunk_once(
+    default_bundle: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, bundle = default_bundle
+    reads: list[tuple[str, tuple[slice, ...]]] = []
+    original = ar._LazyZipArray.__getitem__
+
+    def record(self: Any, key: tuple[slice, ...]) -> np.ndarray:
+        # dask probes each array with an empty slice for its meta.
+        if self.member == "masks/1" and all(part.stop > part.start for part in key):
+            reads.append((self.member, key))
+        return original(self, key)
+
+    monkeypatch.setattr(ar._LazyZipArray, "__getitem__", record)
+    labels = ar.read_atera_labels(bundle, chunks=(40, 40))
+    array = labels["cell_labels"]
+    assert array.chunks[0][0] == 40 and array.chunks[1][0] == 40
+    with dask.config.set(scheduler="synchronous"):
+        values = array.compute()
+    with ar.open_zip_group(bundle.cells_zip) as group:
+        np.testing.assert_array_equal(values, group["masks/1"][:])
+        vendor = group["masks/1"].chunks
+    starts = Counter()
+    assert reads
+    for _, key in reads:
+        for axis, part in enumerate(key):
+            assert part.start % vendor[axis] == 0
+            stop = min(part.stop, array.shape[axis])
+            assert stop % vendor[axis] == 0 or stop == array.shape[axis]
+        starts[(key[0].start, key[1].start)] += 1
+    assert max(starts.values()) == 1
+
+
+def test_mask_pixel_counter_matches_the_streamed_area(default_bundle: tuple) -> None:
+    _, bundle = default_bundle
+    cells = ar.read_atera_cells(bundle)
+    counter = ar.MaskPixelCounter(cells.n_nuclei)
+    with ar.open_zip_group(bundle.cells_zip) as group:
+        mask = np.asarray(group["masks/0"][:])
+    for rows in np.array_split(np.arange(mask.shape[0]), 3):
+        counter(mask[rows])
+    assert counter.n_pixels == mask.size
+    np.testing.assert_array_equal(
+        ar.nucleus_area_total_from_counts(counter.counts, cells, bundle.pixel_size_um),
+        ar.atera_nucleus_area_total(bundle, cells),
+    )
+    with pytest.raises(AteraFormatError, match="exceeds"):
+        counter(np.asarray([cells.n_nuclei + 1]))
+
+
+def test_reader_errors_print_no_input_path(
+    default_bundle: tuple, tmp_path: Path
+) -> None:
+    synth, _ = default_bundle
+    missing = tmp_path / "SECRET_RUN_FOLDER"
+    with pytest.raises(FileNotFoundError) as excinfo:
+        ar.resolve_atera_bundle(missing)
+    assert "SECRET_RUN_FOLDER" not in str(excinfo.value)
+    with pytest.raises(FileNotFoundError) as excinfo:
+        ar.resolve_atera_bundle(synth.root, transcripts_path=missing)
+    assert "SECRET_RUN_FOLDER" not in str(excinfo.value)

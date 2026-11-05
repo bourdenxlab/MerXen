@@ -125,6 +125,37 @@ def writeModelBundle() {
         groovy.json.JsonOutput.toJson([weights_sha256: "a" * 64])
 }
 
+// ATERA rows build only (plan AT-4): no segment, enrich or viewer-cache case.
+def ateraRows() {
+    def dir = [atera_dir: "raw/atera"]
+    return [
+        dir_only: pairRow(dir),
+        spatialdata_only: pairRow([atera_spatialdata_path: "raw/atera_spatialdata.zarr"]),
+        dir_spatialdata_spec: pairRow(dir + [
+            atera_spatialdata_path: "raw/atera_spatialdata.zarr",
+            atera_spec_path: "raw/atera/experiment.spatial",
+        ]),
+        blank_fields: pairRow(dir + [atera_spatialdata_path: "  ", atera_spec_path: "  "]),
+        other_platform_fields: pairRow(dir + [
+            xenium_dir: "raw/xenium",
+            xenium_spec_path: "raw/xenium/experiment.xenium",
+            merscope_dir: "raw/merscope",
+        ]),
+        missing_inputs: pairRow([:]),
+        blank_inputs: pairRow([atera_dir: "  ", atera_spatialdata_path: " "]),
+    ]
+}
+
+def ateraBuildCases(String launch) {
+    ateraRows().each { name, row ->
+        def id = "${launch}/ATERA/${name}"
+        attempt("build", id) { buildConfigForPlatform(row, "PAIR_A", "ATERA") }
+        if (launch == "L0") {
+            attempt("build", "${id}/inputs") { requirePlatformInput(row, "PAIR_A", "ATERA") }
+        }
+    }
+}
+
 def rowsFor(String platform) {
     return platform == "MERSCOPE" ? merscopeRows() : xeniumRows()
 }
@@ -265,6 +296,7 @@ def modeCases(String launch) {
     def aliases = [
         "paired", "pair", "both", "merscope", "merfish", "m", "xenium", "x",
         " Paired ", "MERSCOPE", "Xenium", "both-", "", "multi_error",
+        "atera", "a", " ATERA ",
     ]
     aliases.each { alias ->
         def isError = alias.endsWith("_error")
@@ -294,12 +326,19 @@ def modeCases(String launch) {
             attempt("modes", "${id}/segment") { segmentFor(row, platform) }
         }
     }
+    // An atera row builds ATERA only, whatever other platform fields it holds.
+    def ateraRow = row + [atera_dir: "raw/atera"]
+    activePlatformsForMode(normalizeAnalysisMode("atera")).each { platform ->
+        attempt("modes", "${launch}/atera_row/atera/${platform}/build") {
+            buildConfigForPlatform(ateraRow, "PAIR_A", platform)
+        }
+    }
 }
 
 workflow {
     def launch = params.golden_launch?.toString()
-    if (!(launch in ["L0", "L1", "L2", "L3"])) {
-        throw new IllegalArgumentException("--golden_launch must be L0, L1, L2 or L3")
+    if (!(launch in ["L0", "L1", "L2", "L3", "L4"])) {
+        throw new IllegalArgumentException("--golden_launch must be L0 to L4")
     }
     writeModelBundle()
     if (launch == "L0") {
@@ -310,6 +349,9 @@ workflow {
         }
         samplesCases(launch)
         modeCases(launch)
+        ateraBuildCases(launch)
+    } else if (launch == "L4") {
+        ateraBuildCases(launch)
     } else {
         buildAndSegmentCases(launch, "MERSCOPE")
     }

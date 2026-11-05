@@ -12,27 +12,28 @@ from collections.abc import Callable
 from pathlib import Path
 
 import anndata as ad
+import dask
 import numpy as np
 import pandas as pd
 import pytest
 import shapely
+from scipy import sparse
 
 from merxen.gene_ids import is_ensembl_gene_id
 from merxen.io import atera_reader as ar
 from merxen.segmentation.mask_geometry import masks_to_labeled_polygons
 
+from .atera_real import extracted_outs
+
 pytestmark = pytest.mark.slow
 
-PUBLIC_DATASET = "Atera_v1_WTA_S4A_Brain_Hippocampus_ND_FF"
 SMALL_TILE = "5,4"
 
 
 @pytest.fixture
 def bundle(real_path: Callable[[str], Path]) -> ar.AteraBundle:
     """The extracted public dataset, resolved."""
-    outs = real_path("MERXEN_ATERA_RAW_ROOT") / PUBLIC_DATASET / "outs"
-    if not (outs / ".extract_complete").exists():
-        pytest.skip("the public Atera bundle is not extracted on this host")
+    outs = extracted_outs(real_path("MERXEN_ATERA_RAW_ROOT"))
     return ar.resolve_atera_bundle(outs, species="human")
 
 
@@ -161,3 +162,79 @@ def test_real_default_simplification_keeps_centroids(bundle: ar.AteraBundle) -> 
         shapely.get_y(centroids) - summary["cell_centroid_y"].to_numpy()[rows],
     )
     assert error.max() < 0.01
+
+
+#: Tile whose interior cells are checked against the vendor values (plan §2).
+FIDELITY_TILE = "6,1"
+
+
+def test_real_crop_matches_the_vendor_cell_values(bundle: ar.AteraBundle) -> None:
+    """Labels, nucleus owners and Q20 counts agree with the vendor's own values.
+
+    The crop is one transcript tile's pixel window; only cells that do not
+    touch its border are compared, so all their transcripts lie in the tile.
+    """
+    ps = bundle.pixel_size_um
+    cells = ar.read_atera_cells(bundle)
+    summary = cells.summary
+    tile = {item.key: item for item in ar.read_atera_tile_index(bundle)}[FIDELITY_TILE]
+    x0, x1, y0, y1 = tile.bounds_um
+    height, width = bundle.morphology_shape_yx
+    c0, c1 = max(0, int(x0 / ps)), min(width, int(x1 / ps))
+    r0, r1 = max(0, int(y0 / ps)), min(height, int(y1 / ps))
+    labels = ar.read_atera_labels(bundle)
+    cell_mask = np.asarray(labels["cell_labels"][r0:r1, c0:c1]).astype(np.int64)
+    nucleus_mask = np.asarray(labels["nucleus_labels"][r0:r1, c0:c1]).astype(np.int64)
+    border = np.unique(
+        np.concatenate([cell_mask[0], cell_mask[-1], cell_mask[:, 0], cell_mask[:, -1]])
+    )
+    interior = np.setdiff1d(np.unique(cell_mask), np.concatenate([[0], border]))
+    assert interior.size > 100
+    rows = interior - 1
+
+    # Cell label = row + 1: areas and corner-convention centroids.
+    yy, xx = np.nonzero(cell_mask)
+    values = cell_mask[yy, xx]
+    n_labels = int(values.max()) + 1
+    area = np.bincount(values, minlength=n_labels)[interior]
+    cx = np.bincount(values, weights=xx, minlength=n_labels)[interior] / area
+    cy = np.bincount(values, weights=yy, minlength=n_labels)[interior] / area
+    np.testing.assert_allclose(
+        area * ps * ps, summary["cell_area"].to_numpy()[rows], rtol=1e-5
+    )
+    np.testing.assert_allclose(
+        (cx + c0 + 0.5) * ps, summary["cell_centroid_x"].to_numpy()[rows], atol=0.01
+    )
+    np.testing.assert_allclose(
+        (cy + r0 + 0.5) * ps, summary["cell_centroid_y"].to_numpy()[rows], atol=0.01
+    )
+
+    # Nucleus label = nucleus row + 1, owned through polygon_sets/0/cell_index.
+    on_nucleus = nucleus_mask > 0
+    owners = cells.nucleus_cell_index[nucleus_mask[on_nucleus] - 1] + 1
+    assert np.mean(cell_mask[on_nucleus] == owners) > 0.99
+
+    # Per-cell QV >= 20 counts reproduce the vendor matrix exactly.
+    with dask.config.set(scheduler="threads", num_workers=8):
+        points, _, _ = ar.read_atera_transcripts(
+            bundle, min_qv=20.0, tile_allowlist=[FIDELITY_TILE]
+        )
+        frame = points.compute()
+    assigned = (
+        frame["original_assignment"].to_numpy(dtype=np.float64, na_value=0)
+    ).astype(np.int64)
+    keep = np.isin(assigned, interior)
+    order = {int(cell): k for k, cell in enumerate(interior)}
+    counted = sparse.csr_matrix(
+        (
+            np.ones(int(keep.sum())),
+            (
+                np.asarray([order[int(cell)] for cell in assigned[keep]]),
+                frame["feature_name"].cat.codes.to_numpy()[keep],
+            ),
+        ),
+        shape=(interior.size, len(ar.read_atera_gene_names(bundle))),
+    )
+    with ar.open_zip_group(bundle.cell_feature_matrix_zip) as group:
+        vendor = sparse.csr_matrix(ad.io.sparse_dataset(group["X"])[rows])
+    assert abs(counted - vendor).sum() == 0

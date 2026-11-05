@@ -111,7 +111,7 @@ to `none` or `/dev/null` on purpose:
 |-------|---------|-------------|
 | `outdir` | `./results` | Output root. |
 | `species` | `human` | Dataset species for the whole invocation: `human` or `mouse`. Controls reference-backed defaults; mixed-species samplesheets are not supported. |
-| `analysis_mode` | `paired` | Fallback row mode: `paired`, `merscope`, or `xenium`. A non-empty samplesheet `analysis_mode` value overrides this per row. |
+| `analysis_mode` | `paired` | Fallback row mode: `paired`, `merscope`, `xenium` or `atera` (alias `a`; build only for now). A non-empty samplesheet `analysis_mode` value overrides this per row. |
 | `enable_alignment` | `false` | Fallback row alignment switch. A non-empty samplesheet `enable_alignment` value overrides this per row; alignment only applies to paired rows. |
 | `analysis_segmentation` | `all` | Fallback downstream analysis branches after enrichment. Valid values: `all`, `both`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, `proseg_hybrid`; comma-separated combinations are accepted. `all` includes all four branches, while `both` restricts analysis to `reseg,original_seg`. A non-empty samplesheet value overrides this per row. |
 | `register_images_refine_affine` | `true` | Refine each Xenium Explorer matrix with a robust DAPI-to-DAPI affine fit before resampling registered images. The stage itself is enabled per row by `xenium_registered_images_csv`; see [stages/register-images.md](stages/register-images.md). |
@@ -365,6 +365,15 @@ install paths trigger a `sudo` prompt.
 | Param | Default | Description |
 |-------|---------|-------------|
 | `xenium_min_qv` | `20.0` | Minimum transcript QV to retain. |
+| `atera_min_qv` | `20.0` | Minimum transcript QV the Atera build keeps (`null` keeps all); 20 reproduces the vendor matrix. |
+| `atera_build_cpus` | `16` | CPUs of an ATERA `BUILD_SPATIALDATA` task (other platforms keep 8). |
+| `atera_build_memory_gb` | `128` | Memory reservation of an ATERA build task, doubled on its one retry after an external kill (exit 137 or 140). Other platforms keep 80 GB. |
+| `atera_build_max_rss_gb` | `120` | Watchdog cap on the ATERA build's anonymous memory; above it the build exits with status 99 (not retried). Raise it together with `atera_build_memory_gb`. |
+| `default_atera_voxel_layers` | `2` | ProSeg voxel layers for ATERA (used once ProSeg supports ATERA). |
+| `atera_cellpose_model`, `atera_cellpose_cellprob`, `atera_cellpose_flow_threshold`, `atera_cellpose_diameter`, `atera_cellpose_final_max_area_um2`, `atera_mask_max_eccentricity` | `null` | The ATERA twins of the per-platform Cellpose overrides. They are declared because Cellpose preflight reads them for every active platform; ATERA rows do not segment yet. |
+
+ATERA rows run only `build_spatialdata` for now; see
+[Stage 1 — Atera](stages/spatialdata-build.md#atera).
 
 ### Alignment
 

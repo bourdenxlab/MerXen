@@ -344,3 +344,27 @@ def test_parse_samplesheet_supports_gaston_row_overrides(tmp_path: Path) -> None
     assert pair.gaston_keep_seed_models is True
     assert pair.gaston_keep_checkpoints == "all"
     assert pair.gaston_max_genes == 500
+
+
+def test_atera_rows_parse_and_validate_without_printing_paths(tmp_path: Path) -> None:
+    """ATERA rows need atera_dir or atera_spatialdata_path; messages name fields."""
+    roi = tmp_path / "SYNTHSN000__SYNTHSLIDE__roi"
+    roi.mkdir()
+    csv_path = tmp_path / "samplesheet.csv"
+    csv_path.write_text(
+        "pair_id,analysis_mode,atera_dir,atera_spatialdata_path,atera_spec_path\n"
+        f"A1,atera,{roi},,\n"
+        "A2,atera,,,\n"
+        f"A3,atera,{tmp_path / 'missing'},,{tmp_path / 'missing.spatial'}\n"
+    )
+    first, second, third = parse_samplesheet(csv_path)
+    assert first.atera_dir == roi
+    assert required_platforms_for_mode("atera") == ("ATERA",)
+    validate_samplesheet([first])
+    with pytest.raises(FileNotFoundError) as excinfo:
+        validate_samplesheet([second, third])
+    message = str(excinfo.value)
+    assert "[A2] Provide either atera_dir or atera_spatialdata_path." in message
+    assert "[A3] Neither atera_dir nor atera_spatialdata_path exists." in message
+    assert "[A3] atera_spec_path does not exist." in message
+    assert str(tmp_path) not in message

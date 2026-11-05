@@ -250,5 +250,13 @@ def test_default_shape_keys_are_pinned() -> None:
             "xenium_cell_boundaries",
             "xenium_nucleus",
         ),
+        "ATERA": (
+            "MOSAIK_proseg",
+            "MOSAIK_proseg_hybrid",
+            "MOSAIK_cellpose",
+            "cellpose_nuclei",
+            "atera_cell_boundaries",
+            "atera_nucleus",
+        ),
     }
-    assert list(build_module.DEFAULT_SHAPE_KEYS) == ["MERSCOPE", "XENIUM"]
+    assert list(build_module.DEFAULT_SHAPE_KEYS) == ["MERSCOPE", "XENIUM", "ATERA"]

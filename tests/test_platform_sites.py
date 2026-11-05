@@ -124,13 +124,17 @@ REASONS: dict[str, dict[str, str]] = {
         "src/merxen/analysis/clustering_squidpy.py": (
             "nucleus shape priority list; nucleus consumer for AT-6"
         ),
-        "src/merxen/config.py": "Xenium reader option (build config field)",
+        "src/merxen/config.py": "Xenium and Atera reader options (build config fields)",
         "src/merxen/enrichment/enrich.py": (
             "raw Xenium reader inputs and source layer names; nucleus consumer for AT-6"
         ),
         "src/merxen/io/atera_reader.py": (
             "Atera reader produces per-nucleus shapes keyed by nucleus id with "
             "cell_instance_id (D7)"
+        ),
+        "src/merxen/io/builders/atera.py": (
+            "Atera builder writes the per-nucleus source shapes element (D7); "
+            "registered as atera_nucleus only in AT-6"
         ),
         "src/merxen/io/builders/xenium.py": "Xenium reader option",
         "src/merxen/masks.py": "ordered mask-branch discovery list (AT-6)",
@@ -143,6 +147,10 @@ REASONS: dict[str, dict[str, str]] = {
         "src/merxen/io/atera_reader.py": (
             "Atera table reads the largest-nucleus area and sums all nuclei per cell "
             "through polygon_sets/0/cell_index (D7)"
+        ),
+        "src/merxen/io/builders/atera.py": (
+            "Atera builder passes the nucleus areas counted during the masks/0 "
+            "export to the table (D7)"
         ),
         "src/merxen/io/spatialdata_io.py": "cell layer selection excludes nuclei",
         "src/merxen/visualization/sanity_plots.py": (
@@ -279,7 +287,10 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
             '"nucleus_boundaries",',
             '"xenium_nucleus",',
         ),
-        "src/merxen/config.py": ("nucleus_boundaries: bool = True",),
+        "src/merxen/config.py": (
+            "nucleus_boundaries: bool = True",
+            "nucleus_boundaries: bool = True",
+        ),
         "src/merxen/enrichment/enrich.py": (
             '["nucleus_boundaries", XENIUM_OLD_NUCLEUS_SHAPE_NAME],',
             'csv_path = xenium_dir / "nucleus_boundaries.csv.gz"',
@@ -290,6 +301,10 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
             '("nucleus_boundaries", cells.nucleus_vertices, '
             "cells.nucleus_num_vertices),",
             '``{"cell_boundaries": ..., "nucleus_boundaries": ...}``. Both carry',
+        ),
+        "src/merxen/io/builders/atera.py": (
+            'NUCLEUS_SHAPES_KEY: Final = "nucleus_boundaries"',
+            "NUCLEUS_SHAPES_KEY: build_config.nucleus_boundaries,",
         ),
         "src/merxen/io/builders/xenium.py": (
             "nucleus_boundaries=build_config.nucleus_boundaries,",
@@ -319,6 +334,16 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
             'obs["nucleus_area"] = summary["nucleus_area"].to_numpy(np.float64)',
             'obs["nucleus_area_total"] = '
             "np.asarray(nucleus_area_total, dtype=np.float64)",
+            "def nucleus_area_total_from_counts(",
+            "exported (for :func:`nucleus_area_total_from_counts`).",
+            "return nucleus_area_total_from_counts(counter.counts, cells, "
+            "bundle.pixel_size_um)",
+            '{"cell_centroid_x", "cell_centroid_y", "cell_area", "nucleus_area", '
+            '"nucleus_count"}',
+        ),
+        "src/merxen/io/builders/atera.py": (
+            "ar.nucleus_area_total_from_counts(",
+            "nucleus_area_total=(",
         ),
         "src/merxen/io/spatialdata_io.py": (
             'if "cell" in str(key).lower() and "nucleus" not in str(key).lower()',

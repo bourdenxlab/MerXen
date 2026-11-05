@@ -68,7 +68,7 @@ def test_schema_registered_shape_needs_no_registry_lookup() -> None:
     """A store that names its original shape is read without consulting the registry."""
     key, _, _ = frames._choose_dataset_element(
         _fake_sdata(("custom_original",), schema_shape="custom_original"),
-        platform="ATERA",
+        platform="COSMX",
     )
     assert key == "custom_original"
 
@@ -81,5 +81,5 @@ def test_unknown_platform_raises_when_the_registry_is_needed(
     with pytest.raises(UnknownPlatformError, match="Unknown platform"):
         frames._choose_dataset_element(
             _fake_sdata(_BOTH_ORIGINALS, schema_shape=schema_shape),
-            platform="ATERA",
+            platform="COSMX",
         )

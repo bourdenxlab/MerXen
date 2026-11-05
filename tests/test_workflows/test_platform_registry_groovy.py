@@ -47,6 +47,11 @@ _SAMPLESHEET_FIELDS: dict[str, dict[str, list[str]]] = {
         "spatialdata_path_fields": ["xenium_spatialdata_path"],
         "transform_path_fields": ["xenium_spec_path"],
     },
+    "ATERA": {
+        "input_dir_fields": ["atera_dir"],
+        "spatialdata_path_fields": ["atera_spatialdata_path"],
+        "transform_path_fields": ["atera_spec_path"],
+    },
 }
 
 
@@ -173,15 +178,15 @@ _UNKNOWN_SITES = (
 
 
 @pytest.mark.nextflow
-@pytest.mark.parametrize("platform", ["ATERA", "merscope"])
+@pytest.mark.parametrize("platform", ["COSMX", "merscope"])
 def test_unknown_platform_raises_at_every_converted_site(
     groovy_output: dict[str, Any], platform: str
 ) -> None:
     """An unregistered platform raises instead of taking another one's branch.
 
-    Before the registry, ``analysisLayerKeys("ATERA", "original_seg")``
-    returned the Xenium shape key, and the restart, transform and channel
-    lookups silently used Xenium (or MERSCOPE) fields.
+    Before the registry, ``analysisLayerKeys("ATERA", "original_seg")`` (ATERA
+    was not registered then) returned the Xenium shape key, and the restart,
+    transform and channel lookups silently used Xenium (or MERSCOPE) fields.
     """
     unknown = groovy_output["unknown"]
     for site in _UNKNOWN_SITES:
