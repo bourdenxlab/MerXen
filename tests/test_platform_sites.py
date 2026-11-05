@@ -141,6 +141,10 @@ REASONS: dict[str, dict[str, str]] = {
         "src/merxen/segmentation/pipeline.py": "Xenium reader option",
     },
     "nucleus_joins": {
+        "scripts/acceptance/make_atera_crop.py": (
+            "Atera crop keeps a cell only when its largest nucleus "
+            "(cell_summary.nucleus_area) lies whole in the window (AT-5)"
+        ),
         "src/merxen/analysis/clustering_squidpy.py": (
             "nucleus area metrics join nuclei to cells by id (AT-6)"
         ),
@@ -315,6 +319,11 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         "src/merxen/segmentation/pipeline.py": ("nucleus_boundaries=False,",),
     },
     "nucleus_joins": {
+        "scripts/acceptance/make_atera_crop.py": (
+            'nucleus_area = cells.summary["nucleus_area"].to_numpy(np.float64)',
+            "nucleus_ok = ~has_nucleus | (largest == np.rint(nucleus_area / "
+            "pixel_area))",
+        ),
         "src/merxen/analysis/clustering_squidpy.py": (
             '"nucleus_area",',
             '_apply_area_metric(adata, nucleus_metrics, column="nucleus_area")',
