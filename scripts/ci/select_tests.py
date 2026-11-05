@@ -1289,7 +1289,8 @@ def _write_github(plan: Plan) -> None:
     output = os.environ.get("GITHUB_OUTPUT")
     lines = [
         f"mode={plan.mode}",
-        f"reason={plan.reason}",
+        # One line: a changed path in the reason must not start a new output.
+        "reason=" + " ".join(plan.reason.split()),
         f"count={plan.shards}",
         f"shards={json.dumps(list(range(1, plan.shards + 1)))}",
         f"est_seconds={round(plan.est_seconds)}",

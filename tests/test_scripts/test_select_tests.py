@@ -608,3 +608,19 @@ def test_real_repository_selection() -> None:
     )
     this_file = "tests/test_scripts/test_select_tests.py"
     assert this_file in sel.select(index, [sel.Change(this_file)], durations).tests
+
+
+def test_github_output_keeps_the_reason_on_one_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "github_output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    sel._write_github(sel.Plan("full", "docs/a\nmode=selected has no mapping"))
+    lines = output.read_text().splitlines()
+    assert [line.split("=", 1)[0] for line in lines] == [
+        "mode",
+        "reason",
+        "count",
+        "shards",
+        "est_seconds",
+    ]
