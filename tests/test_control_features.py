@@ -8,6 +8,7 @@ import pytest
 
 from merxen.analysis import clustering_squidpy
 from merxen.control_features import (
+    CONTROL_FEATURE_TYPES,
     CONTROL_TOKENS,
     classify_control_transcripts,
     control_token_mask,
@@ -70,7 +71,10 @@ TENX_CONTROL_CATEGORIES: list[tuple[str, str]] = [
     ("Deprecated Codeword", "DeprecatedCodeword_0001"),
 ]
 
-# Gene symbols that contain fragments of control prefixes or tokens.
+TENX_CONTROL_NAMES: list[str] = [name for _, name in TENX_CONTROL_CATEGORIES]
+
+# Gene symbols that contain fragments of control prefixes or tokens. ``CTRL``
+# is a real Atera gene and the closest miss: the token is ``control``.
 TOKEN_LIKE_GENES: list[str] = [
     "GFAP",
     "HLA-DMB",
@@ -82,16 +86,16 @@ TOKEN_LIKE_GENES: list[str] = [
     "INTS1",
     "CNTNAP2",
     "INTS6L",
+    "CTRL",
 ]
 
 
 @pytest.mark.parametrize("platform", ["XENIUM", "ATERA", None])
-@pytest.mark.parametrize(("feature_type", "name"), TENX_CONTROL_CATEGORIES)
+@pytest.mark.parametrize("name", TENX_CONTROL_NAMES)
 def test_every_10x_control_category_is_a_control_by_name(
-    platform: str | None, feature_type: str, name: str
+    platform: str | None, name: str
 ) -> None:
     """Each control category is recognised from its name alone."""
-    del feature_type
     assert matches_control_name_pattern(name, platform)
     assert is_registered_control_name(name, platform)
     assert control_transcript_mask([name], platform=platform).tolist() == [True]
@@ -117,6 +121,23 @@ def test_feature_type_flags_every_10x_control_category() -> None:
     )
 
     assert mask.tolist() == [True] * len(types) + [False, False]
+
+
+def test_control_feature_types_cover_every_10x_control_category() -> None:
+    """The registry lists every 10x control category, plus the old blank name."""
+    assert {feature_type for feature_type, _ in TENX_CONTROL_CATEGORIES} | {
+        "Blank Codeword"
+    } == CONTROL_FEATURE_TYPES
+
+
+def test_unrecognised_feature_types_fall_back_to_names() -> None:
+    """Non-control types and stringified missing values leave it to the name."""
+    names = ["Protein_1", "GFAP", "Odd_1", "NegControlProbe_1", "Odd_2"]
+    feature_type = ["Protein Expression", "nan", "None", "nan", "Blank Codeword"]
+
+    mask = control_transcript_mask(names, platform="XENIUM", feature_type=feature_type)
+
+    assert mask.tolist() == [False, False, False, True, True]
 
 
 def test_feature_type_gene_keeps_control_like_name_and_falls_back() -> None:

@@ -10,9 +10,12 @@ Sources for the names and categories below:
   Analysis release notes): cell-feature-matrix feature types are
   ``Gene Expression``, ``Negative Control Codeword``, ``Negative Control
   Probe``, ``Genomic Control`` (Xenium Prime), ``Unassigned Codeword`` and
-  ``Deprecated Codeword``. Since XOA 3.0 ``transcripts.parquet`` also carries
-  ``is_gene`` (whether the feature is ``Gene Expression``) and
-  ``codeword_category`` (``predesigned_gene`` / ``custom_gene`` for genes).
+  ``Deprecated Codeword`` (``Blank Codeword`` before the rename to
+  ``Unassigned Codeword``); other modalities add types such as ``Protein
+  Expression``, which are not controls. Since XOA 3.0
+  ``transcripts.parquet`` also carries ``is_gene`` (whether the feature is
+  ``Gene Expression``) and ``codeword_category`` (``predesigned_gene`` /
+  ``custom_gene`` for genes).
   Control feature names start with ``NegControlProbe_``,
   ``NegControlCodeword_``, ``UnassignedCodeword_`` (``BLANK_`` before the
   rename in early XOA releases), ``DeprecatedCodeword_`` and, for the Xenium
@@ -65,10 +68,21 @@ XENIUM_GENE_CODEWORD_CATEGORIES: frozenset[str] = frozenset(
     {"predesigned_gene", "custom_gene"}
 )
 
-# The 10x cell-feature-matrix feature type of real genes (``feature_types`` in
-# the Xenium HDF5 matrix, ``feature_type`` in the Atera zarr matrix). Every
-# other non-empty type is a control.
+# 10x cell-feature-matrix feature types (``feature_types`` in the Xenium HDF5
+# matrix, ``feature_type`` in the Atera zarr matrix), compared case-insensitively.
+# Any other value (``Protein Expression``, a stringified missing value, ...)
+# is not a known type, so the name rules decide.
 GENE_FEATURE_TYPE = "Gene Expression"
+CONTROL_FEATURE_TYPES: frozenset[str] = frozenset(
+    {
+        "Negative Control Codeword",
+        "Negative Control Probe",
+        "Genomic Control",
+        "Unassigned Codeword",
+        "Deprecated Codeword",
+        "Blank Codeword",
+    }
+)
 
 # Anchored, case-sensitive name rules, used for transcripts without a feature
 # type. The Xenium rule keeps ProSeg's own Xenium preset prefixes
@@ -90,6 +104,8 @@ _ALL_CONTROL_NAME_PATTERNS: tuple[re.Pattern[str], ...] = (
     XENIUM_CONTROL_NAME_PATTERN,
     MERSCOPE_CONTROL_NAME_PATTERN,
 )
+
+_CONTROL_FEATURE_TYPES_FOLDED = frozenset(t.casefold() for t in CONTROL_FEATURE_TYPES)
 
 _TRUE_STRINGS = frozenset({"true", "t", "1", "yes", "y"})
 _FALSE_STRINGS = frozenset({"false", "f", "0", "no", "n"})
@@ -191,8 +207,10 @@ def classify_control_transcripts(
     Works on transcripts or on features (one row per gene). A row with a
     usable feature type is a control when that type says it is not a gene:
     ``is_gene`` false, else a ``codeword_category`` outside
-    :data:`XENIUM_GENE_CODEWORD_CATEGORIES`, else a ``feature_type`` other
-    than :data:`GENE_FEATURE_TYPE`. A row without one is a control when its
+    :data:`XENIUM_GENE_CODEWORD_CATEGORIES`, else a ``feature_type`` in
+    :data:`CONTROL_FEATURE_TYPES` (a ``feature_type`` is usable only when it
+    is :data:`GENE_FEATURE_TYPE` or one of those). A row without one is a
+    control when its
     name matches the platform's anchored control-name pattern or contains
     one of :data:`CONTROL_TOKENS`.
 
@@ -205,7 +223,9 @@ def classify_control_transcripts(
             ``codeword_category`` values, used where ``is_gene`` is missing.
         feature_type: Optional per-row 10x cell-feature-matrix feature types
             (``Gene Expression``, ``Negative Control Probe``, ...), used where
-            the two columns above are missing.
+            the two columns above are missing. Values that are neither
+            :data:`GENE_FEATURE_TYPE` nor in :data:`CONTROL_FEATURE_TYPES`
+            leave the row to the name rules.
 
     Returns:
         The control flags, plus the transcripts kept only because their
@@ -254,15 +274,15 @@ def classify_control_transcripts(
     if feature_type is not None:
         if len(feature_type) != n_rows:
             raise ValueError("feature_type must have one value per feature name")
-        types = pd.Series(feature_type).astype("string").str.strip()
-        known = (types.notna() & (types != "")).to_numpy(dtype=bool)
-        use = known & ~has_type
-        is_gene_type = (
-            (types.str.casefold() == GENE_FEATURE_TYPE.casefold())
-            .fillna(False)
-            .to_numpy(dtype=bool)
+        types = pd.Series(feature_type).astype("string").str.strip().str.casefold()
+        is_control_type = (
+            types.isin(_CONTROL_FEATURE_TYPES_FOLDED).fillna(False).to_numpy(dtype=bool)
         )
-        type_is_control[use] = ~is_gene_type[use]
+        is_gene_type = (
+            (types == GENE_FEATURE_TYPE.casefold()).fillna(False).to_numpy(dtype=bool)
+        )
+        use = (is_control_type | is_gene_type) & ~has_type
+        type_is_control[use] = is_control_type[use]
         has_type |= use
 
     return ControlTranscriptFlags(
@@ -291,7 +311,8 @@ def control_transcript_mask(
         codeword_category: Optional per-transcript Xenium
             ``codeword_category`` values, used where ``is_gene`` is missing.
         feature_type: Optional per-row 10x cell-feature-matrix feature types,
-            used where the two columns above are missing.
+            used where the two columns above are missing; unrecognised values
+            leave the row to the name rules.
 
     Returns:
         Boolean array, ``True`` for control transcripts.

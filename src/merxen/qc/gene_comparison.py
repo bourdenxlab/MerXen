@@ -25,15 +25,29 @@ logger = logging.getLogger(__name__)
 # Atera zarr matrix.
 FEATURE_TYPE_COLUMNS: tuple[str, ...] = ("feature_types", "feature_type")
 
+# ``var`` column holding gene names when ``var_names`` are feature ids, as in
+# the Atera cell-feature matrix (Ensembl ids in ``var_names``).
+FEATURE_NAME_COLUMN = "feature_name"
+
 
 def _table_gene_labels(adata: Any, gene_label: str) -> pd.Index:
-    if gene_label in adata.var.columns:
-        return pd.Index(adata.var[gene_label].astype(str))
+    for column in (gene_label, FEATURE_NAME_COLUMN):
+        if column in adata.var.columns:
+            return pd.Index(adata.var[column].astype(str))
     return pd.Index(adata.var_names.astype(str))
 
 
 def gene_totals_from_table(adata: Any, gene_label: str = "gene") -> pd.Series:
-    """Aggregate per-gene totals from an AnnData table."""
+    """Aggregate per-gene totals from an AnnData table.
+
+    Args:
+        adata: AnnData table.
+        gene_label: ``var`` column holding gene names. When absent, the
+            ``feature_name`` column is used, else ``var_names``.
+
+    Returns:
+        Summed counts indexed by unique gene name.
+    """
     genes = _table_gene_labels(adata, gene_label)
     totals = np.asarray(adata.X.sum(axis=0)).ravel()
     return pd.Series(totals, index=genes).groupby(level=0).sum().astype(float)
@@ -44,8 +58,8 @@ def feature_types_from_table(adata: Any, gene_label: str = "gene") -> pd.Series 
 
     Args:
         adata: AnnData table.
-        gene_label: ``var`` column holding gene names; ``var_names`` when absent,
-            as in :func:`gene_totals_from_table`.
+        gene_label: ``var`` column holding gene names, resolved as in
+            :func:`gene_totals_from_table`.
 
     Returns:
         Feature types indexed by unique gene name (the first non-missing type
@@ -138,24 +152,30 @@ def apply_dataset_filter(
 ) -> pd.Series:
     """Remove platform control features from gene counts.
 
-    Uses the shared rules of :mod:`merxen.control_features`: a gene with a
-    known feature type is a control unless the type is ``Gene Expression``;
-    any other gene is a control when its name matches the platform's
+    Uses the shared rules of :mod:`merxen.control_features`: a gene whose
+    feature type is ``Gene Expression`` is kept and one whose type is a 10x
+    control category is dropped; any other gene (no type, or a type such as
+    ``Protein Expression``) is a control when its name matches the platform's
     control-name pattern or contains a control token.
 
     Args:
         gene_counts: Per-gene counts indexed by unique gene name.
         dataset_name: Platform name (any case); selects the name patterns.
             An unknown name checks every platform's patterns.
-        feature_types: Optional feature types indexed by unique gene name, as
-            returned by :func:`feature_types_from_table`. Genes missing from it
-            fall back to the name rules.
+        feature_types: Optional feature types indexed by gene name, as
+            returned by :func:`feature_types_from_table`; a repeated name uses
+            its first non-missing type. Genes missing from it fall back to the
+            name rules.
 
     Returns:
         A copy of ``gene_counts`` without the platform's control features.
     """
     names = gene_counts.index.astype(str)
-    types = None if feature_types is None else feature_types.reindex(names)
+    types = None
+    if feature_types is not None:
+        if not feature_types.index.is_unique:
+            feature_types = feature_types.groupby(level=0).first()
+        types = feature_types.reindex(names)
     controls = control_transcript_mask(
         names.to_numpy(dtype=object), platform=dataset_name, feature_type=types
     )
