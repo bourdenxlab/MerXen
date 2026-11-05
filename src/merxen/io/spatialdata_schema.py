@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from copy import deepcopy
+from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
@@ -576,6 +577,315 @@ def validate_merxen_schema(
                 raise SpatialDataContractError(
                     f"{branch}: point assignments reference missing shapes"
                 )
+
+
+@dataclass(frozen=True)
+class StreamingPointsSummary:
+    """What ``validate_merxen_schema_streaming`` counted in one points element.
+
+    Attributes:
+        points_key: Name of the points element.
+        partition_rows: Row count of every partition, in partition order.
+        group_rows: Row count per value of the group column (empty when no
+            group column was counted).
+        transcript_id_min: Smallest ``transcript_id`` (None when empty).
+        transcript_id_max: Largest ``transcript_id`` (None when empty).
+        reread_partitions: Partitions read a second time because their
+            ``transcript_id`` ranges overlap another partition's.
+    """
+
+    points_key: str
+    partition_rows: tuple[int, ...]
+    group_rows: Mapping[str, int]
+    transcript_id_min: int | None
+    transcript_id_max: int | None
+    reread_partitions: int
+
+    @property
+    def n_rows(self) -> int:
+        """Total number of rows."""
+        return sum(self.partition_rows)
+
+
+@dataclass(frozen=True)
+class _AssignmentCheck:
+    """One registered assignment column and the shape IDs it may reference."""
+
+    branch: str
+    column: str
+    shape_ids: np.ndarray
+
+
+def validate_merxen_schema_streaming(
+    sdata_obj: Any,
+    *,
+    expected_partition_rows: Mapping[str, Sequence[int]] | None = None,
+    group_column: str | None = None,
+    expected_group_rows: Mapping[str, Mapping[str, int]] | None = None,
+) -> dict[str, StreamingPointsSummary]:
+    """Run the deep schema checks one points partition at a time.
+
+    It checks what ``validate_merxen_schema(deep=True)`` checks without
+    materialising a whole points column, plus optional row-count
+    reconciliation:
+
+    - everything ``validate_merxen_schema(deep=False)`` checks, including
+      table IDs == shape IDs for every registered branch, and equal count
+      matrices for coordinate variants;
+    - ``transcript_id`` is positive and unique over the whole element: unique
+      within each partition, and partitions whose ID ranges overlap are
+      re-read together and checked as one;
+    - every non-null value of each registered assignment column is a shape ID
+      of its branch (checked per partition);
+    - with ``expected_partition_rows``, the row count of every partition;
+    - with ``expected_group_rows``, the row count per value of
+      ``group_column`` (for example per source tile, against the vendor's
+      per-tile counts after the QV filter). Groups may span partitions.
+
+    Memory bound: one partition at a time, and only the columns checked
+    (``transcript_id``, the assignment columns and the group column), plus a
+    sorted copy of its IDs (8 B per row); the shape IDs (8 B per shape); and
+    one integer pair per partition. Partitions whose ID ranges overlap are
+    re-read as a cluster, holding that cluster's IDs (8 B per row, twice
+    while sorting). With partition-ordered IDs (the default contract, or
+    vendor ordinals read in row ranges) every cluster is one partition and
+    nothing is read twice.
+
+    Args:
+        sdata_obj: SpatialData object (typically read back from disk).
+        expected_partition_rows: Expected row count per partition, keyed by
+            points element.
+        group_column: Points column whose values group the rows, e.g.
+            ``source_tile``. Needed with ``expected_group_rows``.
+        expected_group_rows: Expected row count per group value, keyed by
+            points element. A group absent from the data counts as 0 rows.
+
+    Returns:
+        A summary per points element that was read.
+
+    Raises:
+        SpatialDataContractError: On any contract violation or count mismatch.
+        ValueError: If the expectations name an unknown element, or
+            ``expected_group_rows`` is given without ``group_column``.
+    """
+    validate_merxen_schema(sdata_obj, deep=False)
+    expected_partition_rows = dict(expected_partition_rows or {})
+    expected_group_rows = dict(expected_group_rows or {})
+    if expected_group_rows and group_column is None:
+        raise ValueError("expected_group_rows needs a group_column")
+    for points_key in (*expected_partition_rows, *expected_group_rows):
+        if points_key not in sdata_obj.points:
+            raise ValueError(f"No points element {points_key!r} to reconcile")
+
+    attrs = dict(getattr(sdata_obj, "attrs", {}).get(MERXEN_SCHEMA_ATTR, {}))
+    registry = dict(attrs.get("segmentations", {}))
+    checks: dict[str, list[_AssignmentCheck]] = {}
+    for branch, entry in registry.items():
+        points_key = str(entry["points"])
+        branch_checks = checks.setdefault(points_key, [])
+        _check_coordinate_variant_matrix(sdata_obj, registry, str(branch), entry)
+        assignment_col = entry.get("assignment_column")
+        if assignment_col is None:
+            continue
+        instance_key = entry.get("instance_key", INSTANCE_ID_COLUMN)
+        shape_ids = canonical_instance_series(
+            sdata_obj.shapes[entry["shape"]][instance_key],
+            field_name=f"{branch}.shape.{instance_key}",
+        ).to_numpy(dtype=np.uint64)
+        branch_checks.append(
+            _AssignmentCheck(str(branch), str(assignment_col), np.sort(shape_ids))
+        )
+    for points_key in (*expected_partition_rows, *expected_group_rows):
+        checks.setdefault(points_key, [])
+
+    return {
+        points_key: _stream_points_checks(
+            sdata_obj.points[points_key],
+            points_key=points_key,
+            assignment_checks=assignment_checks,
+            group_column=group_column,
+            expected_partition_rows=expected_partition_rows.get(points_key),
+            expected_group_rows=expected_group_rows.get(points_key),
+        )
+        for points_key, assignment_checks in checks.items()
+    }
+
+
+def _check_coordinate_variant_matrix(
+    sdata_obj: Any,
+    registry: Mapping[str, Any],
+    branch: str,
+    entry: Mapping[str, Any],
+) -> None:
+    """Require a coordinate variant's count matrix to equal its parent's."""
+    parent_key = entry.get("coordinate_variant_of")
+    table_key = entry.get("table")
+    if parent_key is None or table_key is None:
+        return
+    parent_table_key = registry[parent_key].get("table")
+    if parent_table_key is None or parent_table_key not in sdata_obj.tables:
+        return
+    table = sdata_obj.tables[table_key]
+    parent_table = sdata_obj.tables[parent_table_key]
+    if not _matrix_values_equal(table.X, parent_table.X):
+        raise SpatialDataContractError(
+            f"{branch}: count matrix differs from coordinate parent"
+        )
+
+
+def _iter_partitions(points: Any) -> Iterator[tuple[int, pd.DataFrame]]:
+    """Yield ``(number, pandas partition)`` one partition at a time."""
+    if hasattr(points, "npartitions") and hasattr(points, "partitions"):
+        for number in range(int(points.npartitions)):
+            yield number, points.partitions[number].compute()
+    else:
+        yield 0, points
+
+
+def _stream_points_checks(
+    points: Any,
+    *,
+    points_key: str,
+    assignment_checks: Sequence[_AssignmentCheck],
+    group_column: str | None,
+    expected_partition_rows: Sequence[int] | None,
+    expected_group_rows: Mapping[str, int] | None,
+) -> StreamingPointsSummary:
+    """Check one points element partition by partition; see the caller."""
+    count_groups = group_column is not None and (
+        expected_group_rows is not None or group_column in points.columns
+    )
+    if count_groups and group_column not in points.columns:
+        raise SpatialDataContractError(
+            f"{points_key}: group column {group_column!r} does not exist"
+        )
+    columns = [TRANSCRIPT_ID_COLUMN]
+    columns += [check.column for check in assignment_checks]
+    if count_groups and group_column is not None:
+        columns.append(group_column)
+    selected = points[list(dict.fromkeys(columns))]
+
+    partition_rows: list[int] = []
+    id_ranges: list[tuple[int, int, int]] = []
+    group_rows: dict[str, int] = {}
+    for number, partition in _iter_partitions(selected):
+        partition_rows.append(len(partition))
+        ids = _unique_partition_transcript_ids(
+            partition[TRANSCRIPT_ID_COLUMN],
+            label=f"{points_key} partition {number}",
+        )
+        if len(ids):
+            id_ranges.append((int(ids[0]), int(ids[-1]), number))
+        for check in assignment_checks:
+            _check_partition_assignments(partition[check.column], check, number)
+        if count_groups and group_column is not None:
+            counts = partition[group_column].astype("string").value_counts()
+            for group, count in counts.items():
+                group_rows[str(group)] = group_rows.get(str(group), 0) + int(count)
+        del partition, ids
+
+    if expected_partition_rows is not None:
+        expected = [int(rows) for rows in expected_partition_rows]
+        if partition_rows != expected:
+            raise SpatialDataContractError(
+                f"{points_key}: partition row counts {partition_rows} differ "
+                f"from the expected {expected}"
+            )
+    if expected_group_rows is not None:
+        mismatched = {
+            group: (group_rows.get(group, 0), int(expected_group_rows.get(group, 0)))
+            for group in sorted({*group_rows, *map(str, expected_group_rows)})
+            if group_rows.get(group, 0) != int(expected_group_rows.get(group, 0))
+        }
+        if mismatched:
+            raise SpatialDataContractError(
+                f"{points_key}: rows per {group_column} (found, expected) differ: "
+                f"{mismatched}"
+            )
+
+    reread = 0
+    for cluster in _overlapping_id_clusters(id_ranges):
+        reread += len(cluster)
+        _unique_partition_transcript_ids(
+            pd.concat(
+                [
+                    selected[TRANSCRIPT_ID_COLUMN].partitions[number].compute()
+                    for number in cluster
+                ],
+                ignore_index=True,
+            ),
+            label=f"{points_key} partitions {cluster}",
+        )
+    return StreamingPointsSummary(
+        points_key=points_key,
+        partition_rows=tuple(partition_rows),
+        group_rows=group_rows,
+        transcript_id_min=min((low for low, _, _ in id_ranges), default=None),
+        transcript_id_max=max((high for _, high, _ in id_ranges), default=None),
+        reread_partitions=reread,
+    )
+
+
+def _unique_partition_transcript_ids(values: pd.Series, *, label: str) -> np.ndarray:
+    """Return sorted positive transcript IDs, raising on a duplicate."""
+    ids = np.sort(
+        canonical_instance_series(
+            values,
+            field_name=f"{label}.{TRANSCRIPT_ID_COLUMN}",
+        ).to_numpy(dtype=np.uint64)
+    )
+    duplicated = ids[1:][ids[1:] == ids[:-1]]
+    if len(duplicated):
+        raise SpatialDataContractError(
+            f"{label}: duplicate transcript identifiers, e.g. "
+            f"{np.unique(duplicated)[:5].tolist()}"
+        )
+    return ids
+
+
+def _check_partition_assignments(
+    values: pd.Series,
+    check: _AssignmentCheck,
+    number: int,
+) -> None:
+    """Require one partition's assignments to reference existing shapes."""
+    assigned = canonical_instance_series(
+        pd.Series(pd.unique(values.dropna())),
+        field_name=f"{check.branch}.points.{check.column}",
+    ).to_numpy(dtype=np.uint64)
+    missing = assigned[~np.isin(assigned, check.shape_ids)]
+    if len(missing):
+        raise SpatialDataContractError(
+            f"{check.branch}: point assignments in partition {number} reference "
+            f"missing shapes, e.g. {np.sort(missing)[:5].tolist()}"
+        )
+
+
+def _overlapping_id_clusters(
+    id_ranges: Sequence[tuple[int, int, int]],
+) -> list[list[int]]:
+    """Group partitions whose ``[min, max]`` ID ranges overlap.
+
+    Args:
+        id_ranges: ``(min, max, partition number)`` per non-empty partition.
+
+    Returns:
+        The partition numbers of every cluster with more than one partition.
+    """
+    clusters: list[list[int]] = []
+    current: list[int] = []
+    current_max = -1
+    for low, high, number in sorted(id_ranges):
+        if current and low <= current_max:
+            current.append(number)
+            current_max = max(current_max, high)
+            continue
+        if len(current) > 1:
+            clusters.append(sorted(current))
+        current, current_max = [number], high
+    if len(current) > 1:
+        clusters.append(sorted(current))
+    return clusters
 
 
 def _matrix_values_equal(left: Any, right: Any) -> bool:

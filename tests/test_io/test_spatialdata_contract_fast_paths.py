@@ -31,6 +31,7 @@ from merxen.io.spatialdata_io import (
 from merxen.io.spatialdata_schema import (
     SpatialDataContractError,
     validate_merxen_schema,
+    validate_merxen_schema_streaming,
     with_stable_transcript_ids,
 )
 
@@ -311,6 +312,21 @@ def test_points_canonical_keeps_the_reader_category_order() -> None:
     genes = canonical.points["transcripts"].compute()["gene"]
     assert genes.cat.categories.tolist() == ["Zeb2", "Actb", "Gad1"]
     assert genes.astype(str).tolist() == frame["gene"].astype(str).tolist()
+
+
+def test_points_canonical_writes_points_in_one_read(tmp_path: Path) -> None:
+    """Contract plus write reads every canonical partition exactly once."""
+    _, canonical, reads = _default_and_canonical("XENIUM")
+
+    prepare_source_spatialdata_contract(
+        canonical, platform="XENIUM", points_canonical=True
+    )
+    write_spatialdata_zarr(canonical, tmp_path / "source.zarr")
+
+    assert reads.reads == dict.fromkeys(range(N_PARTITIONS), 1)
+    written = sd.read_zarr(tmp_path / "source.zarr")
+    validate_merxen_schema(written, deep=False)
+    assert validate_merxen_schema_streaming(written)["transcripts"].n_rows == N_ROWS
 
 
 def test_points_canonical_without_a_table_leaves_points_untouched() -> None:
