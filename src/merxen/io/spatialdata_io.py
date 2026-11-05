@@ -463,15 +463,21 @@ def normalize_points_for_latest_write(
     - A gene column that is categorical with known categories keeps its
       dtype and category order (the default casts it to strings, and the
       caller later recomputes and sorts the categories).
-    - ``transcript_id``, ``cell`` and ``assignment`` keep an unsigned integer
-      dtype (the default goes through ``float64`` and narrows ``assignment``
-      to ``UInt32``).
+    - ``transcript_id`` and ``assignment`` keep an unsigned integer dtype,
+      nullable or not. The default goes through ``float64``, which rounds IDs
+      above 2**53, and narrows ``assignment`` to ``UInt32``; the fast path
+      keeps the input width (e.g. ``uint64``). Nulls stay null either way.
+    - ``cell`` keeps a non-nullable unsigned integer dtype. A nullable
+      ``cell`` takes the default path, which writes a null as 0.
 
     A Dask Parquet round trip returns categoricals with *unknown* categories.
-    Those are not canonical: with ``feature_categories`` they are restored
-    lazily, and each partition raises if a value is missing from the list;
-    without it the column falls back to the default string cast. Every other
-    column is normalized as by default.
+    Those are not canonical: with ``feature_categories`` the feature column
+    (the ``feature_key`` of the points, else the first of ``gene``,
+    ``feature_name`` and ``target``) is restored lazily, and each partition
+    raises if a value is missing from the list. Any other gene column, and
+    the feature column without the list, keeps known categories or falls
+    back to the default string cast. Every other column is normalized as by
+    default.
 
     Args:
         points_obj: A Dask or pandas DataFrame of transcript points.
@@ -479,8 +485,8 @@ def normalize_points_for_latest_write(
         points_canonical: Keep columns that are already canonical (see above).
             Off by default; the default output is unchanged.
         feature_categories: Known gene categories, in the order to keep, used
-            only with ``points_canonical`` for gene columns whose categories are
-            unknown or differ.
+            only with ``points_canonical`` for the feature column when its
+            categories are unknown or differ.
 
     Returns:
         The DataFrame with normalized column types.
@@ -490,16 +496,22 @@ def normalize_points_for_latest_write(
 
     df = points_obj
     cols = set(map(str, list(df.columns)))
+    gene_cols = [col for col in ("gene", "feature_name", "target") if col in cols]
+    point_attrs = dict(getattr(points_obj, "attrs", {}).get("spatialdata_attrs", {}))
+    feature_key = point_attrs.get("feature_key")
+    if feature_key not in gene_cols:
+        feature_key = gene_cols[0] if gene_cols else None
 
     df = _preserve_observed_transcript_coordinates(df, cols)
     cols = set(map(str, list(df.columns)))
 
     # Gene columns: force to plain string to avoid categorical overflow
-    for gene_col in ("gene", "feature_name", "target"):
+    for gene_col in gene_cols:
         if gene_col in cols:
             if points_canonical:
                 canonical_genes = _canonical_feature_column(
-                    df[gene_col], feature_categories
+                    df[gene_col],
+                    feature_categories if gene_col == feature_key else None,
                 )
                 if canonical_genes is not None:
                     df[gene_col] = canonical_genes
@@ -519,7 +531,8 @@ def normalize_points_for_latest_write(
     int_casts: dict[str, str] = {"cell": "uint32"}
     for c, target_dtype in int_casts.items():
         if c in cols:
-            if points_canonical and is_unsigned_integer_dtype(df[c].dtype):
+            dtype = df[c].dtype
+            if points_canonical and isinstance(dtype, np.dtype) and dtype.kind == "u":
                 continue
             try:
                 df[c] = df[c].astype("float64").fillna(0).astype(target_dtype)
@@ -624,7 +637,7 @@ def _recategorize_checked(values: pd.Series, dtype: pd.CategoricalDtype) -> pd.S
     """Cast one partition to ``dtype``, refusing values outside its categories."""
     if isinstance(values.dtype, pd.CategoricalDtype):
         # ``astype`` keeps the old order when only the order differs.
-        result = values.cat.set_categories(dtype.categories)
+        result = values.cat.set_categories(dtype.categories, ordered=dtype.ordered)
     else:
         result = values.astype(dtype)
     lost = result.isna() & values.notna()
@@ -683,23 +696,36 @@ def _stable_source_instance_mapping(values: Any) -> dict[str, int]:
     source = pd.Series(values, copy=False).astype(str)
     if bool(source.duplicated().any()):
         raise ValueError("Source segmentation contains duplicate cell identifiers")
+    integer_mapping = _integer_source_instance_mapping(source)
+    if integer_mapping is not None:
+        return integer_mapping
+    return {
+        source_id: index + 1 for index, source_id in enumerate(sorted(source.tolist()))
+    }
+
+
+def _integer_source_instance_mapping(source: pd.Series) -> dict[str, int] | None:
+    """Map source IDs to their own values when all are distinct positive integers.
+
+    Args:
+        source: Source cell IDs as strings.
+
+    Returns:
+        The mapping, or None when an ID is not a positive integer or two IDs
+        parse to the same integer (the caller then numbers sorted IDs).
+    """
     parsed: list[int] = []
-    all_positive_integers = True
     for value in source:
         try:
             number = int(value)
         except ValueError:
-            all_positive_integers = False
-            break
+            return None
         if number <= 0 or number > np.iinfo(np.uint64).max:
-            all_positive_integers = False
-            break
+            return None
         parsed.append(number)
-    if all_positive_integers and len(set(parsed)) == len(parsed):
-        return dict(zip(source.tolist(), parsed, strict=True))
-    return {
-        source_id: index + 1 for index, source_id in enumerate(sorted(source.tolist()))
-    }
+    if len(set(parsed)) != len(parsed):
+        return None
+    return dict(zip(source.tolist(), parsed, strict=True))
 
 
 def _canonicalize_source_points_partition(
@@ -772,6 +798,12 @@ def _require_canonical_points(points_obj: Any, points_key: str) -> None:
     ].dtype != np.dtype(np.uint64):
         raise SpatialDataContractError(f"{prefix} needs a uint64 transcript_id")
     instance_key = point_attrs.get("instance_key")
+    source_column = first_existing_col(points_obj, ["cell_id", "EntityID"])
+    if source_column is not None:
+        raise SpatialDataContractError(
+            f"{prefix} has a source assignment column {source_column!r} that "
+            "still needs mapping"
+        )
     if "original_assignment" in points_obj.columns:
         if instance_key != "original_assignment":
             raise SpatialDataContractError(
@@ -781,11 +813,10 @@ def _require_canonical_points(points_obj: Any, points_key: str) -> None:
             raise SpatialDataContractError(
                 f"{prefix}.original_assignment must be UInt64"
             )
-    elif instance_key is not None or first_existing_col(
-        points_obj, ["cell_id", "EntityID"]
-    ):
+    elif instance_key is not None:
         raise SpatialDataContractError(
-            f"{prefix} has a source assignment column that still needs mapping"
+            f"{prefix} has a source assignment column {instance_key!r} that "
+            "still needs mapping"
         )
 
 
@@ -817,15 +848,23 @@ def prepare_source_spatialdata_contract(
       (no ``source_transcript_id`` is added);
     - with a cell table, assignments are already canonical instance IDs in a
       nullable ``UInt64`` ``original_assignment`` column registered as the
-      points ``instance_key`` (the IDs the table's mapping gives, e.g. the cell
-      label values), and no source column (``cell_id``, ``EntityID``) is left
-      to map; points without assignments carry no ``instance_key``;
+      points ``instance_key``: the IDs the table maps its cells to. The table
+      must give them explicitly, as an instance-label column distinct from
+      the source cell ID (e.g. the cell label values) or as source cell IDs
+      that are distinct positive integers. Source IDs that would be numbered
+      by sorted rank are refused, because canonical points cannot be checked
+      against that numbering without a pass;
+    - no source assignment column (``cell_id``, ``EntityID``) is left;
+      points without assignments carry no ``instance_key``;
     - partitions carry a default RangeIndex, as ``reset_index(drop=True)``
       leaves them.
 
-    The metadata checks raise on a wrong column, dtype or attr. The value-level
-    guarantees (IDs unique, assignments present as shapes) are checked by
-    ``validate_merxen_schema_streaming`` after the write.
+    The metadata checks run before anything is changed and raise on a wrong
+    column, dtype or attr. The value-level guarantees (IDs positive and
+    unique, assignments present as shapes) are not checked here; the caller
+    runs ``validate_merxen_schema_streaming``. Neither check can tell a
+    permutation of correct assignments from the right ones; that needs a
+    comparison with the vendor's cell-by-gene counts.
 
     Args:
         sdata_obj: SpatialData object straight from an instrument reader.
@@ -834,8 +873,12 @@ def prepare_source_spatialdata_contract(
 
     Raises:
         SpatialDataContractError: With ``points_canonical``, if a points element
-            is not canonical according to its metadata.
+            is not canonical according to its metadata, or the table would
+            number its cells by sorted rank.
     """
+    if points_canonical:
+        for points_key, points_obj in getattr(sdata_obj, "points", {}).items():
+            _require_canonical_points(points_obj, str(points_key))
     primary_points = choose_primary_points_key(sdata_obj)
     stamp_merxen_schema(
         sdata_obj,
@@ -848,10 +891,9 @@ def prepare_source_spatialdata_contract(
     table_key = "table" if "table" in tables else None
     table_obj = tables.get(table_key) if table_key is not None else None
     if table_obj is None:
+        if points_canonical:
+            return
         for points_key in list(points):
-            if points_canonical:
-                _require_canonical_points(points[points_key], str(points_key))
-                continue
             points[points_key] = with_stable_transcript_ids(
                 points[points_key],
                 preserve_existing=True,
@@ -900,6 +942,19 @@ def prepare_source_spatialdata_contract(
             )
         )
     else:
+        if (
+            points_canonical
+            and any(
+                "original_assignment" in points_obj.columns
+                for points_obj in points.values()
+            )
+            and _integer_source_instance_mapping(source_ids) is None
+        ):
+            raise SpatialDataContractError(
+                "points_canonical: the cell table has no instance-label column "
+                "and its source cell IDs are not distinct positive integers, so "
+                "its cells would be numbered by sorted rank"
+            )
         mapping = _stable_source_instance_mapping(source_ids)
         instance_ids = source_ids.map(mapping).astype("uint64")
 
@@ -1001,10 +1056,9 @@ def prepare_source_spatialdata_contract(
     )
 
     for points_key in list(sdata_obj.points):
-        points_obj = sdata_obj.points[points_key]
         if points_canonical:
-            _require_canonical_points(points_obj, str(points_key))
             continue
+        points_obj = sdata_obj.points[points_key]
         transformations = get_transformation(points_obj, get_all=True)
         point_attrs = dict(points_obj.attrs.get("spatialdata_attrs", {}))
         source_assignment_col = point_attrs.get("instance_key")

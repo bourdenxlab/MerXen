@@ -31,6 +31,7 @@ from merxen.io.spatialdata_io import (
     write_spatialdata_zarr,
 )
 from merxen.io.spatialdata_schema import (
+    MERXEN_SCHEMA_ATTR,
     SpatialDataContractError,
     validate_merxen_schema,
     validate_merxen_schema_streaming,
@@ -610,7 +611,13 @@ def _parse_calls_without_sort(source: str) -> list[int]:
 
 
 def test_every_points_parse_passes_sort() -> None:
-    """Without ``sort`` spatialdata scans every partition's index (a full pass)."""
+    """Without ``sort`` spatialdata scans every partition's index (a full pass).
+
+    The guard covers Dask input, where ``sort=True`` only skips that scan. In
+    spatialdata 0.8.0 a pandas input cannot take ``sort`` at all (the model
+    passes its own to ``from_pandas``), so a future pandas call site converts
+    to Dask first or is exempted here with a reason.
+    """
     source_root = Path(merxen.__file__).parent
     missing = {
         str(path.relative_to(source_root)): lines
@@ -619,3 +626,139 @@ def test_every_points_parse_passes_sort() -> None:
     }
 
     assert missing == {}
+
+
+def test_stable_transcript_ids_per_partition_reads_match_the_counted_ids() -> None:
+    """Partitions read with ``to_delayed`` keep their offsets, unequal lengths too."""
+    frame = xenium_raw_points_frame()
+    bounds = [0, 3, 10, 18, N_ROWS]
+    reads = PartitionReads(
+        [
+            frame.iloc[start:stop].reset_index(drop=True)
+            for start, stop in zip(bounds[:-1], bounds[1:], strict=True)
+        ]
+    )
+    lengths = [len(part) for part in reads.frames]
+    expected = [
+        list(range(start + 1, stop + 1))
+        for start, stop in zip(bounds[:-1], bounds[1:], strict=True)
+    ]
+
+    for partition_lengths in (None, lengths):
+        result = with_stable_transcript_ids(
+            reads.dataframe(), partition_lengths=partition_lengths
+        )
+        parts = [
+            part.compute()["transcript_id"].tolist() for part in result.to_delayed()
+        ]
+        assert parts == expected
+
+
+def test_normalize_points_canonical_casts_non_canonical_ids_as_by_default() -> None:
+    """Signed, float or nullable IDs take the default casts even with the flag."""
+    frame = pd.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [3.0, 4.0, 5.0],
+            "transcript_id": np.asarray([5, 6, 7], dtype=np.int64),
+            "assignment": np.asarray([1.0, np.nan, 2.0]),
+            "cell": pd.Series([1, pd.NA, 2], dtype="UInt64"),
+        }
+    )
+    points = dd.from_pandas(frame, npartitions=2)
+
+    default = normalize_points_for_latest_write(points.copy()).compute()
+    fast = normalize_points_for_latest_write(
+        points.copy(), points_canonical=True
+    ).compute()
+
+    pd.testing.assert_frame_equal(fast, default)
+    assert fast["transcript_id"].dtype == "UInt64"
+    assert fast["assignment"].dtype == "UInt32"
+    assert fast["cell"].tolist() == [1, 0, 2]
+
+
+def test_normalize_points_canonical_restores_only_the_feature_column() -> None:
+    """``feature_categories`` applies to the feature key, not every gene column."""
+    frame = pd.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [3.0, 4.0, 5.0],
+            "feature_name": pd.Categorical(["A", "B", "A"], ordered=True),
+            "gene": pd.Categorical(["g1", "g2", "g1"]),
+        }
+    )
+    points = PointsModel.parse(
+        dd.from_pandas(frame, npartitions=2), feature_key="feature_name", sort=True
+    )
+
+    result = normalize_points_for_latest_write(
+        points, points_canonical=True, feature_categories=["B", "A"]
+    )
+
+    computed = result.compute()
+    assert computed["feature_name"].dtype == result["feature_name"].dtype
+    assert computed["feature_name"].cat.categories.tolist() == ["B", "A"]
+    assert not computed["feature_name"].cat.ordered
+    assert computed["gene"].cat.categories.tolist() == ["g1", "g2"]
+
+
+def test_points_canonical_refuses_unparsed_points() -> None:
+    """Points without a transformation are not parsed points."""
+    _, canonical, reads = _default_and_canonical("XENIUM")
+    del canonical.points["transcripts"].attrs["transform"]
+
+    with pytest.raises(SpatialDataContractError, match="is not parsed points"):
+        prepare_source_spatialdata_contract(
+            canonical, platform="XENIUM", points_canonical=True
+        )
+    assert MERXEN_SCHEMA_ATTR not in canonical.attrs
+    assert reads.total == 0
+
+
+def test_points_canonical_without_a_table_still_checks_the_metadata() -> None:
+    """The no-table branch refuses non-canonical points too."""
+    reference, _ = merscope_raw_spatialdata()
+    prepare_source_spatialdata_contract(reference, platform="MERSCOPE")
+    frame = reference.points["transcripts"].compute().reset_index(drop=True)
+    raw, _ = merscope_raw_spatialdata()
+    canonical, _ = canonical_spatialdata_like(
+        reference, raw, frame=frame.astype({"transcript_id": "int64"})
+    )
+    del canonical.tables["table"]
+
+    with pytest.raises(SpatialDataContractError, match="uint64"):
+        prepare_source_spatialdata_contract(
+            canonical, platform="MERSCOPE", points_canonical=True
+        )
+
+
+def test_points_canonical_refuses_a_leftover_source_column() -> None:
+    """A source cell column next to canonical assignments is not canonical."""
+    reference, _ = xenium_raw_spatialdata()
+    prepare_source_spatialdata_contract(reference, platform="XENIUM")
+    frame = reference.points["transcripts"].compute().reset_index(drop=True)
+    frame["cell_id"] = frame["source_cell_id"]
+    raw, _ = xenium_raw_spatialdata()
+    canonical, _ = canonical_spatialdata_like(reference, raw, frame=frame)
+
+    with pytest.raises(SpatialDataContractError, match="'cell_id'"):
+        prepare_source_spatialdata_contract(
+            canonical, platform="XENIUM", points_canonical=True
+        )
+
+
+def test_points_canonical_refuses_rank_numbered_cells() -> None:
+    """Without label values or integer cell IDs the table numbers cells by rank."""
+    _, canonical, _ = _default_and_canonical("XENIUM")
+    table = canonical.tables["table"].copy()
+    del table.obs["cell_labels"]
+    table.uns.pop("spatialdata_attrs")
+    canonical.tables["table"] = TableModel.parse(
+        table, region="cell_labels", region_key="region", instance_key="cell_id"
+    )
+
+    with pytest.raises(SpatialDataContractError, match="sorted rank"):
+        prepare_source_spatialdata_contract(
+            canonical, platform="XENIUM", points_canonical=True
+        )
