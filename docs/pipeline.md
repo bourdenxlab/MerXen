@@ -244,6 +244,22 @@ transcript coordinates, so final cell boundaries reflect where mRNA actually
 sits. Cellpose acts as a prior for ProSeg's MCMC sampler. Details in
 [Segmentation](stages/segmentation.md).
 
+## Standalone workflows
+
+Two further Nextflow scripts live next to `main.nf` and are **not** stages of it:
+`workflows/manual_registration_prepare.nf` and
+`workflows/manual_registration_register.nf` (manual landmark registration of an
+image pair, with a human labelling step in the napari viewer between them; see
+[Manual landmark registration](stages/manual-registration.md)). They sit in
+`workflows/` so that they inherit `nextflow.config`, the execution profiles, the
+site configs and `workflows/lib/`, and they share the `VIEWER_CACHE` module with
+the main pipeline. Their samplesheet is validated and their task configs are
+emitted by the Groovy library `workflows/lib/ManualRegistrationSheet.groovy`
+(pure functions, so the Groovy tests run it in one Nextflow launch). Their three
+processes are `cache false`: the Python commands keep their own provenance and
+skip unchanged work in seconds, and the viewer edits the prepared store in place,
+which Nextflow's input hashing cannot see.
+
 ## How a Nextflow run talks to Python
 
 1. The workflow builds a nested Groovy map for each stage — cellpose params,
@@ -259,4 +275,6 @@ sits. Cellpose acts as a prior for ProSeg's MCMC sampler. Details in
 This means **the Pydantic models in `config.py` are the authoritative contract**
 between the workflow and the Python code. Changing a config field requires
 updating both the model and the Groovy emitter in
-[workflows/main.nf](../workflows/main.nf).
+[workflows/main.nf](../workflows/main.nf) (or in
+[workflows/lib/ManualRegistrationSheet.groovy](../workflows/lib/ManualRegistrationSheet.groovy)
+for the manual-registration workflows).

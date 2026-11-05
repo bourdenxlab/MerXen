@@ -447,6 +447,30 @@ mapmycells`. The process copies the previously published
 directory, skips MapMyCells execution, and rewrites the plots from the existing
 CSV/extended JSON outputs.
 
+## Standalone workflows: manual landmark registration
+
+Two scripts next to `main.nf` register an image pair by hand-placed landmarks
+(for example a Zeiss CZI slide scan against a Xenium DAPI image). They are not
+stages of `main.nf`: they read their own samplesheet and run in two steps with a
+human step (the napari viewer) between them.
+
+```bash
+nextflow run workflows/manual_registration_prepare.nf -profile dwight,conda \
+    --samplesheet workflows/samplesheet.manual_registration.csv \
+    --outdir "$MERXEN_RESULTS_ROOT/manual_registration"
+# place the landmarks in the viewer (Dataset loader > Manual Registration), then:
+nextflow run workflows/manual_registration_register.nf -profile dwight,conda \
+    --samplesheet workflows/samplesheet.manual_registration.csv \
+    --outdir "$MERXEN_RESULTS_ROOT/manual_registration"
+```
+
+Use an `--outdir` that is separate from the main pipeline's (the report, timeline
+and trace files under `<outdir>/nextflow/` are overwritten per launch); the
+workflows refuse the main pipeline's default `./results`. Every
+sheet and store problem is reported in one `Preflight checks failed:` block
+before any task starts. See [Manual landmark registration](stages/manual-registration.md)
+for the samplesheet, the params, the CZI runtime and the outputs.
+
 ## Running on a cluster
 
 The default [Dwight profile](../workflows/conf/dwight.config) uses the local

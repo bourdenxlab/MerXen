@@ -1,0 +1,13 @@
+# requirements.lock sha256: 7e5132510f5c34630a73f0ec4c3d066d07a16f122ab2663085578985b50d33bc
+name: merxen-czi
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      # Paths are relative to this file's directory. MerXen itself is not
+      # installed: merxen.io.czi.run_* run `python -m merxen.io.czi` with
+      # PYTHONPATH set to a temporary directory holding only a `merxen`
+      # symlink, so nothing else from the base env shadows this env.
+      - -r ../requirements/requirements.czi.lock

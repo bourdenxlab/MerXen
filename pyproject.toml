@@ -74,6 +74,16 @@ pciseq-runtime = [
     "scipy>=1.12",
     "spatialdata>=0.8.0,<0.9",
 ]
+czi-runtime = [
+    # Zeiss CZI reader for merxen.io.czi (python -m merxen.io.czi). Kept out of the
+    # base env: squidpy caps imagecodecs<2026 and czifile needs imagecodecs>=2026.8.16.
+    "czifile==2026.10.14",
+    "imagecodecs>=2026.8.16",
+    # Same versions as requirements/requirements.lock, so OME-TIFFs written here
+    # are byte-identical to ones written in the base env.
+    "numpy==2.2.6",
+    "tifffile==2026.4.11",
+]
 alignment-runtime = [
     "aicspylibczi>=3.1.2,<4",
     "beautifulsoup4>=4.11.1,<5",

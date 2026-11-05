@@ -52,6 +52,14 @@ case "${install_mode}" in
     locked)
         uv pip install --python "${venv_dir}/bin/python" --no-deps -r requirements/requirements.lock
         uv pip install --python "${venv_dir}/bin/python" -e . --no-deps
+        # Isolated runtime for reading Zeiss CZI files (czifile cannot live in
+        # the base env: squidpy caps imagecodecs below what it needs).
+        czi_venv="${venv_dir}/czi-runtime"
+        if [[ ! -x "${czi_venv}/bin/python" ]]; then
+            uv venv --python 3.12 "${czi_venv}"
+        fi
+        uv pip install --python "${czi_venv}/bin/python" --no-deps -r requirements/requirements.czi.lock
+        export MERXEN_CZI_PYTHON="${MERXEN_CZI_PYTHON:-${czi_venv}/bin/python}"
         ;;
     local)
         uv pip install --python "${venv_dir}/bin/python" -e ".[dev]"

@@ -79,6 +79,10 @@ everything below, stays in [Pipeline architecture](pipeline.md).
   meaning for a reader: `ENSURE_PROSEG` (installs the ProSeg binary),
   `VIEWER_CACHE` (derived viewer cache) and `VALIDATE_ANALYSIS_LAYER` (a pre-QC
   guard producing no artifacts of its own).
+- **The standalone manual-registration workflows have no station.**
+  `MANUAL_REGISTRATION_PREPARE`, `MANUAL_REGISTRATION_REGISTER` and
+  `MANUAL_REGISTRATION_COMPARE` are not part of `main.nf`
+  ([stages/manual-registration.md](stages/manual-registration.md)).
 - **One station stands for three processes.** `Clustering` covers
   `CLUSTERING_SQUIDPY_PREPARE`, `CLUSTERING_SQUIDPY_COMPUTE` and
   `CLUSTERING_SQUIDPY_FINALIZE`.

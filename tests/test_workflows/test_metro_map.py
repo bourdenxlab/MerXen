@@ -39,6 +39,15 @@ OMITTED_PROCESSES = {
         ],
         "optional GASTON analysis, documented in docs/stages/gaston.md",
     ),
+    **dict.fromkeys(
+        [
+            "MANUAL_REGISTRATION_PREPARE",
+            "MANUAL_REGISTRATION_REGISTER",
+            "MANUAL_REGISTRATION_COMPARE",
+        ],
+        "standalone manual-registration workflow, "
+        "documented in docs/stages/manual-registration.md",
+    ),
     "ENSURE_PROSEG": "bootstrap step that installs the ProSeg binary",
     "VIEWER_CACHE": "derived cache for the interactive viewer",
     "VALIDATE_ANALYSIS_LAYER": "pre-QC guard with no artifacts of its own",

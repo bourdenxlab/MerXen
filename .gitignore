@@ -34,6 +34,7 @@ alignment_test/
 # Workflow samplesheets
 workflows/*.csv
 !workflows/samplesheet.example.csv
+!workflows/samplesheet.manual_registration.example.csv
 
 # Run archives
 run_archives/

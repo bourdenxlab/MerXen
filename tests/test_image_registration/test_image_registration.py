@@ -66,9 +66,9 @@ def _nuclei_field(rng: np.random.Generator) -> np.ndarray:
     return image + rng.normal(0.0, 5.0, image.shape).clip(0.0)
 
 
-@pytest.fixture
-def registration_inputs(tmp_path: Path) -> dict[str, Path]:
+def _write_registration_inputs(tmp_path: Path) -> dict[str, Path]:
     """Write a reference zarr and an IF OME-TIFF related by ``TRUE_MATRIX``."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(7)
     reference_dapi = _nuclei_field(rng)
     marker = np.zeros_like(reference_dapi)
@@ -137,6 +137,12 @@ def registration_inputs(tmp_path: Path) -> dict[str, Path]:
         ),
         "output_dir": tmp_path / "register_images_out",
     }
+
+
+@pytest.fixture
+def registration_inputs(tmp_path: Path) -> dict[str, Path]:
+    """Write a reference zarr and an IF OME-TIFF related by ``TRUE_MATRIX``."""
+    return _write_registration_inputs(tmp_path)
 
 
 @pytest.fixture

@@ -34,6 +34,8 @@ converge at alignment; dashed stations are governed by a parameter. See
 - [Configuration](configuration.md) — environment variables, `nextflow.config`
   parameters, and Pydantic config models.
 - [Outputs](outputs.md) — directory layout and artifacts produced by each stage.
+- [Manual landmark registration](stages/manual-registration.md) — standalone
+  prepare, label and register workflows for image pairs, including Zeiss CZI.
 
 ### Pipeline stages
 - [SpatialData build](stages/spatialdata-build.md)
@@ -41,6 +43,7 @@ converge at alignment; dashed stations are governed by a parameter. See
 - [Cellpose HITL model selection](stages/cellpose-hitl.md) (optional model plumbing)
 - [Enrichment](stages/enrichment.md)
 - [Image registration](stages/register-images.md) (post-Xenium IF onto the mask grid)
+- [Manual landmark registration](stages/manual-registration.md) (standalone workflows, not a stage of `main.nf`)
 - [Mask image quantification](stages/mask-image-quantification.md)
 - [Cortical depth](stages/cortical-depth.md)
 - [QC](stages/qc.md)

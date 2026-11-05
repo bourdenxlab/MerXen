@@ -58,7 +58,7 @@ the values):
 
 | File | Template | Included by | Sets |
 |------|----------|-------------|------|
-| `workflows/conf/site.config` | `site.config.example` | `nextflow.config`, so every profile | `apptainer_container`, `apptainer_bind_paths`, `clustering_squidpy_gpu_container`, `mender_container` |
+| `workflows/conf/site.config` | `site.config.example` | `nextflow.config`, so every profile | `apptainer_container`, `apptainer_bind_paths`, `clustering_squidpy_gpu_container`, `mender_container`, `manual_registration_czi_python` |
 | `workflows/conf/dwight.site.config` | `dwight.site.config.example` | `conf/dwight.config`, so the `standard`, `dwight` and `local` profiles | the legacy MapMyCells / WHB sources and caches, `annotation_gene_id_fallback_csv`, `cellpose_model_store`, `cellpose_protected_output_roots`, `task_tmp_dir`, and the task environment (`TMPDIR`, `MERXEN_ALIAS_FILE`) |
 
 Each file is found at the path in `MERXEN_SITE_CONFIG` /
@@ -255,6 +255,22 @@ arms with verified provenance for reuse.
 `REGISTER_IMAGES` requests 8 CPUs and 32 GB (HD1 optical-flow validation peaked at 2.7 GB; full registration remains bounded by image resampling). The viewer pyramid of each
 registered image follows `viewer_cache_build_image_pyramid`.
 
+### Manual registration
+
+Parameters of the standalone [manual landmark registration](stages/manual-registration.md)
+workflows (`manual_registration_prepare.nf`, `manual_registration_register.nf`);
+`main.nf` ignores them.
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `manual_registration_presets` | `"same_section"` | Presets of rows with a blank `presets` column (`;`-separated: `same_section`, `serial_section`). |
+| `manual_registration_settings` | `""` | Settings overrides for every row, `key=value;preset:key=value`; the samplesheet's `registration_settings` column wins. |
+| `manual_registration_force_prepare` | `false` | Rebuild the prepared store that Python would otherwise keep. The old store is kept as `<id>_prepared.zarr.superseded-<UTC>`; its landmarks are carried over only when both images keep their shape and pixel size, otherwise label the new store again (copy the superseded one first if needed). |
+| `manual_registration_force_register` | `false` | Re-run registrations that Python would otherwise skip. |
+| `manual_registration_czi_python` | `null` | Python of the isolated CZI runtime (`envs/environment.czi.yml`), or `in_process`. A host location: set it in the gitignored `workflows/conf/site.config`. Required for `.czi` rows; the prepare task exports it as `MERXEN_CZI_PYTHON`. |
+| `manual_registration_prepare_max_forks` | Dwight: `2` | Maximum concurrent prepare processes. |
+| `manual_registration_register_max_forks` | Dwight: `2` | Maximum concurrent register processes. |
+
 ### Viewer caches
 
 | Param | Default | Description |
@@ -263,7 +279,7 @@ registered image follows `viewer_cache_build_image_pyramid`.
 | `viewer_cache_downsample` | `4` | Downsampling factor for derived image and label pyramids. |
 | `viewer_cache_label_chunk_size` | `2048` | Label rasterization chunk edge length in pixels. |
 | `viewer_cache_contour_width` | `1` | Cached label-outline width. |
-| `viewer_cache_min_size` | `4096` | Minimum image dimension at which another pyramid level is generated. |
+| `viewer_cache_min_size` | `1024` | Minimum image dimension at which another pyramid level is generated. |
 | `viewer_cache_build_image_pyramid` | `true` | Also pre-build the viewer image pyramid. |
 | `viewer_cache_max_forks` | Dwight: `9` | Maximum concurrent viewer-cache processes. The workstation profile pairs this with a 60 GB process reservation, capping the stage at 540 GB and 72 CPUs. |
 
@@ -756,6 +772,9 @@ for every task. Portable per-process CPU/memory requests remain in
 | `GASTON_TRAIN` | 4 | 48 GB | 1 |
 | `GASTON_POSTPROCESS` | 8 | 64 GB | 2 |
 | `GASTON_IMPORT` | 4 | 48 GB | 1 |
+| `MANUAL_REGISTRATION_PREPARE` | 8 | 16 GB | `manual_registration_prepare_max_forks` = 2 |
+| `MANUAL_REGISTRATION_REGISTER` | 8 | 48 GB | `manual_registration_register_max_forks` = 2 |
+| `MANUAL_REGISTRATION_COMPARE` | 1 | 4 GB | unbounded |
 
 On Dwight, `CELLPOSE_SEGMENT`, `ALIGN` when `alignment_device != "cpu"`, and
 `CLUSTERING_SQUIDPY` when `clustering_squidpy_use_gpu=true`, and
@@ -817,6 +836,10 @@ models is the ground truth for how stages are configured.
 | `ClusteringSquidpyConfig` | `clustering-squidpy` | [config.py](../src/merxen/config.py) |
 | `MapMyCellsConfig` | `mapmycells` | [config.py](../src/merxen/config.py) |
 | `GastonConfig` | `gaston` | [config.py](../src/merxen/config.py) |
+| `ManualRegistrationPrepareConfig` | `manual-registration-prepare` | [manual_registration/config.py](../src/merxen/manual_registration/config.py) |
+| `ManualRegistrationRunConfig` | `manual-registration-register` | [manual_registration/config.py](../src/merxen/manual_registration/config.py) |
+| `ManualRegistrationCompareConfig` | `manual-registration-compare` | [manual_registration/config.py](../src/merxen/manual_registration/config.py) |
+| `ViewerCacheConfig` | `build-viewer-caches` (also image-only: `image_only`, `image_keys`) | [config.py](../src/merxen/config.py) |
 
 Nested sub-models:
 
@@ -832,6 +855,11 @@ Nested sub-models:
 - `MerscopeBeadRemovalConfig` — optional bead removal, nested as
   `MerscopeBuildConfig.bead_removal` (`None` means off). Fields are listed in
   [stages/spatialdata-build.md](stages/spatialdata-build.md#configuration).
+- `ManualRegistrationImageInput` — one input image of a manual-registration pair,
+  nested twice in `ManualRegistrationPrepareConfig` (`reference`, `moving`);
+  `ManualRegistrationSettings(RegistrationSettings)` — the per-run settings that
+  `registration_settings` overrides. Fields:
+  [stages/manual-registration.md](stages/manual-registration.md#config-schema).
 - `PipelineConfig(BaseSettings)` — top-level, loaded from `MERXEN_*` env vars.
 
 `load_config_from_json(path, cls)` in

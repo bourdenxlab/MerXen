@@ -236,6 +236,38 @@ git push origin HEAD --tags
     --python-platform linux -o requirements/requirements.alignment.lock
   ```
 
+- **The isolated CZI runtime** (`envs/environment.czi.yml`, lock
+  `requirements/requirements.czi.lock`) holds `czifile` for reading Zeiss CZI
+  files. It cannot live in the base env: squidpy caps `imagecodecs<2026` while
+  current `czifile` needs `imagecodecs>=2026.8`. MerXen itself is not installed
+  in it; `merxen.io.czi` re-runs itself under its interpreter. Regenerate the
+  lock and its hash with:
+
+  ```bash
+  uv pip compile --group czi-runtime --python-version 3.12 --python-platform linux \
+    -o requirements/requirements.czi.lock
+  python scripts/update_env_lock_hash.py --lock requirements/requirements.czi.lock \
+    --env envs/environment.czi.yml
+  ```
+
+  Create it locally once, then export its python (or set it in `.env`):
+
+  ```bash
+  uv venv --python 3.12 ~/merxen-czi-runtime
+  uv pip install --python ~/merxen-czi-runtime/bin/python --no-deps -r requirements/requirements.czi.lock
+  export MERXEN_CZI_PYTHON=~/merxen-czi-runtime/bin/python
+  ```
+
+  `scripts/run_ci_checks.sh` and GitHub CI build the same venv. The tiny CZI test
+  fixtures under `tests/test_data/czi/` are regenerated, on purpose only, with
+  `scripts/manual_registration/make_czi_fixtures.py` in an ephemeral environment
+  (the LGPL writer is never a dependency):
+
+  ```bash
+  uv run --no-project --python 3.12 --with pylibCZIrw==6.1.0 --with numpy==2.2.6 \
+      python scripts/manual_registration/make_czi_fixtures.py --out tests/test_data/czi
+  ```
+
 - **Never `pip install <pkg>` directly.** That leaves you out of sync with
   the lockfile and CI.
 - **Conda env (`envs/environment.yml`)** is deliberately thin — Python 3.12, pip,

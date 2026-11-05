@@ -82,6 +82,13 @@ evidence = local_config.require_path("MERXEN_EVIDENCE_ROOT", "reads recorded run
 - `add_location_argument(parser, "--evidence-root", "MERXEN_EVIDENCE_ROOT",
   help)`: an argparse option whose default is the variable, required when it
   is unset (the help says `default: $MERXEN_EVIDENCE_ROOT`).
+- `MERXEN_CZI_PYTHON` (the python of the isolated CZI runtime used by
+  `merxen.io.czi`, `merxen convert-czi` and the CZI tests) and
+  `MERXEN_MANUAL_REGISTRATION_TEST_DIR` (the folder of the Zeiss test pairs) are
+  locations like the others: read them through `merxen.local_config` (the
+  environment first, then `.env`). Nextflow runs take the CZI runtime from the
+  `manual_registration_czi_python` param of the site config instead
+  ([manual landmark registration](stages/manual-registration.md)).
 - Resolve locations at the point of use, never at import, so `--help`, test
   imports and CI work without a `.env`. Package CLIs under `src/merxen/cli`
   take every path from Nextflow params and do not use the loader.
@@ -97,6 +104,7 @@ Tracked code, data, tests and docs name samples by aliases only:
 | HD1_IF, HD3_IF | human IF samples (MERSCOPE only), derived from the donor alias |
 | HM1, HM2, HM3, HM4 | new-panel human MERSCOPE donors |
 | MS1, MS2 | mouse sections |
+| LCM1, LCM2 | Zeiss Axioscan CZI pairs (a Xenium section as reference and a serial LCM section as moving image), manual-registration test data |
 
 Aliases are stable: never renumbered, a new sample takes the next free number,
 and a new sample of a donor that already has an alias gets a derived alias

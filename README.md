@@ -97,6 +97,8 @@ Each stage is one Nextflow module and one `merxen` subcommand, sharing a Pydanti
 | [MapMyCells](docs/stages/mapmycells.md) | Local Allen Institute MapMyCells cell type assignment | off (past default `stop_stage`) |
 | [Distance from object](docs/stages/distance-from-object.md) | Nearest registered polygon-edge annotation and grey-matter paired near-vs-far PyDESeq2 | off (`--distance_from_object_enabled`) |
 
+Two further workflows are **not** stages of `main.nf`: [manual landmark registration](docs/stages/manual-registration.md) prepares an image pair (including Zeiss CZI scans), lets you place landmarks in the napari viewer, and registers the pair with a landmark fit, guarded DAPI refinement and optional optical flow (`workflows/manual_registration_prepare.nf` and `workflows/manual_registration_register.nf`, one samplesheet).
+
 Downstream analysis runs for all four segmentation branches by default (`--analysis_segmentation all`): ProSeg-resegmented cells, original instrument segmentations, the Cellpose mask, and the ProSeg hybrid. Use `both` explicitly to restrict analysis to `reseg` and `original_seg`.
 
 See [Metro map](docs/metro-map.md) for what the diagram above does and does not show, and [Pipeline architecture](docs/pipeline.md) for the precise stage graph.
@@ -140,7 +142,7 @@ Machine-specific locations and real sample names never enter the repository. The
 
 - `.env`: every location Python, scripts, tests and notebooks need (template [.env.example](.env.example), which also lists the required environment variables). Python reads it through `merxen.local_config`; an unset location is an error, never a built-in default.
 - `workflows/conf/site.config` and `workflows/conf/dwight.site.config`: the Nextflow site locations (templates `*.site.config.example`).
-- `.aliases.tsv`: maps the neutral sample aliases used in code and docs (HD1-HD4, HD1_IF, HD3_IF, HM1-HM4, MS1, MS2) to real names (template [.aliases.example.tsv](.aliases.example.tsv)).
+- `.aliases.tsv`: maps the neutral sample aliases used in code and docs (HD1-HD4, HD1_IF, HD3_IF, HM1-HM4, MS1, MS2, LCM1, LCM2) to real names (template [.aliases.example.tsv](.aliases.example.tsv)).
 
 The privacy hooks refuse host paths and sample names in commits, commit messages, branch names and PR text. Details: [Local configuration and privacy](docs/local-configuration.md).
 
@@ -181,7 +183,7 @@ Every `.png` is also written as a same-stem `.pdf`. Nextflow's own `./work/` dir
 
 Full documentation lives in [docs/](docs/) — start at [docs/index.md](docs/index.md).
 
-- **Usage** — [Getting started](docs/getting-started.md) · [Samplesheet format](docs/samplesheet.md) · [Running the pipeline](docs/running-the-pipeline.md) · [Configuration](docs/configuration.md) · [Local configuration and privacy](docs/local-configuration.md) · [Outputs](docs/outputs.md)
+- **Usage** — [Getting started](docs/getting-started.md) · [Samplesheet format](docs/samplesheet.md) · [Running the pipeline](docs/running-the-pipeline.md) · [Configuration](docs/configuration.md) · [Local configuration and privacy](docs/local-configuration.md) · [Outputs](docs/outputs.md) · [Manual landmark registration](docs/stages/manual-registration.md)
 - **Developer reference** — [Pipeline architecture](docs/pipeline.md) · [Metro map](docs/metro-map.md) · [Python API](docs/python-api.md) · [CLI reference](docs/cli.md) · [Development workflow](docs/development.md)
 - **GASTON** — [Spatial domains](docs/stages/gaston.md)
 

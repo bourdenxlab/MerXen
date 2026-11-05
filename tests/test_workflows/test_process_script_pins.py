@@ -135,10 +135,10 @@ def test_main_nf_defines_no_process() -> None:
 
 
 def test_pinned_inventory(pinned: dict[str, str]) -> None:
-    """Today's inventory: 40 processes, 40 ``script:`` and 4 ``stub:`` sections."""
+    """Today's inventory: 43 processes, 43 ``script:`` and 7 ``stub:`` sections."""
     labels = [key.rsplit("::", 1)[1] for key in pinned]
-    assert labels.count("script") == 40
-    assert labels.count("stub") == 4
+    assert labels.count("script") == 43
+    assert labels.count("stub") == 7
     assert {key for key in pinned if key.endswith("::stub")} == {
         f"workflows/modules/pciseq.nf::{name}::stub"
         for name in (
@@ -146,6 +146,13 @@ def test_pinned_inventory(pinned: dict[str, str]) -> None:
             "PCISEQ_PREPARE",
             "PCISEQ_COMPUTE",
             "PCISEQ_FINALIZE",
+        )
+    } | {
+        f"workflows/modules/manual_registration.nf::{name}::stub"
+        for name in (
+            "MANUAL_REGISTRATION_PREPARE",
+            "MANUAL_REGISTRATION_REGISTER",
+            "MANUAL_REGISTRATION_COMPARE",
         )
     }
 

@@ -85,6 +85,13 @@ jobs:
           # Downloading the prebuilt ones, several GB of CUDA wheels among
           # them, is as fast as restoring them.
           uv cache prune --ci
+      # Isolated runtime for reading Zeiss CZI files (squidpy caps imagecodecs
+      # below what czifile needs, so czifile cannot live in the base env).
+      - name: Install the CZI reader runtime
+        run: |
+          uv venv --python 3.12 "${{ runner.temp }}/merxen-czi-runtime"
+          uv pip install --python "${{ runner.temp }}/merxen-czi-runtime/bin/python" --no-deps -r requirements/requirements.czi.lock
+          echo "MERXEN_CZI_PYTHON=${{ runner.temp }}/merxen-czi-runtime/bin/python" >> "$GITHUB_ENV"
       - name: Verify locked Cellpose runtime
         run: python -c 'from merxen.segmentation.model_identity import require_cellpose_runtime; print(require_cellpose_runtime())'
       - uses: actions/setup-java@v5
