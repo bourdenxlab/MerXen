@@ -357,6 +357,11 @@ def _run_bead_harness(tmp_path: Path, *params: str) -> dict[str, str]:
     )
     script = tmp_path / "harness.nf"
     script.write_text(functions + "\n" + _BEAD_HARNESS.read_text())
+    # requirePlatformInput reads the platform registry (workflows/lib).
+    (tmp_path / "lib").symlink_to(
+        Path(__file__).resolve().parents[2] / "workflows" / "lib",
+        target_is_directory=True,
+    )
     root = tmp_path / "published"
     completed = subprocess.run(
         [

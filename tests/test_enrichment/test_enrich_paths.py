@@ -32,6 +32,8 @@ from merxen.enrichment.enrich import (
     _cellpose_gdf_from_mask,
     _copy_image_preprocessing_attr,
     _is_already_enriched,
+    _is_enriched_except_nuclei,
+    _partial_enrichment_artifact_paths,
     _read_latest_zarr_for_enrichment,
     _remove_partial_enrichment_artifacts_from_zarr_path,
     _remove_path,
@@ -45,6 +47,7 @@ from merxen.io.bead_removal.provenance import (
     write_store_segmentation_sidecar,
 )
 from merxen.io.spatialdata_io import write_spatialdata_metadata
+from merxen.platforms import UnknownPlatformError
 
 
 def test_cellpose_polygon_export_preserves_sparse_mask_labels(
@@ -158,6 +161,146 @@ def test_is_already_enriched_requires_real_xenium_image() -> None:
 
     sdata.images["morphology_focus"] = object()
     assert _is_already_enriched(sdata, "XENIUM")
+
+
+@pytest.mark.parametrize(
+    "check", [_is_already_enriched, _is_enriched_except_nuclei], ids=["full", "nuclei"]
+)
+def test_completeness_checks_reject_an_unknown_platform(check: Any) -> None:
+    """An unregistered platform raises instead of using the Xenium rules."""
+    sdata = SimpleNamespace(shapes={}, tables={}, images={})
+    with pytest.raises(UnknownPlatformError, match="Unknown platform: 'ATERA'"):
+        check(sdata, "ATERA")
+
+
+def test_partial_artifact_paths_reject_an_unknown_platform(tmp_path: Path) -> None:
+    """An unregistered platform raises instead of using the Xenium layers."""
+    with pytest.raises(UnknownPlatformError, match="Supported: MERSCOPE, XENIUM"):
+        _partial_enrichment_artifact_paths(tmp_path, "ATERA")
+
+
+# Characterisation of the platform-dependent completeness rules. The names are
+# written as literals (not the module constants) so that a refactor of the
+# constants cannot change both sides at once.
+_COMMON_PARTIAL_PATHS = {
+    "shapes/MOSAIK_proseg",
+    "shapes/MOSAIK_cellpose",
+    "shapes/cellpose_nuclei",
+    "tables/table_original",
+}
+
+
+@pytest.mark.parametrize(
+    ("platform", "platform_paths"),
+    [
+        (
+            "MERSCOPE",
+            {"shapes/merscope_cell_boundaries", "images/MERSCOPE_z_projection"},
+        ),
+        (
+            "merscope",
+            {"shapes/merscope_cell_boundaries", "images/MERSCOPE_z_projection"},
+        ),
+        ("XENIUM", {"shapes/xenium_cell_boundaries", "shapes/xenium_nucleus"}),
+    ],
+)
+def test_partial_enrichment_artifact_paths_are_platform_specific(
+    tmp_path: Path, platform: str, platform_paths: set[str]
+) -> None:
+    """Rebuildable artifacts: common shapes, platform originals, derived tables."""
+    store = tmp_path / "store.zarr"
+    assert _partial_enrichment_artifact_paths(store, platform) == (
+        _COMMON_PARTIAL_PATHS | platform_paths
+    )
+
+    for name in ("table_original", "table_MOSAIK_proseg", "not_a_table"):
+        (store / "tables" / name).mkdir(parents=True)
+    assert _partial_enrichment_artifact_paths(store, platform) == (
+        _COMMON_PARTIAL_PATHS | platform_paths | {"tables/table_MOSAIK_proseg"}
+    )
+
+
+def _enriched_namespace(
+    shapes: set[str], images: set[str], tables: set[str] | None = None
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        shapes=dict.fromkeys(shapes, object()),
+        images=dict.fromkeys(images, object()),
+        tables=dict.fromkeys(tables or {"table_original"}, object()),
+    )
+
+
+def test_is_enriched_except_nuclei_merscope_needs_original_shape_and_projection() -> (
+    None
+):
+    """MERSCOPE pre-nuclei completeness: original cells and the z projection."""
+    shapes = {"MOSAIK_proseg", "MOSAIK_cellpose", "merscope_cell_boundaries"}
+    images = {"MERSCOPE_z_projection"}
+
+    assert _is_enriched_except_nuclei(_enriched_namespace(shapes, images), "MERSCOPE")
+    assert _is_enriched_except_nuclei(_enriched_namespace(shapes, images), "merscope")
+    assert not _is_enriched_except_nuclei(
+        _enriched_namespace(shapes - {"merscope_cell_boundaries"}, images), "MERSCOPE"
+    )
+    assert not _is_enriched_except_nuclei(
+        _enriched_namespace(shapes, {"morphology_focus"}), "MERSCOPE"
+    )
+    assert not _is_enriched_except_nuclei(
+        _enriched_namespace(shapes, images, tables={"table"}), "MERSCOPE"
+    )
+    # The Xenium originals do not stand in for the MERSCOPE one.
+    xenium_shapes = {"MOSAIK_proseg", "MOSAIK_cellpose", "xenium_cell_boundaries"}
+    assert not _is_enriched_except_nuclei(
+        _enriched_namespace(xenium_shapes | {"xenium_nucleus"}, images), "MERSCOPE"
+    )
+
+
+def test_is_enriched_except_nuclei_xenium_needs_cell_and_nucleus_and_real_image() -> (
+    None
+):
+    """Xenium pre-nuclei completeness: both original shapes and a real image."""
+    shapes = {
+        "MOSAIK_proseg",
+        "MOSAIK_cellpose",
+        "xenium_cell_boundaries",
+        "xenium_nucleus",
+    }
+
+    assert _is_enriched_except_nuclei(
+        _enriched_namespace(shapes, {"morphology_focus"}), "XENIUM"
+    )
+    # Any image that is not a derived viewer image counts.
+    assert _is_enriched_except_nuclei(
+        _enriched_namespace(shapes, {"another_image"}), "XENIUM"
+    )
+    assert not _is_enriched_except_nuclei(
+        _enriched_namespace(shapes, {"_napari_compare_imgpyr__morphology_focus__ds4"}),
+        "XENIUM",
+    )
+    for missing in ("xenium_cell_boundaries", "xenium_nucleus"):
+        assert not _is_enriched_except_nuclei(
+            _enriched_namespace(shapes - {missing}, {"morphology_focus"}), "XENIUM"
+        )
+
+
+def test_is_already_enriched_xenium_requires_nucleus_shape() -> None:
+    """Full Xenium completeness also needs the vendor nucleus shape."""
+    shapes = {
+        "MOSAIK_proseg",
+        "MOSAIK_cellpose",
+        "cellpose_nuclei",
+        "xenium_cell_boundaries",
+        "xenium_nucleus",
+    }
+    images = {"morphology_focus"}
+
+    assert _is_already_enriched(_enriched_namespace(shapes, images), "XENIUM")
+    assert not _is_already_enriched(
+        _enriched_namespace(shapes - {"xenium_nucleus"}, images), "XENIUM"
+    )
+    assert not _is_already_enriched(
+        _enriched_namespace(shapes - {"cellpose_nuclei"}, images), "XENIUM"
+    )
 
 
 def _stub_merscope_enrichment(

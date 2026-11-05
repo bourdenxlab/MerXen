@@ -20,6 +20,7 @@ from merxen.enrichment.assignment import (
     compute_table_from_points_for_shape,
     ensure_shape_has_cell_id,
     run_per_shape_assignment_for_dataset,
+    shape_to_existing_table_source,
 )
 
 
@@ -263,3 +264,21 @@ def test_per_shape_assignment_serializes_with_another_store_writer(
 
     assert [summary["table_key"] for summary in summaries] == ["table_MOSAIK_proseg"]
     assert sdata.written[-1] == "metadata"
+
+
+@pytest.mark.parametrize(
+    ("shape_key", "source"),
+    [
+        ("MOSAIK_proseg", "table"),
+        ("cell_boundaries", "table"),
+        ("merscope_cell_boundaries", "table_original"),
+        ("xenium_cell_boundaries", "table_original"),
+        ("xenium_nucleus", None),
+        ("MOSAIK_cellpose", None),
+        ("merscope_cell_boundaries_aligned_nonrigid", None),
+        ("xenium_cell_boundaries_aligned_nonrigid", None),
+    ],
+)
+def test_shape_to_existing_table_source(shape_key: str, source: str | None) -> None:
+    """Only ProSeg and the vendor cell shapes reuse an existing table."""
+    assert shape_to_existing_table_source(shape_key) == source

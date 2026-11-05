@@ -30,6 +30,7 @@ from merxen.io.spatialdata_schema import (
     choose_primary_points_key,
 )
 from merxen.io.transcript_io import iter_points_chunks, resolve_col
+from merxen.platforms import platform_spec
 
 _BRANCHES = {
     "reseg": "proseg",
@@ -239,7 +240,7 @@ def _check_native_vendor_frame(
         or original.get("shape") != shape_key
         or original.get("id_namespace") != ORIGINAL_ID_NAMESPACE
         or original.get("coordinate_variant_of") is not None
-        or shape_key != f"{config.platform.lower()}_cell_boundaries"
+        or shape_key != platform_spec(config.platform).original_cell_shape_key
     ):
         return
     point_matrix = _affine(sdata_obj.points[points_key], "global", 2)
