@@ -126,16 +126,18 @@ Segmentation, enrichment and the later stages can open it with only the consumer
 **Status (AT-5a, 2026-11-05): all seven items hold on the public dataset.** The Nextflow task built the
 store, then `scripts/acceptance/atera_build.py` checked it as re-read from disk. Its report is
 `$MERXEN_EVIDENCE_ROOT/atera_at5/full/acceptance_full.json`, with the trace, report, timeline and logs
-beside it.
+beside it. After the AT-5 review the acceptance script gained checks (Appendix A, "AT-5 review"); the
+store passes all eleven criteria (`atera_at5/rerun/acceptance_full_v2.json`), and so does a rebuild at
+the reviewed revision with the new resource defaults (`atera_at5/full_r2/`).
 
 | Item | Result |
 |---|---|
-| 1. Build | `BUILD_SPATIALDATA`, one ATERA row with `stop_stage=build_spatialdata`, 16 CPUs: 8 min 24 s; watchdog peak 11.7 GB anonymous RSS (cap then 120 GB). Sizes in §6.1. A crop build killed with SIGKILL after it had written its points, images and labels exited 137. Nextflow retried it once (256 GB reservation): the retry removed the partial store and its mask folder, built from scratch and passed acceptance |
+| 1. Build | `BUILD_SPATIALDATA`, one ATERA row with `stop_stage=build_spatialdata`, 16 CPUs: 8 min 24 s; watchdog peak 11.7 GB anonymous RSS (cap then 120 GB). Sizes in §6.1. A crop build killed with SIGKILL after it had written its points, images and labels exited 137. Nextflow retried it once (256 GB reservation): the retry removed the partial store and its mask folder, built from scratch and passed acceptance. Rebuilt after the review with the 64 GB reservation and 48 GB cap: 9 min 22 s, 11.65 GB peak anonymous RSS, the same build fingerprint |
 | 2. Schema | Shallow schema passes. Streaming deep check: 1,409,601,228 points rows = raw QV ≥ 20 rows; IDs unique per tile; every per-tile count reconciles over 34 non-empty tiles and 409 files |
 | 3. Matrix | Points total 638,849,843 = vendor total on the columns with transcripts; 638,693,512 gene counts; 0 mismatched entries. The vendor total is 638,849,927; the excess is exactly 84 counts, all in four `DeprecatedCodeword_*` columns without transcripts (24 + 21 + 14 + 25) |
-| 4. Labels | 91,431 cells and 90,238 nuclei, no empty label; largest area difference 7.2e-5 µm²; largest label centroid difference 0.0014 µm; 0 containment violations; shape centroids within 0.0046 µm (median 0.00035 µm) |
+| 4. Labels | 91,431 cells and 90,238 nuclei, no empty label; largest area difference 7.2e-5 µm²; largest label centroid difference 0.0014 µm; 0 containment violations; every label pixel equals the vendor `masks/1` / `masks/0`; one shape per cell, indexed by its label; shape centroids within 0.0046 µm (median 0.00035 µm) |
 | 5. Metadata lookups | `sd.read_zarr` opens every element; `find_um_per_px(store, "ATERA") == 0.21249222` |
-| 6. Vendor metadata | 10 byte-identical sidecars, 5,167 vendor zarr metadata members, 5 OME-XML headers, 49 `experiment.spatial` fields and 103 metrics columns in attrs; the fingerprint recomputed from the bundle matches the marker |
+| 6. Vendor metadata | 10 byte-identical sidecars, 5,167 vendor zarr metadata members, 5 OME-XML headers, 49 `experiment.spatial` fields and 103 metrics columns in attrs; the fingerprint recomputed from the bundle matches the marker. The table has `instance_id` = vendor row + 1, X equal to the vendor gene columns (638,693,512 counts), every vendor `obs` column, the `cell_summary` values (nucleus centroids included), the vendor PCA/UMAP, 270 `de_*` columns and 4 colour lists |
 | 7. Existing platforms | The XENIUM and MERSCOPE goldens and process script pins are unchanged; only the ATERA build JSON goldens follow the AT-5 cap change (§6.1) |
 
 ### 1.2 Out of scope for milestone 1
@@ -1254,11 +1256,13 @@ unknown: the crop had been cut from it earlier that day.
 | Polygons (0.25 px) | Cells: 13 / 61 / 278 vertices (min / median / max), 3 MultiPolygons. Nuclei: 10 / 47 / 332, none |
 | Store size | **38.8 GB** in all. Points 24.1 GB (17.1 B/row; the dask index column `__null_dask_index__` and `transcript_id` take about a quarter each). Image 14.0 GB. Table 493 MB. Shapes 56 + 41 MB. Labels 38 + 28 MB. Vendor sidecars and metadata 67 MB |
 | Reads and writes | 23.7 GB read, 36.2 GB written (`rchar` / `wchar`) |
-| Acceptance script | 6 min 26 s, 21.1 GB peak RSS (the int64 matrix comparison over 258 M nonzeros; the streaming schema check takes 4 min 46 s at 5.3 GB) |
+| Acceptance script | 6 min 26 s, 21.1 GB peak RSS (the int64 matrix comparison over 258 M nonzeros; the streaming schema check takes 4 min 46 s at 5.3 GB). With the checks added after the review: 7 min 37 s, 20.9 GB (vendor-mask pixel comparison 31 s, table check 39 s) |
 
 **Resource defaults after AT-5:** `atera_build_memory_gb = 64` (128 GB on the one retry) and
-`atera_build_max_rss_gb = 48`, about 4× the measured anonymous peak. Together with the memory-mapped
-masks, the build's physical footprint is about 33 GB. `atera_build_cpus` stays 16. A section several
+`atera_build_max_rss_gb = 48`. The cap is about 4× the measured anonymous peak. Together with the
+memory-mapped masks, the build's physical footprint is about 33 GB, so the reservation is about 2× it.
+The full section was rebuilt with these defaults after the review: 9 min 22 s task time, 11.65 GB peak
+anonymous RSS, 724% mean CPU (host load 6–10). `atera_build_cpus` stays 16. A section several
 times larger scales the table and the masks; raise both values together if the watchdog stops the build
 (exit 99).
 
@@ -1923,3 +1927,28 @@ move to AT-6 (§1.1 item 5).
 
 Not measured in AT-5: `emit_codeword_index` (left off), and the zarr event-loop ceiling and repeated zip
 opens on their own. The whole build is 8.5 minutes, so neither is worth separate work now.
+
+**AT-5 review (2026-11-05).** Two reviews of the AT-5 branch re-checked the full store with their own
+code (raw zips, `zipfile` and `tifffile`, not the Atera reader) and found no failing criterion. Their
+findings and what was done:
+
+| Finding | Change or decision |
+|---|---|
+| The acceptance script did not check the vendor table data of §1.1 item 6 (nucleus centroids, `de_*` statistics, colours) | New `table_vs_vendor` criterion, read straight from the zips: `instance_id` = vendor row + 1, X against the vendor gene columns, every vendor `obs` column, the `cell_summary` values, the vendor PCA/UMAP, `varm["vendor_de"]` (270 columns) and the colours |
+| Labels were matched to rows by assumption, never compared with the vendor masks | Every label pixel is compared with `masks/1` and `masks/0` (0 differing pixels on the full section, 31 s more) |
+| The build options came from the store's own header | New `build_options` criterion: `min_qv` 20, 0.25 px and no allow-list, unless overridden on the command line |
+| `--expected-vendor-excess` was optional | Required for `points_vs_matrix` unless `--allow-unpinned-excess` |
+| One shape per cell was checked by unique positions only; leftover `.partial-*` folders were reported, not failed | Shape count must equal the cell count, shapes are indexed by their label, nucleus shapes by nucleus row + 1 with the right owner; a leftover partial fails `build_marker` |
+| The metadata check reused the reader's helpers for zip members, metrics and panel header | Members are listed from the zip name list, metrics are compared with the CSV text and the panel header is rebuilt in the script |
+| The module docstring claimed bounded memory | It now says the matrix and table checks grow with the nonzeros (about 21 GB) |
+| Missing negative tests | Tests for a per-tile row mismatch, an off-tolerance shape centroid, a duplicate shape, other build options, an unpinned excess, a leftover partial, table edits, a metrics edit and a pixel swap that keeps every area |
+| §7.4 item 1 still said "exact, 638,849,927" | States the 84-count deprecated-codeword excess |
+| "4× headroom on both" | The cap is about 4× the anonymous peak; the reservation is about 2× the physical footprint |
+| The new 64 / 48 GB defaults had not run on the full section; no code revision in the evidence | The full section was rebuilt at the reviewed revision with the defaults (§6.1) and both stores pass the new acceptance; the report records the git revision; the task's `.command.run` / `.command.sh` and the scratch scripts are copied into the evidence |
+| The points index box order was undocumented | Documented as `[xmin, xmax, ymin, ymax]` µm in the builder and `docs/stages/spatialdata-build.md`; `block_bounds_um` edges can be `null` |
+| The plan said AT-5b had not run | §8 AT-5 and AT-9 record the benchmark and the decision |
+| Commit messages carry `Claude-Session` lines | Not rewritten here: rewriting both stacked branches is the maintainer's call before any push |
+
+**AT-5b ProSeg benchmark (2026-11-05).** Experiment only; no code change. The numbers and the AT-9
+decision are in §8 (AT-5, AT-9); R9 and R15 are updated. The crop is a sparse corner, so the densest
+2 mm tile of the full section was run as well and the extrapolation is calibrated on it.

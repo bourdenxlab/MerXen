@@ -798,7 +798,7 @@ Measured on the public whole-section dataset (AT-5; plan §6.1), 16 CPUs:
 | Shared memory | About 21 GB of memory-mapped masks during polygonisation. The trace's `peak_rss` (103.6 GB) counts them once per worker, so size the task by the watchdog's figure, not the trace's |
 | Store | 38.8 GB: points 24.1 GB (1.41e9 rows, 17.1 B/row), image 14.0 GB, table 0.49 GB, shapes 0.10 GB, labels 0.07 GB, vendor metadata 0.07 GB |
 | Scratch | Two 10.4 GB `.npy` masks beside the target during the build, plus the `.partial` store |
-| Acceptance | `scripts/acceptance/atera_build.py`: 6.5 min, 21 GB peak RSS |
+| Acceptance | `scripts/acceptance/atera_build.py`: about 7.5 min, 21 GB peak RSS (eleven criteria) |
 
 The 48 GB cap is about 4× the anonymous peak; the 64 GB reservation is about
 2× the physical footprint (11.7 GB anonymous plus about 21 GB of mapped
