@@ -169,6 +169,9 @@ never the correction code, and the package imports no GPU code. Configured by `M
   `codeword_category`, or a cell-feature-matrix `feature_type`) decides
   where present, name rules apply elsewhere. Also flags rows kept because their feature
   type says gene although a control-name rule matches.
+- `GENE_FEATURE_TYPE` / `CONTROL_FEATURE_TYPES` — the 10x
+  cell-feature-matrix feature types read as gene or control; any other
+  value leaves the row to the name rules.
 - `control_transcript_mask(...)` — the control flags alone.
 - `matches_control_name_pattern(name, platform)` /
   `control_token_mask(values)` — the anchored and substring name rules.
