@@ -206,6 +206,9 @@ REASONS: dict[str, dict[str, str]] = {
     "native_image_names": {
         "scripts/acceptance/hitl0_tile_check.py": "acceptance check of a Xenium arm",
         "scripts/acceptance/prepare_hitl1_fixture.py": "acceptance fixture",
+        "scripts/manual_registration/export_reference_image.py": (
+            "standalone export script; --image-key is a user-overridable default"
+        ),
         "src/merxen/alignment/frames.py": (
             "image preference list with a Xenium MIP fallback (pairing roles)"
         ),
@@ -413,6 +416,12 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         ),
         "scripts/acceptance/prepare_hitl1_fixture.py": (
             'image_key="morphology_focus",',
+        ),
+        "scripts/manual_registration/export_reference_image.py": (
+            "``morphology_focus`` image lives inside a SpatialData store, so a ground-truth",  # noqa: E501
+            "Xenium stores keep ``morphology_focus`` in pixel units (an identity ``global``",  # noqa: E501
+            'parser.add_argument("--image-key", default="morphology_focus")',
+            '"is the identity, as for Xenium morphology_focus: 0.2125).",',
         ),
         "src/merxen/alignment/frames.py": (
             'else ["morphology_focus", "morphology_mip"]',
