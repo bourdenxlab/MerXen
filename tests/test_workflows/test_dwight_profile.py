@@ -220,19 +220,21 @@ def test_resolved_bead_removal_device_lock_export_and_gpu_container(
     assert "--gpus-per-node=1" in build["clusterOptions"]
 
 
+# The directive closures read the process input ``platform``, as in the real
+# BUILD_SPATIALDATA; the ATERA task must never get the GPU.
 _DIRECTIVE_PROBE = """
 process BUILD_SPATIALDATA {
     input:
-    val x
+    val platform
     output:
     stdout
     script:
     \"\"\"
-    echo "RESULT queue=${task.queue} cluster=[${task.clusterOptions}] nv=\\
+    echo "RESULT ${platform} queue=${task.queue} cluster=[${task.clusterOptions}] nv=\\
 ${task.containerOptions.contains('--nv')}"
     \"\"\"
 }
-workflow { BUILD_SPATIALDATA(1) | view }
+workflow { BUILD_SPATIALDATA(channel.of("MERSCOPE", "ATERA")) | view }
 """
 
 # The build asks for more CPUs and memory than a CI runner has, and the local
@@ -245,6 +247,7 @@ process {
     }
 }
 """
+_ATERA_RESULT = "RESULT ATERA queue=htc cluster=[] nv=false"
 
 
 @pytest.mark.nextflow
@@ -334,9 +337,10 @@ def test_build_gets_a_gpu_queue_and_nv_only_for_the_gpu_device(
     assert completed.returncode == 0, (
         completed.stdout[-3000:] + completed.stderr[-2000:]
     )
-    assert f"RESULT {expected}" in completed.stdout, (
+    assert f"RESULT MERSCOPE {expected}" in completed.stdout, (
         completed.stdout[-3000:] + completed.stderr[-2000:]
     )
+    assert _ATERA_RESULT in completed.stdout, completed.stdout[-3000:]
 
 
 @pytest.mark.nextflow
