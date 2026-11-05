@@ -1035,6 +1035,65 @@ def test_points_index_orders_files_numerically(tmp_path: Path) -> None:
         assert item["bbox_um"][0] == float(k)
 
 
+def test_points_index_writes_open_block_edges_as_null(tmp_path: Path) -> None:
+    # tile_blocks blocks on a tile edge are open (infinite) on that side; the
+    # index must still be valid JSON.
+    directory = tmp_path / "points" / "transcripts" / "points.parquet"
+    directory.mkdir(parents=True)
+    frame = pd.DataFrame(
+        {"x": [1.0], "y": [2.0], "transcript_id": np.asarray([1], dtype=np.uint64)}
+    )
+    frame.to_parquet(directory / "part.0.parquet")
+    frame.to_parquet(directory / "part.1.parquet")
+    specs = [
+        ar.PartitionSpec("0,0", 0, 1, 0, block_bounds_um=(-np.inf, 500.0, 0.0, np.inf)),
+        ar.PartitionSpec("0,0", 0, 1, 0, block_bounds_um=(500.0, 1000.0, 0.0, 500.0)),
+    ]
+    atera_builder.write_points_index(tmp_path, specs)
+    index = json.loads((tmp_path / atera_builder.POINTS_INDEX_NAME).read_text())
+    files = index["points"]["transcripts"]["files"]
+    assert files[0]["block_bounds_um"] == [None, 500.0, 0.0, None]
+    assert files[1]["block_bounds_um"] == [500.0, 1000.0, 0.0, 500.0]
+
+
+def test_tile_blocks_build_writes_a_complete_store(
+    built: Built, tmp_path: Path
+) -> None:
+    # Small blocks split every synthetic tile, so the outer blocks are open.
+    config = _config(
+        built.synth.root,
+        tmp_path / "source.zarr",
+        spatial_order="tile_blocks",
+        spatial_block_um=2.5,
+        min_block_rows=1,
+    )
+    store = build_spatialdata_artifact(config)
+    assert atera_builder.read_build_marker(store) is not None
+    index = json.loads((store / atera_builder.POINTS_INDEX_NAME).read_text())
+    files = index["points"]["transcripts"]["files"]
+    bounds = [item["block_bounds_um"] for item in files if item["block_bounds_um"]]
+    assert any(None in b for b in bounds)
+    reference = json.loads((built.store / atera_builder.POINTS_INDEX_NAME).read_text())[
+        "points"
+    ]["transcripts"]
+    assert (
+        index["points"]["transcripts"]["fingerprint"]["n_rows"]
+        == reference["fingerprint"]["n_rows"]
+    )
+    ids = np.concatenate(
+        [
+            pq.read_table(
+                store / "points/transcripts/points.parquet" / item["file"],
+                columns=["transcript_id"],
+            )
+            .column(0)
+            .to_numpy()
+            for item in files
+        ]
+    )
+    assert len(np.unique(ids)) == len(ids) == reference["fingerprint"]["n_rows"]
+
+
 def test_xenium_build_refuses_a_preview_before_reading(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -799,7 +799,9 @@ def write_points_index(
 
     The index sits at the store root (store rewrites keep it). It is keyed
     by parquet file name, never by dask partition number: a reader may split
-    or merge files. Only the footers are read.
+    or merge files. Only the footers are read. A ``tile_blocks`` block on the
+    edge of its tile is open on that side; JSON has no infinity, so its open
+    ``block_bounds_um`` edges are written as ``null``.
 
     Args:
         store: The written store.
@@ -835,7 +837,7 @@ def write_points_index(
                 "tile": spec.tile_key if spec else None,
                 "tile_rows": [spec.row_start, spec.row_stop] if spec else None,
                 "block_bounds_um": (
-                    list(spec.block_bounds_um)
+                    _json_safe(list(spec.block_bounds_um))
                     if spec and spec.block_bounds_um is not None
                     else None
                 ),
