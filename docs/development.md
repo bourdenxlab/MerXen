@@ -117,8 +117,10 @@ name, PR text and commit messages.
 ### Sharding
 
 [scripts/ci/pytest_shard.py](../scripts/ci/pytest_shard.py) is a pytest
-plugin (`PYTHONPATH=scripts/ci pytest -p pytest_shard --shard-count N
---shard-index I --shard-durations FILE --shard-report OUT.json`). It
+plugin (`PYTHONPATH=scripts/ci pytest -p pytest_shard --shard-count=N
+--shard-index=I --shard-durations=FILE --shard-report=OUT.json`; write each
+path option with `=`, or pytest takes the path for a test path when it picks
+the rootdir and loses the settings in `pyproject.toml`). It
 partitions the collected tests (after `-m`) by recorded duration: whole test
 files, longest first, onto the least loaded shard; a file heavier than half a
 shard's share is split into single tests; inside a shard the tests of 10 s or
