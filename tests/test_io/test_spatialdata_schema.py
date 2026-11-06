@@ -390,3 +390,42 @@ def test_source_contract_maps_opaque_ids_to_existing_label_values() -> None:
     ]
     assert sdata_obj.shapes["cell_boundaries"][INSTANCE_ID_COLUMN].tolist() == [7, 11]
     validate_merxen_schema(sdata_obj, deep=True)
+
+
+def test_branch_label_and_prior_are_stored_only_when_set() -> None:
+    """AT-9 fields leave every existing registry entry byte-identical."""
+    from types import SimpleNamespace
+
+    from merxen.io.spatialdata_schema import (
+        MERXEN_SCHEMA_ATTR,
+        ORIGINAL_ID_NAMESPACE,
+        register_segmentation_branch,
+    )
+
+    plain = SimpleNamespace(attrs={}, points={"transcripts": None})
+    register_segmentation_branch(
+        plain,
+        "proseg",
+        points_key="transcripts",
+        assignment_column="assignment",
+        shape_key="MOSAIK_proseg",
+        table_key="table_MOSAIK_proseg",
+        id_namespace="cellpose_label_v1",
+    )
+    entry = plain.attrs[MERXEN_SCHEMA_ATTR]["segmentations"]["proseg"]
+    assert "label" not in entry and "prior" not in entry
+    atera = SimpleNamespace(attrs={}, points={"transcripts": None})
+    register_segmentation_branch(
+        atera,
+        "proseg",
+        points_key="transcripts",
+        assignment_column="assignment",
+        shape_key="MOSAIK_proseg",
+        table_key="table_MOSAIK_proseg",
+        id_namespace=ORIGINAL_ID_NAMESPACE,
+        label_key="proseg_cell_labels",
+        prior="vendor_cell_labels",
+    )
+    entry = atera.attrs[MERXEN_SCHEMA_ATTR]["segmentations"]["proseg"]
+    assert entry["label"] == "proseg_cell_labels"
+    assert entry["prior"] == "vendor_cell_labels"
