@@ -566,6 +566,9 @@ workflow {
     def rowSettings = rowSampleSettings(sampleRow, runParams)
     def pair = rowSettings.pair_id
     sample_rows_ch = channel.of(tuple(pair, sampleRow, rowSettings))
+    // main.nf builds the barrier specs from the rows released after pciSeq;
+    // this row runs no pciSeq, so they are the same rows.
+    post_pciseq_sample_rows_ch = sample_rows_ch
     // FINALIZE finishes before cortical depth and MAPMYCELLS, as in a real
     // run. A legacy row waits for MAPMYCELLS, a map_first row for cortical
     // depth (runMapMyCells is false in map_first).
