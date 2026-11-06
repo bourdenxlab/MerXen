@@ -7,8 +7,11 @@ keeps the two sides equal. Python code that needs the clustered table key
 calls ``clustered_table_key`` instead of building ``*_clustering_squidpy``
 itself, so the table-key suffix (plan §4.8, OD-A3) reaches every consumer.
 
-This module imports only the standard library, so every pipeline
-environment can use it.
+The original (vendor) shape key of each platform comes from the platform
+registry (``merxen.platforms``), as ``analysisLayerKeys`` reads it from
+``PlatformSpec``. This module imports only the standard library and that
+registry (itself standard-library only), so every pipeline environment can
+use it.
 """
 
 from __future__ import annotations
@@ -19,7 +22,9 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final
 
-PLATFORMS: Final[tuple[str, ...]] = ("MERSCOPE", "XENIUM")
+from merxen.platforms import PLATFORM_SPECS, supported_platforms
+
+PLATFORMS: Final[tuple[str, ...]] = supported_platforms()
 PROSEG_TABLE_KEY: Final = "table_MOSAIK_proseg"
 ORIGINAL_TABLE_KEY: Final = "table_original"
 # Appended to the source table key to name the clustered table written back
@@ -53,8 +58,8 @@ def _platform_independent(
 _PROSEG_KEYS = _platform_independent(PROSEG_TABLE_KEY, "MOSAIK_proseg")
 _ORIGINAL_KEYS: Mapping[str, AnalysisLayerKeys] = MappingProxyType(
     {
-        "MERSCOPE": AnalysisLayerKeys(ORIGINAL_TABLE_KEY, "merscope_cell_boundaries"),
-        "XENIUM": AnalysisLayerKeys(ORIGINAL_TABLE_KEY, "xenium_cell_boundaries"),
+        name: AnalysisLayerKeys(ORIGINAL_TABLE_KEY, spec.original_cell_shape_key)
+        for name, spec in PLATFORM_SPECS.items()
     }
 )
 _CELLPOSE_KEYS = _platform_independent("table_MOSAIK_cellpose", "MOSAIK_cellpose")
@@ -86,7 +91,8 @@ def analysis_layer_keys(platform: str, segmentation: str) -> AnalysisLayerKeys:
     Mirrors ``analysisLayerKeys(platform, segmentation)`` in ``main.nf``.
 
     Args:
-        platform: ``MERSCOPE`` or ``XENIUM`` (case-insensitive).
+        platform: A registered platform (``merxen.platforms``;
+            case-insensitive).
         segmentation: Analysis segmentation or one of its aliases (e.g.
             ``reseg``, ``original_seg``, ``proseg_hybrid``).
 

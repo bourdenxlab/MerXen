@@ -137,6 +137,7 @@ import pandas as pd
 
 from merxen import local_config, privacy
 from merxen.local_config import LocalConfigError
+from merxen.platforms import PLATFORM_SPECS
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sample_labels import alias_key, display_text  # noqa: E402
@@ -185,7 +186,7 @@ APPLIED_NOT_RUN = f"{VARIANT_APPLIED} not run"
 
 # The layer keys of ``workflows/main.nf`` ``analysisLayerKeys`` and the
 # registration reference of ``workflows/modules/qc.nf`` (the platform's own
-# cells).
+# cells, which qc.nf reads from the platform registry since AT-6).
 SHAPE_KEYS: dict[str, str] = {
     "proseg_hybrid": "MOSAIK_proseg_hybrid",
     "reseg": "MOSAIK_proseg",
@@ -194,8 +195,7 @@ SHAPE_KEYS: dict[str, str] = {
     "cellpose": "MOSAIK_cellpose",
 }
 REFERENCE_SHAPE_KEYS: dict[str, str] = {
-    "MERSCOPE": "merscope_cell_boundaries",
-    "XENIUM": "xenium_cell_boundaries",
+    name: spec.original_cell_shape_key for name, spec in PLATFORM_SPECS.items()
 }
 
 # D21 (plan §4): on the scored segmentation HD4 warns (shared mask .235,
@@ -383,7 +383,7 @@ def layer_keys(platform: str, segmentation: str) -> tuple[str, str]:
     """Return a layer's shape key and its registration reference shape key.
 
     Args:
-        platform: ``MERSCOPE`` or ``XENIUM``.
+        platform: A registered platform (``merxen.platforms``).
         segmentation: The segmentation (``main.nf`` ``analysisLayerKeys``).
 
     Returns:

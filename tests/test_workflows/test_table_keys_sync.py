@@ -24,6 +24,7 @@ import pytest
 from merxen.analysis.clustering_squidpy import _clustered_spatialdata_table_key
 from merxen.config import CorticalDepthTableConfig
 from merxen.cortical_depth.pipeline import _clustering_table_key
+from merxen.platforms import platform_spec
 from merxen.table_keys import (
     ANALYSIS_LAYER_KEYS,
     PLATFORMS,
@@ -48,6 +49,8 @@ SUFFIX_PREAMBLE = (
     'def suffixToken = suffix == null ? "" : suffix.toString().trim()',
     'def suffixFragment = suffixToken ? "_${suffixToken}" : ""',
 )
+# The registry lookup analysisLayerKeys starts with (AT-6).
+SPEC_LOOKUP = "def spec = PlatformSpec.forName(platform)"
 # Suffixes the pipeline can pass: none, the pre-flip default and an explicit
 # token (surrounding spaces are trimmed on both sides).
 SUFFIX_CASES: tuple[str, ...] = ("", "mapfirst", " trial_2 ")
@@ -96,6 +99,10 @@ def _main_nf_analysis_layer_keys() -> dict[str, dict[str, AnalysisLayerKeys]]:
     blocks = list(block_pattern.finditer(body))
     assert blocks, "no branches parsed from analysisLayerKeys"
     remainder = block_pattern.sub("", body).strip()
+    # The original branch reads its shape key from the platform registry
+    # (AT-6); the registry's Groovy twin equals merxen.platforms
+    # (tests/test_workflows/test_platform_registry_groovy.py).
+    remainder = remainder.removeprefix(SPEC_LOOKUP).strip()
     assert remainder.startswith("throw new IllegalArgumentException"), remainder
 
     mapping: dict[str, dict[str, AnalysisLayerKeys]] = {}
@@ -111,6 +118,9 @@ def _main_nf_analysis_layer_keys() -> dict[str, dict[str, AnalysisLayerKeys]]:
         table_match = re.search(r'table_key:\s*"([^"]+)"', value)
         assert table_match is not None, value
         shape_literal = re.search(r'shape_key:\s*"([^"]+)"', value)
+        shape_from_registry = re.search(
+            r"shape_key:\s*spec\.originalCellShapeKey", value
+        )
         shape_ternary = re.search(
             r'shape_key:\s*platform == "(?P<platform>[A-Z]+)"\s*'
             r'\?\s*"(?P<when_true>[^"]+)"\s*:\s*"(?P<when_false>[^"]+)"',
@@ -120,6 +130,8 @@ def _main_nf_analysis_layer_keys() -> dict[str, dict[str, AnalysisLayerKeys]]:
         for platform in PLATFORMS:
             if shape_literal is not None:
                 shape_key = shape_literal.group(1)
+            elif shape_from_registry is not None:
+                shape_key = platform_spec(platform).original_cell_shape_key
             else:
                 assert shape_ternary is not None, f"unparsed shape_key: {value}"
                 shape_key = (

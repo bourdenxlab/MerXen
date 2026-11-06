@@ -254,8 +254,9 @@ def test_layer_keys_follow_the_pipeline(script: ModuleType) -> None:
     qc_nf = (REPO_ROOT / "workflows" / "modules" / "qc.nf").read_text()
     assert 'shape_key: "MOSAIK_proseg_hybrid"' in main_nf
     assert 'shape_key: "MOSAIK_proseg"' in main_nf
-    assert '"merscope_cell_boundaries"' in qc_nf
-    assert '"xenium_cell_boundaries"' in qc_nf
+    # qc.nf reads the reference from the platform registry (AT-6), the same
+    # registry the script reads.
+    assert "PlatformSpec.forName(platform).originalCellShapeKey" in qc_nf
     with pytest.raises(script.RegressionError, match="platform"):
         script.layer_keys("COSMX", "reseg")
     with pytest.raises(script.RegressionError, match="segmentation"):
