@@ -789,16 +789,30 @@ def derived_proseg_tables(latest: Path, layer: ProsegLayer | None = None) -> lis
         than the layer's table (image quantification, clustering).
     """
     layer = layer or PROSEG_LAYERS["vendor"]
+    return derived_tables(latest, layer.shapes_key, layer.table_key)
+
+
+def derived_tables(latest: Path, shapes_key: str, table_key: str) -> list[str]:
+    """Return the tables of region ``shapes_key`` other than ``table_key``.
+
+    Args:
+        latest: The latest store.
+        shapes_key: The layer's shapes element.
+        table_key: The layer's own table.
+
+    Returns:
+        Sorted table names (image quantification, clustering).
+    """
     tables_dir = Path(latest) / "tables"
     if not tables_dir.is_dir():
         return []
     found = []
     for table_dir in sorted(tables_dir.iterdir()):
-        if not table_dir.is_dir() or table_dir.name == layer.table_key:
+        if not table_dir.is_dir() or table_dir.name == table_key:
             continue
         region = _table_region(table_dir)
         regions = region if isinstance(region, list) else [region]
-        if layer.shapes_key in regions:
+        if shapes_key in regions:
             found.append(table_dir.name)
     return found
 

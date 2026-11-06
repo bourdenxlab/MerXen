@@ -55,6 +55,7 @@ from merxen.segmentation.atera_proseg.stitch import (
     CONTROL_COUNT_PREFIXES,
     OTHER_CONTROL_COLUMN,
     _control_category,
+    derived_tables,
 )
 
 logger = logging.getLogger(__name__)
@@ -236,7 +237,7 @@ def build_atera_cellpose_layer(
     from spatialdata.models import Labels2DModel, ShapesModel, TableModel
     from spatialdata.transformations import Identity, Scale
 
-    from merxen.io.spatialdata_io import write_or_replace_element
+    from merxen.io.spatialdata_io import delete_element, write_or_replace_element
     from merxen.segmentation.atera_proseg.plan import mask_shape
 
     latest = Path(latest)
@@ -346,7 +347,12 @@ def build_atera_cellpose_layer(
         (key_counts.astype(np.float32), (keys // n_genes, keys % n_genes)),
         shape=(labels.size, n_genes),
     ).tocsr()
-    transcript_counts = np.asarray(matrix.sum(axis=1)).ravel().astype(np.int64)
+    # Sums in float64: a float32 total loses integers past 2**24 (a crop already
+    # holds 21 M gene rows on cells).
+    transcript_counts = np.rint(
+        np.asarray(matrix.sum(axis=1, dtype=np.float64)).ravel()
+    ).astype(np.int64)
+    n_counted = int(transcript_counts.sum())
     area = np.asarray(shapely.area(geometries), dtype=np.float64)
     source_ids = np.asarray([f"{SOURCE_ID_PREFIX}_{int(v)}" for v in labels], object)
     obs = pd.DataFrame(
@@ -397,6 +403,11 @@ def build_atera_cellpose_layer(
     )
 
     sdata = sd.read_zarr(latest, selection=("shapes", "tables", "labels"))
+    # Tables computed from earlier Cellpose cells (image quantification,
+    # clustering) would be reused against the new polygons: they go.
+    stale = derived_tables(latest, CELLPOSE_SHAPES_KEY, CELLPOSE_TABLE_KEY)
+    for key in stale:
+        delete_element(sdata, key, "tables")
     write_or_replace_element(sdata, CELLPOSE_SHAPES_KEY, "shapes", shapes)
     write_or_replace_element(sdata, CELLPOSE_LABEL_KEY, "labels", label_element)
     write_or_replace_element(sdata, CELLPOSE_TABLE_KEY, "tables", table)
@@ -431,11 +442,11 @@ def build_atera_cellpose_layer(
         "n_control_rows_on_cells": int(n_control_rows),
         "n_zero_transcript_cells": int((transcript_counts == 0).sum()),
         "table_ids_equal_shape_ids_equal_mask_labels": True,
-        "table_counts_equal_points": int(matrix.sum()) == int(n_gene_rows),
+        "table_counts_equal_points": n_counted == int(n_gene_rows),
     }
     if not check["table_counts_equal_points"]:
         raise RuntimeError(
-            f"[{dataset_name}] The Cellpose table holds {int(matrix.sum())} counts "
+            f"[{dataset_name}] The Cellpose table holds {n_counted} counts "
             f"for {n_gene_rows} gene rows on cells"
         )
     record = {
@@ -444,6 +455,7 @@ def build_atera_cellpose_layer(
         "built_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "pixel_size_um": float(pixel_size_um),
         "assignment_rule": "cellpose_mask_corner",
+        "deleted_derived_tables": stale,
         "check": check,
     }
     sdata.attrs[LAYER_ATTR] = record

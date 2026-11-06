@@ -538,3 +538,44 @@ def test_an_unprinted_weight_is_accepted_only_at_one() -> None:
     check_prior_weight(None, 1.01, 0.02)
     with pytest.raises(PriorWeightMismatchError, match="printed no prior weight"):
         check_prior_weight(None, 140.0, 0.02)
+
+
+def test_a_rebuilt_cellpose_layer_drops_its_derived_tables(
+    route: Route, store: Path, tmp_path: Path
+) -> None:
+    from spatialdata.models import TableModel
+
+    from merxen.enrichment.atera_cellpose_layer import build_atera_cellpose_layer
+    from merxen.io.spatialdata_io import write_or_replace_element
+
+    enrich_single_latest(
+        _enrich_config(route, store, tmp_path / "enrich_out"), polygon_n_jobs=2
+    )
+    sdata = sd.read_zarr(store, selection=("tables",))
+    derived = sdata.tables["table_MOSAIK_cellpose"].copy()
+    derived.uns.pop("spatialdata_attrs", None)
+    derived = TableModel.parse(
+        derived,
+        region="MOSAIK_cellpose",
+        region_key="region",
+        instance_key="instance_id",
+    )
+    write_or_replace_element(
+        sdata, "table_MOSAIK_cellpose_image_quantification", "tables", derived
+    )
+    del sdata
+    record = build_atera_cellpose_layer(
+        store,
+        route.mask_path,
+        pixel_size_um=PS,
+        dataset_name=DATASET,
+        n_jobs=2,
+        model_identity=None,
+        force=True,
+    )
+    assert record["deleted_derived_tables"] == [
+        "table_MOSAIK_cellpose_image_quantification"
+    ]
+    tables = sd.read_zarr(store, selection=("tables",)).tables
+    assert "table_MOSAIK_cellpose_image_quantification" not in tables
+    assert "table_MOSAIK_cellpose" in tables
