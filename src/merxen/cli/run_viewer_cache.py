@@ -38,6 +38,7 @@ def build_viewer_caches_command(config_path: Path, force_rerun: bool) -> None:
         shape_keys=tuple(cfg.shape_keys) if cfg.shape_keys is not None else None,
         build_image_pyramid=cfg.build_image_pyramid,
         force=force_rerun,
+        base_image_key=cfg.base_image_key,
     )
     if cfg.image_only:
         if cfg.shape_keys:

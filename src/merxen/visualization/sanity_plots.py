@@ -20,15 +20,28 @@ from matplotlib import patheffects as path_effects
 from matplotlib.lines import Line2D
 from shapely.geometry import box as shapely_box
 
+from merxen.io.points_aggregates import read_points_aggregates
 from merxen.io.spatialdata_schema import choose_primary_points_key
 from merxen.io.transcript_io import assignment_mask_from_points
+from merxen.masks import discover_masks
 from merxen.platforms import (
     ORIGINAL_CELL_SHAPE_KEYS,
+    PLATFORM_SPECS,
+    PlatformSpec,
     find_platform_spec,
+    find_um_per_px,
     platform_spec,
     spec_file_pixel_size,
 )
 from merxen.plotting import prepare_plot_output, save_figure
+from merxen.visualization.raster_density import (
+    ASSIGNED_LAYER,
+    UNASSIGNED_LAYER,
+    DensityRaster,
+    composite_rgba,
+    points_bounds,
+    stream_hist2d,
+)
 
 SANITY_CROP_SIZE_UM = 250.0
 SANITY_MAX_TRANSCRIPTS_PER_PANEL = 2_000_000
@@ -51,6 +64,23 @@ SANITY_SHAPE_DRAW_ORDER: tuple[str, ...] = (
     "MOSAIK_proseg",
     "MOSAIK_proseg_hybrid",
 )
+# The original cell layers of the other registered platforms (ATERA) share the
+# "Original segmentation" style and are drawn after the two above.
+for _spec in PLATFORM_SPECS.values():
+    if _spec.original_cell_shape_key not in SANITY_SHAPE_STYLES:
+        SANITY_SHAPE_STYLES[_spec.original_cell_shape_key] = (
+            "Original segmentation",
+            "#ff7f0e",
+        )
+        SANITY_SHAPE_DRAW_ORDER = (
+            *SANITY_SHAPE_DRAW_ORDER,
+            _spec.original_cell_shape_key,
+        )
+SANITY_RASTER_BIN_UM = 0.5
+SANITY_RASTER_ASSIGNED_COLOR = "yellow"
+SANITY_RASTER_UNASSIGNED_COLOR = "#d62728"
+SANITY_RASTER_ALL_COLOR = "#e5e7eb"
+SANITY_CROP_LOCATION_CMAP = "Greys"
 SANITY_SHAPE_LEGEND_ORDER: tuple[str, ...] = (
     "ProSeg hybrid",
     "ProSeg",
@@ -264,6 +294,7 @@ def plot_single_sanity_crop(
         crop_location_path,
         crop_bbox=crop_bbox,
         prefer_aligned_vectors=prefer_aligned,
+        zarr_path=zarr_path,
     )
     return output_path
 
@@ -347,6 +378,29 @@ def plot_sanity_crop_panel(
                 label=f"{label} ({len(shp_crop):,})",
             )
         )
+
+    dataset_spec = find_platform_spec(dataset_name)
+    if dataset_spec is not None and dataset_spec.rasterised_transcript_plots:
+        tx_handles = _draw_transcript_raster(
+            ax,
+            sdata_obj,
+            bbox,
+            zarr_path=_store_path(sdata_obj, zarr_path, dataset_spec),
+            assignment_shape_key=assignment_shape_key,
+            assignment_column=assignment_column,
+        )
+        _finish_sanity_panel(
+            ax,
+            bbox,
+            dataset_name=dataset_name,
+            dataset_spec=dataset_spec,
+            handles=tx_handles + shape_handles,
+        )
+        if ref_shape_key not in shape_keys:
+            print(
+                f"[{dataset_name}] Warning: reference shape {ref_shape_key} not plotted"
+            )
+        return
 
     tx_crop, _points_key, _assign_col = _crop_points(
         sdata_obj,
@@ -454,6 +508,28 @@ def plot_sanity_crop_panel(
                     )
                 )
 
+    _finish_sanity_panel(
+        ax,
+        bbox,
+        dataset_name=dataset_name,
+        dataset_spec=dataset_spec,
+        handles=tx_handles + shape_handles,
+    )
+
+    if ref_shape_key not in shape_keys:
+        print(f"[{dataset_name}] Warning: reference shape {ref_shape_key} not plotted")
+
+
+def _finish_sanity_panel(
+    ax: plt.Axes,
+    bbox: tuple[float, float, float, float],
+    *,
+    dataset_name: str,
+    dataset_spec: PlatformSpec | None,
+    handles: list[Line2D],
+) -> None:
+    """Set limits, title, scale bar and legend of a sanity crop panel."""
+    x0, y0, x1, y1 = bbox
     ax.set_xlim(x0, x1)
     ax.set_ylim(y0, y1)
     ax.set_aspect("equal")
@@ -463,16 +539,112 @@ def plot_sanity_crop_panel(
     ax.set_yticks([])
     ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
     ax.set_title(str(dataset_name).upper())
-    if str(dataset_name).upper() == "XENIUM":
+    # 10x-family panels (XENIUM, ATERA) carry a scale bar.
+    if dataset_spec is not None and dataset_spec.family == "10X":
         _add_scale_bar(ax, bbox, length_um=SANITY_SCALE_BAR_UM)
 
-    handles = tx_handles + shape_handles
     if handles:
         handles = _ordered_legend_handles(handles)
         ax.legend(handles=handles, loc="upper right", frameon=True, fontsize=8)
 
-    if ref_shape_key not in shape_keys:
-        print(f"[{dataset_name}] Warning: reference shape {ref_shape_key} not plotted")
+
+def _store_path(
+    sdata_obj: Any, zarr_path: Path | str | None, spec: PlatformSpec
+) -> Path:
+    """Return the store a rasterised panel streams its points from."""
+    store = zarr_path if zarr_path is not None else getattr(sdata_obj, "path", None)
+    if store is None:
+        raise ValueError(
+            f"{spec.name} sanity plots stream the points from the store; pass "
+            "zarr_path or a store-backed SpatialData object."
+        )
+    return Path(store)
+
+
+def registered_assignment_column(sdata_obj: Any, shape_key: str | None) -> str | None:
+    """Return the per-transcript assignment column registered for a shape.
+
+    Args:
+        sdata_obj: SpatialData object with a ``merxen_schema`` registry.
+        shape_key: Shape element of the segmentation branch.
+
+    Returns:
+        The branch's ``assignment_column``, or ``None`` when the shape is not
+        a registered mask or its transcripts carry no assignment.
+    """
+    if shape_key is None:
+        return None
+    for mask in discover_masks(sdata_obj):
+        if mask.shape_key == str(shape_key):
+            return mask.assignment_column
+    return None
+
+
+def _draw_transcript_raster(
+    ax: plt.Axes,
+    sdata_obj: Any,
+    bbox: tuple[float, float, float, float],
+    *,
+    zarr_path: Path,
+    assignment_shape_key: str | None,
+    assignment_column: str | None,
+) -> list[Line2D]:
+    """Draw every transcript of a crop as a density raster and return handles.
+
+    With an assignment column (given, or registered for the assignment shape)
+    the raster has two layers, assigned (yellow, on top) and unassigned (red);
+    otherwise one layer of all transcripts. The legend counts are exact.
+    """
+    points_key = _reference_points_key(sdata_obj, prefer_aligned=False)
+    column = assignment_column or registered_assignment_column(
+        sdata_obj, assignment_shape_key
+    )
+    raster = stream_hist2d(
+        zarr_path,
+        points_key,
+        bbox,
+        SANITY_RASTER_BIN_UM,
+        category=column,
+        category_mode="assignment",
+    )
+    if column is None:
+        layers = [(raster.counts["all"], SANITY_RASTER_ALL_COLOR, "All tx")]
+    else:
+        layers = [
+            (
+                raster.counts[UNASSIGNED_LAYER],
+                SANITY_RASTER_UNASSIGNED_COLOR,
+                "Unassigned tx",
+            ),
+            (
+                raster.counts[ASSIGNED_LAYER],
+                SANITY_RASTER_ASSIGNED_COLOR,
+                "Assigned tx",
+            ),
+        ]
+    rgba = composite_rgba([(counts, colour) for counts, colour, _ in layers])
+    ax.imshow(
+        rgba,
+        origin="lower",
+        extent=raster.extent,
+        interpolation="nearest",
+        zorder=2,
+    )
+    handles = []
+    for counts, colour, label in reversed(layers):
+        n_layer = int(counts.sum(dtype=np.uint64))
+        handles.append(
+            Line2D(
+                [0],
+                [0],
+                marker="s",
+                linestyle="None",
+                color=colour,
+                label=f"{label} ({n_layer:,}, all; {raster.bin_um:g} um bins)",
+                markersize=6,
+            )
+        )
+    return handles
 
 
 def plot_pair_crop_location(
@@ -523,6 +695,7 @@ def plot_single_crop_location(
     *,
     crop_bbox: tuple[float, float, float, float],
     prefer_aligned_vectors: bool,
+    zarr_path: Path | str | None = None,
 ) -> Path:
     """Plot the crop rectangle used for a single-platform sanity crop."""
     output_path = prepare_plot_output(output_path)
@@ -537,6 +710,7 @@ def plot_single_crop_location(
         crop_bbox,
         prefer_aligned_vectors=prefer_aligned_vectors,
         dataset_name=label,
+        zarr_path=zarr_path,
     )
     save_figure(fig, output_path, dpi=200)
     plt.close(fig)
@@ -722,7 +896,18 @@ def _plot_crop_location_panel(
     *,
     prefer_aligned_vectors: bool,
     dataset_name: str,
+    zarr_path: Path | str | None = None,
 ) -> None:
+    spec = find_platform_spec(dataset_name)
+    if spec is not None and spec.rasterised_transcript_plots:
+        _plot_density_crop_location_panel(
+            ax,
+            _store_path(sdata_obj, zarr_path, spec),
+            title,
+            bbox,
+            points_key=_reference_points_key(sdata_obj, prefer_aligned=False),
+        )
+        return
     key = _reference_shape_key(sdata_obj, prefer_aligned=prefer_aligned_vectors)
     gdf = _shape_geometry_only(sdata_obj.shapes[key])
     if len(gdf) > SANITY_CROP_LOCATION_SAMPLE_N:
@@ -753,6 +938,57 @@ def _plot_crop_location_panel(
             fontsize=8,
             bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75},
         )
+
+
+def _plot_density_crop_location_panel(
+    ax: plt.Axes,
+    zarr_path: Path,
+    title: str,
+    bbox: tuple[float, float, float, float],
+    *,
+    points_key: str,
+) -> None:
+    """Draw the crop box over the transcript density of the whole section.
+
+    The build's density grid is used while the points index matches the
+    store; otherwise every transcript is binned at the same 50 um.
+    """
+    aggregates = read_points_aggregates(zarr_path, points_key)
+    if (
+        aggregates is not None
+        and aggregates.density.size > 0
+        and aggregates.fingerprint_matches()
+    ):
+        density = aggregates.density.astype(np.float64)
+        x0, y0, x1, y1 = aggregates.density_extent_um()
+        extent = (x0, x1, y0, y1)
+        bin_um = aggregates.density_bin_um
+    else:
+        raster: DensityRaster = stream_hist2d(
+            zarr_path, points_key, points_bounds(zarr_path, points_key), 50.0
+        )
+        density = raster.combined().astype(np.float64)
+        extent = raster.extent
+        bin_um = raster.bin_um
+    shown = np.ma.masked_less_equal(density, 0.0)
+    ax.imshow(
+        np.log1p(shown),
+        origin="lower",
+        extent=extent,
+        cmap=SANITY_CROP_LOCATION_CMAP,
+        interpolation="nearest",
+        aspect="equal",
+    )
+    _draw_bbox(ax, bbox, color="#ef4444", linewidth=2.0)
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_title(f"{title} (all transcripts, {bin_um:g} um bins)")
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
 
 
 def _draw_bbox(
@@ -1309,7 +1545,13 @@ def _get_background_image_crop(
     rgb[..., 2] = dapi
     rgb[..., 1] = rna
 
-    extent_um = _crop_extent_um(crop, x_transform, y_transform)
+    spec = find_platform_spec(dataset_name)
+    extent_um = _crop_extent_um(
+        crop,
+        x_transform,
+        y_transform,
+        corner=spec is not None and spec.mask_pixel_convention == "corner",
+    )
     return {
         "image_key": image_key,
         "channels_used": {"dapi": ch_dapi, "rna_like": ch_rna},
@@ -1369,14 +1611,26 @@ def _crop_extent_um(
     crop: Any,
     x_transform: tuple[float, float, float],
     y_transform: tuple[float, float, float],
+    *,
+    corner: bool = False,
 ) -> tuple[float, float, float, float]:
+    """Return the micron ``(left, right, bottom, top)`` of an image crop.
+
+    With ``corner`` the extent follows the SpatialData raster convention: the
+    pixel whose centre coordinate is ``i + 0.5`` covers ``[i, i + 1)`` pixels,
+    so ``[i * ps, (i + 1) * ps)`` microns, and the extent reaches the outer
+    pixel edges. Without it the extent runs between the outer pixel centres
+    (the behaviour of the XENIUM and MERSCOPE panels).
+    """
     xv = np.asarray(crop.coords["x"].values)
     yv = np.asarray(crop.coords["y"].values)
+    half_x = 0.5 * _coord_step(xv) if corner else 0.0
+    half_y = 0.5 * _coord_step(yv) if corner else 0.0
     px_corners = [
-        (float(xv.min()), float(yv.min())),
-        (float(xv.min()), float(yv.max())),
-        (float(xv.max()), float(yv.min())),
-        (float(xv.max()), float(yv.max())),
+        (float(xv.min()) - half_x, float(yv.min()) - half_y),
+        (float(xv.min()) - half_x, float(yv.max()) + half_y),
+        (float(xv.max()) + half_x, float(yv.min()) - half_y),
+        (float(xv.max()) + half_x, float(yv.max()) + half_y),
     ]
     um_corners = [
         _affine_px_to_um(px, py, x_transform, y_transform) for px, py in px_corners
@@ -1384,6 +1638,13 @@ def _crop_extent_um(
     x_um_vals = [corner[0] for corner in um_corners]
     y_um_vals = [corner[1] for corner in um_corners]
     return (min(x_um_vals), max(x_um_vals), min(y_um_vals), max(y_um_vals))
+
+
+def _coord_step(coords: np.ndarray) -> float:
+    """Return the pixel step of a coordinate axis (1 for a single pixel)."""
+    if coords.size < 2:
+        return 1.0
+    return float(np.median(np.abs(np.diff(coords.astype(np.float64)))))
 
 
 def _resolve_dataset_mask_affine(
@@ -1404,6 +1665,17 @@ def _resolve_dataset_mask_affine(
         if xenium_mpp is None:
             xenium_mpp = platform_spec(dataset).fallback_um_per_px
         return (float(xenium_mpp), 0.0, 0.0), (0.0, float(xenium_mpp), 0.0)
+
+    spec = find_platform_spec(dataset)
+    if spec is not None and spec.family == "10X":
+        # Other 10x-family stores (ATERA) record the pixel size in the spec
+        # sidecars the build copied; a guessed fallback would misplace the image.
+        if zarr_path is None:
+            raise ValueError(
+                f"{spec.name} image placement needs the store path for its pixel size"
+            )
+        mpp = find_um_per_px(Path(zarr_path), spec.name)
+        return (float(mpp), 0.0, 0.0), (0.0, float(mpp), 0.0)
 
     raise ValueError(f"Unknown dataset: {dataset_name}")
 
