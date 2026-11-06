@@ -119,7 +119,11 @@ corresponding derived clustered table in the published
 
 Only `MENDER_COMPUTE` uses `envs/environment.mender.yml`. The environment contains
 the old AnnData 0.9, Scanpy 1.9, and Squidpy 1.2-era stack; these packages are
-not added to MerXen's base project dependencies. Build a portable CPU image and
+not added to MerXen's base project dependencies. It also pins umap-learn's
+nearest-neighbour stack (`pynndescent` 0.5.13, `numba` 0.55.2, `llvmlite`
+0.38.1): left open, a fresh environment resolved `pynndescent` 0.7, whose
+parallel subtree builder numba 0.55 cannot compile, and `MENDER_COMPUTE`
+failed on inputs of about 90k cells or more. Build a portable CPU image and
 override its path as needed:
 
 ```bash
