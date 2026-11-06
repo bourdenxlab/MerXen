@@ -49,7 +49,7 @@ from merxen.enrichment.enrich import (
     native_label_check_path,
 )
 from merxen.enrichment.label_lookup import NATIVE_COUNT_COLUMNS
-from merxen.io.points_aggregates import points_parquet_dir
+from merxen.io.points_aggregates import fingerprint_matches, points_parquet_dir
 from merxen.io.spatialdata_schema import MERXEN_SCHEMA_ATTR
 from merxen.segmentation import native as native_segmentation
 
@@ -195,6 +195,9 @@ def test_native_enrichment_adds_only_counts_and_vendor_provenance(
     assert record["version"] == enrich_module.NATIVE_ENRICHMENT_VERSION
     assert record["label_check"]["passed"] is True
     assert _manifest(stores.source) == source_manifest
+    # QC's fast paths (build aggregates, window pruning) need the points index
+    # to still describe the enriched store.
+    assert fingerprint_matches(stores.latest)
 
 
 @pytest.mark.integration
