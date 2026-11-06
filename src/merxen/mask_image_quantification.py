@@ -41,6 +41,10 @@ PROSEG_HYBRID_SHAPE_NAME = "MOSAIK_proseg_hybrid"
 HYBRID_IMAGE_QUANTIFICATION_OBSM_KEY = "cellpose_image_quantification"
 HYBRID_IMAGE_QUANTIFICATION_OBS_PREFIX = "cellpose_image__"
 IMAGE_QUANTIFICATION_STATS = ("min", "median", "mean", "max", "iqr")
+#: ``uns["mask_image_quantification"]`` / summary key of an extra layer: the
+#: ``instance_id`` of the layer's shapes that have no pixel in its label image
+#: (tiny or fully covered polygons), so they have no row in the table.
+SHAPES_WITHOUT_LABEL_PIXELS_KEY = "shapes_without_label_pixels"
 
 
 @dataclass(frozen=True)
@@ -277,9 +281,30 @@ def _quantify_extra_layer(
             and _recorded_bead_removal(sdata_obj.tables[layer.table_key])
             == bead_removal
         ):
+            existing = sdata_obj.tables[layer.table_key]
+            if SHAPES_WITHOUT_LABEL_PIXELS_KEY in existing.uns.get(
+                "mask_image_quantification", {}
+            ):
+                log_status(
+                    f"[{config.dataset_name}] Image quantification of "
+                    f"{layer.shape_key} already exists; skipping."
+                )
+                return paths
+            # A table written before the field existed: record the shapes it
+            # leaves out without quantifying the images again.
+            missing = _record_shapes_without_label_pixels(
+                sdata_obj, existing, layer, config.dataset_name
+            )
+            write_or_replace_element(
+                sdata_obj, layer.table_key, "tables", existing, overwrite=True
+            )
+            summary = json.loads(paths["summary"].read_text())
+            summary.update(_shapes_without_label_pixels_summary(missing))
+            paths["summary"].write_text(json.dumps(summary, indent=2) + "\n")
             log_status(
                 f"[{config.dataset_name}] Image quantification of "
-                f"{layer.shape_key} already exists; skipping."
+                f"{layer.shape_key} already exists; recorded the shapes it "
+                "leaves out."
             )
             return paths
         mask = _label_element_level0(
@@ -300,6 +325,10 @@ def _quantify_extra_layer(
             layer.mask_label_key
         )
         result.summary["mask_label_key"] = str(layer.mask_label_key)
+        missing = _record_shapes_without_label_pixels(
+            sdata_obj, result.table, layer, config.dataset_name
+        )
+        result.summary.update(_shapes_without_label_pixels_summary(missing))
         parsed_table = TableModel.parse(
             result.table,
             region=layer.shape_key,
@@ -321,6 +350,58 @@ def _quantify_extra_layer(
     finally:
         del sdata_obj
         force_release(note=f"after {config.dataset_name} {layer.shape_key} MIQ")
+
+
+def _record_shapes_without_label_pixels(
+    sdata_obj: Any,
+    table: ad.AnnData,
+    layer: MiqLayer,
+    dataset_name: str,
+) -> list[int]:
+    """Record in ``table.uns`` the layer's shapes that have no table row.
+
+    A shape without a pixel in the layer's label image (a polygon smaller than
+    a pixel, or covered by other cells) gets no image-quantification row. The
+    ``instance_id`` of each is listed in
+    ``uns["mask_image_quantification"]["shapes_without_label_pixels"]`` and
+    logged as a warning, so the gap is visible in the store. A missing shape
+    element, or one without ``instance_id``, records an empty list.
+    """
+    shapes = getattr(sdata_obj, "shapes", None) or {}
+    missing: list[int] = []
+    if layer.shape_key in shapes:
+        gdf = shapes[layer.shape_key]
+        if INSTANCE_ID_COLUMN in gdf.columns:
+            shape_ids = canonical_instance_series(
+                gdf[INSTANCE_ID_COLUMN],
+                field_name=f"{layer.shape_key}.{INSTANCE_ID_COLUMN}",
+            ).to_numpy(dtype=np.int64)
+            quantified = canonical_instance_series(
+                table.obs[INSTANCE_ID_COLUMN],
+                field_name=f"{layer.table_key}.{INSTANCE_ID_COLUMN}",
+            ).to_numpy(dtype=np.int64)
+            missing = [
+                int(v) for v in np.setdiff1d(shape_ids, quantified, assume_unique=False)
+            ]
+    table.uns["mask_image_quantification"][SHAPES_WITHOUT_LABEL_PIXELS_KEY] = missing
+    if missing:
+        logger.warning(
+            "[%s] %d %s shape(s) have no pixel in label '%s' and no row in %s: %s",
+            dataset_name,
+            len(missing),
+            layer.shape_key,
+            layer.mask_label_key,
+            layer.table_key,
+            missing[:20],
+        )
+    return missing
+
+
+def _shapes_without_label_pixels_summary(missing: list[int]) -> dict[str, Any]:
+    return {
+        f"n_{SHAPES_WITHOUT_LABEL_PIXELS_KEY}": len(missing),
+        SHAPES_WITHOUT_LABEL_PIXELS_KEY: list(missing),
+    }
 
 
 def _quantify_store(

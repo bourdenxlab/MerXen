@@ -8,6 +8,7 @@ labels and every per-cell value of the two layers must agree.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 from pathlib import Path
@@ -15,6 +16,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import spatialdata as sd
+import zarr
 
 from merxen.config import EnrichmentConfig, MaskImageQuantificationConfig, MiqLayer
 from merxen.enrichment.assignment import run_per_shape_assignment_for_dataset
@@ -22,6 +24,10 @@ from merxen.enrichment.enrich import (
     _derived_table_paths,
     _is_native_store,
     enrich_single_latest,
+)
+from merxen.io.spatialdata_io import write_or_replace_element
+from merxen.mask_image_quantification import (
+    SHAPES_WITHOUT_LABEL_PIXELS_KEY as SHAPES_KEY,
 )
 from merxen.mask_image_quantification import run_mask_image_quantification
 from merxen.segmentation.atera_proseg.plan import write_plan
@@ -183,6 +189,27 @@ def test_viewer_cache_discovery_is_unchanged_without_label_entries() -> None:
     assert vendor_label_keys(xenium, "XENIUM") == {}
 
 
+def _miq_config(store: Path, out: Path) -> MaskImageQuantificationConfig:
+    return MaskImageQuantificationConfig(
+        dataset_name=DATASET,
+        platform="ATERA",
+        latest_zarr_path=store,
+        mask_path=None,
+        mask_label_key="cell_labels",
+        output_dir=out,
+        shape_key="atera_cell_boundaries",
+        table_key="table_atera_cell_boundaries_image_quantification",
+        tile_size=32,
+        extra_layers=[
+            MiqLayer(
+                mask_label_key="proseg_cell_labels",
+                shape_key="MOSAIK_proseg",
+                table_key="table_MOSAIK_proseg_image_quantification",
+            )
+        ],
+    )
+
+
 def test_miq_quantifies_the_proseg_layer(store: Path, tmp_path: Path) -> None:
     config = MaskImageQuantificationConfig(
         dataset_name=DATASET,
@@ -220,6 +247,69 @@ def test_miq_quantifies_the_proseg_layer(store: Path, tmp_path: Path) -> None:
     # A second run skips both layers.
     again = run_mask_image_quantification(config)
     assert again["MOSAIK_proseg_summary"] == outputs["MOSAIK_proseg_summary"]
+    assert list(proseg.uns["mask_image_quantification"][SHAPES_KEY]) == []
+    summary = json.loads(outputs["MOSAIK_proseg_summary"].read_text())
+    assert summary[f"n_{SHAPES_KEY}"] == 0
+
+
+def test_miq_records_proseg_shapes_without_label_pixels(
+    store: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A ProSeg cell with no label pixel is named in ``uns`` and the summary."""
+    sdata = sd.read_zarr(store)
+    shape_ids = sdata.shapes["MOSAIK_proseg"]["instance_id"].astype(int).tolist()
+    del sdata
+    blanked = shape_ids[0]
+    labels = zarr.open_array(store / "labels" / "proseg_cell_labels" / "s0", mode="r+")
+    pixels = labels[...]
+    assert (pixels == blanked).any()
+    pixels[pixels == blanked] = 0
+    labels[...] = pixels
+
+    config = _miq_config(store, tmp_path / "miq")
+    with caplog.at_level(logging.WARNING, logger="merxen.mask_image_quantification"):
+        outputs = run_mask_image_quantification(config)
+    assert any("no pixel in label" in r.getMessage() for r in caplog.records)
+    proseg = sd.read_zarr(store).tables["table_MOSAIK_proseg_image_quantification"]
+    assert blanked not in set(proseg.obs["instance_id"].astype(int))
+    recorded = proseg.uns["mask_image_quantification"][SHAPES_KEY]
+    assert [int(v) for v in recorded] == [blanked]
+    summary = json.loads(outputs["MOSAIK_proseg_summary"].read_text())
+    assert summary[SHAPES_KEY] == [blanked]
+    assert summary[f"n_{SHAPES_KEY}"] == 1
+
+
+def test_miq_backfills_the_shapes_field_of_an_older_table(
+    store: Path, tmp_path: Path
+) -> None:
+    """A table written before the field existed gains it without re-quantifying."""
+    config = _miq_config(store, tmp_path / "miq")
+    outputs = run_mask_image_quantification(config)
+    summary_path = outputs["MOSAIK_proseg_summary"]
+    wide = outputs["MOSAIK_proseg_wide_matrix"]
+
+    # Make the store and the summary look like ones from before the field.
+    sdata = sd.read_zarr(store)
+    table = sdata.tables["table_MOSAIK_proseg_image_quantification"]
+    del table.uns["mask_image_quantification"][SHAPES_KEY]
+    write_or_replace_element(
+        sdata,
+        "table_MOSAIK_proseg_image_quantification",
+        "tables",
+        table,
+        overwrite=True,
+    )
+    summary = json.loads(summary_path.read_text())
+    del summary[SHAPES_KEY], summary[f"n_{SHAPES_KEY}"]
+    summary_path.write_text(json.dumps(summary))
+    wide_mtime = wide.stat().st_mtime_ns
+
+    run_mask_image_quantification(config)
+    table = sd.read_zarr(store).tables["table_MOSAIK_proseg_image_quantification"]
+    assert list(table.uns["mask_image_quantification"][SHAPES_KEY]) == []
+    assert json.loads(summary_path.read_text())[f"n_{SHAPES_KEY}"] == 0
+    # The images were not quantified again.
+    assert wide.stat().st_mtime_ns == wide_mtime
 
 
 # --------------------------------------------------------------------------- #
