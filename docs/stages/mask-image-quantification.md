@@ -43,7 +43,7 @@ enriched zarr as before.
 | `mask_image_quantification_out/*_mask_image_quantification_features.csv` | Feature metadata with `image_key`, `channel`, and `statistic`. |
 | `mask_image_quantification_out/*_mask_image_quantification_summary.json` | Dataset, image, feature, and output summary. |
 
-Rows are named `cellpose_<label_id>`. Feature names use
+Rows from a Cellpose mask are named `cellpose_<label_id>`. Feature names use
 `{image_key}__{channel}__{stat}`.
 
 Images registered by [`REGISTER_IMAGES`](register-images.md), such as
@@ -51,6 +51,29 @@ post-Xenium IF, are ordinary source images on the mask grid and are quantified
 the same way. An existing quantification table is reused only when its
 `image_key` set matches the zarr's current source images; registering or
 removing an image triggers re-quantification.
+
+## Native rows (ATERA)
+
+A native row has no Cellpose mask. Its config sets `mask_path: null` and
+`mask_label_key: cell_labels`, and the stage quantifies the store's own vendor
+cell labels. The mask slot of the task holds an empty placeholder file, which
+the stage never reads.
+
+- **Lazy reads.** The level-0 label array is read lazily, tile by tile. The
+  pixel counts use a tiled `bincount`, and the full mask is never loaded or
+  copied. `tile_size` is rounded up to whole label chunks (4096 px for
+  Atera), so no chunk is decoded more than once per pass; the summary records
+  the tile used as `tile_size_px`. Memory is set by the per-cell pixel value
+  lists of the second pass, as on the Cellpose path.
+- **Rows.** There is one row per vendor cell, named by its vendor
+  `source_cell_id` from `atera_cell_boundaries`.
+- **Outputs.** The table is `table_atera_cell_boundaries_image_quantification`,
+  with region `atera_cell_boundaries`. The table's `uns` and the summary
+  record `mask_label_key`.
+- **Hybrid join.** There is no hybrid table, so the hybrid join is skipped.
+
+The vendor labels share the morphology image's pixel grid, so the image-shape
+check applies unchanged.
 
 When `table_MOSAIK_proseg_hybrid` exists, the stage joins these Cellpose-mask
 measurements onto hybrid cells by their shared `instance_id`. It does not

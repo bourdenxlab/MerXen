@@ -282,3 +282,138 @@ def test_per_shape_assignment_serializes_with_another_store_writer(
 def test_shape_to_existing_table_source(shape_key: str, source: str | None) -> None:
     """Only ProSeg and the vendor cell shapes reuse an existing table."""
     assert shape_to_existing_table_source(shape_key) == source
+
+
+def _xenium_store() -> _RecordingStore:
+    """In-memory XENIUM latest store: vendor cells, vendor nuclei, two tables."""
+    shapes = {
+        "xenium_cell_boundaries": gpd.GeoDataFrame(
+            {"cell_id": ["cell_a", "cell_b"]},
+            geometry=[box(0, 0, 2, 2), box(3, 0, 5, 2)],
+        ),
+        "xenium_nucleus": gpd.GeoDataFrame(
+            {"cell_id": ["cell_a", "cell_b"]},
+            geometry=[box(0.5, 0.5, 1.5, 1.5), box(3.5, 0.5, 4.5, 1.5)],
+        ),
+    }
+    original = _source_table()
+    return _RecordingStore(
+        points={
+            "transcripts": pd.DataFrame(
+                {
+                    "x": [1.0, 1.9, 4.0, 4.4, 9.0],
+                    "y": [1.0, 1.9, 1.0, 1.2, 9.0],
+                    "gene": ["GeneA", "GeneB", "GeneA", "GeneA", "GeneB"],
+                }
+            )
+        },
+        shapes=shapes,
+        tables={"table": _source_table(), "table_original": original},
+        attrs={},
+        written=[],
+    )
+
+
+_XENIUM_SUMMARIES = [
+    {
+        "dataset": "P1_XENIUM",
+        "shape_key": "xenium_cell_boundaries",
+        "table_key": "table_xenium_cell_boundaries",
+        "mode": "copied_from_table_original",
+        "n_cells": 2,
+        "n_genes": 2,
+    },
+    {
+        "dataset": "P1_XENIUM",
+        "shape_key": "xenium_nucleus",
+        "n_cells": 2,
+        "n_genes": 2,
+        "n_points_input": 5,
+        "n_points_used": 5,
+        "n_points_assigned": 3,
+        "pct_assigned": 60.0,
+        "table_key": "table_xenium_nucleus",
+        "mode": "computed_sjoin",
+    },
+]
+
+
+@pytest.mark.parametrize(
+    "native_arguments",
+    [{}, {"platform": "XENIUM", "segmentation_source": "cellpose_proseg"}],
+)
+def test_xenium_assignment_still_clones_and_joins_its_nucleus_layer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    native_arguments: dict[str, str],
+) -> None:
+    """AT-6 regression: XENIUM keeps its clone and its xenium_nucleus sjoin."""
+    sdata = _xenium_store()
+    monkeypatch.setattr(assignment_module.sd, "read_zarr", lambda path: sdata)
+
+    summaries = run_per_shape_assignment_for_dataset(
+        "P1_XENIUM", tmp_path / "latest.zarr", **native_arguments
+    )
+
+    cleaned = [
+        {key: value for key, value in summary.items() if not pd.isna(value)}
+        for summary in summaries
+    ]
+    assert cleaned == _XENIUM_SUMMARIES
+    assert sdata.written == [
+        "xenium_cell_boundaries",
+        "table_xenium_cell_boundaries",
+        "xenium_nucleus",
+        "table_xenium_nucleus",
+        "metadata",
+    ]
+    nucleus_counts = sdata.tables["table_xenium_nucleus"].X.toarray()
+    np.testing.assert_array_equal(nucleus_counts, [[1, 0], [2, 0]])
+    registry = sdata.attrs["merxen_schema"]["segmentations"]
+    assert registry["original"]["table"] == "table_original"
+    assert registry["original"]["shape"] == "xenium_cell_boundaries"
+
+
+def test_nucleus_row_shapes_are_never_assigned() -> None:
+    """Only ATERA's per-nucleus shape is keyed by nucleus row."""
+    assert frozenset({"atera_nucleus"}) == assignment_module.NUCLEUS_ROW_SHAPE_KEYS
+
+
+@pytest.mark.parametrize("segmentation_source", [None, "cellpose_only"])
+def test_atera_nucleus_rows_are_skipped_on_non_native_routes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    segmentation_source: str | None,
+) -> None:
+    """ATERA nuclei are keyed by nucleus row: never a per-shape table.
+
+    A table keyed by nucleus id would put nucleus k's transcripts on cell k.
+    Native stores skip every non-cell shape anyway, so this guards the
+    Cellpose routes (AT-7) that still see ``atera_nucleus``.
+    """
+    sdata = _xenium_store()
+    sdata.shapes = {
+        "atera_cell_boundaries": sdata.shapes["xenium_cell_boundaries"],
+        "atera_nucleus": gpd.GeoDataFrame(
+            {"instance_id": [1, 2], "cell_instance_id": [2, 1]},
+            geometry=[box(3.5, 0.5, 4.5, 1.5), box(0.5, 0.5, 1.5, 1.5)],
+        ),
+    }
+    monkeypatch.setattr(assignment_module.sd, "read_zarr", lambda path: sdata)
+    messages: list[str] = []
+    monkeypatch.setattr(assignment_module, "log_status", messages.append)
+
+    summaries = run_per_shape_assignment_for_dataset(
+        "HA1",
+        tmp_path / "latest.zarr",
+        platform="ATERA",
+        segmentation_source=segmentation_source,
+    )
+
+    assert [summary["shape_key"] for summary in summaries] == ["atera_cell_boundaries"]
+    assert "table_atera_nucleus" not in sdata.tables
+    assert "atera_nucleus" not in sdata.written
+    assert any(
+        "Skipping nucleus shapes keyed by nucleus row ['atera_nucleus']" in message
+        for message in messages
+    )
