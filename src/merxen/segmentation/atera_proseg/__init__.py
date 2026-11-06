@@ -55,3 +55,28 @@ def tile_id(column: int, row: int) -> str:
 
 class AteraProsegError(RuntimeError):
     """Raised when a plan, a tile or the stitch cannot proceed safely."""
+
+
+class ProsegRunError(AteraProsegError):
+    """Raised when the ProSeg process itself exits non-zero.
+
+    Unlike the other errors of a tile (inputs, version, self-checks), this
+    can be transient, so the tile CLI exits with the plain failure status that
+    the workflow retries once.
+    """
+
+
+class PriorWeightMismatchError(AteraProsegError):
+    """Raised when ProSeg reports another effective prior weight than requested.
+
+    Attributes:
+        reported: The weight ProSeg printed (``None`` when it printed none).
+        requested: The requested effective weight.
+    """
+
+    def __init__(
+        self, message: str, *, reported: float | None, requested: float
+    ) -> None:
+        super().__init__(message)
+        self.reported = reported
+        self.requested = requested

@@ -40,6 +40,18 @@ def test_centroid_on_a_core_edge_goes_to_the_higher_tile() -> None:
     assert tile_id(-1, 0) == "c-1_r0"
 
 
+def test_core_index_corrects_float_rounding_at_core_edges() -> None:
+    from merxen.segmentation.atera_proseg.plan import _core_index
+
+    # With a tile edge that is not a binary fraction, floor(x / T) puts these
+    # one core too high (5.699999999999999 < 19 * 0.3) or too low
+    # (9.299999999999999 == 31 * 0.3).
+    values = np.asarray([5.699999999999999, 9.299999999999999, 0.0, 0.3])
+    index = _core_index(values, 0.3)
+    assert index.tolist() == [18, 31, 0, 1]
+    assert (index * 0.3 <= values).all() and (values < (index + 1) * 0.3).all()
+
+
 def test_every_label_has_exactly_one_owner(source: Path, tmp_path: Path) -> None:
     plan = build_plan(plan_config(source, tmp_path))
     cells = read_vendor_cells(source)

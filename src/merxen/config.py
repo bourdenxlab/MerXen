@@ -692,6 +692,8 @@ class AteraProsegTileConfig(BaseModel):
         keep_inputs: Keep the exported parquet, prior and raw ProSeg outputs.
         edge_tolerance_voxels: Distance (in voxels) from an interior window
             edge at which an owned polygon is reported.
+        allow_untested_version: Run a ProSeg version other than the verified
+            one (``atera_proseg_allow_untested_version``), with a warning.
     """
 
     dataset_name: str
@@ -711,6 +713,7 @@ class AteraProsegTileConfig(BaseModel):
     proseg_git_rev: str | None = None
     keep_inputs: bool = False
     edge_tolerance_voxels: float = 1.0
+    allow_untested_version: bool = False
 
     @model_validator(mode="after")
     def _validate_window(self: AteraProsegTileConfig) -> AteraProsegTileConfig:

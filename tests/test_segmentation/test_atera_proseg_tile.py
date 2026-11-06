@@ -13,7 +13,10 @@ import pytest
 import zarr
 
 from merxen.config import AteraProsegModelParams
-from merxen.segmentation.atera_proseg import AteraProsegError
+from merxen.segmentation.atera_proseg import (
+    AteraProsegError,
+    PriorWeightMismatchError,
+)
 from merxen.segmentation.atera_proseg.export import (
     XENIUM_SCHEMA,
     export_tile,
@@ -35,6 +38,7 @@ from merxen.segmentation.atera_proseg.tile import (
     run_tile,
 )
 from test_segmentation.atera_proseg_fixture import (
+    BUNDLE_OPTIONS,
     build_multitile_latest,
     fake_proseg_binary,
     plan_config,
@@ -130,6 +134,30 @@ def test_export_writes_window_genes_only_and_the_prior(
     assert np.array_equal(np.load(record.prior_path), labels[row0:row1, col0:col1])
     exported = sum(np.load(path).size for path in record.exported_dir.glob("*.npy"))
     assert exported == record.n_rows
+
+
+def test_export_drops_rows_below_min_qv(
+    stores: tuple[Path, Path, dict], tmp_path: Path
+) -> None:
+    source, _, plan = stores
+    tile = next(t for t in plan["tiles"] if t["tile_id"] == "c1_r1")
+    points = _points(source)
+    keep = (
+        window_row_mask(
+            points.column("x").to_numpy(),
+            points.column("y").to_numpy(),
+            tile["window_px"],
+            PS,
+        )
+        & points.column("is_gene").to_numpy()
+    )
+    qv = points.column("qv").to_numpy()
+    threshold = float(np.median(qv[keep]))
+    assert (qv[keep] < threshold).any()
+    record = export_tile(source, tile["window_px"], PS, tmp_path, min_qv=threshold)
+    written = pq.read_table(record.parquet_path)
+    assert (written.column("qv").to_numpy() >= threshold).all()
+    assert record.n_rows == int((keep & (qv >= threshold)).sum())
 
 
 # --------------------------------------------------------------------------- #
@@ -237,6 +265,8 @@ def test_version_refusal(tmp_path: Path) -> None:
     other = fake_proseg_binary(tmp_path / "other", FAKE_PROSEG_VERSION="3.3.0")
     with pytest.raises(AteraProsegError, match="needs ProSeg 3.2.0"):
         check_version(other)
+    # atera_proseg_allow_untested_version reaches the tile: run it anyway.
+    assert check_version(other, allow_untested=True) == "3.3.0"
 
 
 def test_watchdog_stops_the_task_with_exit_99(tmp_path: Path) -> None:
@@ -260,14 +290,22 @@ def test_watchdog_stops_the_task_with_exit_99(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _config(
+    stores: tuple[Path, Path, dict], tmp_path: Path, tile: str, **overrides: Any
+) -> Any:
+    source, _, plan = stores
+    return next(
+        c
+        for c in tile_configs(plan, source, tmp_path / "tiles", **overrides)
+        if c.tile_id == tile
+    )
+
+
 def _run(
     stores: tuple[Path, Path, dict], tmp_path: Path, tile: str, **env: str
 ) -> dict:
-    source, _, plan = stores
     binary = fake_proseg_binary(tmp_path / "bin", **env)
-    config = next(
-        c for c in tile_configs(plan, source, tmp_path / "tiles") if c.tile_id == tile
-    )
+    config = _config(stores, tmp_path, tile)
     return run_tile(config, binary) | {"_dir": str(config.output_dir)}
 
 
@@ -289,6 +327,10 @@ def test_tile_claims_only_owned_cells(
     assert manifest["proseg"]["arguments"][0] == "proseg"
     assert not any(arg.startswith("/") for arg in manifest["proseg"]["arguments"])
     assert not (out / "work" / "inputs").exists()
+    # ProSeg's debug files stay in its output folder, not the caller's folder.
+    assert (out / "work" / "proseg" / "membership_debug.txt").is_file()
+    assert not (Path.cwd() / "membership_debug.txt").exists()
+    assert manifest["prior_weight"]["restarts"] == []
     assert set(manifest["result_sha256"]) == {
         "cells.parquet",
         *(f"claims/{p.name}" for p in (out / "claims").glob("*.parquet")),
@@ -303,11 +345,77 @@ def test_tile_recount_mismatch_fails(
         _run(stores, tmp_path, "c0_r0", FAKE_PROSEG_CORRUPT_X="1")
 
 
-def test_tile_wrong_prior_weight_stops_the_run(
+def test_tile_off_prior_weight_restarts_once_with_a_rescaled_multiplier(
     stores: tuple[Path, Path, dict], tmp_path: Path
 ) -> None:
-    with pytest.raises(AteraProsegError, match="effective prior weight"):
-        _run(stores, tmp_path, "c0_r0", FAKE_PROSEG_WEIGHT_FACTOR="1.5")
+    # ProSeg's own scaling differs from the export's by a constant factor (its
+    # cell-free filter): one restart with requested / printed corrects it.
+    manifest = _run(stores, tmp_path, "c0_r0", FAKE_PROSEG_WEIGHT_FACTOR="1.5")
+    weight = manifest["prior_weight"]
+    assert weight["restarts"] == [{"multiplier": 140.0, "reported": 210.0}]
+    assert weight["multiplier"] == pytest.approx(140.0 / 1.5)
+    assert weight["reported"] == pytest.approx(140.0, rel=0.02)
+    arguments = manifest["proseg"]["arguments"]
+    assert float(arguments[arguments.index("--prior-weight") + 1]) == pytest.approx(
+        140.0 / 1.5
+    )
+
+
+def test_tile_prior_weight_still_off_after_the_restart_fails(
+    stores: tuple[Path, Path, dict], tmp_path: Path
+) -> None:
+    with pytest.raises(PriorWeightMismatchError, match="effective prior weight"):
+        _run(stores, tmp_path, "c0_r0", FAKE_PROSEG_WEIGHT_OFFSET="50")
+
+
+def test_tile_refuses_another_source_build(
+    stores: tuple[Path, Path, dict], tmp_path: Path
+) -> None:
+    config = _config(stores, tmp_path, "c0_r0", source_build_fingerprint="0" * 64)
+    with pytest.raises(AteraProsegError, match="another build"):
+        run_tile(config, fake_proseg_binary(tmp_path / "bin"))
+    assert not (Path(config.output_dir) / "work" / "inputs").exists()
+
+
+def test_tile_refuses_two_proseg_cells_with_one_label(
+    stores: tuple[Path, Path, dict], tmp_path: Path
+) -> None:
+    with pytest.raises(AteraProsegError, match="share a vendor label"):
+        _run(stores, tmp_path, "c0_r0", FAKE_PROSEG_DUPLICATE_LABEL="1")
+
+
+def test_tile_cli_exit_status_separates_refusals_from_run_failures(
+    stores: tuple[Path, Path, dict], tmp_path: Path
+) -> None:
+    from click.testing import CliRunner
+
+    from merxen.cli import main
+    from merxen.cli.run_atera_proseg import TILE_NO_RETRY_EXIT
+
+    binary = fake_proseg_binary(tmp_path / "bin")
+    refused = _config(stores, tmp_path, "c0_r0", source_build_fingerprint="0" * 64)
+    path = tmp_path / "refused.json"
+    path.write_text(refused.model_dump_json())
+    result = CliRunner().invoke(
+        main,
+        ["atera-proseg-tile", "--config", str(path), "--proseg-binary", str(binary)],
+    )
+    assert result.exit_code == TILE_NO_RETRY_EXIT == 3
+    crashing = tmp_path / "crash" / "proseg"
+    crashing.parent.mkdir()
+    crashing.write_text(
+        '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "proseg 3.2.0"; '
+        "exit 0; fi\nexit 7\n"
+    )
+    crashing.chmod(0o755)
+    path = tmp_path / "crash.json"
+    path.write_text(_config(stores, tmp_path / "c", "c0_r0").model_dump_json())
+    result = CliRunner().invoke(
+        main,
+        ["atera-proseg-tile", "--config", str(path), "--proseg-binary", str(crashing)],
+    )
+    # A failed ProSeg process may be transient: the plain failure, retried.
+    assert result.exit_code == 1
 
 
 def test_interior_edge_check_ignores_mask_boundary_edges() -> None:
@@ -342,3 +450,29 @@ def test_manifest_records_identity_and_cells(
     assert manifest["cells"]["owned_labels_without_proseg_cell"] == []
     assert manifest["cells"]["owned_cells_zero_transcripts"] == []
     assert manifest["proseg"]["version"] == "3.2.0"
+
+
+@pytest.fixture(scope="module")
+def dense(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path, dict]:
+    """A store with far more than 100 transcripts per cell (ProSeg scales)."""
+    root = tmp_path_factory.mktemp("dense")
+    options = {
+        **BUNDLE_OPTIONS,
+        "tiles": {key: count * 10 for key, count in BUNDLE_OPTIONS["tiles"].items()},
+    }
+    source, latest = build_multitile_latest(root, **options)
+    plan = build_plan(plan_config(source, root / "plan"))
+    return source, latest, plan
+
+
+def test_dense_tile_undoes_proseg_scaling_without_a_restart(
+    dense: tuple[Path, Path, dict], tmp_path: Path
+) -> None:
+    manifest = _run(dense, tmp_path, "c0_r0")
+    export = manifest["export"]
+    mean = export["n_rows"] / export["n_labels_in_window"]
+    assert mean > 100
+    weight = manifest["prior_weight"]
+    assert weight["multiplier"] == pytest.approx(140.0 / (mean / 100))
+    assert weight["restarts"] == []
+    assert weight["reported"] == pytest.approx(140.0, rel=0.02)

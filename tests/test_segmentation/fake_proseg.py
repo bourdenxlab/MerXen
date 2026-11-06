@@ -13,9 +13,14 @@ It accepts the command of ``merxen.segmentation.atera_proseg.runner`` and:
   a cell's pixels to the nearest cell (``greedy_halo``, which makes two tiles
   claim one halo row);
 - prints the dataset summary with ProSeg's prior-weight scaling
-  (``FAKE_PROSEG_WEIGHT_FACTOR`` skews it) and writes the cell metadata,
-  transcript metadata, polygons and ``proseg.zarr`` count table
-  (``FAKE_PROSEG_CORRUPT_X=1`` adds one count to the first cell).
+  (``FAKE_PROSEG_WEIGHT_FACTOR`` multiplies it, as ProSeg's own filters do;
+  ``FAKE_PROSEG_WEIGHT_OFFSET`` adds to it, which no rescaling corrects) and
+  writes the cell metadata, transcript metadata, polygons and ``proseg.zarr``
+  count table (``FAKE_PROSEG_CORRUPT_X=1`` adds one count to the first cell;
+  ``FAKE_PROSEG_DUPLICATE_LABEL=1`` gives the second cell the first one's
+  label);
+- writes ``membership_debug.txt`` into its working directory, as ProSeg 3.2.0
+  does.
 """
 
 from __future__ import annotations
@@ -150,6 +155,8 @@ def main() -> int:
     n_cells = len(labels)
     weight = float(args.prior_weight) * max(n_rows / max(n_cells, 1) / 100.0, 1.0)
     weight *= float(os.environ.get("FAKE_PROSEG_WEIGHT_FACTOR", "1"))
+    weight += float(os.environ.get("FAKE_PROSEG_WEIGHT_OFFSET", "0"))
+    Path("membership_debug.txt").write_text("debug\n", encoding="utf-8")
     genes = sorted(set(table.column("feature_name").to_pylist()))
     print("Using 1 threads\nFinished reading input\nRead dataset:")
     print(f"{n_rows:>9} transcripts\n{n_cells:>9} cells\n{len(genes):>9} genes")
@@ -208,6 +215,15 @@ def main() -> int:
         ),
         out / args.output_cell_metadata,
     )
+    if os.environ.get("FAKE_PROSEG_DUPLICATE_LABEL") == "1" and n_cells > 1:
+        original_ids = [str(int(v)) for v in labels]
+        original_ids[1] = original_ids[0]
+        metadata = pq.read_table(out / args.output_cell_metadata)
+        index = metadata.column_names.index("original_cell_id")
+        metadata = metadata.set_column(
+            index, "original_cell_id", pa.array(original_ids)
+        )
+        pq.write_table(metadata, out / args.output_cell_metadata)
     gene_index = {name: i for i, name in enumerate(genes)}
     gene_codes = np.asarray(
         [gene_index[name] for name in table.column("feature_name").to_pylist()],

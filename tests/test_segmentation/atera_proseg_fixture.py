@@ -56,18 +56,19 @@ def fake_proseg_binary(directory: Path, **env: str) -> Path:
     return wrapper
 
 
-def build_multitile_latest(tmp_path: Path) -> tuple[Path, Path]:
+def build_multitile_latest(tmp_path: Path, **bundle_options: Any) -> tuple[Path, Path]:
     """Build the synthetic source store and its native latest store.
 
     Args:
         tmp_path: Test directory.
+        **bundle_options: Bundle options; :data:`BUNDLE_OPTIONS` when none.
 
     Returns:
         ``(source_store, latest_store)``.
     """
     from test_io.atera_native_fixture import build_atera_source
 
-    source = build_atera_source(tmp_path, **BUNDLE_OPTIONS)
+    source = build_atera_source(tmp_path, **(bundle_options or BUNDLE_OPTIONS))
     latest = tmp_path / "results" / "latest" / "latest_spatialdata.zarr"
     build_native_latest(
         NativeLatestConfig(

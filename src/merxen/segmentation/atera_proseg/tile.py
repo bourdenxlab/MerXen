@@ -12,8 +12,8 @@ keeps only what the stitch needs (``tile_<id>/``):
   store's points file;
 - ``tile_manifest.json``: identity (window, source fingerprint, ProSeg version
   and command), row and cell counts, the prior weight (requested, multiplier,
-  reported), timings, peak memory, the interior-edge check and the SHA-256 of
-  the result files.
+  reported, and the run restarted with a rescaled multiplier, if any), timings,
+  peak memory, the interior-edge check and the SHA-256 of the result files.
 
 Before writing, the per-cell, per-gene foreground counts recounted from the
 transcript metadata must equal ProSeg's count matrix for every owned cell.
@@ -43,6 +43,7 @@ from merxen.segmentation.atera_proseg import (
     TILE_FORMAT_VERSION,
     TILE_MANIFEST_NAME,
     AteraProsegError,
+    PriorWeightMismatchError,
 )
 from merxen.segmentation.atera_proseg.export import (
     export_tile,
@@ -394,8 +395,35 @@ def reduce_tile(
     }
 
 
+def _check_source_build(cfg: AteraProsegTileConfig) -> None:
+    """Refuse a source store other than the build the plan was made from.
+
+    Raises:
+        AteraProsegError: If the store has no build marker or another build
+            fingerprint than ``cfg.source_build_fingerprint``.
+    """
+    from merxen.io.builders.atera import read_build_marker
+
+    marker = read_build_marker(Path(cfg.source_zarr_path))
+    found = None if marker is None else marker.get("build_fingerprint")
+    if found is None:
+        raise AteraProsegError(
+            f"[{cfg.dataset_name}] Tile {cfg.tile_id}: the source store has no "
+            "build marker"
+        )
+    if str(found) != cfg.source_build_fingerprint:
+        raise AteraProsegError(
+            f"[{cfg.dataset_name}] Tile {cfg.tile_id}: the source store is another "
+            "build than the tile plan's; re-run ATERA_PROSEG_PLAN"
+        )
+
+
 def run_tile(cfg: AteraProsegTileConfig, proseg_binary: Path) -> dict[str, Any]:
     """Export, run ProSeg on and reduce one tile.
+
+    A run whose printed prior weight is off (ProSeg's mean counts the rows
+    left after its own filters) is restarted once with the multiplier rescaled
+    by requested / printed.
 
     Args:
         cfg: The tile configuration.
@@ -405,15 +433,21 @@ def run_tile(cfg: AteraProsegTileConfig, proseg_binary: Path) -> dict[str, Any]:
         The tile manifest (also written to ``tile_manifest.json``).
 
     Raises:
-        AteraProsegError: On a wrong ProSeg version, a failed run, a wrong
-            prior weight or a failed self-check.
+        AteraProsegError: On another source build, a wrong ProSeg version, a
+            failed run, a prior weight still wrong after the restart or a
+            failed self-check.
     """
-    out = Path(cfg.output_dir)
+    # Absolute: ProSeg runs in its output folder (it writes debug files to its
+    # working directory), so no path of the command may be relative.
+    out = Path(cfg.output_dir).absolute()
+    if "/" in str(proseg_binary):
+        proseg_binary = Path(proseg_binary).absolute()
     out.mkdir(parents=True, exist_ok=True)
     work = out / "work"
     inputs_dir = work / "inputs"
     proseg_dir = work / "proseg"
-    version = check_version(proseg_binary)
+    _check_source_build(cfg)
+    version = check_version(proseg_binary, allow_untested=cfg.allow_untested_version)
     model = cfg.model
     export = export_tile(
         cfg.source_zarr_path,
@@ -428,36 +462,59 @@ def run_tile(cfg: AteraProsegTileConfig, proseg_binary: Path) -> dict[str, Any]:
     multiplier = prior_weight_multiplier(
         model.prior_weight_effective, export.n_rows, export.n_labels_in_window
     )
-    command = build_command(
-        proseg_binary,
-        parquet_path=export.parquet_path,
-        prior_path=export.prior_path,
-        output_dir=proseg_dir,
-        model=model,
-        prior_weight=multiplier,
-        pixel_size_um=cfg.pixel_size_um,
-        col0=cfg.window_px[0],
-        row0=cfg.window_px[2],
-        num_threads=cfg.num_threads,
-    )
+    restarts: list[dict[str, float]] = []
     # ProSeg refuses an output path that does not exist.
     proseg_dir.mkdir(parents=True, exist_ok=True)
-    logger.info("[%s] Tile %s: running ProSeg", cfg.dataset_name, cfg.tile_id)
-    run = run_proseg(
-        command,
-        log_dir=out,
-        burnin_samples=model.burnin_samples,
-        max_rss_gb=cfg.max_rss_gb,
-        cleanup=[work],
-        version=version,
-        expected_prior_weight=model.prior_weight_effective,
-        prior_weight_tolerance=model.prior_weight_tolerance,
-    )
-    check_prior_weight(
-        run.reported_prior_weight,
-        model.prior_weight_effective,
-        model.prior_weight_tolerance,
-    )
+    while True:
+        command = build_command(
+            proseg_binary,
+            parquet_path=export.parquet_path,
+            prior_path=export.prior_path,
+            output_dir=proseg_dir,
+            model=model,
+            prior_weight=multiplier,
+            pixel_size_um=cfg.pixel_size_um,
+            col0=cfg.window_px[0],
+            row0=cfg.window_px[2],
+            num_threads=cfg.num_threads,
+        )
+        logger.info("[%s] Tile %s: running ProSeg", cfg.dataset_name, cfg.tile_id)
+        try:
+            run = run_proseg(
+                command,
+                log_dir=out,
+                burnin_samples=model.burnin_samples,
+                max_rss_gb=cfg.max_rss_gb,
+                cleanup=[work],
+                version=version,
+                expected_prior_weight=model.prior_weight_effective,
+                prior_weight_tolerance=model.prior_weight_tolerance,
+                cwd=proseg_dir,
+            )
+            check_prior_weight(
+                run.reported_prior_weight,
+                model.prior_weight_effective,
+                model.prior_weight_tolerance,
+            )
+            break
+        except PriorWeightMismatchError as error:
+            if restarts or not error.reported:
+                raise
+            rescaled = multiplier * model.prior_weight_effective / error.reported
+            logger.warning(
+                "[%s] Tile %s: ProSeg reported prior weight %s for %s; restarting "
+                "with --prior-weight %s instead of %s",
+                cfg.dataset_name,
+                cfg.tile_id,
+                error.reported,
+                model.prior_weight_effective,
+                rescaled,
+                multiplier,
+            )
+            restarts.append(
+                {"multiplier": float(multiplier), "reported": float(error.reported)}
+            )
+            multiplier = rescaled
     reduced = reduce_tile(cfg, proseg_dir, export.exported_dir, window_labels)
     if not cfg.keep_inputs:
         shutil.rmtree(inputs_dir, ignore_errors=True)
@@ -500,6 +557,7 @@ def run_tile(cfg: AteraProsegTileConfig, proseg_binary: Path) -> dict[str, Any]:
             "requested_effective": model.prior_weight_effective,
             "multiplier": multiplier,
             "reported": run.reported_prior_weight,
+            "restarts": restarts,
         },
         **reduced,
         "run": {

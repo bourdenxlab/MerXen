@@ -208,15 +208,15 @@ def export_tile(
         pixel_size_um: Microns per pixel.
         output_dir: Folder for ``tile.parquet``, ``prior.npy`` and
             ``exported/``.
-        min_qv: Smallest QV exported (the store already applies it).
+        min_qv: Smallest QV exported. The build already applies it, so a
+            gene row below it is logged as a warning and not exported.
         nuclear_compartment: Give ProSeg ``overlaps_nucleus``.
 
     Returns:
         The export record.
 
     Raises:
-        AteraProsegError: If a store row has a QV below ``min_qv`` while the
-            build claims to have filtered it, or the window holds no row.
+        AteraProsegError: If the window holds no gene row.
     """
     from merxen.visualization.raster_density import points_files
 

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
+from typing import Final
 
 import click
 
@@ -13,6 +15,11 @@ from merxen.config import (
     AteraProsegTileConfig,
     load_config_from_json,
 )
+
+logger = logging.getLogger(__name__)
+
+TILE_NO_RETRY_EXIT: Final = 3
+"""Exit status of a tile failure that a retry would repeat (not retried)."""
 
 _CONFIG = click.option(
     "--config",
@@ -44,12 +51,25 @@ def atera_proseg_plan_command(config_path: Path) -> None:
     help="The ProSeg 3.2.0 executable.",
 )
 def atera_proseg_tile_command(config_path: Path, proseg_binary: Path) -> None:
-    """Run ProSeg on one tile and reduce it to its owned cells."""
+    """Run ProSeg on one tile and reduce it to its owned cells.
+
+    A refusal that a retry would repeat (another source build or ProSeg
+    version, a prior weight still off after the restart, a failed self-check)
+    exits with :data:`TILE_NO_RETRY_EXIT`; a failed ProSeg process or any other
+    error exits 1, which the workflow retries once.
+    """
+    from merxen.segmentation.atera_proseg import AteraProsegError, ProsegRunError
     from merxen.segmentation.atera_proseg.tile import run_tile
 
     cfg = load_config_from_json(config_path, AteraProsegTileConfig)
     assert isinstance(cfg, AteraProsegTileConfig)
-    manifest = run_tile(cfg, proseg_binary)
+    try:
+        manifest = run_tile(cfg, proseg_binary)
+    except ProsegRunError:
+        raise
+    except AteraProsegError as error:
+        logger.error("[%s] Tile %s: %s", cfg.dataset_name, cfg.tile_id, error)
+        raise SystemExit(TILE_NO_RETRY_EXIT) from error
     click.echo(
         f"Tile {cfg.tile_id}: {manifest['cells']['n_owned_proseg_cells']} owned cells"
     )
