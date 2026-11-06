@@ -2117,6 +2117,30 @@ stores through MENDER (§1.4, §6.2). Findings and changes:
 | The Xenium parquet layout turns on ProSeg's nuclear compartment model, untested at the full schedule | Crop and dense tile agree with the CSV benchmark (above); kept on, `atera_proseg_nuclear_compartment=false` is the fallback |
 | `-resume` | No tile re-runs (their inputs are values); the stitch task re-runs and skips by fingerprint; ENRICH and its layer check skip |
 
+**AT-9 reviews (2026-11-06).** A code and data review and a scale and mutation review of the AT-9
+branch. Both rebuilt the crop stitch independently and found no defect in the stitching, the pixel
+convention, the parquet layout, the filtering or the layer registration. Findings and changes:
+
+| Finding | Change or decision |
+|---|---|
+| A re-stitch (another prior weight or schedule) rewrote the ProSeg layer in place but kept the tables computed from the old cells; MIQ's skip check (table, sidecars, image keys, bead removal) would keep intensities of the old polygons under the same vendor ids | A stitch that writes deletes every table of region `MOSAIK_proseg` other than `table_MOSAIK_proseg` (image quantification, clustering) and reports them; test with a changed tile manifest (also covers the stitch skip ignoring the fingerprint) |
+| One failed tile dropped the row after `segment` on both layers, with no message naming the tile (`failOnIgnore` exits non-zero) | The log names the failed tiles of each row and says `-resume` re-runs only those. A tile task is retried once unless it exits 99 (watchdog) or 3 (new: a refusal a retry would repeat); a failed ProSeg process exits 1 and is retried. Routing the row's native layer on alone was rejected: the row asks for both layers, and finishing it with one would be a quieter partial result than a named failure that `-resume` repairs cheaply. Wiring test with a failing tile (exit 3: one attempt; exit 1: two) |
+| The printed prior weight is lower than requested by the share of rows ProSeg's cell-free filter drops (crop 0.31%; at most 0.68% per tile on the full section from a 2% sample); a section with large cell-free areas could pass 2% and fail its tiles | A tile whose printed weight is off restarts once with the multiplier rescaled by requested / printed (ProSeg's factor is fixed by the data), and fails only if it is still off; restarts are in the manifest |
+| `atera_proseg_allow_untested_version=true` passed the preflight, but every tile refused any version but 3.2.0 | The flag reaches the tile config (only when true, so default task hashes are unchanged) and the tile runs that version with a warning |
+| The stitch report summed only the vendor labels without a ProSeg cell; owned cells without a polygon reached only the tile manifests | Both are listed and counted in the report, with a warning when either is non-zero (their transcripts become background) |
+| `seam_overlap_pixels` mostly counted overlaps of two cells of one tile (crop: 567 of 568 pairs) | Split into `overlap_pixels_within_tile` and `overlap_pixels_across_tiles` |
+| A tile trusted the plan's source build fingerprint | The tile compares it with the source store's build marker before exporting |
+| ProSeg writes `membership_debug.txt` and `rebalanced_membership_debug.txt` to its working directory (the repo root when tests ran from there) | ProSeg runs in its output folder (`work/proseg`); the command's paths are absolute |
+| The stitch's label raster (10.4 GB on the full section) was removed only on success | Removed whether or not the stitch succeeds |
+| The `export_tile` docstring said a row below `min_qv` raises; the code warns and drops it | Docstring fixed; a test now covers the QV filter |
+| Surviving mutants: claims naming points files the store lacks, two tiles owning one label, two ProSeg cells of one label, the export QV filter, the float-rounding correction of the core index, the prior-weight multiplier (killed only by the real-ProSeg test) | One test each (the multiplier on a synthetic store with more than 100 transcripts per cell); all seven mutants are now killed |
+| The `nextflow.config` comment gave the dense tile's peak as 21.7 GB | 24.2 GB (16 threads) and 25 GB (32 threads) against the 32 GB reservation; the watchdog cap (40 GB) sits above the reservation, so an executor that enforces memory kills first and the retry gets 64 GB |
+| A failed tile keeps its inputs in the work folder (1–2 GB of parquet, up to 430 MB of prior) | Kept: they are what a failure is diagnosed from; finished tiles drop them unless `atera_proseg_keep_tile_inputs` |
+| A halo tile's claim on a transcript beats the core tile's background; the core rule settles only two claims | As designed: in effect the tile that owns the cell decides, which is the requirement "transcripts assigned in halos resolved by the owning tile". For the user to confirm |
+| The effective prior weight is 140 on every tile; ProSeg's automatic weight follows local density (about 113 and 152 on the two crop tiles) | Open question for the user with Q1–Q8 of the design. Crop and dense tile agree with the benchmark; sparse tiles get a stronger prior than the benchmark's automatic one |
+| A `-resume` re-runs 8 tasks (the stitch, ENRICH, VIEWER_CACHE, MIQ, both layer validations, both QC); QC recomputes in full | Recorded with AT-6's ENRICH `-resume` finding for the AT-7 restart work; the full-section stitch (30 tiles, a 42,548 x 61,369 raster) has not run yet |
+| Changed test text missing from the implementation entry above | The golden harness span signatures gained `rowSource = null`; the process-pin count went from 44 to 47 (three new pins, none changed); the rule that a default keeping no layer resolves to every layer also applies to `cellpose_only`, which no platform allows today. All need the user's OK |
+
 **AT-6 reviews (2026-11-06).** An end-to-end data review and a code review of the AT-6 branch.
 Findings and changes:
 

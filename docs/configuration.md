@@ -376,15 +376,15 @@ install paths trigger a `sudo` prompt.
 | `atera_proseg_halo_um` | `100` | Margin a tile also reads around its core; at least 100 (refused below). |
 | `atera_proseg_owned_margin_um` | `20` | Margin around the bounding box of every cell a tile owns that its window must cover. |
 | `atera_proseg_burnin_samples`, `atera_proseg_samples`, `atera_proseg_hillclimb`, `atera_proseg_recorded_samples` | `100`, `200`, `20`, `100` | ProSeg schedule of every tile (the AT-5(b) short schedule). The voxel sizes, nuclear reassignment, diffusion and compactness come from the `proseg_*` params. |
-| `atera_proseg_prior_weight` | `140.0` | Effective prior weight ProSeg reports for every tile (its own `max(mean transcripts per cell / 100, 1)` scaling is undone per tile); a tile whose reported weight is more than 2% off is stopped. |
+| `atera_proseg_prior_weight` | `140.0` | Effective prior weight ProSeg reports for every tile (its own `max(mean transcripts per cell / 100, 1)` scaling is undone per tile); a tile whose reported weight is more than 2% off is stopped and restarted once with the multiplier rescaled by requested / reported, and fails if it is still off. |
 | `atera_proseg_nuclear_compartment` | `true` | Give ProSeg the vendor `overlaps_nucleus` flag (its nuclear compartment model); `false` writes 0. |
-| `atera_proseg_tile_cpus`, `atera_proseg_tile_memory_gb` | `16`, `32` | CPUs (ProSeg `--nthreads`) and memory reservation of a tile task; the reservation doubles on the one retry after an external kill (137, 140). |
-| `atera_proseg_tile_max_rss_gb` | `40` | Watchdog cap on a tile task's anonymous memory; above it the task exits 99 (not retried) and the row's ProSeg branch stops. |
+| `atera_proseg_tile_cpus`, `atera_proseg_tile_memory_gb` | `16`, `32` | CPUs (ProSeg `--nthreads`) and memory reservation of a tile task; the reservation doubles on the one retry (any failure other than exit 99 or 3). |
+| `atera_proseg_tile_max_rss_gb` | `40` | Watchdog cap on a tile task's anonymous memory; above it the task exits 99 (not retried) and the row stops after `segment` on both layers (the log names the failed tile). |
 | `atera_proseg_tile_max_forks` | `4` | Tile tasks at once (also set in `conf/dwight.config`). |
 | `atera_proseg_stitch_cpus`, `atera_proseg_stitch_memory_gb` | `16`, `64` | Resources of `ATERA_PROSEG_STITCH`. |
 | `atera_proseg_keep_tile_inputs` | `false` | Keep each tile's exported parquet, prior mask and raw ProSeg transcript metadata. |
 | `atera_proseg_tile_subset` | `null` | Comma list of tile ids (`c2_r1`) to run as a check; no stitch, and any stage after `segment` is refused. |
-| `atera_proseg_allow_untested_version` | `false` | Allow a `proseg_version` other than 3.2.0 (the only one whose Xenium-layout reader and flags were verified) on `native_proseg` rows. |
+| `atera_proseg_allow_untested_version` | `false` | Allow a `proseg_version` other than 3.2.0 (the only one whose Xenium-layout reader and flags were verified) on `native_proseg` rows; the preflight and every tile then run it with a warning. |
 | `atera_cellpose_model`, `atera_cellpose_cellprob`, `atera_cellpose_flow_threshold`, `atera_cellpose_diameter`, `atera_cellpose_final_max_area_um2`, `atera_mask_max_eccentricity` | `null` | The ATERA twins of the per-platform Cellpose overrides. They are declared because Cellpose preflight reads them for every active platform; native ATERA rows run no Cellpose. |
 | `atera_clustering_hvg_n_top_genes` | `2000` | Highly variable genes the clustering PCA of an ATERA (whole-transcriptome) sample uses. ATERA samples also skip the 300-gene panel check; XENIUM and MERSCOPE samples are unchanged. |
 

@@ -606,8 +606,12 @@ proseg tile.parquet xenium -x x_location -y y_location -z z_location
   `fov_name` and float32 coordinates and QV. Controls are not exported.
 - ProSeg scales `--prior-weight` by `max(mean transcripts per cell / 100, 1)`.
   `atera_proseg_prior_weight` (140) is the *effective* weight: each tile's
-  multiplier `m` undoes that scaling, and a run that reports a weight more
-  than 2% off is stopped as soon as it prints it.
+  multiplier `m` undoes that scaling. ProSeg takes the mean after its own
+  cell-free filter, so the weight it prints is lower by the share of rows that
+  filter drops (0.3% on the crop, at most 0.7% per tile on the full section).
+  A run that prints a weight more than 2% off is stopped as soon as it prints
+  it and restarted once with `m` rescaled by requested / printed; the tile
+  fails if the weight is still off. The manifest records each restart.
 - The mask transforms map pixel (i, j) to ProSeg's pixel centre
   ((j + 0.5) ps, (i + 0.5) ps), the vendor's corner convention.
 - The schedule is the short one of the AT-5(b) benchmark
@@ -615,14 +619,21 @@ proseg tile.parquet xenium -x x_location -y y_location -z z_location
   `_recorded_samples`). `prior_seg_reassignment_prob` and
   `--use-cell-initialization` stay at ProSeg's defaults, as in the benchmark.
 - Each tile reserves `atera_proseg_tile_cpus` (16) and
-  `atera_proseg_tile_memory_gb` (32 GB, doubled on the one retry after an
-  external kill). Its own watchdog stops it (exit 99, not retried) above
-  `atera_proseg_tile_max_rss_gb` (40 GB) of anonymous memory. ProSeg versions
-  other than 3.2.0 are refused at config time unless
-  `atera_proseg_allow_untested_version=true`.
-- A failed tile drops the row's ProSeg branch: no stitch and no later stage
-  for that row. `atera_proseg_tile_subset` (comma list of tile ids) runs only
-  those tiles as a check and is refused with any stage after `segment`.
+  `atera_proseg_tile_memory_gb` (32 GB; the densest tile peaked at 24.2 GB).
+  Its own watchdog stops it (exit 99) above `atera_proseg_tile_max_rss_gb`
+  (40 GB) of anonymous memory. A tile checks that the source store is the
+  build the plan was made from. ProSeg versions other than 3.2.0 are refused
+  at config time and in the tile unless
+  `atera_proseg_allow_untested_version=true` (the tile then logs a warning).
+  ProSeg runs in its output folder, where it writes its debug files.
+- A failed tile is retried once (with twice the memory reservation), except
+  the watchdog's exit 99 and exit 3: a refusal a retry would repeat (another
+  source build or ProSeg version, a prior weight still off after the restart,
+  a failed self-check). A tile that still fails leaves its row without the
+  stitch and every later stage, on both layers; the run exits non-zero and
+  the log names the failed tiles. `-resume` re-runs only those (finished
+  tiles are cached). `atera_proseg_tile_subset` (comma list of tile ids) runs
+  only those tiles as a check and is refused with any stage after `segment`.
 
 **Stitched layer** (written in place into
 `<outdir>/<pair>/atera/latest/latest_spatialdata.zarr` under the store lock):
@@ -648,13 +659,22 @@ proseg tile.parquet xenium -x x_location -y y_location -z z_location
 - **Provenance.** Root attr `merxen_atera_proseg`: fingerprint, source build,
   ProSeg version and git revision, the command template, model parameters,
   grid, every tile manifest (window, rows, cells, prior weight requested,
-  multiplier and reported, timings, peak memory, edge check) and the stitch
-  counts (cells, zero-transcript cells, assigned and foreground rows,
-  conflicts, seam overlap pixels). A compact copy is in the table's `uns`.
+  multiplier, reported and restarts, timings, peak memory, edge check) and
+  the stitch counts (cells, zero-transcript cells, vendor labels without a
+  ProSeg cell and owned cells without a polygon, both listed and warned
+  about since their transcripts become background, assigned and foreground
+  rows, conflicts, and polygon overlap pixels within one tile and across
+  tiles). A compact copy is in the table's `uns`.
 - **Idempotency.** A store that already carries the fingerprint of the same
   plan and tile manifests is not re-stitched (a `-resume` re-runs the stitch
   task, which then only stages its output). Tiles are cached by their config
-  value, so a re-run plan does not invalidate them.
+  value, so a re-run plan does not invalidate them. A stitch from other tiles
+  (another prior weight or schedule) deletes the tables computed from the
+  previous ProSeg cells (every table of region `MOSAIK_proseg` other than
+  `table_MOSAIK_proseg`, such as the image quantification and clustering), so
+  MIQ cannot skip on intensities of the old polygons; the report lists them.
+  The label raster scratch file is removed whether or not the stitch
+  succeeds.
 - **Points rewrite.** New files go to `points.parquet.partial-<uuid>/` and the
   two directories are swapped by rename; the old hardlinks are unlinked, so the
   source store keeps every inode, byte and modification time. The latest
