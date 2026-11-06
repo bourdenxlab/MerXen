@@ -273,7 +273,12 @@ def test_writes_to_the_latest_store_never_reach_the_source(
             assert key not in source_inodes, rel
 
     # ENRICH's partial cleanup, a metadata write and a table rewrite in place.
+    # The cleanup keeps the vendor elements of a native store (only derived
+    # tables go); ensure_native_elements re-creates any that went missing.
     enrich._remove_partial_enrichment_artifacts_from_zarr_path(latest, "ATERA")
+    assert native.ensure_native_elements(latest, source) == []
+    for element in report.elements_written:
+        shutil.rmtree(latest / element)
     recreated = native.ensure_native_elements(latest, source)
     assert sorted(recreated) == sorted(report.elements_written)
     sdata = sd.read_zarr(latest)
