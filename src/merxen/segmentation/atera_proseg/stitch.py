@@ -930,6 +930,7 @@ def _stitch_into(
     gdf = gpd.GeoDataFrame(
         {
             "instance_id": instance_ids,
+            "source_cell_id": obs["source_cell_id"].to_numpy(),
             "proseg_internal_id": cells["proseg_internal_id"].to_numpy(np.uint32),
             "proseg_tile": cells["proseg_tile"].to_numpy(),
         },
@@ -1013,3 +1014,119 @@ def _compact_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     compact.get("rows", {}).pop("claims_per_file", None)
     compact.pop("model", None)
     return compact
+
+
+# --------------------------------------------------------------------------- #
+# Layer check (ENRICH of a native_proseg row)
+# --------------------------------------------------------------------------- #
+
+
+def _check_points_file(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return the foreground gene counts per assigned cell of one file."""
+    table = pq.read_table(
+        path, columns=[ASSIGNMENT_COLUMN, BACKGROUND_COLUMN, "is_gene"]
+    )
+    assignment = table.column(ASSIGNMENT_COLUMN).combine_chunks()
+    valid = assignment.is_valid().to_numpy(zero_copy_only=False)
+    values = assignment.fill_null(0).to_numpy().astype(np.uint64)
+    background = table.column(BACKGROUND_COLUMN).to_numpy(zero_copy_only=False)
+    is_gene = table.column("is_gene").to_numpy(zero_copy_only=False).astype(bool)
+    counted = valid & ~background.astype(bool) & is_gene
+    cells, counts = np.unique(values[counted], return_counts=True)
+    assigned_ids = np.unique(values[valid])
+    return cells, counts, assigned_ids
+
+
+def check_proseg_layer(
+    latest_path: Path, n_workers: int | None = None
+) -> dict[str, Any]:
+    """Check the stitched ProSeg layer of a latest store in one streaming pass.
+
+    Checks that the table and shape ids are equal, every non-null
+    ``assignment`` is a table id, the per-cell foreground gene counts of the
+    points equal the table's row sums (int64), and the registry entry is the
+    expected one.
+
+    Args:
+        latest_path: The latest store.
+        n_workers: Threads over the points files.
+
+    Returns:
+        ``{"passed": bool, "failures": [...], ...}`` with the counts checked.
+
+    Raises:
+        AteraProsegError: If the store has no stitched ProSeg layer.
+    """
+    import anndata as ad
+    import geopandas as gpd
+    import zarr
+
+    latest = Path(latest_path)
+    if not _layer_complete(latest) or not _points_have_assignment(latest):
+        raise AteraProsegError(
+            "native_proseg row without a stitched ProSeg layer: the latest store "
+            f"lacks {PROSEG_SHAPES_KEY}, {PROSEG_TABLE_KEY}, {PROSEG_LABEL_KEY} or "
+            "the points assignment; run the segment stage (ATERA_PROSEG_STITCH)"
+        )
+    failures: list[str] = []
+    group = zarr.open_group(str(latest / "tables" / PROSEG_TABLE_KEY), mode="r")
+    obs = ad.io.read_elem(group["obs"])
+    x_matrix = ad.io.read_elem(group["X"])
+    table_ids = obs["instance_id"].to_numpy(dtype=np.uint64)
+    row_sums = np.asarray(sparse.csr_matrix(x_matrix).sum(axis=1)).ravel()
+    row_sums = np.rint(row_sums).astype(np.int64)
+    shapes = gpd.read_parquet(latest / "shapes" / PROSEG_SHAPES_KEY / "shapes.parquet")
+    shape_ids = shapes["instance_id"].to_numpy(dtype=np.uint64)
+    if set(table_ids.tolist()) != set(shape_ids.tolist()):
+        failures.append("table and shape ids differ")
+    order = np.argsort(table_ids)
+    sorted_ids = table_ids[order]
+    counted = np.zeros(table_ids.size, dtype=np.int64)
+    unknown = 0
+    files = sorted(points_parquet_dir(latest, POINTS_KEY).glob("*.parquet"))
+    workers = max(n_workers or int(os.environ.get("DASK_NUM_WORKERS", "4") or 4), 1)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for cells, counts, assigned in pool.map(_check_points_file, files):
+            position = np.searchsorted(sorted_ids, assigned)
+            position = np.minimum(position, max(sorted_ids.size - 1, 0))
+            if sorted_ids.size == 0:
+                unknown += int(assigned.size)
+            else:
+                unknown += int((sorted_ids[position] != assigned).sum())
+            if cells.size:
+                rows = order[np.searchsorted(sorted_ids, cells)]
+                np.add.at(counted, rows, counts.astype(np.int64))
+    if unknown:
+        failures.append(f"{unknown} assigned cell ids are not table ids")
+    differing = int((counted != row_sums).sum())
+    if differing:
+        failures.append(
+            f"{differing} cells: points foreground counts != table row sums"
+        )
+    entry = (
+        dict(read_root_attrs(latest).get(MERXEN_SCHEMA_ATTR, {}) or {})
+        .get("segmentations", {})
+        .get(PROSEG_BRANCH, {})
+    )
+    expected = {
+        "shape": PROSEG_SHAPES_KEY,
+        "table": PROSEG_TABLE_KEY,
+        "assignment_column": ASSIGNMENT_COLUMN,
+        "background_column": BACKGROUND_COLUMN,
+        "id_namespace": ORIGINAL_ID_NAMESPACE,
+        "label": PROSEG_LABEL_KEY,
+        "prior": PRIOR_NAME,
+    }
+    wrong = sorted(key for key, value in expected.items() if entry.get(key) != value)
+    if wrong:
+        failures.append(f"registry entry {PROSEG_BRANCH} differs in {', '.join(wrong)}")
+    provenance = dict(read_root_attrs(latest).get(PROVENANCE_ATTR) or {})
+    return {
+        "passed": not failures,
+        "failures": failures,
+        "fingerprint": provenance.get("fingerprint"),
+        "n_cells": int(table_ids.size),
+        "n_points_files": len(files),
+        "n_foreground_gene_rows": int(counted.sum()),
+        "checked_at": datetime.now(UTC).isoformat(timespec="seconds"),
+    }

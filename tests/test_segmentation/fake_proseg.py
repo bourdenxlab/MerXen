@@ -183,7 +183,8 @@ def main() -> int:
     background = ~is_assigned
 
     out = Path(args.output_path)
-    out.mkdir(parents=True, exist_ok=True)
+    # As ProSeg 3.2.0 (main.rs): the output path must exist.
+    assert out.is_dir(), f"Output path {out} does not exist"
     centroids = np.zeros((n_cells, 2), dtype=np.float32)
     for index, label in enumerate(labels):
         rr, cc = np.nonzero(prior == label)

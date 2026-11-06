@@ -440,6 +440,8 @@ def run_tile(cfg: AteraProsegTileConfig, proseg_binary: Path) -> dict[str, Any]:
         row0=cfg.window_px[2],
         num_threads=cfg.num_threads,
     )
+    # ProSeg refuses an output path that does not exist.
+    proseg_dir.mkdir(parents=True, exist_ok=True)
     logger.info("[%s] Tile %s: running ProSeg", cfg.dataset_name, cfg.tile_id)
     run = run_proseg(
         command,

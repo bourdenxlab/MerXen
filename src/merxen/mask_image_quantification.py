@@ -17,7 +17,7 @@ import spatialdata as sd
 from spatialdata.models import TableModel
 
 from merxen.alignment.manifest import NONRIGID_ELEMENT_SUFFIX
-from merxen.config import MaskImageQuantificationConfig
+from merxen.config import MaskImageQuantificationConfig, MiqLayer
 from merxen.io.bead_removal.provenance import (
     IMAGE_PREPROCESSING_ATTR,
     bead_removal_table_metadata,
@@ -222,13 +222,105 @@ def run_mask_image_quantification(
     # The image table and the hybrid-table join each replace a whole table, so
     # the store lock is held from the read until both are persisted.
     with spatialdata_write_lock(latest_path):
-        return _quantify_store(
+        outputs = _quantify_store(
             config,
             latest_path=latest_path,
             mask_path=mask_path,
             paths=paths,
             force_rerun=force_rerun,
         )
+        for layer in config.extra_layers:
+            layer_paths = _quantify_extra_layer(
+                config,
+                layer,
+                latest_path=latest_path,
+                output_dir=output_dir,
+                force_rerun=force_rerun,
+            )
+            outputs.update(
+                {
+                    f"{layer.shape_key}_{key}": value
+                    for key, value in layer_paths.items()
+                }
+            )
+        return outputs
+
+
+def _quantify_extra_layer(
+    config: MaskImageQuantificationConfig,
+    layer: MiqLayer,
+    *,
+    latest_path: Path,
+    output_dir: Path,
+    force_rerun: bool,
+) -> dict[str, Path]:
+    """Quantify one further label layer of the store (``extra_layers``).
+
+    The layer is a label element of the store whose values are the
+    ``instance_id`` of ``layer.shape_key`` (the stitched ATERA ProSeg cells,
+    ``proseg_cell_labels``). It gets its own table and sidecar files (named
+    after the dataset and the shape); the hybrid-cell join of the main layer
+    does not apply. The caller holds the store's write lock.
+    """
+    paths = _output_paths(output_dir, f"{config.dataset_name}_{layer.shape_key}")
+    sdata_obj = sd.read_zarr(latest_path)
+    try:
+        bead_removal = bead_removal_table_metadata(
+            (getattr(sdata_obj, "attrs", None) or {}).get(IMAGE_PREPROCESSING_ATTR)
+        )
+        if (
+            not force_rerun
+            and layer.table_key in sdata_obj.tables
+            and _sidecar_outputs_exist(paths)
+            and _quantified_image_keys(sdata_obj.tables[layer.table_key])
+            == set(_source_image_keys(sdata_obj))
+            and _recorded_bead_removal(sdata_obj.tables[layer.table_key])
+            == bead_removal
+        ):
+            log_status(
+                f"[{config.dataset_name}] Image quantification of "
+                f"{layer.shape_key} already exists; skipping."
+            )
+            return paths
+        mask = _label_element_level0(
+            sdata_obj, layer.mask_label_key, config.dataset_name
+        )
+        result = build_mask_image_quantification_table(
+            sdata_obj,
+            mask,
+            config.dataset_name,
+            table_key=layer.table_key,
+            shape_key=layer.shape_key,
+            tile_size=config.tile_size,
+            bead_removal=bead_removal,
+            source_cell_ids=_shape_source_cell_ids(sdata_obj, layer.shape_key),
+            mask_name=f"label '{layer.mask_label_key}'",
+        )
+        result.table.uns["mask_image_quantification"]["mask_label_key"] = str(
+            layer.mask_label_key
+        )
+        result.summary["mask_label_key"] = str(layer.mask_label_key)
+        parsed_table = TableModel.parse(
+            result.table,
+            region=layer.shape_key,
+            region_key="region",
+            instance_key=INSTANCE_ID_COLUMN,
+        )
+        write_or_replace_element(
+            sdata_obj,
+            layer.table_key,
+            "tables",
+            parsed_table,
+            overwrite=True,
+        )
+        _write_sidecar_outputs(result.table, result.summary, paths)
+        log_status(
+            f"[{config.dataset_name}] Image quantification complete: {layer.table_key}"
+        )
+        return paths
+    finally:
+        del sdata_obj
+        force_release(note=f"after {config.dataset_name} {layer.shape_key} MIQ")
 
 
 def _quantify_store(
