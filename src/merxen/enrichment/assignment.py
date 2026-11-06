@@ -489,10 +489,11 @@ def run_per_shape_assignment_for_dataset(
     """Compute and persist per-shape assignment tables for one enriched dataset.
 
     Vendor nucleus shapes keyed by nucleus row (:data:`NUCLEUS_ROW_SHAPE_KEYS`)
-    are never assigned. With ``segmentation_source="native"`` (which needs
-    ``platform``), only the vendor shapes are handled: the vendor cell shape is
-    registered with ``table_original`` as is (no clone, no spatial join), and
-    no gene vocabulary is read from a ``table`` element.
+    are never assigned. With ``segmentation_source="native"`` or
+    ``"native_proseg"`` (which need ``platform``), only the vendor shapes are
+    handled: the vendor cell shape is registered with ``table_original`` as is
+    (no clone, no spatial join), no gene vocabulary is read from a ``table``
+    element, and the stitched ProSeg shapes keep the table the stitch wrote.
 
     Args:
         dataset_name: Dataset alias for log lines and summaries.
@@ -505,8 +506,9 @@ def run_per_shape_assignment_for_dataset(
         max_ram_gb: Memory limit of the spatial join.
         warn_ram_gb: Memory warning threshold of the spatial join.
         platform: Platform of the store (required for a native store).
-        segmentation_source: ``native`` for a vendor-segmentation store;
-            ``None`` or any other value keeps the Cellpose/ProSeg behaviour.
+        segmentation_source: ``native`` or ``native_proseg`` for a
+            vendor-segmentation store; ``None`` or any other value keeps the
+            Cellpose/ProSeg behaviour.
 
     Returns:
         One summary per table added or registered.
@@ -516,12 +518,15 @@ def run_per_shape_assignment_for_dataset(
     """
     latest_path = Path(latest_path)
     native_spec = None
-    if segmentation_source == "native":
+    if segmentation_source in ("native", "native_proseg"):
         native_spec = find_platform_spec(platform)
-        if native_spec is None or "native" not in native_spec.segmentation_sources:
+        if (
+            native_spec is None
+            or segmentation_source not in native_spec.segmentation_sources
+        ):
             raise ValueError(
-                f"segmentation_source=native needs a platform with a native "
-                f"segmentation, got {platform!r}"
+                f"segmentation_source={segmentation_source} needs a platform with "
+                f"a native segmentation, got {platform!r}"
             )
     # Tables, normalized shapes, and the store's attrs (or, without
     # write_element, the whole store) are written back, so the store lock is

@@ -16,7 +16,12 @@
 > (§8 AT-5 and AT-9, Appendix A "AT-5b ProSeg benchmark"). **AT-6 (2026-11-06):** the native
 > (vendor-segmentation) route runs end to end through Nextflow on the crop and on the full public section,
 > from the AT-5 source stores to clustering and MENDER, and passes every exit check (§1.4, §6.2, §8 AT-6,
-> Appendix A "AT-6 exit runs").
+> Appendix A "AT-6 exit runs"). **AT-9 (2026-11-06):** the opt-in ProSeg route
+> (`segmentation_source=native_proseg`: vendor masks as the prior, 2 mm label-owned tiles, a stitched
+> `reseg` layer) runs end to end on the crop and on the full public section through MENDER on both
+> layers (full section: 30 tiles, 91,431 cells, 8 h 41 min on a busy host, every check passed), and
+> the short ProSeg schedule is confirmed on the densest tile (§6.2, §8 AT-9, Appendix A "AT-9
+> implementation and crop run", "AT-9 full-section run" and "AT-9 final review").
 
 *Names and paths (2026-11-04).* The only dataset used here is the public 10x Atera whole-transcriptome
 dataset of a human hippocampus section (atera-1.1.1, fresh frozen); its name is not written here, and the
@@ -1335,6 +1340,45 @@ numbers are in `stage_resources.json`). The native route uses no `.npy` export: 
 | CLUSTERING_SQUIDPY (prepare + compute + finalize) | 64 / 96 / 64 GB | 2 min / 3.2 GB | 6 min 32 s / 19.4 GB |
 | MENDER (prepare + compute + finalize + import) | 64 / 192 / 64 / 48 GB | 1 min 43 s / 1.0 GB | 6 min 30 s / 17.7 GB |
 
+**ATERA ProSeg route (AT-9, `native_proseg`), measured 2026-11-06.** Both rows ran both layers
+through MENDER. The crop ran at host load 10–55. The full section ran in one Nextflow run from
+11:11 to 19:52 (8 h 41 min wall, 60 tasks, no failure, no retry), at host load 30–345 (other
+sessions' test suites and, for the first 3 h 49 min, the 200 + 600 schedule check of `c2_r1` at
+16 threads beside the 4 tiles); the lowest available host memory was 404 GB.
+
+| Process | Reserved | Crop: time / peak RSS | Full section: time / peak RSS |
+|---|---|---|---|
+| ATERA_PROSEG_PLAN | 2 CPU, 16 GB | 11 s / 1.1 GB | 12 s / 1.5 GB (30 of 35 tiles run) |
+| ATERA_PROSEG_TILE | 16 CPU, 32 GB (×2 on retry), 40 GB cap | 10 min 40 s / 5.5 GB (13.9 M rows); 17 min 50 s / 7.2 GB (29.2 M rows) | 30 tiles, 4 at once: 3 min 15 s (0.1 M rows) to 2 h 1 min (`c2_r1`, 102.6 M rows); peak 24.1 GB (trace; 22.7 GB anonymous). 1.69 B exported rows, 26.2 h of task time, tile phase 7 h 26 min wall. Earlier single-tile checks of `c2_r1` at a quieter time: 53 min 51 s / 24.2 GB at 16 CPUs, 40 min 15 s / 25.0 GB at 32 |
+| ATERA_PROSEG_STITCH | 16 CPU, 64 GB | 30 s / 7.8 GB; a re-run on `-resume` is a 10 s skip | 6 min 29 s / 46.7 GB (a 42,548 × 61,369 raster, 409 points files, 1.41 B rows rewritten) |
+| ENRICH (with the layer check) | 8 CPU, 64 GB | 46 s | 6 min 33 s / 13.6 GB |
+| VIEWER_CACHE (both layers' pyramids) | 8 CPU, 60 GB | — | 3 min 17 s / 11.4 GB |
+| MASK_IMAGE_QUANTIFICATION (both layers) | 4 CPU, 160 GB | 41 s | 6 min 40 s / 11.5 GB |
+| VALIDATE_ANALYSIS_LAYER, per layer | 1 CPU | — | 21 s / 4.9 GB |
+| QC, per layer | 4 CPU, 48 GB | as native | 2 min 14 s / 7.1 GB |
+| VISUALIZE, per layer | 4 CPU, 64 GB | as native | 4 min 49 s – 5 min 22 s / 6.5 GB |
+| SPATIAL_GENE_ANALYSIS, per layer | 12 CPU, 120 GB | as native | 14 min 18 s – 14 min 56 s / 22.8 GB |
+| CLUSTERING_SQUIDPY (prepare + compute + finalize), per layer | 64 / 96 / 64 GB | as native | about 9.5–10 min / 19.4 GB |
+| MENDER (prepare + compute + finalize + import), per layer | 64 / 192 / 64 / 48 GB | as native | about 10 min / 24.0 GB |
+
+Stitch to MENDER on the full section takes 1 h 15 min wall for both layers. Per-tile numbers
+(time, RSS, rows, owned and empty cells, prior weight, disk) are in
+`$MERXEN_EVIDENCE_ROOT/atera_at9/tiles_full.tsv`; the stage table in `stage_table_full.md`.
+Nextflow does not start the tiles in plan or size order: the largest tile still pending at
+17:18 (`c2_r2`, 102.8 M rows) set the end of the tile phase. Starting the largest tiles first
+would shorten it, but the order in which Nextflow releases tasks held by `maxForks` is not
+controlled by the emission order; left as a possible improvement.
+
+| Disk (full section, ProSeg route) | Measured |
+|---|---|
+| Latest store, bytes not shared with the source | **29.5 GB**: rewritten points 25.4 GB, clustering tables 1.07 GB (vendor) and 0.93 GB (ProSeg), image pyramid 0.74 GB, `table_original` 0.49 GB, `table_MOSAIK_proseg` 0.41 GB, ProSeg labels and their viewer pyramids 0.14 GB, shapes 0.10 GB, MIQ tables 15 MB |
+| Tile results (30 tiles, inputs dropped) | 2.9 GB |
+| Work directories | Clustering about 12 GB per layer (h5ad outputs), MENDER about 5 GB per layer, the rest under 1 GB |
+
+The crop's rewritten points take 0.68 GB (no longer hardlinked to the source); the ProSeg labels,
+table and shapes add 19 MB; each tile result keeps 40–181 MB (cells, claims, polygons, ProSeg's
+cell metadata and table).
+
 | Disk (full section) | Measured |
 |---|---|
 | Latest store, bytes not shared with the source | **2.56 GB**: clustering table 1.07 GB, `table_original` 0.49 GB, image pyramid 0.74 GB, label pyramids and outlines 0.08 GB, shapes 0.10 GB, metadata and sidecar copies 0.07 GB, MIQ table 7 MB. The 38.2 GB of payloads are hardlinks |
@@ -1717,6 +1761,117 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
     matches the floor convention of the vendor masks.
   - The short schedule (100 burn-in + 200 samples) by default, after checking it on one dense tile.
   - Report the number of cells left with no transcripts.
+- **Status (2026-11-06): implemented; the crop and the full section run end to end.** Opt-in
+  `segmentation_source=native_proseg` (aliases `vendor_proseg`, `instrument_proseg`); `native` stays
+  the default. The segment stage is `NATIVE_LATEST`, `ATERA_PROSEG_PLAN`, one `ATERA_PROSEG_TILE`
+  task per 2 mm tile (100 µm halo, label-owned: a vendor label belongs to the tile whose core holds
+  its vendor centroid) and `ATERA_PROSEG_STITCH`, which writes the layer `reseg` into the latest
+  store (shapes `MOSAIK_proseg`, table `table_MOSAIK_proseg`, labels `proseg_cell_labels`, points
+  columns `assignment` and `background`; registry branch `proseg`, alias `reseg`, with `label` and
+  `prior`). ProSeg instance ids are the vendor labels. The effective prior weight is fixed at 140
+  per tile (the multiplier undoes ProSeg's own scaling). ENRICH checks the layer; MIQ, the viewer
+  cache, QC, VISUALIZE, spatial gene analysis, clustering and MENDER run on both layers with
+  `analysis_segmentation=all`. Docs: `docs/stages/segmentation.md` (ATERA ProSeg route). Evidence:
+  `$MERXEN_EVIDENCE_ROOT/atera_at9/`.
+  - **Crop (`ATERA_PUB_CROP`, 2 tiles, one Nextflow row through MENDER):** 32 tasks, no failure.
+    Tiles: 13.9 M and 29.2 M rows, 10 min 40 s and 17 min 50 s at 16 threads (sampling 1.9 and
+    3.0 s per iteration on a host at load 20–55), 5.5 and 7.2 GB peak RSS; reported prior weight
+    139.57 and 139.59. Stitch 30 s, 7.8 GB: 3,013 cells (every vendor label), 4 with no
+    transcripts, 18,138,163 assigned rows, 292 seam conflicts (0.0016%). The verification passes:
+    source store unchanged (927 files), points files and row counts unchanged and the build's points
+    index still matching, table and shape ids equal, every assignment a table id, int64 row sums
+    equal to the foreground counts, ENRICH check recorded, both layers through MIQ, the viewer cache,
+    QC, VISUALIZE, spatial gene analysis, clustering and MENDER. A `-resume` re-runs no tile; the
+    stitch task re-runs as a 10 s skip (fingerprint), ENRICH and its check skip.
+  - **ProSeg against the vendor layer (crop):** ProSeg assigns 44.6% of gene transcripts (vendor
+    46.5%), absorbs 15.4% of the vendor-unassigned ones and releases 21.7% of the vendor-assigned
+    ones (70.2% stay in the same cell, 8.1% move); median area ratio 0.83 (p05–p95 0.49–1.83),
+    total area −2.2%. These match the CSV benchmark (`run_s200`: 45.4%, 16.6%, 21.5%, 0.85), so the
+    nuclear compartment model the Xenium parquet layout turns on does not change the result on the
+    crop (Q3 of the AT-9 design: compartment model kept on).
+  - **Dense-tile check (`ATERA_PUB` tile `c2_r1`, the benchmark's [2,1]; `stop_stage=segment`,
+    `atera_proseg_tile_subset=c2_r1`, 16 threads):** 102.6 M rows exported, 102.4 M kept, 7,008
+    labels in the window, 5,716 owned. 53 min 51 s task time (ProSeg 48.8 min: burn-in 2.5 s and
+    sampling 8.8 s per iteration, against 1.76 and 5.83 s at 32 threads in the benchmark), 22.7 GB
+    peak anonymous RSS (trace 24.2 GB) against the 32 GB reservation and the 40 GB cap. Reported
+    prior weight 139.77 (benchmark auto weight 146.17). The recount equals ProSeg's count matrix;
+    39 owned cells (0.7%) end with no transcripts; no owned cell reaches an interior window edge.
+    Against the CSV benchmark run on the same owned cells: median area ratio 0.841 (benchmark
+    0.844), 41.7 M against 41.1 M assigned rows, and 57.7% of the rows either run assigns to these
+    cells are assigned to the same cell by both (two CSV runs on the crop: 62.1%; ProSeg's chain
+    noise, AT-5(b)). The compartment model therefore stays on. Re-run at 32 threads
+    (`atera_proseg_tile_cpus=32`): 40 min 15 s task time, burn-in 1.68 s and sampling 5.82 s per
+    iteration (benchmark 1.76 and 5.83 s; total 1.07× the benchmark's 37 min 42 s), 23.5 GB peak
+    anonymous RSS (trace 25.0 GB), 73 owned cells with no transcripts (benchmark: 74). Halving the
+    threads costs 1.34× the time, so the default stays 16 threads with 4 tiles at once.
+  - **Schedule check on the dense tile (2026-11-06): the short default stays.** The same tile
+    `c2_r1` at 200 burn-in + 600 samples (+ 20 hillclimb, 100 recorded; one run, 16 threads, at
+    nice 15 beside the full-section run, host load 30–175) against three short-schedule runs (the
+    16- and 32-thread checks and the full-section tile), on the 5,716 owned cells
+    (`dense_schedule_compare.json`):
+
+    | | Short runs (3) | Long 200 + 600 |
+    |---|---|---|
+    | Foreground rows on owned cells | 41.7–43.3 M | 42.2 M |
+    | Owned cells with no transcripts | 39–73 | 50 |
+    | Median area ratio to vendor (p05–p95) | 0.841–0.852 (0.47–0.49 to 1.56–1.64) | 0.811 (0.45–1.78) |
+    | Total area change | −1.6% to −0.9% | −0.6% |
+    | Same cell among rows either run assigns, short vs short / short vs long | 58.5–59.2% | 57.1–57.8% |
+    | Same cell when both assign | 84.7–85.0% | 83.7–84.0% |
+    | Per-cell count Pearson, short vs short / short vs long | 0.991 | 0.984–0.985 |
+    | Per-cell area Pearson | 0.977–0.978 | 0.961–0.964 |
+
+    The long chain differs from the short ones a little more than the short ones differ from each
+    other (about 1.3 points of agreement), and it widens the area distribution (the same direction
+    as the crop's 1,200-sample run in AT-5(b): median 0.80 against 0.85, p95 2.11 against 1.94).
+    Totals, assigned rows and empty cells stay inside the short runs' spread. The long run took
+    3 h 49 min wall (ProSeg sampling 16.8 s per iteration under contention), 3.4 times the short
+    schedule's ProSeg time, for a shift smaller than the chain noise between two short runs, so the
+    default stays 100 + 200 + 20. Longer schedules remain available through the
+    `atera_proseg_*` schedule params.
+  - **Full section (`ATERA_PUB`, one Nextflow row through MENDER on both layers, 2026-11-06):** 60
+    tasks, no failure, no retry, no prior-weight restart; 8 h 41 min wall on a host at load 30–345
+    (§6.2). 30 tiles, 1.69 B exported rows (halos included), reported prior weights 138.76–139.99.
+    The stitch keeps **91,431 ProSeg cells, every vendor cell once** (no vendor label without a
+    ProSeg cell, no owned cell without a polygon), **806 (0.88%) with no transcripts**, 572.8 M
+    assigned rows, 160,659 seam conflicts (0.028% of the assigned rows; 1,592 cells lose some),
+    no owned cell near an interior window edge. The verification
+    (`verify_full.json`) passes: source store unchanged (3,352 files: inode, size, mtime), points
+    files and rows unchanged (409 files, 1,409,601,228 rows, every transcript, with
+    `original_assignment`, `assignment` and `background` for the viewer), points index fingerprint
+    still matching, table and shape ids equal and unique, all 91,431 polygons valid and non-empty,
+    every assignment a table id, table row sums equal to the per-cell foreground counts of the
+    points (572,765,066), registry entry `proseg` (label `proseg_cell_labels`, prior
+    `vendor_cell_labels`, ProSeg 3.2.0 identity), ENRICH layer check recorded, viewer pyramids of
+    both layers, MIQ and clustering tables of both layers, and VISUALIZE, spatial gene analysis,
+    clustering, MENDER and QC outputs for both layers (QC as `atera/<layer>/qc/qc_out`, 5 files each; the
+    first version of the check looked in a folder that does not exist and is replaced by the
+    final review's re-run).
+  - **ProSeg against the vendor layer (full section, `layer_compare_full.json`):** ProSeg assigns
+    **40.6% of gene transcripts (vendor 45.3%)**; it absorbs 12.9% of the vendor-unassigned ones and
+    releases 25.9% of the vendor-assigned ones (66.0% stay in the same cell, 8.1% move to another);
+    **median area ratio 0.81** (p05–p95 0.48–1.71), total cell area −3.2%. Denser than the crop
+    (44.6% / 46.5%, area ratio 0.83), as the AT-5(b) dense tile predicted (46.5% / 53.1%, 0.83).
+  - **Clustering of the two layers (`cluster_compare_full.json`):** clustering QC keeps 88,960
+    ProSeg cells against 91,381 vendor cells (median 4,323 against 4,812 counts and 2,291 against
+    2,687 genes per cell); both give 12 Leiden clusters and 19 MENDER domains. On the 88,958 shared
+    cells (ProSeg ids are the vendor labels) Leiden ARI 0.88 (NMI 0.85), broad class ARI 0.87 with
+    93.5% the same label, neuron split 96.7% the same, MENDER domains ARI 0.65. Both layers agree as
+    well with the vendor Azimuth broad labels (ARI 0.659 ProSeg, 0.664 vendor). The class that
+    moves is the vendor layer's mixed "Fibroblasts" cluster (7,244 cells, against 4,748 on ProSeg):
+    in ProSeg 752 of its cells go to Vascular cells and 611 to Microglia; and 1,730 vendor
+    "Oligodendrocyte precursors" (mature oligodendrocytes, AT-6 note on the broad labels) become
+    Neurons on ProSeg (not checked; a likely cause is neuronal transcripts entering small glial
+    cells next to neurons). The broad labels stay provisional for ATERA (AT-6).
+  - **Cells without label pixels:** 9 ProSeg cells (0.25–4 µm² polygons, covered by later cells
+    or smaller than a pixel centre) have no pixel in `proseg_cell_labels`, so the ProSeg MIQ table
+    has 91,422 rows; the crop has 1. Found by this run and now reported by the stitch
+    (`cells_without_label_pixels`, with a warning); the full-section store was stitched before
+    the change and skips a re-stitch (same fingerprint), so its count comes from
+    `label_pixels_full.json`. After the final review, MIQ also lists the shapes without a row
+    in its table's `uns` and summary (`shapes_without_label_pixels`, with a warning) and adds
+    the list to an older table without quantifying again; the full-section store got it that
+    way (the 9 ids, checked by `verify_full.json`).
 
 ### AT-10 optional, on request
 
@@ -2041,6 +2196,73 @@ stores through MENDER (§1.4, §6.2). Findings and changes:
 | A `-resume` re-runs ENRICH and every stage that takes the latest store as input: ENRICH rewrites the store's root `zarr.json`, which changes the directory's modification time that Nextflow hashes | Not changed in AT-6: the reruns are skips (ENRICH 1.5 min on the full section) and the analysis stages downstream of VISUALIZE stay cached. Recorded for the AT-7 restart work |
 | The first hardlink run made the source stores' linked payloads read-only (143 crop files, 1,543 full-section files) | By design (`readonly_payloads`); bytes, inodes and modification times are unchanged. Writing to those files now fails instead of corrupting the source |
 | MIQ on the full section was unmeasured (WP-X) | 3 min 9 s, 9.6 GB peak, against a 160 GB reservation |
+
+**AT-9 implementation and crop run (2026-11-06).** The ProSeg route for ATERA
+(`segmentation_source=native_proseg`; §8 AT-9). Findings and changes:
+
+| Finding | Change or decision |
+|---|---|
+| ProSeg 3.2.0 refuses an `--output-path` that does not exist (found on the first real crop tile) | The tile task creates it; the fake ProSeg of the tests now refuses a missing one too |
+| With two ATERA sources, ENRICH's native-store fallback (`segmentation_sources == ("native",)`) turned false, and per-shape assignment ran its Cellpose path (spatial joins of every shape, including the 1.4 B-row points against `MOSAIK_proseg`) for any source other than `native` | The fallback keys on the default source; per-shape assignment treats `native_proseg` as native. Tests for both |
+| A failed ENRICH's partial cleanup would delete `table_MOSAIK_proseg`, which ENRICH cannot rebuild | Tables of registry branches with a `prior` are never derived tables |
+| ATERA refused to draw any mask that is not a vendor label element | A registry branch with a `label` element is backed by it (`MOSAIK_proseg` -> `proseg_cell_labels`) |
+| `sanity_plots._crop_points` and `qc.gene_comparison` use a points `background` column whenever one exists, whatever the assignment column | Not reached on ATERA (overlays use the rasterised path with the registry column; `assigned_only` has no caller); a grep test lists every generic `assignment` pick with its reason |
+| Changed test text | The `native` golden changes the error text of two cases (the list of sources): the ATERA-only `atera_cellpose_only_error` and the platform-independent `unknown_error`, so an unknown `segmentation_source` on a XENIUM or MERSCOPE row now also lists `native_proseg` (message only; no task input or hash changes; corrected by the final review, which found the second case is not ATERA-only; for the user's OK). The ENSURE_PROSEG trigger pin of `test_analysis_segmentation_branches.py` follows the new trigger (same value). No process script or pin changed |
+| The Xenium parquet layout turns on ProSeg's nuclear compartment model, untested at the full schedule | Crop and dense tile agree with the CSV benchmark (above); kept on, `atera_proseg_nuclear_compartment=false` is the fallback |
+| `-resume` | No tile re-runs (their inputs are values); the stitch task re-runs and skips by fingerprint; ENRICH and its layer check skip |
+
+**AT-9 reviews (2026-11-06).** A code and data review and a scale and mutation review of the AT-9
+branch. Both rebuilt the crop stitch independently and found no defect in the stitching, the pixel
+convention, the parquet layout, the filtering or the layer registration. Findings and changes:
+
+| Finding | Change or decision |
+|---|---|
+| A re-stitch (another prior weight or schedule) rewrote the ProSeg layer in place but kept the tables computed from the old cells; MIQ's skip check (table, sidecars, image keys, bead removal) would keep intensities of the old polygons under the same vendor ids | A stitch that writes deletes every table of region `MOSAIK_proseg` other than `table_MOSAIK_proseg` (image quantification, clustering) and reports them; test with a changed tile manifest (also covers the stitch skip ignoring the fingerprint) |
+| One failed tile dropped the row after `segment` on both layers, with no message naming the tile (`failOnIgnore` exits non-zero) | The log names the failed tiles of each row and says `-resume` re-runs only those. A tile task is retried once unless it exits 99 (watchdog) or 3 (new: a refusal a retry would repeat); a failed ProSeg process exits 1 and is retried. Routing the row's native layer on alone was rejected: the row asks for both layers, and finishing it with one would be a quieter partial result than a named failure that `-resume` repairs cheaply. Wiring test with a failing tile (exit 3: one attempt; exit 1: two) |
+| The printed prior weight is lower than requested by the share of rows ProSeg's cell-free filter drops (crop 0.31%; at most 0.68% per tile on the full section from a 2% sample); a section with large cell-free areas could pass 2% and fail its tiles | A tile whose printed weight is off restarts once with the multiplier rescaled by requested / printed (ProSeg's factor is fixed by the data), and fails only if it is still off; restarts are in the manifest |
+| `atera_proseg_allow_untested_version=true` passed the preflight, but every tile refused any version but 3.2.0 | The flag reaches the tile config (only when true, so default task hashes are unchanged) and the tile runs that version with a warning |
+| The stitch report summed only the vendor labels without a ProSeg cell; owned cells without a polygon reached only the tile manifests | Both are listed and counted in the report, with a warning when either is non-zero (their transcripts become background) |
+| `seam_overlap_pixels` mostly counted overlaps of two cells of one tile (crop: 567 of 568 pairs) | Split into `overlap_pixels_within_tile` and `overlap_pixels_across_tiles` |
+| A tile trusted the plan's source build fingerprint | The tile compares it with the source store's build marker before exporting |
+| ProSeg writes `membership_debug.txt` and `rebalanced_membership_debug.txt` to its working directory (the repo root when tests ran from there) | ProSeg runs in its output folder (`work/proseg`); the command's paths are absolute |
+| The stitch's label raster (10.4 GB on the full section) was removed only on success | Removed whether or not the stitch succeeds |
+| The `export_tile` docstring said a row below `min_qv` raises; the code warns and drops it | Docstring fixed; a test now covers the QV filter |
+| Surviving mutants: claims naming points files the store lacks, two tiles owning one label, two ProSeg cells of one label, the export QV filter, the float-rounding correction of the core index, the prior-weight multiplier (killed only by the real-ProSeg test) | One test each (the multiplier on a synthetic store with more than 100 transcripts per cell); all seven mutants are now killed |
+| The `nextflow.config` comment gave the dense tile's peak as 21.7 GB | 24.2 GB (16 threads) and 25 GB (32 threads) against the 32 GB reservation; the watchdog cap (40 GB) sits above the reservation, so an executor that enforces memory kills first and the retry gets 64 GB |
+| A failed tile keeps its inputs in the work folder (1–2 GB of parquet, up to 430 MB of prior) | Kept: they are what a failure is diagnosed from; finished tiles drop them unless `atera_proseg_keep_tile_inputs` |
+| A halo tile's claim on a transcript beats the core tile's background; the core rule settles only two claims | As designed: in effect the tile that owns the cell decides, which is the requirement "transcripts assigned in halos resolved by the owning tile". For the user to confirm, together with the seam polygons of cells that lose a conflict (AT-9 final review) |
+| The effective prior weight is 140 on every tile; ProSeg's automatic weight follows local density (about 113 and 152 on the two crop tiles) | Open question for the user with Q1–Q8 of the design. Crop and dense tile agree with the benchmark; sparse tiles get a stronger prior than the benchmark's automatic one |
+| A `-resume` re-runs 8 tasks (the stitch, ENRICH, VIEWER_CACHE, MIQ, both layer validations, both QC); QC recomputes in full | Recorded with AT-6's ENRICH `-resume` finding for the AT-7 restart work; the full-section stitch (30 tiles, a 42,548 x 61,369 raster) has not run yet |
+| Changed test text missing from the implementation entry above | The golden harness span signatures gained `rowSource = null`; the process-pin count went from 44 to 47 (three new pins, none changed); the rule that a default keeping no layer resolves to every layer also applies to `cellpose_only`, which no platform allows today. All need the user's OK |
+
+**AT-9 full-section run (2026-11-06).** `ATERA_PUB` through the ProSeg route and both layers to
+MENDER (§6.2, §8 AT-9; evidence `$MERXEN_EVIDENCE_ROOT/atera_at9/`: `run_full.sh`, trace, report,
+timeline, `verify_full.json`, `tiles_full.tsv`, `layer_compare_full.json`,
+`cluster_compare_full.json`, `dense_schedule_compare.json`, `disk_full.json`). Findings and
+changes:
+
+| Finding | Change or decision |
+|---|---|
+| The run passes every check on the first attempt: 30 tiles, no retry, no prior-weight restart, every vendor cell once, 806 empty cells reported, table counts equal to the points assignment, source store unchanged | None |
+| 9 ProSeg cells (0.01%) have no pixel in `proseg_cell_labels` (tiny or covered polygons) and are silently absent from the ProSeg MIQ table; their control counts are zero | The rasteriser counts each cell's final pixels; the stitch report lists them (`cells_without_label_pixels`) and warns. Tests on covered, sub-pixel and off-grid polygons. Mask-based stages still leave them out (they have no mask) |
+| Short schedule against 200 + 600 on the densest tile | Short default kept (§8 AT-9: the long chain differs by about 1.3 points of agreement, less than the chain noise between short runs, at 3.4× the ProSeg time). The longer chain widens the area distribution (median ratio 0.81 against 0.84–0.85), as on the crop in AT-5(b) |
+| Tile phase 7 h 26 min on a host at load up to 345, with 4 tiles at once and the schedule check beside them; the largest pending tile started last | Concurrency default kept (4). Largest-first ordering is a possible improvement; Nextflow's release order under `maxForks` is not the emission order |
+| The ProSeg route adds 29.5 GB to the latest store (25.4 GB of rewritten points) against 2.6 GB for the native route | As designed (the points carry the second assignment column); recorded in §6.2 |
+| ProSeg cells carry fewer counts (median 4,323 against 4,812); clustering QC drops 2,471 ProSeg cells against 50 vendor cells | Recorded; follows from the 25.9% release and the 806 empty cells. No threshold change |
+
+**AT-9 final review (2026-11-06).** An independent check of the full-section outputs against
+the report (source store, trace, tiles, table, shapes, points, labels, downstream, clustering
+numbers, AT-1 guards) found no blocking problem. Findings and changes:
+
+| Finding | Change or decision |
+|---|---|
+| The label-pixel fix does not reach the existing store (the stitch format version and fingerprint are unchanged), and MIQ of the ProSeg layer left out the 9 cells without a label pixel without saying so | MIQ of an extra layer lists the shapes it has no row for in its table's `uns` and summary (`shapes_without_label_pixels`, `n_shapes_without_label_pixels`) and warns; a table without the field gets it on the next run without quantifying again. Tests with a blanked label and an older table. The full-section store was updated that way; the docs say stores stitched before the report field lack it there |
+| A cell that loses a seam conflict keeps its full polygon: 174 cross-tile polygon pairs overlap by more than 1 µm² (48 by more than 10 µm², at most 91.5 µm²); the label raster settles their pixels by ascending id, not by the transcripts' core rule, so MIQ and control counts can give a pixel to another cell than its transcripts | Added to the pending "halo tile claim vs owning tile" decision (AT-9 reviews). Options: clip the losing polygon, or rasterise cross-tile overlap pixels by the core rule. Scale: the 160,659 conflicts are 0.028% of the assigned rows (1,592 cells). Documented in the segmentation stage doc |
+| `verify_full.json` never checked QC (it looked in `atera/qc`), but §8 cites it for QC outputs of both layers | The check looks in `atera/<layer>/qc/qc_out` (5 files per layer) and also checks the MIQ field above; re-run (`verify_full.json`, previous result kept as `verify_full_v2.json`) |
+| The evidence `manifests/full_tile_plan.json` was the dense-tile check's plan (`tile_subset: ["c2_r1"]`) | Renamed `dense_tile_plan.json`; `full_tile_plan.json` is now the full run's published plan |
+| The `native` golden's `unknown_error` case is not ATERA-only, so XENIUM/MERSCOPE rows see the new error text | Docstring and the AT-9 entry above corrected; listed for the user (message only, no hash change) |
+| The tiles (2.7 GB) and the stitch report were published as links into the work directory; cleaning it would lose what a re-stitch needs | Tiles and the report are published by copy (publishDir only: no script pin or task hash changes); the store link and placeholders stay links. The full run's published tiles and report were materialised the same way |
+| Tiles do not start largest-first (`c2_r2` started last and set the end of the tile phase) | Already recorded (AT-9 full-section run); not a defect |
 
 **AT-6 reviews (2026-11-06).** An end-to-end data review and a code review of the AT-6 branch.
 Findings and changes:

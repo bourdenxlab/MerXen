@@ -65,7 +65,7 @@ forward.
 | `output_dir` | Where to write `enrich_out/` summaries. |
 | `persistent_output_path` | Durable "latest" zarr path under `results/.../latest/`. |
 | `transform_path` | Optional transform override, same semantics as in segmentation. |
-| `segmentation_source` | `cellpose_proseg` (default) or `native` (ATERA vendor segmentation; see below). |
+| `segmentation_source` | `cellpose_proseg` (default), `native` (ATERA vendor segmentation; see below) or `native_proseg` (the same, plus the check of the stitched ProSeg layer). |
 | `native_label_check` | Run the native label check (default `true`; native rows only). |
 
 ## Walkthrough
@@ -193,6 +193,28 @@ Native outputs in `enrich_out/`:
 |------|----------|
 | `<dataset>_native_label_check.json` | `passed`, `checks` and `failures`; mismatch counts and tolerance, nucleus attribution and `overlaps_nucleus` agreement, the pixel size and arithmetic used (`pixel_precision`) and whether the pixel size agrees with the store's points transform. |
 | `<dataset>_per_shape_assignment_summary.csv` | One `native_table_original` row. |
+
+## ATERA ProSeg rows (`segmentation_source=native_proseg`)
+
+The ProSeg layer of a `native_proseg` row is written by `ATERA_PROSEG_STITCH`
+([segmentation](segmentation.md#atera-proseg-route-native_proseg-at-9)), not by
+`ENRICH`. ENRICH runs the native enrichment above and then checks the layer in
+one streaming pass over the points:
+
+- the ids of `table_MOSAIK_proseg` and `MOSAIK_proseg` are equal;
+- every non-null `assignment` is a table id;
+- per cell, the count of gene rows with that `assignment` and not
+  `background` equals the table's row sum (int64);
+- the registry entry `proseg` has the expected shape, table, columns, id
+  namespace, `label` and `prior`.
+
+The result is written to `enrich_out/atera_proseg_layer_check.json` and to
+`attrs["merxen_atera_proseg"]["enrich_check"]`; it is not repeated while the
+stitch fingerprint is the same. A row whose store has no stitched layer stops
+with "native_proseg row without a stitched ProSeg layer". Per-shape assignment
+treats the row as native, so `MOSAIK_proseg` keeps the stitched table, and the
+partial-enrichment cleanup never removes the table of a registry branch that
+records a `prior` (`table_MOSAIK_proseg`): enrichment cannot rebuild it.
 
 ## What "per-shape" means
 

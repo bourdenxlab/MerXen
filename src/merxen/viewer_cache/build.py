@@ -473,8 +473,10 @@ def vendor_label_keys(sdata: Any, platform: str) -> dict[str, str]:
     A platform that ships its segmentation as label images aligned with its
     original shapes (``PlatformSpec.original_label_keys``, ATERA) gets its
     viewer base masks from those labels: their values are the shapes'
-    ``instance_id``. Only pairs whose shape and label are both in the store
-    are returned; XENIUM and MERSCOPE declare none.
+    ``instance_id``. On such a platform a registry branch with a ``label``
+    element (the stitched ProSeg layer of a ``native_proseg`` row) is backed
+    by that element in the same way. Only pairs whose shape and label are both
+    in the store are returned; XENIUM and MERSCOPE declare none.
 
     Args:
         sdata: The store.
@@ -488,13 +490,29 @@ def vendor_label_keys(sdata: Any, platform: str) -> dict[str, str]:
         return {}
     labels = {str(k) for k in sdata.labels}
     shapes = {str(k) for k in sdata.shapes}
-    return {
+    found = {
         shape_key: label_key
         for shape_key, label_key in zip(
             spec.original_shape_keys, spec.original_label_keys, strict=False
         )
         if shape_key in shapes and label_key in labels
     }
+    # Registry branches that carry their own label element on the image grid
+    # (the stitched ATERA ProSeg layer: MOSAIK_proseg -> proseg_cell_labels).
+    registry = (sdata.attrs.get(MERXEN_SCHEMA_ATTR) or {}).get("segmentations") or {}
+    for entry in registry.values():
+        if not isinstance(entry, dict) or entry.get("coordinate_variant_of"):
+            continue
+        shape_key, label_key = entry.get("shape"), entry.get("label")
+        if (
+            shape_key
+            and label_key
+            and str(shape_key) in shapes
+            and str(label_key) in labels
+            and str(shape_key) not in found
+        ):
+            found[str(shape_key)] = str(label_key)
+    return found
 
 
 def _refuse_rasterised_mask_on_vendor_platform(platform: str, shape_key: str) -> None:

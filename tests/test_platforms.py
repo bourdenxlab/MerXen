@@ -25,6 +25,7 @@ from merxen.platforms import (
     segmentation_layers,
     spec_file_pixel_size,
     supported_platforms,
+    uses_vendor_segmentation,
 )
 
 
@@ -99,10 +100,11 @@ def test_atera_fields() -> None:
             "experiment.spatial",
         ),
         mask_pixel_convention="corner",
-        segmentation_sources=("native",),
+        segmentation_sources=("native", "native_proseg"),
         default_segmentation_source="native",
         original_label_keys=("cell_labels", "nucleus_labels"),
         rasterised_transcript_plots=True,
+        proseg_label_key="proseg_cell_labels",
     )
     assert spec.original_shape_keys == ("atera_cell_boundaries", "atera_nucleus")
     assert len(spec.original_label_keys) == len(spec.original_shape_keys)
@@ -116,6 +118,7 @@ def test_cellpose_platforms_keep_the_new_field_defaults(platform: str) -> None:
     assert spec.default_segmentation_source == "cellpose_proseg"
     assert spec.original_label_keys == ()
     assert spec.rasterised_transcript_plots is False
+    assert spec.proseg_label_key is None
 
 
 def test_segmentation_layers_per_source() -> None:
@@ -128,6 +131,8 @@ def test_segmentation_layers_per_source() -> None:
         "proseg_hybrid",
     )
     assert segmentation_layers("cellpose_only") == ("proseg_mask", "original_seg")
+    # AT-9: the ProSeg layer first, as the "all" order of XENIUM and MERSCOPE.
+    assert segmentation_layers("native_proseg") == ("reseg", "original_seg")
     for spec in PLATFORM_SPECS.values():
         assert spec.default_segmentation_source in spec.segmentation_sources
     with pytest.raises(ValueError, match="Unknown segmentation source"):
@@ -308,3 +313,18 @@ def test_spec_file_pixel_size(
     path.write_text(content)
     assert spec_file_pixel_size(path) == expected
     assert spec_file_pixel_size(tmp_path / "missing.json") is None
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("native", True),
+        ("native_proseg", True),
+        ("cellpose_only", False),
+        ("cellpose_proseg", False),
+        (None, False),
+    ],
+)
+def test_uses_vendor_segmentation(source: str | None, expected: bool) -> None:
+    """Both vendor sources keep NATIVE_LATEST; the Cellpose sources do not."""
+    assert uses_vendor_segmentation(source) is expected

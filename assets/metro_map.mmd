@@ -72,10 +72,12 @@ graph LR
         proseg_segment[ProSeg refine]
         proseg_hybrid[ProSeg hybrid]
         native_latest[Vendor masks]
+        atera_proseg[ProSeg tiles]
 
         cellpose_nuclei_segment -->|merscope,xenium| cellpose_segment
         cellpose_segment -->|merscope,xenium| proseg_segment
         proseg_segment -->|optional| proseg_hybrid
+        native_latest -->|optional| atera_proseg
     end
 
     subgraph tables [Enrichment and QC]
@@ -150,6 +152,7 @@ graph LR
     build_spatialdata -->|merscope,xenium| cellpose_nuclei_segment
     build_spatialdata -->|atera| native_latest
     native_latest -->|atera| enrich
+    atera_proseg -->|optional| enrich
     proseg_segment -->|merscope,xenium| enrich
     proseg_hybrid -->|optional| enrich
     qc -->|optional| mecr_reference

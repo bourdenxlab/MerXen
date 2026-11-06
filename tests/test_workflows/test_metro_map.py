@@ -60,6 +60,11 @@ STATION_ALIASES = {
         "CLUSTERING_SQUIDPY_COMPUTE",
         "CLUSTERING_SQUIDPY_FINALIZE",
     },
+    "atera_proseg": {
+        "ATERA_PROSEG_PLAN",
+        "ATERA_PROSEG_TILE",
+        "ATERA_PROSEG_STITCH",
+    },
     "mender": {
         "MENDER_PREPARE",
         "MENDER_COMPUTE",

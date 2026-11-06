@@ -38,7 +38,6 @@ import logging
 import math
 import os
 import signal
-import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -46,7 +45,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from types import TracebackType
 from typing import Any, Final
 
 import dask
@@ -73,7 +71,15 @@ from merxen.io.spatialdata_io import (
     write_spatialdata_zarr,
 )
 from merxen.io.spatialdata_schema import INSTANCE_ID_COLUMN
-from merxen.memory import force_release
+from merxen.memory import (
+    RSS_LIMIT_EXIT_CODE,
+    force_release,
+    process_tree_anonymous_rss_bytes,
+)
+from merxen.memory import RssWatchdog as _TreeRssWatchdog
+from merxen.memory import (
+    _anonymous_rss_bytes as _anonymous_rss_bytes,
+)
 from merxen.path_utils import remove_path
 from merxen.platforms import platform_spec
 
@@ -93,10 +99,6 @@ IMAGE_KEY: Final = platform_spec("ATERA").native_image_key
 CELL_SHAPES_KEY: Final = "cell_boundaries"
 NUCLEUS_SHAPES_KEY: Final = "nucleus_boundaries"
 TABLE_KEY: Final = "table"
-#: Exit status of a build stopped by the watchdog. It differs from 137 (a
-#: SIGKILL from the kernel or the scheduler), so the workflow retries an
-#: external kill with more memory but not a build that hit its own cap.
-RSS_LIMIT_EXIT_CODE: Final = 99
 #: AteraBuildConfig fields that change how the build runs, not what it writes.
 RUNTIME_ONLY_FIELDS: Final = frozenset({"max_rss_gb", "polygon_n_jobs"})
 #: AteraBuildConfig fields naming input files; the fingerprint records the
@@ -104,48 +106,11 @@ RUNTIME_ONLY_FIELDS: Final = frozenset({"max_rss_gb", "polygon_n_jobs"})
 INPUT_PATH_FIELDS: Final = frozenset(
     {"transcripts_path", "cells_path", "cell_feature_matrix_path"}
 )
-_GIB: Final = float(1 << 30)
 
 
 # --------------------------------------------------------------------------- #
 # Memory watchdog
 # --------------------------------------------------------------------------- #
-
-
-def _anonymous_rss_bytes(process: psutil.Process) -> int:
-    """Anonymous resident memory of one process (``RssAnon``, else USS).
-
-    File-backed pages (a memory-mapped mask touched by every polygonisation
-    worker) are shared page cache, so they are not counted.
-    """
-    try:
-        with open(f"/proc/{process.pid}/status", encoding="ascii") as handle:
-            for line in handle:
-                if line.startswith("RssAnon:"):
-                    return int(line.split()[1]) * 1024
-    except OSError:
-        pass
-    return int(process.memory_full_info().uss)
-
-
-def process_tree_anonymous_rss_bytes(pid: int | None = None) -> int:
-    """Anonymous resident memory of a process and all its descendants.
-
-    Args:
-        pid: Root process; this process when ``None``.
-
-    Returns:
-        Bytes summed over the tree; processes that exit while being read are
-        skipped.
-    """
-    root = psutil.Process(pid)
-    total = 0
-    for process in (root, *root.children(recursive=True)):
-        try:
-            total += _anonymous_rss_bytes(process)
-        except (psutil.NoSuchProcess, psutil.AccessDenied, ProcessLookupError):
-            continue
-    return total
 
 
 def _stop_build(used_gb: float, limit_gb: float, cleanup: Sequence[Path]) -> None:
@@ -176,21 +141,13 @@ def _stop_build(used_gb: float, limit_gb: float, cleanup: Sequence[Path]) -> Non
     os._exit(RSS_LIMIT_EXIT_CODE)
 
 
-class RssWatchdog:
+class RssWatchdog(_TreeRssWatchdog):
     """Stop the build when its process tree exceeds an anonymous-memory cap.
 
-    A background thread polls the anonymous RSS of this process and its
-    descendants (``RssAnon`` from ``/proc``, else USS; never ``rss``, which
-    counts shared page cache once per process). The local executor only
-    schedules memory and does not cap it, so the watchdog is the cap that
-    keeps a runaway build from the kernel OOM killer, which may pick another
-    session's process. With no cap it only records the peak.
-
-    Use it as a context manager, or call :meth:`start` and :meth:`stop`.
-
-    Attributes:
-        cleanup: Paths the default action removes before it exits (the
-            build's partial store and mask scratch folder).
+    The ATERA build's :class:`merxen.memory.RssWatchdog`: the default action
+    logs the build message, kills the child processes, removes
+    :attr:`cleanup` (the build's partial store and mask scratch folder) and
+    exits with :data:`RSS_LIMIT_EXIT_CODE`.
     """
 
     def __init__(
@@ -207,77 +164,17 @@ class RssWatchdog:
             limit_gb: Cap in GiB; ``None`` only records the peak.
             interval_s: Seconds between two measurements.
             on_exceed: Called with ``(used_gb, limit_gb)`` when the cap is
-                exceeded; the default logs, kills the child processes,
-                removes :attr:`cleanup` and exits with
-                :data:`RSS_LIMIT_EXIT_CODE`.
+                exceeded; defaults to stopping the build.
             measure: Returns the bytes to compare with the cap.
         """
-        self.limit_gb = limit_gb
-        self.interval_s = interval_s
-        self.cleanup: list[Path] = []
-        self._on_exceed = on_exceed or (
-            lambda used, limit: _stop_build(used, limit, self.cleanup)
+        super().__init__(
+            limit_gb,
+            interval_s=interval_s,
+            on_exceed=on_exceed
+            or (lambda used, limit: _stop_build(used, limit, self.cleanup)),
+            measure=measure,
+            name="ATERA",
         )
-        self._measure = measure
-        self._failed = False
-        self._stop_event = threading.Event()
-        self._thread: threading.Thread | None = None
-        self.peak_gb = 0.0
-
-    def check(self) -> float:
-        """Measure once, update the peak and act on the cap.
-
-        Returns:
-            The measured anonymous RSS in GiB.
-        """
-        used_gb = self._measure() / _GIB
-        self.peak_gb = max(self.peak_gb, used_gb)
-        if self.limit_gb is not None and used_gb > self.limit_gb:
-            self._on_exceed(used_gb, self.limit_gb)
-        return used_gb
-
-    def _run(self) -> None:
-        while not self._stop_event.wait(self.interval_s):
-            try:
-                self.check()
-            except Exception:
-                # A failed reading must not end the thread and lift the cap.
-                if not self._failed:
-                    logger.exception("[ATERA] Memory watchdog reading failed")
-                    self._failed = True
-
-    def start(self) -> RssWatchdog:
-        """Start polling in a daemon thread.
-
-        Returns:
-            This watchdog.
-        """
-        if self._thread is None:
-            self.check()
-            self._thread = threading.Thread(
-                target=self._run, name="atera-rss-watchdog", daemon=True
-            )
-            self._thread.start()
-        return self
-
-    def stop(self) -> None:
-        """Stop polling (idempotent) after a last measurement."""
-        if self._thread is not None:
-            self._stop_event.set()
-            self._thread.join()
-            self._thread = None
-            self.check()
-
-    def __enter__(self) -> RssWatchdog:
-        return self.start()
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        self.stop()
 
 
 # --------------------------------------------------------------------------- #

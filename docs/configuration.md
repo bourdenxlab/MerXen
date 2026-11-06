@@ -113,7 +113,7 @@ to `none` or `/dev/null` on purpose:
 | `species` | `human` | Dataset species for the whole invocation: `human` or `mouse`. Controls reference-backed defaults; mixed-species samplesheets are not supported. |
 | `analysis_mode` | `paired` | Fallback row mode: `paired`, `merscope`, `xenium` or `atera` (alias `a`; the native segmentation route, see [ATERA rows](#atera-rows)). A non-empty samplesheet `analysis_mode` value overrides this per row. |
 | `enable_alignment` | `false` | Fallback row alignment switch. A non-empty samplesheet `enable_alignment` value overrides this per row; alignment only applies to paired rows. |
-| `segmentation_source` | `null` | Where the cells of a row come from: `native` (the vendor segmentation; aliases `vendor`, `instrument`), `cellpose_only` (alias `cellpose`) or `cellpose_proseg` (alias `proseg`). `null` uses the platform default: `native` for ATERA, `cellpose_proseg` for XENIUM and MERSCOPE. These are also the only values each platform accepts for now; any other is refused before a task starts. A non-empty samplesheet `segmentation_source` overrides this per row. |
+| `segmentation_source` | `null` | Where the cells of a row come from: `native` (the vendor segmentation; aliases `vendor`, `instrument`), `native_proseg` (the vendor segmentation plus ProSeg cells refined from the vendor masks, ATERA only; aliases `vendor_proseg`, `instrument_proseg`), `cellpose_only` (alias `cellpose`) or `cellpose_proseg` (alias `proseg`). `null` uses the platform default: `native` for ATERA, `cellpose_proseg` for XENIUM and MERSCOPE. ATERA accepts `native` and `native_proseg`, XENIUM and MERSCOPE `cellpose_proseg`; any other is refused before a task starts. A non-empty samplesheet `segmentation_source` overrides this per row. |
 | `native_latest_link_mode` | `hardlink` | How `NATIVE_LATEST` brings image, label and transcript payload files into the latest store of a native row: `hardlink` (shared with the source store and made read-only) or `copy` (when the latest store is on another filesystem). |
 | `analysis_segmentation` | `all` | Fallback downstream analysis branches after enrichment. Valid values: `all`, `both`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, `proseg_hybrid`; comma-separated combinations are accepted. `all` includes all four branches, while `both` restricts analysis to `reseg,original_seg`. A non-empty samplesheet value overrides this per row. |
 | `register_images_refine_affine` | `true` | Refine each Xenium Explorer matrix with a robust DAPI-to-DAPI affine fit before resampling registered images. The stage itself is enabled per row by `xenium_registered_images_csv`; see [stages/register-images.md](stages/register-images.md). |
@@ -371,7 +371,20 @@ install paths trigger a `sudo` prompt.
 | `atera_build_cpus` | `16` | CPUs of an ATERA `BUILD_SPATIALDATA` task (other platforms keep 8). |
 | `atera_build_memory_gb` | `64` | Memory reservation of an ATERA build task, doubled on its one retry after an external kill (exit 137 or 140). Other platforms keep 80 GB. |
 | `atera_build_max_rss_gb` | `48` | Watchdog cap on the ATERA build's anonymous memory; above it the build exits with status 99 (not retried). Raise it together with `atera_build_memory_gb`. |
-| `default_atera_voxel_layers` | `2` | ProSeg voxel layers for ATERA (used once ProSeg supports ATERA). |
+| `default_atera_voxel_layers` | `2` | ProSeg voxel layers of the ATERA ProSeg route (`native_proseg`). |
+| `atera_proseg_tile_um` | `2000` | Edge of an ATERA ProSeg tile core in microns (grid origin 0, 0). Must exceed twice the halo. |
+| `atera_proseg_halo_um` | `100` | Margin a tile also reads around its core; at least 100 (refused below). |
+| `atera_proseg_owned_margin_um` | `20` | Margin around the bounding box of every cell a tile owns that its window must cover. |
+| `atera_proseg_burnin_samples`, `atera_proseg_samples`, `atera_proseg_hillclimb`, `atera_proseg_recorded_samples` | `100`, `200`, `20`, `100` | ProSeg schedule of every tile (the AT-5(b) short schedule). The voxel sizes, nuclear reassignment, diffusion and compactness come from the `proseg_*` params. |
+| `atera_proseg_prior_weight` | `140.0` | Effective prior weight ProSeg reports for every tile (its own `max(mean transcripts per cell / 100, 1)` scaling is undone per tile); a tile whose reported weight is more than 2% off is stopped and restarted once with the multiplier rescaled by requested / reported, and fails if it is still off. |
+| `atera_proseg_nuclear_compartment` | `true` | Give ProSeg the vendor `overlaps_nucleus` flag (its nuclear compartment model); `false` writes 0. |
+| `atera_proseg_tile_cpus`, `atera_proseg_tile_memory_gb` | `16`, `32` | CPUs (ProSeg `--nthreads`) and memory reservation of a tile task; the reservation doubles on the one retry (any failure other than exit 99 or 3). |
+| `atera_proseg_tile_max_rss_gb` | `40` | Watchdog cap on a tile task's anonymous memory; above it the task exits 99 (not retried) and the row stops after `segment` on both layers (the log names the failed tile). |
+| `atera_proseg_tile_max_forks` | `4` | Tile tasks at once (also set in `conf/dwight.config`). |
+| `atera_proseg_stitch_cpus`, `atera_proseg_stitch_memory_gb` | `16`, `64` | Resources of `ATERA_PROSEG_STITCH`. |
+| `atera_proseg_keep_tile_inputs` | `false` | Keep each tile's exported parquet, prior mask and raw ProSeg transcript metadata. |
+| `atera_proseg_tile_subset` | `null` | Comma list of tile ids (`c2_r1`) to run as a check; no stitch, and any stage after `segment` is refused. |
+| `atera_proseg_allow_untested_version` | `false` | Allow a `proseg_version` other than 3.2.0 (the only one whose Xenium-layout reader and flags were verified) on `native_proseg` rows; the preflight and every tile then run it with a warning. |
 | `atera_cellpose_model`, `atera_cellpose_cellprob`, `atera_cellpose_flow_threshold`, `atera_cellpose_diameter`, `atera_cellpose_final_max_area_um2`, `atera_mask_max_eccentricity` | `null` | The ATERA twins of the per-platform Cellpose overrides. They are declared because Cellpose preflight reads them for every active platform; native ATERA rows run no Cellpose. |
 | `atera_clustering_hvg_n_top_genes` | `2000` | Highly variable genes the clustering PCA of an ATERA (whole-transcriptome) sample uses. ATERA samples also skip the 300-gene panel check; XENIUM and MERSCOPE samples are unchanged. |
 
@@ -399,6 +412,19 @@ Native rows have one analysis layer, `original_seg`. A global
 says so; a samplesheet value that names `reseg`, `proseg_mask` or
 `proseg_hybrid` on a native row is an error.
 
+`segmentation_source=native_proseg` (opt-in, AT-9) runs the same stages and
+adds the ProSeg layer `reseg` (shapes `MOSAIK_proseg`, table
+`table_MOSAIK_proseg`): its `segment` stage is `NATIVE_LATEST`, then
+`ATERA_PROSEG_PLAN`, one `ATERA_PROSEG_TILE` task per 2 mm tile and
+`ATERA_PROSEG_STITCH` ([segmentation](stages/segmentation.md#atera-proseg-route-native_proseg-at-9)).
+`analysis_segmentation=all` resolves to `reseg, original_seg`, and QC,
+VISUALIZE, spatial gene analysis, clustering and MENDER run on both layers; the
+MENDER default resolves to both layers too. ENRICH checks the stitched layer,
+MIQ quantifies both label elements in one task and the viewer cache draws both
+masks. `proseg_mask` and `proseg_hybrid` are not layers of such a row (a
+samplesheet value naming them is an error). The `atera_proseg_*` params above
+are checked before a task starts.
+
 Refused for ATERA rows, before any task starts (each switch message ends
 with "remove `<setting>` from row `<pair>` or set it to false"):
 
@@ -411,7 +437,8 @@ with "remove `<setting>` from row `<pair>` or set it to false"):
 | row `spatial_gene_analysis_transcript_analysis_enabled=true` | transcript spatial patterns are off for ATERA rows |
 | row `cortical_depth_enabled=true` or `distance_from_object_enabled=true` | cortical depth and distance from object are off for non-cortical ATERA sections |
 | row `enable_alignment` or `xenium_registered_images_csv` | image registration and alignment are not covered for ATERA rows (AT-10) |
-| `segmentation_source=cellpose_only` or `cellpose_proseg` | segmentation_source=… is not available for ATERA rows yet; ATERA supports: native |
+| `segmentation_source=cellpose_only` or `cellpose_proseg` | segmentation_source=… is not available for ATERA rows yet; ATERA supports: native, native_proseg |
+| `native_proseg` with `atera_proseg_halo_um` below 100, a tile no wider than twice the halo, an invalid schedule or prior weight, `proseg_version` other than 3.2.0, or `atera_proseg_tile_subset` with a stage after `segment` | one message each, naming the param |
 | `start_stage`, `stop_stage` or `only_stage` naming a stage ATERA rows do not run (such as `pciseq`, `gaston`, `mecr`) | … is not active for this run. ATERA rows run only build_spatialdata, segment, … |
 
 The global `pciseq_enabled`, `gaston_enabled`, `mecr_enabled`,
