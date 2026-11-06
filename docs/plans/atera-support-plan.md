@@ -1778,6 +1778,31 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
     iteration (benchmark 1.76 and 5.83 s; total 1.07× the benchmark's 37 min 42 s), 23.5 GB peak
     anonymous RSS (trace 25.0 GB), 73 owned cells with no transcripts (benchmark: 74). Halving the
     threads costs 1.34× the time, so the default stays 16 threads with 4 tiles at once.
+  - **Schedule check on the dense tile (2026-11-06): the short default stays.** The same tile
+    `c2_r1` at 200 burn-in + 600 samples (+ 20 hillclimb, 100 recorded; one run, 16 threads, at
+    nice 15 beside the full-section run, host load 30–175) against three short-schedule runs (the
+    16- and 32-thread checks and the full-section tile), on the 5,716 owned cells
+    (`dense_schedule_compare.json`):
+
+    | | Short runs (3) | Long 200 + 600 |
+    |---|---|---|
+    | Foreground rows on owned cells | 41.7–43.3 M | 42.2 M |
+    | Owned cells with no transcripts | 39–73 | 50 |
+    | Median area ratio to vendor (p05–p95) | 0.841–0.852 (0.47–0.49 to 1.56–1.64) | 0.811 (0.45–1.78) |
+    | Total area change | −1.6% to −0.9% | −0.6% |
+    | Same cell among rows either run assigns, short vs short / short vs long | 58.5–59.2% | 57.1–57.8% |
+    | Same cell when both assign | 84.7–85.0% | 83.7–84.0% |
+    | Per-cell count Pearson, short vs short / short vs long | 0.991 | 0.984–0.985 |
+    | Per-cell area Pearson | 0.977–0.978 | 0.961–0.964 |
+
+    The long chain differs from the short ones a little more than the short ones differ from each
+    other (about 1.3 points of agreement), and it widens the area distribution (the same direction
+    as the crop's 1,200-sample run in AT-5(b): median 0.80 against 0.85, p95 2.11 against 1.94).
+    Totals, assigned rows and empty cells stay inside the short runs' spread. The long run took
+    3 h 49 min wall (ProSeg sampling 16.8 s per iteration under contention), 3.4 times the short
+    schedule's ProSeg time, for a shift smaller than the chain noise between two short runs, so the
+    default stays 100 + 200 + 20. Longer schedules remain available through the
+    `atera_proseg_*` schedule params.
 
 ### AT-10 optional, on request
 

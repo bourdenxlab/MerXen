@@ -616,7 +616,11 @@ proseg tile.parquet xenium -x x_location -y y_location -z z_location
   ((j + 0.5) ps, (i + 0.5) ps), the vendor's corner convention.
 - The schedule is the short one of the AT-5(b) benchmark
   (`atera_proseg_burnin_samples`, `_samples`, `_hillclimb`,
-  `_recorded_samples`). `prior_seg_reassignment_prob` and
+  `_recorded_samples`), confirmed on the densest tile against a 200 + 600
+  run: the long chain moved per-transcript agreement by about 1.3 points,
+  less than the chain noise between two short runs (about 41% of the rows
+  either run assigns land in different cells or in background), at 3.4 times
+  the ProSeg time (plan §8 AT-9). `prior_seg_reassignment_prob` and
   `--use-cell-initialization` stay at ProSeg's defaults, as in the benchmark.
 - Each tile reserves `atera_proseg_tile_cpus` (16) and
   `atera_proseg_tile_memory_gb` (32 GB; the densest tile peaked at 24.2 GB).
