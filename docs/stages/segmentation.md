@@ -661,7 +661,7 @@ proseg tile.parquet xenium -x x_location -y y_location -z z_location
   points no longer share inodes with the source (about +25 GB on the full
   section).
 
-**Outputs** (under `<outdir>/<pair>/atera/segmentation/`): `atera_proseg/tile_plan.json`,
+**Outputs** (under `<outdir>/<pair>/atera/segmentation/`): `atera_proseg/plan_out/tile_plan.json`,
 `atera_proseg/tiles/tile_<id>/` (cells, claims, `tile_manifest.json`, ProSeg's
 logs, cell metadata, polygons and `proseg.zarr` table), and
 `stitch_out/` (`proseg_latest.zarr` link, `atera_proseg_report.json`, the three

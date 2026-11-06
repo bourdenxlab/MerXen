@@ -1345,7 +1345,7 @@ ran both layers through MENDER; the full section ran the dense tile only.
 | Process | Reserved | Crop: time / peak RSS | Full section |
 |---|---|---|---|
 | ATERA_PROSEG_PLAN | 2 CPU, 16 GB | 11 s / 1.1 GB | 12 s / 1.5 GB (30 of 35 tiles run) |
-| ATERA_PROSEG_TILE | 16 CPU, 32 GB (×2 on retry), 40 GB cap | 10 min 40 s / 5.5 GB (13.9 M rows); 17 min 50 s / 7.2 GB (29.2 M rows) | dense tile `c2_r1`: 53 min 51 s / 24.2 GB (102.6 M rows) |
+| ATERA_PROSEG_TILE | 16 CPU, 32 GB (×2 on retry), 40 GB cap | 10 min 40 s / 5.5 GB (13.9 M rows); 17 min 50 s / 7.2 GB (29.2 M rows) | dense tile `c2_r1`: 53 min 51 s / 24.2 GB (102.6 M rows); at 32 CPUs 40 min 15 s / 25.0 GB |
 | ATERA_PROSEG_STITCH | 16 CPU, 64 GB | 30 s / 7.8 GB; a re-run on `-resume` is a 10 s skip | not run |
 | Second layer downstream | as the native route | ENRICH 46 s (with the layer check), MIQ 41 s for both layers; QC, VISUALIZE, spatial gene analysis, clustering and MENDER as the native route, per layer | not run |
 
@@ -1773,7 +1773,11 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
     Against the CSV benchmark run on the same owned cells: median area ratio 0.841 (benchmark
     0.844), 41.7 M against 41.1 M assigned rows, and 57.7% of the rows either run assigns to these
     cells are assigned to the same cell by both (two CSV runs on the crop: 62.1%; ProSeg's chain
-    noise, AT-5(b)). The compartment model therefore stays on.
+    noise, AT-5(b)). The compartment model therefore stays on. Re-run at 32 threads
+    (`atera_proseg_tile_cpus=32`): 40 min 15 s task time, burn-in 1.68 s and sampling 5.82 s per
+    iteration (benchmark 1.76 and 5.83 s; total 1.07× the benchmark's 37 min 42 s), 23.5 GB peak
+    anonymous RSS (trace 25.0 GB), 73 owned cells with no transcripts (benchmark: 74). Halving the
+    threads costs 1.34× the time, so the default stays 16 threads with 4 tiles at once.
 
 ### AT-10 optional, on request
 
