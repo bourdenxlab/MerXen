@@ -85,6 +85,14 @@ and MapMyCells. Set
 cell-level autocorrelation outputs but skip the annotation-dependent
 transcript-level analysis.
 
+ATERA rows (native segmentation, `original_seg` only) run the cell-level
+autocorrelation on every retained gene of `table_original` and plot only the
+top-N ranked genes. Transcript-level analysis is off for ATERA rows: the
+workflow turns `spatial_gene_analysis_transcript_analysis_enabled` off for them
+(logging when a global `true` is ignored) and preflight refuses a row that sets
+it to `true`. The sample's `nuclei_shape_key` is the registry's nucleus layer
+(`atera_nucleus`), which the transcript analysis would need once it is enabled.
+
 The process requests 12 CPUs and 120 GB. Under the implicit `standard`
 (Dwight) profile, `spatial_gene_analysis_max_forks = 4`, so four samples may
 run at once, using at most 480/640 GB (75%) and 48/72 configured CPUs. Those

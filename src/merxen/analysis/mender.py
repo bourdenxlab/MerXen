@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import anndata as ad
+import h5py
 import matplotlib
 
 matplotlib.use("Agg", force=True)
@@ -176,9 +177,13 @@ def prepare_mender(config: MenderConfig, output_dir: Path | str) -> Path:
     """Validate modern inputs and export MENDER's minimal portable table."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    clustered = ad.read_h5ad(config.source_h5ad)
+    # Only obs and uns are needed here; X, layers and obsm (tens of GB for a
+    # whole-transcriptome table) are never read.
+    clustered = _read_obs_and_uns(config.source_h5ad)
     cell_ids = resolve_cell_ids(clustered)
     states, keep = _validate_cell_states(clustered, config)
+    n_source_cells = int(clustered.n_obs)
+    del clustered
     selected_ids = cell_ids[keep]
 
     import spatialdata as sd
@@ -239,7 +244,7 @@ def prepare_mender(config: MenderConfig, output_dir: Path | str) -> Path:
         "native_shape_key": config.native_shape_key,
         "cell_state_key": config.cell_state_key,
         "missing_state_policy": config.missing_state_policy,
-        "n_source_cells": int(clustered.n_obs),
+        "n_source_cells": n_source_cells,
         "n_cells": int(len(portable)),
         "n_missing_states": int((~keep).sum()),
         "state_counts": {str(key): int(value) for key, value in state_counts.items()},
@@ -261,9 +266,35 @@ def prepare_mender(config: MenderConfig, output_dir: Path | str) -> Path:
         len(state_counts),
         config.native_shape_key,
     )
-    del clustered
     force_release(note=f"after writing MENDER portable input {config.sample_id}")
     return manifest_path
+
+
+def _read_obs_and_uns(path: Path | str) -> ad.AnnData:
+    """Read only ``obs`` and ``uns`` of an H5AD file.
+
+    Args:
+        path: H5AD file.
+
+    Returns:
+        An AnnData with the file's ``obs`` (index included) and ``uns`` and no
+        ``X``, layers or embeddings.
+    """
+    with h5py.File(path, "r") as handle:
+        obs = ad.io.read_elem(handle["obs"])
+        uns = ad.io.read_elem(handle["uns"]) if "uns" in handle else {}
+    return ad.AnnData(obs=obs, uns=uns)
+
+
+def _close_backed(adata: ad.AnnData) -> None:
+    """Close the file handle of a backed AnnData, if it has one open.
+
+    Args:
+        adata: AnnData read with ``backed="r"`` (in-memory objects are left
+            alone).
+    """
+    if adata.isbacked:
+        adata.file.close()
 
 
 def _read_compute_domains(computed_dir: Path) -> pd.DataFrame:
@@ -451,25 +482,33 @@ def finalize_mender(
         raise ValueError("At least one portable input cell has no MENDER domain")
     cells["mender_domain"] = pd.Categorical(cells["mender_domain"].astype(str))
 
-    original = ad.read_h5ad(config.source_h5ad)
-    original_ids = resolve_cell_ids(original)
-    domain_lookup = domains.set_index("cell_id")["mender_domain"]
-    missing = original_ids.difference(domain_lookup.index)
-    if len(missing) > 0:
-        raise ValueError(
-            f"Cannot annotate source H5AD: {len(missing)} cells lack MENDER domains"
-        )
-    original.obs["mender_domain"] = pd.Categorical(
-        domain_lookup.loc[original_ids].astype(str).to_numpy()
-    )
     input_manifest = json.loads((prepared_dir / "input_manifest.json").read_text())
     provenance = _provenance(config, input_manifest)
-    original.uns["merxen_mender"] = provenance
-
     annotated_path = sample_dir / f"{config.sample_id}_mender_annotated.h5ad"
     context_path = sample_dir / f"{config.sample_id}_mender_context.h5ad"
     cells_path = sample_dir / f"{config.sample_id}_mender_cells.parquet"
-    original.write_h5ad(annotated_path)
+    # Backed read: X stays on disk and is copied from the source file when the
+    # annotated copy is written (anndata loads layers and obsm into memory, so
+    # this saves the X part of the table only). The written file is
+    # byte-identical to the one an in-memory read produces
+    # (tests/test_analysis/test_mender.py).
+    original = ad.read_h5ad(config.source_h5ad, backed="r")
+    try:
+        original_ids = resolve_cell_ids(original)
+        domain_lookup = domains.set_index("cell_id")["mender_domain"]
+        missing = original_ids.difference(domain_lookup.index)
+        if len(missing) > 0:
+            raise ValueError(
+                f"Cannot annotate source H5AD: {len(missing)} cells lack MENDER domains"
+            )
+        original.obs["mender_domain"] = pd.Categorical(
+            domain_lookup.loc[original_ids].astype(str).to_numpy()
+        )
+        original.uns["merxen_mender"] = provenance
+        original.write_h5ad(annotated_path)
+    finally:
+        _close_backed(original)
+    del original
     shutil.copy2(computed_dir / "mender_context.h5ad", context_path)
     cells.to_parquet(cells_path, index=False)
     shutil.copy2(
@@ -504,7 +543,7 @@ def finalize_mender(
     }
     manifest_path = sample_dir / "mender_manifest.json"
     manifest_path.write_text(json.dumps(output_manifest, indent=2) + "\n")
-    del original, context
+    del context
     force_release(note=f"after finalizing MENDER output {config.sample_id}")
     return {
         "annotated_h5ad": annotated_path,

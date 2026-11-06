@@ -246,8 +246,32 @@ def prepare_spatial_autocorr_adata(
     normalize_exclude_highly_expressed: bool = False,
     normalize_max_fraction: float = 0.05,
 ) -> ad.AnnData:
-    """Return a filtered, log-normalized AnnData for gene autocorrelation."""
-    prepared = remove_control_features(adata) if drop_control_features else adata.copy()
+    """Return a filtered, log-normalized AnnData for gene autocorrelation.
+
+    Args:
+        adata: Cell-by-gene table.
+        drop_control_features: Remove blank/negative/control features first.
+        min_counts: Minimum counts per cell; ``0`` keeps every cell.
+        min_cells: Minimum cells expressing a gene.
+        normalize_target_sum: Target sum of ``normalize_total``.
+        normalize_exclude_highly_expressed: Passed to ``normalize_total``.
+        normalize_max_fraction: Passed to ``normalize_total``.
+
+    Returns:
+        The filtered, normalised and log-transformed copy.
+
+    Raises:
+        ValueError: If fewer than three cells or no genes remain.
+    """
+    # Spatial gene analysis checks no panel size, so the control-filter
+    # summary records no expected gene count (a 300-gene expectation would be
+    # wrong for whole-transcriptome ATERA tables). The summary lives only in
+    # this in-memory copy's uns, which is never written.
+    prepared = (
+        remove_control_features(adata, expected_panel_gene_count=None)
+        if drop_control_features
+        else adata.copy()
+    )
     if min_counts > 0:
         sc.pp.filter_cells(prepared, min_counts=int(min_counts))
     sc.pp.filter_genes(prepared, min_cells=int(min_cells))
