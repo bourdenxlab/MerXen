@@ -173,9 +173,11 @@ def activePlatformsForMode(analysisMode) {
 }
 
 // Where the cells of a row come from (plan AT-6): "native" keeps the vendor
-// segmentation (ATERA), "cellpose_only" runs Cellpose without ProSeg (AT-7),
-// "cellpose_proseg" is the XENIUM/MERSCOPE route. null or blank means the
-// platform default of the registry.
+// segmentation (ATERA), "native_proseg" also adds ProSeg cells refined from
+// the vendor masks (ATERA, AT-9; no Cellpose), "cellpose_only" runs Cellpose
+// without ProSeg (AT-7), "cellpose_proseg" is the XENIUM/MERSCOPE route. null
+// or blank means the platform default of the registry. The bare word "proseg"
+// keeps meaning cellpose_proseg.
 def normalizeSegmentationSource(rawValue) {
     if (rawValue == null || !rawValue.toString().trim()) {
         return null
@@ -190,6 +192,9 @@ def normalizeSegmentationSource(rawValue) {
         "native": "native",
         "vendor": "native",
         "instrument": "native",
+        "native_proseg": "native_proseg",
+        "vendor_proseg": "native_proseg",
+        "instrument_proseg": "native_proseg",
         "cellpose": "cellpose_only",
         "cellpose_only": "cellpose_only",
         "proseg": "cellpose_proseg",
@@ -198,7 +203,7 @@ def normalizeSegmentationSource(rawValue) {
     if (!aliases.containsKey(key)) {
         throw new IllegalArgumentException(
             "Unknown segmentation_source '${rawValue}'. Valid values: " +
-            "native, cellpose_only, cellpose_proseg"
+            "native, native_proseg, cellpose_only, cellpose_proseg"
         )
     }
     return aliases[key]
@@ -239,6 +244,7 @@ def segmentationSourceForRow(row, activePlatforms, params) {
 def availableSegmentationLayers(segmentationSource) {
     def layers = [
         "native": ["original_seg"],
+        "native_proseg": ["reseg", "original_seg"],
         "cellpose_proseg": ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"],
         "cellpose_only": ["proseg_mask", "original_seg"],
     ]
@@ -250,10 +256,19 @@ def availableSegmentationLayers(segmentationSource) {
     return layers[segmentationSource]
 }
 
+// Sources whose original layer is the vendor segmentation: their segment stage
+// is NATIVE_LATEST and no Cellpose nuclei stage runs
+// (merxen.platforms.uses_vendor_segmentation).
+def usesVendorSegmentation(segmentationSource) {
+    return segmentationSource in ["native", "native_proseg"]
+}
+
 // Keep the layers a source has (AT-6 rule): a default or group value ("all",
 // a global param) falls back to the layers the source has, adding a note on
 // what was dropped (the workflow logs the notes of each row); a samplesheet
-// value naming a layer the source lacks is an error. Sources with every layer
+// value naming a layer the source lacks is an error. A default that keeps no
+// layer at all (the MENDER default proseg_hybrid) resolves to every layer the
+// source has (AT-9; native has one). Sources with every layer
 // (cellpose_proseg, or null) return `selected` as is.
 def filterSegmentationsForSource(
     selected,
@@ -280,7 +295,7 @@ def filterSegmentationsForSource(
     }
     def kept = selected.findAll { segmentation -> available.contains(segmentation) }
     if (!kept) {
-        kept = [available[0]]
+        kept = available
     }
     notes << (
         "${label} ${selected.join(', ')} resolves to ${kept.join(', ')} " +
@@ -1102,9 +1117,10 @@ def activeStageOrder(
     segmentationSource = "cellpose_proseg"
 ) {
     def stages = ["build_spatialdata", "segment_nuclei", "segment", "enrich"]
-    // Native rows keep the vendor nuclei: "segment" is NATIVE_LATEST and no
-    // Cellpose nuclei stage runs.
-    if (segmentationSource == "native") {
+    // Native rows keep the vendor nuclei: "segment" is NATIVE_LATEST (and,
+    // for native_proseg, the tiled ProSeg tasks) and no Cellpose nuclei stage
+    // runs.
+    if (usesVendorSegmentation(segmentationSource)) {
         stages = ["build_spatialdata", "segment", "enrich"]
     }
     // Registered images join the zarr before the viewer cache and quantification
@@ -1167,10 +1183,10 @@ def validateStage(
 ) {
     if (!stages.contains(stage)) {
         def hint = ""
-        if (stage == "segment_nuclei" && segmentationSource == "native") {
+        if (stage == "segment_nuclei" && usesVendorSegmentation(segmentationSource)) {
             hint = (
-                " Rows with segmentation_source=native keep the vendor nuclei and " +
-                "run no Cellpose nuclei stage; use segment (NATIVE_LATEST)."
+                " Rows with segmentation_source=${segmentationSource} keep the vendor " +
+                "nuclei and run no Cellpose nuclei stage; use segment (NATIVE_LATEST)."
             )
         }
         if (stage in ["align", "align_qc"] && !alignmentEnabled) {
@@ -2335,6 +2351,7 @@ def appendAteraPreflightChecks(errors, row, settings, params) {
         return
     }
     def stageOrder = settings.stage_order
+    appendAteraProsegPreflightChecks(errors, settings, params)
     if (settings.run_mapmycells) {
         errors.add(
             "standalone MapMyCells is not covered for ATERA rows; stop at " +
@@ -2431,6 +2448,231 @@ def publishedNativeOutput(params, pairId, platform, name) {
             "segmentation/native_out/${name}",
         ),
         "NATIVE_LATEST ${name} for ${pairId}:${platform}",
+    )
+}
+
+// ---------------------------------------------------------------------------
+// ATERA ProSeg route (segmentation_source=native_proseg, plan AT-9)
+// ---------------------------------------------------------------------------
+
+// A numeric ATERA ProSeg param; command-line values arrive as strings.
+def ateraProsegNumber(params, name, integer) {
+    def raw = params[name]
+    if (raw == null || raw instanceof Boolean || !raw.toString().trim()) {
+        throw new IllegalArgumentException(
+            "${name} must be set for segmentation_source=native_proseg rows"
+        )
+    }
+    def value
+    try {
+        value = new BigDecimal(raw.toString().trim())
+    } catch (NumberFormatException error) {
+        throw new IllegalArgumentException("${name}=${raw} is not a number")
+    }
+    if (integer) {
+        try {
+            return value.intValueExact()
+        } catch (ArithmeticException error) {
+            throw new IllegalArgumentException("${name}=${raw} is not an integer")
+        }
+    }
+    return value.doubleValue()
+}
+
+// Tile ids of atera_proseg_tile_subset (a check run), or null for every tile.
+def ateraProsegTileSubset(params) {
+    def raw = params.atera_proseg_tile_subset
+    if (raw == null || raw instanceof Boolean || !raw.toString().trim()) {
+        return null
+    }
+    def ids = raw.toString().split(",").collect { value -> value.trim() }.findAll { value ->
+        value.length() > 0
+    }
+    return ids ? ids : null
+}
+
+// ProSeg model and schedule of every tile (AteraProsegModelParams).
+def ateraProsegModelParams(params) {
+    return [
+        voxel_size: ateraProsegNumber(params, "proseg_voxel_size", false),
+        burnin_voxel_size: ateraProsegNumber(params, "proseg_burnin_voxel_size", false),
+        voxel_layers: ateraProsegNumber(params, "default_atera_voxel_layers", true),
+        nuclear_reassignment_prob: ateraProsegNumber(
+            params, "proseg_nuclear_reassignment_prob", false
+        ),
+        diffusion_probability: ateraProsegNumber(
+            params, "proseg_diffusion_probability", false
+        ),
+        cell_compactness: ateraProsegNumber(params, "proseg_cell_compactness", false),
+        burnin_samples: ateraProsegNumber(params, "atera_proseg_burnin_samples", true),
+        samples: ateraProsegNumber(params, "atera_proseg_samples", true),
+        hillclimb: ateraProsegNumber(params, "atera_proseg_hillclimb", true),
+        recorded_samples: ateraProsegNumber(params, "atera_proseg_recorded_samples", true),
+        prior_weight_effective: ateraProsegNumber(params, "atera_proseg_prior_weight", false),
+        min_qv: params.atera_min_qv == null ? 0.0d : ateraProsegNumber(params, "atera_min_qv", false),
+        nuclear_compartment: boolOrDefault(
+            params.atera_proseg_nuclear_compartment,
+            true,
+            "atera_proseg_nuclear_compartment",
+        ),
+    ]
+}
+
+// Refusals of a native_proseg row that the Pydantic models would only raise
+// inside a task (plan AT-9 §2.2).
+def appendAteraProsegPreflightChecks(errors, settings, params) {
+    if (settings.segmentation_source != "native_proseg") {
+        return
+    }
+    def checks = []
+    try {
+        def halo = ateraProsegNumber(params, "atera_proseg_halo_um", false)
+        def tile = ateraProsegNumber(params, "atera_proseg_tile_um", false)
+        if (halo < 100) {
+            checks << "atera_proseg_halo_um=${halo} is below the minimum of 100 microns"
+        }
+        if (tile <= 2 * halo) {
+            checks << "atera_proseg_tile_um=${tile} must exceed twice the halo (${halo})"
+        }
+        if (ateraProsegNumber(params, "atera_proseg_owned_margin_um", false) < 0) {
+            checks << "atera_proseg_owned_margin_um must be at least 0"
+        }
+        def model = ateraProsegModelParams(params)
+        ["burnin_samples", "hillclimb", "recorded_samples"].each { name ->
+            if (model[name] < 0) {
+                checks << "atera_proseg_${name} must be at least 0"
+            }
+        }
+        if (model.samples < 1) {
+            checks << "atera_proseg_samples must be at least 1"
+        }
+        if (model.recorded_samples > model.samples) {
+            checks << (
+                "atera_proseg_recorded_samples=${model.recorded_samples} exceeds " +
+                "atera_proseg_samples=${model.samples}"
+            )
+        }
+        if (model.prior_weight_effective <= 0) {
+            checks << "atera_proseg_prior_weight must be positive"
+        }
+        if (ateraProsegNumber(params, "atera_proseg_tile_cpus", true) < 1) {
+            checks << "atera_proseg_tile_cpus must be at least 1"
+        }
+    } catch (IllegalArgumentException error) {
+        checks << error.getMessage()
+    }
+    def allowUntested = boolOrDefault(
+        params.atera_proseg_allow_untested_version,
+        false,
+        "atera_proseg_allow_untested_version",
+    )
+    if (params.proseg_version?.toString()?.trim() != "3.2.0" && !allowUntested) {
+        checks << (
+            "the ATERA ProSeg route is verified with ProSeg 3.2.0 only (Xenium-layout " +
+            "parquet reader and flags); proseg_version=${params.proseg_version}. Set " +
+            "atera_proseg_allow_untested_version=true to run it anyway"
+        )
+    }
+    def subset = ateraProsegTileSubset(params)
+    if (subset != null) {
+        def order = settings.stage_order
+        def later = settings.selected_stages.findAll { stage ->
+            order.indexOf(stage) > order.indexOf("segment")
+        }
+        if (later) {
+            checks << (
+                "atera_proseg_tile_subset (${subset.join(',')}) is a check run of " +
+                "single tiles and cannot be stitched; ${settings.pair_id} also " +
+                "selects ${later.join(', ')}. Use stop_stage=segment"
+            )
+        }
+    }
+    errors.addAll(checks)
+}
+
+// ATERA_PROSEG_PLAN config: the plan reads the staged source store.
+def ateraProsegPlanConfig(pairId, platform, params) {
+    def config = [
+        dataset_name: "${pairId}_${platform}",
+        platform: platform,
+        source_zarr_path: "proseg_source.zarr",
+        output_dir: "plan_out",
+        tile_um: ateraProsegNumber(params, "atera_proseg_tile_um", false),
+        halo_um: ateraProsegNumber(params, "atera_proseg_halo_um", false),
+        owned_margin_um: ateraProsegNumber(params, "atera_proseg_owned_margin_um", false),
+    ]
+    def subset = ateraProsegTileSubset(params)
+    if (subset != null) {
+        config.tile_subset = subset
+    }
+    return config
+}
+
+// The tiles a plan runs: one [tile_id, AteraProsegTileConfig map] per tile.
+// The config is a value (not the plan file), so a re-run plan with the same
+// content does not invalidate finished tiles.
+def ateraProsegTileSpecs(planText, pairId, platform, sourceZarrPath, params) {
+    def plan = new groovy.json.JsonSlurper().parseText(planText)
+    def model = ateraProsegModelParams(params)
+    def gitRev = params.proseg_git_rev?.toString()?.trim()
+    return plan.tiles.findAll { tile -> tile.run }.collect { tile ->
+        def config = [
+            dataset_name: "${pairId}_${platform}",
+            platform: platform,
+            tile_id: tile.tile_id,
+            source_zarr_path: sourceZarrPath,
+            source_build_fingerprint: plan.source_build_fingerprint,
+            pixel_size_um: plan.pixel_size_um,
+            core_um: tile.core_um,
+            window_px: tile.window_px,
+            mask_shape_px: plan.mask_shape_px,
+            owned_labels: tile.owned_labels,
+            output_dir: "tile_${tile.tile_id}",
+            num_threads: ateraProsegNumber(params, "atera_proseg_tile_cpus", true),
+            max_rss_gb: ateraProsegNumber(params, "atera_proseg_tile_max_rss_gb", false),
+            model: model,
+            proseg_git_rev: gitRev ? gitRev : null,
+            keep_inputs: boolOrDefault(
+                params.atera_proseg_keep_tile_inputs,
+                false,
+                "atera_proseg_keep_tile_inputs",
+            ),
+        ]
+        [tile.tile_id.toString(), config]
+    }
+}
+
+// ATERA_PROSEG_STITCH config: the stitch writes the ProSeg layer into the
+// persistent latest store of the row.
+def ateraProsegStitchConfig(pairId, platform, tileIds, params) {
+    return [
+        dataset_name: "${pairId}_${platform}",
+        platform: platform,
+        latest_zarr_path: "native_latest.zarr",
+        persistent_latest_zarr_path: file(
+            publishedDatasetPath(
+                params.outdir,
+                pairId,
+                platform,
+                "latest/latest_spatialdata.zarr",
+            )
+        ).toAbsolutePath().toString(),
+        plan_path: "tile_plan.json",
+        tile_dirs: tileIds.collect { tileId -> "tile_${tileId}".toString() }.sort(),
+        output_dir: "stitch_out",
+    ]
+}
+
+// A published ATERA_PROSEG_STITCH output (restart from a later stage).
+def publishedAteraProsegOutput(params, pairId, platform, name) {
+    return requireExistingPath(
+        publishedDatasetPath(
+            params.outdir,
+            pairId,
+            platform,
+            "segmentation/stitch_out/${name}",
+        ),
+        "ATERA_PROSEG_STITCH ${name} for ${pairId}:${platform}",
     )
 }
 
@@ -2571,7 +2813,7 @@ def rowSampleSettings(row, params) {
     def pairedMode = analysisMode == "paired"
     def activePlatforms = activePlatformsForMode(analysisMode)
     def segmentationSource = segmentationSourceForRow(row, activePlatforms, params)
-    def nativeSegmentation = segmentationSource == "native"
+    def nativeSegmentation = usesVendorSegmentation(segmentationSource)
     // MECR and the transcript spatial patterns read whole panels into memory;
     // they stay off for ATERA (whole-transcriptome) rows until they stream.
     def ateraRow = activePlatforms.contains("ATERA")
@@ -3176,6 +3418,7 @@ def rowSampleSettings(row, params) {
         run_segment_nuclei: runSegmentNuclei,
         run_segment: runSegment,
         run_native_segment: runSegment && nativeSegmentation,
+        run_atera_proseg: runSegment && segmentationSource == "native_proseg",
         run_enrich: runEnrich,
         run_register_images: runRegisterImages,
         registered_images_csv: registeredImagesCsv,

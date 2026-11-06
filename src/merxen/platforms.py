@@ -44,18 +44,28 @@ the pixel whose ``[i * ps, (i + 1) * ps)`` interval holds it (``floor``).
 PlatformFamily = Literal["10X", "MERSCOPE"]
 """Vendor family of a platform; members of a family share readers and layouts."""
 
-SegmentationSource = Literal["native", "cellpose_only", "cellpose_proseg"]
+SegmentationSource = Literal[
+    "native", "native_proseg", "cellpose_only", "cellpose_proseg"
+]
 """Where the cells of a row come from.
 
 ``"native"`` keeps the vendor segmentation (masks, shapes and table) and runs
-no Cellpose or ProSeg; ``"cellpose_only"`` runs Cellpose without ProSeg
-(reserved for AT-7); ``"cellpose_proseg"`` is the Cellpose prior refined by
-ProSeg that XENIUM and MERSCOPE rows run.
+no Cellpose or ProSeg; ``"native_proseg"`` keeps it as the original layer and
+adds ProSeg cells refined from the vendor masks as prior (tiled, AT-9; no
+Cellpose); ``"cellpose_only"`` runs Cellpose without ProSeg (reserved for
+AT-7); ``"cellpose_proseg"`` is the Cellpose prior refined by ProSeg that
+XENIUM and MERSCOPE rows run.
 """
+
+VENDOR_SEGMENTATION_SOURCES: Final[frozenset[str]] = frozenset(
+    {"native", "native_proseg"}
+)
+"""Sources whose original layer is the vendor segmentation (NATIVE_LATEST)."""
 
 _SEGMENTATION_LAYERS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
     {
         "native": ("original_seg",),
+        "native_proseg": ("reseg", "original_seg"),
         "cellpose_proseg": ("reseg", "original_seg", "proseg_mask", "proseg_hybrid"),
         "cellpose_only": ("proseg_mask", "original_seg"),
     }
@@ -104,6 +114,9 @@ class PlatformSpec:
         rasterised_transcript_plots: Whether static transcript figures are
             drawn as density rasters over every transcript instead of point
             scatters (whole-transcriptome panels).
+        proseg_label_key: Label element holding the ProSeg cells rasterised
+            on the morphology grid (``native_proseg`` rows), or ``None`` when
+            the platform's ProSeg layer has no label element.
     """
 
     name: str
@@ -121,6 +134,7 @@ class PlatformSpec:
     default_segmentation_source: SegmentationSource = "cellpose_proseg"
     original_label_keys: tuple[str, ...] = ()
     rasterised_transcript_plots: bool = False
+    proseg_label_key: str | None = None
 
     @property
     def original_shape_keys(self) -> tuple[str, ...]:
@@ -175,10 +189,11 @@ PLATFORM_SPECS: Final[Mapping[str, PlatformSpec]] = MappingProxyType(
                 "experiment.spatial",
             ),
             mask_pixel_convention="corner",
-            segmentation_sources=("native",),
+            segmentation_sources=("native", "native_proseg"),
             default_segmentation_source="native",
             original_label_keys=("cell_labels", "nucleus_labels"),
             rasterised_transcript_plots=True,
+            proseg_label_key="proseg_cell_labels",
         ),
     }
 )
@@ -206,12 +221,28 @@ def supported_platforms() -> tuple[str, ...]:
     return tuple(PLATFORM_SPECS)
 
 
+def uses_vendor_segmentation(source: SegmentationSource | str | None) -> bool:
+    """Return whether a segmentation source keeps the vendor segmentation.
+
+    ``native`` and ``native_proseg`` rows build their latest store with
+    NATIVE_LATEST and enrich the vendor layer natively; the ProSeg layer of
+    ``native_proseg`` is added on top of it.
+
+    Args:
+        source: A segmentation source, or ``None``.
+
+    Returns:
+        ``True`` for ``native`` and ``native_proseg``.
+    """
+    return str(source) in VENDOR_SEGMENTATION_SOURCES
+
+
 def segmentation_layers(source: SegmentationSource | str) -> tuple[str, ...]:
     """Return the analysis layers a segmentation source produces.
 
     Args:
-        source: A segmentation source (``native``, ``cellpose_only`` or
-            ``cellpose_proseg``).
+        source: A segmentation source (``native``, ``native_proseg``,
+            ``cellpose_only`` or ``cellpose_proseg``).
 
     Returns:
         The analysis segmentations (``analysis_segmentation`` values) the
