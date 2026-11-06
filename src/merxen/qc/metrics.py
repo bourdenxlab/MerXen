@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import spatialdata as sd
 
+from merxen.io.points_aggregates import read_points_aggregates
 from merxen.io.spatialdata_schema import choose_primary_points_key
 from merxen.io.transcript_io import (
     assignment_mask_from_points,
@@ -105,10 +106,15 @@ def _compute_cell_metrics_from_points(
             cell_metrics = pd.concat([trans_per_cell, genes_per_cell], axis=1)
             cell_metrics = cell_metrics.reset_index(drop=False)
             return n_total, n_assigned, cell_metrics
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "Dask QC aggregation failed (%s); falling back to pandas.", exc
-            )
+        except Exception as exc:
+            # Never fall back to materialising dask points: an ATERA section
+            # holds over a billion rows.
+            raise RuntimeError(
+                "QC could not aggregate the dask-backed transcript points "
+                f"(columns {point_cols}): {exc}. MerXen does not fall back to "
+                "loading every transcript into memory; fix the points element "
+                "or the assignment column."
+            ) from exc
 
     pts = to_pandas(points_obj)
     is_assigned = assignment_mask_from_points(pts[point_cols], assign_col=assign_col)
@@ -259,7 +265,7 @@ def compute_dataset_qc(
         )
 
     if resolved_table_key is not None:
-        n_total = _point_count(points_obj)
+        n_total = _point_count(points_obj, latest_zarr_path, points_key)
         n_assigned, cell_metrics = _compute_cell_metrics_from_table(
             sdata.tables[resolved_table_key]
         )
@@ -320,6 +326,7 @@ def compute_dataset_qc(
             shape_key=resolved_shape_key,
             points_key=points_key,
             reference_shape_key=registration_reference_shape_key,
+            zarr_path=latest_zarr_path,
         )
         registration_qc = registration.to_dict()
         summary.update(
@@ -357,8 +364,36 @@ def compute_dataset_qc(
     }
 
 
-def _point_count(points_obj: Any) -> int:
-    """Return row count for pandas or dask-backed SpatialData points."""
+def _point_count(
+    points_obj: Any,
+    zarr_path: Path | None = None,
+    points_key: str | None = None,
+) -> int:
+    """Return the row count of pandas- or dask-backed SpatialData points.
+
+    A store whose build recorded transcript aggregates (ATERA) is counted from
+    ``n_points_written`` while the points index still matches the parquet
+    files, which avoids a pass over every row. XENIUM and MERSCOPE stores carry
+    no aggregates and are counted as before.
+
+    Args:
+        points_obj: The points element.
+        zarr_path: Store the points were read from, if known.
+        points_key: Name of the points element in that store.
+
+    Returns:
+        Number of transcript rows.
+    """
+    if zarr_path is not None and points_key is not None:
+        aggregates = read_points_aggregates(Path(zarr_path), points_key)
+        if aggregates is not None:
+            if aggregates.fingerprint_matches():
+                return int(aggregates.n_points_written)
+            logger.info(
+                "Points aggregates of %s do not match its parquet files; counting "
+                "the points with dask.",
+                points_key,
+            )
     if hasattr(points_obj, "npartitions") and hasattr(points_obj, "partitions"):
         return int(points_obj.shape[0].compute())
     return int(len(points_obj))

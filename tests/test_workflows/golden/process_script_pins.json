@@ -40,7 +40,7 @@
   "workflows/modules/pciseq.nf::PCISEQ_REFERENCE::script": "9bfed648dcf6ee31393600d0564d8efd67a05ddef0a3a87633d82cb85df9a5fd",
   "workflows/modules/pciseq.nf::PCISEQ_REFERENCE::stub": "eaf7679eb13ae7f955ac970b8daf950a4dadd78739070e67911673e0313e03d3",
   "workflows/modules/proseg_bootstrap.nf::ENSURE_PROSEG::script": "d435b018884afe5f8daf1a680a4fb4e346b6215012cb27b5da696c69b0d37f7a",
-  "workflows/modules/qc.nf::QC::script": "c0b67f4332a335c08092de1d7600baf24b5291a932220f514dc5c823f7771848",
+  "workflows/modules/qc.nf::QC::script": "64ad812e0d017ca21a0965faae2ba0bf007a237296041acdd845207248f2a4de",
   "workflows/modules/qc.nf::VALIDATE_ANALYSIS_LAYER::script": "6a6ecbde5506f50b515c9d8e17a640ec6a9fa90916deb6055f5f44ac346b5f83",
   "workflows/modules/register_images.nf::REGISTER_IMAGES::script": "a514fe054fb3f4e03086d635d3e42738c0348111c41745e2452ff0a606698d48",
   "workflows/modules/segmentation.nf::CELLPOSE_NUCLEI_SEGMENT::script": "aa76aa01e330337f0041341b7ebe4b2e4ec773db9e04bf77f24585740503ce01",

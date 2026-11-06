@@ -1,0 +1,1172 @@
+{
+ "MERSCOPE": {
+  "gene_totals": {
+   "Blank-7": 716.0,
+   "GeneA": 8924.0,
+   "GeneB": 8796.0,
+   "GeneC": 8806.0,
+   "GeneD": 8758.0
+  },
+  "points": {
+   "cell_metrics": {
+    "columns": [
+     "cell_id_norm",
+     "transcripts_per_cell",
+     "genes_per_cell",
+     "dataset"
+    ],
+    "head": {
+     "cell_id_norm": [
+      "1",
+      "10",
+      "100",
+      "101",
+      "102"
+     ],
+     "dataset": [
+      "S1_MERSCOPE",
+      "S1_MERSCOPE",
+      "S1_MERSCOPE",
+      "S1_MERSCOPE",
+      "S1_MERSCOPE"
+     ],
+     "genes_per_cell": [
+      4,
+      4,
+      5,
+      5,
+      5
+     ],
+     "transcripts_per_cell": [
+      30,
+      30,
+      30,
+      30,
+      30
+     ]
+    },
+    "max": {
+     "genes_per_cell": 5,
+     "transcripts_per_cell": 30
+    },
+    "min": {
+     "genes_per_cell": 3,
+     "transcripts_per_cell": 30
+    },
+    "n_rows": 600,
+    "sum": {
+     "genes_per_cell": 2676,
+     "transcripts_per_cell": 18000
+    }
+   },
+   "geometry_metrics": {
+    "columns": [
+     "dataset",
+     "area",
+     "perimeter",
+     "convex_area",
+     "circularity",
+     "solidity",
+     "eccentricity",
+     "aspect_ratio",
+     "log10_area"
+    ],
+    "head": {
+     "area": [
+      77.64571353075635,
+      77.64571353075632,
+      77.64571353075601,
+      77.6457135307564,
+      77.64571353075668
+     ],
+     "aspect_ratio": [
+      1.0392304845413214,
+      1.0392304845413265,
+      1.0392304845413263,
+      1.0392304845413274,
+      1.0392304845413267
+     ],
+     "circularity": [
+      0.9942818882921576,
+      0.9942818882921585,
+      0.9942818882921577,
+      0.9942818882921585,
+      0.9942818882921581
+     ],
+     "convex_area": [
+      77.64571353075635,
+      77.6457135307563,
+      77.64571353075603,
+      77.64571353075635,
+      77.64571353075668
+     ],
+     "dataset": [
+      "S1_MERSCOPE",
+      "S1_MERSCOPE",
+      "S1_MERSCOPE",
+      "S1_MERSCOPE",
+      "S1_MERSCOPE"
+     ],
+     "eccentricity": [
+      0.27216552697589214,
+      0.27216552697590907,
+      0.2721655269759083,
+      0.27216552697591195,
+      0.2721655269759097
+     ],
+     "log10_area": [
+      1.8901174852890021,
+      1.8901174852890021,
+      1.8901174852890004,
+      1.8901174852890026,
+      1.8901174852890041
+     ],
+     "perimeter": [
+      31.326286132812413,
+      31.326286132812392,
+      31.326286132812342,
+      31.326286132812406,
+      31.32628613281247
+     ],
+     "solidity": [
+      1.0,
+      1.0000000000000004,
+      0.9999999999999998,
+      1.0000000000000004,
+      1.0
+     ]
+    },
+    "max": {
+     "area": 77.64571353075674,
+     "aspect_ratio": 1.0392304845413316,
+     "circularity": 0.9942818882921588,
+     "convex_area": 77.64571353075674,
+     "eccentricity": 0.2721655269759262,
+     "log10_area": 1.8901174852890044,
+     "perimeter": 31.326286132812477,
+     "solidity": 1.0000000000000007
+    },
+    "min": {
+     "area": 77.64571353075601,
+     "aspect_ratio": 1.0392304845413207,
+     "circularity": 0.9942818882921574,
+     "convex_area": 77.64571353075603,
+     "eccentricity": 0.2721655269758899,
+     "log10_area": 1.8901174852890004,
+     "perimeter": 31.326286132812335,
+     "solidity": 0.9999999999999994
+    },
+    "n_rows": 600,
+    "sum": {
+     "area": 46587.42811845383,
+     "aspect_ratio": 623.5382907247956,
+     "circularity": 596.5691329752949,
+     "convex_area": 46587.42811845383,
+     "eccentricity": 163.29931618554488,
+     "log10_area": 1134.0704911734015,
+     "perimeter": 18795.771679687445,
+     "solidity": 600.0
+    }
+   },
+   "registration_qc": {
+    "density_ratio": 9.576960087784158,
+    "mean_transcripts_at_centroids": 32.85735294117647,
+    "mean_transcripts_at_random": 3.430875,
+    "n_centroids": 1360,
+    "n_random_points": 8000,
+    "n_shift_windows": 8,
+    "n_windows": 8,
+    "params": {
+     "bin_um": 2.0,
+     "exclude_control_features": false,
+     "max_search_um": 150.0,
+     "max_shift_um": 5.0,
+     "min_centroids": 50,
+     "min_density_ratio": 1.5,
+     "min_peak_z": 4.0,
+     "n_random_per_window": 1000,
+     "n_windows": 8,
+     "radius_um": 4.0,
+     "seed": 0,
+     "window_size_um": 400.0
+    },
+    "per_window": [
+     {
+      "mean_transcripts_at_centroids": 33.02272727272727,
+      "mean_transcripts_at_random": 4.967,
+      "n_centroids": 220.0,
+      "shift_peak_z": 46.622785810477204,
+      "shift_x_um": 0.0,
+      "shift_y_um": 0.0,
+      "x_min": 32.51982688097095,
+      "y_min": 24.937262417060225
+     },
+     {
+      "mean_transcripts_at_centroids": 31.93617021276596,
+      "mean_transcripts_at_random": 2.589,
+      "n_centroids": 141.0,
+      "shift_peak_z": 34.71727014454596,
+      "shift_x_um": 0.0,
+      "shift_y_um": 0.0,
+      "x_min": -83.18968584405735,
+      "y_min": 364.9176896684654
+     },
+     {
+      "mean_transcripts_at_centroids": 33.90419161676647,
+      "mean_transcripts_at_random": 3.616,
+      "n_centroids": 167.0,
+      "shift_peak_z": 42.74957380776073,
+      "shift_x_um": 0.0,
+      "shift_y_um": 0.0,
+      "x_min": -43.73734634670976,
+      "y_min": -87.7658735292773
+     },
+     {
+      "mean_transcripts_at_centroids": 34.91044776119403,
+      "mean_transcripts_at_random": 2.593,
+      "n_centroids": 134.0,
+      "shift_peak_z": 38.3715946573163,
+      "shift_x_um": -2.0,
+      "shift_y_um": 0.0,
+      "x_min": 223.20045424910836,
+      "y_min": -184.51149231808427
+     },
+     {
+      "mean_transcripts_at_centroids": 31.927835051546392,
+      "mean_transcripts_at_random": 3.521,
+      "n_centroids": 194.0,
+      "shift_peak_z": 39.05851389190922,
+      "shift_x_um": -2.0,
+      "shift_y_um": 0.0,
+      "x_min": 18.03941423168041,
+      "y_min": 312.9362197452723
+     },
+     {
+      "mean_transcripts_at_centroids": 31.832167832167833,
+      "mean_transcripts_at_random": 2.767,
+      "n_centroids": 143.0,
+      "shift_peak_z": 35.481836329189846,
+      "shift_x_um": 0.0,
+      "shift_y_um": 0.0,
+      "x_min": -138.44678985372573,
+      "y_min": 310.426170256158
+     },
+     {
+      "mean_transcripts_at_centroids": 32.45147679324894,
+      "mean_transcripts_at_random": 4.814,
+      "n_centroids": 237.0,
+      "shift_peak_z": 47.20927655996978,
+      "shift_x_um": 0.0,
+      "shift_y_um": 0.0,
+      "x_min": 122.65316390669409,
+      "y_min": 134.4592050817784
+     },
+     {
+      "mean_transcripts_at_centroids": 33.395161290322584,
+      "mean_transcripts_at_random": 2.58,
+      "n_centroids": 124.0,
+      "shift_peak_z": 38.1331036056096,
+      "shift_x_um": -2.0,
+      "shift_y_um": 0.0,
+      "x_min": 355.54130335985883,
+      "y_min": -74.72870920736038
+     }
+    ],
+    "reasons": [],
+    "shift_um": 0.0,
+    "shift_x_um": 0.0,
+    "shift_y_um": 0.0,
+    "status": "pass"
+   },
+   "summary": {
+    "dataset": "S1_MERSCOPE",
+    "median_area": 77.6457135307564,
+    "median_eccentricity": 0.2721655269759083,
+    "median_genes_per_cell": 4.0,
+    "median_transcripts_per_cell": 30.0,
+    "n_cells": 600,
+    "n_transcripts_assigned": 18000,
+    "n_transcripts_total": 36000,
+    "pct_assigned": 50.0,
+    "registration_density_ratio": 9.576960087784158,
+    "registration_shift_um": 0.0,
+    "registration_status": "pass",
+    "shape_key": "MOSAIK_proseg",
+    "table_key": null
+   }
+  },
+  "table": {
+   "cell_metrics": {
+    "columns": [
+     "cell_id_norm",
+     "transcripts_per_cell",
+     "genes_per_cell",
+     "dataset"
+    ],
+    "head": {
+     "cell_id_norm": [
+      "1",
+      "10",
+      "100",
+      "101",
+      "102"
+     ],
+     "dataset": [
+      "S1_MERSCOPE",
+      "S1_MERSCOPE",
+      "S1_MERSCOPE",
+      "S1_MERSCOPE",
+      "S1_MERSCOPE"
+     ],
+     "genes_per_cell": [
+      5.0,
+      5.0,
+      5.0,
+      5.0,
+      5.0
+     ],
+     "transcripts_per_cell": [
+      28.0,
+      22.0,
+      37.0,
+      44.0,
+      35.0
+     ]
+    },
+    "max": {
+     "genes_per_cell": 5.0,
+     "transcripts_per_cell": 51.0
+    },
+    "min": {
+     "genes_per_cell": 4.0,
+     "transcripts_per_cell": 16.0
+    },
+    "n_rows": 600,
+    "sum": {
+     "genes_per_cell": 2993.0,
+     "transcripts_per_cell": 18139.0
+    }
+   },
+   "geometry_metrics": {
+    "columns": [
+     "dataset",
+     "area",
+     "perimeter",
+     "convex_area",
+     "circularity",
+     "solidity",
+     "eccentricity",
+     "aspect_ratio",
+     "log10_area"
+    ],
+    "head": {
+     "area": [
+      77.64571353075635,
+      77.64571353075632,
+      77.64571353075601,
+      77.6457135307564,
+      77.64571353075668
+     ],
+     "aspect_ratio": [
+      1.0392304845413214,
+      1.0392304845413265,
+      1.0392304845413263,
+      1.0392304845413274,
+      1.0392304845413267
+     ],
+     "circularity": [
+      0.9942818882921576,
+      0.9942818882921585,
+      0.9942818882921577,
+      0.9942818882921585,
+      0.9942818882921581
+     ],
+     "convex_area": [
+      77.64571353075635,
+      77.6457135307563,
+      77.64571353075603,
+      77.64571353075635,
+      77.64571353075668
+     ],
+     "dataset": [
+      "S1_MERSCOPE",
+      "S1_MERSCOPE",
+      "S1_MERSCOPE",
+      "S1_MERSCOPE",
+      "S1_MERSCOPE"
+     ],
+     "eccentricity": [
+      0.27216552697589214,
+      0.27216552697590907,
+      0.2721655269759083,
+      0.27216552697591195,
+      0.2721655269759097
+     ],
+     "log10_area": [
+      1.8901174852890021,
+      1.8901174852890021,
+      1.8901174852890004,
+      1.8901174852890026,
+      1.8901174852890041
+     ],
+     "perimeter": [
+      31.326286132812413,
+      31.326286132812392,
+      31.326286132812342,
+      31.326286132812406,
+      31.32628613281247
+     ],
+     "solidity": [
+      1.0,
+      1.0000000000000004,
+      0.9999999999999998,
+      1.0000000000000004,
+      1.0
+     ]
+    },
+    "max": {
+     "area": 77.64571353075674,
+     "aspect_ratio": 1.0392304845413316,
+     "circularity": 0.9942818882921588,
+     "convex_area": 77.64571353075674,
+     "eccentricity": 0.2721655269759262,
+     "log10_area": 1.8901174852890044,
+     "perimeter": 31.326286132812477,
+     "solidity": 1.0000000000000007
+    },
+    "min": {
+     "area": 77.64571353075601,
+     "aspect_ratio": 1.0392304845413207,
+     "circularity": 0.9942818882921574,
+     "convex_area": 77.64571353075603,
+     "eccentricity": 0.2721655269758899,
+     "log10_area": 1.8901174852890004,
+     "perimeter": 31.326286132812335,
+     "solidity": 0.9999999999999994
+    },
+    "n_rows": 600,
+    "sum": {
+     "area": 46587.42811845383,
+     "aspect_ratio": 623.5382907247956,
+     "circularity": 596.5691329752949,
+     "convex_area": 46587.42811845383,
+     "eccentricity": 163.29931618554488,
+     "log10_area": 1134.0704911734015,
+     "perimeter": 18795.771679687445,
+     "solidity": 600.0
+    }
+   },
+   "registration_qc": {
+    "density_ratio": 9.576960087784158,
+    "mean_transcripts_at_centroids": 32.85735294117647,
+    "mean_transcripts_at_random": 3.430875,
+    "n_centroids": 1360,
+    "n_random_points": 8000,
+    "n_shift_windows": 8,
+    "n_windows": 8,
+    "params": {
+     "bin_um": 2.0,
+     "exclude_control_features": false,
+     "max_search_um": 150.0,
+     "max_shift_um": 5.0,
+     "min_centroids": 50,
+     "min_density_ratio": 1.5,
+     "min_peak_z": 4.0,
+     "n_random_per_window": 1000,
+     "n_windows": 8,
+     "radius_um": 4.0,
+     "seed": 0,
+     "window_size_um": 400.0
+    },
+    "per_window": [
+     {
+      "mean_transcripts_at_centroids": 33.02272727272727,
+      "mean_transcripts_at_random": 4.967,
+      "n_centroids": 220.0,
+      "shift_peak_z": 46.622785810477204,
+      "shift_x_um": 0.0,
+      "shift_y_um": 0.0,
+      "x_min": 32.51982688097095,
+      "y_min": 24.937262417060225
+     },
+     {
+      "mean_transcripts_at_centroids": 31.93617021276596,
+      "mean_transcripts_at_random": 2.589,
+      "n_centroids": 141.0,
+      "shift_peak_z": 34.71727014454596,
+      "shift_x_um": 0.0,
+      "shift_y_um": 0.0,
+      "x_min": -83.18968584405735,
+      "y_min": 364.9176896684654
+     },
+     {
+      "mean_transcripts_at_centroids": 33.90419161676647,
+      "mean_transcripts_at_random": 3.616,
+      "n_centroids": 167.0,
+      "shift_peak_z": 42.74957380776073,
+      "shift_x_um": 0.0,
+      "shift_y_um": 0.0,
+      "x_min": -43.73734634670976,
+      "y_min": -87.7658735292773
+     },
+     {
+      "mean_transcripts_at_centroids": 34.91044776119403,
+      "mean_transcripts_at_random": 2.593,
+      "n_centroids": 134.0,
+      "shift_peak_z": 38.3715946573163,
+      "shift_x_um": -2.0,
+      "shift_y_um": 0.0,
+      "x_min": 223.20045424910836,
+      "y_min": -184.51149231808427
+     },
+     {
+      "mean_transcripts_at_centroids": 31.927835051546392,
+      "mean_transcripts_at_random": 3.521,
+      "n_centroids": 194.0,
+      "shift_peak_z": 39.05851389190922,
+      "shift_x_um": -2.0,
+      "shift_y_um": 0.0,
+      "x_min": 18.03941423168041,
+      "y_min": 312.9362197452723
+     },
+     {
+      "mean_transcripts_at_centroids": 31.832167832167833,
+      "mean_transcripts_at_random": 2.767,
+      "n_centroids": 143.0,
+      "shift_peak_z": 35.481836329189846,
+      "shift_x_um": 0.0,
+      "shift_y_um": 0.0,
+      "x_min": -138.44678985372573,
+      "y_min": 310.426170256158
+     },
+     {
+      "mean_transcripts_at_centroids": 32.45147679324894,
+      "mean_transcripts_at_random": 4.814,
+      "n_centroids": 237.0,
+      "shift_peak_z": 47.20927655996978,
+      "shift_x_um": 0.0,
+      "shift_y_um": 0.0,
+      "x_min": 122.65316390669409,
+      "y_min": 134.4592050817784
+     },
+     {
+      "mean_transcripts_at_centroids": 33.395161290322584,
+      "mean_transcripts_at_random": 2.58,
+      "n_centroids": 124.0,
+      "shift_peak_z": 38.1331036056096,
+      "shift_x_um": -2.0,
+      "shift_y_um": 0.0,
+      "x_min": 355.54130335985883,
+      "y_min": -74.72870920736038
+     }
+    ],
+    "reasons": [],
+    "shift_um": 0.0,
+    "shift_x_um": 0.0,
+    "shift_y_um": 0.0,
+    "status": "pass"
+   },
+   "summary": {
+    "dataset": "S1_MERSCOPE",
+    "median_area": 77.6457135307564,
+    "median_eccentricity": 0.2721655269759083,
+    "median_genes_per_cell": 5.0,
+    "median_transcripts_per_cell": 30.0,
+    "n_cells": 600,
+    "n_transcripts_assigned": 18139,
+    "n_transcripts_total": 36000,
+    "pct_assigned": 50.38611111111111,
+    "registration_density_ratio": 9.576960087784158,
+    "registration_shift_um": 0.0,
+    "registration_status": "pass",
+    "shape_key": "MOSAIK_proseg",
+    "table_key": "table_MOSAIK_proseg"
+   }
+  }
+ },
+ "XENIUM": {
+  "gene_totals": {
+   "GeneA": 8907.0,
+   "GeneB": 8851.0,
+   "GeneC": 8787.0,
+   "GeneD": 8756.0,
+   "NegControlProbe_00042": 699.0
+  },
+  "points": {
+   "cell_metrics": {
+    "columns": [
+     "cell_id_norm",
+     "transcripts_per_cell",
+     "genes_per_cell",
+     "dataset"
+    ],
+    "head": {
+     "cell_id_norm": [
+      "1",
+      "10",
+      "100",
+      "101",
+      "102"
+     ],
+     "dataset": [
+      "S1_XENIUM",
+      "S1_XENIUM",
+      "S1_XENIUM",
+      "S1_XENIUM",
+      "S1_XENIUM"
+     ],
+     "genes_per_cell": [
+      5,
+      4,
+      4,
+      5,
+      4
+     ],
+     "transcripts_per_cell": [
+      30,
+      30,
+      30,
+      30,
+      30
+     ]
+    },
+    "max": {
+     "genes_per_cell": 5,
+     "transcripts_per_cell": 30
+    },
+    "min": {
+     "genes_per_cell": 4,
+     "transcripts_per_cell": 30
+    },
+    "n_rows": 600,
+    "sum": {
+     "genes_per_cell": 2666,
+     "transcripts_per_cell": 18000
+    }
+   },
+   "geometry_metrics": {
+    "columns": [
+     "dataset",
+     "area",
+     "perimeter",
+     "convex_area",
+     "circularity",
+     "solidity",
+     "eccentricity",
+     "aspect_ratio",
+     "log10_area"
+    ],
+    "head": {
+     "area": [
+      77.64571353075638,
+      77.6457135307564,
+      77.64571353075654,
+      77.64571353075624,
+      77.64571353075658
+     ],
+     "aspect_ratio": [
+      1.0392304845413256,
+      1.039230484541328,
+      1.0392304845413234,
+      1.0392304845413258,
+      1.0392304845413283
+     ],
+     "circularity": [
+      0.9942818882921586,
+      0.994281888292158,
+      0.9942818882921585,
+      0.9942818882921581,
+      0.9942818882921581
+     ],
+     "convex_area": [
+      77.64571353075638,
+      77.64571353075638,
+      77.64571353075654,
+      77.64571353075625,
+      77.64571353075657
+     ],
+     "dataset": [
+      "S1_XENIUM",
+      "S1_XENIUM",
+      "S1_XENIUM",
+      "S1_XENIUM",
+      "S1_XENIUM"
+     ],
+     "eccentricity": [
+      0.2721655269759066,
+      0.2721655269759142,
+      0.27216552697589885,
+      0.2721655269759066,
+      0.2721655269759152
+     ],
+     "log10_area": [
+      1.8901174852890024,
+      1.8901174852890026,
+      1.8901174852890033,
+      1.8901174852890017,
+      1.8901174852890035
+     ],
+     "perimeter": [
+      31.326286132812402,
+      31.326286132812413,
+      31.326286132812434,
+      31.32628613281238,
+      31.32628613281245
+     ],
+     "solidity": [
+      1.0,
+      1.0000000000000002,
+      1.0,
+      0.9999999999999998,
+      1.0000000000000002
+     ]
+    },
+    "max": {
+     "area": 77.64571353075674,
+     "aspect_ratio": 1.0392304845413316,
+     "circularity": 0.9942818882921588,
+     "convex_area": 77.64571353075674,
+     "eccentricity": 0.2721655269759258,
+     "log10_area": 1.8901174852890044,
+     "perimeter": 31.326286132812477,
+     "solidity": 1.0000000000000007
+    },
+    "min": {
+     "area": 77.64571353075588,
+     "aspect_ratio": 1.0392304845413207,
+     "circularity": 0.9942818882921572,
+     "convex_area": 77.64571353075588,
+     "eccentricity": 0.2721655269758899,
+     "log10_area": 1.8901174852889997,
+     "perimeter": 31.326286132812314,
+     "solidity": 0.9999999999999994
+    },
+    "n_rows": 600,
+    "sum": {
+     "area": 46587.42811845381,
+     "aspect_ratio": 623.5382907247956,
+     "circularity": 596.5691329752949,
+     "convex_area": 46587.42811845381,
+     "eccentricity": 163.29931618554468,
+     "log10_area": 1134.0704911734015,
+     "perimeter": 18795.771679687445,
+     "solidity": 600.0
+    }
+   },
+   "registration_qc": {
+    "density_ratio": 10.927285089888,
+    "mean_transcripts_at_centroids": 33.233971690258116,
+    "mean_transcripts_at_random": 3.041375,
+    "n_centroids": 1201,
+    "n_random_points": 8000,
+    "n_shift_windows": 8,
+    "n_windows": 8,
+    "params": {
+     "bin_um": 2.0,
+     "exclude_control_features": false,
+     "max_search_um": 150.0,
+     "max_shift_um": 5.0,
+     "min_centroids": 50,
+     "min_density_ratio": 1.5,
+     "min_peak_z": 4.0,
+     "n_random_per_window": 1000,
+     "n_windows": 8,
+     "radius_um": 4.0,
+     "seed": 0,
+     "window_size_um": 400.0
+    },
+    "per_window": [
+     {
+      "mean_transcripts_at_centroids": 32.823008849557525,
+      "mean_transcripts_at_random": 2.377,
+      "n_centroids": 113.0,
+      "shift_peak_z": 38.456719265124235,
+      "shift_x_um": -2.0,
+      "shift_y_um": 0.0,
+      "x_min": 394.7002651938046,
+      "y_min": -18.83619635442693
+     },
+     {
+      "mean_transcripts_at_centroids": 33.62643678160919,
+      "mean_transcripts_at_random": 3.424,
+      "n_centroids": 174.0,
+      "shift_peak_z": 39.406535363141224,
+      "shift_x_um": -2.0,
+      "shift_y_um": 0.0,
+      "x_min": -51.94356933156166,
+      "y_min": 306.63498902073604
+     },
+     {
+      "mean_transcripts_at_centroids": 33.87356321839081,
+      "mean_transcripts_at_random": 3.74,
+      "n_centroids": 174.0,
+      "shift_peak_z": 42.89265861623211,
+      "shift_x_um": 0.0,
+      "shift_y_um": 0.0,
+      "x_min": 291.0418615817949,
+      "y_min": 128.9451613220158
+     },
+     {
+      "mean_transcripts_at_centroids": 33.19724770642202,
+      "mean_transcripts_at_random": 4.404,
+      "n_centroids": 218.0,
+      "shift_peak_z": 43.070239367060935,
+      "shift_x_um": 0.0,
+      "shift_y_um": 0.0,
+      "x_min": -64.9811735119643,
+      "y_min": 87.22941879283371
+     },
+     {
+      "mean_transcripts_at_centroids": 32.96694214876033,
+      "mean_transcripts_at_random": 2.142,
+      "n_centroids": 121.0,
+      "shift_peak_z": 35.92345034637231,
+      "shift_x_um": 0.0,
+      "shift_y_um": 0.0,
+      "x_min": -50.639625628858454,
+      "y_min": -187.7839709557181
+     },
+     {
+      "mean_transcripts_at_centroids": 33.09016393442623,
+      "mean_transcripts_at_random": 2.241,
+      "n_centroids": 122.0,
+      "shift_peak_z": 34.09510530813784,
+      "shift_x_um": -2.0,
+      "shift_y_um": 0.0,
+      "x_min": -158.64071389536363,
+      "y_min": -123.85025948582637
+     },
+     {
+      "mean_transcripts_at_centroids": 33.270833333333336,
+      "mean_transcripts_at_random": 1.798,
+      "n_centroids": 96.0,
+      "shift_peak_z": 33.50196990785014,
+      "shift_x_um": -2.0,
+      "shift_y_um": 0.0,
+      "x_min": -103.10578353701139,
+      "y_min": 397.3615253238024
+     },
+     {
+      "mean_transcripts_at_centroids": 32.80327868852459,
+      "mean_transcripts_at_random": 4.205,
+      "n_centroids": 183.0,
+      "shift_peak_z": 42.89847674583483,
+      "shift_x_um": -2.0,
+      "shift_y_um": 0.0,
+      "x_min": 258.86204981854667,
+      "y_min": -31.352485940804854
+     }
+    ],
+    "reasons": [],
+    "shift_um": 2.0,
+    "shift_x_um": -2.0,
+    "shift_y_um": 0.0,
+    "status": "pass"
+   },
+   "summary": {
+    "dataset": "S1_XENIUM",
+    "median_area": 77.64571353075637,
+    "median_eccentricity": 0.27216552697590757,
+    "median_genes_per_cell": 4.0,
+    "median_transcripts_per_cell": 30.0,
+    "n_cells": 600,
+    "n_transcripts_assigned": 18000,
+    "n_transcripts_total": 36000,
+    "pct_assigned": 50.0,
+    "registration_density_ratio": 10.927285089888,
+    "registration_shift_um": 2.0,
+    "registration_status": "pass",
+    "shape_key": "MOSAIK_proseg",
+    "table_key": null
+   }
+  },
+  "table": {
+   "cell_metrics": {
+    "columns": [
+     "cell_id_norm",
+     "transcripts_per_cell",
+     "genes_per_cell",
+     "dataset"
+    ],
+    "head": {
+     "cell_id_norm": [
+      "1",
+      "10",
+      "100",
+      "101",
+      "102"
+     ],
+     "dataset": [
+      "S1_XENIUM",
+      "S1_XENIUM",
+      "S1_XENIUM",
+      "S1_XENIUM",
+      "S1_XENIUM"
+     ],
+     "genes_per_cell": [
+      5.0,
+      5.0,
+      5.0,
+      5.0,
+      5.0
+     ],
+     "transcripts_per_cell": [
+      28.0,
+      34.0,
+      31.0,
+      30.0,
+      31.0
+     ]
+    },
+    "max": {
+     "genes_per_cell": 5.0,
+     "transcripts_per_cell": 48.0
+    },
+    "min": {
+     "genes_per_cell": 4.0,
+     "transcripts_per_cell": 15.0
+    },
+    "n_rows": 600,
+    "sum": {
+     "genes_per_cell": 2994.0,
+     "transcripts_per_cell": 17882.0
+    }
+   },
+   "geometry_metrics": {
+    "columns": [
+     "dataset",
+     "area",
+     "perimeter",
+     "convex_area",
+     "circularity",
+     "solidity",
+     "eccentricity",
+     "aspect_ratio",
+     "log10_area"
+    ],
+    "head": {
+     "area": [
+      77.64571353075638,
+      77.6457135307564,
+      77.64571353075654,
+      77.64571353075624,
+      77.64571353075658
+     ],
+     "aspect_ratio": [
+      1.0392304845413256,
+      1.039230484541328,
+      1.0392304845413234,
+      1.0392304845413258,
+      1.0392304845413283
+     ],
+     "circularity": [
+      0.9942818882921586,
+      0.994281888292158,
+      0.9942818882921585,
+      0.9942818882921581,
+      0.9942818882921581
+     ],
+     "convex_area": [
+      77.64571353075638,
+      77.64571353075638,
+      77.64571353075654,
+      77.64571353075625,
+      77.64571353075657
+     ],
+     "dataset": [
+      "S1_XENIUM",
+      "S1_XENIUM",
+      "S1_XENIUM",
+      "S1_XENIUM",
+      "S1_XENIUM"
+     ],
+     "eccentricity": [
+      0.2721655269759066,
+      0.2721655269759142,
+      0.27216552697589885,
+      0.2721655269759066,
+      0.2721655269759152
+     ],
+     "log10_area": [
+      1.8901174852890024,
+      1.8901174852890026,
+      1.8901174852890033,
+      1.8901174852890017,
+      1.8901174852890035
+     ],
+     "perimeter": [
+      31.326286132812402,
+      31.326286132812413,
+      31.326286132812434,
+      31.32628613281238,
+      31.32628613281245
+     ],
+     "solidity": [
+      1.0,
+      1.0000000000000002,
+      1.0,
+      0.9999999999999998,
+      1.0000000000000002
+     ]
+    },
+    "max": {
+     "area": 77.64571353075674,
+     "aspect_ratio": 1.0392304845413316,
+     "circularity": 0.9942818882921588,
+     "convex_area": 77.64571353075674,
+     "eccentricity": 0.2721655269759258,
+     "log10_area": 1.8901174852890044,
+     "perimeter": 31.326286132812477,
+     "solidity": 1.0000000000000007
+    },
+    "min": {
+     "area": 77.64571353075588,
+     "aspect_ratio": 1.0392304845413207,
+     "circularity": 0.9942818882921572,
+     "convex_area": 77.64571353075588,
+     "eccentricity": 0.2721655269758899,
+     "log10_area": 1.8901174852889997,
+     "perimeter": 31.326286132812314,
+     "solidity": 0.9999999999999994
+    },
+    "n_rows": 600,
+    "sum": {
+     "area": 46587.42811845381,
+     "aspect_ratio": 623.5382907247956,
+     "circularity": 596.5691329752949,
+     "convex_area": 46587.42811845381,
+     "eccentricity": 163.29931618554468,
+     "log10_area": 1134.0704911734015,
+     "perimeter": 18795.771679687445,
+     "solidity": 600.0
+    }
+   },
+   "registration_qc": {
+    "density_ratio": 10.927285089888,
+    "mean_transcripts_at_centroids": 33.233971690258116,
+    "mean_transcripts_at_random": 3.041375,
+    "n_centroids": 1201,
+    "n_random_points": 8000,
+    "n_shift_windows": 8,
+    "n_windows": 8,
+    "params": {
+     "bin_um": 2.0,
+     "exclude_control_features": false,
+     "max_search_um": 150.0,
+     "max_shift_um": 5.0,
+     "min_centroids": 50,
+     "min_density_ratio": 1.5,
+     "min_peak_z": 4.0,
+     "n_random_per_window": 1000,
+     "n_windows": 8,
+     "radius_um": 4.0,
+     "seed": 0,
+     "window_size_um": 400.0
+    },
+    "per_window": [
+     {
+      "mean_transcripts_at_centroids": 32.823008849557525,
+      "mean_transcripts_at_random": 2.377,
+      "n_centroids": 113.0,
+      "shift_peak_z": 38.456719265124235,
+      "shift_x_um": -2.0,
+      "shift_y_um": 0.0,
+      "x_min": 394.7002651938046,
+      "y_min": -18.83619635442693
+     },
+     {
+      "mean_transcripts_at_centroids": 33.62643678160919,
+      "mean_transcripts_at_random": 3.424,
+      "n_centroids": 174.0,
+      "shift_peak_z": 39.406535363141224,
+      "shift_x_um": -2.0,
+      "shift_y_um": 0.0,
+      "x_min": -51.94356933156166,
+      "y_min": 306.63498902073604
+     },
+     {
+      "mean_transcripts_at_centroids": 33.87356321839081,
+      "mean_transcripts_at_random": 3.74,
+      "n_centroids": 174.0,
+      "shift_peak_z": 42.89265861623211,
+      "shift_x_um": 0.0,
+      "shift_y_um": 0.0,
+      "x_min": 291.0418615817949,
+      "y_min": 128.9451613220158
+     },
+     {
+      "mean_transcripts_at_centroids": 33.19724770642202,
+      "mean_transcripts_at_random": 4.404,
+      "n_centroids": 218.0,
+      "shift_peak_z": 43.070239367060935,
+      "shift_x_um": 0.0,
+      "shift_y_um": 0.0,
+      "x_min": -64.9811735119643,
+      "y_min": 87.22941879283371
+     },
+     {
+      "mean_transcripts_at_centroids": 32.96694214876033,
+      "mean_transcripts_at_random": 2.142,
+      "n_centroids": 121.0,
+      "shift_peak_z": 35.92345034637231,
+      "shift_x_um": 0.0,
+      "shift_y_um": 0.0,
+      "x_min": -50.639625628858454,
+      "y_min": -187.7839709557181
+     },
+     {
+      "mean_transcripts_at_centroids": 33.09016393442623,
+      "mean_transcripts_at_random": 2.241,
+      "n_centroids": 122.0,
+      "shift_peak_z": 34.09510530813784,
+      "shift_x_um": -2.0,
+      "shift_y_um": 0.0,
+      "x_min": -158.64071389536363,
+      "y_min": -123.85025948582637
+     },
+     {
+      "mean_transcripts_at_centroids": 33.270833333333336,
+      "mean_transcripts_at_random": 1.798,
+      "n_centroids": 96.0,
+      "shift_peak_z": 33.50196990785014,
+      "shift_x_um": -2.0,
+      "shift_y_um": 0.0,
+      "x_min": -103.10578353701139,
+      "y_min": 397.3615253238024
+     },
+     {
+      "mean_transcripts_at_centroids": 32.80327868852459,
+      "mean_transcripts_at_random": 4.205,
+      "n_centroids": 183.0,
+      "shift_peak_z": 42.89847674583483,
+      "shift_x_um": -2.0,
+      "shift_y_um": 0.0,
+      "x_min": 258.86204981854667,
+      "y_min": -31.352485940804854
+     }
+    ],
+    "reasons": [],
+    "shift_um": 2.0,
+    "shift_x_um": -2.0,
+    "shift_y_um": 0.0,
+    "status": "pass"
+   },
+   "summary": {
+    "dataset": "S1_XENIUM",
+    "median_area": 77.64571353075637,
+    "median_eccentricity": 0.27216552697590757,
+    "median_genes_per_cell": 5.0,
+    "median_transcripts_per_cell": 30.0,
+    "n_cells": 600,
+    "n_transcripts_assigned": 17882,
+    "n_transcripts_total": 36000,
+    "pct_assigned": 49.672222222222224,
+    "registration_density_ratio": 10.927285089888,
+    "registration_shift_um": 2.0,
+    "registration_status": "pass",
+    "shape_key": "MOSAIK_proseg",
+    "table_key": "table_MOSAIK_proseg"
+   }
+  }
+ }
+}

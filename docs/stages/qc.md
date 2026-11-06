@@ -35,8 +35,10 @@ for every branch and uses no labels:
    HD2 and HD1 (both platforms) and MS2 `original_seg` layers it is
    1.7–3.1; the misregistered MS2 branches score 1.04–1.28.
 3. **Offset:** the centroid density map is cross-correlated with that of the
-   platform's own cells (`merscope_cell_boundaries` / `xenium_cell_boundaries`;
-   skipped for `original_seg` itself). The reported shift is platform minus
+   platform's own cells (the registry's original cell shape:
+   `merscope_cell_boundaries`, `xenium_cell_boundaries` or
+   `atera_cell_boundaries`; skipped when it is the tested shape, as for
+   `original_seg`, the only layer of a native ATERA row). The reported shift is platform minus
    branch, median over windows with a clear peak (z ≥ 4), on a 2 µm grid.
    It is 0 for every registered layer above and (-22, -112) µm for the MS2
    branches.
@@ -45,6 +47,28 @@ The status is `warn` when the density ratio is below 1.5 or the shift is
 larger than 5 µm, and `skipped` when fewer than 50 centroids or no transcripts
 fall inside the windows. Coordinates are compared in each element's intrinsic
 (micron) frame, not a SpatialData coordinate system.
+
+On a store with a points index (ATERA, below) the windows read only the
+parquet files whose bounding box overlaps them. With
+`exclude_control_features` (off by default) control probes are dropped by the
+platform rules of `merxen.control_features`.
+
+## ATERA stores: build aggregates instead of full passes
+
+An ATERA section holds over a billion transcripts. Its build records the
+transcript count, per-gene totals and a per-file bounding-box index
+(`merxen.io.points_aggregates`), which QC uses while the index still matches
+the parquet files on disk (file names, footer row counts, total):
+
+- `n_transcripts_total` is the build's `n_points_written`;
+- per-gene totals (`gene_totals_from_points` with `assigned_only=False`, used
+  by gene summaries and comparisons) are the build's `gene_counts_kept`;
+- the registration windows read only the overlapping files.
+
+A stale index falls back to streaming the points with dask. QC never loads
+every transcript into pandas: if a dask aggregation fails it raises with the
+cause instead of retrying in memory. XENIUM and MERSCOPE stores carry no
+aggregates, so their QC is unchanged.
 
 A warning is logged and written to the outputs; the task still succeeds.
 With `--qc_registration_strict true` a `warn` makes `merxen qc` exit non-zero
@@ -66,7 +90,10 @@ provenance columns before the QC/analysis fan-out is launched.
 
 - **Input:** `tuple(key, pair_id, platform, segmentation, latest_zarr, table_key, shape_key)`.
 - **CLI:** `merxen qc --config qc_config.json`. The config JSON is built
-  inline by the process itself.
+  inline by the process itself. The reference shape comes from the platform
+  registry; that lookup replaced a MERSCOPE/XENIUM branch in AT-6, which
+  changed the script text (and so every QC task hash) once while rendering the
+  same config for XENIUM and MERSCOPE.
 - **Output:** `tuple(key, pair_id, platform, segmentation, latest_zarr, qc_out/, table_key, shape_key)`.
 - **publishDir:** `${outdir}/${pair_id}/${platform}/${segmentation}/qc/` (symlink mode).
 
@@ -90,7 +117,7 @@ provenance columns before the QC/analysis fan-out is launched.
 | `table_key` | Optional AnnData table used for transcript/cell and gene/cell metrics. |
 | `shape_key` | Optional shape layer used for geometry metrics. |
 | `registration_check` | Run the registration check (default `true`). |
-| `registration_reference_shape_key` | The platform's own cell shapes for the offset estimate. Nextflow passes `merscope_cell_boundaries` or `xenium_cell_boundaries`. |
+| `registration_reference_shape_key` | The platform's own cell shapes for the offset estimate. Nextflow passes the registry's original cell shape (`PlatformSpec.originalCellShapeKey`): `merscope_cell_boundaries`, `xenium_cell_boundaries` or `atera_cell_boundaries`. |
 | `registration_strict` | Exit non-zero when the check warns. Nextflow passes `params.qc_registration_strict` (default `false`). |
 
 ## Walkthrough
@@ -150,3 +177,7 @@ Hybrid-only files are emitted only for the `proseg_hybrid` branch.
 - **`No assignment column found`** — no `table_key` was supplied and the points
   table lacks `assignment` / `cell` / `cell_id`.
 - **`No gene column found`** — same as above, for the gene label column.
+- **`QC could not aggregate the dask-backed transcript points`** — the dask
+  per-cell aggregation over the points failed (no `table_key` was supplied).
+  QC no longer retries by loading every transcript into memory; the message
+  carries the dask error.
