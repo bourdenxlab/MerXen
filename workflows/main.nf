@@ -2639,6 +2639,15 @@ def ateraProsegTileSpecs(planText, pairId, platform, sourceZarrPath, params) {
                 "atera_proseg_keep_tile_inputs",
             ),
         ]
+        // Only when set, so the default config (and the task hash of
+        // finished tiles) is unchanged.
+        if (boolOrDefault(
+            params.atera_proseg_allow_untested_version,
+            false,
+            "atera_proseg_allow_untested_version",
+        )) {
+            config.allow_untested_version = true
+        }
         [tile.tile_id.toString(), config]
     }
 }
@@ -4138,10 +4147,40 @@ workflow {
     )
 
     // A failed tile leaves its group incomplete: groupTuple drops it, so the
-    // row's stitch (and its later stages) does not run.
-    atera_proseg_tiles_ch = ATERA_PROSEG_TILE(
+    // row's stitch (and its later stages) does not run; the failed tiles are
+    // named below.
+    atera_proseg_tile_results_ch = ATERA_PROSEG_TILE(
         atera_proseg_tile_specs_ch.combine(proseg_path_ch)
     ).tile
+
+    atera_proseg_tile_specs_ch
+        .map { key, pairId, platform, _nTiles, tileId, _tileConfig ->
+            tuple(key, "${pairId}:${platform}".toString(), tileId)
+        }
+        .groupTuple(by: [0, 1])
+        .join(
+            atera_proseg_tile_results_ch
+                .map { key, _nTiles, tileId, _tileDir -> tuple(key, tileId) }
+                .groupTuple(),
+            remainder: true,
+        )
+        .subscribe { key, label, expectedIds, finishedIds ->
+            if (key == null || label == null) {
+                return
+            }
+            def missing = (expectedIds - (finishedIds ?: [])).sort()
+            if (missing) {
+                log.error(
+                    "${label}: ${missing.size()} of ${expectedIds.size()} ATERA " +
+                    "ProSeg tiles failed (${missing.join(', ')}); the ProSeg stitch " +
+                    "and every later stage of this row (original_seg and proseg " +
+                    "layers) do not run. Fix the cause and re-run with -resume; " +
+                    "the finished tiles are cached."
+                )
+            }
+        }
+
+    atera_proseg_tiles_ch = atera_proseg_tile_results_ch
         .map { key, nTiles, tileId, tileDir ->
             tuple(groupKey(key, nTiles), tileId, tileDir)
         }

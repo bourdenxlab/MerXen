@@ -17,6 +17,7 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -71,6 +72,9 @@ _FAKE_MERXEN = textwrap.dedent(
                 tile["run"] = tile["run"] and tile["tile_id"] in config["tile_subset"]
         (out / "tile_plan.json").write_text(json.dumps(plan))
     elif command == "atera-proseg-tile":
+        failing = os.environ.get("FAKE_FAIL_TILE", "")
+        if failing and failing.split(":")[0] == config["tile_id"]:
+            sys.exit(int(failing.split(":")[1]))
         out = Path(config["output_dir"])
         out.mkdir(exist_ok=True)
         (out / "tile_manifest.json").write_text("{{}}")
@@ -98,7 +102,13 @@ _MODELS = {
 
 
 def _run(
-    tmp_path: Path, rows: str, name: str, *extra: str, resume: bool = False
+    tmp_path: Path,
+    rows: str,
+    name: str,
+    *extra: str,
+    resume: bool = False,
+    env_extra: dict[str, str] | None = None,
+    expect_success: bool = True,
 ) -> tuple[str, dict[str, list[dict]]]:
     nextflow = shutil.which("nextflow")
     assert nextflow is not None
@@ -112,6 +122,7 @@ def _run(
             "MERXEN_DWIGHT_SITE_CONFIG": "/dev/null",
             "NXF_OFFLINE": "true",
             "NXF_ANSI_LOG": "false",
+            **(env_extra or {}),
         }
     )
     work = tmp_path / "work"
@@ -140,20 +151,25 @@ def _run(
         timeout=600,
         check=False,
     )
-    assert result.returncode == 0, f"{result.stdout[-3000:]}\n{result.stderr[-2000:]}"
+    if expect_success:
+        assert result.returncode == 0, (
+            f"{result.stdout[-3000:]}\n{result.stderr[-2000:]}"
+        )
+    else:
+        assert result.returncode != 0, result.stdout[-3000:]
     calls: dict[str, list[dict]] = {}
     for path in sorted(work.glob("*/*/merxen_call.json")):
         if path.stat().st_mtime < _start_times.get(name, 0):
             continue
         call = json.loads(path.read_text())
         calls.setdefault(call["command"], []).append(call["config"])
-    return result.stdout, calls
+    return result.stdout + result.stderr, calls
 
 
 _start_times: dict[str, float] = {}
 
 
-def _fresh_calls(tmp_path: Path, name: str, *args: str, **kwargs: bool) -> tuple:
+def _fresh_calls(tmp_path: Path, name: str, *args: str, **kwargs: Any) -> tuple:
     import time
 
     _start_times[name] = time.time()
@@ -253,3 +269,37 @@ def test_a_tile_subset_runs_its_tiles_without_a_stitch(tmp_path: Path) -> None:
     assert [config["tile_id"] for config in calls["atera-proseg-tile"]] == ["c1_r0"]
     assert calls["atera-proseg-plan"][0]["tile_subset"] == ["c1_r0"]
     assert "atera-proseg-stitch" not in calls
+
+
+@pytest.mark.nextflow
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
+@pytest.mark.parametrize(("status", "attempts"), [(3, 1), (1, 2)])
+def test_a_failed_tile_is_named_and_retried_unless_a_refusal(
+    tmp_path: Path, status: int, attempts: int
+) -> None:
+    (tmp_path / "bin").mkdir()
+    fake = tmp_path / "bin" / "merxen"
+    fake.write_text(_FAKE_MERXEN.format(python=sys.executable))
+    fake.chmod(0o755)
+    proseg = tmp_path / "bin" / "proseg"
+    proseg.write_text(_FAKE_PROSEG)
+    proseg.chmod(0o755)
+    (tmp_path / "raw" / "atera").mkdir(parents=True)
+    output, calls = _fresh_calls(
+        tmp_path,
+        f"fail_{status}",
+        "pair_id,analysis_mode,atera_dir,segmentation_source,stop_stage\n"
+        "PAIR_A,atera,raw/atera,native_proseg,enrich\n",
+        f"fail_{status}",
+        "--atera_proseg_allow_untested_version",
+        "true",
+        env_extra={"FAKE_FAIL_TILE": f"c1_r0:{status}"},
+        expect_success=False,
+    )
+    tried = [c["tile_id"] for c in calls["atera-proseg-tile"]]
+    # Exit 3 (a refusal a retry would repeat) is not retried; exit 1 is, once.
+    assert tried.count("c1_r0") == attempts
+    assert tried.count("c0_r0") == 1
+    assert all(c["allow_untested_version"] is True for c in calls["atera-proseg-tile"])
+    assert "atera-proseg-stitch" not in calls and "enrich" not in calls
+    assert "PAIR_A:ATERA: 1 of 2 ATERA ProSeg tiles failed (c1_r0)" in output
