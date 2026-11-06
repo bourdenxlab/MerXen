@@ -16,7 +16,11 @@
 > (§8 AT-5 and AT-9, Appendix A "AT-5b ProSeg benchmark"). **AT-6 (2026-11-06):** the native
 > (vendor-segmentation) route runs end to end through Nextflow on the crop and on the full public section,
 > from the AT-5 source stores to clustering and MENDER, and passes every exit check (§1.4, §6.2, §8 AT-6,
-> Appendix A "AT-6 exit runs").
+> Appendix A "AT-6 exit runs"). **AT-9 (2026-11-06):** the opt-in ProSeg route
+> (`segmentation_source=native_proseg`: vendor masks as the prior, 2 mm label-owned tiles, a stitched
+> `reseg` layer) runs end to end on the crop through MENDER on both layers, and its dense-tile check
+> fits 16 threads and 24 GB (§6.2, §8 AT-9, Appendix A "AT-9 implementation and crop run"). The full
+> section has not run the route yet.
 
 *Names and paths (2026-11-04).* The only dataset used here is the public 10x Atera whole-transcriptome
 dataset of a human hippocampus section (atera-1.1.1, fresh frozen); its name is not written here, and the
@@ -1335,6 +1339,20 @@ numbers are in `stage_resources.json`). The native route uses no `.npy` export: 
 | CLUSTERING_SQUIDPY (prepare + compute + finalize) | 64 / 96 / 64 GB | 2 min / 3.2 GB | 6 min 32 s / 19.4 GB |
 | MENDER (prepare + compute + finalize + import) | 64 / 192 / 64 / 48 GB | 1 min 43 s / 1.0 GB | 6 min 30 s / 17.7 GB |
 
+**ATERA ProSeg route (AT-9, `native_proseg`), measured 2026-11-06** (host load 10–55). The crop row
+ran both layers through MENDER; the full section ran the dense tile only.
+
+| Process | Reserved | Crop: time / peak RSS | Full section |
+|---|---|---|---|
+| ATERA_PROSEG_PLAN | 2 CPU, 16 GB | 11 s / 1.1 GB | 12 s / 1.5 GB (30 of 35 tiles run) |
+| ATERA_PROSEG_TILE | 16 CPU, 32 GB (×2 on retry), 40 GB cap | 10 min 40 s / 5.5 GB (13.9 M rows); 17 min 50 s / 7.2 GB (29.2 M rows) | dense tile `c2_r1`: 53 min 51 s / 24.2 GB (102.6 M rows) |
+| ATERA_PROSEG_STITCH | 16 CPU, 64 GB | 30 s / 7.8 GB; a re-run on `-resume` is a 10 s skip | not run |
+| Second layer downstream | as the native route | ENRICH 46 s (with the layer check), MIQ 41 s for both layers; QC, VISUALIZE, spatial gene analysis, clustering and MENDER as the native route, per layer | not run |
+
+The crop's rewritten points take 0.68 GB (no longer hardlinked to the source); the ProSeg labels,
+table and shapes add 19 MB; each tile result keeps 40–181 MB (cells, claims, polygons, ProSeg's
+cell metadata and table).
+
 | Disk (full section) | Measured |
 |---|---|
 | Latest store, bytes not shared with the source | **2.56 GB**: clustering table 1.07 GB, `table_original` 0.49 GB, image pyramid 0.74 GB, label pyramids and outlines 0.08 GB, shapes 0.10 GB, metadata and sidecar copies 0.07 GB, MIQ table 7 MB. The 38.2 GB of payloads are hardlinks |
@@ -1717,6 +1735,45 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
     matches the floor convention of the vendor masks.
   - The short schedule (100 burn-in + 200 samples) by default, after checking it on one dense tile.
   - Report the number of cells left with no transcripts.
+- **Status (2026-11-06): implemented; the crop runs end to end.** Opt-in
+  `segmentation_source=native_proseg` (aliases `vendor_proseg`, `instrument_proseg`); `native` stays
+  the default. The segment stage is `NATIVE_LATEST`, `ATERA_PROSEG_PLAN`, one `ATERA_PROSEG_TILE`
+  task per 2 mm tile (100 µm halo, label-owned: a vendor label belongs to the tile whose core holds
+  its vendor centroid) and `ATERA_PROSEG_STITCH`, which writes the layer `reseg` into the latest
+  store (shapes `MOSAIK_proseg`, table `table_MOSAIK_proseg`, labels `proseg_cell_labels`, points
+  columns `assignment` and `background`; registry branch `proseg`, alias `reseg`, with `label` and
+  `prior`). ProSeg instance ids are the vendor labels. The effective prior weight is fixed at 140
+  per tile (the multiplier undoes ProSeg's own scaling). ENRICH checks the layer; MIQ, the viewer
+  cache, QC, VISUALIZE, spatial gene analysis, clustering and MENDER run on both layers with
+  `analysis_segmentation=all`. Docs: `docs/stages/segmentation.md` (ATERA ProSeg route). Evidence:
+  `$MERXEN_EVIDENCE_ROOT/atera_at9/`.
+  - **Crop (`ATERA_PUB_CROP`, 2 tiles, one Nextflow row through MENDER):** 32 tasks, no failure.
+    Tiles: 13.9 M and 29.2 M rows, 10 min 40 s and 17 min 50 s at 16 threads (sampling 1.9 and
+    3.0 s per iteration on a host at load 20–55), 5.5 and 7.2 GB peak RSS; reported prior weight
+    139.57 and 139.59. Stitch 30 s, 7.8 GB: 3,013 cells (every vendor label), 4 with no
+    transcripts, 18,138,163 assigned rows, 292 seam conflicts (0.0016%). The verification passes:
+    source store unchanged (927 files), points files and row counts unchanged and the build's points
+    index still matching, table and shape ids equal, every assignment a table id, int64 row sums
+    equal to the foreground counts, ENRICH check recorded, both layers through MIQ, the viewer cache,
+    QC, VISUALIZE, spatial gene analysis, clustering and MENDER. A `-resume` re-runs no tile; the
+    stitch task re-runs as a 10 s skip (fingerprint), ENRICH and its check skip.
+  - **ProSeg against the vendor layer (crop):** ProSeg assigns 44.6% of gene transcripts (vendor
+    46.5%), absorbs 15.4% of the vendor-unassigned ones and releases 21.7% of the vendor-assigned
+    ones (70.2% stay in the same cell, 8.1% move); median area ratio 0.83 (p05–p95 0.49–1.83),
+    total area −2.2%. These match the CSV benchmark (`run_s200`: 45.4%, 16.6%, 21.5%, 0.85), so the
+    nuclear compartment model the Xenium parquet layout turns on does not change the result on the
+    crop (Q3 of the AT-9 design: compartment model kept on).
+  - **Dense-tile check (`ATERA_PUB` tile `c2_r1`, the benchmark's [2,1]; `stop_stage=segment`,
+    `atera_proseg_tile_subset=c2_r1`, 16 threads):** 102.6 M rows exported, 102.4 M kept, 7,008
+    labels in the window, 5,716 owned. 53 min 51 s task time (ProSeg 48.8 min: burn-in 2.5 s and
+    sampling 8.8 s per iteration, against 1.76 and 5.83 s at 32 threads in the benchmark), 22.7 GB
+    peak anonymous RSS (trace 24.2 GB) against the 32 GB reservation and the 40 GB cap. Reported
+    prior weight 139.77 (benchmark auto weight 146.17). The recount equals ProSeg's count matrix;
+    39 owned cells (0.7%) end with no transcripts; no owned cell reaches an interior window edge.
+    Against the CSV benchmark run on the same owned cells: median area ratio 0.841 (benchmark
+    0.844), 41.7 M against 41.1 M assigned rows, and 57.7% of the rows either run assigns to these
+    cells are assigned to the same cell by both (two CSV runs on the crop: 62.1%; ProSeg's chain
+    noise, AT-5(b)). The compartment model therefore stays on.
 
 ### AT-10 optional, on request
 
@@ -2041,6 +2098,20 @@ stores through MENDER (§1.4, §6.2). Findings and changes:
 | A `-resume` re-runs ENRICH and every stage that takes the latest store as input: ENRICH rewrites the store's root `zarr.json`, which changes the directory's modification time that Nextflow hashes | Not changed in AT-6: the reruns are skips (ENRICH 1.5 min on the full section) and the analysis stages downstream of VISUALIZE stay cached. Recorded for the AT-7 restart work |
 | The first hardlink run made the source stores' linked payloads read-only (143 crop files, 1,543 full-section files) | By design (`readonly_payloads`); bytes, inodes and modification times are unchanged. Writing to those files now fails instead of corrupting the source |
 | MIQ on the full section was unmeasured (WP-X) | 3 min 9 s, 9.6 GB peak, against a 160 GB reservation |
+
+**AT-9 implementation and crop run (2026-11-06).** The ProSeg route for ATERA
+(`segmentation_source=native_proseg`; §8 AT-9). Findings and changes:
+
+| Finding | Change or decision |
+|---|---|
+| ProSeg 3.2.0 refuses an `--output-path` that does not exist (found on the first real crop tile) | The tile task creates it; the fake ProSeg of the tests now refuses a missing one too |
+| With two ATERA sources, ENRICH's native-store fallback (`segmentation_sources == ("native",)`) turned false, and per-shape assignment ran its Cellpose path (spatial joins of every shape, including the 1.4 B-row points against `MOSAIK_proseg`) for any source other than `native` | The fallback keys on the default source; per-shape assignment treats `native_proseg` as native. Tests for both |
+| A failed ENRICH's partial cleanup would delete `table_MOSAIK_proseg`, which ENRICH cannot rebuild | Tables of registry branches with a `prior` are never derived tables |
+| ATERA refused to draw any mask that is not a vendor label element | A registry branch with a `label` element is backed by it (`MOSAIK_proseg` -> `proseg_cell_labels`) |
+| `sanity_plots._crop_points` and `qc.gene_comparison` use a points `background` column whenever one exists, whatever the assignment column | Not reached on ATERA (overlays use the rasterised path with the registry column; `assigned_only` has no caller); a grep test lists every generic `assignment` pick with its reason |
+| Changed test text | The `native` golden changes the text of two ATERA-only error cases (the list of sources); the ENSURE_PROSEG trigger pin of `test_analysis_segmentation_branches.py` follows the new trigger (same value). No process script, pin or XENIUM/MERSCOPE golden value changed |
+| The Xenium parquet layout turns on ProSeg's nuclear compartment model, untested at the full schedule | Crop and dense tile agree with the CSV benchmark (above); kept on, `atera_proseg_nuclear_compartment=false` is the fallback |
+| `-resume` | No tile re-runs (their inputs are values); the stitch task re-runs and skips by fingerprint; ENRICH and its layer check skip |
 
 **AT-6 reviews (2026-11-06).** An end-to-end data review and a code review of the AT-6 branch.
 Findings and changes:
