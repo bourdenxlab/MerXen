@@ -2465,3 +2465,50 @@ def test_native_reference_prepare_keeps_vendor_nucleus_metrics(
         assert joined.obs["nucleus_area_total"].iloc[row] == pytest.approx(own.sum())
         assert joined.obs["nucleus_count"].iloc[row] == own.size
     assert joined.obs["nucleus_count"].to_numpy()[two_nucleus].tolist() == [2]
+
+
+def test_atera_nucleus_join_needs_the_vendor_id_namespace() -> None:
+    """AT-7: vendor nuclei never join a Cellpose-label table by cell id.
+
+    Cellpose label k is not vendor cell k, so a ``cellpose_label_v1`` table
+    gets no nucleus metrics (and the reason in ``uns``); a table registered
+    with the vendor namespace keeps the join.
+    """
+    store = _atera_store(with_vendor_nucleus_columns=False)
+    cellpose = store.tables["table_original"].copy()
+    cellpose.uns["spatialdata_attrs"] = {
+        "region": "MOSAIK_cellpose",
+        "region_key": "region",
+        "instance_key": "instance_id",
+    }
+    store.tables["table_MOSAIK_cellpose"] = cellpose
+    store.shapes["MOSAIK_cellpose"] = store.shapes["atera_cell_boundaries"].copy()
+    registry = store.attrs["merxen_schema"]["segmentations"]
+    registry["original"]["id_namespace"] = "source_segmentation_v1"
+    registry["cellpose"] = {
+        "shape": "MOSAIK_cellpose",
+        "table": "table_MOSAIK_cellpose",
+        "id_namespace": "cellpose_label_v1",
+    }
+
+    out = adata_from_spatialdata(
+        store,
+        platform="ATERA",
+        table_key="table_MOSAIK_cellpose",
+        shape_key="MOSAIK_cellpose",
+    )
+    if "nucleus_area" in out.obs:
+        assert out.obs["nucleus_area"].isna().all()
+    assert "nucleus_count" not in out.obs
+    meta = out.uns["merxen_clustering_squidpy"]
+    assert meta["nucleus_shape_key"] is None
+    assert "cellpose_label_v1" in meta["nucleus_metrics_skipped"]
+
+    vendor = adata_from_spatialdata(
+        store,
+        platform="ATERA",
+        table_key="table_original",
+        shape_key="atera_cell_boundaries",
+    )
+    assert vendor.obs["nucleus_count"].tolist() == [1, 2, 0]
+    assert "nucleus_metrics_skipped" not in vendor.uns["merxen_clustering_squidpy"]
