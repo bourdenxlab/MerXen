@@ -7,8 +7,10 @@ should take its colours from here rather than hardcoding hex strings.
 The palette derives from the title logo in ``assets/MerXen_title.svg``:
 ``MERSCOPE`` is the purple of "Mer", ``XENIUM`` the teal of "Xen", and
 ``PAIRED`` the blue midpoint of the underline gradient, where the two halves
-meet. Anything that is neither platform nor a paired result — the toggleable
-stages on the metro map, an accent on a plot — uses ``OPTIONAL``.
+meet. ``ATERA``, 10x's whole-transcriptome platform, is a rose red that sits
+apart from all three. Anything that is neither platform nor a paired result —
+the toggleable stages on the metro map, an accent on a plot — uses
+``OPTIONAL``.
 
 ``tests/test_workflows/test_metro_map.py`` checks the metro map source in
 ``assets/metro_map.mmd`` against these values, so the diagram cannot silently
@@ -31,6 +33,10 @@ MERSCOPE: Final = "#8350FF"
 #: 10x Genomics Xenium. The teal of "Xen" in the title logo.
 XENIUM: Final = "#17BCAC"
 
+#: 10x Genomics Atera (whole transcriptome). Outside the logo's purple, teal
+#: and blue, and apart from the orange of ``OPTIONAL``.
+ATERA: Final = "#C8385A"
+
 #: Paired-section results, where the two platforms converge. The blue midpoint
 #: of the title logo's underline gradient.
 PAIRED: Final = "#3980BE"
@@ -43,18 +49,20 @@ OPTIONAL: Final = "#EE7733"
 #: Light neutral used behind grouped content, e.g. metro map section boxes.
 SURFACE: Final = "#EDEDED"
 
-#: The two platform colours, keyed by the platform names used throughout the
-#: pipeline (``merscope`` / ``xenium``), for indexing straight off a config or
-#: a dataframe column.
+#: The platform colours, keyed by the platform names used throughout the
+#: pipeline (``merscope`` / ``xenium`` / ``atera``), for indexing straight off a
+#: config or a dataframe column.
 PLATFORM_COLOURS: Final[dict[str, str]] = {
     "merscope": MERSCOPE,
     "xenium": XENIUM,
+    "atera": ATERA,
 }
 
 #: Every named brand colour, keyed by role. Used by the metro map drift test.
 BRAND_COLOURS: Final[dict[str, str]] = {
     "merscope": MERSCOPE,
     "xenium": XENIUM,
+    "atera": ATERA,
     "paired": PAIRED,
     "optional": OPTIONAL,
 }

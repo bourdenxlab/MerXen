@@ -169,14 +169,16 @@ def test_is_already_enriched_requires_real_xenium_image() -> None:
 def test_completeness_checks_reject_an_unknown_platform(check: Any) -> None:
     """An unregistered platform raises instead of using the Xenium rules."""
     sdata = SimpleNamespace(shapes={}, tables={}, images={})
-    with pytest.raises(UnknownPlatformError, match="Unknown platform: 'ATERA'"):
-        check(sdata, "ATERA")
+    with pytest.raises(UnknownPlatformError, match="Unknown platform: 'COSMX'"):
+        check(sdata, "COSMX")
 
 
 def test_partial_artifact_paths_reject_an_unknown_platform(tmp_path: Path) -> None:
     """An unregistered platform raises instead of using the Xenium layers."""
-    with pytest.raises(UnknownPlatformError, match="Supported: MERSCOPE, XENIUM"):
-        _partial_enrichment_artifact_paths(tmp_path, "ATERA")
+    with pytest.raises(
+        UnknownPlatformError, match="Supported: MERSCOPE, XENIUM, ATERA"
+    ):
+        _partial_enrichment_artifact_paths(tmp_path, "COSMX")
 
 
 # Characterisation of the platform-dependent completeness rules. The names are

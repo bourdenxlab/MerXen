@@ -342,6 +342,8 @@ _BEAD_HARNESS_FUNCTIONS = (
     "publishedBeadRemovalState",
     "appendPublishedBeadRemovalChecks",
     "buildConfigForPlatform",
+    "ateraBuildOptions",
+    "normalizeSpecies",
     "requirePlatformInput",
 )
 

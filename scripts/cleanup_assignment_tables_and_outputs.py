@@ -108,6 +108,8 @@ def active_platforms(row: dict[str, str]) -> tuple[str, ...]:
         return ("MERSCOPE",)
     if mode == "xenium":
         return ("XENIUM",)
+    if mode == "atera":
+        return ("ATERA",)
     raise ValueError(f"Unknown analysis_mode={mode!r} for pair {row.get('pair_id')!r}")
 
 

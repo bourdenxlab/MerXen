@@ -36,6 +36,7 @@
 %% map still parses in greyscale.
 %%metro line: merscope | MERSCOPE (Vizgen) | #8350FF
 %%metro line: xenium | Xenium (10x) | #17BCAC
+%%metro line: atera | Atera (10x, build only) | #C8385A
 %%metro line: paired | Paired-section analysis | #3980BE
 %%metro line: optional | Toggleable stages | #EE7733 | dashed
 
@@ -45,6 +46,7 @@
 %% them. See the Styling section of docs/metro-map.md.
 %%metro dir: merscope_in | MERSCOPE | raw export
 %%metro dir: xenium_in | Xenium | raw export
+%%metro dir: atera_in | Atera | ROI outs
 %%metro file: mecr_out | CSV | mecr_out
 %%metro file: compare_out | CSV | compare_out
 %%metro file: mapmycells_out | H5AD | mapmycells_out
@@ -54,10 +56,12 @@ graph LR
         %%metro exit: right | merscope, xenium
         merscope_in[ ]
         xenium_in[ ]
+        atera_in[ ]
         build_spatialdata[SpatialData build]
 
         merscope_in -->|merscope| build_spatialdata
         xenium_in -->|xenium| build_spatialdata
+        atera_in -->|atera| build_spatialdata
     end
 
     subgraph segmentation [Segmentation]

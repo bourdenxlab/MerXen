@@ -9,7 +9,8 @@ The mode of a samplesheet row is resolved in three places:
 
 The canonical modes must give the same ordered platforms everywhere, and each
 map's alias set is pinned, including the divergence known today, so that a mode
-added to one map alone (AT-4's ``atera``) fails here until all three have it.
+added to one map alone fails here until all three have it (AT-4 added ``atera``
+to all three).
 The Groovy maps are read as text (the golden harness of
 ``test_platform_config_golden.py`` also evaluates them).
 """
@@ -34,6 +35,7 @@ CANONICAL: dict[str, tuple[str, ...]] = {
     "paired": ("MERSCOPE", "XENIUM"),
     "merscope": ("MERSCOPE",),
     "xenium": ("XENIUM",),
+    "atera": ("ATERA",),
 }
 
 # Alias -> canonical mode of each map, as of today. The Groovy map also has the
@@ -49,9 +51,13 @@ GROOVY_ALIASES: dict[str, str] = {
     "m": "merscope",
     "xenium": "xenium",
     "x": "xenium",
+    "atera": "atera",
+    "a": "atera",
 }
 SAMPLESHEET_ALIASES: dict[str, str] = {
-    alias: mode for alias, mode in GROOVY_ALIASES.items() if alias not in {"m", "x"}
+    alias: mode
+    for alias, mode in GROOVY_ALIASES.items()
+    if alias not in {"m", "x", "a"}
 }
 CLEANUP_ALIASES: dict[str, str] = dict(SAMPLESHEET_ALIASES)
 
@@ -142,7 +148,7 @@ def test_cleanup_map_matches_canonical_modes_and_pinned_aliases(
 def test_no_map_accepts_a_mode_the_others_reject(
     probe: str, cleanup_script: ModuleType
 ) -> None:
-    """A new mode must land in all three maps at once (AT-4: ``atera``)."""
+    """A new mode must land in all three maps at once (as AT-4's ``atera`` did)."""
     accepted = {
         "groovy": probe in _groovy_aliases(),
         "samplesheet": _accepts(required_platforms_for_mode, probe),

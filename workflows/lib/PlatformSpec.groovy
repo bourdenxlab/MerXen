@@ -41,6 +41,17 @@ class PlatformSpec {
             ['xenium_spatialdata_path'],
             ['xenium_spec_path'],
         ),
+        ATERA: new PlatformSpec(
+            'ATERA',
+            '10X',
+            'morphology_focus',
+            'atera_cell_boundaries',
+            'atera_nucleus',
+            ['DAPI', '18S'],
+            ['atera_dir'],
+            ['atera_spatialdata_path'],
+            ['atera_spec_path'],
+        ),
     ] as LinkedHashMap<String, PlatformSpec>)
 
     PlatformSpec(
