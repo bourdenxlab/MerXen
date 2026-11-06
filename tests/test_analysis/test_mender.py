@@ -505,3 +505,151 @@ def test_shared_spatialdata_lock_serializes_contending_writers(
 def test_mender_import_takes_the_shared_store_writer_lock() -> None:
     # A private copy of the lock would drift from the shared lock path rules.
     assert spatialdata_write_lock is shared_spatialdata_write_lock
+
+
+def _write_finalize_inputs(tmp_path: Path, cell_ids: list[str]) -> tuple[Path, Path]:
+    prepared = tmp_path / "prepared_in"
+    computed = tmp_path / "computed_in"
+    prepared.mkdir()
+    computed.mkdir()
+    portable = pd.DataFrame(
+        {
+            "cell_id": cell_ids,
+            "native_x": [0.0, 1.0, 2.0, 3.0],
+            "native_y": [4.0, 5.0, 6.0, 7.0],
+            "cell_state": pd.Categorical(["a", "a", "b", "b"]),
+        }
+    )
+    portable.to_parquet(prepared / "mender_input.parquet", index=False)
+    (prepared / "input_manifest.json").write_text(
+        json.dumps({"n_cells": 4, "state_counts": {"a": 2, "b": 2}})
+    )
+    pd.DataFrame(
+        {
+            "cell_id": ["c4", "c2", "c1", "c3"],
+            "mender_domain": pd.Categorical(["1", "0", "1", "0"]),
+        }
+    ).to_parquet(computed / "mender_domains.parquet", index=False)
+    context = ad.AnnData(X=np.ones((4, 3)), obs=pd.DataFrame(index=pd.Index(cell_ids)))
+    context.obsm["spatial"] = portable[["native_x", "native_y"]].to_numpy()
+    context.obsm["X_MENDERMAP2D"] = np.array(
+        [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]]
+    )
+    context.write_h5ad(computed / "mender_context.h5ad")
+    pd.DataFrame(
+        {
+            "scale": range(6),
+            "cell_count_min": [1] * 6,
+            "cell_count_median": [2] * 6,
+            "cell_count_mean": [2] * 6,
+            "cell_count_max": [3] * 6,
+        }
+    ).to_csv(computed / "scale_neighbour_summary.tsv", sep="\t", index=False)
+    return prepared, computed
+
+
+def test_backed_source_reads_give_identical_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """prepare reads only obs/uns, finalize reads backed; outputs are unchanged.
+
+    The same inputs run once as shipped and once with every read forced into
+    a full in-memory read (the pre-AT-6 behaviour); every data product must
+    be byte-identical.
+    """
+    import merxen.analysis.mender as mender_mod
+
+    config = _config(tmp_path)
+    cell_ids = ["c1", "c2", "c3", "c4"]
+    source = _clustered_adata(cell_ids, pd.Categorical(["a", "a", "b", "b"]))
+    source.X = sparse.csr_matrix(np.arange(8, dtype=np.float32).reshape(4, 2))
+    source.layers["counts"] = source.X.copy()
+    source.obsm["X_pca"] = np.arange(8, dtype=np.float32).reshape(4, 2)
+    source.write_h5ad(config.source_h5ad)
+    shapes = gpd.GeoDataFrame(
+        {"cell_id": cell_ids},
+        geometry=[Point(1, 1), Point(2, 2), Point(3, 3), Point(4, 4)],
+    )
+    fake_sdata = types.SimpleNamespace(
+        tables={config.source_spatialdata_table: source.copy()},
+        shapes={config.native_shape_key: shapes},
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "spatialdata",
+        types.SimpleNamespace(read_zarr=lambda _path: fake_sdata),
+    )
+    prepared_in, computed_in = _write_finalize_inputs(tmp_path, cell_ids)
+    real_read = ad.read_h5ad
+    modes: list[object] = []
+
+    def recording_read(path: Path, *args: Any, **kwargs: Any) -> ad.AnnData:
+        if Path(path) == config.source_h5ad:
+            modes.append(kwargs.get("backed"))
+        return real_read(path, *args, **kwargs)
+
+    def in_memory_read(path: Path, *args: Any, **kwargs: Any) -> ad.AnnData:
+        kwargs.pop("backed", None)
+        return real_read(path, *args, **kwargs)
+
+    real_obs_reader = mender_mod._read_obs_and_uns
+    outputs: dict[str, dict[str, bytes]] = {}
+    for label, reader, obs_reader in (
+        ("backed", recording_read, real_obs_reader),
+        ("memory", in_memory_read, in_memory_read),
+    ):
+        monkeypatch.setattr(mender_mod.ad, "read_h5ad", reader)
+        monkeypatch.setattr(mender_mod, "_read_obs_and_uns", obs_reader)
+        prepared = prepare_mender(config, tmp_path / f"prepared_{label}")
+        final = finalize_mender(
+            config, prepared_in, computed_in, tmp_path / f"final_{label}"
+        )
+        sample_dir = final["annotated_h5ad"].parent
+        outputs[label] = {
+            "portable": (prepared.parent / "mender_input.parquet").read_bytes(),
+            "input_manifest": prepared.read_bytes(),
+            "annotated": final["annotated_h5ad"].read_bytes(),
+            "cells": (sample_dir / "pair1_MERSCOPE_mender_cells.parquet").read_bytes(),
+            "manifest": (sample_dir / "mender_manifest.json").read_bytes(),
+        }
+
+    # prepare never opens the file through read_h5ad; finalize reads it backed.
+    assert modes == ["r"]
+    assert outputs["backed"] == outputs["memory"]
+    annotated = real_read(
+        tmp_path
+        / "final_backed"
+        / "merscope"
+        / ("pair1_MERSCOPE_mender_annotated.h5ad")
+    )
+    assert (annotated.X != source.X).nnz == 0
+    assert (annotated.layers["counts"] != source.layers["counts"]).nnz == 0
+    np.testing.assert_array_equal(annotated.obsm["X_pca"], source.obsm["X_pca"])
+    assert list(annotated.obs["mender_domain"].astype(str)) == ["1", "0", "0", "1"]
+    # The source file is opened read-only and left as it was.
+    reread = real_read(config.source_h5ad)
+    assert "mender_domain" not in reread.obs
+    assert "merxen_mender" not in reread.uns
+
+
+def test_read_obs_and_uns_skips_the_matrices(tmp_path: Path) -> None:
+    """The prepare-step reader returns obs and uns only, as a full read has them."""
+    import merxen.analysis.mender as mender_mod
+
+    source = _clustered_adata(["c1", "c2", "c3"], pd.Categorical(["a", "b", "a"]))
+    source.X = sparse.csr_matrix(np.ones((3, 2), dtype=np.float32))
+    source.layers["counts"] = source.X.copy()
+    source.obsm["X_pca"] = np.zeros((3, 2), dtype=np.float32)
+    path = tmp_path / "clustered.h5ad"
+    source.write_h5ad(path)
+
+    light = mender_mod._read_obs_and_uns(path)
+    full = ad.read_h5ad(path)
+
+    pd.testing.assert_frame_equal(light.obs, full.obs)
+    assert light.uns.keys() == full.uns.keys()
+    assert light.X is None
+    assert len(light.layers) == 0
+    assert len(light.obsm) == 0
+    assert light.n_obs == full.n_obs

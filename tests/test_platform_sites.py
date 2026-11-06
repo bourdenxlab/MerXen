@@ -119,7 +119,8 @@ REASONS: dict[str, dict[str, str]] = {
     },
     "vendor_nucleus_names": {
         "src/merxen/analysis/clustering_squidpy.py": (
-            "nucleus shape priority list; nucleus consumer for AT-6"
+            "nucleus shape priority list for platforms whose nucleus ids are cell "
+            "ids; ATERA uses the registered nucleus layer instead (AT-6)"
         ),
         "src/merxen/config.py": "Xenium and Atera reader options (build config fields)",
         "src/merxen/enrichment/enrich.py": (
@@ -154,7 +155,8 @@ REASONS: dict[str, dict[str, str]] = {
             "(cell_summary.nucleus_area) lies whole in the window (AT-5)"
         ),
         "src/merxen/analysis/clustering_squidpy.py": (
-            "nucleus area metrics join nuclei to cells by id (AT-6)"
+            "nucleus area metrics: by id where nucleus ids are cell ids, else "
+            "aggregated per cell through cell_instance_id (AT-6)"
         ),
         "src/merxen/io/atera_reader.py": (
             "Atera table reads the largest-nucleus area and sums all nuclei per cell "
@@ -330,12 +332,19 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         ),
         "src/merxen/analysis/clustering_squidpy.py": (
             '"nucleus_area",',
+            '"nucleus_area": grouped.max(),',
+            '"nucleus_area_total": grouped.sum(min_count=1),',
+            'NUCLEUS_METRIC_COLUMNS = ("nucleus_area", "nucleus_area_total", '
+            '"nucleus_count")',
+            "``instance_id``: ``nucleus_area`` is the largest nucleus of the cell,",
+            "``nucleus_area_total`` the summed area and ``nucleus_count`` the "
+            "number of",
             '_apply_area_metric(adata, nucleus_metrics, column="nucleus_area")',
             '_obs_numeric(adata, "nucleus_area"),',
             'adata.obs["nucleus_area"] = np.nan',
-            "def _choose_nucleus_shape_key(sdata_obj: Any) -> str | None:",
+            "def _choose_nucleus_shape_key(",
             'if "nucleus_area" not in adata.obs:',
-            "nucleus_shape_key = _choose_nucleus_shape_key(sdata_obj)",
+            "nucleus_shape_key, nucleus_join = _choose_nucleus_shape_key(",
         ),
         "src/merxen/io/atera_reader.py": (
             "``cell_summary.nucleus_area`` describes only the largest nucleus of a",
