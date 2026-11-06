@@ -558,7 +558,12 @@ shares its source inode and that no other file does.
 
 On the public ATERA crop (ATERA_PUB_CROP: 3,013 cells, 40.6 M transcripts)
 the build links 143 payload files (1.37 GB), copies 43 files and adds 0.10 GB
-of new bytes, in about 50 s and 1.5 GB of memory.
+of new bytes, in about 50 s and 1.5 GB of memory. On the full public section
+(ATERA_PUB: 91,431 cells, 1.41 B transcripts) the Nextflow task links 1,543
+payload files (38.2 GB), copies 46 files and adds 0.66 GB, in 35 s at 3.8 GB.
+After the whole native route (to MENDER) the latest store holds 2.56 GB not
+shared with the source, and every source file keeps its inode, size and
+modification time (AT-6 exit runs).
 
 ## Memory guardrails
 

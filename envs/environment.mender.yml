@@ -22,8 +22,9 @@ dependencies:
       - leidenalg==0.9.1
       - umap-learn==0.5.3
       # Transitive pins: pynndescent 0.7 (via umap-learn) fails to compile its
-      # parallel subtree builder under numba 0.55 once a dataset is large
-      # enough for deferred subtrees (about 90k cells), so a fresh env broke.
+      # parallel subtree builder under numba 0.55; a fresh env failed on the
+      # full ATERA section (91k cells; under 4,096 cells Scanpy uses exact
+      # neighbours and never reaches it).
       - pynndescent==0.5.13
       - numba==0.55.2
       - llvmlite==0.38.1

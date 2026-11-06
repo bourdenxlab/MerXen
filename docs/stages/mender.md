@@ -123,7 +123,8 @@ not added to MerXen's base project dependencies. It also pins umap-learn's
 nearest-neighbour stack (`pynndescent` 0.5.13, `numba` 0.55.2, `llvmlite`
 0.38.1): left open, a fresh environment resolved `pynndescent` 0.7, whose
 parallel subtree builder numba 0.55 cannot compile, and `MENDER_COMPUTE`
-failed on inputs of about 90k cells or more. Build a portable CPU image and
+failed in `sc.pp.neighbors` on the full ATERA section (91,381 cells; under
+4,096 cells Scanpy 1.9 computes exact neighbours and never reaches it). Build a portable CPU image and
 override its path as needed:
 
 ```bash

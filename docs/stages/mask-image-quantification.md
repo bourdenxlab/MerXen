@@ -75,6 +75,10 @@ the stage never reads.
 The vendor labels share the morphology image's pixel grid, so the image-shape
 check applies unchanged.
 
+On the public full section (91,431 cells, 4-channel 42,548 × 61,369 image) the
+task takes about 3 min at 9.6 GB peak memory (AT-6 exit run), far under the
+160 GB reservation.
+
 When `table_MOSAIK_proseg_hybrid` exists, the stage joins these Cellpose-mask
 measurements onto hybrid cells by their shared `instance_id`. It does not
 re-quantify expanded hybrid polygons. The hybrid expression matrix remains

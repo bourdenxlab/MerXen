@@ -178,6 +178,9 @@ panel size those panels never reach, so their outputs are unchanged.
   records `hvg_method`, `hvg_n_top_genes`, `n_highly_variable_genes` and
   `pca_mask_var`. The vendor's `vendor_highly_variable` column is never read.
   (`seurat_v3` would need scikit-misc, which MerXen does not declare.)
+- **Scale.** On the public full section (91,381 cells after filtering, 18,049
+  genes) prepare, compute (GPU) and finalize take 6.5 min in all, at 19.4 GB
+  peak memory (AT-6 exit run).
 - **No 300-gene panel check.** `expected_panel_gene_count` is `null` for ATERA,
   so the "Expected 300 genes" warning and the `has_expected_panel_gene_count*`
   flags of the control-filter summary are left out.

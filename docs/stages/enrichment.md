@@ -131,6 +131,7 @@ Native enrichment (`_enrich_native_in_place`):
    blocks are kept in a 3 GiB LRU shared by the partitions in flight, so each
    block is decoded about once instead of once per partition. On the public
    full section the pass takes about 1.5–2 min with 12 workers and 12.5 GB
+   (the whole Nextflow task, counts and table write included: 5 min, 11.7 GB)
    peak memory. It uses the vendor's corner convention in the vendor's float32
    arithmetic: a transcript at `x` µm is on pixel
    `floor(float32(x) * float32(1 / ps))`. Float64 `x / ps` disagrees with the

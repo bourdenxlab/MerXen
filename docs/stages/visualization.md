@@ -115,7 +115,9 @@ Each listed `.png` plot is also written as a same-stem `.pdf`.
 A whole-transcriptome section holds more than a billion transcripts. MerXen
 neither caps nor subsamples them: platforms whose registry entry sets
 `rasterised_transcript_plots` (ATERA) draw their transcripts as density rasters
-binned over all of them. XENIUM and MERSCOPE figures are unchanged.
+binned over all of them. XENIUM and MERSCOPE figures are unchanged. On the
+public full section VISUALIZE bins all 1,409,601,228 transcripts in about
+3.5 min at 4.5 GB peak memory (AT-6 exit run).
 
 - **Streaming binner.** `raster_density.stream_hist2d` reads the points
   element one parquet file at a time, in record batches of the needed columns

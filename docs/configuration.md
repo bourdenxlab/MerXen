@@ -391,7 +391,7 @@ and no Cellpose or ProSeg task runs. See
 | `build_viewer_caches` | Vendor label masks on `morphology_focus`. |
 | `mask_image_quantification` | Quantifies the vendor `cell_labels`. |
 | `qc`, `visualize`, `spatial_gene_analysis`, `clustering_squidpy` | Run on the `original_seg` layer. |
-| `mender` | Runs when `mender_enabled` (on `original_seg`). |
+| `mender` | Runs when `mender_enabled` (on `original_seg`). An explicit `stop_stage=mender` passes over the standalone `mapmycells` stage, which ATERA rows do not run. |
 
 Native rows have one analysis layer, `original_seg`. A global
 `analysis_segmentation` (such as the default `all`) or `mender_segmentations`
