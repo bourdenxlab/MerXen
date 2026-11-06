@@ -458,7 +458,6 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
             'if dataset == "XENIUM":',
             'if dataset_name.upper() == "MERSCOPE" and prefer_aligned_vectors:',
             'if dataset_name.upper() == "MERSCOPE":',
-            'if str(dataset_name).upper() == "XENIUM":',
         ),
         "workflows/main.nf": (
             '!(settings.run_register_images && platform == "XENIUM")',
