@@ -37,7 +37,10 @@ JSON
 process ATERA_PROSEG_TILE {
     tag "${pair_id}:${platform}:${tile_id}"
 
-    publishDir { "${params.outdir}/${pair_id}/${platform.toLowerCase()}/segmentation/atera_proseg/tiles" }, mode: "symlink", overwrite: true
+    // Copied, not linked: a re-stitch needs each tile's polygons and claims,
+    // so cleaning the work directory must not lose them (2.7 GB on the full
+    // public section).
+    publishDir { "${params.outdir}/${pair_id}/${platform.toLowerCase()}/segmentation/atera_proseg/tiles" }, mode: "copy", overwrite: true
 
     input:
     tuple val(key), val(pair_id), val(platform), val(n_tiles), val(tile_id), val(tile_config_json), path(proseg_path_file)
@@ -64,7 +67,10 @@ JSON
 process ATERA_PROSEG_STITCH {
     tag "${pair_id}:${platform}"
 
-    publishDir { "${params.outdir}/${pair_id}/${platform.toLowerCase()}/segmentation" }, mode: "symlink", overwrite: true
+    // The store link and the placeholders are linked like NATIVE_LATEST's;
+    // the report is copied so it outlives the work directory.
+    publishDir { "${params.outdir}/${pair_id}/${platform.toLowerCase()}/segmentation" }, mode: "symlink", overwrite: true, pattern: "stitch_out/{proseg_latest.zarr,NO_*}"
+    publishDir { "${params.outdir}/${pair_id}/${platform.toLowerCase()}/segmentation" }, mode: "copy", overwrite: true, pattern: "stitch_out/atera_proseg_report.json"
 
     input:
     tuple val(key), val(pair_id), val(platform), val(stitch_config_json), path(latest_zarr, stageAs: "native_latest.zarr"), path(tile_plan, stageAs: "tile_plan.json"), path(tile_dirs)
