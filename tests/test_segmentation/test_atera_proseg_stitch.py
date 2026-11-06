@@ -7,8 +7,10 @@ import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import spatialdata as sd
@@ -138,7 +140,26 @@ def test_rasterise_uses_pixel_centres_and_last_wins() -> None:
     )
     assert out[0, 0] == 1 and out[2, 2] == 2 and out[4, 4] == 2
     assert out[5, 5] == 0 and out[0, 4] == 0
-    assert overlap == 1
+    assert overlap.total == 1 and overlap.cross_group == 0
+
+
+def test_rasterise_splits_overlap_within_and_across_groups() -> None:
+    from shapely.geometry import box
+
+    out = np.zeros((6, 6), dtype=np.uint32)
+    # Labels 1 and 3 (tile 0) overlap on pixel (2, 2); label 2 (tile 1) then
+    # covers pixels (3..4, 3..4), taking (3, 3) from label 3.
+    overlap = rasterise_cells(
+        [box(0.0, 0.0, 3.0, 3.0), box(2.0, 2.0, 4.0, 4.0), box(3.0, 3.0, 5.0, 5.0)],
+        np.asarray([1, 3, 2]),
+        (6, 6),
+        1.0,
+        out,
+        groups=np.asarray([0, 0, 1]),
+    )
+    assert overlap.total == 2
+    assert overlap.cross_group == 1
+    assert overlap.within_group == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -241,6 +262,15 @@ def test_identity_stitch_reproduces_the_vendor_counts(
     provenance = sdata.attrs["merxen_atera_proseg"]
     assert len(provenance["tiles"]) == len(built.tile_dirs)
     assert provenance["stitch"]["control_assignment"] == "proseg_label_raster_corner"
+    for key in (
+        "n_vendor_labels_without_proseg_cell",
+        "n_owned_cells_without_polygon",
+        "overlap_pixels_within_tile",
+        "overlap_pixels_across_tiles",
+    ):
+        assert report[key] == 0, key
+    assert report["deleted_derived_tables"] == []
+    assert not (tmp_path / "out" / "scratch").exists()
     assert (
         validate_analysis_layer(
             built.latest,
@@ -361,3 +391,106 @@ def test_pandas_metadata_lists_the_appended_columns() -> None:
     )
     names = [column["name"] for column in meta["columns"]]
     assert names == ["x", "assignment", "background", "__null_dask_index__"]
+
+
+def _copy_tiles(built: Built, tmp_path: Path) -> list[Path]:
+    dirs = []
+    for tile_dir in built.tile_dirs:
+        target = tmp_path / "tiles" / Path(tile_dir).name
+        shutil.copytree(tile_dir, target)
+        dirs.append(target)
+    return dirs
+
+
+def _edit_manifest(tile_dir: Path, edit: Any) -> None:
+    path = tile_dir / "tile_manifest.json"
+    manifest = json.loads(path.read_text())
+    edit(manifest)
+    path.write_text(json.dumps(manifest))
+
+
+def test_changed_tiles_restitch_and_drop_the_old_derived_tables(
+    identity: Built, tmp_path: Path
+) -> None:
+    from merxen.io.spatialdata_io import write_or_replace_element
+
+    built = _copy(identity, tmp_path)
+    tile_dirs = _copy_tiles(built, tmp_path)
+    first = stitch(
+        stitch_config(built.latest, built.plan_path, tile_dirs, tmp_path / "out1")
+    )
+    # Tables computed from these ProSeg cells (MIQ, clustering) and one of
+    # the vendor cells.
+    sdata = sd.read_zarr(built.latest, selection=("tables",))
+    write_or_replace_element(
+        sdata,
+        "table_MOSAIK_proseg_image_quantification",
+        "tables",
+        sdata.tables["table_MOSAIK_proseg"].copy(),
+    )
+    write_or_replace_element(
+        sdata,
+        "table_original_clustering_squidpy",
+        "tables",
+        sdata.tables["table_original"].copy(),
+    )
+    del sdata
+
+    # Another prior weight re-runs the tiles: their manifests change.
+    def reweigh(manifest: dict[str, Any]) -> None:
+        manifest["prior_weight"]["requested_effective"] = 100.0
+
+    _edit_manifest(tile_dirs[0], reweigh)
+    second = stitch(
+        stitch_config(built.latest, built.plan_path, tile_dirs, tmp_path / "out2")
+    )
+    assert second["skipped"] is False
+    assert second["fingerprint"] != first["fingerprint"]
+    assert second["deleted_derived_tables"] == [
+        "table_MOSAIK_proseg_image_quantification"
+    ]
+    sdata = sd.read_zarr(built.latest)
+    assert "table_MOSAIK_proseg_image_quantification" not in sdata.tables
+    assert "table_original_clustering_squidpy" in sdata.tables
+    assert "table_MOSAIK_proseg" in sdata.tables
+    assert sdata.attrs["merxen_atera_proseg"]["fingerprint"] == second["fingerprint"]
+    # The same tiles once more: a skip.
+    third = stitch(
+        stitch_config(built.latest, built.plan_path, tile_dirs, tmp_path / "out3")
+    )
+    assert third["skipped"] is True
+
+
+def test_claims_of_points_files_the_store_lacks_are_refused(
+    identity: Built, tmp_path: Path
+) -> None:
+    built = _copy(identity, tmp_path)
+    tile_dirs = _copy_tiles(built, tmp_path)
+    claims = sorted((tile_dirs[0] / "claims").glob("*.parquet"))[0]
+    shutil.copy(claims, tile_dirs[0] / "claims" / "missing.parquet")
+
+    def add_file(manifest: dict[str, Any]) -> None:
+        manifest["rows"]["claims_per_file"]["missing.parquet"] = 1
+
+    _edit_manifest(tile_dirs[0], add_file)
+    with pytest.raises(AteraProsegError, match="points files the store lacks"):
+        stitch(stitch_config(built.latest, built.plan_path, tile_dirs, tmp_path / "o"))
+    assert not (tmp_path / "o" / "scratch").exists()
+
+
+def test_two_tiles_owning_one_label_are_refused(
+    identity: Built, tmp_path: Path
+) -> None:
+    built = _copy(identity, tmp_path)
+    tile_dirs = _copy_tiles(built, tmp_path)
+    first = pq.read_table(tile_dirs[0] / "cells.parquet")
+    second = pq.read_table(tile_dirs[1] / "cells.parquet")
+    column = second.column_names.index("instance_id")
+    ids = second.column("instance_id").to_pylist()
+    ids[0] = first.column("instance_id")[0].as_py()
+    pq.write_table(
+        second.set_column(column, "instance_id", pa.array(ids, pa.uint64())),
+        tile_dirs[1] / "cells.parquet",
+    )
+    with pytest.raises(AteraProsegError, match="Two tiles own the same vendor label"):
+        stitch(stitch_config(built.latest, built.plan_path, tile_dirs, tmp_path / "o"))

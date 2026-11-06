@@ -27,7 +27,10 @@ background. Control rows are attributed to cells geometrically: their pixel's
 value in ``proseg_cell_labels``.
 
 The stitch records a fingerprint of the plan and the tile manifests; a store
-that already carries it (and every element) is left as it is.
+that already carries it (and every element) is left as it is. A new stitch
+deletes the tables derived from the previous ProSeg cells (every table of
+region ``MOSAIK_proseg`` other than ``table_MOSAIK_proseg``: the image
+quantification, clustering), so no later stage reuses them.
 """
 
 from __future__ import annotations
@@ -339,13 +342,33 @@ def _claim_files(tiles: _Tiles) -> dict[str, list[tuple[str, Path]]]:
 # --------------------------------------------------------------------------- #
 
 
+@dataclass
+class RasterOverlap:
+    """Pixels claimed by two different polygons while rasterising.
+
+    Attributes:
+        total: Every such pixel.
+        cross_group: Those whose two polygons belong to different groups
+            (cells of two tiles: an overlap across a tile seam).
+    """
+
+    total: int = 0
+    cross_group: int = 0
+
+    @property
+    def within_group(self) -> int:
+        """Overlap pixels of two polygons of one group (one tile)."""
+        return self.total - self.cross_group
+
+
 def rasterise_cells(
     geometries: list[Any],
     instance_ids: np.ndarray,
     shape: tuple[int, int],
     pixel_size_um: float,
     out: np.ndarray,
-) -> int:
+    groups: np.ndarray | None = None,
+) -> RasterOverlap:
     """Rasterise polygons (microns) into ``out`` by the pixel-centre rule.
 
     Pixel ``(i, j)`` takes the label of the polygon containing its centre
@@ -354,20 +377,31 @@ def rasterise_cells(
 
     Args:
         geometries: Shapely polygons or multipolygons, in microns.
-        instance_ids: Label of each geometry.
+        instance_ids: Label of each geometry (unique).
         shape: ``(n_rows, n_cols)`` of the grid.
         pixel_size_um: Microns per pixel.
         out: uint32 array of ``shape`` (zeros), written in place.
+        groups: Integer group of each geometry (its tile); ``None`` puts every
+            geometry in one group.
 
     Returns:
-        Pixels claimed by two different polygons.
+        The overlap pixels, in total and across groups.
     """
     from skimage.draw import polygon as draw_polygon
 
     n_rows, n_cols = shape
     ps = float(pixel_size_um)
-    overlap = 0
-    for geometry, label in zip(geometries, instance_ids, strict=True):
+    overlap = RasterOverlap()
+    ids = np.asarray(instance_ids, dtype=np.uint64)
+    order = np.argsort(ids, kind="stable")
+    sorted_ids = ids[order]
+    group_of = (
+        np.zeros(ids.size, dtype=np.int64)
+        if groups is None
+        else np.asarray(groups, dtype=np.int64)
+    )
+    sorted_groups = group_of[order]
+    for geometry, label, group in zip(geometries, ids, group_of, strict=True):
         if geometry is None or geometry.is_empty:
             continue
         x0, y0, x1, y1 = geometry.bounds
@@ -391,7 +425,11 @@ def rasterise_cells(
                 local[rr, cc] = value
         window = out[r0:r1, c0:c1]
         taken = local & (window != 0) & (window != label)
-        overlap += int(taken.sum())
+        if taken.any():
+            overlap.total += int(taken.sum())
+            previous = window[taken].astype(np.uint64)
+            position = np.searchsorted(sorted_ids, previous)
+            overlap.cross_group += int((sorted_groups[position] != group).sum())
         window[local] = np.uint32(label)
     return overlap
 
@@ -675,6 +713,45 @@ def _points_have_assignment(latest: Path) -> bool:
     )
 
 
+def _table_region(table_dir: Path) -> Any:
+    """Return the ``region`` attribute of an on-disk table (zarr v3 or v2)."""
+    for name in ("zarr.json", ".zattrs"):
+        path = table_dir / name
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        attrs = data.get("attributes", data) if name == "zarr.json" else data
+        return attrs.get("region")
+    return None
+
+
+def derived_proseg_tables(latest: Path) -> list[str]:
+    """Return the tables computed from the ProSeg cells (not the layer's own).
+
+    Args:
+        latest: The latest store.
+
+    Returns:
+        Sorted names of the tables of region ``MOSAIK_proseg`` other than
+        ``table_MOSAIK_proseg`` (image quantification, clustering).
+    """
+    tables_dir = Path(latest) / "tables"
+    if not tables_dir.is_dir():
+        return []
+    found = []
+    for table_dir in sorted(tables_dir.iterdir()):
+        if not table_dir.is_dir() or table_dir.name == PROSEG_TABLE_KEY:
+            continue
+        region = _table_region(table_dir)
+        regions = region if isinstance(region, list) else [region]
+        if PROSEG_SHAPES_KEY in regions:
+            found.append(table_dir.name)
+    return found
+
+
 def stitch(cfg: AteraProsegStitchConfig) -> dict[str, Any]:
     """Stitch the tiles of a plan into the latest store (or skip if current).
 
@@ -714,7 +791,12 @@ def stitch(cfg: AteraProsegStitchConfig) -> dict[str, Any]:
                 **recorded.get("stitch", {}),
             }
         else:
-            report = _stitch_into(cfg, latest, tiles, fingerprint)
+            try:
+                report = _stitch_into(cfg, latest, tiles, fingerprint)
+            finally:
+                # The label raster (n_rows x n_cols uint32, about 10 GB for a
+                # full section) is scratch whether or not the stitch succeeds.
+                remove_path(cfg.output_dir / "scratch")
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     stage_existing_output(latest, cfg.output_dir / "proseg_latest.zarr")
     (cfg.output_dir / "atera_proseg_report.json").write_text(
@@ -737,7 +819,7 @@ def _stitch_into(
     from spatialdata.models import Labels2DModel, ShapesModel, TableModel
     from spatialdata.transformations import Identity, Scale
 
-    from merxen.io.spatialdata_io import write_or_replace_element
+    from merxen.io.spatialdata_io import delete_element, write_or_replace_element
 
     plan = tiles.plan
     ps = float(plan["pixel_size_um"])
@@ -768,15 +850,22 @@ def _stitch_into(
     labels = np.lib.format.open_memmap(
         raster_path, mode="w+", dtype=np.uint32, shape=(n_rows_px, n_cols_px)
     )
+    tile_codes = pd.Categorical(cells["proseg_tile"], categories=tiles.order).codes
     overlap = rasterise_cells(
-        geometries, instance_ids, (n_rows_px, n_cols_px), ps, labels
+        geometries,
+        instance_ids,
+        (n_rows_px, n_cols_px),
+        ps,
+        labels,
+        groups=np.asarray(tile_codes, dtype=np.int64),
     )
     labels.flush()
     logger.info(
-        "[%s] Rasterised %d ProSeg cells (%d seam overlap pixels)",
+        "[%s] Rasterised %d ProSeg cells (%d overlap pixels, %d across tiles)",
         cfg.dataset_name,
         len(geometries),
-        overlap,
+        overlap.total,
+        overlap.cross_group,
     )
 
     # Points: rewrite every file with the resolved assignment.
@@ -862,6 +951,26 @@ def _stitch_into(
     )
     for index, column in enumerate([*CONTROL_COUNT_PREFIXES, OTHER_CONTROL_COLUMN]):
         obs[column] = control_matrix[:, index]
+    without_cell = sorted(
+        int(v)
+        for m in tiles.manifests.values()
+        for v in m["cells"]["owned_labels_without_proseg_cell"]
+    )
+    without_polygon = sorted(
+        int(v)
+        for m in tiles.manifests.values()
+        for v in m["cells"]["owned_cells_without_polygon"]
+    )
+    if without_cell or without_polygon:
+        # Their transcripts are background in the layer: vendor cells lost.
+        logger.warning(
+            "[%s] %d vendor labels have no ProSeg cell and %d owned ProSeg cells "
+            "have no polygon; they are not in %s",
+            cfg.dataset_name,
+            len(without_cell),
+            len(without_polygon),
+            PROSEG_TABLE_KEY,
+        )
     conflicts: Counter[str] = Counter()
     losing: Counter[int] = Counter()
     for result in results:
@@ -873,12 +982,10 @@ def _stitch_into(
         "n_cells": int(n_cells),
         "n_zero_transcript_cells": int(zero.sum()),
         "zero_transcript_cells": [int(v) for v in instance_ids[zero]],
-        "n_vendor_labels_without_proseg_cell": int(
-            sum(
-                len(m["cells"]["owned_labels_without_proseg_cell"])
-                for m in tiles.manifests.values()
-            )
-        ),
+        "n_vendor_labels_without_proseg_cell": len(without_cell),
+        "vendor_labels_without_proseg_cell": without_cell,
+        "n_owned_cells_without_polygon": len(without_polygon),
+        "owned_cells_without_polygon": without_polygon,
         "n_points_files": len(results),
         "n_rows": int(sum(result.n_rows for result in results)),
         "n_rows_assigned": int(sum(result.n_assigned for result in results)),
@@ -891,7 +998,8 @@ def _stitch_into(
         "cells_losing_most_conflicts": [
             [int(cell), int(count)] for cell, count in losing.most_common(20)
         ],
-        "seam_overlap_pixels": int(overlap),
+        "overlap_pixels_within_tile": int(overlap.within_group),
+        "overlap_pixels_across_tiles": int(overlap.cross_group),
         "owned_cells_near_interior_window_edge": int(
             sum(
                 len(m["edge_check"]["owned_cells_near_interior_edge"])
@@ -952,6 +1060,17 @@ def _stitch_into(
     write_or_replace_element(sdata, PROSEG_SHAPES_KEY, "shapes", shapes)
     write_or_replace_element(sdata, PROSEG_LABEL_KEY, "labels", label_element)
     write_or_replace_element(sdata, PROSEG_TABLE_KEY, "tables", table)
+    stale = derived_proseg_tables(latest)
+    for key in stale:
+        delete_element(sdata, key, "tables")
+    if stale:
+        logger.info(
+            "[%s] Deleted %d tables of the previous ProSeg cells: %s",
+            cfg.dataset_name,
+            len(stale),
+            ", ".join(stale),
+        )
+    stitch_record["deleted_derived_tables"] = stale
     register_segmentation_branch(
         sdata,
         PROSEG_BRANCH,
