@@ -565,6 +565,108 @@ After the whole native route (to MENDER) the latest store holds 2.56 GB not
 shared with the source, and every source file keeps its inode, size and
 modification time (AT-6 exit runs).
 
+## ATERA ProSeg route (`native_proseg`, AT-9)
+
+A row with `segmentation_source=native_proseg` (aliases `vendor_proseg`,
+`instrument_proseg`; ATERA only, opt-in) keeps the vendor segmentation as the
+`original_seg` layer and adds ProSeg cells refined from the vendor cell masks as
+the `reseg` layer. No Cellpose runs: the vendor `cell_labels` are ProSeg's prior.
+`native` stays the ATERA default, and the bare word `proseg` still means
+`cellpose_proseg`. The segment stage runs `NATIVE_LATEST` (as above), then
+([atera_proseg.nf](../../workflows/modules/atera_proseg.nf),
+[segmentation/atera_proseg/](../../src/merxen/segmentation/atera_proseg/)):
+
+| Process | Command | What it does |
+|---|---|---|
+| `ATERA_PROSEG_PLAN` | `merxen atera-proseg-plan` | Cuts the section into `atera_proseg_tile_um` (2000 µm) cores from origin (0, 0), ids `c{col}_r{row}`. A vendor label belongs to the tile whose half-open core holds its vendor centroid, so every label has one owner. A window is the core plus `atera_proseg_halo_um` (100 µm, at least 100), grown to cover each owned cell's bounding box plus `atera_proseg_owned_margin_um` (20 µm; at most one halo further), clipped to the mask and snapped to pixels. Tiles that own no cell are not run. Reads the build aggregates, the vendor table and the cell polygon bounds only. |
+| `ATERA_PROSEG_TILE` (one task per tile, at most `atera_proseg_tile_max_forks` at once) | `merxen atera-proseg-tile` | Exports the window's gene transcripts (vendor float32 floor rule, QV ≥ `atera_min_qv`) in ProSeg's Xenium parquet layout, crops the vendor cell mask as the prior and runs ProSeg 3.2.0 (below). Keeps the owned cells (polygons, metadata) and the transcripts ProSeg assigned to them (claims), after checking that the recounted foreground counts equal ProSeg's count matrix. |
+| `ATERA_PROSEG_STITCH` | `merxen atera-proseg-stitch` | Writes the stitched layer into the latest store and emits the segmentation tuple (with NATIVE_LATEST's empty placeholders), so ENRICH and every later stage take it like NATIVE_LATEST's output. |
+
+**ProSeg command** (per tile; `runner.build_command`):
+
+```
+proseg tile.parquet xenium -x x_location -y y_location -z z_location
+  --gene-column feature_name --cell-id-column cell_id --cell-id-unassigned 0
+  --transcript-id-column transcript_id --qv-column qv --min-qv 20
+  --compartment-column overlaps_nucleus --compartment-nuclear 1 --fov-column fov_name
+  --voxel-size 0.5 --burnin-voxel-size 1.0 --voxel-layers 2
+  --nuclear-reassignment-prob 0.2 --diffusion-probability 0.2 --cell-compactness 0.04
+  --burnin-samples 100 --samples 200 --hillclimb 20 --recorded-samples 100
+  --prior-weight <m> --cellpose-masks prior.npy
+  --cellpose-x-transform <ps> 0 <col0*ps> --cellpose-y-transform 0 <ps> <row0*ps>
+  --nthreads 16 --output-path proseg --output-spatialdata proseg.zarr
+  --exclude-spatialdata-transcripts --output-cell-metadata cell-metadata.parquet
+  --output-transcript-metadata transcript-metadata.parquet
+  --output-cell-polygons cell-polygons.geojson.gz --overwrite
+```
+
+- The parquet has plain-string `feature_name` and `cell_id` (the vendor label,
+  `"0"` when unassigned), uint64 `transcript_id`, uint8 `overlaps_nucleus` (the
+  vendor flag; `atera_proseg_nuclear_compartment=false` writes 0), a constant
+  `fov_name` and float32 coordinates and QV. Controls are not exported.
+- ProSeg scales `--prior-weight` by `max(mean transcripts per cell / 100, 1)`.
+  `atera_proseg_prior_weight` (140) is the *effective* weight: each tile's
+  multiplier `m` undoes that scaling, and a run that reports a weight more
+  than 2% off is stopped as soon as it prints it.
+- The mask transforms map pixel (i, j) to ProSeg's pixel centre
+  ((j + 0.5) ps, (i + 0.5) ps), the vendor's corner convention.
+- The schedule is the short one of the AT-5(b) benchmark
+  (`atera_proseg_burnin_samples`, `_samples`, `_hillclimb`,
+  `_recorded_samples`). `prior_seg_reassignment_prob` and
+  `--use-cell-initialization` stay at ProSeg's defaults, as in the benchmark.
+- Each tile reserves `atera_proseg_tile_cpus` (16) and
+  `atera_proseg_tile_memory_gb` (32 GB, doubled on the one retry after an
+  external kill). Its own watchdog stops it (exit 99, not retried) above
+  `atera_proseg_tile_max_rss_gb` (40 GB) of anonymous memory. ProSeg versions
+  other than 3.2.0 are refused at config time unless
+  `atera_proseg_allow_untested_version=true`.
+- A failed tile drops the row's ProSeg branch: no stitch and no later stage
+  for that row. `atera_proseg_tile_subset` (comma list of tile ids) runs only
+  those tiles as a check and is refused with any stage after `segment`.
+
+**Stitched layer** (written in place into
+`<outdir>/<pair>/atera/latest/latest_spatialdata.zarr` under the store lock):
+
+| Element | Contents |
+|---|---|
+| `shapes/MOSAIK_proseg` | Every owned ProSeg consensus polygon, unclipped, in microns, with the vendor shapes' `Scale(1/ps)` transform; `instance_id`, `source_cell_id`, `proseg_internal_id`, `proseg_tile`. |
+| `labels/proseg_cell_labels` | The polygons rasterised on the morphology grid (pixel-centre rule, ascending `instance_id`, last wins), vendor pyramid, `Identity` transform. |
+| `tables/table_MOSAIK_proseg` | Cells × genes foreground counts (`var` copied from `table_original`, genes only). `obs`: `instance_id`, `source_cell_id`, ProSeg's `proseg_internal_id`, `proseg_tile`, centroid, `volume`, `surface_area`, `scale`, `proseg_cluster`, `cell_area`, `transcript_counts`, `proseg_zero_transcripts` and the control counts (`genomic_control_counts`, `unassigned_codeword_counts`, `deprecated_codeword_counts`, `control_codeword_counts`, `control_probe_counts`, `other_control_counts`), attributed geometrically through `proseg_cell_labels`. |
+| `points/transcripts` | Every file rewritten with two more columns, `assignment` (nullable uint64: the vendor label of the ProSeg cell) and `background`. Names, row counts, row order and the other columns are kept, so the build's points index and aggregates still describe the files. Controls, vendor and ProSeg background and the rows ProSeg dropped have no assignment. |
+
+- **Ids.** A ProSeg cell keeps its vendor label as `instance_id` (namespace
+  `source_segmentation_v1`), as Xenium ProSeg cells keep their Cellpose labels.
+  Nucleus metrics of both layers join the vendor nuclei through
+  `cell_instance_id`.
+- **Seams.** A transcript claimed by two tiles for different cells goes to the
+  tile whose core holds it, else to the first tile in plan order. Conflicts are
+  counted per tile pair and per losing cell, not hidden.
+- **Registry.** Branch `proseg` (legacy alias `reseg`) with `assignment`,
+  `background`, `label: proseg_cell_labels`, `prior: vendor_cell_labels` and the
+  ProSeg model identity. `merxen_schema.segmentation_source` stays `native` (it
+  describes the store's original segmentation).
+- **Provenance.** Root attr `merxen_atera_proseg`: fingerprint, source build,
+  ProSeg version and git revision, the command template, model parameters,
+  grid, every tile manifest (window, rows, cells, prior weight requested,
+  multiplier and reported, timings, peak memory, edge check) and the stitch
+  counts (cells, zero-transcript cells, assigned and foreground rows,
+  conflicts, seam overlap pixels). A compact copy is in the table's `uns`.
+- **Idempotency.** A store that already carries the fingerprint of the same
+  plan and tile manifests is not re-stitched (a `-resume` re-runs the stitch
+  task, which then only stages its output). Tiles are cached by their config
+  value, so a re-run plan does not invalidate them.
+- **Points rewrite.** New files go to `points.parquet.partial-<uuid>/` and the
+  two directories are swapped by rename; the old hardlinks are unlinked, so the
+  source store keeps every inode, byte and modification time. The latest
+  points no longer share inodes with the source (about +25 GB on the full
+  section).
+
+**Outputs** (under `<outdir>/<pair>/atera/segmentation/`): `atera_proseg/tile_plan.json`,
+`atera_proseg/tiles/tile_<id>/` (cells, claims, `tile_manifest.json`, ProSeg's
+logs, cell metadata, polygons and `proseg.zarr` table), and
+`stitch_out/` (`proseg_latest.zarr` link, `atera_proseg_report.json`, the three
+placeholders).
+
 ## Memory guardrails
 
 The stage functions free memory aggressively:

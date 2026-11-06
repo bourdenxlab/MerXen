@@ -75,6 +75,14 @@ the stage never reads.
 The vendor labels share the morphology image's pixel grid, so the image-shape
 check applies unchanged.
 
+A `native_proseg` row (AT-9) also quantifies its stitched ProSeg cells in the
+same task (one writer per store): the config lists them in `extra_layers`
+(`mask_label_key: proseg_cell_labels`, `shape_key: MOSAIK_proseg`,
+`table_key: table_MOSAIK_proseg_image_quantification`). Each extra layer gets
+its own table (region `MOSAIK_proseg`) and its own sidecar files
+(`<dataset>_mosaik_proseg_mask_image_quantification.*`), and is skipped on a
+re-run like the main layer. `extra_layers` is empty for every other row.
+
 On the public full section (91,431 cells, 4-channel 42,548 × 61,369 image) the
 task takes about 3 min at 9.6 GB peak memory (AT-6 exit run), far under the
 160 GB reservation.
