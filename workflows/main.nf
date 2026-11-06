@@ -1162,7 +1162,8 @@ def validateStage(
     alignmentEnabled,
     spatialGeneAnalysisEnabled,
     menderEnabled,
-    segmentationSource = "cellpose_proseg"
+    segmentationSource = "cellpose_proseg",
+    ateraRow = false
 ) {
     if (!stages.contains(stage)) {
         def hint = ""
@@ -1198,6 +1199,11 @@ def validateStage(
         }
         if (stage == "pciseq") {
             hint = " Pass --pciseq_enabled true to use pciSeq."
+        }
+        // The enable hints above lead into the ATERA refusal; ATERA rows are
+        // told which stages they run instead (the native nuclei hint stays).
+        if (ateraRow && !(stage in ateraNativeStages()) && stage != "segment_nuclei") {
+            hint = " ATERA rows run only ${ateraNativeStages().join(', ')}."
         }
         throw new IllegalArgumentException(
             "${paramName} '${stage}' is not active for this run.${hint} " +
@@ -2336,16 +2342,29 @@ def appendAteraPreflightChecks(errors, row, settings, params) {
         )
     }
     if (stageOrder.contains("gaston")) {
-        errors.add("GASTON is not covered for ATERA rows")
+        errors.add(
+            "GASTON is not covered for ATERA rows; remove gaston_enabled from " +
+            "row ${settings.pair_id} or set it to false"
+        )
     }
     if (stageOrder.contains("pciseq")) {
-        errors.add("pciSeq is off for ATERA rows")
+        errors.add(
+            "pciSeq is off for ATERA rows; remove pciseq_enabled from row " +
+            "${settings.pair_id} or set it to false"
+        )
     }
     if (stageOrder.contains("mecr")) {
-        errors.add("MECR is off for ATERA rows until it streams its reference")
+        errors.add(
+            "MECR is off for ATERA rows until it streams its reference; remove " +
+            "mecr_enabled from row ${settings.pair_id} or set it to false"
+        )
     }
     if (settings.spatial_gene_analysis_transcript_analysis_enabled) {
-        errors.add("transcript spatial patterns are off for ATERA rows")
+        errors.add(
+            "transcript spatial patterns are off for ATERA rows; remove " +
+            "spatial_gene_analysis_transcript_analysis_enabled from row " +
+            "${settings.pair_id} or set it to false"
+        )
     }
     if (
         stageOrder.contains("compute_cortical_depth") ||
@@ -2353,7 +2372,9 @@ def appendAteraPreflightChecks(errors, row, settings, params) {
     ) {
         errors.add(
             "cortical depth and distance from object are off for non-cortical " +
-            "ATERA sections"
+            "ATERA sections; remove cortical_depth_enabled and " +
+            "distance_from_object_enabled from row ${settings.pair_id} or set " +
+            "them to false"
         )
     }
     def alignmentRequested = boolOrDefault(
@@ -2522,6 +2543,21 @@ def merscopeBeadRemovalFillMode(params) {
     return rawMode.toString().trim().toLowerCase()
 }
 
+// A global switch of a stage that is off for ATERA rows is ignored on them with
+// a setting note, so a mixed samplesheet keeps it for its other rows. A value
+// set on the ATERA row itself is kept, and the ATERA preflight refuses it.
+def ateraIgnoresGlobalSwitch(enabled, ateraRow, row, fieldName, stageLabel, settingNotes) {
+    if (!ateraRow || chooseField(row, [fieldName]) != null) {
+        return enabled
+    }
+    if (enabled) {
+        settingNotes << (
+            "${stageLabel} is off for ATERA rows; the global ${fieldName} is ignored"
+        ).toString()
+    }
+    return false
+}
+
 def rowSampleSettings(row, params) {
     def pairId = row.pair_id?.toString()?.trim()
     if (!pairId) {
@@ -2553,10 +2589,17 @@ def rowSampleSettings(row, params) {
         pairId,
         settingNotes,
     )
-    def pciseqEnabled = boolOrDefault(
-        rowFieldOrDefault(row, "pciseq_enabled", params.pciseq_enabled),
-        false,
-        "pciseq_enabled for ${pairId}",
+    def pciseqEnabled = ateraIgnoresGlobalSwitch(
+        boolOrDefault(
+            rowFieldOrDefault(row, "pciseq_enabled", params.pciseq_enabled),
+            false,
+            "pciseq_enabled for ${pairId}",
+        ),
+        ateraRow,
+        row,
+        "pciseq_enabled",
+        "pciSeq",
+        settingNotes,
     )
     def pciseqReference = pciseqReferenceSettings(row, species, params)
     def requestedAlignmentEnabled = boolOrDefault(
@@ -2629,23 +2672,37 @@ def rowSampleSettings(row, params) {
         }
         spatialGeneTranscriptAnalysisEnabled = false
     }
-    def corticalDepthEnabled = boolOrDefault(
-        rowFieldOrDefault(
-            row,
-            "cortical_depth_enabled",
-            params.cortical_depth_enabled,
+    def corticalDepthEnabled = ateraIgnoresGlobalSwitch(
+        boolOrDefault(
+            rowFieldOrDefault(
+                row,
+                "cortical_depth_enabled",
+                params.cortical_depth_enabled,
+            ),
+            false,
+            "cortical_depth_enabled for ${pairId}",
         ),
-        false,
-        "cortical_depth_enabled for ${pairId}",
+        ateraRow,
+        row,
+        "cortical_depth_enabled",
+        "cortical depth",
+        settingNotes,
     )
-    def distanceFromObjectEnabled = boolOrDefault(
-        rowFieldOrDefault(
-            row,
-            "distance_from_object_enabled",
-            params.distance_from_object_enabled,
+    def distanceFromObjectEnabled = ateraIgnoresGlobalSwitch(
+        boolOrDefault(
+            rowFieldOrDefault(
+                row,
+                "distance_from_object_enabled",
+                params.distance_from_object_enabled,
+            ),
+            false,
+            "distance_from_object_enabled for ${pairId}",
         ),
-        false,
-        "distance_from_object_enabled for ${pairId}",
+        ateraRow,
+        row,
+        "distance_from_object_enabled",
+        "distance from object",
+        settingNotes,
     )
     def mecrEnabled = boolOrDefault(
         rowFieldOrDefault(row, "mecr_enabled", params.mecr_enabled),
@@ -2676,10 +2733,17 @@ def rowSampleSettings(row, params) {
         pairId,
         settingNotes,
     )
-    def gastonEnabled = boolOrDefault(
-        rowFieldOrDefault(row, "gaston_enabled", params.gaston_enabled),
-        false,
-        "gaston_enabled for ${pairId}",
+    def gastonEnabled = ateraIgnoresGlobalSwitch(
+        boolOrDefault(
+            rowFieldOrDefault(row, "gaston_enabled", params.gaston_enabled),
+            false,
+            "gaston_enabled for ${pairId}",
+        ),
+        ateraRow,
+        row,
+        "gaston_enabled",
+        "GASTON",
+        settingNotes,
     )
     def gastonSegmentations = normalizeGastonSegmentations(
         rowFieldOrDefault(
@@ -2913,6 +2977,7 @@ def rowSampleSettings(row, params) {
         spatialGeneAnalysisEnabled,
         menderEnabled,
         segmentationSource,
+        ateraRow,
     )
     validateStage(
         stopStage,
@@ -2922,6 +2987,7 @@ def rowSampleSettings(row, params) {
         spatialGeneAnalysisEnabled,
         menderEnabled,
         segmentationSource,
+        ateraRow,
     )
     // Opt-in terminal analyses extend the historical clustering stop default.
     // Explicit only_stage selections and non-default stop stages remain exact.

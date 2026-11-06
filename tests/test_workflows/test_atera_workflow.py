@@ -231,6 +231,9 @@ _REFUSALS = {
         "segmentation_source=native"
     ),
     "atera/segment_nuclei": "keep the vendor nuclei and run no Cellpose nuclei stage",
+    "atera/only_pciseq": "'pciseq' is not active for this run. ATERA rows run only",
+    "atera/stop_gaston": "'gaston' is not active for this run. ATERA rows run only",
+    "atera/only_mecr": "'mecr' is not active for this run. ATERA rows run only",
     "mixed/xenium_native": (
         "segmentation_source=native is not available for XENIUM rows yet; "
         "XENIUM supports: cellpose_proseg"
@@ -322,6 +325,29 @@ def test_atera_refusals(preflight_cases: dict[str, dict[str, Any]], case: str) -
     record = preflight_cases[case]
     assert record.get("error_class") == "java.lang.IllegalArgumentException", record
     assert _REFUSALS[case] in record["message"], record["message"]
+    # No hint sends an ATERA row towards a switch the preflight then refuses.
+    assert "Pass --" not in record["message"], record["message"]
+
+
+_ROW_SWITCH_REFUSALS = {
+    "atera/pciseq": "pciseq_enabled",
+    "atera/gaston": "gaston_enabled",
+    "atera/mecr": "mecr_enabled",
+    "atera/transcript_analysis": "spatial_gene_analysis_transcript_analysis_enabled",
+    "atera/cortical_depth": "cortical_depth_enabled",
+    "atera/distance_from_object": "distance_from_object_enabled",
+}
+
+
+@pytest.mark.nextflow
+@pytest.mark.parametrize("case", sorted(_ROW_SWITCH_REFUSALS))
+def test_row_switch_refusals_name_the_row_setting(
+    preflight_cases: dict[str, dict[str, Any]], case: str
+) -> None:
+    message = preflight_cases[case]["message"]
+    field = _ROW_SWITCH_REFUSALS[case]
+    assert f"remove {field}" in message or f"and {field}" in message, message
+    assert "from row PAIR_A" in message, message
 
 
 @pytest.mark.nextflow
@@ -376,6 +402,54 @@ def test_global_mecr_and_transcripts_are_ignored_for_atera(tmp_path: Path) -> No
     assert record["result"] == "OK", record
     assert record["run_mecr"] is False and record["transcript_analysis"] is False
     assert "mecr" not in record["stage_order"]
+
+
+@pytest.mark.nextflow
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
+def test_global_off_stage_switches_are_ignored_for_atera(tmp_path: Path) -> None:
+    """Global switches of off stages are noted and ignored on ATERA rows.
+
+    A mixed samplesheet keeps them for its XENIUM and MERSCOPE rows; only a
+    value set on the ATERA row itself is refused (``test_atera_refusals``).
+    """
+    cases = _preflight_cases(
+        tmp_path,
+        "--stop_stage",
+        "enrich",
+        "--pciseq_enabled",
+        "true",
+        "--gaston_enabled",
+        "true",
+        "--cortical_depth_enabled",
+        "true",
+        "--distance_from_object_enabled",
+        "true",
+    )
+    for case in ("atera/no_stop_stage", "mixed/atera"):
+        record = cases[case]
+        assert record["result"] == "OK", (case, record)
+        for stage in (
+            "pciseq",
+            "gaston",
+            "compute_cortical_depth",
+            "distance_from_object",
+        ):
+            assert stage not in record["stage_order"], (case, stage)
+        for field, label in (
+            ("pciseq_enabled", "pciSeq"),
+            ("gaston_enabled", "GASTON"),
+            ("cortical_depth_enabled", "cortical depth"),
+            ("distance_from_object_enabled", "distance from object"),
+        ):
+            assert (
+                f"{label} is off for ATERA rows; the global {field} is ignored"
+            ) in record["setting_notes"], (case, record["setting_notes"])
+    # The XENIUM row of the mixed samplesheet keeps the global switches.
+    xenium = cases["mixed/xenium_enrich"]
+    assert xenium["result"] == "OK", xenium
+    for stage in ("pciseq", "gaston", "compute_cortical_depth", "distance_from_object"):
+        assert stage in xenium["stage_order"], stage
+    assert xenium["setting_notes"] == []
 
 
 # --------------------------------------------------------------------------- #

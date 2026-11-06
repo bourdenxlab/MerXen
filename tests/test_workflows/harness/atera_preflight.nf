@@ -76,6 +76,11 @@ workflow {
     check("atera/analysis_reseg", atera + [analysis_segmentation: "reseg"])
     check("atera/mender_hybrid", atera + [mender_enabled: "true", mender_segmentations: "proseg_hybrid"])
     check("atera/segment_nuclei", atera + [only_stage: "segment_nuclei"])
+    // A stage that is off for ATERA rows names the ATERA stages, not the switch
+    // that would only lead into the refusal above.
+    check("atera/only_pciseq", atera + [only_stage: "pciseq"])
+    check("atera/stop_gaston", atera + [stop_stage: "gaston"])
+    check("atera/only_mecr", atera + [only_stage: "mecr"])
     // Mixed samplesheet: the XENIUM row keeps its four layers and Cellpose.
     def xenium = [pair_id: "PAIR_B", analysis_mode: "xenium", xenium_dir: "raw/xenium"]
     check("mixed/xenium", xenium + [stop_stage: "build_spatialdata"])

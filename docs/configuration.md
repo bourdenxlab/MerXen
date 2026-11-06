@@ -399,23 +399,27 @@ Native rows have one analysis layer, `original_seg`. A global
 says so; a samplesheet value that names `reseg`, `proseg_mask` or
 `proseg_hybrid` on a native row is an error.
 
-Refused for ATERA rows, before any task starts:
+Refused for ATERA rows, before any task starts (each switch message ends
+with "remove `<setting>` from row `<pair>` or set it to false"):
 
 | Request | Message |
 |---------|---------|
 | `mapmycells` selected (`stop_stage=mapmycells`) | standalone MapMyCells is not covered for ATERA rows; stop at clustering_squidpy or mender |
-| `gaston_enabled` | GASTON is not covered for ATERA rows |
-| `pciseq_enabled` | pciSeq is off for ATERA rows |
+| row `gaston_enabled=true` | GASTON is not covered for ATERA rows |
+| row `pciseq_enabled=true` | pciSeq is off for ATERA rows |
 | row `mecr_enabled=true` | MECR is off for ATERA rows until it streams its reference |
 | row `spatial_gene_analysis_transcript_analysis_enabled=true` | transcript spatial patterns are off for ATERA rows |
-| `cortical_depth_enabled` or `distance_from_object_enabled` | cortical depth and distance from object are off for non-cortical ATERA sections |
+| row `cortical_depth_enabled=true` or `distance_from_object_enabled=true` | cortical depth and distance from object are off for non-cortical ATERA sections |
 | row `enable_alignment` or `xenium_registered_images_csv` | image registration and alignment are not covered for ATERA rows (AT-10) |
 | `segmentation_source=cellpose_only` or `cellpose_proseg` | segmentation_source=… is not available for ATERA rows yet; ATERA supports: native |
+| `start_stage`, `stop_stage` or `only_stage` naming a stage ATERA rows do not run (such as `pciseq`, `gaston`, `mecr`) | … is not active for this run. ATERA rows run only build_spatialdata, segment, … |
 
-The global `mecr_enabled` and `spatial_gene_analysis_transcript_analysis_enabled`
-do not apply to ATERA rows (they default off there; the run log says when a
-global value is ignored), so a mixed samplesheet keeps them for its XENIUM and
-MERSCOPE rows.
+The global `pciseq_enabled`, `gaston_enabled`, `mecr_enabled`,
+`cortical_depth_enabled`, `distance_from_object_enabled` and
+`spatial_gene_analysis_transcript_analysis_enabled` do not apply to ATERA rows:
+the stages stay off there and the run log says when a global `true` is ignored,
+so a mixed samplesheet keeps them for its XENIUM and MERSCOPE rows. Only a
+value set on the ATERA row itself is refused.
 
 ### Alignment
 

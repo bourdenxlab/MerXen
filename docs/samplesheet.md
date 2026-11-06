@@ -163,8 +163,9 @@ From [workflows/main.nf](../workflows/main.nf):
 - In `analysis_mode=xenium`, only Xenium source/cache columns are required.
 - In `analysis_mode=atera`, the row must provide `atera_dir` or
   `atera_spatialdata_path`. It runs the native segmentation route; stages and
-  options it does not cover are refused (see
-  [ATERA rows](configuration.md#atera-rows)). Preflight checks every row before
+  options it does not cover are refused when the row sets them (see
+  [ATERA rows](configuration.md#atera-rows)); the global switches of those
+  stages are ignored on ATERA rows with a log note. Preflight checks every row before
   any task starts, so one refused ATERA row stops the whole run, including the
   other rows of a mixed samplesheet.
 - Blank row-level analysis, alignment, optional-analysis, or stage settings inherit the matching Nextflow
