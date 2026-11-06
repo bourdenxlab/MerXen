@@ -11,8 +11,19 @@ from merxen.io.spatialdata_schema import (
     choose_primary_points_key,
     register_segmentation_branch,
 )
+from merxen.platforms import PLATFORM_SPECS
 
 BoundaryType = Literal["cell", "nucleus"]
+
+ORIGINAL_NUCLEUS_ROW_ID_NAMESPACE = "original_nucleus_row_v1"
+"""Id namespace of vendor nuclei keyed by nucleus row (``instance_id`` = row + 1).
+
+Used by platforms whose nucleus ids are not cell ids (ATERA); their nuclei join
+cells through :data:`NUCLEUS_CELL_KEY`.
+"""
+
+NUCLEUS_CELL_KEY = "cell_instance_id"
+"""Nucleus-shape column naming the owning cell when nucleus ids are not cell ids."""
 
 
 @dataclass(frozen=True)
@@ -28,6 +39,7 @@ class MaskSpec:
     instance_key: str
     id_namespace: str
     coordinate_variant_of: str | None = None
+    cell_key: str | None = None
 
     @property
     def has_assignment(self: MaskSpec) -> bool:
@@ -40,9 +52,61 @@ class MaskSpec:
         return self.table_key is not None
 
 
-_NUCLEUS_BRANCHES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("cellpose_nuclei", "cellpose_nuclei", ("nuclei",)),
-    ("original_nucleus", "xenium_nucleus", ("nucleus_boundaries",)),
+@dataclass(frozen=True)
+class _NucleusBranch:
+    """A nucleus mask branch registered when its shapes exist but it is missing.
+
+    Attributes:
+        branch: Registry name of the branch.
+        shape_key: Shapes element of the nuclei.
+        aliases: Legacy names of the branch.
+        id_namespace: Namespace of the nucleus ids.
+        cell_key: Shape column naming the owning cell, or ``None`` when the
+            nucleus ids are the cell ids.
+    """
+
+    branch: str
+    shape_key: str
+    aliases: tuple[str, ...]
+    id_namespace: str
+    cell_key: str | None = None
+
+
+def _original_nucleus_branches() -> tuple[_NucleusBranch, ...]:
+    """Return the vendor nucleus branches of the registry, in registry order."""
+    branches: list[_NucleusBranch] = []
+    for spec in PLATFORM_SPECS.values():
+        if spec.original_nucleus_shape_key is None:
+            continue
+        if spec.nucleus_ids_are_cell_ids:
+            # Xenium nuclei share the cell ids; keep the namespace and alias
+            # older stores were registered with.
+            branches.append(
+                _NucleusBranch(
+                    "original_nucleus",
+                    spec.original_nucleus_shape_key,
+                    ("nucleus_boundaries",),
+                    f"{ORIGINAL_ID_NAMESPACE}_nucleus",
+                )
+            )
+        else:
+            branches.append(
+                _NucleusBranch(
+                    "original_nucleus",
+                    spec.original_nucleus_shape_key,
+                    (),
+                    ORIGINAL_NUCLEUS_ROW_ID_NAMESPACE,
+                    cell_key=NUCLEUS_CELL_KEY,
+                )
+            )
+    return tuple(branches)
+
+
+_NUCLEUS_BRANCHES: tuple[_NucleusBranch, ...] = (
+    _NucleusBranch(
+        "cellpose_nuclei", "cellpose_nuclei", ("nuclei",), "cellpose_nucleus_label_v1"
+    ),
+    *_original_nucleus_branches(),
 )
 
 
@@ -66,29 +130,26 @@ def register_missing_mask_branches(sdata_obj: Any) -> tuple[str, ...]:
     schema = dict(getattr(sdata_obj, "attrs", {}).get(MERXEN_SCHEMA_ATTR, {}))
     registry = dict(schema.get("segmentations", {}))
     added: list[str] = []
-    for branch, shape_key, aliases in _NUCLEUS_BRANCHES:
-        if shape_key not in getattr(sdata_obj, "shapes", {}):
+    for candidate in _NUCLEUS_BRANCHES:
+        if candidate.shape_key not in getattr(sdata_obj, "shapes", {}):
             continue
-        if branch in registry:
+        if candidate.branch in registry:
             continue
         register_segmentation_branch(
             sdata_obj,
-            branch,
+            candidate.branch,
             points_key=points_key,
             assignment_column=None,
-            shape_key=shape_key,
+            shape_key=candidate.shape_key,
             table_key=None,
-            id_namespace=(
-                "cellpose_nucleus_label_v1"
-                if branch == "cellpose_nuclei"
-                else f"{ORIGINAL_ID_NAMESPACE}_nucleus"
-            ),
-            legacy_aliases=aliases,
+            id_namespace=candidate.id_namespace,
+            legacy_aliases=candidate.aliases,
+            cell_key=candidate.cell_key,
         )
         registry = dict(
             sdata_obj.attrs.get(MERXEN_SCHEMA_ATTR, {}).get("segmentations", {})
         )
-        added.append(branch)
+        added.append(candidate.branch)
     return tuple(added)
 
 
@@ -148,6 +209,9 @@ def discover_masks(
                     None
                     if coordinate_variant_of is None
                     else str(coordinate_variant_of)
+                ),
+                cell_key=(
+                    None if entry.get("cell_key") is None else str(entry["cell_key"])
                 ),
             )
         )

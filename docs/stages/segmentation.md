@@ -482,6 +482,84 @@ source is stored as a finite categorical vocabulary. The root
 `proseg_base_raw.zarr` is treated as a transient intermediate and removed
 after the latest-format zarr is written successfully.
 
+## Native segmentation (ATERA, `NATIVE_LATEST`)
+
+A row with `segmentation_source=native` keeps the vendor segmentation and runs
+no Cellpose or ProSeg. In AT-6 that is every ATERA row (the platform default;
+see [configuration](../configuration.md)). The `segment` stage of such a row
+is the `NATIVE_LATEST` process
+([native_segmentation.nf](../../workflows/modules/native_segmentation.nf),
+`merxen native-latest`,
+[native.py](../../src/merxen/segmentation/native.py)). It derives the latest
+store from the source store that `BUILD_SPATIALDATA` wrote, at
+`<outdir>/<pair>/atera/latest/latest_spatialdata.zarr`:
+
+| Source store | Latest store | How |
+|---|---|---|
+| `images/morphology_focus`, `labels/cell_labels`, `labels/nucleus_labels` chunks | same names | hardlinked, then made read-only (`chmod a-w`) |
+| `points/transcripts/**.parquet` | same name | hardlinked, then made read-only |
+| every `zarr.json` (and v2 metadata), `atera/` sidecars, `merxen_atera_points_index.json`, root attrs | same names | copied |
+| `shapes/cell_boundaries` | `shapes/atera_cell_boundaries` | written fresh |
+| `shapes/nucleus_boundaries` | `shapes/atera_nucleus` | written fresh |
+| `tables/table` | `tables/table_original` (region `atera_cell_boundaries`) | written fresh |
+
+The source names `cell_boundaries`, `nucleus_boundaries` and `table` never
+appear in the latest store, so no fallback can pick them. The build marker of
+the source (`merxen_build_complete.json`) is not copied either; the latest
+store carries `merxen_native_latest.json` instead.
+
+The segmentation registry (`merxen_schema.segmentations`) gets two entries, and
+`merxen_schema.segmentation_source` is `native`:
+
+- `original`: shape `atera_cell_boundaries`, table `table_original`,
+  assignment column `original_assignment`;
+- `original_nucleus`: shape `atera_nucleus`, no table and no assignment, id
+  namespace `original_nucleus_row_v1` (nucleus row + 1) and
+  `cell_key: cell_instance_id`. Nucleus ids are not cell ids: every consumer
+  joins nuclei to cells through `cell_instance_id`.
+
+**Why hardlinks are safe.** Only immutable payloads share an inode with the
+source; every file a later stage rewrites in place (metadata, shapes, tables)
+is a private copy. Linked payloads lose their write bits, so an in-place write
+fails with `EACCES` instead of changing the source. The source shares the inode
+and becomes read-only too, which is the intended state of a published build.
+Element rewrites (`write_element`, the enrichment backups) replace directories
+and never open a payload for writing. The build checks that every linked file
+shares its source inode and that no other file does.
+
+**Build, reuse and replacement.**
+
+- The store is built under `<target>.partial-<uuid>` and moved into place with
+  `os.replace`; a failed build leaves no partial store behind. A killed run
+  (timeout, out of memory) can leave `<target>.partial-*` or `<target>.stale-*`
+  folders; the next run removes them first.
+- A target whose `merxen_native_latest.json` names the same source build
+  fingerprint, link mode and format version is reused as it is (ENRICH writes
+  into it in place). Missing renamed elements or registry entries are
+  re-created first (`ensure_native_elements`, which ENRICH also calls after a
+  partial cleanup). A store built with `readonly_payloads: false` that is
+  reused with the default `true` has its linked payloads made read-only then.
+- A native store of another source build is rebuilt. A target that is not a
+  native store is refused; remove it, or run `merxen native-latest` by hand
+  with `force: true` in its config (the pipeline has no force flag).
+- A source that holds a symlinked directory is refused, since the file walk
+  would leave its files out.
+- Hardlinks need the source and the target on one filesystem. Otherwise the
+  build stops and names `native_latest_link_mode=copy`, which copies every
+  payload instead (no shared inodes, no read-only payloads).
+
+**Outputs** (under `<outdir>/<pair>/atera/segmentation/native_out/`):
+
+| File | Contents |
+|---|---|
+| `native_latest.zarr` | Symlink to the persistent latest store. |
+| `native_latest_report.json` | Files and bytes linked and copied, elements written, new bytes (apparent size of the files not shared with the source), source build fingerprint, and whether the store was reused. The same provenance is in the root attr `merxen_native_latest`. |
+| `NO_CELLPOSE_MASK`, `NO_TRANSCRIPTS_CSV`, `NO_NUCLEI_MASK` | Empty placeholders in the Cellpose mask, transcript CSV and nuclei mask slots of the segmentation tuple. |
+
+On the public ATERA crop (ATERA_PUB_CROP: 3,013 cells, 40.6 M transcripts)
+the build links 143 payload files (1.37 GB), copies 43 files and adds 0.10 GB
+of new bytes, in about 50 s and 1.5 GB of memory.
+
 ## Memory guardrails
 
 The stage functions free memory aggressively:
