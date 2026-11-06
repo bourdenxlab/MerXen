@@ -692,6 +692,13 @@ proseg tile.parquet xenium -x x_location -y y_location -z z_location
   points no longer share inodes with the source (about +25 GB on the full
   section).
 
+**Scale (full public section, 2026-11-06).** 30 tiles (1.69 B exported rows
+with halos), 4 at once: 3 min to 2 h per tile, at most 24.1 GB, 7 h 26 min
+for the tile phase on a busy shared host. The stitch takes 6.5 min at
+46.7 GB and writes 91,431 cells (806 with no transcripts, 9 without label
+pixels); stitch to MENDER on both layers takes 1 h 15 min. The latest store
+grows by 29.5 GB, 25.4 GB of it the rewritten points (plan §6.2).
+
 **Outputs** (under `<outdir>/<pair>/atera/segmentation/`): `atera_proseg/plan_out/tile_plan.json`,
 `atera_proseg/tiles/tile_<id>/` (cells, claims, `tile_manifest.json`, ProSeg's
 logs, cell metadata, polygons and `proseg.zarr` table), and
