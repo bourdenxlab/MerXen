@@ -1,9 +1,11 @@
 name: CI
 on:
   push:
-    # feature/robust-celltype-annotation: the integration branch of
-    # docs/plans/robust-celltype-annotation-plan.md (§2.2), gated like main.
-    branches: [main, feature/robust-celltype-annotation]
+    # feature/atera-support: the integration branch of
+    # docs/plans/atera-support-plan.md (§8), which also carries the robust
+    # cell-type annotation work since RCA was merged into it; gated like main.
+    # (feature/robust-celltype-annotation is frozen and gets no more pushes.)
+    branches: [main, feature/atera-support]
   # 'labeled' lets the full-ci label replace a PR's selected run with a full
   # one (docs/development.md, Test selection).
   pull_request:
