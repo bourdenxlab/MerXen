@@ -68,7 +68,11 @@ the parquet files on disk (file names, footer row counts, total):
 - `n_transcripts_total` is the build's `n_points_written`;
 - per-gene totals (`gene_totals_from_points` with `assigned_only=False`, used
   by gene summaries and comparisons) are the build's `gene_counts_kept`;
-- the registration windows read only the overlapping files.
+- the registration windows read only the overlapping files;
+- `n_transcripts_assigned` and the per-cell `transcripts_per_cell` are summed
+  from the table in float64 and totalled in int64. The vendor matrix is
+  float32, and a float32 total drifts past 2^24 counts (one count on the
+  public crop, tens on a full section).
 
 The QC log says which path each figure took ("from the build aggregates",
 "the windows read k of n indexed parquet files"). The fingerprint checks file

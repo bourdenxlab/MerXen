@@ -170,10 +170,33 @@ def _cell_ids_from_table(adata_obj: Any) -> pd.Index:
     return pd.Index(adata_obj.obs_names.astype(str), dtype=str, name="cell_id_norm")
 
 
-def _compute_cell_metrics_from_table(adata_obj: Any) -> tuple[int, pd.DataFrame]:
-    """Compute assigned transcript and gene counts from an AnnData cell table."""
+def _compute_cell_metrics_from_table(
+    adata_obj: Any, *, exact_counts: bool = False
+) -> tuple[int, pd.DataFrame]:
+    """Compute assigned transcript and gene counts from an AnnData cell table.
+
+    Args:
+        adata_obj: The cell table; ``X`` holds counts.
+        exact_counts: Sum in float64 and total the rounded per-cell sums in
+            int64. A float32 ``X`` summed in float32 drifts once the total
+            passes 2**24 (tens of counts on an ATERA section). Off keeps the
+            historical float32 sums of the XENIUM and MERSCOPE outputs.
+
+    Returns:
+        The assigned transcript total and one row of metrics per cell.
+    """
     x_matrix = adata_obj.X
-    transcripts_per_cell = np.asarray(x_matrix.sum(axis=1)).ravel()
+    if exact_counts:
+        transcripts_per_cell = np.asarray(
+            x_matrix.sum(axis=1, dtype=np.float64)
+        ).ravel()
+        finite = transcripts_per_cell[np.isfinite(transcripts_per_cell)]
+        n_assigned_exact: int | None = int(
+            np.rint(finite).astype(np.int64).sum(dtype=np.int64)
+        )
+    else:
+        transcripts_per_cell = np.asarray(x_matrix.sum(axis=1)).ravel()
+        n_assigned_exact = None
     if hasattr(x_matrix, "getnnz"):
         genes_per_cell = np.asarray(x_matrix.getnnz(axis=1)).ravel()
     else:
@@ -186,6 +209,8 @@ def _compute_cell_metrics_from_table(adata_obj: Any) -> tuple[int, pd.DataFrame]
             "genes_per_cell": genes_per_cell.astype(float),
         }
     )
+    if n_assigned_exact is not None:
+        return n_assigned_exact, cell_metrics
     n_assigned = int(np.nansum(transcripts_per_cell))
     return n_assigned, cell_metrics
 
@@ -266,8 +291,12 @@ def compute_dataset_qc(
 
     if resolved_table_key is not None:
         n_total = _point_count(points_obj, latest_zarr_path, points_key)
+        # Stores with build aggregates (ATERA) hold totals past float32's
+        # exact range; XENIUM and MERSCOPE keep their historical sums.
+        exact_counts = read_points_aggregates(latest_zarr_path, points_key) is not None
         n_assigned, cell_metrics = _compute_cell_metrics_from_table(
-            sdata.tables[resolved_table_key]
+            sdata.tables[resolved_table_key],
+            exact_counts=exact_counts,
         )
     else:
         assign_col = first_existing_col(points_obj, ["assignment", "cell", "cell_id"])
