@@ -190,7 +190,7 @@ times, memory and disk are in §6.2.
 | QC: transcript total, assigned total, registration | 40,642,374; 18,894,687 (after the float32 fix); pass, density ratio 7.2 | 1,409,601,228; 638,693,512; pass, density ratio 4.8 |
 | Density figures bin every transcript | section pass bins 40,642,374 of 40,642,374 | section pass bins 1,409,601,228 of 1,409,601,228 (409 of 409 files) |
 | Clustering | 3,012 cells × 15,479 genes, 2,000 HVGs (`cell_ranger`), PCA `mask_var` | 91,381 cells × 18,049 genes, 2,000 HVGs, GPU |
-| Nucleus metrics via `cell_instance_id` | 2 two-nucleus cells; `nucleus_count` equals the join for every cell | 332 multi-nucleus cells (up to 5 nuclei); `nucleus_count` equals the join for every cell; spot checks: count, largest and summed area within 10% of the nucleus polygons |
+| Nucleus metrics via `cell_instance_id` | 2 two-nucleus cells; `nucleus_count` equals the join for every cell | 332 multi-nucleus cells (up to 5 nuclei); `nucleus_count` equals the join for every cell; 10 spot-checked cells (2–4 nuclei): count equal, largest and summed nucleus area within 0.5% of the nucleus polygons |
 | MENDER | 15 outputs | 15 outputs (after the env pin) |
 
 ---
