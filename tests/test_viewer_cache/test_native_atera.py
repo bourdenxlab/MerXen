@@ -26,6 +26,7 @@ from merxen.viewer_cache.build import (
     VENDOR_LABEL_SOURCE,
     ViewerCacheParams,
     build_viewer_caches,
+    vendor_label_fingerprint,
     vendor_label_keys,
 )
 from merxen.viewer_cache.transform import resolve_mask_affine
@@ -112,6 +113,9 @@ def test_vendor_labels_become_the_base_masks(latest: Path) -> None:
         assert marker["source_label_key"] == vendor_key
         assert marker["link_mode"] == "hardlink"
         assert marker["shape"] == list(base.shape)
+        assert marker["source_fingerprint"] == vendor_label_fingerprint(
+            latest / "labels" / vendor_key
+        )
     # The vendor elements themselves are unchanged and keep their attrs.
     for vendor_key in VENDOR.values():
         attrs = zarr.open_group(str(latest / "labels" / vendor_key), mode="r").attrs
@@ -241,3 +245,116 @@ def test_link_count_of_payloads(latest: Path) -> None:
         if p.is_file() and p.name != "zarr.json"
     )
     assert os.stat(chunk).st_nlink == 2
+
+
+def _marker(store: Path, label_key: str) -> dict:
+    group = zarr.open_group(str(store / "labels" / label_key), mode="r")
+    return dict(group.attrs[fmt.LABEL_CACHE_ATTR])
+
+
+def test_markers_record_the_label_id_namespace(latest: Path) -> None:
+    build_viewer_caches(latest, "ATERA", latest, params=PARAMS)
+
+    cell = _marker(latest, "atera_cell_boundaries_labels")
+    assert cell["id_namespace"] == "source_segmentation_v1"
+    assert "cell_join_key" not in cell
+    # Nucleus label k is nucleus row k - 1, not cell k: the join goes through
+    # the nucleus shapes' cell_instance_id column.
+    nucleus = _marker(latest, "atera_nucleus_labels")
+    assert nucleus["id_namespace"] == "original_nucleus_row_v1"
+    assert nucleus["cell_join_key"] == "cell_instance_id"
+    shapes = sd.read_zarr(latest).shapes["atera_nucleus"]
+    assert nucleus["cell_join_key"] in shapes.columns
+
+
+def test_changed_vendor_labels_rebuild_the_alias(latest: Path) -> None:
+    build_viewer_caches(latest, "ATERA", latest, params=PARAMS)
+    vendor = latest / "labels" / "cell_labels"
+    alias_key = "atera_cell_boundaries_labels"
+
+    # A refreshed vendor element (same shape, new payload files, e.g. a
+    # re-linked latest store) must not keep the stale alias.
+    data = _labels(latest, "cell_labels")
+    changed = data.copy()
+    changed[changed > 0] = changed[changed > 0][::-1]
+    assert not np.array_equal(changed, data)
+    for chunk in (vendor / "s0").rglob("*"):
+        if chunk.is_file() and chunk.name != "zarr.json":
+            # Break the link first: the alias keeps the old payload.
+            copy = chunk.with_name(chunk.name + ".tmp")
+            shutil.copyfile(chunk, copy)
+            os.replace(copy, chunk)
+    zarr.open_array(str(vendor / "s0"), mode="r+")[...] = changed
+
+    again = build_viewer_caches(latest, "ATERA", latest, params=PARAMS)
+    cell = again["masks"]["atera_cell_boundaries"]
+    assert cell["mask"] == "vendor_hardlink"
+    # The pyramid and outline follow the new base.
+    assert (cell["label_pyramid"], cell["outline"]) == ("built", "built")
+    nucleus = again["masks"]["atera_nucleus"]
+    assert (nucleus["mask"], nucleus["label_pyramid"]) == ("skipped", "skipped")
+    np.testing.assert_array_equal(_labels(latest, alias_key), changed)
+    pyramid_key = fmt.derived_label_pyramid_cache_key(alias_key, PARAMS.downsample)
+    level0 = _labels(latest, pyramid_key)
+    step = PARAMS.downsample
+    np.testing.assert_array_equal(level0[0, 0], changed[:step, :step].max())
+    assert _marker(latest, alias_key)["source_fingerprint"] == (
+        vendor_label_fingerprint(vendor)
+    )
+
+
+def test_marker_of_another_vendor_element_rebuilds(latest: Path) -> None:
+    build_viewer_caches(latest, "ATERA", latest, params=PARAMS)
+    alias_key = "atera_cell_boundaries_labels"
+    group = zarr.open_group(str(latest / "labels" / alias_key), mode="r+")
+    marker = dict(group.attrs[fmt.LABEL_CACHE_ATTR])
+    group.attrs[fmt.LABEL_CACHE_ATTR] = {**marker, "source_label_key": "other"}
+
+    again = build_viewer_caches(latest, "ATERA", latest, params=PARAMS)
+    assert again["masks"]["atera_cell_boundaries"]["mask"] == "vendor_hardlink"
+    assert _marker(latest, alias_key)["source_label_key"] == "cell_labels"
+
+
+def test_fingerprint_tracks_payload_and_metadata(tmp_path: Path) -> None:
+    element = tmp_path / "cell_labels"
+    (element / "s0" / "c" / "0").mkdir(parents=True)
+    (element / "zarr.json").write_text("{}")
+    chunk = element / "s0" / "c" / "0" / "0"
+    chunk.write_bytes(b"abc")
+    first = vendor_label_fingerprint(element)
+    assert first == vendor_label_fingerprint(element)
+    # Metadata rewritten with the same content keeps the fingerprint.
+    (element / "zarr.json").write_text("{}")
+    assert vendor_label_fingerprint(element) == first
+    (element / "zarr.json").write_text('{"a": 1}')
+    second = vendor_label_fingerprint(element)
+    assert second != first
+    os.utime(chunk, ns=(1, 1))
+    assert vendor_label_fingerprint(element) != second
+
+
+def test_unbacked_atera_mask_is_refused(
+    latest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Without the nucleus vendor labels the nucleus mask would be rasterized
+    # in ATERA's pixel global system and misplaced: refuse it.
+    monkeypatch.setattr(
+        build_module,
+        "vendor_label_keys",
+        lambda *_a, **_k: {"atera_cell_boundaries": "cell_labels"},
+    )
+    with pytest.raises(ValueError, match="rasterized masks are not supported"):
+        build_viewer_caches(latest, "ATERA", latest, params=PARAMS)
+    build_module._refuse_rasterised_mask_on_vendor_platform(
+        "XENIUM", "xenium_cell_boundaries"
+    )
+    build_module._refuse_rasterised_mask_on_vendor_platform(
+        "MERSCOPE", "merscope_cell_boundaries"
+    )
+
+
+def test_alias_onto_itself_is_refused(latest: Path) -> None:
+    sdata = sd.read_zarr(latest)
+    with pytest.raises(ValueError, match="onto itself"):
+        build_module._alias_label_element(sdata, latest, "cell_labels", "cell_labels")
+    assert (latest / "labels" / "cell_labels" / "zarr.json").is_file()

@@ -115,6 +115,45 @@ class DensityRaster:
             return 0 if values is None else int(values.sum(dtype=np.uint64))
         return int(sum(int(v.sum(dtype=np.uint64)) for v in self.counts.values()))
 
+    def coarsen(self, factor: int) -> DensityRaster:
+        """Return the raster with ``factor x factor`` blocks of bins summed.
+
+        The coarse grid keeps the origin and has bins of ``factor * bin_um``;
+        the last row and column of blocks are padded with empty bins, so every
+        count is kept. One streaming pass can therefore feed several panels.
+
+        Args:
+            factor: Bins per coarse bin along each axis (``>= 1``).
+
+        Returns:
+            A new raster (the same raster's counts copied when ``factor`` is 1).
+
+        Raises:
+            ValueError: If ``factor`` is below 1.
+        """
+        factor = int(factor)
+        if factor < 1:
+            raise ValueError(f"coarsen factor must be >= 1, got {factor}")
+        n_y, n_x = self.shape
+        c_y, c_x = -(-n_y // factor), -(-n_x // factor)
+        counts: dict[str, np.ndarray] = {}
+        for layer, values in self.counts.items():
+            padded = np.zeros((c_y * factor, c_x * factor), dtype=np.uint64)
+            padded[:n_y, :n_x] = values
+            counts[layer] = padded.reshape(c_y, factor, c_x, factor).sum(
+                axis=(1, 3), dtype=np.uint64
+            )
+        return DensityRaster(
+            origin_um=self.origin_um,
+            bin_um=self.bin_um * factor,
+            shape=(c_y, c_x),
+            counts=counts,
+            n_rows_read=self.n_rows_read,
+            n_files_read=self.n_files_read,
+            n_files_total=self.n_files_total,
+            pruned=self.pruned,
+        )
+
     def combined(self) -> np.ndarray:
         """Return the sum of every layer (``uint64``, shape ``shape``)."""
         out = np.zeros(self.shape, dtype=np.uint64)

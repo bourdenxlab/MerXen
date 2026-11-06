@@ -1511,11 +1511,24 @@ def _get_background_image_crop(
         )
         ch2_pref = ["18S", "PolyT"]
 
+    spec = find_platform_spec(dataset_name)
+    # A platform whose masks are its vendor labels refuses the fallback pixel
+    # size: a missing pixel size fails the figure instead of dropping its
+    # background with a warning.
+    strict_affine = (
+        _resolve_dataset_mask_affine(dataset_name, zarr_path=zarr_path)
+        if spec is not None and spec.original_label_keys
+        else None
+    )
     try:
         da = _get_scale0_dataarray(sdata_obj.images[image_key])
-        x_transform, y_transform = _resolve_dataset_mask_affine(
-            dataset_name,
-            zarr_path=zarr_path,
+        x_transform, y_transform = (
+            strict_affine
+            if strict_affine is not None
+            else _resolve_dataset_mask_affine(
+                dataset_name,
+                zarr_path=zarr_path,
+            )
         )
         crop = _crop_image_dataarray_to_bbox(da, bbox, x_transform, y_transform)
     except Exception as exc:  # noqa: BLE001
@@ -1545,7 +1558,6 @@ def _get_background_image_crop(
     rgb[..., 2] = dapi
     rgb[..., 1] = rna
 
-    spec = find_platform_spec(dataset_name)
     extent_um = _crop_extent_um(
         crop,
         x_transform,

@@ -127,10 +127,13 @@ binned over all of them. XENIUM and MERSCOPE figures are unchanged.
   files whose indexed bounding box meets the window are read; otherwise every
   file is. Section bounds come from the build aggregates, else from the
   parquet column statistics.
-- **Transcript overview** (`<sample_id>_transcript_overview.png`):
-  1. density over the section in `heatmap_bins` (400) square bins, colour
-     limit at the 99.5th percentile of the non-empty bins (not the fixed
-     1,700 used by the XENIUM/MERSCOPE panels);
+- **Transcript overview** (`<sample_id>_transcript_overview.png`), from one
+  pass over the section and one pruned pass over the crop:
+  1. density over the section in about `heatmap_bins` (400) square bins per
+     axis, summed from the 10 um raster of panel 2 (the bin edge is the
+     multiple of 10 um closest to `span / 400`), colour limit at the 99.5th
+     percentile of the non-empty bins (not the fixed 1,700 used by the
+     XENIUM/MERSCOPE panels);
   2. 10 um bins over the section, log colour scale (replaces the 250,000-point
      scatter subsample);
   3. 1 um bins over the 2 mm centre crop, log colour scale (replaces the

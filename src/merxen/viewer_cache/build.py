@@ -9,12 +9,13 @@ matches the current format is skipped unless ``force`` is set.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import shutil
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -33,10 +34,12 @@ from merxen.io.spatialdata_io import (
     write_or_replace_element,
     write_spatialdata_metadata,
 )
+from merxen.io.spatialdata_schema import MERXEN_SCHEMA_ATTR, ORIGINAL_ID_NAMESPACE
 from merxen.masks import discover_masks, register_missing_mask_branches
 from merxen.memory import force_release, log_status
 from merxen.path_utils import remove_path
 from merxen.platforms import PLATFORM_SPECS, find_platform_spec
+from merxen.segmentation.native import NUCLEUS_CELL_KEY, NUCLEUS_ID_NAMESPACE
 from merxen.viewer_cache.format import (
     DERIVED_CACHE_ATTR,
     LABEL_CACHE_ATTR,
@@ -200,6 +203,7 @@ def _build_viewer_caches_in_store(
             )
             force_release(note=f"after viewer-cache build for {shape_key}")
             continue
+        _refuse_rasterised_mask_on_vendor_platform(platform, shape_key)
         summary["masks"][shape_key] = _build_mask_and_derived(
             sdata=sdata,
             zarr_path=zarr_path,
@@ -493,6 +497,28 @@ def vendor_label_keys(sdata: Any, platform: str) -> dict[str, str]:
     }
 
 
+def _refuse_rasterised_mask_on_vendor_platform(platform: str, shape_key: str) -> None:
+    """Refuse to rasterize a mask on a platform whose masks are vendor labels.
+
+    The ``global`` coordinate system of such a store (ATERA) is in morphology
+    pixels, so the pixel-to-micron transform of the rasterized path would
+    misplace the mask. Only vendor-backed masks are supported there until a
+    rasterized mask gets its own transform.
+
+    Raises:
+        ValueError: If the platform declares ``original_label_keys``.
+    """
+    spec = find_platform_spec(platform)
+    if spec is None or not spec.original_label_keys:
+        return
+    raise ValueError(
+        f"[{spec.name}] viewer mask for shapes[{shape_key}] has no vendor label "
+        f"element ({', '.join(spec.original_label_keys)}); rasterized masks are "
+        f"not supported for {spec.name} (its global coordinate system is in "
+        "pixels). Pass shape_keys to build only the vendor-backed masks."
+    )
+
+
 #: Zarr metadata files, copied (never linked) when a label element is aliased:
 #: every writer rewrites them in place.
 _ZARR_METADATA_NAMES = frozenset(
@@ -524,7 +550,9 @@ def _build_vendor_mask_and_derived(
     vendor element: its chunk files are hardlinks of the vendor chunks (copies
     across filesystems) and its metadata files are copies. The label pyramid
     and outline are then built from it with the vendor element's own
-    transform. The base-mask marker records the vendor element and link mode.
+    transform. The base-mask marker records the vendor element, its
+    fingerprint (:func:`vendor_label_fingerprint`; a changed vendor element
+    rebuilds the alias), the link mode and the label id namespace.
     """
     vendor_element = sdata.labels[vendor_label_key]
     transformations = get_transformation(vendor_element, get_all=True)
@@ -538,11 +566,13 @@ def _build_vendor_mask_and_derived(
     }
     marker = _read_marker(zarr_path, "labels", label_key, LABEL_CACHE_ATTR)
     vendor_base = da.from_zarr(str(zarr_path / "labels" / vendor_label_key / "s0"))
+    fingerprint = vendor_label_fingerprint(zarr_path / "labels" / vendor_label_key)
     mask_complete = (
         marker.get("complete")
         and marker.get("version") == LABEL_CACHE_VERSION
         and marker.get("source_shape_key") == str(shape_key)
         and marker.get("source_label_key") == str(vendor_label_key)
+        and marker.get("source_fingerprint") == fingerprint
         and marker.get("shape") == [int(s) for s in vendor_base.shape]
     )
     if mask_complete and not params.force:
@@ -565,7 +595,9 @@ def _build_vendor_mask_and_derived(
             {
                 "source": VENDOR_LABEL_SOURCE,
                 "source_label_key": str(vendor_label_key),
+                "source_fingerprint": fingerprint,
                 "link_mode": link_mode,
+                **_label_id_namespace(sdata, platform, shape_key),
             }
         )
         _stamp_marker(zarr_path, "labels", label_key, LABEL_CACHE_ATTR, base_marker)
@@ -578,6 +610,11 @@ def _build_vendor_mask_and_derived(
         zarr_path, "labels", label_key, LABEL_CACHE_ATTR
     ).get("link_mode")
 
+    # A re-aliased base (new or changed vendor labels) rebuilds its pyramid and
+    # outline: their markers name the base key, not its content.
+    derived_params = (
+        params if result["mask"] == "skipped" else replace(params, force=True)
+    )
     base_da = da.from_zarr(str(zarr_path / "labels" / label_key / "s0"))
     result["label_pyramid"] = _build_label_pyramid(
         zarr_path=zarr_path,
@@ -585,7 +622,7 @@ def _build_vendor_mask_and_derived(
         label_key=label_key,
         base_da=base_da,
         transform=transform,
-        params=params,
+        params=derived_params,
         coordinate_system=coordinate_system,
     )
     result["outline"] = _build_outline(
@@ -594,10 +631,72 @@ def _build_vendor_mask_and_derived(
         label_key=label_key,
         base_da=base_da,
         transform=transform,
-        params=params,
+        params=derived_params,
         coordinate_system=coordinate_system,
     )
     return result
+
+
+def vendor_label_fingerprint(element_dir: Path) -> str:
+    """Return a fingerprint of a vendor label element on disk.
+
+    Covers every file of the element: chunk files by relative path, size and
+    modification time (stat only; a hardlinked alias shares them), metadata
+    files by relative path and content (writers may rewrite them unchanged).
+    A re-linked, rewritten or reshaped vendor element gives a new fingerprint.
+
+    Args:
+        element_dir: ``labels/<key>`` directory of the store.
+
+    Returns:
+        ``sha256:<hex>``.
+    """
+    digest = hashlib.sha256()
+    for path in sorted(p for p in Path(element_dir).rglob("*") if p.is_file()):
+        relative = path.relative_to(element_dir).as_posix()
+        if path.name in _ZARR_METADATA_NAMES:
+            content = hashlib.sha256(path.read_bytes()).hexdigest()
+            digest.update(f"M {relative} {content}\n".encode())
+        else:
+            stat = path.stat()
+            digest.update(f"C {relative} {stat.st_size} {stat.st_mtime_ns}\n".encode())
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _label_id_namespace(sdata: Any, platform: str, shape_key: str) -> dict[str, str]:
+    """Return the id namespace (and cell join key) of a vendor-backed mask.
+
+    The label values are the shapes' instance ids, so they carry the id
+    namespace of the segmentation branch registered for the shapes. Cell
+    labels hold cell ids. On a platform whose nucleus ids are not cell ids
+    (ATERA: nucleus row + 1), the nucleus labels hold nucleus ids and join to
+    cells only through the nucleus shapes' ``cell_instance_id`` column
+    (``cell_join_key``), never by value. Without a registry entry the
+    platform registry decides.
+    """
+    registry = (sdata.attrs.get(MERXEN_SCHEMA_ATTR) or {}).get("segmentations") or {}
+    for entry in registry.values():
+        if (
+            isinstance(entry, dict)
+            and entry.get("shape") == str(shape_key)
+            and entry.get("coordinate_variant_of") is None
+            and entry.get("id_namespace")
+        ):
+            found = {"id_namespace": str(entry["id_namespace"])}
+            if entry.get("cell_key"):
+                found["cell_join_key"] = str(entry["cell_key"])
+            return found
+    spec = find_platform_spec(platform)
+    if (
+        spec is None
+        or spec.nucleus_ids_are_cell_ids
+        or shape_key != spec.original_nucleus_shape_key
+    ):
+        return {"id_namespace": ORIGINAL_ID_NAMESPACE}
+    return {
+        "id_namespace": NUCLEUS_ID_NAMESPACE,
+        "cell_join_key": NUCLEUS_CELL_KEY,
+    }
 
 
 def _alias_label_element(
@@ -615,6 +714,11 @@ def _alias_label_element(
     Returns:
         ``"hardlink"`` when every chunk was linked, else ``"copy"``.
     """
+    if str(alias_key) == str(source_key):
+        raise ValueError(
+            f"labels[{source_key}] cannot be aliased onto itself; the alias "
+            "would replace the vendor element"
+        )
     labels_dir = zarr_path / "labels"
     source = labels_dir / source_key
     target = labels_dir / alias_key

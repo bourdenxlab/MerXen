@@ -78,6 +78,22 @@ def test_bin_indices_match_histogram_edges() -> None:
     values = np.array([0.0, 0.5, 0.9999999, 1.0, 2.0, 3.0, -1e-9, 3.0000001, np.nan])
     index = bin_indices(values, 0.0, 1.0, 3)
     assert index.tolist() == [0, 0, 0, 1, 2, 2, -1, -1, -1]
+
+
+def test_bin_indices_correct_the_floor_estimate_on_float_edges() -> None:
+    # Values on float64 edges where floor((v - origin) / bin) is off by one in
+    # both directions (2.0 and 4.1 one bin low, 1.8 and 3.5 one bin high).
+    origin, bin_um, n_bins = 0.1, 0.1, 50
+    values = np.array([2.0, 4.1, 1.8, 3.5])
+    estimate = np.floor((values - origin) / bin_um).astype(np.int64)
+    edges = origin + bin_um * np.arange(n_bins + 1, dtype=np.float64)
+    expected = np.searchsorted(edges, values, side="right") - 1
+    assert (estimate < expected).any() and (estimate > expected).any()
+
+    index = bin_indices(values, origin, bin_um, n_bins)
+    assert index.tolist() == expected.tolist()
+    hist, _ = np.histogram(values, bins=edges)
+    assert hist.tolist() == np.bincount(index, minlength=n_bins).tolist()
     rng = np.random.default_rng(0)
     coords = rng.uniform(-3.0, 13.0, 50_000).astype(np.float32)
     edges = 0.1 + 0.37 * np.arange(28)
@@ -167,6 +183,28 @@ def test_points_bounds_use_aggregates_or_statistics(latest: Path) -> None:
     )
     raster = stream_hist2d(latest, "transcripts", (2.0, 10.0, 6.0, 16.0), 0.5)
     assert raster.pruned is False
+
+
+def test_coarsen_sums_blocks_and_keeps_every_count(latest: Path) -> None:
+    points = _all_points(latest)
+    x0, y0 = float(points["x"].min()) - 0.3, float(points["y"].min()) - 0.7
+    bbox = (x0, y0, float(points["x"].max()) + 0.2, float(points["y"].max()) + 0.1)
+    fine = stream_hist2d(latest, "transcripts", bbox, 0.5)
+    assert fine.shape[0] % 3 or fine.shape[1] % 3  # exercises the padding
+    coarse = fine.coarsen(3)
+    assert coarse.bin_um == pytest.approx(1.5)
+    assert coarse.origin_um == fine.origin_um
+    assert coarse.shape == (-(-fine.shape[0] // 3), -(-fine.shape[1] // 3))
+    assert coarse.total() == fine.total() == len(points)
+    expected, _, _ = np.histogram2d(
+        points["y"].to_numpy(np.float64),
+        points["x"].to_numpy(np.float64),
+        bins=[coarse.y_edges, coarse.x_edges],
+    )
+    np.testing.assert_array_equal(coarse.combined(), expected.astype(np.uint64))
+    assert fine.coarsen(1).combined().tolist() == fine.combined().tolist()
+    with pytest.raises(ValueError):
+        fine.coarsen(0)
 
 
 def test_composite_rgba_alpha_and_order() -> None:
@@ -272,12 +310,12 @@ def test_atera_transcript_overview_rasterises_every_transcript(
     )
     assert out.exists()
     points = _all_points(latest)
-    assert len(log.calls) == 3
+    # One pass over the section (both section panels) and one over the crop.
+    assert len(log.calls) == 2
     for _, raster in log.calls:
         assert raster.total() == _n_in_raster(points, raster)
     # The section panels hold every transcript.
     assert log.calls[0][1].total() == len(points)
-    assert log.calls[1][1].total() == len(points)
 
 
 def test_atera_sanity_crop_rasterises_assignment(
@@ -339,6 +377,66 @@ def test_atera_sanity_panel_legend_counts_and_scale_bar(latest: Path) -> None:
         assert any(label.startswith("Original segmentation") for label in labels)
         assert any(text.get_text().endswith(" um") for text in ax.texts)
         assert ax.get_title() == "ATERA"
+    finally:
+        plt.close(fig)
+
+
+def test_atera_sanity_background_follows_the_corner_convention(latest: Path) -> None:
+    import spatialdata as sd
+
+    sdata = sd.read_zarr(latest)
+    image = sd.get_pyramid_levels(sdata.images["morphology_focus"], n=0)
+    xs = np.asarray(image.coords["x"].values, dtype=np.float64)
+    ys = np.asarray(image.coords["y"].values, dtype=np.float64)
+    # SpatialData pixel centres: pixel i sits at i + 0.5.
+    np.testing.assert_allclose(xs, np.arange(xs.size) + 0.5)
+    bbox = (-10.0, -1.0, 12.0, 21.0)
+    fig, ax = plt.subplots()
+    try:
+        plot_sanity_crop_panel(
+            ax,
+            sdata,
+            "ATERA",
+            crop_bbox=bbox,
+            assignment_shape_key="atera_cell_boundaries",
+            zarr_path=latest,
+        )
+        background = ax.images[0]
+        extent = background.get_extent()
+        n_y, n_x = background.get_array().shape[:2]
+    finally:
+        plt.close(fig)
+    # The crop keeps the pixels whose centre lies within the bbox plus 1 px.
+    sel_x = xs[(xs >= bbox[0] / PIXEL_SIZE - 1) & (xs <= bbox[2] / PIXEL_SIZE + 1)]
+    sel_y = ys[(ys >= bbox[1] / PIXEL_SIZE - 1) & (ys <= bbox[3] / PIXEL_SIZE + 1)]
+    assert (n_y, n_x) == (sel_y.size, sel_x.size)
+    i0, i1 = int(sel_x.min() - 0.5), int(sel_x.max() - 0.5)
+    j0, j1 = int(sel_y.min() - 0.5), int(sel_y.max() - 0.5)
+    # Pixel i covers [i * ps, (i + 1) * ps): the extent reaches the outer edges.
+    assert extent == pytest.approx(
+        (i0 * PIXEL_SIZE, (i1 + 1) * PIXEL_SIZE, j0 * PIXEL_SIZE, (j1 + 1) * PIXEL_SIZE)
+    )
+
+
+def test_atera_sanity_background_refuses_a_missing_pixel_size(
+    latest: Path, tmp_path: Path
+) -> None:
+    import spatialdata as sd
+
+    sdata = sd.read_zarr(latest)
+    empty = tmp_path / "empty.zarr"
+    empty.mkdir()
+    fig, ax = plt.subplots()
+    try:
+        with pytest.raises(FileNotFoundError):
+            plot_sanity_crop_panel(
+                ax,
+                sdata,
+                "ATERA",
+                crop_bbox=(-10.0, -1.0, 12.0, 21.0),
+                assignment_shape_key="atera_cell_boundaries",
+                zarr_path=empty,
+            )
     finally:
         plt.close(fig)
 

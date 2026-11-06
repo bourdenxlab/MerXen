@@ -438,12 +438,15 @@ def plot_rasterised_transcript_overview(
 ) -> Path:
     """Render the three overview panels as density over every transcript.
 
-    Nothing is sampled: each panel streams the points element of the store one
-    parquet file at a time (:func:`raster_density.stream_hist2d`), and the crop
-    reads only the files the points index places in the crop.
+    Nothing is sampled: the points element of the store is streamed one
+    parquet file at a time (:func:`raster_density.stream_hist2d`) in two
+    passes: one over the section at ``full_bin_um``, and one over the crop
+    that reads only the files the points index places in the crop.
 
-    - Panel 0: ``heatmap_bins`` square bins over the section; the colour
-      limit is the ``vmax_percentile`` of the non-empty bins.
+    - Panel 0: about ``heatmap_bins`` square bins per axis over the section,
+      summed from the section pass (the bin edge is the multiple of
+      ``full_bin_um`` closest to ``span / heatmap_bins``); the colour limit is
+      the ``vmax_percentile`` of the non-empty bins.
     - Panel 1: ``full_bin_um`` bins over the section, log colour scale.
     - Panel 2: ``crop_bin_um`` bins over the crop, log colour scale.
 
@@ -455,7 +458,7 @@ def plot_rasterised_transcript_overview(
         crop_bbox_um: Crop ``(x0, y0, x1, y1)``; centred on the section when
             ``None``.
         crop_size_um: Crop edge when ``crop_bbox_um`` is ``None``.
-        heatmap_bins: Bins per axis of panel 0.
+        heatmap_bins: Target bins per axis of panel 0.
         heatmap_cmap: Colormap of panel 0.
         heatmap_vmin: Lower colour limit of panel 0 (default 0).
         full_bin_um: Bin edge of panel 1.
@@ -478,10 +481,10 @@ def plot_rasterised_transcript_overview(
     if crop_bbox_um is None:
         crop_bbox_um = _centered_bbox(bounds, crop_size_um)
 
-    heat = stream_hist2d(
-        zarr_path, points_key, square, span / max(int(heatmap_bins), 1)
-    )
     full = stream_hist2d(zarr_path, points_key, square, full_bin_um)
+    heat = full.coarsen(
+        max(1, round(span / max(int(heatmap_bins), 1) / float(full_bin_um)))
+    )
     crop = stream_hist2d(zarr_path, points_key, crop_bbox_um, crop_bin_um)
 
     colour = ATERA_TRANSCRIPT_COLOR
