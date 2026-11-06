@@ -608,6 +608,10 @@ HIERARCHY_IMPORT_EXEMPTIONS = {
     "merxen.io.spatialdata_io": "SpatialData writes (FINALIZE, PREPARE)",
     "merxen.io.transcript_io": "column lookups (PREPARE's SpatialData reads)",
     "merxen.memory": "memory logging",
+    "merxen.platforms": (
+        "platform registry (config's platform Literals; the registry's layer "
+        "keys are read by PREPARE, whose outputs COMPUTE_CPU hashes)"
+    ),
     "merxen.plotting": "figure saving",
     "merxen.table_keys": "FINALIZE's key (the suffix is in compute_spec)",
 }
