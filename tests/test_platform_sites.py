@@ -242,19 +242,20 @@ REASONS: dict[str, dict[str, str]] = {
         "src/merxen/annotation/panel.py": (
             "map_first panel modes of the MERSCOPE/XENIUM targeted panels (set c "
             "needs both pseudobulks, Xenium symbols first); ATERA rows are kept "
-            "off map_first until RCA on Atera (main.nf ATERA gate)"
+            "off map_first until AT-11 (RCA on Atera; main.nf ATERA gate)"
         ),
         "src/merxen/annotation/pipeline.py": (
             "map_first pairing roles (Xenium fixed frame, MERSCOPE moving) and the "
             "MERSCOPE+XENIUM cross-platform pair; ATERA rows are kept off "
-            "map_first until RCA on Atera (main.nf ATERA gate)"
+            "map_first until AT-11 (RCA on Atera; main.nf ATERA gate)"
         ),
         "src/merxen/annotation/report_scoring.py": (
             "fixed scoring datasets of the human acceptance pairs (aliases)"
         ),
         "src/merxen/annotation/sim_inputs.py": (
             "panel chemistry detection (MERSCOPE, else Xenium Prime gene lists); "
-            "ATERA rows are kept off map_first until RCA on Atera (main.nf ATERA gate)"
+            "ATERA rows are kept off map_first until AT-11 (RCA on Atera; main.nf "
+            "ATERA gate)"
         ),
     },
     "native_image_names": {

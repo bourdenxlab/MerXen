@@ -181,12 +181,15 @@ class AnnotationSettings {
      *
      * main.nf logs it when the DAG is built, so -preview shows it too: each
      * row's pair_id with its resolved clustering mode, marked "(row)" when
-     * the row's clustering_squidpy_mode column set it.
+     * the row's clustering_squidpy_mode column set it, or "(ATERA)" when
+     * main.nf held an ATERA row in legacy mode (annotationModeRow).
      *
      * @param params Pipeline params.
      * @param rows Samplesheet rows (maps with pair_id and the optional
      *     clustering_squidpy_mode column).
      * @param flippedSpecies Species whose default is map_first.
+     * @param ateraLegacyPairIds pair_ids of the ATERA rows main.nf holds in
+     *     legacy mode; their filled-in column is not the row's own choice.
      * @return The line, or "" without rows or with an invalid species or run
      *     mode (rowSampleSettings reports it). An invalid row mode is listed
      *     as invalid.
@@ -194,7 +197,8 @@ class AnnotationSettings {
     static String rowModeSummary(
         Map params,
         Collection rows,
-        Collection flippedSpecies = AnnotationDefaults.FLIPPED_SPECIES
+        Collection flippedSpecies = AnnotationDefaults.FLIPPED_SPECIES,
+        Collection ateraLegacyPairIds = []
     ) {
         if (!rows) {
             return ""
@@ -215,7 +219,9 @@ class AnnotationSettings {
             } catch (IllegalArgumentException ignored) {
                 mode = "invalid '${rowMode}'"
             }
-            "${rowValue(row, 'pair_id')}=${mode}${rowMode == null ? '' : ' (row)'}".toString()
+            def pairId = rowValue(row, "pair_id")
+            def source = pairId in ateraLegacyPairIds ? " (ATERA)" : rowMode == null ? "" : " (row)"
+            "${pairId}=${mode}${source}".toString()
         }
         return (
             "Clustering mode per samplesheet row (${species}; run mode ${runMode}): " +

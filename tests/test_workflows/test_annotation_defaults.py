@@ -1481,17 +1481,24 @@ def test_groovy_row_mode_summary_lists_each_rows_mode(
 def test_main_nf_logs_the_row_modes_and_the_legacy_deprecation() -> None:
     """Both lines are logged once, before any channel runs (hook H5 site)."""
     main_text = (REPO_ROOT / "workflows" / "main.nf").read_text()
-    # The rows as their annotation mode reads them: ATERA rows without their
-    # own mode column cluster in legacy mode (main.nf annotationModeRow) and
-    # raise no deprecation warning.
-    summary = main_text.index(
-        "AnnotationSettings.rowModeSummary(params, annotationModeRows)"
-    )
-    warning = main_text.index(
-        "AnnotationSettings.deprecatedLegacyWarning(\n        params,"
-    )
-    assert main_text.index("AnnotationSettings.useRowModes(") < summary < warning
-    assert warning < main_text.index("sample_rows_raw_ch = samplesheet_ch.map")
+    # main.nf annotationModeLaunchLog builds both lines from the rows as their
+    # annotation mode reads them: ATERA rows without their own mode column
+    # cluster in legacy mode (annotationModeRow), and no ATERA row raises the
+    # deprecation warning (test_atera_workflow.py checks the lines).
+    helper = main_text.index("def annotationModeLaunchLog(samplesheetRows, params) {")
+    helper_end = main_text.index("\n}\n", helper)
+    summary = main_text.index("AnnotationSettings.rowModeSummary(", helper)
+    warning = main_text.index("AnnotationSettings.deprecatedLegacyWarning(", helper)
+    assert helper < summary < warning < helper_end
+    assert main_text.count("AnnotationSettings.rowModeSummary(") == 1
+    assert main_text.count("AnnotationSettings.deprecatedLegacyWarning(") == 1
+    workflow = main_text.index("\nworkflow {")
+    call = main_text.index("annotationModeLaunchLog(samplesheetRows, params)", workflow)
+    info = main_text.index("annotationModeLog.info.each", workflow)
+    warn = main_text.index("annotationModeLog.warn.each", workflow)
+    assert main_text.index("AnnotationSettings.useRowModes(", workflow) < call
+    assert call < info < warn
+    assert warn < main_text.index("sample_rows_raw_ch = samplesheet_ch.map")
     assert "usesDeprecatedHumanLegacy" not in main_text
 
 

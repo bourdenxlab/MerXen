@@ -2367,8 +2367,8 @@ def rowIsAtera(row, params) {
 // (ANNOTATE_PANEL, ANNOTATE_REFERENCE_PREP, MAP, RESOLVE, COMPUTE_CPU and
 // ANNOTATION_REPORT) is not covered for ATERA rows yet: its panel, reference
 // and gate steps are built for the targeted MERSCOPE/XENIUM panels and have
-// never run on a whole-transcriptome ATERA section (RCA on Atera is the next
-// milestone). An ATERA row that does not set its own clustering_squidpy_mode
+// never run on a whole-transcriptome ATERA section (AT-11, RCA on Atera, in
+// docs/plans/atera-support-plan.md §8). An ATERA row that does not set its own clustering_squidpy_mode
 // column therefore clusters in legacy mode, whatever the species default or
 // --clustering_squidpy_mode, like the other global switches ATERA rows ignore;
 // a row that asks for map_first itself is refused by the ATERA preflight.
@@ -2383,6 +2383,64 @@ def annotationModeRow(row, params) {
         return row
     }
     return row + [(AnnotationDefaults.ROW_MODE_COLUMN): AnnotationDefaults.LEGACY]
+}
+
+// The launch-log lines of the run's annotation modes, logged once before any
+// channel runs (hook H5 site):
+// - info: the per-row mode summary, where an ATERA row held in legacy mode by
+//   annotationModeRow reads "legacy (ATERA)" rather than "(row)", and the note
+//   naming those rows;
+// - warn: the legacy deprecation warning of a flipped species. It leaves out
+//   every ATERA row: holding one in legacy mode, or a row that names legacy as
+//   the ATERA refusal advises, is not a deprecated choice.
+def annotationModeLaunchLog(samplesheetRows, params) {
+    def ateraRows = samplesheetRows.findAll { row -> rowIsAtera(row, params) }
+    def ateraLegacyRows = ateraRows.findAll { row ->
+        chooseField(row, [AnnotationDefaults.ROW_MODE_COLUMN]) == null
+    }
+    def info = []
+    def summary = AnnotationSettings.rowModeSummary(
+        params,
+        samplesheetRows.collect { row -> annotationModeRow(row, params) },
+        AnnotationDefaults.FLIPPED_SPECIES,
+        ateraLegacyRows.collect { row -> row.pair_id },
+    )
+    if (summary) {
+        info.add(summary)
+    }
+    if (ateraLegacyRows) {
+        info.add(
+            "ATERA rows ${ateraLegacyRows.collect { row -> row.pair_id }.join(', ')} " +
+            "cluster in legacy mode: map_first annotation is not covered for ATERA " +
+            "rows yet (AT-11, RCA on Atera)"
+        )
+    }
+    def warn = []
+    def deprecation = AnnotationSettings.deprecatedLegacyWarning(
+        params,
+        samplesheetRows
+            .findAll { row -> !rowIsAtera(row, params) }
+            .collect { row -> row[AnnotationDefaults.ROW_MODE_COLUMN] },
+    )
+    if (deprecation) {
+        warn.add(deprecation)
+    }
+    return [info: info.collect { line -> line.toString() }, warn: warn]
+}
+
+// Whether --annotation_prepare_only leaves a (pair_id, row, settings) entry out:
+// an ATERA row builds no reference bundle, as its rows cluster in legacy mode
+// (AT-11, RCA on Atera; annotationModeRow).
+def ateraPrepareOnlyRow(entry) {
+    def settings = entry[2]
+    if (!("ATERA" in settings.active_platforms)) {
+        return false
+    }
+    log.info(
+        "annotation_prepare_only: ATERA row ${settings.pair_id} builds no reference " +
+        "bundle: map_first annotation is not covered for ATERA rows yet (AT-11, RCA on Atera)"
+    )
+    return true
 }
 
 def appendAteraPreflightChecks(errors, row, settings, params) {
@@ -2405,8 +2463,8 @@ def appendAteraPreflightChecks(errors, row, settings, params) {
     }
     if (AnnotationSettings.isMapFirst(settings)) {
         errors.add(
-            "map_first annotation is not covered for ATERA rows yet (RCA on " +
-            "Atera is the next milestone); remove clustering_squidpy_mode from " +
+            "map_first annotation is not covered for ATERA rows yet (AT-11, RCA " +
+            "on Atera); remove clustering_squidpy_mode from " +
             "row ${settings.pair_id} or set it to legacy"
         )
     }
@@ -3478,20 +3536,10 @@ workflow {
     AnnotationSettings.useRowModes(
         annotationModeRows.collect { row -> row[AnnotationDefaults.ROW_MODE_COLUMN] }
     )
-    def rowModeSummary = AnnotationSettings.rowModeSummary(params, annotationModeRows)
-    if (rowModeSummary) {
-        log.info(rowModeSummary)
-    }
-    def ateraLegacyRows = samplesheetRows.findAll { row ->
-        rowIsAtera(row, params) && chooseField(row, [AnnotationDefaults.ROW_MODE_COLUMN]) == null
-    }
-    if (ateraLegacyRows) {
-        log.info(
-            "ATERA rows ${ateraLegacyRows.collect { row -> row.pair_id }.join(', ')} " +
-            "cluster in legacy mode: map_first annotation is not covered for ATERA " +
-            "rows yet (RCA on Atera is the next milestone)"
-        )
-    }
+    // The mode summary and the legacy deprecation warning, which leaves out
+    // every ATERA row (annotationModeLaunchLog).
+    def annotationModeLog = annotationModeLaunchLog(samplesheetRows, params)
+    annotationModeLog.info.each { line -> log.info(line) }
     def nearMissModeColumns = AnnotationSettings.nearMissModeColumns(
         samplesheetRows ? samplesheetRows[0].keySet() : []
     )
@@ -3502,17 +3550,9 @@ workflow {
             "Those rows follow the run's clustering mode."
         )
     }
-    // Legacy rows of a flipped species (human since M8, mouse since M9).
-    // The ATERA rows held in legacy mode above are not a deprecated choice.
-    def deprecatedLegacyWarning = AnnotationSettings.deprecatedLegacyWarning(
-        params,
-        samplesheetRows
-            .findAll { row -> !(row in ateraLegacyRows) }
-            .collect { row -> row[AnnotationDefaults.ROW_MODE_COLUMN] },
-    )
-    if (deprecatedLegacyWarning) {
-        log.warn(deprecatedLegacyWarning)
-    }
+    // Legacy rows of a flipped species (human since M8, mouse since M9); no
+    // ATERA row is a deprecated choice.
+    annotationModeLog.warn.each { line -> log.warn(line) }
 
     sample_rows_raw_ch = samplesheet_ch.map { row ->
         def settings = rowSampleSettings(row, params)
@@ -3548,6 +3588,7 @@ workflow {
     // rca-hook:H10: --annotation_prepare_only builds reference bundles (plan §3.2)
     // and runs no pipeline stage; legacy and map_first runs skip this block.
     if (AnnotationReferences.prepareOnly(params)) {
+        sample_rows_raw_ch = sample_rows_raw_ch.filter { entry -> !ateraPrepareOnlyRow(entry) }
         ANNOTATION_PREPARE_ONLY(sample_rows_raw_ch)
         sample_rows_raw_ch = channel.empty()
     }
