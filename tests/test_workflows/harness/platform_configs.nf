@@ -336,7 +336,7 @@ def ateraProsegCases(String launch) {
             [pair_id: "PAIR_A", segmentation_source: "native_proseg"], ["XENIUM"], params
         )
     }
-    ["reseg", "proseg"].each { segmentation ->
+    ["proseg_vendor", "vendor_proseg"].each { segmentation ->
         attempt("atera_proseg", "${id}/layer_keys/${segmentation}") {
             analysisLayerKeys("ATERA", segmentation)
         }
@@ -350,6 +350,148 @@ def ateraProsegCases(String launch) {
     }
     attempt("atera_proseg", "${id}/published_restart_error") {
         publishedAteraProsegOutput(params, "PAIR_A", "ATERA", "proseg_latest.zarr")
+    }
+}
+
+// AT-7 ATERA Cellpose route (segmentation_source=cellpose_proseg): the Cellpose
+// segment config (DAPI + 18S on morphology_focus, no CSV), the Cellpose plan,
+// tile and stitch configs, ENRICH and MIQ of the row, layers and filters.
+def ateraCellposePlanText() {
+    return groovy.json.JsonOutput.toJson([
+        format_version: 1,
+        source_build_fingerprint: "f" * 64,
+        pixel_size_um: 0.21249222,
+        mask_shape_px: [42548, 61369],
+        tile_subset: null,
+        prior: [
+            kind: "cellpose",
+            mask_path: "data/seg/cellpose_masks_tiled.npy",
+            mask_sha256: "a" * 64,
+            mask_stat: [10443000000L, 1762000000000000000L],
+            cellprob_path: "data/seg/cellpose_cellprobs_tiled.npy",
+            cellprob_sha256: "b" * 64,
+            cellprob_stat: [10443000000L, 1762000000000000001L],
+            fingerprint: "c" * 64,
+        ],
+        prior_weight: [rule: "whole_section_auto", effective: 93.5, n_gene_rows: 1400000000,
+            n_labels: 149733],
+        tiles: [
+            [tile_id: "c0_r0", grid: [0, 0], core_um: [0.0, 0.0, 2000.0, 2000.0],
+             window_px: [0, 9883, 0, 9883], owned_labels: [1, 2, 5], run: true],
+            [tile_id: "c0_r1", grid: [0, 1], core_um: [0.0, 2000.0, 2000.0, 4000.0],
+             window_px: [0, 9883, 8941, 19295], owned_labels: [3, 4], run: true],
+        ],
+    ])
+}
+
+def ateraCellposeCases(String launch) {
+    def id = "${launch}/ATERA/cellpose_proseg"
+    def group = "atera_cellpose_proseg"
+    def row = pairRow([atera_dir: "raw/atera"])
+    attempt(group, "${id}/segment_meta") { segmentMetaForPlatform(row, "ATERA", params) }
+    attempt(group, "${id}/segment") {
+        segmentationConfigMap(
+            "PAIR_A", "ATERA", "source_spatialdata.zarr",
+            segmentMetaForPlatform(row, "ATERA", params), params,
+        )
+    }
+    attempt(group, "${id}/segment_channels") {
+        segmentMetaForPlatform(row + [atera_channels: "DAPI, 18S"], "ATERA", params)
+    }
+    attempt(group, "${id}/plan") {
+        ateraProsegPlanConfig("PAIR_A", "ATERA", params, "cellpose")
+    }
+    attempt(group, "${id}/model") { ateraProsegModelParams(params, "cellpose") }
+    attempt(group, "${id}/tile_specs") {
+        ateraProsegTileSpecs(
+            ateraCellposePlanText(), "PAIR_A", "ATERA", "data/atera_source.zarr", params,
+        )
+    }
+    attempt(group, "${id}/stitch") {
+        ateraProsegStitchConfig("PAIR_A", "ATERA", ["c0_r1", "c0_r0"], params, "cellpose")
+    }
+    attempt(group, "${id}/enrich") {
+        renderEnrich(
+            "PAIR_A|ATERA",
+            "PAIR_A",
+            "ATERA",
+            "proseg_latest.zarr",
+            "cellpose_masks_tiled.npy",
+            "NO_NUCLEI_MASK",
+            "source_spatialdata.zarr",
+            "cellpose_proseg",
+        )
+    }
+    attempt(group, "${id}/mask_image_quantification") {
+        renderMaskImageQuantification(
+            "PAIR_A|ATERA", "PAIR_A", "ATERA", "latest.zarr", "cellpose_masks_tiled.npy",
+            "cellpose_proseg",
+        )
+    }
+    attempt(group, "${id}/layers") {
+        availableSegmentationLayers("cellpose_proseg", ["ATERA"])
+    }
+    attempt(group, "${id}/stage_order") {
+        activeStageOrder(
+            false, false, true, true, false, false, true, false, true, false,
+            false, false, "cellpose_proseg", ["ATERA"],
+        )
+    }
+    attempt(group, "${id}/routes") {
+        [
+            native_latest: usesNativeLatest("cellpose_proseg", ["ATERA"]),
+            atera_cellpose: runsAteraCellpose("cellpose_proseg", ["ATERA"]),
+            atera_proseg: runsAteraProseg("cellpose_proseg", ["ATERA"]),
+            xenium_native_latest: usesNativeLatest("cellpose_proseg", ["XENIUM"]),
+            xenium_atera_proseg: runsAteraProseg("cellpose_proseg", ["XENIUM"]),
+            prior_kind: AteraProsegLayers.priorKindForSource("cellpose_proseg"),
+        ]
+    }
+    attempt(group, "${id}/row_source") {
+        segmentationSourceForRow(
+            [pair_id: "PAIR_A", segmentation_source: "cellpose_proseg"], ["ATERA"], params
+        )
+    }
+    ["reseg", "proseg", "proseg_mask", "cellpose", "original_seg"].each { segmentation ->
+        attempt(group, "${id}/layer_keys/${segmentation}") {
+            analysisLayerKeys("ATERA", segmentation)
+        }
+    }
+    def notes = []
+    attempt(group, "${id}/all_default") {
+        filterSegmentationsForSource(
+            normalizeAnalysisSegmentation("all"), "cellpose_proseg", false,
+            "analysis_segmentation", "PAIR_A", notes, ["ATERA"],
+        ) + notes
+    }
+    def menderNotes = []
+    attempt(group, "${id}/mender_default") {
+        filterSegmentationsForSource(
+            ["proseg_hybrid"], "cellpose_proseg", false, "mender_segmentations",
+            "PAIR_A", menderNotes, ["ATERA"],
+        ) + menderNotes
+    }
+    attempt(group, "${id}/hybrid_strict_error") {
+        filterSegmentationsForSource(
+            ["proseg_hybrid"], "cellpose_proseg", true, "analysis_segmentation",
+            "PAIR_A", [], ["ATERA"],
+        )
+    }
+    def xeniumNotes = []
+    attempt(group, "${launch}/XENIUM/all_default") {
+        filterSegmentationsForSource(
+            normalizeAnalysisSegmentation("all"), "cellpose_proseg", false,
+            "analysis_segmentation", "PAIR_A", xeniumNotes, ["XENIUM"],
+        ) + xeniumNotes
+    }
+    attempt(group, "${launch}/XENIUM/vendor_layer_strict_error") {
+        filterSegmentationsForSource(
+            ["proseg_vendor"], "cellpose_proseg", true, "analysis_segmentation",
+            "PAIR_A", [], ["XENIUM"],
+        )
+    }
+    attempt(group, "${id}/published_mask_error") {
+        publishedAteraCellposeMask(params, "PAIR_A", "ATERA")
     }
 }
 
@@ -575,6 +717,7 @@ workflow {
         ateraNativeCases(launch)
         ateraQcCases(launch)
         ateraProsegCases(launch)
+        ateraCellposeCases(launch)
     } else if (launch == "L4") {
         ateraBuildCases(launch)
     } else {

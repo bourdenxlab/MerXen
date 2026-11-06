@@ -24,6 +24,9 @@ Changes made so far:
   re-run (docs/plans/atera-support-plan.md, AT-6).
 - AT-9 added the pins of ATERA_PROSEG_PLAN, ATERA_PROSEG_TILE and
   ATERA_PROSEG_STITCH (``modules/atera_proseg.nf``); no existing pin changed.
+- AT-7 added the pins of ATERA_CELLPOSE_SEGMENT (``modules/atera_cellpose.nf``)
+  and ATERA_PROSEG_PLAN_CELLPOSE (``modules/atera_proseg.nf``, the script of
+  ATERA_PROSEG_PLAN with two more staged inputs); no existing pin changed.
 """
 
 from __future__ import annotations
@@ -147,13 +150,14 @@ def test_main_nf_defines_no_process() -> None:
 
 
 def test_pinned_inventory(pinned: dict[str, str]) -> None:
-    """Today's inventory: 47 processes, 47 ``script:`` and 7 ``stub:`` sections.
+    """Today's inventory: 49 processes, 49 ``script:`` and 7 ``stub:`` sections.
 
     AT-9 added the three ATERA ProSeg processes (``modules/atera_proseg.nf``);
-    no existing pin changed.
+    AT-7 added ATERA_CELLPOSE_SEGMENT (``modules/atera_cellpose.nf``) and
+    ATERA_PROSEG_PLAN_CELLPOSE. No existing pin changed.
     """
     labels = [key.rsplit("::", 1)[1] for key in pinned]
-    assert labels.count("script") == 47
+    assert labels.count("script") == 49
     assert labels.count("stub") == 7
     assert {key for key in pinned if key.endswith("::stub")} == {
         f"workflows/modules/pciseq.nf::{name}::stub"

@@ -219,7 +219,7 @@ _REFUSALS = {
     "atera/alignment": "AT-10",
     "atera/cellpose_only": (
         "segmentation_source=cellpose_only is not available for ATERA rows yet; "
-        "ATERA supports: native"
+        "ATERA supports: native, native_proseg, cellpose_proseg"
     ),
     "atera/unknown_source": "Unknown segmentation_source 'magic'",
     "atera/analysis_reseg": (
@@ -528,7 +528,12 @@ def test_build_task_builds_an_atera_row(tmp_path: Path) -> None:
 _PROSEG_REFUSALS = {
     "proseg/hybrid": (
         "analysis_segmentation=proseg_hybrid for PAIR_A is not available with "
-        "segmentation_source=native_proseg; available: reseg, original_seg"
+        "segmentation_source=native_proseg; available: proseg_vendor, original_seg"
+    ),
+    # AT-7 renamed the vendor-prior layer: reseg is the Cellpose-prior layer.
+    "proseg/reseg_only": (
+        "analysis_segmentation=reseg for PAIR_A is not available with "
+        "segmentation_source=native_proseg; available: proseg_vendor, original_seg"
     ),
     "proseg/mender_hybrid": (
         "mender_segmentations=proseg_hybrid for PAIR_A is not available with "
@@ -554,15 +559,16 @@ def test_native_proseg_rows_run_both_layers(
     assert full["selected_stages"] == _ATERA_FULL_STAGES
     assert "segment_nuclei" not in full["stage_order"]
     assert full["run_native_segment"] is True and full["run_atera_proseg"] is True
-    assert full["analysis_segmentations"] == ["reseg", "original_seg"]
+    assert full["run_atera_cellpose"] is False
+    assert full["analysis_segmentations"] == ["proseg_vendor", "original_seg"]
     mender = preflight_cases["proseg/all_mender"]
     assert mender["result"] == "OK", mender
-    assert mender["analysis_segmentations"] == ["reseg", "original_seg"]
+    assert mender["analysis_segmentations"] == ["proseg_vendor", "original_seg"]
     # The global MENDER default (proseg_hybrid) resolves to both layers.
-    assert mender["mender_segmentations"] == ["reseg", "original_seg"]
+    assert mender["mender_segmentations"] == ["proseg_vendor", "original_seg"]
     assert (
-        "mender_segmentations proseg_hybrid resolves to reseg, original_seg "
-        "(segmentation_source=native_proseg has reseg, original_seg)"
+        "mender_segmentations proseg_hybrid resolves to proseg_vendor, original_seg "
+        "(segmentation_source=native_proseg has proseg_vendor, original_seg)"
     ) in mender["setting_notes"]
     assert preflight_cases["proseg/stop_segment"]["selected_stages"] == [
         "build_spatialdata",
@@ -572,7 +578,9 @@ def test_native_proseg_rows_run_both_layers(
     assert start["selected_stages"] == ["enrich"]
     assert start["run_atera_proseg"] is False
     assert preflight_cases["proseg/alias"]["segmentation_source"] == "native_proseg"
-    assert preflight_cases["proseg/reseg_only"]["analysis_segmentations"] == ["reseg"]
+    assert preflight_cases["proseg/vendor_only"]["analysis_segmentations"] == [
+        "proseg_vendor"
+    ]
     # The native route is unchanged by the second source.
     assert preflight_cases["atera/no_stop_stage"]["run_atera_proseg"] is False
 
@@ -631,3 +639,103 @@ def test_native_proseg_param_refusals(
             *references,
         )
         assert allowed["proseg/default"]["result"] == "OK"
+
+
+# --------------------------------------------------------------------------- #
+# AT-7: Cellpose (DAPI + 18S) and Cellpose-prior tiled ProSeg on ATERA
+# --------------------------------------------------------------------------- #
+
+_CELLPOSE_REFUSALS = {
+    "cellpose/hybrid": (
+        "analysis_segmentation=proseg_hybrid for PAIR_A is not available with "
+        "segmentation_source=cellpose_proseg; available: reseg, original_seg, "
+        "proseg_mask"
+    ),
+    "cellpose/vendor_layer": (
+        "analysis_segmentation=proseg_vendor for PAIR_A is not available with "
+        "segmentation_source=cellpose_proseg"
+    ),
+    "cellpose/mender_hybrid": (
+        "mender_segmentations=proseg_hybrid for PAIR_A is not available with "
+        "segmentation_source=cellpose_proseg"
+    ),
+    "cellpose/segment_nuclei": "ATERA rows keep the vendor nuclei",
+    "cellpose/blank_channels": "atera_channels of PAIR_A names no channel",
+}
+
+
+@pytest.mark.nextflow
+def test_atera_cellpose_rows_run_three_layers(
+    preflight_cases: dict[str, dict[str, Any]],
+) -> None:
+    full = preflight_cases["cellpose/default"]
+    assert full["result"] == "OK", full
+    assert full["segmentation_source"] == "cellpose_proseg"
+    assert full["selected_stages"] == _ATERA_FULL_STAGES
+    assert "segment_nuclei" not in full["stage_order"]
+    assert full["run_native_segment"] is True
+    assert full["run_atera_cellpose"] is True and full["run_atera_proseg"] is True
+    assert full["run_segment_nuclei"] is False
+    # "all": every layer the route makes; ATERA has no hybrid layer.
+    assert full["analysis_segmentations"] == ["reseg", "original_seg", "proseg_mask"]
+    assert (
+        "analysis_segmentation reseg, original_seg, proseg_mask, proseg_hybrid "
+        "resolves to reseg, original_seg, proseg_mask (segmentation_source="
+        "cellpose_proseg has reseg, original_seg, proseg_mask)"
+    ) in full["setting_notes"]
+    mender = preflight_cases["cellpose/all_mender"]
+    assert mender["result"] == "OK", mender
+    assert mender["mender_segmentations"] == ["reseg", "original_seg", "proseg_mask"]
+    assert preflight_cases["cellpose/alias"]["segmentation_source"] == (
+        "cellpose_proseg"
+    )
+    assert preflight_cases["cellpose/stop_segment"]["selected_stages"] == [
+        "build_spatialdata",
+        "segment",
+    ]
+    start = preflight_cases["cellpose/start_enrich"]
+    assert start["selected_stages"] == ["enrich"]
+    assert start["run_atera_cellpose"] is False and start["run_atera_proseg"] is False
+    assert preflight_cases["cellpose/mask_only"]["analysis_segmentations"] == [
+        "proseg_mask"
+    ]
+    assert preflight_cases["cellpose/channels"]["result"] == "OK"
+    # The native routes run no ATERA Cellpose.
+    for case in ("atera/no_stop_stage", "proseg/default"):
+        assert preflight_cases[case]["run_atera_cellpose"] is False
+
+
+@pytest.mark.nextflow
+@pytest.mark.parametrize("case", sorted(_CELLPOSE_REFUSALS))
+def test_atera_cellpose_refusals(
+    preflight_cases: dict[str, dict[str, Any]], case: str
+) -> None:
+    record = preflight_cases[case]
+    assert record.get("error_class") == "java.lang.IllegalArgumentException", record
+    assert _CELLPOSE_REFUSALS[case] in record["message"], record["message"]
+
+
+@pytest.mark.nextflow
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
+@pytest.mark.parametrize(
+    ("params", "message"),
+    [
+        (
+            ("--atera_cellpose_proseg_prior_weight", "0"),
+            "atera_cellpose_proseg_prior_weight must be positive",
+        ),
+        (("--atera_proseg_halo_um", "50"), "below the minimum of 100 microns"),
+        (("--proseg_version", "3.3.0"), "verified with ProSeg 3.2.0 only"),
+    ],
+)
+def test_atera_cellpose_param_refusals(
+    tmp_path: Path, params: tuple[str, ...], message: str
+) -> None:
+    references = _clustering_reference_params(tmp_path)
+    launch = tmp_path / "launch"
+    launch.mkdir()
+    cases = _preflight_cases(launch, *params, *references)
+    record = cases["cellpose/default"]
+    assert record.get("error_class") == "java.lang.IllegalArgumentException", record
+    assert message in record["message"], record["message"]
+    assert cases["atera/no_stop_stage"]["result"] == "OK"
