@@ -1705,11 +1705,47 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
   awaiting the user's OK). The broad atlas labels of ATERA rows are provisional (Appendix A, "AT-6
   reviews").
 
-### AT-7 `[feature]`: `cellpose_only` for Atera (5 d)
+### AT-7 `[feature]`: Cellpose (DAPI + 18S) and Cellpose-prior tiled ProSeg for Atera (6–8 d)
 
-- **Scope:** segmentation REQ items; CSV export out of the GPU lock or skipped; enrichment mask lookup;
-  `convert_to_latest` fast paths verified on ATERA.
-- **Exit:** a `reseg` layer on the crop and on the full section.
+Brought forward ahead of RCA and MECR at the user's request: the vendor segmentation looked poor.
+The user's decisions: Cellpose-SAM on **DAPI + 18S only**, as on XENIUM (no boundary stain); the
+XENIUM pipeline (Cellpose masks → Cellpose layer, ProSeg with the Cellpose prior → ProSeg layer),
+so ATERA gets the XENIUM layer set; `proseg_hybrid` stays off; the native and `native_proseg`
+routes stay. ProSeg runs on AT-9's tiled route only, never as one whole-section run.
+
+- **Source scheme:** `native` (default) | `native_proseg` (vendor prior, layer `proseg_vendor`) |
+  `cellpose_proseg` (layers `reseg` = ProSeg cells, `proseg_mask` = Cellpose cells, plus the vendor
+  `original_seg`). `cellpose_only` stays reserved and refused. `all` and the MENDER default
+  resolve to the layers the route makes; `proseg_hybrid` is an error on ATERA
+  (`PlatformSpec.proseg_hybrid=False`). Every ATERA route builds its latest store with
+  NATIVE_LATEST (`native_latest_base`), and no ATERA route runs Cellpose nuclei (ProSeg and the
+  layers do not use them; ATERA keeps the vendor nuclei).
+- **Rename (flagged to the user):** AT-9 had written its vendor-prior layer under the XENIUM
+  ProSeg names. It is now `proseg_vendor` (`MOSAIK_proseg_vendor`, `table_MOSAIK_proseg_vendor`,
+  `proseg_vendor_cell_labels`, branch `proseg_vendor`), so `reseg`/`MOSAIK_proseg` mean the
+  Cellpose-prior ProSeg layer as on XENIUM. The stitch config gained `prior_kind`: an AT-9 store
+  re-stitches once on `-resume` (tiles cached) and the stitch removes the old-named elements.
+- **Cellpose:** `ATERA_CELLPOSE_SEGMENT` (GPU lock) runs the XENIUM tiled Cellpose on
+  `morphology_focus` of the built store; zarr only, `image_key` required, every requested channel
+  must be present; transforms from the spec sidecars; **no transcript CSV**
+  (`proseg_transcripts="none"`), so nothing transcript-related runs under the GPU lock.
+- **Prior:** `ATERA_PROSEG_PLAN_CELLPOSE` streams label statistics from the mask (row strips),
+  records the SHA-256, size and mtime of the mask and logits, and fixes the effective prior weight:
+  `atera_cellpose_proseg_prior_weight`, else ProSeg's automatic weight of one whole-section run,
+  `max(gene rows / labels / 100, 1)`. Tiles slice the prior from the mask, seed `cell_id` from the
+  Cellpose label at each row's pixel (corner rule), pass `--cellpose-cellprobs`, write
+  `overlaps_nucleus=0` (`atera_cellpose_proseg_nuclear_compartment=false`) and refuse changed prior
+  files. The stitch writes `reseg` (namespace `cellpose_label_v1`, `source_cell_id
+  cellpose_<label>`) and the points column `cellpose_assignment`. Vendor tile configs and commands
+  are byte-identical to AT-9's.
+- **ENRICH:** native vendor enrichment, the ProSeg layer check, and the `proseg_mask` layer:
+  `MOSAIK_cellpose` (AT-3 polygoniser), `cellpose_cell_labels` (for the viewer cache and MIQ, which
+  read ATERA layers from labels) and `table_MOSAIK_cellpose` counted from `cellpose_assignment`
+  (no spatial join).
+- **Guards:** clustering joins vendor nuclei only to tables in the vendor id namespace; VISUALIZE
+  reads the registered assignment column of every ATERA layer.
+- **Exit:** the three layers on the crop through MENDER, then the full section; a comparison of
+  Cellpose vs vendor and ProSeg(Cellpose prior) vs ProSeg(vendor prior) for the user.
 
 ### AT-8 `[feature]`: whole-transcriptome analysis paths (8 d)
 
