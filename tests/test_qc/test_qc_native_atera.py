@@ -272,8 +272,72 @@ def test_dask_failure_raises_without_pandas_fallback(
 
     with pytest.raises(RuntimeError, match="does not fall back"):
         metrics._compute_cell_metrics_from_points(
+            points,
+            assign_col="assignment",
+            gene_col="feature_name",
+            allow_pandas_fallback=False,
+        )
+
+
+def test_dask_failure_keeps_the_pandas_fallback_without_aggregates(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """XENIUM and MERSCOPE stores (no build aggregates) keep the old fallback."""
+    real_mask = metrics.assignment_mask_from_points
+    calls = {"dask": 0}
+
+    def _broken_on_dask(frame: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(frame, pd.DataFrame) and calls["dask"] == 0:
+            calls["dask"] += 1
+            raise ValueError("synthetic dask failure")
+        return real_mask(frame, *args, **kwargs)
+
+    monkeypatch.setattr(metrics, "assignment_mask_from_points", _broken_on_dask)
+    points = dd.from_pandas(
+        pd.DataFrame({"assignment": [1, 0, 2], "feature_name": ["A", "B", "A"]}),
+        npartitions=1,
+    )
+
+    with caplog.at_level("WARNING", logger=metrics.logger.name):
+        n_total, n_assigned, cells = metrics._compute_cell_metrics_from_points(
             points, assign_col="assignment", gene_col="feature_name"
         )
+
+    assert calls["dask"] == 1
+    assert "falling back to pandas" in caplog.text
+    assert (n_total, n_assigned) == (3, 2)
+    assert sorted(cells["cell_id_norm"]) == ["1", "2"]
+
+
+def test_qc_refuses_the_pandas_fallback_on_stores_with_aggregates(
+    latest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """compute_dataset_qc turns the fallback off for a store with aggregates."""
+    seen: dict[str, bool] = {}
+
+    def _record(*_args: Any, allow_pandas_fallback: bool = True, **_kw: Any) -> Any:
+        seen["allow"] = allow_pandas_fallback
+        raise RuntimeError("stop after recording")
+
+    monkeypatch.setattr(metrics, "_compute_cell_metrics_from_points", _record)
+    # The native latest store names its assignment column original_assignment.
+    real_first = metrics.first_existing_col
+
+    def _first(frame: Any, candidates: list[str]) -> str | None:
+        if "assignment" in candidates:
+            return "original_assignment"
+        return real_first(frame, candidates)
+
+    monkeypatch.setattr(metrics, "first_existing_col", _first)
+    with pytest.raises(RuntimeError, match="stop after recording"):
+        compute_dataset_qc(
+            latest,
+            "ATERA_SYNTH",
+            table_key=None,
+            shape_key=CELL_SHAPES_KEY,
+            registration_check=False,
+        )
+    assert seen == {"allow": False}
 
 
 def _windows(latest: Path) -> list[tuple[float, float, float, float]]:
@@ -481,6 +545,9 @@ def test_exact_counts_survive_float32_totals() -> None:
     n_legacy, legacy_cells = metrics._compute_cell_metrics_from_table(table)
 
     assert n_exact == exact_total
+    # The fixture does drift on the legacy float32 path (240,333,536 against
+    # 240,333,534), so the exact path is what keeps the total right.
+    assert n_legacy != exact_total
     assert np.array_equal(
         cells["transcripts_per_cell"].to_numpy(),
         counts.astype(np.int64).sum(axis=1).astype(float),

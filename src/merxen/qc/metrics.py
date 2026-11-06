@@ -75,8 +75,28 @@ def _compute_cell_metrics_from_points(
     points_obj: Any,
     assign_col: str,
     gene_col: str,
+    *,
+    allow_pandas_fallback: bool = True,
 ) -> tuple[int, int, pd.DataFrame]:
-    """Compute assignment counts and per-cell transcript/gene metrics."""
+    """Compute assignment counts and per-cell transcript/gene metrics.
+
+    Args:
+        points_obj: Pandas- or dask-backed points.
+        assign_col: Column holding the cell assignment.
+        gene_col: Column holding the gene name.
+        allow_pandas_fallback: When the dask aggregation fails, log a warning
+            and load the points into pandas (the historical XENIUM and
+            MERSCOPE behaviour). False raises instead; stores with build
+            aggregates (ATERA) hold over a billion rows and must never be
+            materialised.
+
+    Returns:
+        The total and assigned transcript counts and one row of metrics per
+        cell.
+
+    Raises:
+        RuntimeError: The dask aggregation failed and the fallback is off.
+    """
     cols = set(map(str, list(points_obj.columns)))
     has_background = "background" in cols
     point_cols = [assign_col, gene_col] + (["background"] if has_background else [])
@@ -106,15 +126,18 @@ def _compute_cell_metrics_from_points(
             cell_metrics = pd.concat([trans_per_cell, genes_per_cell], axis=1)
             cell_metrics = cell_metrics.reset_index(drop=False)
             return n_total, n_assigned, cell_metrics
-        except Exception as exc:
-            # Never fall back to materialising dask points: an ATERA section
-            # holds over a billion rows.
-            raise RuntimeError(
-                "QC could not aggregate the dask-backed transcript points "
-                f"(columns {point_cols}): {exc}. MerXen does not fall back to "
-                "loading every transcript into memory; fix the points element "
-                "or the assignment column."
-            ) from exc
+        except Exception as exc:  # noqa: BLE001
+            if not allow_pandas_fallback:
+                # An ATERA section holds over a billion rows.
+                raise RuntimeError(
+                    "QC could not aggregate the dask-backed transcript points "
+                    f"(columns {point_cols}): {exc}. MerXen does not fall back "
+                    "to loading every transcript of this store into memory; fix "
+                    "the points element or the assignment column."
+                ) from exc
+            logger.warning(
+                "Dask QC aggregation failed (%s); falling back to pandas.", exc
+            )
 
     pts = to_pandas(points_obj)
     is_assigned = assignment_mask_from_points(pts[point_cols], assign_col=assign_col)
@@ -309,6 +332,10 @@ def compute_dataset_qc(
             points_obj,
             assign_col=assign_col,
             gene_col=gene_col,
+            # Stores with build aggregates (ATERA) never load every transcript.
+            allow_pandas_fallback=(
+                read_points_aggregates(latest_zarr_path, points_key) is None
+            ),
         )
     cell_metrics["dataset"] = dataset_name
     pct_assigned = 100.0 * n_assigned / max(n_total, 1)

@@ -79,9 +79,11 @@ The QC log says which path each figure took ("from the build aggregates",
 names and row counts only, so a step that rewrites the points must keep each
 file's rows and feature names or drop the index. A stale index falls back to
 streaming the points with dask. QC never loads
-every transcript into pandas: if a dask aggregation fails it raises with the
-cause instead of retrying in memory. XENIUM and MERSCOPE stores carry no
-aggregates, so their QC is unchanged.
+every transcript of an ATERA store into pandas: if a dask aggregation fails it
+raises with the cause instead of retrying in memory. XENIUM and MERSCOPE stores
+carry no aggregates, so their QC is unchanged: their table totals stay the
+historical float32 sums, and a failed dask aggregation still logs a warning
+and retries in pandas.
 
 A warning is logged and written to the outputs; the task still succeeds.
 With `--qc_registration_strict true` a `warn` makes `merxen qc` exit non-zero
