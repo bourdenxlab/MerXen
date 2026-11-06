@@ -323,3 +323,41 @@ def test_a_latest_store_of_another_build_is_refused(
 
 def test_tile_grid_constant_matches_the_fixture() -> None:
     assert TILE_UM == 8.0
+
+
+def test_an_interrupted_points_swap_is_repaired(tmp_path: Path) -> None:
+    from merxen.segmentation.atera_proseg.stitch import _remove_leftovers
+
+    directory = tmp_path / "points.parquet"
+    old = tmp_path / "points.parquet.old-abc"
+    partial = tmp_path / "points.parquet.partial-def"
+    old.mkdir()
+    (old / "part.0.parquet").write_text("old")
+    partial.mkdir()
+    # Killed between the two renames: no points directory, the old one aside.
+    _remove_leftovers(directory)
+    assert (directory / "part.0.parquet").read_text() == "old"
+    assert not old.exists() and not partial.exists()
+    # Killed after the swap: the old directory is only removed.
+    old.mkdir()
+    _remove_leftovers(directory)
+    assert directory.is_dir() and not old.exists()
+
+
+def test_pandas_metadata_lists_the_appended_columns() -> None:
+    import pandas as pd
+    import pyarrow as pa
+
+    from merxen.segmentation.atera_proseg.stitch import _pandas_metadata
+
+    frame = pd.DataFrame({"x": [1.0]}, index=[0])
+    frame.index.name = "__null_dask_index__"
+    schema = pa.Table.from_pandas(frame).schema
+    meta = json.loads(
+        _pandas_metadata(
+            schema,
+            [("assignment", "uint64", "UInt64"), ("background", "bool", "bool")],
+        )
+    )
+    names = [column["name"] for column in meta["columns"]]
+    assert names == ["x", "assignment", "background", "__null_dask_index__"]
