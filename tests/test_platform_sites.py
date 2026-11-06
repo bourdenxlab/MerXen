@@ -107,7 +107,6 @@ REASONS: dict[str, dict[str, str]] = {
         "src/merxen/analysis/pciseq.py": (
             "ordered priority list, XENIUM listed first (AT-6)"
         ),
-        "src/merxen/masks.py": "ordered mask-branch discovery list (AT-6)",
         "src/merxen/visualization/sanity_plots.py": (
             "display styles and draw order of the original layers"
         ),
@@ -137,7 +136,10 @@ REASONS: dict[str, dict[str, str]] = {
             "registered as atera_nucleus only in AT-6"
         ),
         "src/merxen/io/builders/xenium.py": "Xenium reader option",
-        "src/merxen/masks.py": "ordered mask-branch discovery list (AT-6)",
+        "src/merxen/masks.py": (
+            "legacy alias of the Xenium original_nucleus branch; the branch list "
+            "is built from the registry since AT-6"
+        ),
         "src/merxen/segmentation/native.py": (
             "NATIVE_LATEST renames the source nucleus shapes to the registry's "
             "atera_nucleus; the source name must not reach the latest store (AT-6)"
@@ -275,9 +277,6 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         "src/merxen/analysis/pciseq.py": (
             '"original_seg": ("xenium_cell_boundaries", "merscope_cell_boundaries"),',
         ),
-        "src/merxen/masks.py": (
-            '("original_nucleus", "xenium_nucleus", ("nucleus_boundaries",)),',
-        ),
         "src/merxen/visualization/sanity_plots.py": (
             '"merscope_cell_boundaries",',
             '"merscope_cell_boundaries",',
@@ -292,7 +291,7 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         ),
     },
     "built_shape_names": {
-        "src/merxen/masks.py": ('else f"{ORIGINAL_ID_NAMESPACE}_nucleus"',),
+        "src/merxen/masks.py": ('f"{ORIGINAL_ID_NAMESPACE}_nucleus",',),
     },
     "vendor_nucleus_names": {
         "src/merxen/analysis/clustering_squidpy.py": (
@@ -321,9 +320,7 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         "src/merxen/io/builders/xenium.py": (
             "nucleus_boundaries=build_config.nucleus_boundaries,",
         ),
-        "src/merxen/masks.py": (
-            '("original_nucleus", "xenium_nucleus", ("nucleus_boundaries",)),',
-        ),
+        "src/merxen/masks.py": ('("nucleus_boundaries",),',),
         "src/merxen/segmentation/native.py": (
             '("shapes", "nucleus_boundaries"): ("shapes", NATIVE_NUCLEUS_SHAPES_KEY),',
             "``cell_boundaries`` -> ``atera_cell_boundaries``, ``nucleus_boundaries`` ->",  # noqa: E501

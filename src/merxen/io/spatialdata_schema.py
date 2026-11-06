@@ -123,8 +123,28 @@ def register_segmentation_branch(
     assignment_source_column: str | None = None,
     coordinate_variant_of: str | None = None,
     legacy_aliases: tuple[str, ...] = (),
+    cell_key: str | None = None,
 ) -> None:
-    """Register an explicit points/assignment/shape/table segmentation pairing."""
+    """Register an explicit points/assignment/shape/table segmentation pairing.
+
+    Args:
+        sdata_obj: SpatialData-like object whose ``merxen_schema`` is updated.
+        branch: Registry name of the segmentation branch.
+        points_key: Points element the branch's assignment column lives in.
+        assignment_column: Transcript column holding the branch's instance ids,
+            or ``None`` when transcripts carry no assignment for it.
+        shape_key: Shapes element of the branch.
+        table_key: Expression table of the branch, or ``None``.
+        instance_key: Column holding the instance ids of the shapes.
+        id_namespace: Namespace of the branch's instance ids.
+        background_column: Transcript column flagging background, if any.
+        assignment_source_column: Column the assignment was derived from.
+        coordinate_variant_of: Branch this one is an aligned copy of.
+        legacy_aliases: Older names of the branch.
+        cell_key: Shape column naming the owning cell when the branch's ids are
+            not cell ids (vendor nuclei keyed by nucleus row); stored only when
+            set, so registries without it stay byte-identical.
+    """
     schema = stamp_merxen_schema(sdata_obj)
     if schema.get("primary_points") is None:
         schema["primary_points"] = str(points_key)
@@ -141,6 +161,8 @@ def register_segmentation_branch(
     }
     if coordinate_variant_of is not None:
         entry["coordinate_variant_of"] = str(coordinate_variant_of)
+    if cell_key is not None:
+        entry["cell_key"] = str(cell_key)
     # Refreshing assignments must retain the model that produced the geometry.
     previous = schema["segmentations"].get(str(branch), {})
     source = schema["segmentations"].get(coordinate_variant_of, {})
