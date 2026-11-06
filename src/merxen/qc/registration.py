@@ -255,16 +255,26 @@ def window_parquet_files(
     zarr_path: Path | str | None,
     points_key: str,
     windows: list[Window],
+    *,
+    x_col: str = "x",
+    y_col: str = "y",
 ) -> list[Path] | None:
     """Return the indexed parquet files that may hold rows in any window.
 
-    Only stores whose build recorded a points index (ATERA) can be pruned,
-    and only while the index still matches the parquet files.
+    Only stores whose build recorded a points index (ATERA) are pruned, and
+    only while the index still matches the parquet files (names and row
+    counts). Each file's box is then read afresh from the ``x_col`` /
+    ``y_col`` statistics of its footer rather than taken from the index, so a
+    rewrite that moved rows between files while keeping every file's row
+    count cannot hide transcripts from a window. A file whose footer has no
+    such statistics is always read.
 
     Args:
         zarr_path: Store the points element lives in, or ``None``.
         points_key: Points element.
         windows: Windows as ``(x_min, x_max, y_min, y_max)``.
+        x_col: Points column holding x in microns.
+        y_col: Points column holding y in microns.
 
     Returns:
         The overlapping files in index order, or ``None`` when the store
@@ -283,12 +293,55 @@ def window_parquet_files(
             points_key,
         )
         return None
-    selected: set[Path] = set()
-    for x_min, x_max, y_min, y_max in windows:
-        # The index takes (x0, y0, x1, y1); windows are (x_min, x_max, ...).
-        selected.update(aggregates.files_intersecting((x_min, y_min, x_max, y_max)))
-    ordered = [aggregates.points_dir / entry.name for entry in aggregates.files]
-    return [path for path in ordered if path in selected]
+    selected = []
+    for entry in aggregates.files:
+        path = aggregates.points_dir / entry.name
+        box = _footer_box(path, x_col, y_col)
+        # The footer box is inclusive and the windows half-open, so this keeps
+        # every file that can hold a row inside a window.
+        if box is None or any(
+            box[0] <= x_max and box[1] >= x_min and box[2] <= y_max and box[3] >= y_min
+            for x_min, x_max, y_min, y_max in windows
+        ):
+            selected.append(path)
+    logger.info(
+        "Registration check: the windows read %d of %d indexed parquet files of %s.",
+        len(selected),
+        len(aggregates.files),
+        points_key,
+    )
+    return selected
+
+
+def _footer_box(path: Path, x_col: str, y_col: str) -> Window | None:
+    """Return ``(x_min, x_max, y_min, y_max)`` of a parquet file's rows.
+
+    Taken from the row-group statistics of its footer; ``None`` when a
+    column or a row group's statistics are missing.
+    """
+    metadata = pq.read_metadata(path)
+    names = [metadata.schema.column(i).name for i in range(metadata.num_columns)]
+    if x_col not in names or y_col not in names:
+        return None
+    ranges: list[tuple[float, float]] = []
+    for position in (names.index(x_col), names.index(y_col)):
+        lows: list[float] = []
+        highs: list[float] = []
+        for group in range(metadata.num_row_groups):
+            chunk = metadata.row_group(group)
+            if chunk.num_rows == 0:
+                continue
+            stats = chunk.column(position).statistics
+            if stats is None or not stats.has_min_max:
+                return None
+            lows.append(float(stats.min))
+            highs.append(float(stats.max))
+        if not lows:
+            # No rows: nothing can fall inside a window.
+            return (np.inf, -np.inf, np.inf, -np.inf)
+        ranges.append((min(lows), max(highs)))
+    (x_min, x_max), (y_min, y_max) = ranges
+    return (x_min, x_max, y_min, y_max)
 
 
 def segmentation_registration_check(
@@ -507,7 +560,9 @@ def compute_segmentation_registration_qc(
             y_col=y_col,
             gene_col=gene_col,
             platform=platform,
-            parquet_files=window_parquet_files(zarr_path, points_key, windows),
+            parquet_files=window_parquet_files(
+                zarr_path, points_key, windows, x_col=x_col, y_col=y_col
+            ),
         )
     return segmentation_registration_check(
         centroids,

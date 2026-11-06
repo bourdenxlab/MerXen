@@ -106,11 +106,12 @@ def _gene_totals_from_aggregates(
         return None
     counts = pd.Series(
         aggregates.gene_counts_kept,
-        index=pd.Index(aggregates.feature_names, dtype=str),
+        index=pd.Index(aggregates.feature_names, dtype=str, name=gene_col),
         dtype=np.int64,
     )
     # A groupby over the points only sees features that occur.
     counts = counts[counts > 0]
+    logger.info("Per-gene totals of %s come from the build aggregates.", points_key)
     return counts.groupby(level=0).sum().astype(float)
 
 

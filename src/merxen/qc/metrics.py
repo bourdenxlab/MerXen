@@ -327,6 +327,9 @@ def compute_dataset_qc(
             points_key=points_key,
             reference_shape_key=registration_reference_shape_key,
             zarr_path=latest_zarr_path,
+            # No platform: control probes are dropped only with
+            # exclude_control_features (off here), and platform=None would
+            # then apply the rules of every platform.
         )
         registration_qc = registration.to_dict()
         summary.update(
@@ -388,6 +391,10 @@ def _point_count(
         aggregates = read_points_aggregates(Path(zarr_path), points_key)
         if aggregates is not None:
             if aggregates.fingerprint_matches():
+                logger.info(
+                    "Counting the transcripts of %s from the build aggregates.",
+                    points_key,
+                )
                 return int(aggregates.n_points_written)
             logger.info(
                 "Points aggregates of %s do not match its parquet files; counting "

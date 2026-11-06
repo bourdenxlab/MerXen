@@ -10,6 +10,7 @@ every transcript into pandas.
 
 from __future__ import annotations
 
+import json
 import shutil
 from collections.abc import Iterator
 from pathlib import Path
@@ -18,9 +19,11 @@ from typing import Any
 import dask.dataframe as dd
 import numpy as np
 import pandas as pd
+import pyarrow as pa_arrow
 import pyarrow.parquet as pq
 import pytest
 import spatialdata as sd
+from dask.dataframe.dask_expr._collection import FrameBase
 from test_io.atera_native_fixture import (
     CELL_SHAPES_KEY,
     POINTS_KEY,
@@ -67,12 +70,56 @@ def _no_pandas(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gene_comparison, "to_pandas", _refuse)
 
 
+def _no_dask_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail on any dask computation over a dataframe (a pass over the points).
+
+    The dask fallbacks give the same numbers as the fast paths, so only a
+    refused computation shows that a fast path was taken.
+    """
+
+    def _refuse(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("QC must not stream the points when the index matches")
+
+    monkeypatch.setattr(FrameBase, "compute", _refuse)
+
+
+def _spy_read_table(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Record the parquet files the registration check reads directly."""
+    calls: list[Path] = []
+    read_table = pq.read_table
+
+    def _spy(path: Any, *args: Any, **kwargs: Any) -> Any:
+        calls.append(Path(path))
+        return read_table(path, *args, **kwargs)
+
+    monkeypatch.setattr(registration.pq, "read_table", _spy)
+    return calls
+
+
+def _with_feature_counts(store: Path, extra: dict[str, int]) -> None:
+    """Append features to the build's per-gene totals of a store copy."""
+    v3 = store / "zarr.json"
+    path = v3 if v3.is_file() else store / ".zattrs"
+    document = json.loads(path.read_text())
+    attrs = document["attributes"] if path == v3 else document
+    transcripts = attrs[pa.ATERA_ATTRS_KEY]["transcripts"]
+    transcripts["feature_names"] = [*transcripts["feature_names"], *extra]
+    transcripts["gene_counts_kept"] = [
+        *transcripts["gene_counts_kept"],
+        *extra.values(),
+    ]
+    path.write_text(json.dumps(document))
+
+
 def test_native_qc_counts_from_the_aggregates(
     latest: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _no_pandas(monkeypatch)
     aggregates = pa.read_points_aggregates(latest)
     assert aggregates is not None and aggregates.fingerprint_matches()
+    expected_count = _dask_count(latest)
+    _no_dask_pass(monkeypatch)
+    reads = _spy_read_table(monkeypatch)
 
     result = compute_dataset_qc(
         latest,
@@ -84,7 +131,10 @@ def test_native_qc_counts_from_the_aggregates(
 
     summary = result["summary"]
     assert summary["n_transcripts_total"] == aggregates.n_points_written
-    assert summary["n_transcripts_total"] == _dask_count(latest)
+    assert summary["n_transcripts_total"] == expected_count
+    # The registration check read the indexed files, not the dask points.
+    points_dir = aggregates.points_dir
+    assert [path for path in reads if path.parent == points_dir]
     assert summary["shape_key"] == CELL_SHAPES_KEY
     assert summary["table_key"] == TABLE_KEY
     table = sd.read_zarr(latest).tables[TABLE_KEY]
@@ -123,12 +173,17 @@ def test_reference_equal_to_tested_shape_is_skipped(
     assert all(row["shift_x_um"] is None for row in with_reference.per_window)
 
 
-def test_point_count_fast_path_equals_dask(latest: Path) -> None:
+def test_point_count_fast_path_equals_dask(
+    latest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     points = sd.read_zarr(latest).points[POINTS_KEY]
+    expected = metrics._point_count(points)
+    assert expected == _dask_count(latest)
 
+    _no_dask_pass(monkeypatch)
     fast = metrics._point_count(points, latest, POINTS_KEY)
 
-    assert fast == metrics._point_count(points) == _dask_count(latest)
+    assert fast == expected
 
 
 def test_gene_totals_fast_path_equals_dask(
@@ -141,16 +196,43 @@ def test_gene_totals_fast_path_equals_dask(
     expected = expected[expected > 0].groupby(level=0).sum().astype(float)
 
     _no_pandas(monkeypatch)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            gene_comparison, "_gene_totals_from_aggregates", lambda *_args: None
+        )
+        streamed = gene_comparison.gene_totals_from_points(sdata, assigned_only=False)
     fast = gene_comparison._gene_totals_from_aggregates(
         sdata, POINTS_KEY, "feature_name"
     )
+    _no_dask_pass(monkeypatch)
     totals = gene_comparison.gene_totals_from_points(sdata, assigned_only=False)
 
     assert fast is not None
     pd.testing.assert_series_equal(totals, fast)
+    # Same values, index and index name as the dask path.
+    pd.testing.assert_series_equal(totals.sort_index(), streamed.sort_index())
     pd.testing.assert_series_equal(
         totals.sort_index(), expected.sort_index(), check_names=False
     )
+
+
+def test_gene_totals_drop_features_without_transcripts(
+    latest: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A feature the build counted zero times is absent, as in a groupby."""
+    store = Path(shutil.copytree(latest, tmp_path / "zero.zarr"))
+    _with_feature_counts(store, {"ZERO_FEATURE": 0})
+    aggregates = pa.read_points_aggregates(store)
+    assert aggregates is not None and aggregates.fingerprint_matches()
+    assert aggregates.gene_counts()["ZERO_FEATURE"] == 0
+    sdata = sd.read_zarr(store)
+    _no_dask_pass(monkeypatch)
+
+    totals = gene_comparison.gene_totals_from_points(sdata, assigned_only=False)
+
+    assert "ZERO_FEATURE" not in totals.index
+    assert (totals > 0).all()
+    assert totals.sum() == aggregates.n_points_written
 
 
 def test_stale_index_falls_back_to_dask(
@@ -247,12 +329,24 @@ def test_far_window_reads_no_file(latest: Path) -> None:
     assert xy.shape == (0, 2)
 
 
-def test_registration_with_pruning_equals_full_scan(latest: Path) -> None:
+def test_registration_with_pruning_equals_full_scan(
+    latest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     sdata = sd.read_zarr(latest)
     params = RegistrationCheckParams(
         window_size_um=16.0, radius_um=2.0, min_centroids=1
     )
 
+    full = compute_segmentation_registration_qc(
+        sdata, shape_key=CELL_SHAPES_KEY, points_key=POINTS_KEY, params=params
+    )
+    centroids = registration.shape_centroids(sdata.shapes[CELL_SHAPES_KEY])
+    windows = registration.sample_registration_windows(centroids, params)
+    expected_files = window_parquet_files(latest, POINTS_KEY, windows)
+    assert expected_files is not None
+
+    _no_dask_pass(monkeypatch)
+    reads = _spy_read_table(monkeypatch)
     pruned = compute_segmentation_registration_qc(
         sdata,
         shape_key=CELL_SHAPES_KEY,
@@ -260,10 +354,8 @@ def test_registration_with_pruning_equals_full_scan(latest: Path) -> None:
         params=params,
         zarr_path=latest,
     )
-    full = compute_segmentation_registration_qc(
-        sdata, shape_key=CELL_SHAPES_KEY, points_key=POINTS_KEY, params=params
-    )
 
+    assert reads == expected_files
     assert full.mean_transcripts_at_centroids  # windows hold transcripts
     assert pruned.to_dict() == full.to_dict()
 
@@ -304,3 +396,66 @@ def test_atera_control_names_follow_the_registry() -> None:
     )
 
     np.testing.assert_allclose(xy, [[1.0, 1.0], [5.0, 5.0]])
+
+
+def test_pruning_follows_rows_moved_between_files(latest: Path, tmp_path: Path) -> None:
+    """Rows swapped between two files keep every row count, so the index
+    fingerprint still matches; pruning reads the footers and still finds them.
+    """
+
+    store = Path(shutil.copytree(latest, tmp_path / "swapped.zarr"))
+    aggregates = pa.read_points_aggregates(store)
+    assert aggregates is not None
+    # Two files whose indexed boxes do not overlap.
+    first, second = (
+        entry
+        for entry in aggregates.files
+        if entry.name in {"part.0.parquet", "part.2.parquet"}
+    )
+    assert first.bbox_um is not None and second.bbox_um is not None
+    assert first.bbox_um[1] > second.bbox_um[3]  # disjoint in y
+    a = pq.read_table(aggregates.points_dir / first.name)
+    b = pq.read_table(aggregates.points_dir / second.name)
+    moved = a.slice(a.num_rows - 1, 1)
+    pq.write_table(
+        pa_arrow.concat_tables(
+            [a.slice(0, a.num_rows - 1), b.slice(b.num_rows - 1, 1).cast(a.schema)]
+        ),
+        aggregates.points_dir / first.name,
+    )
+    pq.write_table(
+        pa_arrow.concat_tables([b.slice(0, b.num_rows - 1), moved.cast(b.schema)]),
+        aggregates.points_dir / second.name,
+    )
+    assert aggregates.fingerprint_matches()
+    x = float(moved.column("x")[0].as_py())
+    y = float(moved.column("y")[0].as_py())
+    window = [(x - 0.01, x + 0.01, y - 0.01, y + 0.01)]
+    # The index box of the file the row left still claims it.
+    assert aggregates.files_intersecting((x - 0.01, y - 0.01, x + 0.01, y + 0.01)) == [
+        aggregates.points_dir / first.name
+    ]
+
+    files = window_parquet_files(store, POINTS_KEY, window)
+    points = sd.read_zarr(store).points[POINTS_KEY]
+    pruned = transcripts_in_windows(
+        points, window, x_col="x", y_col="y", parquet_files=files
+    )
+    full = transcripts_in_windows(points, window, x_col="x", y_col="y")
+
+    assert files is not None and aggregates.points_dir / second.name in files
+    assert len(full) == 1
+    np.testing.assert_array_equal(_sorted_rows(pruned), _sorted_rows(full))
+
+
+def test_pruning_without_coordinate_statistics_reads_every_file(latest: Path) -> None:
+    """Points named other than the indexed x/y columns are never pruned away."""
+    aggregates = pa.read_points_aggregates(latest)
+    assert aggregates is not None
+    far = [(1.0e6, 1.0e6 + 10.0, 1.0e6, 1.0e6 + 10.0)]
+
+    files = window_parquet_files(
+        latest, POINTS_KEY, far, x_col="global_x", y_col="global_y"
+    )
+
+    assert files == [aggregates.points_dir / entry.name for entry in aggregates.files]

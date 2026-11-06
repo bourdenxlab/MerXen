@@ -38,7 +38,8 @@ for every branch and uses no labels:
    platform's own cells (the registry's original cell shape:
    `merscope_cell_boundaries`, `xenium_cell_boundaries` or
    `atera_cell_boundaries`; skipped when it is the tested shape, as for
-   `original_seg`, the only layer of a native ATERA row). The reported shift is platform minus
+   the `original` and `original_seg` layers of a native ATERA row, whose
+   tested shape is the vendor's own). The reported shift is platform minus
    branch, median over windows with a clear peak (z ≥ 4), on a 2 µm grid.
    It is 0 for every registered layer above and (-22, -112) µm for the MS2
    branches.
@@ -49,7 +50,11 @@ fall inside the windows. Coordinates are compared in each element's intrinsic
 (micron) frame, not a SpatialData coordinate system.
 
 On a store with a points index (ATERA, below) the windows read only the
-parquet files whose bounding box overlaps them. With
+parquet files whose rows can fall inside them. Each file's box comes from the
+x/y statistics of its parquet footer, read at QC time, not from the box the
+index recorded at build time: a rewrite that moves rows between files while
+keeping every file's row count still matches the index fingerprint, and the
+footers keep pruning correct. A file without those statistics is always read. With
 `exclude_control_features` (off by default) control probes are dropped by the
 platform rules of `merxen.control_features`.
 
@@ -65,7 +70,11 @@ the parquet files on disk (file names, footer row counts, total):
   by gene summaries and comparisons) are the build's `gene_counts_kept`;
 - the registration windows read only the overlapping files.
 
-A stale index falls back to streaming the points with dask. QC never loads
+The QC log says which path each figure took ("from the build aggregates",
+"the windows read k of n indexed parquet files"). The fingerprint checks file
+names and row counts only, so a step that rewrites the points must keep each
+file's rows and feature names or drop the index. A stale index falls back to
+streaming the points with dask. QC never loads
 every transcript into pandas: if a dask aggregation fails it raises with the
 cause instead of retrying in memory. XENIUM and MERSCOPE stores carry no
 aggregates, so their QC is unchanged.
