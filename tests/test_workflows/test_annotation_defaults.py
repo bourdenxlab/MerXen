@@ -1481,10 +1481,15 @@ def test_groovy_row_mode_summary_lists_each_rows_mode(
 def test_main_nf_logs_the_row_modes_and_the_legacy_deprecation() -> None:
     """Both lines are logged once, before any channel runs (hook H5 site)."""
     main_text = (REPO_ROOT / "workflows" / "main.nf").read_text()
+    # The rows as their annotation mode reads them: ATERA rows without their
+    # own mode column cluster in legacy mode (main.nf annotationModeRow) and
+    # raise no deprecation warning.
     summary = main_text.index(
-        "AnnotationSettings.rowModeSummary(params, samplesheetRows)"
+        "AnnotationSettings.rowModeSummary(params, annotationModeRows)"
     )
-    warning = main_text.index("AnnotationSettings.deprecatedLegacyWarning(params)")
+    warning = main_text.index(
+        "AnnotationSettings.deprecatedLegacyWarning(\n        params,"
+    )
     assert main_text.index("AnnotationSettings.useRowModes(") < summary < warning
     assert warning < main_text.index("sample_rows_raw_ch = samplesheet_ch.map")
     assert "usesDeprecatedHumanLegacy" not in main_text

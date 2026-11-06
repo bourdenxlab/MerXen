@@ -917,9 +917,7 @@ def corticalDepthConfigForPlatform(
             segmentation: segmentation,
             table_key: layerKeys.table_key,
             shape_key: layerKeys.shape_key,
-        ] + AnnotationSettings.clusteredTableFields(
-            annotationModeRow(row, params), params
-        ) // rca-site:H2
+        ] + AnnotationSettings.clusteredTableFields(row, params) // rca-site:H2
     }
     return [
         dataset_name: "${pairId}_${platform}",
@@ -2374,8 +2372,9 @@ def rowIsAtera(row, params) {
 // column therefore clusters in legacy mode, whatever the species default or
 // --clustering_squidpy_mode, like the other global switches ATERA rows ignore;
 // a row that asks for map_first itself is refused by the ATERA preflight.
-// Every reader of a row's annotation mode (the run's mode list, the row
-// settings, the clustered-table fields) goes through this function.
+// The readers of a row's annotation mode (the run's mode list and the row
+// settings) go through this function; cortical depth, whose clustered-table
+// fields also read the mode, is refused for ATERA rows.
 def annotationModeRow(row, params) {
     if (!rowIsAtera(row, params)) {
         return row

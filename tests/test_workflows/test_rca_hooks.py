@@ -73,7 +73,10 @@ HOOK_CONTENT: dict[str, tuple[str, ...]] = {
         'def clusteredSpatialdataTableKey(sourceTableKey, segmentation, suffix = "")',
     ),
     "H3": (
-        "def annotationSettings = AnnotationSettings.forRow(row, params, species)",
+        # ATERA rows without their own mode column read as legacy
+        # (annotationModeRow, RCA merge into the Atera line).
+        "def annotationSettings = AnnotationSettings.forRow(",
+        "annotationModeRow(row, params), params, species",
         "runMapMyCells = AnnotationSettings.runMapMyCells(",
         "return annotationSettings + [",
     ),
