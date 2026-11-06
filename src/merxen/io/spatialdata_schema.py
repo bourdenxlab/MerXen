@@ -124,6 +124,8 @@ def register_segmentation_branch(
     coordinate_variant_of: str | None = None,
     legacy_aliases: tuple[str, ...] = (),
     cell_key: str | None = None,
+    label_key: str | None = None,
+    prior: str | None = None,
 ) -> None:
     """Register an explicit points/assignment/shape/table segmentation pairing.
 
@@ -144,6 +146,11 @@ def register_segmentation_branch(
         cell_key: Shape column naming the owning cell when the branch's ids are
             not cell ids (vendor nuclei keyed by nucleus row); stored only when
             set, so registries without it stay byte-identical.
+        label_key: Label element holding the branch's cells on the image grid
+            (the ATERA ProSeg layer); stored only when set.
+        prior: What the branch's cells were refined from (``"vendor_cell_labels"``
+            for the ATERA ProSeg layer); stored only when set. A branch with a
+            prior is a segmentation result that enrichment cannot rebuild.
     """
     schema = stamp_merxen_schema(sdata_obj)
     if schema.get("primary_points") is None:
@@ -163,6 +170,10 @@ def register_segmentation_branch(
         entry["coordinate_variant_of"] = str(coordinate_variant_of)
     if cell_key is not None:
         entry["cell_key"] = str(cell_key)
+    if label_key is not None:
+        entry["label"] = str(label_key)
+    if prior is not None:
+        entry["prior"] = str(prior)
     # Refreshing assignments must retain the model that produced the geometry.
     previous = schema["segmentations"].get(str(branch), {})
     source = schema["segmentations"].get(coordinate_variant_of, {})

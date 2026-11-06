@@ -28,6 +28,11 @@ from merxen.cli.run_annotation_panels import (
     annotation_panel_simulate_command,
 )
 from merxen.cli.run_annotation_report import annotation_report_command
+from merxen.cli.run_atera_proseg import (
+    atera_proseg_plan_command,
+    atera_proseg_stitch_command,
+    atera_proseg_tile_command,
+)
 from merxen.cli.run_build_spatialdata import build_spatialdata_command
 from merxen.cli.run_clustering_squidpy import clustering_squidpy_command
 from merxen.cli.run_comparison import compare_command
@@ -85,6 +90,9 @@ main.add_command(cellpose_segment_command)
 main.add_command(cellpose_nuclei_segment_command)
 main.add_command(proseg_segment_command)
 main.add_command(native_latest_command)
+main.add_command(atera_proseg_plan_command)
+main.add_command(atera_proseg_tile_command)
+main.add_command(atera_proseg_stitch_command)
 main.add_command(enrich_command)
 main.add_command(register_images_command)
 main.add_command(build_viewer_caches_command)

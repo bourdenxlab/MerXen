@@ -19,6 +19,12 @@ BUILD cases with the ATERA params off their defaults (AT-4 added the ATERA
 cases; the XENIUM and MERSCOPE cases are unchanged). AT-6 added the ATERA
 native-route cases (the ``native`` file and ATERA ids in ``enrich``,
 ``viewer_cache`` and ``analysis_layers``); again only case ids were added.
+AT-9 added the ``atera_proseg`` file (the ATERA ProSeg route) and changed the
+error text of two ``native`` cases (the list of sources): the ATERA-only
+``atera_cellpose_only_error`` and the platform-independent ``unknown_error``,
+so an unknown ``segmentation_source`` on a XENIUM or MERSCOPE row now lists
+``native_proseg`` among the valid values. Only the message changes; no task
+input or hash does.
 
 Goldens hold the compact ``JsonOutput.toJson`` text of each case (the task input
 is its deterministic ``prettyPrint``) with the launch directory written as
@@ -63,6 +69,7 @@ GOLDEN_FILES: tuple[str, ...] = (
     "pciseq",
     "native",
     "mask_image_quantification",
+    "atera_proseg",
 )
 
 # Launch id -> extra command-line params (params are global per run).
@@ -129,7 +136,7 @@ SPANS: tuple[Span, ...] = (
     ),
     Span(
         "renderEnrich(key, pairId, platform, latestZarr, maskPath, nucleiMaskPath, "
-        "originalDataPath)",
+        "originalDataPath, rowSource = null)",
         "enrich_inputs_ch = segment_results_ch",
         "def persistentLatestZarrPath",
         "\n            tuple(",
@@ -162,7 +169,7 @@ SPANS: tuple[Span, ...] = (
     ),
     Span(
         "renderMaskImageQuantification(key, pairId, platform, enrichedLatestZarr, "
-        "maskPath)",
+        "maskPath, rowSource = null)",
         "mask_image_quantification_inputs_ch = post_enrich_zarrs_ch",
         "def quantConfig",
         "\n            tuple(",

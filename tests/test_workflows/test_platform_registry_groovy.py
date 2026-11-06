@@ -36,6 +36,7 @@ _PYTHON_FIELDS = (
     "default_channels",
     "segmentation_sources",
     "default_segmentation_source",
+    "proseg_label_key",
 )
 # Samplesheet fields of each platform, as main.nf read them before the registry.
 _SAMPLESHEET_FIELDS: dict[str, dict[str, list[str]]] = {

@@ -550,6 +550,229 @@ class NativeLatestConfig(BaseModel):
     force: bool = False
 
 
+class AteraProsegModelParams(BaseModel):
+    """ProSeg model and schedule of the tiled ATERA route (``native_proseg``).
+
+    The model values are the ProSeg values the Cellpose route uses
+    (``proseg_*`` params); the schedule is the short one validated by the
+    AT-5(b) benchmark. ``prior_seg_reassignment_prob`` and
+    ``use_cell_initialization`` default to ProSeg's own defaults, as in the
+    benchmark, not to :class:`ProsegConfig`'s.
+
+    Attributes:
+        voxel_size: ``--voxel-size`` (microns).
+        burnin_voxel_size: ``--burnin-voxel-size`` (microns).
+        voxel_layers: ``--voxel-layers``.
+        nuclear_reassignment_prob: ``--nuclear-reassignment-prob``.
+        diffusion_probability: ``--diffusion-probability``.
+        cell_compactness: ``--cell-compactness``.
+        burnin_samples: ``--burnin-samples``.
+        samples: ``--samples``.
+        hillclimb: ``--hillclimb``.
+        recorded_samples: ``--recorded-samples``.
+        prior_weight_effective: The effective prior weight ProSeg reports
+            (``prior weight`` line). The ``--prior-weight`` multiplier of each
+            tile is chosen so that ProSeg's own scaling gives this value.
+        prior_weight_tolerance: Largest relative difference between the
+            reported and the requested effective weight.
+        min_qv: ``--min-qv`` (the store already holds QV >= 20 rows only).
+        prior_seg_reassignment_prob: ``--prior-seg-reassignment-prob``, or
+            ``None`` for ProSeg's default.
+        use_cell_initialization: Pass ``--use-cell-initialization``.
+        nuclear_compartment: Give ProSeg the vendor ``overlaps_nucleus`` flag
+            (its nuclear compartment model); ``False`` writes 0 for every row.
+    """
+
+    voxel_size: float = 0.5
+    burnin_voxel_size: float = 1.0
+    voxel_layers: int = 2
+    nuclear_reassignment_prob: float = 0.2
+    diffusion_probability: float = 0.2
+    cell_compactness: float = 0.04
+    burnin_samples: int = 100
+    samples: int = 200
+    hillclimb: int = 20
+    recorded_samples: int = 100
+    prior_weight_effective: float = 140.0
+    prior_weight_tolerance: float = 0.02
+    min_qv: float = 20.0
+    prior_seg_reassignment_prob: float | None = None
+    use_cell_initialization: bool = False
+    nuclear_compartment: bool = True
+
+    @model_validator(mode="after")
+    def _validate_schedule(self: AteraProsegModelParams) -> AteraProsegModelParams:
+        for name in ("burnin_samples", "hillclimb", "recorded_samples"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be at least 0")
+        if self.samples < 1:
+            raise ValueError("samples must be at least 1")
+        if self.recorded_samples > self.samples:
+            raise ValueError(
+                f"recorded_samples ({self.recorded_samples}) must not exceed "
+                f"samples ({self.samples})"
+            )
+        weight = self.prior_weight_effective
+        if not isfinite(weight) or weight <= 0:
+            raise ValueError("prior_weight_effective must be a positive number")
+        if not 0 < self.prior_weight_tolerance < 1:
+            raise ValueError("prior_weight_tolerance must lie in (0, 1)")
+        for name in ("voxel_size", "burnin_voxel_size"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive")
+        if self.voxel_layers < 1:
+            raise ValueError("voxel_layers must be at least 1")
+        return self
+
+
+ATERA_PROSEG_MIN_HALO_UM = 100.0
+"""Smallest halo of the ATERA ProSeg tiles (plan AT-9; tests lower it)."""
+
+
+class AteraProsegPlanConfig(BaseModel):
+    """Configuration of ATERA_PROSEG_PLAN, the tile plan of a ``native_proseg`` row.
+
+    Attributes:
+        dataset_name: Dataset alias used in logs and provenance.
+        platform: Platform of the row (ATERA only).
+        source_zarr_path: The built source store.
+        output_dir: Task output folder (``tile_plan.json``).
+        tile_um: Edge of a tile core in microns (grid origin 0, 0).
+        halo_um: Margin around a core that a tile also reads.
+        min_halo_um: Smallest halo accepted.
+        owned_margin_um: Margin around the bounding box of every owned cell
+            that the window must cover.
+        max_window_extension_um: How far the window may reach beyond the
+            halo to cover owned cells; ``None`` means ``halo_um``.
+        tile_subset: Tile ids to run (a check run); ``None`` runs every tile
+            that owns cells. A plan with a subset cannot be stitched.
+    """
+
+    dataset_name: str
+    platform: Literal["ATERA"]
+    source_zarr_path: Path
+    output_dir: Path
+    tile_um: float = 2000.0
+    halo_um: float = 100.0
+    min_halo_um: float = ATERA_PROSEG_MIN_HALO_UM
+    owned_margin_um: float = 20.0
+    max_window_extension_um: float | None = None
+    tile_subset: list[str] | None = None
+
+    @model_validator(mode="after")
+    def _validate_grid(self: AteraProsegPlanConfig) -> AteraProsegPlanConfig:
+        if self.halo_um < self.min_halo_um:
+            raise ValueError(
+                f"halo_um={self.halo_um} is below the minimum of "
+                f"{self.min_halo_um} microns"
+            )
+        if self.tile_um <= 2 * self.halo_um:
+            raise ValueError(
+                f"tile_um={self.tile_um} must exceed twice the halo ({self.halo_um})"
+            )
+        if self.owned_margin_um < 0:
+            raise ValueError("owned_margin_um must be at least 0")
+        extension = self.max_window_extension_um
+        if extension is not None and extension < 0:
+            raise ValueError("max_window_extension_um must be at least 0")
+        if self.tile_subset is not None and not self.tile_subset:
+            raise ValueError("tile_subset must name at least one tile")
+        return self
+
+
+class AteraProsegTileConfig(BaseModel):
+    """Configuration of one ATERA_PROSEG_TILE task.
+
+    The tile entry is copied from the plan, so the task's inputs are the
+    config value and the source store (never the plan file).
+
+    Attributes:
+        dataset_name: Dataset alias.
+        platform: ATERA.
+        tile_id: Tile id (``c{col}_r{row}``).
+        source_zarr_path: The built source store the tile reads.
+        source_build_fingerprint: Build fingerprint of that store.
+        pixel_size_um: Microns per morphology pixel.
+        core_um: ``[x0, y0, x1, y1]`` of the tile core (half-open).
+        window_px: ``[col0, col1, row0, row1]`` of the window (end-exclusive).
+        mask_shape_px: ``[n_rows, n_cols]`` of the vendor cell mask.
+        owned_labels: Vendor labels whose centroid lies in the core.
+        output_dir: Folder of the tile result (``tile_<id>``).
+        num_threads: ProSeg ``--nthreads``.
+        max_rss_gb: Cap on the anonymous memory of the task's process tree.
+        model: ProSeg model and schedule.
+        proseg_git_rev: Git revision of the ProSeg build (provenance).
+        keep_inputs: Keep the exported parquet, prior and raw ProSeg outputs.
+        edge_tolerance_voxels: Distance (in voxels) from an interior window
+            edge at which an owned polygon is reported.
+        allow_untested_version: Run a ProSeg version other than the verified
+            one (``atera_proseg_allow_untested_version``), with a warning.
+    """
+
+    dataset_name: str
+    platform: Literal["ATERA"]
+    tile_id: str
+    source_zarr_path: Path
+    source_build_fingerprint: str
+    pixel_size_um: float
+    core_um: list[float]
+    window_px: list[int]
+    mask_shape_px: list[int]
+    owned_labels: list[int]
+    output_dir: Path
+    num_threads: int = 16
+    max_rss_gb: float | None = None
+    model: AteraProsegModelParams = AteraProsegModelParams()
+    proseg_git_rev: str | None = None
+    keep_inputs: bool = False
+    edge_tolerance_voxels: float = 1.0
+    allow_untested_version: bool = False
+
+    @model_validator(mode="after")
+    def _validate_window(self: AteraProsegTileConfig) -> AteraProsegTileConfig:
+        if len(self.core_um) != 4 or len(self.window_px) != 4:
+            raise ValueError("core_um and window_px need four values")
+        if len(self.mask_shape_px) != 2:
+            raise ValueError("mask_shape_px needs [n_rows, n_cols]")
+        col0, col1, row0, row1 = self.window_px
+        if not (0 <= col0 < col1 and 0 <= row0 < row1):
+            raise ValueError(f"empty or negative window {self.window_px}")
+        if not self.owned_labels:
+            raise ValueError(f"tile {self.tile_id} owns no label; it is not run")
+        if self.num_threads < 1:
+            raise ValueError("num_threads must be at least 1")
+        return self
+
+
+class AteraProsegStitchConfig(BaseModel):
+    """Configuration of ATERA_PROSEG_STITCH.
+
+    Attributes:
+        dataset_name: Dataset alias.
+        platform: ATERA.
+        latest_zarr_path: The staged NATIVE_LATEST output (a link to the
+            persistent latest store).
+        persistent_latest_zarr_path: The latest store written in place.
+        plan_path: ``tile_plan.json``.
+        tile_dirs: Tile result folders, one per tile the plan runs.
+        output_dir: Task output folder (``stitch_out``).
+        n_workers: Worker threads; ``None`` uses ``DASK_NUM_WORKERS``.
+        edge_tolerance_voxels: As in :class:`AteraProsegTileConfig`.
+        force: Re-stitch even when the store records the same fingerprint.
+    """
+
+    dataset_name: str
+    platform: Literal["ATERA"]
+    latest_zarr_path: Path
+    persistent_latest_zarr_path: Path | None = None
+    plan_path: Path
+    tile_dirs: list[Path]
+    output_dir: Path
+    n_workers: int | None = None
+    edge_tolerance_voxels: float = 1.0
+    force: bool = False
+
+
 class CellposeModelPolicy(BaseModel):
     """Explicit custom-model opt-in and protected published output roots."""
 
@@ -582,8 +805,9 @@ class EnrichmentConfig(BaseModel):
 
     ``segmentation_source="native"`` (ATERA only) enriches the vendor
     segmentation of a NATIVE_LATEST store: no Cellpose masks are read, so
-    ``mask_path`` and ``nuclei_mask_path`` may be ``None``. Every other source
-    needs both masks.
+    ``mask_path`` and ``nuclei_mask_path`` may be ``None``.
+    ``"native_proseg"`` does the same and also checks the stitched ProSeg
+    layer of the store (AT-9). Every other source needs both masks.
     """
 
     dataset_name: str
@@ -600,11 +824,11 @@ class EnrichmentConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_segmentation_source(self: EnrichmentConfig) -> EnrichmentConfig:
-        if self.segmentation_source == "native":
+        if self.segmentation_source in ("native", "native_proseg"):
             if self.platform != "ATERA":
                 raise ValueError(
-                    "segmentation_source=native enriches the vendor segmentation "
-                    f"of ATERA rows only, not {self.platform}"
+                    f"segmentation_source={self.segmentation_source} enriches the "
+                    f"vendor segmentation of ATERA rows only, not {self.platform}"
                 )
             return self
         missing = [
@@ -669,12 +893,28 @@ class ViewerCacheConfig(BaseModel):
         return self
 
 
+class MiqLayer(BaseModel):
+    """A further mask layer quantified by the same MIQ task.
+
+    Attributes:
+        mask_label_key: Label element of the store holding the layer's cells.
+        shape_key: Shapes element whose ``instance_id`` the labels hold.
+        table_key: Table written for the layer.
+    """
+
+    mask_label_key: str
+    shape_key: str
+    table_key: str
+
+
 class MaskImageQuantificationConfig(BaseModel):
     """Configuration for mask image-channel quantification.
 
     The mask is either a Cellpose ``.npy`` label image (``mask_path``) or a
     label element of the store (``mask_label_key``, such as the vendor
     ``cell_labels`` of a native ATERA row); exactly one of the two is set.
+    ``extra_layers`` (ATERA ``native_proseg`` rows: the ProSeg labels) are
+    quantified after the main layer, one table each, by the same task.
     """
 
     dataset_name: str
@@ -686,6 +926,7 @@ class MaskImageQuantificationConfig(BaseModel):
     shape_key: str = "MOSAIK_cellpose"
     tile_size: int = 2048
     mask_label_key: str | None = None
+    extra_layers: list[MiqLayer] = Field(default_factory=list)
 
     @field_validator("tile_size")
     @classmethod
@@ -706,6 +947,9 @@ class MaskImageQuantificationConfig(BaseModel):
                 "set exactly one of mask_path (a .npy label image) and "
                 "mask_label_key (a label element of the store)"
             )
+        tables = [self.table_key, *(layer.table_key for layer in self.extra_layers)]
+        if len(set(tables)) != len(tables):
+            raise ValueError(f"every MIQ layer needs its own table, got {tables}")
         return self
 
 

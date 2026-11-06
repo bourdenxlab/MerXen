@@ -30,6 +30,8 @@ Changes made so far:
   pinned as they are on ``feature/robust-celltype-annotation``. They are new
   processes, so no completed task is invalidated; no existing pin changed (RCA
   kept the legacy script texts, MENDER_PREPARE's among them, byte-identical).
+- AT-9 added the pins of ATERA_PROSEG_PLAN, ATERA_PROSEG_TILE and
+  ATERA_PROSEG_STITCH (``modules/atera_proseg.nf``); no existing pin changed.
 """
 
 from __future__ import annotations
@@ -153,9 +155,13 @@ def test_main_nf_defines_no_process() -> None:
 
 
 def test_pinned_inventory(pinned: dict[str, str]) -> None:
-    """Today's inventory: 50 processes, 50 ``script:`` and 12 ``stub:`` sections."""
+    """Today's inventory: 53 processes, 53 ``script:`` and 12 ``stub:`` sections.
+
+    AT-9 added the three ATERA ProSeg processes (``modules/atera_proseg.nf``) and
+    the RCA merge added the annotation processes; no existing pin changed.
+    """
     labels = [key.rsplit("::", 1)[1] for key in pinned]
-    assert labels.count("script") == 50
+    assert labels.count("script") == 53
     assert labels.count("stub") == 12
     assert {key for key in pinned if key.endswith("::stub")} == {
         f"workflows/modules/pciseq.nf::{name}::stub"

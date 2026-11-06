@@ -22,6 +22,7 @@ def check(String id, Map row) {
             stage_order: settings.stage_order,
             selected_stages: settings.selected_stages,
             run_native_segment: settings.run_native_segment,
+            run_atera_proseg: settings.run_atera_proseg,
             run_segment_nuclei: settings.run_segment_nuclei,
             run_mecr: settings.run_mecr,
             run_mapmycells: settings.run_mapmycells,
@@ -102,6 +103,28 @@ workflow {
     check("atera/only_pciseq", atera + [only_stage: "pciseq"])
     check("atera/stop_gaston", atera + [stop_stage: "gaston"])
     check("atera/only_mecr", atera + [only_stage: "mecr"])
+    // AT-9: the ATERA ProSeg route (segmentation_source=native_proseg).
+    def proseg = atera + [segmentation_source: "native_proseg"]
+    check("proseg/default", proseg)
+    check(
+        "proseg/all_mender",
+        proseg + [analysis_segmentation: "all", mender_enabled: "true", stop_stage: "mender"],
+    )
+    check("proseg/stop_segment", proseg + [stop_stage: "segment"])
+    check("proseg/start_enrich", proseg + [start_stage: "enrich", stop_stage: "enrich"])
+    check("proseg/alias", atera + [segmentation_source: "Vendor-ProSeg"])
+    check("proseg/reseg_only", proseg + [analysis_segmentation: "reseg"])
+    check("proseg/hybrid", proseg + [analysis_segmentation: "proseg_hybrid"])
+    check(
+        "proseg/mender_hybrid",
+        proseg + [mender_enabled: "true", mender_segmentations: "proseg_hybrid"],
+    )
+    check("proseg/segment_nuclei", proseg + [only_stage: "segment_nuclei"])
+    check(
+        "proseg/xenium",
+        [pair_id: "PAIR_D", analysis_mode: "xenium", xenium_dir: "raw/xenium",
+         segmentation_source: "native_proseg"],
+    )
     // Mixed samplesheet: the XENIUM row keeps its four layers and Cellpose.
     def xenium = [pair_id: "PAIR_B", analysis_mode: "xenium", xenium_dir: "raw/xenium"]
     check("mixed/xenium", xenium + [stop_stage: "build_spatialdata"])

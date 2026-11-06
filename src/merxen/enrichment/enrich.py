@@ -585,9 +585,10 @@ def _is_native_store(platform: str, attrs: Any) -> bool:
     """Whether a store of ``platform`` holds a native (vendor) segmentation.
 
     A native latest store records ``merxen_schema.segmentation_source ==
-    "native"``; a platform whose only segmentation source is ``native``
-    (ATERA in AT-6) is native even when the record is missing. XENIUM and
-    MERSCOPE stores are never native.
+    "native"`` (also when a ``native_proseg`` row added its ProSeg layer); a
+    platform whose default segmentation source is ``native`` (ATERA) is native
+    even when the record is missing. XENIUM and MERSCOPE stores are never
+    native.
 
     Args:
         platform: Platform name of the store.
@@ -603,7 +604,7 @@ def _is_native_store(platform: str, attrs: Any) -> bool:
     schema = dict(attrs or {}).get(MERXEN_SCHEMA_ATTR)
     if isinstance(schema, dict) and schema.get("segmentation_source") == "native":
         return "native" in spec.segmentation_sources
-    return spec.segmentation_sources == ("native",)
+    return spec.default_segmentation_source == "native"
 
 
 def _missing_native_elements(
@@ -724,14 +725,43 @@ def _remove_per_shape_assignment_tables(dst_sdata: Any) -> None:
             del dst_sdata.tables[table_key]
 
 
+def _segmentation_result_tables(zarr_path: Path) -> set[str]:
+    """Return the tables of registry branches refined from a prior.
+
+    A branch with a ``prior`` (the stitched ATERA ProSeg layer,
+    ``table_MOSAIK_proseg``) is a segmentation result that enrichment cannot
+    rebuild, so its table is never a derived table. No XENIUM or MERSCOPE
+    branch records a prior.
+    """
+    try:
+        schema = read_root_attrs(Path(zarr_path)).get(MERXEN_SCHEMA_ATTR) or {}
+    except (OSError, ValueError):
+        return set()
+    registry = dict(schema).get("segmentations") or {}
+    return {
+        str(entry["table"])
+        for entry in registry.values()
+        if isinstance(entry, dict) and entry.get("prior") and entry.get("table")
+    }
+
+
 def _derived_table_paths(zarr_path: Path) -> set[str]:
-    """Return the ``tables/table_*`` paths of a store other than ``table_original``."""
+    """Return the ``tables/table_*`` paths of a store other than ``table_original``.
+
+    Tables of branches refined from a prior (:func:`_segmentation_result_tables`)
+    are left out.
+    """
     rel_paths: set[str] = set()
     tables_dir = Path(zarr_path) / "tables"
+    kept = _segmentation_result_tables(Path(zarr_path))
     if tables_dir.exists():
         for table_path in tables_dir.iterdir():
             table_name = table_path.name
-            if table_name.startswith("table_") and table_name != ORIGINAL_TABLE_NAME:
+            if (
+                table_name.startswith("table_")
+                and table_name != ORIGINAL_TABLE_NAME
+                and table_name not in kept
+            ):
                 rel_paths.add(f"tables/{table_name}")
     return rel_paths
 
@@ -941,12 +971,14 @@ def enrich_single_latest(
     # Enrichment adds and replaces elements and rewrites the store's attrs, so
     # the store lock is held from the read until the metadata is persisted.
     with spatialdata_write_lock(write_path):
-        if config.segmentation_source == "native":
+        if config.segmentation_source in ("native", "native_proseg"):
             _enrich_native_in_place(
                 config,
                 write_path=write_path,
                 force_rerun=force_rerun,
             )
+            if config.segmentation_source == "native_proseg":
+                _check_atera_proseg_layer(config, write_path=write_path)
         else:
             _enrich_store_in_place(
                 config,
@@ -964,6 +996,57 @@ def enrich_single_latest(
     if latest_path != write_path:
         stage_existing_output(write_path, latest_path)
     return write_path
+
+
+def _check_atera_proseg_layer(config: EnrichmentConfig, *, write_path: Path) -> None:
+    """Check the stitched ProSeg layer of a ``native_proseg`` row (AT-9).
+
+    The layer is written by ATERA_PROSEG_STITCH, not by enrichment; this runs
+    its streaming check (table and shape ids, assignments, per-cell counts,
+    registry) once per stitch and records it in
+    ``attrs["merxen_atera_proseg"]["enrich_check"]``. The caller holds the
+    store's write lock.
+
+    Raises:
+        RuntimeError: If the layer is missing or the check fails.
+    """
+    from merxen.segmentation.atera_proseg import PROVENANCE_ATTR, AteraProsegError
+    from merxen.segmentation.atera_proseg.stitch import check_proseg_layer
+
+    dataset_name = str(config.dataset_name).upper()
+    provenance = dict(read_root_attrs(write_path).get(PROVENANCE_ATTR) or {})
+    previous = dict(provenance.get("enrich_check") or {})
+    if (
+        previous.get("passed")
+        and previous.get("fingerprint") is not None
+        and previous.get("fingerprint") == provenance.get("fingerprint")
+    ):
+        log_status(f"[{dataset_name}] ProSeg layer already checked; skipping.")
+        return
+    try:
+        result = check_proseg_layer(write_path)
+    except AteraProsegError as error:
+        raise RuntimeError(f"[{dataset_name}] {error}") from error
+    output_dir = Path(config.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "atera_proseg_layer_check.json").write_text(
+        json.dumps(result, indent=2) + "\n"
+    )
+    if not result["passed"]:
+        raise RuntimeError(
+            f"[{dataset_name}] ProSeg layer check failed: "
+            f"{'; '.join(result['failures'])}"
+        )
+    dst = sd.read_zarr(write_path, selection=("tables",))
+    record = dict(dst.attrs.get(PROVENANCE_ATTR) or {})
+    record["enrich_check"] = result
+    dst.attrs[PROVENANCE_ATTR] = record
+    dst.write_attrs()
+    del dst
+    log_status(
+        f"[{dataset_name}] ProSeg layer check passed: {result['n_cells']:,} cells, "
+        f"{result['n_foreground_gene_rows']:,} foreground gene transcripts."
+    )
 
 
 def _record_mask_model_identities(dst: Any, config: EnrichmentConfig) -> bool:
