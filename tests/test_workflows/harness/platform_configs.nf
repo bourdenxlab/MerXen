@@ -1,7 +1,8 @@
 // Appended by test_platform_config_golden.py to the Groovy functions of
 // workflows/main.nf and to wrappers around the inline config builders of its
 // workflow block (renderSegment, renderEnrich, renderViewerCache,
-// viewerTransformField, enrichRestartField) and the QC script (renderQcScript).
+// viewerTransformField, enrichRestartField, renderMaskImageQuantification) and
+// the QC script (renderQcScript).
 // It renders the platform-dependent configs of MERSCOPE and XENIUM rows and
 // prints one line per case:
 //
@@ -125,7 +126,8 @@ def writeModelBundle() {
         groovy.json.JsonOutput.toJson([weights_sha256: "a" * 64])
 }
 
-// ATERA rows build only (plan AT-4): no segment, enrich or viewer-cache case.
+// ATERA rows: the BUILD cases (plan AT-4) and, below, the native-route
+// cases of AT-6 (ateraNativeCases); no Cellpose SEGMENT case.
 def ateraRows() {
     def dir = [atera_dir: "raw/atera"]
     return [
@@ -153,6 +155,96 @@ def ateraBuildCases(String launch) {
         if (launch == "L0") {
             attempt("build", "${id}/inputs") { requirePlatformInput(row, "PAIR_A", "ATERA") }
         }
+    }
+}
+
+// AT-6 native route of ATERA rows: NATIVE_LATEST, ENRICH (no masks), the
+// viewer cache (base image), the analysis layers and sample JSONs. XENIUM and
+// MERSCOPE cases are untouched; these only add case ids.
+def ateraNativeCases(String launch) {
+    def id = "${launch}/ATERA"
+    attempt("native", "${id}/native_latest") {
+        nativeLatestConfigForPlatform("PAIR_A", "ATERA", params)
+    }
+    ateraRows().each { name, row ->
+        def rowId = "${id}/${name}"
+        attempt("native", "${rowId}/segmentation_source") {
+            segmentationSourceForRow(row, ["ATERA"], params)
+        }
+        attempt("enrich", "${rowId}/restart_latest_zarr") { enrichRestartField(row, "ATERA") }
+        attempt("viewer_cache", "${rowId}/transform_field") {
+            viewerTransformField(row, "ATERA")
+        }
+        attempt("viewer_cache", rowId) {
+            renderViewerCache(
+                "PAIR_A|ATERA",
+                "PAIR_A",
+                "ATERA",
+                "enriched_latest.zarr",
+                viewerTransformField(row, "ATERA"),
+            )
+        }
+    }
+    [
+        "native", "vendor", "instrument", "cellpose", "cellpose_only", "proseg",
+        "cellpose_proseg", "Cellpose-ProSeg",
+    ].each { raw ->
+        attempt("native", "${launch}/segmentation_source/[${raw}]") {
+            normalizeSegmentationSource(raw)
+        }
+    }
+    attempt("native", "${launch}/segmentation_source/unknown_error") {
+        normalizeSegmentationSource("magic")
+    }
+    attempt("native", "${launch}/segmentation_source/atera_cellpose_only_error") {
+        segmentationSourceForRow(
+            [pair_id: "PAIR_A", segmentation_source: "cellpose_only"], ["ATERA"], params
+        )
+    }
+    attempt("native", "${launch}/segmentation_source/xenium_native_error") {
+        segmentationSourceForRow(
+            [pair_id: "PAIR_A", segmentation_source: "native"], ["XENIUM"], params
+        )
+    }
+    ["native", "cellpose_only", "cellpose_proseg"].each { source ->
+        attempt("native", "${launch}/layers/${source}") { availableSegmentationLayers(source) }
+        attempt("native", "${launch}/stage_order/${source}") {
+            activeStageOrder(
+                false, false, true, true, false, false, true, false, true, false,
+                false, false, source,
+            )
+        }
+    }
+    attempt("enrich", id) {
+        renderEnrich(
+            "PAIR_A|ATERA",
+            "PAIR_A",
+            "ATERA",
+            "native_latest.zarr",
+            "NO_CELLPOSE_MASK",
+            "NO_NUCLEI_MASK",
+            "source_spatialdata.zarr",
+        )
+    }
+    attempt("mask_image_quantification", id) {
+        renderMaskImageQuantification(
+            "PAIR_A|ATERA", "PAIR_A", "ATERA", "latest.zarr", "NO_CELLPOSE_MASK"
+        )
+    }
+    ["original", "original_seg"].each { segmentation ->
+        attempt("analysis_layers", "${id}/${segmentation}") {
+            analysisLayerKeys("ATERA", segmentation)
+        }
+    }
+    def paths = [ATERA: "results/PAIR_A/atera/latest/latest_spatialdata.zarr"]
+    attempt("analysis_layers", "${launch}/samples/atera/original_seg") {
+        samplesJsonForSegmentation("PAIR_A", ["ATERA"], paths, "original_seg")
+    }
+    attempt("analysis_layers", "${launch}/samples/atera/original_seg/spatial_genes") {
+        spatialGeneSamplesJson(
+            samplesJsonForSegmentation("PAIR_A", ["ATERA"], paths, "original_seg"),
+            pairRow([atera_dir: "raw/atera"]),
+        )
     }
 }
 
@@ -226,6 +318,11 @@ def qcHeredoc(String script) {
 
 def platformCases(String launch, String platform) {
     def id = "${launch}/${platform}"
+    attempt("mask_image_quantification", id) {
+        renderMaskImageQuantification(
+            "PAIR_A|${platform}", "PAIR_A", platform, "latest.zarr", "mask.npy"
+        )
+    }
     attempt("enrich", id) {
         renderEnrich(
             "PAIR_A|${platform}",
@@ -266,6 +363,26 @@ def platformCases(String launch, String platform) {
     }
     attempt("analysis_layers", "${id}/unknown_segmentation_error") {
         analysisLayerKeys(platform, "not_a_segmentation")
+    }
+}
+
+// AT-6 QC of native ATERA rows: the registration reference is the registry's
+// original cell shape (atera_cell_boundaries), so the original layers render
+// a reference equal to the tested shape, which the QC check then skips.
+def ateraQcCases(String launch) {
+    ["original", "original_seg"].each { segmentation ->
+        attempt("qc", "${launch}/ATERA/${segmentation}") {
+            def keys = analysisLayerKeys("ATERA", segmentation)
+            qcHeredoc(renderQcScript(
+                "PAIR_A",
+                "ATERA",
+                segmentation,
+                "latest_input.zarr",
+                keys.table_key,
+                keys.shape_key,
+                [cpus: 4],
+            ).toString())
+        }
     }
 }
 
@@ -350,6 +467,8 @@ workflow {
         samplesCases(launch)
         modeCases(launch)
         ateraBuildCases(launch)
+        ateraNativeCases(launch)
+        ateraQcCases(launch)
     } else if (launch == "L4") {
         ateraBuildCases(launch)
     } else {

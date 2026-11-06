@@ -37,7 +37,12 @@ from merxen.io.spatialdata_schema import (
 )
 from merxen.io.transcript_io import first_existing_col, iter_points_chunks
 from merxen.memory import enforce_memory_limit, force_release, log_status
-from merxen.platforms import ORIGINAL_CELL_SHAPE_KEYS
+from merxen.platforms import (
+    ORIGINAL_CELL_SHAPE_KEYS,
+    PLATFORM_SPECS,
+    PlatformSpec,
+    find_platform_spec,
+)
 from merxen.segmentation.proseg_hybrid import (
     PROSEG_HYBRID_SHAPE_NAME,
     PROSEG_HYBRID_TABLE_NAME,
@@ -388,6 +393,19 @@ def shape_to_existing_table_source(shape_key: str) -> str | None:
     return None
 
 
+NUCLEUS_ROW_SHAPE_KEYS: frozenset[str] = frozenset(
+    spec.original_nucleus_shape_key
+    for spec in PLATFORM_SPECS.values()
+    if not spec.nucleus_ids_are_cell_ids and spec.original_nucleus_shape_key is not None
+)
+"""Vendor nucleus shapes keyed by nucleus row, not by cell (ATERA).
+
+Per-shape assignment skips them: a count table keyed by nucleus id would put
+nucleus k's transcripts on cell k. Their nuclei join to cells through
+``cell_instance_id`` instead.
+"""
+
+
 def _register_assignment_branch(
     sdata_obj: Any,
     *,
@@ -465,9 +483,46 @@ def run_per_shape_assignment_for_dataset(
     memory_check_every_chunks: int = 5,
     max_ram_gb: float = 600.0,
     warn_ram_gb: float = 560.0,
+    platform: str | None = None,
+    segmentation_source: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Compute and persist per-shape assignment tables for one enriched dataset."""
+    """Compute and persist per-shape assignment tables for one enriched dataset.
+
+    Vendor nucleus shapes keyed by nucleus row (:data:`NUCLEUS_ROW_SHAPE_KEYS`)
+    are never assigned. With ``segmentation_source="native"`` (which needs
+    ``platform``), only the vendor shapes are handled: the vendor cell shape is
+    registered with ``table_original`` as is (no clone, no spatial join), and
+    no gene vocabulary is read from a ``table`` element.
+
+    Args:
+        dataset_name: Dataset alias for log lines and summaries.
+        latest_path: The enriched latest store.
+        force_rerun: Recompute tables that already exist.
+        chunk_rows: Rows per chunk of a non-partitioned points element.
+        status_every_chunks: Chunks between progress lines.
+        table_prefix: Prefix of the per-shape table names.
+        memory_check_every_chunks: Chunks between memory checks.
+        max_ram_gb: Memory limit of the spatial join.
+        warn_ram_gb: Memory warning threshold of the spatial join.
+        platform: Platform of the store (required for a native store).
+        segmentation_source: ``native`` for a vendor-segmentation store;
+            ``None`` or any other value keeps the Cellpose/ProSeg behaviour.
+
+    Returns:
+        One summary per table added or registered.
+
+    Raises:
+        ValueError: If a native source is given without a known platform.
+    """
     latest_path = Path(latest_path)
+    native_spec = None
+    if segmentation_source == "native":
+        native_spec = find_platform_spec(platform)
+        if native_spec is None or "native" not in native_spec.segmentation_sources:
+            raise ValueError(
+                f"segmentation_source=native needs a platform with a native "
+                f"segmentation, got {platform!r}"
+            )
     # Tables, normalized shapes, and the store's attrs (or, without
     # write_element, the whole store) are written back, so the store lock is
     # held from the read until the last write.
@@ -482,7 +537,47 @@ def run_per_shape_assignment_for_dataset(
             memory_check_every_chunks=memory_check_every_chunks,
             max_ram_gb=max_ram_gb,
             warn_ram_gb=warn_ram_gb,
+            native_spec=native_spec,
         )
+
+
+def _register_native_cell_table(
+    sdata_obj: Any,
+    dataset_name: str,
+    *,
+    points_key: str,
+    shape_key: str,
+) -> dict[str, Any]:
+    """Register the vendor cell shape of a native store with ``table_original``."""
+    if "table_original" not in sdata_obj.tables:
+        raise RuntimeError(
+            f"[{dataset_name}] Native store has no 'table_original' for '{shape_key}'"
+        )
+    # Validates the canonical instance ids (raises on duplicates).
+    ensure_shape_has_cell_id(sdata_obj, shape_key)
+    _register_assignment_branch(
+        sdata_obj,
+        points_key=points_key,
+        shape_key=shape_key,
+        table_key="table_original",
+    )
+    table = sdata_obj.tables["table_original"]
+    log_status(
+        f"[{dataset_name}] Registered vendor table 'table_original' for "
+        f"'{shape_key}' (native segmentation)"
+    )
+    return {
+        "dataset": dataset_name,
+        "shape_key": shape_key,
+        "table_key": "table_original",
+        "mode": "native_table_original",
+        "n_cells": int(table.n_obs),
+        "n_genes": int(table.n_vars),
+        "n_points_input": np.nan,
+        "n_points_used": np.nan,
+        "n_points_assigned": np.nan,
+        "pct_assigned": np.nan,
+    }
 
 
 def _assign_per_shape_tables(
@@ -496,6 +591,7 @@ def _assign_per_shape_tables(
     memory_check_every_chunks: int,
     max_ram_gb: float,
     warn_ram_gb: float,
+    native_spec: PlatformSpec | None = None,
 ) -> list[dict[str, Any]]:
     """Write the per-shape tables of one store; the caller holds its lock."""
     log_status(
@@ -512,7 +608,10 @@ def _assign_per_shape_tables(
         raise RuntimeError(f"[{dataset_name}] No primary transcript element found")
     points_obj = sdata_obj.points[points_key]
     schema = stamp_merxen_schema(sdata_obj, primary_points_key=points_key)
-    gene_list = build_gene_list_from_base_table(sdata_obj)
+    # A native store has no ProSeg 'table'; its only table is table_original.
+    gene_list = (
+        build_gene_list_from_base_table(sdata_obj) if native_spec is None else None
+    )
     coordinate_variant_shapes = {
         str(entry.get("shape"))
         for entry in dict(schema.get("segmentations", {})).values()
@@ -524,6 +623,13 @@ def _assign_per_shape_tables(
         if not str(shape_key).endswith("_aligned_nonrigid")
         and str(shape_key) not in coordinate_variant_shapes
     ]
+    nucleus_row_shapes = [key for key in shape_keys if key in NUCLEUS_ROW_SHAPE_KEYS]
+    if nucleus_row_shapes:
+        log_status(
+            f"[{dataset_name}] Skipping nucleus shapes keyed by nucleus row "
+            f"{nucleus_row_shapes}; their nuclei join cells via cell_instance_id"
+        )
+        shape_keys = [key for key in shape_keys if key not in NUCLEUS_ROW_SHAPE_KEYS]
     log_status(f"[{dataset_name}] Points key='{points_key}', shape layers={shape_keys}")
 
     summaries: list[dict[str, Any]] = []
@@ -535,6 +641,22 @@ def _assign_per_shape_tables(
         desc=f"[{dataset_name}] shape tables",
         unit="shape",
     ):
+        if native_spec is not None:
+            if shape_key == native_spec.original_cell_shape_key:
+                summaries.append(
+                    _register_native_cell_table(
+                        sdata_obj,
+                        dataset_name,
+                        points_key=points_key,
+                        shape_key=shape_key,
+                    )
+                )
+            else:
+                log_status(
+                    f"[{dataset_name}] Native store: no per-shape table for "
+                    f"'{shape_key}'"
+                )
+            continue
         table_key = sanitize_table_key(shape_key, table_prefix=table_prefix)
         table_exists = table_key in sdata_obj.tables
         if shape_key == PROSEG_HYBRID_SHAPE_NAME:
@@ -639,6 +761,7 @@ def _assign_per_shape_tables(
                     "assignment table with a geometric spatial-join fallback."
                 ) from exc
 
+        assert gene_list is not None
         table_obj, summary = compute_table_from_points_for_shape(
             dataset_name=dataset_name,
             points_obj=points_obj,

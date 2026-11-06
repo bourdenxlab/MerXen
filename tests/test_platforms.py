@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import get_args
 
 import pytest
+from pydantic import BaseModel
 
-from merxen.config import DatasetConfig, SpatialDataBuildConfig
+from merxen import config as merxen_config
 from merxen.io.image_source import MERSCOPE_ZPROJ_IMAGE_NAME
 from merxen.platforms import (
     ORIGINAL_CELL_SHAPE_KEYS,
@@ -21,6 +22,7 @@ from merxen.platforms import (
     find_platform_spec,
     find_um_per_px,
     platform_spec,
+    segmentation_layers,
     spec_file_pixel_size,
     supported_platforms,
 )
@@ -97,8 +99,39 @@ def test_atera_fields() -> None:
             "experiment.spatial",
         ),
         mask_pixel_convention="corner",
+        segmentation_sources=("native",),
+        default_segmentation_source="native",
+        original_label_keys=("cell_labels", "nucleus_labels"),
+        rasterised_transcript_plots=True,
     )
     assert spec.original_shape_keys == ("atera_cell_boundaries", "atera_nucleus")
+    assert len(spec.original_label_keys) == len(spec.original_shape_keys)
+
+
+@pytest.mark.parametrize("platform", ["MERSCOPE", "XENIUM"])
+def test_cellpose_platforms_keep_the_new_field_defaults(platform: str) -> None:
+    """The AT-6 fields are no-ops for XENIUM and MERSCOPE (AT-1 cache guard)."""
+    spec = platform_spec(platform)
+    assert spec.segmentation_sources == ("cellpose_proseg",)
+    assert spec.default_segmentation_source == "cellpose_proseg"
+    assert spec.original_label_keys == ()
+    assert spec.rasterised_transcript_plots is False
+
+
+def test_segmentation_layers_per_source() -> None:
+    """Native rows have the vendor layer only; the default source has all four."""
+    assert segmentation_layers("native") == ("original_seg",)
+    assert segmentation_layers("cellpose_proseg") == (
+        "reseg",
+        "original_seg",
+        "proseg_mask",
+        "proseg_hybrid",
+    )
+    assert segmentation_layers("cellpose_only") == ("proseg_mask", "original_seg")
+    for spec in PLATFORM_SPECS.values():
+        assert spec.default_segmentation_source in spec.segmentation_sources
+    with pytest.raises(ValueError, match="Unknown segmentation source"):
+        segmentation_layers("vendor")
 
 
 def test_merscope_keeps_the_field_defaults() -> None:
@@ -163,19 +196,63 @@ def test_find_platform_spec_accepts_none() -> None:
     assert find_platform_spec(None) is None
 
 
-def test_platform_name_alias_matches_the_config_literals() -> None:
-    """The build config takes every platform; downstream Literals are staged.
+# Stages whose ``platform`` Literal takes ATERA since AT-6 (the native route).
+_WIDENED_MODELS: tuple[str, ...] = (
+    "SpatialDataBuildConfig",
+    "EnrichmentConfig",
+    "ViewerCacheConfig",
+    "MaskImageQuantificationConfig",
+    "VisualizationSampleConfig",
+    "ClusteringSquidpySampleConfig",
+    "MenderConfig",
+    "SpatialGeneAnalysisSampleConfig",
+)
+# Stages that stay XENIUM/MERSCOPE only: Pydantic is the second-line refusal
+# behind the workflow preflight (Cellpose segmentation, registration, cortical
+# depth, distance from object, alignment, GASTON, MECR, MapMyCells, pciSeq).
+_NOT_WIDENED_MODELS: tuple[str, ...] = (
+    "DatasetConfig",
+    "ImageRegistrationConfig",
+    "CorticalDepthConfig",
+    "DistanceFromObjectConfig",
+    "DistanceFromObjectCohortConfig",
+    "GastonConfig",
+    "MecrSampleConfig",
+    "MapMyCellsSampleConfig",
+    "PciSeqConfig",
+)
 
-    Plan §3.2: a ``platform`` Literal is widened to ATERA only when its stage
-    handles it, so segmentation (``DatasetConfig``) still lists MERSCOPE and
-    XENIUM only.
-    """
-    names = get_args(PlatformName)
-    assert names == tuple(PLATFORM_SPECS)
-    build = SpatialDataBuildConfig.model_fields["platform"].annotation
-    assert get_args(build) == names
-    dataset = DatasetConfig.model_fields["platform"].annotation
-    assert get_args(dataset) == ("MERSCOPE", "XENIUM")
+
+def _platform_names(model_name: str) -> tuple[str, ...]:
+    model = getattr(merxen_config, model_name)
+    assert issubclass(model, BaseModel)
+    names = tuple(
+        name
+        for arg in get_args(model.model_fields["platform"].annotation)
+        for name in (get_args(arg) or (arg,))
+        if isinstance(name, str)
+    )
+    return names
+
+
+@pytest.mark.parametrize("model_name", _WIDENED_MODELS)
+def test_widened_platform_literals(model_name: str) -> None:
+    """The stages of the native route take every registered platform."""
+    assert get_args(PlatformName) == tuple(PLATFORM_SPECS)
+    assert _platform_names(model_name) == get_args(PlatformName)
+
+
+@pytest.mark.parametrize("model_name", _NOT_WIDENED_MODELS)
+def test_not_widened_platform_literals(model_name: str) -> None:
+    """Plan §3.2: a Literal is widened only when its stage handles ATERA."""
+    assert _platform_names(model_name) == ("MERSCOPE", "XENIUM")
+
+
+def test_alignment_roles_stay_xenium_and_merscope() -> None:
+    """Alignment keeps its fixed/moving pairing Literals."""
+    for field in ("fixed_platform", "moving_platform"):
+        annotation = merxen_config.AlignmentConfig.model_fields[field].annotation
+        assert set(get_args(annotation)) == {"MERSCOPE", "XENIUM"}
 
 
 def _write_spec(path: Path, data: object) -> Path:

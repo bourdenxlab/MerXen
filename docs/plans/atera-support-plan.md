@@ -13,7 +13,10 @@
 > criterion (status after §1.1 item 7; measured numbers in §6.1; decisions in Appendix A, "AT-5 pilot").
 > Milestone 1 is met. **AT-5b (2026-11-05):** the ProSeg benchmark ran on the crop and on the densest
 > 2 mm tile; AT-9 goes ahead as an opt-in tiled route, and a single whole-section run is ruled out
-> (§8 AT-5 and AT-9, Appendix A "AT-5b ProSeg benchmark").
+> (§8 AT-5 and AT-9, Appendix A "AT-5b ProSeg benchmark"). **AT-6 (2026-11-06):** the native
+> (vendor-segmentation) route runs end to end through Nextflow on the crop and on the full public section,
+> from the AT-5 source stores to clustering and MENDER, and passes every exit check (§1.4, §6.2, §8 AT-6,
+> Appendix A "AT-6 exit runs").
 
 *Names and paths (2026-11-04).* The only dataset used here is the public 10x Atera whole-transcriptome
 dataset of a human hippocampus section (atera-1.1.1, fresh frozen); its name is not written here, and the
@@ -145,7 +148,7 @@ the reviewed revision with the new resource defaults (`atera_at5/full_r2/`).
 Each item is sequenced in §8:
 
 - Running SEGMENT, ENRICH, QC, VISUALIZE or the analysis stages on Atera. The "native segmentation"
-  route that lets them run is AT-6, the next milestone. §5 lists every downstream change.
+  route that lets them run is AT-6, the next milestone (done; §1.4). §5 lists every downstream change.
 - ProSeg on Atera. The AT-5b benchmark has run; ProSeg comes in AT-9 as an opt-in tiled route.
 - H&E registration.
 - Pairing Atera with XENIUM or MERSCOPE.
@@ -163,6 +166,32 @@ Each item is sequenced in §8:
 | 5 | **The masks are the true segmentation; the polygons are display simplifications** (official docs).<br>• Cell mask label = cell index + 1 (official docs; exhaustively verified).<br>• Nucleus mask label = nucleus-polygon row + 1 (empirical, exhaustively verified on 90,238 nuclei). The docs state the label rule for cell masks only.<br>• Nucleus pixels are 100% inside their owning cell. | [H] |
 | 6 | **Near-whole-transcriptome panel.**<br>• 18,049 genes and 6,628 control features.<br>• Several downstream stages densify or loop per gene and break or run for many hours at this size (§5). | [H]/[M] |
 | 7 | **Sample-identifying metadata.** `experiment.spatial`, the `metrics_summary_*.csv` header and file name, `analysis_summary_*.html` and `panel_config.customer` all carry run, slide, ROI or serial identifiers, or customer PII. The store keeps them verbatim; committed text and human-facing output never show them (D13). | [H] |
+
+### 1.4 AT-6 status: the native route end to end
+
+**Status (2026-11-06): the AT-6 exit runs pass on the crop and on the full public section.** Each ran
+as one Nextflow row (`analysis_mode=atera`, `segmentation_source=native`, `mender_enabled=true`,
+`stop_stage=mender`) from the AT-5 source store through `NATIVE_LATEST`, ENRICH, VIEWER_CACHE, MIQ, QC,
+VISUALIZE, spatial gene analysis, clustering and MENDER. pciSeq, GASTON, standalone MapMyCells, MECR,
+transcript spatial patterns, cortical depth and distance from object are off or refused for ATERA rows
+(user decision). The runs found three bugs, each fixed with a test (Appendix A, "AT-6 exit runs").
+Evidence: `$MERXEN_EVIDENCE_ROOT/atera_at6/` (run scripts, samplesheets, traces, reports, timelines,
+`verify_{crop,full}.json`, `stage_resources.json`, `disk_{crop,full}.json`, the check scripts). Stage
+times, memory and disk are in §6.2.
+
+| Check | Crop (3,013 cells, 40.6 M transcripts) | Full section (91,431 cells, 1.41 B transcripts) |
+|---|---|---|
+| Source store unchanged (inode, size, mtime of every file; SHA-256 of every metadata file and 200 random payloads) | 927 files, 1.48 GB unchanged; 143 payloads made read-only (0664 → 0444) | 3,352 files, 38.8 GB unchanged; 1,543 payloads made read-only |
+| Latest store shares no metadata inode with the source | 185 payload files hardlinked, 0 metadata | 1,905 payload files (38.2 GB) hardlinked, 0 metadata |
+| Viewer reads every transcript (`points/transcripts` rows of the latest store) | 40,642,374 = source = `n_points_written` | 1,409,601,228 = source = `n_points_written` |
+| Native label check (corner convention, float32) | passed, 0 mismatches | passed, 0 mismatches; 638,849,843 assigned rows; `overlaps_nucleus` agreement 1.0 |
+| ENRICH gene counts per cell = vendor matrix row sums (int64) and vendor `transcript_counts` | 0 cells differ; 18,894,687 | 0 cells differ; 638,693,512 |
+| ENRICH all-feature counts = vendor genes + controls | short by 3 counts in 3 cells, all `DeprecatedCodeword` | short by 84 counts in 84 cells, all `DeprecatedCodeword` (the AT-5 vendor quirk) |
+| QC: transcript total, assigned total, registration | 40,642,374; 18,894,687 (after the float32 fix); pass, density ratio 7.2 | 1,409,601,228; 638,693,512; pass, density ratio 4.8 |
+| Density figures bin every transcript | section pass bins 40,642,374 of 40,642,374 | section pass bins 1,409,601,228 of 1,409,601,228 (409 of 409 files) |
+| Clustering | 3,012 cells × 15,479 genes, 2,000 HVGs (`cell_ranger`), PCA `mask_var` | 91,381 cells × 18,049 genes, 2,000 HVGs, GPU |
+| Nucleus metrics via `cell_instance_id` | 2 two-nucleus cells; `nucleus_count` equals the join for every cell | 332 multi-nucleus cells (up to 5 nuclei); `nucleus_count` equals the join for every cell; 10 spot-checked cells (2–4 nuclei): count equal, largest and summed nucleus area within 0.5% of the nucleus polygons |
+| MENDER | 15 outputs | 15 outputs (after the env pin) |
 
 ---
 
@@ -788,6 +817,12 @@ grow a third arm in every ternary.
   1/ps within `rtol=1e-6`.
 - **Pixel convention (ATERA vendor masks): corner/floor.** Any µm → mask-pixel lookup against vendor masks
   uses `floor(µm/ps)` (100.00% vendor agreement) [H].
+  - The vendor computes it in float32 as `floor(float32(µm) * float32(1/ps))`. Float64 `µm/ps` puts
+    about 1.4e-5 of transcripts, all within 0.0012 px of a pixel edge, on the neighbouring pixel; the
+    float32 rule has 0 mismatches over the whole public section (AT-6). The AT-6 native check uses
+    `merxen.enrichment.label_lookup.PixelFrame` (default `precision="float32"`); the later vendor-mask
+    lookups (AT-7 `assign_labels_from_masks(pixel_convention="corner")`, the AT-9 ProSeg prior) must use
+    the same `PixelFrame`, or they will disagree with the vendor at pixel edges.
   - `assign_labels_from_masks` uses `np.rint` (`segmentation/cellpose.py:896-897`), which disagrees on
     about 1.35% of transcripts.
   - Add a `pixel_convention: Literal["center", "corner"] = "center"` argument. The default keeps Xenium
@@ -1281,6 +1316,36 @@ times larger scales the table and the masks; raise both values together if the w
 | Transcript spatial patterns | About 70–80 GB, about 15–20 h; about 1–1.5 h with the cap | [M/L] |
 | VISUALIZE | About 12 x/y passes per branch, 15–40 min per branch; one pass less with attrs | [L] |
 
+**Measured on the public section (AT-6 exit runs, 2026-11-06).** Nextflow, `-profile dwight,conda`, host
+load 8–30, about 280–510 GB free. Time and peak RSS are the trace's `realtime` and `peak_rss` of the run
+that did the work (a `-resume` re-runs ENRICH and the stages that read the latest store, as skips; their
+numbers are in `stage_resources.json`). The native route uses no `.npy` export: MIQ reads the vendor
+`cell_labels`.
+
+| Process | Reserved | Crop: time / peak RSS | Full: time / peak RSS |
+|---|---|---|---|
+| BUILD_SPATIALDATA (reuse check only) | 16 CPU, 64 GB | 8 s / 1.1 GB | 9 s / 1.1 GB |
+| NATIVE_LATEST | 8 CPU, 32 GB | 28 s / 1.3 GB | 35 s / 3.8 GB |
+| ENRICH (native label check and counts) | 8 CPU, 64 GB | 38 s / 5.5 GB | 5 min 4 s / 11.7 GB |
+| VIEWER_CACHE | 8 CPU, 60 GB | 26 s / 2.5 GB | 2 min 22 s / 9.6 GB |
+| MASK_IMAGE_QUANTIFICATION | 4 CPU, 160 GB | 23 s / 2.0 GB | 3 min 9 s / 9.6 GB |
+| QC | 4 CPU, 48 GB | 28 s / 2.4 GB | 1 min 15 s / 4.9 GB |
+| VISUALIZE | 4 CPU, 64 GB | 40 s / 2.1 GB | 3 min 21 s / 4.5 GB |
+| SPATIAL_GENE_ANALYSIS | 12 CPU, 120 GB | 1 min 1 s / 2.1 GB | 13 min 52 s / 22.8 GB |
+| CLUSTERING_SQUIDPY (prepare + compute + finalize) | 64 / 96 / 64 GB | 2 min / 3.2 GB | 6 min 32 s / 19.4 GB |
+| MENDER (prepare + compute + finalize + import) | 64 / 192 / 64 / 48 GB | 1 min 43 s / 1.0 GB | 6 min 30 s / 17.7 GB |
+
+| Disk (full section) | Measured |
+|---|---|
+| Latest store, bytes not shared with the source | **2.56 GB**: clustering table 1.07 GB, `table_original` 0.49 GB, image pyramid 0.74 GB, label pyramids and outlines 0.08 GB, shapes 0.10 GB, metadata and sidecar copies 0.07 GB, MIQ table 7 MB. The 38.2 GB of payloads are hardlinks |
+| Work directories | Clustering about 13 GB (h5ad outputs), MENDER about 6 GB, the rest under 0.3 GB |
+| Total for the native route on top of the 38.8 GB source store | About 22 GB; source plus route about 61 GB (the 130–160 GB estimate above included the raw download and staging) |
+
+The whole full-section route takes about 45 min of task time (40 min wall for the first run up to the
+MENDER failure, then 14 min for the resumed run). MIQ, ENRICH, VIEWER_CACHE and QC use under 15 GB, far
+under their reservations; the reservations are left as they are (directives are not hashed, so they can
+be lowered for ATERA later without a re-run).
+
 ---
 
 ## 7. Testing plan
@@ -1610,6 +1675,17 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
 - **Tests:** registry contents; source-inode test; `-preview` with `start_stage=enrich`; harness runs;
   script pins.
 - **Exit:** the crop, then the full section, run in native mode through VISUALIZE and clustering.
+- **Status (2026-11-06): exit met.** Both runs pass through clustering and MENDER (§1.4, §6.2). User
+  decisions applied in AT-6: pciSeq off and untested for ATERA; GASTON and standalone MapMyCells refused;
+  MECR off until it streams (with RCA); transcript spatial patterns off; cortical depth and distance from
+  object off for non-cortical sections; no transcript caps or subsampling (figures are density rasters
+  over every transcript the build kept, i.e. every QV >= 20 row, and the viewer reads every one of them).
+  One figure bounds genes rather than transcripts: a branch dotplot of a panel wider than 400 genes draws
+  each group's top 5 genes (the CSV tables keep every gene; awaiting the user's OK). The `qc.nf`
+  reference-shape edit changes the QC task hash of existing XENIUM and MERSCOPE rows once (Q17); the
+  MENDER env pin changes the MENDER_COMPUTE hash of every platform once (Appendix A, "AT-6 exit runs";
+  awaiting the user's OK). The broad atlas labels of ATERA rows are provisional (Appendix A, "AT-6
+  reviews").
 
 ### AT-7 `[feature]`: `cellpose_only` for Atera (5 d)
 
@@ -1952,3 +2028,35 @@ findings and what was done:
 **AT-5b ProSeg benchmark (2026-11-05).** Experiment only; no code change. The numbers and the AT-9
 decision are in §8 (AT-5, AT-9); R9 and R15 are updated. The crop is a sparse corner, so the densest
 2 mm tile of the full section was run as well and the extrapolation is calibrated on it.
+
+**AT-6 exit runs (2026-11-06).** Crop, then full public section, in native mode from the AT-5 source
+stores through MENDER (§1.4, §6.2). Findings and changes:
+
+| Finding | Change or decision |
+|---|---|
+| An explicit `stop_stage=mender` on an ATERA row selected the standalone `mapmycells` stage between clustering and MENDER, so preflight refused the very stop its own message suggests | ATERA rows pass over `mapmycells` unless the row names it as its start, stop or only stage (which preflight still refuses). Harness cases for `stop_stage=mender`, `only_stage=mapmycells` and `start_stage=mapmycells` |
+| QC summed the float32 cell table in float32: the crop's assigned total was 18,894,688, one above the vendor matrix | Stores with build aggregates (ATERA) sum per cell in float64 and total in int64; XENIUM and MERSCOPE keep their historical sums. Full section: 638,693,512, exact |
+| `MENDER_COMPUTE` failed on the full section in `sc.pp.neighbors`: the MENDER env, created fresh during the run, resolved `pynndescent` 0.7.0, whose parallel subtree builder numba 0.55.2 cannot compile. Under 4,096 cells (the crop) Scanpy computes exact neighbours and never reaches that path; MENDER runs of 100–164k cells completed in September, before this env was re-created | `envs/environment.mender.yml` pins `pynndescent==0.5.13`, `numba==0.55.2`, `llvmlite==0.38.1` (tested). This changes the MENDER_COMPUTE env and so its task hash for every platform, once |
+| ENRICH's all-feature counts fall short of the vendor gene + control obs columns by 3 (crop) and 84 (full) counts | Not a MerXen difference: every short count is in a `DeprecatedCodeword` column with no transcript, the vendor matrix quirk recorded in AT-5 |
+| A `-resume` re-runs ENRICH and every stage that takes the latest store as input: ENRICH rewrites the store's root `zarr.json`, which changes the directory's modification time that Nextflow hashes | Not changed in AT-6: the reruns are skips (ENRICH 1.5 min on the full section) and the analysis stages downstream of VISUALIZE stay cached. Recorded for the AT-7 restart work |
+| The first hardlink run made the source stores' linked payloads read-only (143 crop files, 1,543 full-section files) | By design (`readonly_payloads`); bytes, inodes and modification times are unchanged. Writing to those files now fails instead of corrupting the source |
+| MIQ on the full section was unmeasured (WP-X) | 3 min 9 s, 9.6 GB peak, against a 160 GB reservation |
+
+**AT-6 reviews (2026-11-06).** An end-to-end data review and a code review of the AT-6 branch.
+Findings and changes:
+
+| Finding | Change or decision |
+|---|---|
+| A `[docs]` commit reworded a comment in `envs/environment.mender.yml` after the exit runs; Nextflow names a conda env after the file's full text, so HEAD would build an untested env and recompute MENDER_COMPUTE once more | The file is back to the exact text the exit runs used (their env). A new guard pins the SHA-256 of every `envs/*.yml` (`test_env_file_pins.py`), so an env edit is a reviewed decision; env edits stay out of `[docs]` commits |
+| The MENDER env pin changes the MENDER_COMPUTE hash of every platform | Needs the user's OK as a second announced re-run. Without it any freshly built MENDER env fails above 4,096 cells on every platform |
+| The broad atlas labels misname the human hippocampus: 27,805 mature oligodendrocytes (MOBP, PLP1, MOG high, PDGFRA 0.2 per 10k) are "Oligodendrocyte precursor", 8,345 PROX1/CALB1/SLC17A7-positive excitatory neurons are "Upper rhombic lip", 3,512 SLC17A7-high cells are "Cerebellar inhibitory"; the names carry into `broad_class`, the subcluster names and the MENDER cell states | Documented as provisional for ATERA (clustering doc). Follow-up for the robust annotation work: restrict the WHB superclusters by region (no cerebellar classes for hippocampus), add a marker sanity gate (an OPC label needs PDGFRA), and check whether human XENIUM rows show the same pattern |
+| An ATERA row whose `only_stage`/`stop_stage` names `pciseq`, `gaston` or `mecr` was told to pass `--<stage>_enabled true`, which leads into the ATERA refusal | ATERA rows are told which stages they run instead |
+| Global switches of off stages were handled two ways: a global `pciseq_enabled`, `gaston_enabled`, `cortical_depth_enabled` or `distance_from_object_enabled` aborted every run with an ATERA row (mixed samplesheets too), while a global `mecr_enabled` or transcript-pattern switch was ignored with a note | One policy: a global switch is ignored on ATERA rows with a setting note (so mixed samplesheets keep it for XENIUM/MERSCOPE rows); a value set on the ATERA row is refused, and the message names the row setting to remove |
+| QC without a table key raised on every platform when the dask aggregation failed, where XENIUM/MERSCOPE used to warn and retry in pandas | Only stores with build aggregates (ATERA) raise; the others keep the warning and the fallback |
+| The float32 regression test did not show that its fixture drifts on the legacy sum | It now asserts the drift (240,333,536 against 240,333,534) |
+| XENIUM and MERSCOPE keep the float32 QC assigned total, which is inexact past 2^24 counts (a real Xenium section exceeds it) | Unchanged (byte-identity). Candidate accepted change for the user to decide with the QC re-run |
+| The all-transcript figures pruned parquet files by the boxes stored in the points index, which the fingerprint (names, row counts) does not validate | Files are chosen by their own footer statistics, as QC's registration windows are; section bounds come from the footers too, so the overview crop no longer centres on the build's recorded `bounds_um` (0.7 um wider than the rows on the full section) |
+| The wide-panel paths (sparse means above 1,000 genes, dotplot gene selection above 400) depend on panel width, not platform | Documented as panel-width rules: the 300-gene XENIUM/MERSCOPE panels never reach them; a XENIUM 5K panel would (its dotplot exceeded the render limit before) |
+| "All transcripts" means all QV >= 20 transcripts (1,409,601,228 of 1,640,508,930 vendor rows on the full section; D3, `atera_min_qv`) | Stated in the visualization doc and in AT-6's status |
+| The resumed viewer-cache summary records the mask, label and image pyramids as skipped (built in the first attempt) | Noted; the pyramids were built at 03:26–03:29 in the first attempt. Part of the AT-7 restart work with the `-resume` rerun of ENRICH |
+| The source stores' hardlinked payloads are now read-only (143 crop, 1,543 full-section files) | Announced to whoever shares the AT-5 stores (exit report) |

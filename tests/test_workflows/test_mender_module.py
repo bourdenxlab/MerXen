@@ -188,6 +188,11 @@ def test_mender_environment_pins_repository_commit_and_old_stack() -> None:
         "squidpy==1.2.3",
         "pytest==7.4.4",
         "b29dc5ea352a2762cb7bf49d44ee661f0009f694",
+        # umap-learn's nearest-neighbour stack: unpinned, a fresh env resolved
+        # pynndescent 0.7, which numba 0.55 cannot compile on large inputs.
+        "pynndescent==0.5.13",
+        "numba==0.55.2",
+        "llvmlite==0.38.1",
     ]:
         assert expected in environment_text
     assert "envs/environment.mender.yml" in dockerfile_text

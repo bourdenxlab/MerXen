@@ -3,10 +3,11 @@
 The platform registry (``src/merxen/platforms.py`` and its twin
 ``workflows/lib/PlatformSpec.groovy``) is the one place that names a platform's
 original shape layers and native image. Some sites still spell them out: ordered
-priority lists, display code, dispatch that already raises for an unknown
-platform, and the ``qc.nf`` script, whose text is part of the Nextflow task hash.
-Each category below pins those sites by line text (not line number, so the pin
-survives unrelated edits) together with the reason they are not converted yet.
+priority lists, display code and dispatch that already raises for an unknown
+platform (the ``qc.nf`` script has looked its reference shape up in the
+registry since AT-6). Each category below pins those sites by line text (not
+line number, so the pin survives unrelated edits) together with the reason
+they are not converted yet.
 
 A new matching line fails the test. Look the value up in the registry instead,
 or, when the line must name the platform, add it to the pin with a reason. A
@@ -107,12 +108,8 @@ REASONS: dict[str, dict[str, str]] = {
         "src/merxen/analysis/pciseq.py": (
             "ordered priority list, XENIUM listed first (AT-6)"
         ),
-        "src/merxen/masks.py": "ordered mask-branch discovery list (AT-6)",
         "src/merxen/visualization/sanity_plots.py": (
             "display styles and draw order of the original layers"
-        ),
-        "workflows/modules/qc.nf": (
-            "inside the QC script: section; editing it changes task hashes (AT-6)"
         ),
     },
     "built_shape_names": {
@@ -122,7 +119,8 @@ REASONS: dict[str, dict[str, str]] = {
     },
     "vendor_nucleus_names": {
         "src/merxen/analysis/clustering_squidpy.py": (
-            "nucleus shape priority list; nucleus consumer for AT-6"
+            "nucleus shape priority list for platforms whose nucleus ids are cell "
+            "ids; ATERA uses the registered nucleus layer instead (AT-6)"
         ),
         "src/merxen/config.py": "Xenium and Atera reader options (build config fields)",
         "src/merxen/enrichment/enrich.py": (
@@ -137,7 +135,14 @@ REASONS: dict[str, dict[str, str]] = {
             "registered as atera_nucleus only in AT-6"
         ),
         "src/merxen/io/builders/xenium.py": "Xenium reader option",
-        "src/merxen/masks.py": "ordered mask-branch discovery list (AT-6)",
+        "src/merxen/masks.py": (
+            "legacy alias of the Xenium original_nucleus branch; the branch list "
+            "is built from the registry since AT-6"
+        ),
+        "src/merxen/segmentation/native.py": (
+            "NATIVE_LATEST renames the source nucleus shapes to the registry's "
+            "atera_nucleus; the source name must not reach the latest store (AT-6)"
+        ),
         "src/merxen/segmentation/pipeline.py": "Xenium reader option",
     },
     "nucleus_joins": {
@@ -150,7 +155,8 @@ REASONS: dict[str, dict[str, str]] = {
             "(cell_summary.nucleus_area) lies whole in the window (AT-5)"
         ),
         "src/merxen/analysis/clustering_squidpy.py": (
-            "nucleus area metrics join nuclei to cells by id (AT-6)"
+            "nucleus area metrics: by id where nucleus ids are cell ids, else "
+            "aggregated per cell through cell_instance_id (AT-6)"
         ),
         "src/merxen/io/atera_reader.py": (
             "Atera table reads the largest-nucleus area and sums all nuclei per cell "
@@ -222,9 +228,6 @@ REASONS: dict[str, dict[str, str]] = {
             "features, paired roles and the analysis_mode map (kept in step by "
             "test_analysis_mode_parity)"
         ),
-        "workflows/modules/qc.nf": (
-            "inside the QC script: section; editing it changes task hashes (AT-6)"
-        ),
     },
     "native_image_names": {
         "scripts/acceptance/hitl0_tile_check.py": "acceptance check of a Xenium arm",
@@ -271,9 +274,6 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         "src/merxen/analysis/pciseq.py": (
             '"original_seg": ("xenium_cell_boundaries", "merscope_cell_boundaries"),',
         ),
-        "src/merxen/masks.py": (
-            '("original_nucleus", "xenium_nucleus", ("nucleus_boundaries",)),',
-        ),
         "src/merxen/visualization/sanity_plots.py": (
             '"merscope_cell_boundaries",',
             '"merscope_cell_boundaries",',
@@ -282,13 +282,9 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
             '"xenium_cell_boundaries",',
             '"xenium_cell_boundaries": ("Original segmentation", "#ff7f0e"),',
         ),
-        "workflows/modules/qc.nf": (
-            ': "xenium_cell_boundaries"',
-            '? "merscope_cell_boundaries"',
-        ),
     },
     "built_shape_names": {
-        "src/merxen/masks.py": ('else f"{ORIGINAL_ID_NAMESPACE}_nucleus"',),
+        "src/merxen/masks.py": ('f"{ORIGINAL_ID_NAMESPACE}_nucleus",',),
     },
     "vendor_nucleus_names": {
         "src/merxen/analysis/clustering_squidpy.py": (
@@ -317,8 +313,10 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         "src/merxen/io/builders/xenium.py": (
             "nucleus_boundaries=build_config.nucleus_boundaries,",
         ),
-        "src/merxen/masks.py": (
-            '("original_nucleus", "xenium_nucleus", ("nucleus_boundaries",)),',
+        "src/merxen/masks.py": ('("nucleus_boundaries",),',),
+        "src/merxen/segmentation/native.py": (
+            '("shapes", "nucleus_boundaries"): ("shapes", NATIVE_NUCLEUS_SHAPES_KEY),',
+            "``cell_boundaries`` -> ``atera_cell_boundaries``, ``nucleus_boundaries`` ->",  # noqa: E501
         ),
         "src/merxen/segmentation/pipeline.py": ("nucleus_boundaries=False,",),
     },
@@ -334,12 +332,19 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         ),
         "src/merxen/analysis/clustering_squidpy.py": (
             '"nucleus_area",',
+            '"nucleus_area": grouped.max(),',
+            '"nucleus_area_total": grouped.sum(min_count=1),',
+            'NUCLEUS_METRIC_COLUMNS = ("nucleus_area", "nucleus_area_total", '
+            '"nucleus_count")',
+            "``instance_id``: ``nucleus_area`` is the largest nucleus of the cell,",
+            "``nucleus_area_total`` the summed area and ``nucleus_count`` the "
+            "number of",
             '_apply_area_metric(adata, nucleus_metrics, column="nucleus_area")',
             '_obs_numeric(adata, "nucleus_area"),',
             'adata.obs["nucleus_area"] = np.nan',
-            "def _choose_nucleus_shape_key(sdata_obj: Any) -> str | None:",
+            "def _choose_nucleus_shape_key(",
             'if "nucleus_area" not in adata.obs:',
-            "nucleus_shape_key = _choose_nucleus_shape_key(sdata_obj)",
+            "nucleus_shape_key, nucleus_join = _choose_nucleus_shape_key(",
         ),
         "src/merxen/io/atera_reader.py": (
             "``cell_summary.nucleus_area`` describes only the largest nucleus of a",
@@ -453,7 +458,6 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
             'if dataset == "XENIUM":',
             'if dataset_name.upper() == "MERSCOPE" and prefer_aligned_vectors:',
             'if dataset_name.upper() == "MERSCOPE":',
-            'if str(dataset_name).upper() == "XENIUM":',
         ),
         "workflows/main.nf": (
             '!(settings.run_register_images && platform == "XENIUM")',
@@ -467,9 +471,6 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
             'if (platform == "XENIUM") {',
             'settings.paired_mode && platform == "MERSCOPE"',
             'settings.paired_mode && platform == "XENIUM"',
-        ),
-        "workflows/modules/qc.nf": (
-            'def registrationReferenceShapeKey = platform == "MERSCOPE"',
         ),
     },
     "native_image_names": {

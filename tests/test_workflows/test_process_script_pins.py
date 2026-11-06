@@ -10,9 +10,18 @@ Regenerate the pins after an intended, announced change with::
 
     MERXEN_UPDATE_GOLDEN=1 pytest tests/test_workflows/test_process_script_pins.py
 
-and say in the pull request which caches it invalidates and why. The only
-change planned is the QC registration-reference edit of ``modules/qc.nf`` in
-AT-6 (docs/plans/atera-support-plan.md).
+and say in the pull request which caches it invalidates and why.
+
+Changes made so far:
+
+- AT-6 (WP-C): the ``QC`` script of ``modules/qc.nf`` looks its registration
+  reference shape up in the platform registry
+  (``PlatformSpec.forName(platform).originalCellShapeKey``) instead of a
+  MERSCOPE/XENIUM branch, so ATERA rows get ``atera_cell_boundaries``. The
+  rendered ``qc_config.json`` of XENIUM and MERSCOPE rows is unchanged (the
+  ``qc`` golden), but the edited source text changes the hash of every QC task
+  once: the published XENIUM/MERSCOPE QC results get an announced one-time
+  re-run (docs/plans/atera-support-plan.md, AT-6).
 """
 
 from __future__ import annotations
@@ -103,9 +112,10 @@ def test_process_script_text_is_unchanged(
     assert not changed, (
         f"process source text changed: {changed}. Nextflow hashes this text, so "
         "the change invalidates the cache of every completed task of these "
-        "processes. Only change it for an announced reason (the one planned is the "
-        "modules/qc.nf QC edit of AT-6), then regenerate the pins with "
-        "MERXEN_UPDATE_GOLDEN=1."
+        "processes. Only change it for an announced reason (as the AT-6 QC "
+        "registry lookup in modules/qc.nf was, with a one-time QC re-run), then "
+        "regenerate the pins with MERXEN_UPDATE_GOLDEN=1 and record the reason in "
+        "this module's docstring."
     )
 
 
@@ -135,9 +145,9 @@ def test_main_nf_defines_no_process() -> None:
 
 
 def test_pinned_inventory(pinned: dict[str, str]) -> None:
-    """Today's inventory: 43 processes, 43 ``script:`` and 7 ``stub:`` sections."""
+    """Today's inventory: 44 processes, 44 ``script:`` and 7 ``stub:`` sections."""
     labels = [key.rsplit("::", 1)[1] for key in pinned]
-    assert labels.count("script") == 43
+    assert labels.count("script") == 44
     assert labels.count("stub") == 7
     assert {key for key in pinned if key.endswith("::stub")} == {
         f"workflows/modules/pciseq.nf::{name}::stub"

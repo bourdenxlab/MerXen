@@ -186,6 +186,7 @@ def test_viewer_cache_config_field_order() -> None:
         "build_image_pyramid",
         "image_only",
         "image_keys",
+        "base_image_key",
     ]
 
 

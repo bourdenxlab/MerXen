@@ -9,9 +9,9 @@ from the Nextflow command or config, but each row can override those settings
 with optional columns. In the default `analysis_mode=paired`, a row must contain
 one MERSCOPE and one Xenium dataset. In `analysis_mode=merscope`,
 `analysis_mode=xenium` or `analysis_mode=atera`, only the selected platform's
-source/cache columns are required. An `atera` row is one 10x Atera ROI and, for
-now, must set `stop_stage=build_spatialdata` (see
-[Atera rows](#atera-rows)). A template lives at
+source/cache columns are required. An `atera` row is one 10x Atera ROI and runs
+the native (vendor-segmentation) route (see [Atera rows](#atera-rows)). A
+template lives at
 [workflows/samplesheet.example.csv](../workflows/samplesheet.example.csv).
 
 > [!WARNING]
@@ -35,6 +35,7 @@ now, must set `stop_stage=build_spatialdata` (see
 | `pair_id` | **yes** | Unique identifier for this row. Used as the top-level output directory name. |
 | `analysis_mode` | no | Row-level mode: `paired`, `merscope`, `xenium` or `atera`. Blank inherits `--analysis_mode`. |
 | `enable_alignment` | no | Row-level alignment switch: `true` or `false`. Blank inherits `--enable_alignment`; only paired rows can run alignment. |
+| `segmentation_source` | no | Where the row's cells come from: `native` (vendor segmentation), `cellpose_only` or `cellpose_proseg`. Blank inherits `--segmentation_source`, then the platform default (`native` for ATERA, `cellpose_proseg` for XENIUM and MERSCOPE); each platform accepts only its default for now. |
 | `analysis_segmentation` | no | Row-level downstream branch set: `all`, `both`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, `proseg_hybrid`, or comma-separated combinations. `all` expands to all four branches and is the global default; `both` restricts analysis to `reseg,original_seg`; blank inherits `--analysis_segmentation`. |
 | `start_stage` | no | Row-level first stage. Blank inherits `--start_stage` unless `only_stage` applies. |
 | `stop_stage` | no | Row-level final stage. Blank inherits `--stop_stage` unless `only_stage` applies. |
@@ -161,10 +162,12 @@ From [workflows/main.nf](../workflows/main.nf):
   required.
 - In `analysis_mode=xenium`, only Xenium source/cache columns are required.
 - In `analysis_mode=atera`, the row must provide `atera_dir` or
-  `atera_spatialdata_path`, and its stages must be `build_spatialdata` only
-  (set `stop_stage=build_spatialdata` in the row). Preflight checks every row
-  before any task starts, so one ATERA row without it stops the whole run,
-  including the other rows of a mixed samplesheet.
+  `atera_spatialdata_path`. It runs the native segmentation route; stages and
+  options it does not cover are refused when the row sets them (see
+  [ATERA rows](configuration.md#atera-rows)); the global switches of those
+  stages are ignored on ATERA rows with a log note. Preflight checks every row before
+  any task starts, so one refused ATERA row stops the whole run, including the
+  other rows of a mixed samplesheet.
 - Blank row-level analysis, alignment, optional-analysis, or stage settings inherit the matching Nextflow
   parameter. Row-level `only_stage` overrides row-level `start_stage` and
   `stop_stage`; when a row sets either start/stop column, the global
@@ -179,13 +182,19 @@ workflow parses the CSV itself.
 
 One row per ROI: each Atera ROI has its own micron frame, so two ROIs of one
 slide are unrelated datasets. Name the row by an alias, never by the run,
-slide, region or instrument names of the ROI folder. Until the native
-segmentation route lands, an Atera row stops after the build:
+slide, region or instrument names of the ROI folder. An Atera row runs the
+native segmentation route (the vendor cells; no Cellpose or ProSeg) through
+clustering, and on to MENDER with `mender_enabled=true`:
 
 ```csv
-pair_id,analysis_mode,stop_stage,atera_dir,atera_spatialdata_path
-EXAMPLE02,atera,build_spatialdata,$MERXEN_ATERA_RAW_ROOT/<dataset>/outs,/path/to/cache/EXAMPLE02_atera_source.zarr
+pair_id,analysis_mode,atera_dir,atera_spatialdata_path,mender_enabled
+EXAMPLE02,atera,$MERXEN_ATERA_RAW_ROOT/<dataset>/outs,/path/to/cache/EXAMPLE02_atera_source.zarr,true
 ```
+
+`atera_spatialdata_path` is the build's source store; a restart from a later
+stage always reads the published latest store of the row, never this path.
+The stages, the analysis layer (`original_seg` only) and what is refused for
+ATERA rows are listed under [ATERA rows](configuration.md#atera-rows).
 
 (Write real paths in the samplesheet; `$MERXEN_ATERA_RAW_ROOT` stands for the
 `.env` location here.) The build's options and the store it writes are

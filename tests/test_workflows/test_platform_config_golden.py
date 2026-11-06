@@ -16,7 +16,9 @@ the MERSCOPE BUILD and SEGMENT cases with the bead-removal and transform params
 off their defaults, L3 reruns them with bead removal switched on globally
 (``--merscope_bead_removal true``) instead of per row, and L4 reruns the ATERA
 BUILD cases with the ATERA params off their defaults (AT-4 added the ATERA
-cases; the XENIUM and MERSCOPE cases are unchanged).
+cases; the XENIUM and MERSCOPE cases are unchanged). AT-6 added the ATERA
+native-route cases (the ``native`` file and ATERA ids in ``enrich``,
+``viewer_cache`` and ``analysis_layers``); again only case ids were added.
 
 Goldens hold the compact ``JsonOutput.toJson`` text of each case (the task input
 is its deterministic ``prettyPrint``) with the launch directory written as
@@ -59,6 +61,8 @@ GOLDEN_FILES: tuple[str, ...] = (
     "analysis_layers",
     "modes",
     "pciseq",
+    "native",
+    "mask_image_quantification",
 )
 
 # Launch id -> extra command-line params (params are global per run).
@@ -155,6 +159,15 @@ SPANS: tuple[Span, ...] = (
         "\n            tuple(",
         "def viewerCacheConfig = [",
         "viewerCacheConfig",
+    ),
+    Span(
+        "renderMaskImageQuantification(key, pairId, platform, enrichedLatestZarr, "
+        "maskPath)",
+        "mask_image_quantification_inputs_ch = post_enrich_zarrs_ch",
+        "def quantConfig",
+        "\n            tuple(",
+        "def quantConfig = [",
+        "quantConfig",
     ),
 )
 

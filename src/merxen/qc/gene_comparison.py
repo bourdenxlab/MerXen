@@ -11,6 +11,7 @@ import pandas as pd
 import spatialdata as sd
 
 from merxen.control_features import control_transcript_mask
+from merxen.io.points_aggregates import read_points_aggregates
 from merxen.io.spatialdata_schema import choose_primary_points_key
 from merxen.io.transcript_io import (
     assignment_mask_from_points,
@@ -28,6 +29,9 @@ FEATURE_TYPE_COLUMNS: tuple[str, ...] = ("feature_types", "feature_type")
 # ``var`` column holding gene names when ``var_names`` are feature ids, as in
 # the Atera cell-feature matrix (Ensembl ids in ``var_names``).
 FEATURE_NAME_COLUMN = "feature_name"
+
+# Points column the build's per-gene totals (``gene_counts_kept``) count.
+AGGREGATE_GENE_COLUMN = "feature_name"
 
 
 def _table_gene_labels(adata: Any, gene_label: str) -> pd.Index:
@@ -77,11 +81,58 @@ def feature_types_from_table(adata: Any, gene_label: str = "gene") -> pd.Series 
     return types.groupby(level=0).first()
 
 
+def _gene_totals_from_aggregates(
+    sdata_obj: Any, points_key: str, gene_col: str
+) -> pd.Series | None:
+    """Return the build's per-gene totals of a store, when they can be trusted.
+
+    An ATERA build records the rows it wrote per feature
+    (``gene_counts_kept``). They replace a pass over every transcript while
+    the points index still matches the parquet files and the points are
+    named by ``feature_name``. XENIUM and MERSCOPE stores record none.
+    """
+    zarr_path = getattr(sdata_obj, "path", None)
+    if zarr_path is None or gene_col != AGGREGATE_GENE_COLUMN:
+        return None
+    aggregates = read_points_aggregates(Path(zarr_path), points_key)
+    if aggregates is None:
+        return None
+    if not aggregates.fingerprint_matches():
+        logger.info(
+            "Points aggregates of %s do not match its parquet files; counting genes "
+            "with dask.",
+            points_key,
+        )
+        return None
+    counts = pd.Series(
+        aggregates.gene_counts_kept,
+        index=pd.Index(aggregates.feature_names, dtype=str, name=gene_col),
+        dtype=np.int64,
+    )
+    # A groupby over the points only sees features that occur.
+    counts = counts[counts > 0]
+    logger.info("Per-gene totals of %s come from the build aggregates.", points_key)
+    return counts.groupby(level=0).sum().astype(float)
+
+
 def gene_totals_from_points(
     sdata_obj: Any,
     assigned_only: bool = False,
 ) -> pd.Series:
-    """Aggregate per-gene transcript counts from the primary points table."""
+    """Aggregate per-gene transcript counts from the primary points table.
+
+    Dask-backed points are counted with dask; only pandas points are
+    materialised. When ``assigned_only`` is false and the store's build
+    recorded per-gene totals that still match its parquet files (ATERA), those
+    totals are returned without reading the points.
+
+    Args:
+        sdata_obj: SpatialData object with a transcript points element.
+        assigned_only: Count only transcripts assigned to a cell.
+
+    Returns:
+        Counts indexed by unique gene name, as floats.
+    """
     if len(sdata_obj.points) == 0:
         raise RuntimeError("No points found in spatialdata object.")
 
@@ -95,6 +146,11 @@ def gene_totals_from_points(
         raise KeyError(
             f"Could not find gene column in points {points_key}: {list(pts.columns)}"
         )
+
+    if not assigned_only:
+        fast = _gene_totals_from_aggregates(sdata_obj, points_key, gene_col)
+        if fast is not None:
+            return fast
 
     assign_col: str | None = None
     background_col = first_existing_col(pts, ["background"])

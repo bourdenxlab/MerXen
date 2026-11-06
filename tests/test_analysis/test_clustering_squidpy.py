@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import warnings
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -47,6 +48,7 @@ from merxen.analysis.clustering_squidpy import (
     write_clustered_spatialdata_table,
 )
 from merxen.config import ClusteringSquidpyConfig
+from merxen.platforms import UnknownPlatformError
 
 
 def test_adata_from_spatialdata_adds_spatial_area_and_control_metrics() -> None:
@@ -1725,3 +1727,741 @@ def test_prepare_compute_finalize_clustering_process_boundary(
     assert (tmp_path / "final/merscope/pair1_MERSCOPE_clustered.h5ad").exists()
     assert writes == [(tmp_path / "latest.zarr", "reseg")]
     assert results["pair1_MERSCOPE"]["spatialdata_table_key"] == "table_clustered"
+
+
+# --------------------------------------------------------------------------- #
+# AT-6 WP-D: ATERA (native) clustering and the unchanged XENIUM/MERSCOPE path
+# --------------------------------------------------------------------------- #
+
+# The ``uns`` parameter keys a round recorded before AT-6. The XENIUM/MERSCOPE
+# path (no ``hvg_n_top_genes``) must keep exactly this set.
+_PRE_AT6_ROUND_PARAM_KEYS = {
+    "drop_control_features",
+    "min_counts",
+    "min_cells",
+    "input_layer",
+    "key_added",
+    "normalize_target_sum",
+    "normalize_exclude_highly_expressed",
+    "normalize_max_fraction",
+    "n_pcs",
+    "n_neighbors",
+    "effective_neighbors",
+    "leiden_resolution",
+    "umap_min_dist",
+    "umap_spread",
+    "random_seed",
+    "gpu_used",
+    "gpu_requested",
+    "engine",
+    "engine_versions",
+    "embedding_engine",
+    "leiden_flavor",
+    "leiden_n_iterations",
+    "leiden_random_state",
+    "n_pcs_used",
+    "n_neighbors_used",
+}
+_PRE_AT6_CONTROL_FILTER_KEYS = [
+    "enabled",
+    "n_features_before",
+    "n_control_features_removed",
+    "n_features_after_control_filter",
+    "expected_panel_gene_count",
+    "has_expected_panel_gene_count",
+    "removed_control_features",
+    "retained_features",
+    "n_features_after_min_cell_filter",
+    "has_expected_panel_gene_count_after_min_cell_filter",
+]
+
+
+def _square(x0: float, y0: float, side: float) -> object:
+    return box(x0, y0, x0 + side, y0 + side)
+
+
+def _atera_store(
+    *,
+    with_vendor_nucleus_columns: bool,
+    registered: bool = True,
+) -> SimpleNamespace:
+    """An in-memory native ATERA store: 3 cells, 3 nuclei.
+
+    Cell 1 owns nucleus 1 (area 1); cell 2 owns nuclei 2 (area 4) and 3
+    (area 9); cell 3 owns none. Nucleus ids overlap cell ids on purpose: a
+    join by id would give cell 3 nucleus 3's area.
+    """
+    obs = pd.DataFrame(
+        {"instance_id": np.array([1, 2, 3], dtype=np.uint64)},
+        index=["1", "2", "3"],
+    )
+    if with_vendor_nucleus_columns:
+        obs["nucleus_area"] = [1.5, 9.5, np.nan]
+        obs["nucleus_area_total"] = [1.5, 13.5, np.nan]
+        obs["nucleus_count"] = np.array([1, 2, 0], dtype=np.int64)
+    table = ad.AnnData(
+        X=sparse.csr_matrix(np.array([[5, 1], [2, 8], [3, 3]], dtype=np.float32)),
+        obs=obs,
+        var=pd.DataFrame(index=["GeneA", "GeneB"]),
+    )
+    table.uns["spatialdata_attrs"] = {
+        "region": "atera_cell_boundaries",
+        "region_key": "region",
+        "instance_key": "instance_id",
+    }
+    cells = gpd.GeoDataFrame(
+        {
+            "instance_id": np.array([1, 2, 3], dtype=np.uint64),
+            "geometry": [_square(0, 0, 4), _square(10, 0, 8), _square(30, 0, 4)],
+        },
+        geometry="geometry",
+    )
+    nuclei = gpd.GeoDataFrame(
+        {
+            "instance_id": np.array([1, 2, 3], dtype=np.uint64),
+            "cell_instance_id": np.array([1, 2, 2], dtype=np.uint64),
+            "geometry": [_square(1, 1, 1), _square(11, 1, 2), _square(14, 1, 3)],
+        },
+        geometry="geometry",
+    )
+    attrs: dict[str, object] = {}
+    if registered:
+        attrs["merxen_schema"] = {
+            "segmentations": {
+                "original": {
+                    "shape": "atera_cell_boundaries",
+                    "table": "table_original",
+                },
+                "original_nucleus": {
+                    "shape": "atera_nucleus",
+                    "table": None,
+                    "cell_key": "cell_instance_id",
+                },
+            }
+        }
+    return SimpleNamespace(
+        tables={"table_original": table},
+        shapes={"atera_cell_boundaries": cells, "atera_nucleus": nuclei},
+        attrs=attrs,
+    )
+
+
+def test_atera_nucleus_metrics_join_through_cell_instance_id() -> None:
+    """Nuclei aggregate per owning cell; nucleus k never lands on cell k."""
+    store = _atera_store(with_vendor_nucleus_columns=False)
+
+    out = adata_from_spatialdata(
+        store,
+        platform="ATERA",
+        table_key="table_original",
+        shape_key="atera_cell_boundaries",
+    )
+
+    np.testing.assert_allclose(
+        out.obs["nucleus_area"].to_numpy(float), [1.0, 9.0, np.nan]
+    )
+    np.testing.assert_allclose(
+        out.obs["nucleus_area_total"].to_numpy(float), [1.0, 13.0, np.nan]
+    )
+    assert out.obs["nucleus_count"].tolist() == [1, 2, 0]
+    # A join by id would have given cell 3 the area of nucleus 3 (9.0).
+    assert np.isnan(out.obs["nucleus_area"].iloc[2])
+    np.testing.assert_allclose(
+        out.obs["nucleus_ratio"].to_numpy(float), [1 / 16, 9 / 64, np.nan]
+    )
+    meta = out.uns["merxen_clustering_squidpy"]
+    assert meta["nucleus_shape_key"] == "atera_nucleus"
+    assert meta["nucleus_join"] == "cell_instance_id"
+
+
+def test_atera_nucleus_join_keeps_the_vendor_table_columns() -> None:
+    """The build's per-cell nucleus columns are never overwritten."""
+    store = _atera_store(with_vendor_nucleus_columns=True)
+
+    out = adata_from_spatialdata(store, platform="ATERA", table_key="table_original")
+
+    np.testing.assert_allclose(
+        out.obs["nucleus_area"].to_numpy(float), [1.5, 9.5, np.nan]
+    )
+    np.testing.assert_allclose(
+        out.obs["nucleus_area_total"].to_numpy(float), [1.5, 13.5, np.nan]
+    )
+    assert out.obs["nucleus_count"].tolist() == [1, 2, 0]
+
+
+def test_choose_nucleus_shape_key_is_registry_driven_for_atera() -> None:
+    """ATERA ignores the bare source nucleus layer and uses the registry."""
+    store = _atera_store(with_vendor_nucleus_columns=False)
+    assert clustering_mod._choose_nucleus_shape_key(store, platform="ATERA") == (
+        "atera_nucleus",
+        "cell_instance_id",
+    )
+
+    # Unregistered store: the platform's nucleus key, joined by the default.
+    bare = _atera_store(with_vendor_nucleus_columns=False, registered=False)
+    assert clustering_mod._choose_nucleus_shape_key(bare, platform="ATERA") == (
+        "atera_nucleus",
+        "cell_instance_id",
+    )
+
+    # A source-named nucleus layer is never picked for ATERA.
+    source_named = SimpleNamespace(
+        tables={},
+        shapes={"nucleus_boundaries": bare.shapes["atera_nucleus"]},
+        attrs={},
+    )
+    assert clustering_mod._choose_nucleus_shape_key(source_named, platform="ATERA") == (
+        None,
+        None,
+    )
+
+
+@pytest.mark.parametrize("platform", ["XENIUM", "MERSCOPE", None])
+def test_choose_nucleus_shape_key_keeps_the_xenium_candidate_order(
+    platform: str | None,
+) -> None:
+    """Platforms whose nucleus ids are cell ids keep the fixed candidate list."""
+    layer = gpd.GeoDataFrame({"geometry": [box(0, 0, 1, 1)]}, geometry="geometry")
+    for present, expected in [
+        (
+            ["nucleus_boundaries", "xenium_nucleus", "xenium_nucleus_aligned_nonrigid"],
+            "xenium_nucleus_aligned_nonrigid",
+        ),
+        (["nucleus_boundaries", "xenium_nucleus"], "xenium_nucleus"),
+        (["nucleus_boundaries"], "nucleus_boundaries"),
+        (["cellpose_nuclei"], None),
+    ]:
+        store = SimpleNamespace(shapes=dict.fromkeys(present, layer))
+        assert clustering_mod._choose_nucleus_shape_key(store, platform) == (
+            expected,
+            None,
+        )
+
+
+def test_choose_nucleus_shape_key_refuses_an_unknown_platform() -> None:
+    """A misspelt platform raises instead of falling back to the join by id."""
+    layer = gpd.GeoDataFrame({"geometry": [box(0, 0, 1, 1)]}, geometry="geometry")
+    store = SimpleNamespace(shapes={"nucleus_boundaries": layer})
+    with pytest.raises(UnknownPlatformError, match="ATRA"):
+        clustering_mod._choose_nucleus_shape_key(store, platform="ATRA")
+
+
+def test_xenium_nucleus_join_records_no_join_key() -> None:
+    """The XENIUM path keeps its uns record unchanged (no nucleus_join key)."""
+    obs = pd.DataFrame({"cell_id": ["x1", "x2"]}, index=["x1", "x2"])
+    adata = ad.AnnData(
+        X=np.array([[10, 1], [2, 8]], dtype=np.int64),
+        obs=obs,
+        var=pd.DataFrame(index=["GeneA", "GeneB"]),
+    )
+    adata.uns["spatialdata_attrs"] = {"region": "xenium_cell_boundaries"}
+    shapes = {
+        "xenium_cell_boundaries": gpd.GeoDataFrame(
+            {"cell_id": ["x1", "x2"], "geometry": [box(0, 0, 2, 2), box(4, 0, 6, 2)]},
+            geometry="geometry",
+        ),
+        "xenium_nucleus": gpd.GeoDataFrame(
+            {"cell_id": ["x2", "x1"], "geometry": [box(4, 0, 5, 1), box(0, 0, 2, 1)]},
+            geometry="geometry",
+        ),
+    }
+    out = adata_from_spatialdata(
+        SimpleNamespace(tables={"table": adata}, shapes=shapes), platform="XENIUM"
+    )
+
+    np.testing.assert_allclose(out.obs["nucleus_area"].to_numpy(float), [2.0, 1.0])
+    assert "nucleus_area_total" not in out.obs
+    assert "nucleus_count" not in out.obs
+    assert set(out.uns["merxen_clustering_squidpy"]) == {
+        "control_qc_sources",
+        "platform",
+        "table_key",
+        "shape_key",
+        "nucleus_shape_key",
+    }
+
+
+def _wide_adata(n_obs: int, n_vars: int, *, seed: int) -> ad.AnnData:
+    """Sparse counts with two cell groups and group-specific genes."""
+    rng = np.random.default_rng(seed)
+    base = rng.gamma(0.3, 1.0, size=n_vars)
+    groups = rng.integers(0, 3, size=n_obs)
+    boost = np.ones((3, n_vars))
+    for group in range(3):
+        boost[group, rng.choice(n_vars, size=40, replace=False)] = 12.0
+    lam = base[None, :] * boost[groups] * rng.gamma(4.0, 0.5, size=(n_obs, 1))
+    counts = sparse.csr_matrix(rng.poisson(lam).astype(np.float32))
+    adata = ad.AnnData(
+        X=counts,
+        obs=pd.DataFrame(
+            {"group": pd.Categorical([f"g{g}" for g in groups])},
+            index=[f"cell{i}" for i in range(n_obs)],
+        ),
+        var=pd.DataFrame(index=[f"Gene{i}" for i in range(n_vars)]),
+    )
+    adata.obsm["spatial"] = rng.normal(size=(n_obs, 2))
+    return adata
+
+
+def test_hvg_selection_restricts_the_pca_to_the_mask() -> None:
+    """With hvg_n_top_genes the PCA runs on the selected genes only."""
+    out = run_scanpy_clustering(
+        _wide_adata(300, 3000, seed=3),
+        min_counts=1,
+        min_cells=1,
+        n_pcs=10,
+        n_neighbors=10,
+        use_gpu=False,
+        expected_panel_gene_count=None,
+        hvg_n_top_genes=2000,
+    )
+
+    mask = out.var[clustering_mod.HVG_VAR_KEY].to_numpy(bool)
+    params = out.uns["merxen_clustering_params"]
+    assert params["hvg_method"] == clustering_mod.HVG_FLAVOR
+    assert params["hvg_n_top_genes"] == 2000
+    assert params["pca_mask_var"] == clustering_mod.HVG_VAR_KEY
+    assert params["n_highly_variable_genes"] == int(mask.sum())
+    assert out.n_vars > 2000
+    assert 1900 <= int(mask.sum()) <= 2100
+    assert not mask.all()
+    loadings = out.varm["PCs"]
+    assert np.all(loadings[~mask] == 0)
+    assert np.any(loadings[mask] != 0, axis=1).mean() > 0.9
+    # Scanpy's implicit column is never written; the vendor's is never read.
+    assert "highly_variable" not in out.var
+
+
+def test_hvg_selects_every_gene_when_the_panel_is_small() -> None:
+    out = run_scanpy_clustering(
+        _poisson_adata(30, 8, seed=2),
+        min_counts=1,
+        min_cells=1,
+        n_pcs=3,
+        n_neighbors=4,
+        use_gpu=False,
+        hvg_n_top_genes=2000,
+    )
+    assert out.var[clustering_mod.HVG_VAR_KEY].all()
+    assert out.uns["merxen_clustering_params"]["hvg_method"] == "all_genes"
+
+
+def test_hvg_ignores_a_vendor_highly_variable_column(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The vendor's flag never steers the PCA, set or unset."""
+    adata = _wide_adata(200, 1200, seed=4)
+    adata.var["vendor_highly_variable"] = False
+    seen: list[dict[str, object]] = []
+    real_pca = clustering_mod.sc.pp.pca
+
+    def spy(data: ad.AnnData, **kwargs: object) -> object:
+        seen.append(dict(kwargs))
+        return real_pca(data, **kwargs)
+
+    monkeypatch.setattr(clustering_mod.sc.pp, "pca", spy)
+    run_scanpy_clustering(
+        adata, min_counts=1, min_cells=1, n_pcs=5, use_gpu=False, hvg_n_top_genes=300
+    )
+    assert seen[-1]["mask_var"] == clustering_mod.HVG_VAR_KEY
+    run_scanpy_clustering(adata, min_counts=1, min_cells=1, n_pcs=5, use_gpu=False)
+    assert "mask_var" not in seen[-1]
+
+
+def test_unset_hvg_and_default_panel_keep_the_xenium_records(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """XENIUM/MERSCOPE rounds record exactly the pre-AT-6 keys."""
+    adata = _poisson_adata(40, 12, seed=8)
+    adata.var_names = [*adata.var_names[:-1], "NegControlProbe_1"]
+    with caplog.at_level("WARNING", logger=clustering_mod.__name__):
+        out = run_scanpy_clustering(
+            adata, min_counts=1, min_cells=1, n_pcs=3, n_neighbors=4, use_gpu=False
+        )
+
+    assert set(out.uns["merxen_clustering_params"]) == _PRE_AT6_ROUND_PARAM_KEYS
+    summary = out.uns["merxen_clustering_squidpy"]["control_feature_filter"]
+    assert list(summary) == _PRE_AT6_CONTROL_FILTER_KEYS
+    assert summary["expected_panel_gene_count"] == 300
+    assert summary["has_expected_panel_gene_count"] is False
+    assert clustering_mod.HVG_VAR_KEY not in out.var
+    assert "Expected 300 genes" in caplog.text
+
+
+def test_expected_panel_gene_count_none_skips_the_check(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    adata = _poisson_adata(40, 12, seed=8)
+    with caplog.at_level("WARNING", logger=clustering_mod.__name__):
+        out = run_scanpy_clustering(
+            adata,
+            min_counts=1,
+            min_cells=1,
+            n_pcs=3,
+            n_neighbors=4,
+            use_gpu=False,
+            expected_panel_gene_count=None,
+        )
+
+    summary = out.uns["merxen_clustering_squidpy"]["control_feature_filter"]
+    assert "expected_panel_gene_count" not in summary
+    assert "has_expected_panel_gene_count" not in summary
+    assert "has_expected_panel_gene_count_after_min_cell_filter" not in summary
+    assert "Expected" not in caplog.text
+
+
+def test_sample_options_come_from_the_sample_config() -> None:
+    xenium = ClusteringSquidpyConfig.model_validate(
+        {
+            "pair_id": "p",
+            "output_dir": "out",
+            "samples": [
+                {"sample_id": "x", "platform": "XENIUM", "zarr_path": "x.zarr"},
+                {
+                    "sample_id": "a",
+                    "platform": "ATERA",
+                    "zarr_path": "a.zarr",
+                    "expected_panel_gene_count": None,
+                    "hvg_n_top_genes": 2000,
+                },
+            ],
+        }
+    )
+    defaults = clustering_mod.SampleClusteringOptions.from_sample(xenium.samples[0])
+    assert defaults == clustering_mod.DEFAULT_SAMPLE_OPTIONS
+    assert defaults.expected_panel_gene_count == 300
+    assert defaults.hvg_n_top_genes is None
+    atera = clustering_mod.SampleClusteringOptions.from_sample(xenium.samples[1])
+    assert atera.expected_panel_gene_count is None
+    assert atera.hvg_n_top_genes == 2000
+
+
+def test_gpu_pca_receives_the_hvg_mask(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+    monkeypatch.setitem(
+        sys.modules, "rapids_singlecell", _fake_rapids_singlecell(calls)
+    )
+    run_scanpy_clustering(
+        _wide_adata(60, 1500, seed=5),
+        min_counts=1,
+        min_cells=1,
+        n_pcs=3,
+        n_neighbors=4,
+        use_gpu=True,
+        hvg_n_top_genes=200,
+    )
+    pca_kwargs = calls["pca"]
+    assert isinstance(pca_kwargs, dict)
+    assert pca_kwargs["mask_var"] == clustering_mod.HVG_VAR_KEY
+
+    calls.clear()
+    run_scanpy_clustering(
+        _poisson_adata(20, 6, seed=6),
+        min_counts=1,
+        min_cells=1,
+        n_pcs=3,
+        n_neighbors=4,
+        use_gpu=True,
+    )
+    pca_kwargs = calls["pca"]
+    assert isinstance(pca_kwargs, dict)
+    assert "mask_var" not in pca_kwargs
+
+
+def _dense_group_reference(
+    matrix: np.ndarray, labels: np.ndarray, groups: list[str]
+) -> tuple[np.ndarray, np.ndarray]:
+    means = np.zeros((len(groups), matrix.shape[1]))
+    fractions = np.zeros_like(means)
+    for row, group in enumerate(groups):
+        mask = labels == group
+        if mask.any():
+            means[row] = matrix[mask].astype(np.float64).mean(axis=0)
+            fractions[row] = (matrix[mask] > 0).mean(axis=0)
+    return means, fractions
+
+
+def test_sparse_group_means_match_the_dense_computation() -> None:
+    adata = _wide_adata(300, 1200, seed=11)
+    labels = adata.obs["group"].astype(str).to_numpy()
+    groups = ["g2", "g0", "missing", "g1"]
+    means, fractions = clustering_mod._sparse_group_mean_and_fraction(
+        adata.X, labels, groups
+    )
+    dense_means, dense_fractions = _dense_group_reference(
+        adata.X.toarray(), labels, groups
+    )
+    np.testing.assert_allclose(means, dense_means, rtol=1e-12, atol=0)
+    np.testing.assert_allclose(fractions, dense_fractions, rtol=1e-12, atol=0)
+    assert np.all(means[2] == 0)
+
+
+def test_wide_sparse_summaries_never_densify(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Above DENSE_SUMMARY_MAX_GENES the cluster means stay sparse."""
+    adata = _wide_adata(250, 1500, seed=12)
+    dense_input = adata.copy()
+    dense_input.X = dense_input.X.toarray()
+    expected = clustering_mod._mean_expression_by_cluster(dense_input, "group")
+    expected_mean, expected_fraction = compute_group_gene_summary(
+        dense_input, list(adata.var_names), groupby="group"
+    )
+
+    def refuse(_: object) -> np.ndarray:
+        raise AssertionError("wide sparse summaries must not densify the matrix")
+
+    monkeypatch.setattr(clustering_mod, "_matrix_to_dense", refuse)
+    observed = clustering_mod._mean_expression_by_cluster(adata, "group")
+    observed_mean, observed_fraction = compute_group_gene_summary(
+        adata, list(adata.var_names), groupby="group"
+    )
+
+    pd.testing.assert_index_equal(observed.index, expected.index)
+    pd.testing.assert_index_equal(observed.columns, expected.columns)
+    np.testing.assert_allclose(observed.to_numpy(), expected.to_numpy(), rtol=1e-6)
+    np.testing.assert_allclose(
+        observed_mean.to_numpy(), expected_mean.to_numpy(), rtol=1e-6
+    )
+    np.testing.assert_allclose(
+        observed_fraction.to_numpy(), expected_fraction.to_numpy(), rtol=1e-12
+    )
+
+
+def test_panel_sized_summaries_keep_the_dense_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """300-gene panels never take the indicator path, so they stay bit-exact."""
+    adata = _wide_adata(200, 300, seed=13)
+
+    def refuse(*_: object, **__: object) -> object:
+        raise AssertionError("panel-sized summaries must keep the dense path")
+
+    monkeypatch.setattr(clustering_mod, "_sparse_group_mean_and_fraction", refuse)
+    means = clustering_mod._mean_expression_by_cluster(adata, "group")
+    labels = adata.obs["group"].astype(str).to_numpy()
+    dense = adata.X.toarray().astype(float)
+    for group in means.index:
+        expected = dense[labels == group].mean(axis=0)
+        assert np.array_equal(means.loc[group].to_numpy(), expected)
+
+    mean, fraction = compute_group_gene_summary(
+        adata, list(adata.var_names), groupby="group"
+    )
+    for group in mean.index:
+        rows = adata.X[labels == group]
+        assert np.array_equal(
+            mean.loc[group].to_numpy(), np.asarray(rows.mean(axis=0)).ravel()
+        )
+        assert np.array_equal(
+            fraction.loc[group].to_numpy(), np.asarray((rows > 0).mean(axis=0)).ravel()
+        )
+
+
+def test_select_dotplot_genes_takes_group_turns_under_the_cap() -> None:
+    rng = np.random.default_rng(0)
+    n_groups = 120
+    groups = [f"c{i}" for i in range(n_groups)]
+    genes = [f"G{i}" for i in range(3000)]
+    values = rng.random((n_groups, 3000))
+    # Group g's own genes 5g..5g+4, best first: 600 distinct candidates.
+    for group in range(n_groups):
+        values[group, 5 * group : 5 * group + 5] = 100.0 - np.arange(5)
+    means = pd.DataFrame(values, index=groups, columns=genes)
+    fractions = pd.DataFrame(1.0, index=groups, columns=genes)
+
+    selected = clustering_mod.select_dotplot_genes(means, fractions)
+
+    assert len(selected) == clustering_mod.DOTPLOT_MAX_GENES
+    assert len(set(selected)) == len(selected)
+    # Every pick is one of a group's own five genes. Groups take turns, so
+    # three full rounds fit (360 genes) and the cap cuts the fourth round.
+    own = {
+        f"G{5 * group + rank}": group for group in range(n_groups) for rank in range(5)
+    }
+    assert set(selected) <= set(own)
+    per_group = Counter(own[gene] for gene in selected)
+    assert set(per_group.values()) == {3, 4}
+    assert sum(count == 4 for count in per_group.values()) == 400 - 3 * n_groups
+
+
+def test_select_dotplot_genes_prefers_expressed_markers_to_rare_genes() -> None:
+    """A near-silent gene with a top z-score loses to the group's real marker.
+
+    ``RARE`` has a few transcripts in group a only, so its z-score is the
+    highest possible, but only 2% of a's cells express it. ``MARKER`` is
+    expressed by most cells of a and weakly elsewhere: its z-score is a
+    little lower.
+    """
+    groups = ["a", "b", "c"]
+    genes = ["RARE", "MARKER", "WIDE"]
+    means = pd.DataFrame(
+        [[0.02, 3.0, 1.0], [0.0, 0.3, 1.0], [0.0, 0.2, 1.0]],
+        index=groups,
+        columns=genes,
+    )
+    fractions = pd.DataFrame(
+        [[0.02, 0.8, 0.9], [0.0, 0.1, 0.9], [0.0, 0.05, 0.9]],
+        index=groups,
+        columns=genes,
+    )
+
+    unfloored = clustering_mod.select_dotplot_genes(
+        means, fractions, top_k=1, min_fraction=0.0
+    )
+    selected = clustering_mod.select_dotplot_genes(means, fractions, top_k=1)
+
+    assert unfloored[0] == "RARE"
+    assert selected[0] == "MARKER"
+    assert "RARE" not in clustering_mod.select_dotplot_genes(means, fractions, top_k=3)
+    # c has only WIDE above the floor (MARKER reaches 5% there).
+    assert selected == ["MARKER", "WIDE"]
+    with pytest.raises(ValueError, match="share index and columns"):
+        clustering_mod.select_dotplot_genes(means, fractions.iloc[:, :2])
+
+
+def test_select_dotplot_genes_breaks_z_ties_by_fraction_expressing() -> None:
+    """Genes exclusive to one group tie on z; the more widely expressed wins."""
+    groups = ["a", "b", "c"]
+    genes = ["EXCL_LOW", "EXCL_HIGH"]
+    means = pd.DataFrame(
+        [[0.5, 0.5], [0.0, 0.0], [0.0, 0.0]], index=groups, columns=genes
+    )
+    fractions = pd.DataFrame(
+        [[0.2, 0.6], [0.0, 0.0], [0.0, 0.0]], index=groups, columns=genes
+    )
+
+    assert clustering_mod.select_dotplot_genes(means, fractions, top_k=2) == [
+        "EXCL_HIGH",
+        "EXCL_LOW",
+    ]
+
+
+def test_wide_panel_dotplot_is_bounded_and_tables_keep_every_gene(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adata = _wide_adata(240, 2000, seed=14)
+    adata.obs["leiden_subcluster"] = adata.obs["group"].astype(str)
+    captured: dict[str, object] = {}
+    real_plot = clustering_mod.plot_group_gene_dotplot
+
+    def spy(
+        mean: pd.DataFrame, fraction: pd.DataFrame, path: Path, **kw: object
+    ) -> Path:
+        captured["shape"] = mean.shape
+        captured["gene_order"] = kw["gene_order"]
+        return real_plot(mean, fraction, path, **kw)
+
+    monkeypatch.setattr(clustering_mod, "plot_group_gene_dotplot", spy)
+    paths = clustering_mod._save_branch_gene_dotplot(
+        adata,
+        output_dir=tmp_path,
+        prefix="ATERA_SYNTH_branch",
+        group_key="leiden_subcluster",
+        dpi=72,
+    )
+
+    gene_order = captured["gene_order"]
+    assert isinstance(gene_order, list)
+    assert 0 < len(gene_order) <= clustering_mod.DOTPLOT_MAX_GENES
+    assert len(gene_order) <= 3 * clustering_mod.DOTPLOT_TOP_GENES_PER_GROUP
+    assert captured["shape"] == (3, len(gene_order))
+    mean_table = pd.read_csv(
+        paths["ATERA_SYNTH_branch_gene_mean_expression"], index_col=0
+    )
+    fraction_table = pd.read_csv(
+        paths["ATERA_SYNTH_branch_gene_fraction_expressing"], index_col=0
+    )
+    assert list(mean_table.columns) == list(adata.var_names)
+    assert list(fraction_table.columns) == list(adata.var_names)
+    assert paths["ATERA_SYNTH_branch_gene_dotplot"].exists()
+    selection = adata.uns[clustering_mod.DOTPLOT_GENE_SELECTION_UNS_KEY][
+        "ATERA_SYNTH_branch"
+    ]
+    assert selection["n_panel_genes"] == 2000
+    assert selection["n_plotted_genes"] == len(gene_order)
+    assert list(selection["plotted_genes"]) == gene_order
+    assert selection["table_gene_order"] == "var"
+    assert selection["min_group_fraction"] == clustering_mod.DOTPLOT_MIN_GROUP_FRACTION
+
+
+def test_panel_sized_dotplot_keeps_the_clustered_table_order(tmp_path: Path) -> None:
+    """XENIUM-sized panels: tables in clustered order, no selection record."""
+    adata = _wide_adata(150, 300, seed=15)
+    adata.obs["leiden_subcluster"] = adata.obs["group"].astype(str)
+    paths = clustering_mod._save_branch_gene_dotplot(
+        adata,
+        output_dir=tmp_path,
+        prefix="x",
+        group_key="leiden_subcluster",
+        dpi=72,
+    )
+    mean, _ = compute_group_gene_summary(
+        adata, list(adata.var_names), groupby="leiden_subcluster"
+    )
+    table = pd.read_csv(paths["x_gene_mean_expression"], index_col=0)
+    assert list(table.columns) == clustering_mod._cluster_gene_order(mean)
+    assert clustering_mod.DOTPLOT_GENE_SELECTION_UNS_KEY not in adata.uns
+
+
+def test_dotplot_render_guard_refuses_oversized_figures() -> None:
+    clustering_mod._check_dotplot_render_size(
+        n_groups=60, n_genes=clustering_mod.DOTPLOT_MAX_GENES, dpi=220
+    )
+    with pytest.raises(ValueError, match="render"):
+        clustering_mod._check_dotplot_render_size(n_groups=60, n_genes=18000, dpi=220)
+
+
+@pytest.mark.integration
+def test_native_reference_prepare_keeps_vendor_nucleus_metrics(
+    tmp_path: Path,
+) -> None:
+    """Clustering ingest of the native ATERA reference store (two-nucleus cell)."""
+    from test_io.atera_native_fixture import make_native_reference
+
+    _, latest = make_native_reference(tmp_path / "ref")
+    sdata = sd.read_zarr(latest)
+    table = sdata.tables["table_original"]
+    nuclei = sdata.shapes["atera_nucleus"]
+
+    adata = adata_from_spatialdata(
+        sdata,
+        platform="ATERA",
+        table_key="table_original",
+        shape_key="atera_cell_boundaries",
+    )
+
+    meta = adata.uns["merxen_clustering_squidpy"]
+    assert meta["nucleus_shape_key"] == "atera_nucleus"
+    assert meta["nucleus_join"] == "cell_instance_id"
+    for column in ("nucleus_area", "nucleus_area_total", "nucleus_count"):
+        np.testing.assert_array_equal(
+            adata.obs[column].to_numpy(float), table.obs[column].to_numpy(float)
+        )
+    two_nucleus = table.obs["nucleus_count"].to_numpy() == 2
+    assert two_nucleus.sum() == 1
+
+    # Without the vendor columns the join recomputes them from the shapes:
+    # the two-nucleus cell gets its larger nucleus, never nucleus k's area.
+    stripped = table.copy()
+    stripped.obs = stripped.obs.drop(
+        columns=["nucleus_area", "nucleus_area_total", "nucleus_count"]
+    )
+    sdata.tables["table_original"] = stripped
+    joined = adata_from_spatialdata(
+        sdata,
+        platform="ATERA",
+        table_key="table_original",
+        shape_key="atera_cell_boundaries",
+    )
+    owners = nuclei["cell_instance_id"].to_numpy(np.int64)
+    areas = nuclei.geometry.area.to_numpy(float)
+    cell_ids = stripped.obs["instance_id"].to_numpy(np.int64)
+    for row, cell in enumerate(cell_ids):
+        own = areas[owners == cell]
+        if own.size == 0:
+            assert np.isnan(joined.obs["nucleus_area"].iloc[row])
+            assert joined.obs["nucleus_count"].iloc[row] == 0
+            continue
+        assert joined.obs["nucleus_area"].iloc[row] == pytest.approx(own.max())
+        assert joined.obs["nucleus_area_total"].iloc[row] == pytest.approx(own.sum())
+        assert joined.obs["nucleus_count"].iloc[row] == own.size
+    assert joined.obs["nucleus_count"].to_numpy()[two_nucleus].tolist() == [2]

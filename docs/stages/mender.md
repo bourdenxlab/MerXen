@@ -2,8 +2,13 @@
 
 MENDER is an opt-in terminal analysis that identifies spatial domains from a
 categorical cell-state annotation and native cell centroids. MerXen runs every
-MERSCOPE or Xenium acquisition independently with `MENDER_single`; platforms
-and segmentation branches are never concatenated as slices.
+MERSCOPE, Xenium or ATERA acquisition independently with `MENDER_single`;
+platforms and segmentation branches are never concatenated as slices.
+
+ATERA rows use the native (vendor) segmentation, whose only analysis layer is
+`original_seg` (shape `atera_cell_boundaries`). A default or `all`
+`mender_segmentations` value resolves to `original_seg` on those rows; naming
+another layer for an ATERA row is an error.
 
 MENDER is listed after existing stages. Its inputs are released by the shared
 per-pair token only when that pair's current terminal stage is complete. The
@@ -36,7 +41,9 @@ visualization, or spatial-gene analysis.
 ## Data contract
 
 `MENDER_PREPARE` reads the clustered H5AD and its corresponding derived
-SpatialData table in MerXen's modern environment. It requires the configured
+SpatialData table in MerXen's modern environment. Only `obs` and `uns` of the
+H5AD are read (through `h5py`); `X`, layers and embeddings, which are large for
+a whole-transcriptome table, are never loaded. It requires the configured
 categorical state column (default `hierarchical_cluster`) and never falls back
 to ordinary Leiden. It then replaces any aligned coordinates with centroids
 loaded from the explicit native shape and exports only:
@@ -80,7 +87,11 @@ coordinates, omits a domain, produces only one domain, or fails to create its
 context AnnData.
 
 `MENDER_FINALIZE` joins domains by immutable cell ID and publishes the
-annotated source H5AD, context H5AD, manifests, tables, and plots.
+annotated source H5AD, context H5AD, manifests, tables, and plots. It also
+opens the source H5AD backed (`backed="r"`), which keeps `X` on disk; anndata
+still loads layers (such as `counts`) and embeddings into memory, so the saving
+is the `X` part of the table. The annotated copy is written from it and is
+byte-identical to the copy an in-memory read writes.
 `MENDER_IMPORT` then takes the shared `<zarr>.merxen-write.lock` (beside the
 real store, with the staged symlink resolved, so every writer reaching the
 store takes the same lock), rereads the latest store, and updates only `mender_domain` and `uns["merxen_mender"]` in
@@ -108,7 +119,12 @@ corresponding derived clustered table in the published
 
 Only `MENDER_COMPUTE` uses `envs/environment.mender.yml`. The environment contains
 the old AnnData 0.9, Scanpy 1.9, and Squidpy 1.2-era stack; these packages are
-not added to MerXen's base project dependencies. Build a portable CPU image and
+not added to MerXen's base project dependencies. It also pins umap-learn's
+nearest-neighbour stack (`pynndescent` 0.5.13, `numba` 0.55.2, `llvmlite`
+0.38.1): left open, a fresh environment resolved `pynndescent` 0.7, whose
+parallel subtree builder numba 0.55 cannot compile, and `MENDER_COMPUTE`
+failed in `sc.pp.neighbors` on the full ATERA section (91,381 cells; under
+4,096 cells Scanpy 1.9 computes exact neighbours and never reaches it). Build a portable CPU image and
 override its path as needed:
 
 ```bash

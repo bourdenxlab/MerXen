@@ -104,7 +104,7 @@ reference expression matrix and writes separate annotated outputs.
 |-------|-------------|
 | `pair_id` | Pair identifier used in output paths. |
 | `output_dir` | Where `clustering_squidpy_out/` is populated. |
-| `samples` | One or two sample configs: `sample_id`, `platform`, `zarr_path`, optional `table_key`, optional `shape_key`. |
+| `samples` | One or two sample configs: `sample_id`, `platform`, `zarr_path`, optional `table_key`, optional `shape_key`, `expected_panel_gene_count` (default `300`; `null` skips the panel-size check) and `hvg_n_top_genes` (default `null`: PCA on every gene). The workflow sets the last two for ATERA samples only; see [ATERA (whole-transcriptome) samples](#atera-whole-transcriptome-samples). |
 | `drop_control_features` | Remove blank/negative/control-like variables before clustering. |
 | `min_counts` / `min_cells` | Gentle cell and gene filtering thresholds. |
 | `normalize_target_sum` | Optional `scanpy.pp.normalize_total` target sum. `null` uses Scanpy's default. |
@@ -149,6 +149,68 @@ nextflow run workflows/main.nf \
     --species mouse \
     --clustering_squidpy_broad_reference_cache_dir /durable/mapmycells-cache
 ```
+
+## ATERA (whole-transcriptome) samples
+
+ATERA rows (AT-6, native segmentation) cluster the vendor cells of
+`table_original` on `atera_cell_boundaries`. Four things differ from the
+300-gene XENIUM and MERSCOPE panels; each is switched by a sample key or a
+panel size those panels never reach, so their outputs are unchanged.
+
+**The broad atlas labels of ATERA rows are provisional.** On the public human
+hippocampus section the WHB supercluster markers (`CCN202210140_SUPC`) call
+mature oligodendrocytes (MOBP, PLP1 and MOG high, PDGFRA near zero)
+"Oligodendrocyte precursor", give the PDGFRA/VCAN-high cluster "Committed
+oligodendrocyte precursor", and give cerebellar labels ("Upper rhombic lip",
+"Cerebellar inhibitory") to PROX1/CALB1/SLC17A7-positive excitatory neurons.
+The names carry into `broad_class`, the subcluster names and the MENDER cell
+states. Treat them as cluster names to be checked against markers, not as
+cell types, until the robust annotation work restricts the atlas classes by
+region and adds a marker sanity gate.
+
+- **Nucleus metrics are joined through the owning cell.** ATERA nuclei are one
+  row per nucleus (`atera_nucleus`, id = nucleus row + 1, the same integer
+  range as cell ids), so they are never keyed by their own id. The stage reads
+  the nucleus layer from the segmentation registry (the entry with a
+  `cell_key`, normally `cell_instance_id`) and aggregates per cell:
+  `nucleus_area` is the largest nucleus, `nucleus_area_total` the sum and
+  `nucleus_count` the number of nuclei. It fills a column only when the table
+  lacks it or it is all NaN; the build already writes all three from the vendor
+  data, so on ATERA they are kept as built. `uns["merxen_clustering_squidpy"]`
+  records `nucleus_shape_key` and `nucleus_join`. A source-named
+  `nucleus_boundaries` layer is never used for ATERA.
+- **PCA on highly variable genes.** The workflow passes
+  `hvg_n_top_genes = params.atera_clustering_hvg_n_top_genes` (default 2000).
+  Each round (broad, branch and neuron rounds alike) selects that many genes on
+  its own cells with Scanpy's `cell_ranger` flavour on the log-normalised
+  matrix into `var["merxen_highly_variable"]` and runs the PCA with
+  `mask_var="merxen_highly_variable"` (GPU: the same `mask_var` to
+  rapids-singlecell). The round's `uns["merxen_clustering_params_<key>"]`
+  records `hvg_method`, `hvg_n_top_genes`, `n_highly_variable_genes` and
+  `pca_mask_var`. The vendor's `vendor_highly_variable` column is never read.
+  (`seurat_v3` would need scikit-misc, which MerXen does not declare.)
+- **Scale.** On the public full section (91,381 cells after filtering, 18,049
+  genes) prepare, compute (GPU) and finalize take 6.5 min in all, at 19.4 GB
+  peak memory (AT-6 exit run).
+- **No 300-gene panel check.** `expected_panel_gene_count` is `null` for ATERA,
+  so the "Expected 300 genes" warning and the `has_expected_panel_gene_count*`
+  flags of the control-filter summary are left out.
+- **Bounded summaries and dotplots.** These are panel-width rules, not
+  platform rules: they apply to any panel past the limits (a XENIUM 5K panel
+  would take them too; before AT-6 its dotplot exceeded the 65,000 px render
+  limit), and the 300-gene panels never reach them. Above 1,000 genes the per-cluster means
+  and fractions expressing (atlas scoring and dotplot tables) come from one
+  sparse group-indicator product accumulated in float64; the matrix is never
+  densified. Above 400 genes a branch dotplot draws the union of each group's
+  top 5 genes by cluster-mean z-score (groups take turns; at most 400 genes),
+  ordered hierarchically, while the dotplot CSV tables keep every gene in var
+  order. Only genes expressed in at least 10% of a group's cells are that
+  group's candidates (z ties go to the higher fraction expressing), so a gene
+  with a few transcripts in one cluster cannot take a marker's place; if no
+  gene reaches the floor in any group, the floor is dropped and recorded as 0. The branch H5AD records the selection in
+  `uns["merxen_dotplot_gene_selection"][<prefix>]`. This selects genes, not
+  transcripts or cells: an 18,000-gene dotplot cannot be rendered, and the
+  axis label says how many of the panel's genes are shown.
 
 ## Outputs
 

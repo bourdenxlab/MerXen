@@ -44,6 +44,23 @@ the pixel whose ``[i * ps, (i + 1) * ps)`` interval holds it (``floor``).
 PlatformFamily = Literal["10X", "MERSCOPE"]
 """Vendor family of a platform; members of a family share readers and layouts."""
 
+SegmentationSource = Literal["native", "cellpose_only", "cellpose_proseg"]
+"""Where the cells of a row come from.
+
+``"native"`` keeps the vendor segmentation (masks, shapes and table) and runs
+no Cellpose or ProSeg; ``"cellpose_only"`` runs Cellpose without ProSeg
+(reserved for AT-7); ``"cellpose_proseg"`` is the Cellpose prior refined by
+ProSeg that XENIUM and MERSCOPE rows run.
+"""
+
+_SEGMENTATION_LAYERS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
+    {
+        "native": ("original_seg",),
+        "cellpose_proseg": ("reseg", "original_seg", "proseg_mask", "proseg_hybrid"),
+        "cellpose_only": ("proseg_mask", "original_seg"),
+    }
+)
+
 
 class UnknownPlatformError(ValueError):
     """Raised when a platform name is not in the registry.
@@ -78,6 +95,15 @@ class PlatformSpec:
             built store or raw folder, in lookup order (``find_um_per_px``).
         mask_pixel_convention: Pixel convention of micron lookups into the
             vendor masks.
+        segmentation_sources: Segmentation sources a row of this platform may
+            use (``segmentation_source``); others are refused at config time.
+        default_segmentation_source: Source used when a row names none.
+        original_label_keys: Vendor label elements aligned with
+            :attr:`original_shape_keys` (cell labels, then nucleus labels), or
+            ``()`` when the build writes none.
+        rasterised_transcript_plots: Whether static transcript figures are
+            drawn as density rasters over every transcript instead of point
+            scatters (whole-transcriptome panels).
     """
 
     name: str
@@ -91,6 +117,10 @@ class PlatformSpec:
     nucleus_ids_are_cell_ids: bool = True
     spec_sidecar_names: tuple[str, ...] = ()
     mask_pixel_convention: PixelConvention = "center"
+    segmentation_sources: tuple[SegmentationSource, ...] = ("cellpose_proseg",)
+    default_segmentation_source: SegmentationSource = "cellpose_proseg"
+    original_label_keys: tuple[str, ...] = ()
+    rasterised_transcript_plots: bool = False
 
     @property
     def original_shape_keys(self) -> tuple[str, ...]:
@@ -145,6 +175,10 @@ PLATFORM_SPECS: Final[Mapping[str, PlatformSpec]] = MappingProxyType(
                 "experiment.spatial",
             ),
             mask_pixel_convention="corner",
+            segmentation_sources=("native",),
+            default_segmentation_source="native",
+            original_label_keys=("cell_labels", "nucleus_labels"),
+            rasterised_transcript_plots=True,
         ),
     }
 )
@@ -170,6 +204,29 @@ def supported_platforms() -> tuple[str, ...]:
         The platform names, e.g. ``("MERSCOPE", "XENIUM", "ATERA")``.
     """
     return tuple(PLATFORM_SPECS)
+
+
+def segmentation_layers(source: SegmentationSource | str) -> tuple[str, ...]:
+    """Return the analysis layers a segmentation source produces.
+
+    Args:
+        source: A segmentation source (``native``, ``cellpose_only`` or
+            ``cellpose_proseg``).
+
+    Returns:
+        The analysis segmentations (``analysis_segmentation`` values) the
+        source makes available, in the workflow's default order.
+
+    Raises:
+        ValueError: If the source is not a known segmentation source.
+    """
+    layers = _SEGMENTATION_LAYERS.get(str(source))
+    if layers is None:
+        raise ValueError(
+            f"Unknown segmentation source: {source!r}. "
+            f"Known: {', '.join(_SEGMENTATION_LAYERS)}"
+        )
+    return layers
 
 
 def _canonical_name(platform: object) -> str:
