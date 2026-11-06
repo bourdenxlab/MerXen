@@ -917,7 +917,9 @@ def corticalDepthConfigForPlatform(
             segmentation: segmentation,
             table_key: layerKeys.table_key,
             shape_key: layerKeys.shape_key,
-        ] + AnnotationSettings.clusteredTableFields(row, params) // rca-site:H2
+        ] + AnnotationSettings.clusteredTableFields(
+            annotationModeRow(row, params), params
+        ) // rca-site:H2
     }
     return [
         dataset_name: "${pairId}_${platform}",
@@ -2349,6 +2351,41 @@ def ateraNativeStages() {
     ]
 }
 
+// Whether a samplesheet row analyses an ATERA section (its analysis_mode, else
+// --analysis_mode). An invalid mode answers false here; rowSampleSettings then
+// reports it.
+def rowIsAtera(row, params) {
+    try {
+        def analysisMode = normalizeAnalysisMode(
+            rowFieldOrDefault(row, "analysis_mode", params.analysis_mode)
+        )
+        return activePlatformsForMode(analysisMode).contains("ATERA")
+    } catch (IllegalArgumentException ignored) {
+        return false
+    }
+}
+
+// The map_first annotation of the robust cell-type annotation effort
+// (ANNOTATE_PANEL, ANNOTATE_REFERENCE_PREP, MAP, RESOLVE, COMPUTE_CPU and
+// ANNOTATION_REPORT) is not covered for ATERA rows yet: its panel, reference
+// and gate steps are built for the targeted MERSCOPE/XENIUM panels and have
+// never run on a whole-transcriptome ATERA section (RCA on Atera is the next
+// milestone). An ATERA row that does not set its own clustering_squidpy_mode
+// column therefore clusters in legacy mode, whatever the species default or
+// --clustering_squidpy_mode, like the other global switches ATERA rows ignore;
+// a row that asks for map_first itself is refused by the ATERA preflight.
+// Every reader of a row's annotation mode (the run's mode list, the row
+// settings, the clustered-table fields) goes through this function.
+def annotationModeRow(row, params) {
+    if (!rowIsAtera(row, params)) {
+        return row
+    }
+    if (chooseField(row, [AnnotationDefaults.ROW_MODE_COLUMN]) != null) {
+        return row
+    }
+    return row + [(AnnotationDefaults.ROW_MODE_COLUMN): AnnotationDefaults.LEGACY]
+}
+
 def appendAteraPreflightChecks(errors, row, settings, params) {
     if (!("ATERA" in settings.active_platforms)) {
         return
@@ -2365,6 +2402,13 @@ def appendAteraPreflightChecks(errors, row, settings, params) {
         errors.add(
             "standalone MapMyCells is not covered for ATERA rows; stop at " +
             "clustering_squidpy or mender"
+        )
+    }
+    if (AnnotationSettings.isMapFirst(settings)) {
+        errors.add(
+            "map_first annotation is not covered for ATERA rows yet (RCA on " +
+            "Atera is the next milestone); remove clustering_squidpy_mode from " +
+            "row ${settings.pair_id} or set it to legacy"
         )
     }
     if (stageOrder.contains("gaston")) {
@@ -3162,7 +3206,9 @@ def rowSampleSettings(row, params) {
 
     // rca-hook:H3: annotation settings and the map_first MAPMYCELLS rule (plan §3.1).
     // Legacy rows get no key, so their settings and -resume hashes are unchanged.
-    def annotationSettings = AnnotationSettings.forRow(row, params, species)
+    def annotationSettings = AnnotationSettings.forRow(
+        annotationModeRow(row, params), params, species
+    )
     runMapMyCells = AnnotationSettings.runMapMyCells(runMapMyCells, annotationSettings, stopStage)
     return annotationSettings + [
         pair_id: pairId,
@@ -3427,12 +3473,25 @@ workflow {
     // DAG.
     def samplesheetRows = file(params.samplesheet, checkIfExists: true)
         .splitCsv(header: true, sep: ",", quote: '"', strip: true)
+    // ATERA rows without their own mode column cluster in legacy mode
+    // (annotationModeRow).
+    def annotationModeRows = samplesheetRows.collect { row -> annotationModeRow(row, params) }
     AnnotationSettings.useRowModes(
-        samplesheetRows.collect { row -> row[AnnotationDefaults.ROW_MODE_COLUMN] }
+        annotationModeRows.collect { row -> row[AnnotationDefaults.ROW_MODE_COLUMN] }
     )
-    def rowModeSummary = AnnotationSettings.rowModeSummary(params, samplesheetRows)
+    def rowModeSummary = AnnotationSettings.rowModeSummary(params, annotationModeRows)
     if (rowModeSummary) {
         log.info(rowModeSummary)
+    }
+    def ateraLegacyRows = samplesheetRows.findAll { row ->
+        rowIsAtera(row, params) && chooseField(row, [AnnotationDefaults.ROW_MODE_COLUMN]) == null
+    }
+    if (ateraLegacyRows) {
+        log.info(
+            "ATERA rows ${ateraLegacyRows.collect { row -> row.pair_id }.join(', ')} " +
+            "cluster in legacy mode: map_first annotation is not covered for ATERA " +
+            "rows yet (RCA on Atera is the next milestone)"
+        )
     }
     def nearMissModeColumns = AnnotationSettings.nearMissModeColumns(
         samplesheetRows ? samplesheetRows[0].keySet() : []
@@ -3445,7 +3504,13 @@ workflow {
         )
     }
     // Legacy rows of a flipped species (human since M8, mouse since M9).
-    def deprecatedLegacyWarning = AnnotationSettings.deprecatedLegacyWarning(params)
+    // The ATERA rows held in legacy mode above are not a deprecated choice.
+    def deprecatedLegacyWarning = AnnotationSettings.deprecatedLegacyWarning(
+        params,
+        samplesheetRows
+            .findAll { row -> !(row in ateraLegacyRows) }
+            .collect { row -> row[AnnotationDefaults.ROW_MODE_COLUMN] },
+    )
     if (deprecatedLegacyWarning) {
         log.warn(deprecatedLegacyWarning)
     }

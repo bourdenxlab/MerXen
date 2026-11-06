@@ -33,6 +33,15 @@ row calls none of the annotation processes, and a test pins the legacy
 clustering script text, its wiring and its parameter defaults, so legacy
 results and `-resume` are unchanged.
 
+**ATERA rows** (10x Atera, [Atera support](plans/atera-support-plan.md)) do
+not run the new annotation yet: its panel, reference and gate steps are built
+for the targeted MERSCOPE and XENIUM panels. An ATERA row clusters in
+`legacy` mode whatever the species default or a global
+`clustering_squidpy_mode` (without the deprecation warning), and a row that
+sets `clustering_squidpy_mode=map_first` is refused before any task starts
+([ATERA rows](configuration.md#atera-rows)). Annotation on Atera is the next
+milestone.
+
 ---
 
 ## Part 1. Overview

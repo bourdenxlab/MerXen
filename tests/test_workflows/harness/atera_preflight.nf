@@ -27,6 +27,7 @@ def check(String id, Map row) {
             run_mapmycells: settings.run_mapmycells,
             transcript_analysis: settings.spatial_gene_analysis_transcript_analysis_enabled,
             setting_notes: settings.setting_notes,
+            clustering_squidpy_mode: AnnotationSettings.mode(settings),
         ]
     } catch (Throwable error) {
         value = [error_class: error.getClass().getName(), message: error.getMessage()]
@@ -54,6 +55,11 @@ workflow {
     check("atera/analysis_original", atera + [analysis_segmentation: "original"])
     check("atera/analysis_all", atera + [analysis_segmentation: "all"])
     check("atera/mecr_off", atera + [mecr_enabled: "false"])
+    // map_first annotation is gated off for ATERA rows (RCA on Atera is the
+    // next milestone): a row without its own mode clusters in legacy mode, a
+    // row that names legacy keeps it, and a row that names map_first is refused.
+    check("atera/legacy_row", atera + [clustering_squidpy_mode: "legacy"])
+    check("atera/map_first_row", atera + [clustering_squidpy_mode: "map_first"])
     // Refused rows, one message each.
     check("atera/stop_mapmycells", atera + [stop_stage: "mapmycells"])
     check("atera/only_mapmycells", atera + [only_stage: "mapmycells"])
