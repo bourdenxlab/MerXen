@@ -47,6 +47,7 @@ forward.
 | `enrich_single_latest` | [enrichment/enrich.py:531](../../src/merxen/enrichment/enrich.py#L531) |
 | `run_per_shape_assignment_for_dataset` | [enrichment/assignment.py:300](../../src/merxen/enrichment/assignment.py#L300) |
 | `compute_table_from_points_for_shape` | [enrichment/assignment.py:132](../../src/merxen/enrichment/assignment.py#L132) |
+| `native_label_check`, `stream_label_lookup` (native rows) | [enrichment/label_lookup.py](../../src/merxen/enrichment/label_lookup.py) |
 | `build_gene_list_from_base_table` | [enrichment/assignment.py:88](../../src/merxen/enrichment/assignment.py#L88) |
 
 ## Config schema
@@ -56,14 +57,16 @@ forward.
 | Field | Description |
 |-------|-------------|
 | `dataset_name` | Identifier, e.g. `EXAMPLE01_MERSCOPE`. |
-| `platform` | `"MERSCOPE"` or `"XENIUM"` — controls which vendor layers are copied. |
+| `platform` | `"MERSCOPE"`, `"XENIUM"` or `"ATERA"` — controls which vendor layers are copied. |
 | `latest_zarr_path` | Input zarr (copied in as `latest_input.zarr`). |
-| `mask_path` | The Cellpose mask produced by `SEGMENT` (`enrich_input_mask.npy` in the work dir). |
-| `nuclei_mask_path` | The DAPI-only nuclei mask produced by the `segment_nuclei` stage. |
+| `mask_path` | The Cellpose mask produced by `SEGMENT` (`enrich_input_mask.npy` in the work dir); `null` for native rows. |
+| `nuclei_mask_path` | The DAPI-only nuclei mask produced by the `segment_nuclei` stage; `null` for native rows. |
 | `original_data_path` | Path back to the stage-1 `source_spatialdata.zarr`. Used to copy vendor shapes and images. |
 | `output_dir` | Where to write `enrich_out/` summaries. |
 | `persistent_output_path` | Durable "latest" zarr path under `results/.../latest/`. |
 | `transform_path` | Optional transform override, same semantics as in segmentation. |
+| `segmentation_source` | `cellpose_proseg` (default) or `native` (ATERA vendor segmentation; see below). |
+| `native_label_check` | Run the native label check (default `true`; native rows only). |
 
 ## Walkthrough
 
@@ -103,6 +106,73 @@ forward.
 | `enrichment/latest_input.zarr` | Staged symlink to the durable latest zarr for workflow chaining. |
 | `enrich_out/` | Assignment summary CSVs per shape (transcripts assigned, gene totals). |
 
+## Native rows (ATERA, `segmentation_source=native`)
+
+A native row runs no Cellpose or ProSeg. Its latest store comes from
+[`NATIVE_LATEST`](segmentation.md): the vendor cell and nucleus shapes are
+already renamed to `atera_cell_boundaries` and `atera_nucleus`, the vendor
+table is `table_original`, and the registry holds `original` and
+`original_nucleus`. `ENRICH` receives empty placeholder files in its two mask
+slots, and its config carries `segmentation_source: native` with both mask
+paths `null`.
+
+Native enrichment (`_enrich_native_in_place`):
+
+1. **Checks the elements.** It needs the vendor shapes, `table_original`, the
+   native image and the vendor label elements `cell_labels` and
+   `nucleus_labels`. Missing shapes or `table_original` are re-created from the
+   source store (`native.ensure_native_elements`). Missing images, labels or
+   points are shared payloads that only `NATIVE_LATEST` can restore, so the
+   stage stops and says so.
+2. **Runs the label check.** This is one streaming pass over the points,
+   partition by partition, in a thread pool bounded by `DASK_NUM_WORKERS`. It
+   reads only the label blocks each partition touches, so it never loads a
+   whole mask. It uses the vendor's corner convention in the vendor's float32
+   arithmetic: a transcript at `x` µm is on pixel
+   `floor(float32(x) * float32(1 / ps))`. Float64 `x / ps` disagrees with the
+   vendor on about 1.4e-5 of transcripts, all within 0.0012 px of a pixel
+   edge.
+   - **Cell labels.** The `cell_labels` label of every transcript is compared
+     with the vendor's `original_assignment`. More than 1e-6 of rows
+     disagreeing is an error. That usually means a wrong pixel size or
+     transform.
+   - **Nucleus labels.** The `nucleus_labels` label is mapped to its owning
+     cell through `atera_nucleus.cell_instance_id`, because nucleus ids are not
+     cell ids. A cell with two nuclei gets the transcripts of both.
+   - **Vendor flag.** Agreement with the vendor's `overlaps_nucleus` flag is
+     reported.
+3. **Adds per-cell counts to `table_original`.** These are the only change to
+   the table:
+   - `merxen_cell_transcript_counts` and `merxen_nucleus_transcript_counts`
+     count all features;
+   - `merxen_cell_gene_counts` and `merxen_nucleus_gene_counts` count only
+     `is_gene` rows.
+4. **Records provenance.** It sets `merxen_schema.segmentation_source=native`
+   and writes the vendor provenance under `merxen_schema.native_segmentation`:
+   the analysis software version, the segmentation stain and the per-cell
+   segmentation methods. It writes the completion record
+   `merxen_native_enrichment`. No `MOSAIK_*` layer, Cellpose shape or Cellpose
+   model identity is written.
+
+A second run on an enriched store is a skip, which re-writes the label-check
+summary from the store. `native_label_check: false` turns the pass off.
+
+Per-shape assignment on a native row does no clone and no spatial join. It
+registers `atera_cell_boundaries` with `table_original` as it is. Nucleus
+shapes keyed by nucleus row (`atera_nucleus`) never get a per-shape table, on
+any route.
+
+The partial-enrichment cleanup of a native store removes only the derived
+`table_*` tables. The images, labels and points are payloads hardlinked from
+the source store, and the cleanup never touches them.
+
+Native outputs in `enrich_out/`:
+
+| File | Contents |
+|------|----------|
+| `<dataset>_native_label_check.json` | Mismatch counts and tolerance, nucleus attribution and `overlaps_nucleus` agreement, the pixel size used and whether it agrees with the store's points transform. |
+| `<dataset>_per_shape_assignment_summary.csv` | One `native_table_original` row. |
+
 ## What "per-shape" means
 
 Each shape layer (ProSeg polygons, Cellpose polygons, vendor boundaries) gets
@@ -115,6 +185,13 @@ enrichment so all tables share a column order.
 
 - **`No shapes found in latest zarr`** — stage 2 did not produce any cell
   polygons. Rerun `SEGMENT`.
+- **`Native label check failed`** (native rows) — the cell labels disagree
+  with the vendor assignment, so the pixel size or transform does not match
+  the points. Check `transform_path` and the store's `atera/experiment*.spatial`
+  sidecars; `<dataset>_native_label_check.json` has the counts.
+- **`Native latest store lacks payload elements`** — the native latest store
+  lost an image, label or points element. Rebuild it with the segment stage
+  (`NATIVE_LATEST`).
 - **`No points found`** — the transcripts table is missing from the
   SpatialData zarr; this can happen if the stage-1 build excluded
   transcripts.

@@ -68,12 +68,15 @@ def build_mask_image_quantification_table(
     shape_key: str = MOSAIK_CELLPOSE_SHAPE_NAME,
     tile_size: int = 2048,
     bead_removal: Mapping[str, Any] | None = None,
+    source_cell_ids: Mapping[int, str] | None = None,
 ) -> MaskImageQuantificationResult:
     """Quantify every image channel over nonzero Cellpose mask labels.
 
     Args:
         sdata_obj: SpatialData-like object containing image elements.
-        mask: Two-dimensional final Cellpose label mask.
+        mask: Two-dimensional final Cellpose label mask: a numpy array (or
+            memmap), or a lazy label element (dask or zarr), which is read
+            tile by tile and never loaded whole.
         dataset_name: Name used in logging and output summaries.
         table_key: SpatialData table key that will receive the result.
         shape_key: SpatialData shape region represented by the rows.
@@ -82,12 +85,21 @@ def build_mask_image_quantification_table(
             :func:`merxen.io.bead_removal.provenance.bead_removal_table_metadata`),
             recorded in the table's ``uns`` and the summary. ``None`` leaves
             both exactly as without bead removal.
+        source_cell_ids: ``source_cell_id`` of each label, for a mask whose
+            labels are vendor cells (labels without one get ``label_<id>``).
+            ``None`` names the rows ``cellpose_<label>``.
 
     Returns:
         AnnData table plus a JSON-serializable summary.
     """
-    mask_arr = np.asarray(mask)
-    label_ids, label_counts = _foreground_label_counts(mask_arr)
+    if _is_lazy_mask(mask):
+        mask_arr = mask
+        label_ids, label_counts = _foreground_label_counts_tiled(
+            mask_arr, tile_size=int(tile_size)
+        )
+    else:
+        mask_arr = np.asarray(mask)
+        label_ids, label_counts = _foreground_label_counts(mask_arr)
     if label_ids.size == 0:
         raise ValueError(f"[{dataset_name}] Cellpose mask contains no labels.")
 
@@ -136,7 +148,14 @@ def build_mask_image_quantification_table(
         )
     )
     obs[INSTANCE_ID_COLUMN] = label_ids.astype(np.uint64, copy=False)
-    obs[SOURCE_CELL_ID_COLUMN] = _cell_ids(label_ids)
+    obs[SOURCE_CELL_ID_COLUMN] = (
+        _cell_ids(label_ids)
+        if source_cell_ids is None
+        else [
+            source_cell_ids.get(int(label), f"label_{int(label)}")
+            for label in label_ids
+        ]
+    )
     obs["label_id"] = label_ids.astype(np.int64, copy=False)
     obs["mask_pixel_count"] = label_counts.astype(np.int64, copy=False)
     obs["region"] = pd.Categorical([shape_key] * len(obs), categories=[shape_key])
@@ -171,20 +190,20 @@ def run_mask_image_quantification(
     *,
     force_rerun: bool = False,
 ) -> dict[str, Path]:
-    """Read a SpatialData zarr, quantify image channels, and persist outputs."""
-    if config.mask_path is None:
-        raise NotImplementedError(
-            f"label-backed masks (mask_label_key={config.mask_label_key!r}) land "
-            "in AT-6 WP-B"
-        )
+    """Read a SpatialData zarr, quantify image channels, and persist outputs.
+
+    The mask is the Cellpose ``.npy`` of ``mask_path`` or, with
+    ``mask_label_key``, a label element of the store itself (the vendor
+    ``cell_labels`` of a native ATERA row), read lazily tile by tile.
+    """
     latest_path = Path(config.latest_zarr_path)
-    mask_path = Path(config.mask_path)
+    mask_path = None if config.mask_path is None else Path(config.mask_path)
     output_dir = Path(config.output_dir)
     paths = _output_paths(output_dir, config.dataset_name)
 
     if not latest_path.exists():
         raise FileNotFoundError(f"[{config.dataset_name}] Missing zarr: {latest_path}")
-    if not mask_path.exists():
+    if mask_path is not None and not mask_path.exists():
         raise FileNotFoundError(
             f"[{config.dataset_name}] Missing Cellpose mask: {mask_path}"
         )
@@ -206,7 +225,7 @@ def _quantify_store(
     config: MaskImageQuantificationConfig,
     *,
     latest_path: Path,
-    mask_path: Path,
+    mask_path: Path | None,
     paths: dict[str, Path],
     force_rerun: bool,
 ) -> dict[str, Path]:
@@ -261,7 +280,15 @@ def _quantify_store(
             )
             return {"latest_zarr": latest_path, **paths}
 
-        mask = np.load(mask_path, mmap_mode="r")
+        source_cell_ids = None
+        if mask_path is not None:
+            mask = np.load(mask_path, mmap_mode="r")
+        else:
+            assert config.mask_label_key is not None
+            mask = _label_element_level0(
+                sdata_obj, config.mask_label_key, config.dataset_name
+            )
+            source_cell_ids = _shape_source_cell_ids(sdata_obj, config.shape_key)
         result = build_mask_image_quantification_table(
             sdata_obj,
             mask,
@@ -270,7 +297,13 @@ def _quantify_store(
             shape_key=config.shape_key,
             tile_size=config.tile_size,
             bead_removal=bead_removal,
+            source_cell_ids=source_cell_ids,
         )
+        if config.mask_label_key is not None:
+            result.table.uns["mask_image_quantification"]["mask_label_key"] = str(
+                config.mask_label_key
+            )
+            result.summary["mask_label_key"] = str(config.mask_label_key)
         parsed_table = TableModel.parse(
             result.table,
             region=config.shape_key,
@@ -685,6 +718,88 @@ def _foreground_label_counts(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     label_ids = np.flatnonzero(counts)
     label_ids = label_ids[label_ids > 0].astype(np.int64, copy=False)
     return label_ids, counts[label_ids]
+
+
+def _is_lazy_mask(mask: Any) -> bool:
+    """Whether a mask is a lazy (dask or zarr) array rather than numpy."""
+    return not isinstance(mask, np.ndarray) and hasattr(mask, "shape")
+
+
+def _read_mask_tile(mask: Any, y0: int, y1: int, x0: int, x1: int) -> np.ndarray:
+    """Read one tile of a numpy, zarr or dask mask as numpy."""
+    tile = mask[y0:y1, x0:x1]
+    if hasattr(tile, "compute"):
+        tile = tile.compute()
+    return np.asarray(tile)
+
+
+def _foreground_label_counts_tiled(
+    mask: Any, *, tile_size: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the nonzero labels of a lazy mask and their pixel counts.
+
+    Same result as :func:`_foreground_label_counts`, computed tile by tile, so
+    the mask is never loaded or copied whole.
+
+    Args:
+        mask: Two-dimensional label array (dask or zarr).
+        tile_size: Edge of the tiles read at once.
+
+    Returns:
+        ``(label_ids, pixel_counts)`` of the nonzero labels, ascending.
+
+    Raises:
+        ValueError: If the mask is not 2D or holds negative labels.
+    """
+    if len(mask.shape) != 2:
+        raise ValueError(f"Cellpose mask must be 2D, got shape={tuple(mask.shape)}")
+    height, width = (int(size) for size in mask.shape)
+    counts: np.ndarray = np.zeros(1, dtype=np.int64)
+    for y0, y1, x0, x1 in _iter_tiles(height, width, int(tile_size)):
+        tile = _read_mask_tile(mask, y0, y1, x0, x1)
+        if tile.size == 0:
+            continue
+        if np.issubdtype(tile.dtype, np.signedinteger) and bool((tile < 0).any()):
+            raise ValueError("Cellpose mask labels must be non-negative")
+        tile_counts = np.bincount(tile.reshape(-1).astype(np.int64, copy=False))
+        if tile_counts.size > counts.size:
+            counts = np.pad(counts, (0, tile_counts.size - counts.size))
+        counts[: tile_counts.size] += tile_counts
+    label_ids = np.flatnonzero(counts)
+    label_ids = label_ids[label_ids > 0].astype(np.int64, copy=False)
+    return label_ids, counts[label_ids]
+
+
+def _label_element_level0(sdata_obj: Any, label_key: str, dataset_name: str) -> Any:
+    """Return the lazy level-0 array of a label element of the store."""
+    labels = getattr(sdata_obj, "labels", None) or {}
+    if label_key not in labels:
+        raise KeyError(
+            f"[{dataset_name}] Label element '{label_key}' not found; available: "
+            f"{sorted(map(str, labels))}"
+        )
+    from spatialdata import get_pyramid_levels
+
+    return get_pyramid_levels(labels[label_key], n=0).data
+
+
+def _shape_source_cell_ids(sdata_obj: Any, shape_key: str) -> dict[int, str] | None:
+    """Return ``instance_id -> source_cell_id`` of a shape element, if it has both."""
+    shapes = getattr(sdata_obj, "shapes", None) or {}
+    if shape_key not in shapes:
+        return None
+    gdf = shapes[shape_key]
+    if (
+        INSTANCE_ID_COLUMN not in gdf.columns
+        or SOURCE_CELL_ID_COLUMN not in gdf.columns
+    ):
+        return None
+    ids = canonical_instance_series(
+        gdf[INSTANCE_ID_COLUMN], field_name=f"{shape_key}.{INSTANCE_ID_COLUMN}"
+    ).to_numpy(dtype=np.int64)
+    return dict(
+        zip(ids.tolist(), gdf[SOURCE_CELL_ID_COLUMN].astype(str).tolist(), strict=True)
+    )
 
 
 def _unique_channel_names(source: Mapping[str, Any], n_channels: int) -> list[str]:

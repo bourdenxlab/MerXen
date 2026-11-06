@@ -1,0 +1,401 @@
+"""Streaming label-mask lookups (corner convention) and the native label check."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import dask.array as da
+import numpy as np
+import pandas as pd
+import pytest
+
+from merxen.enrichment import label_lookup as ll
+from merxen.segmentation.cellpose import assign_labels_from_masks
+
+PS = 0.21249222
+
+
+def _labels(height: int = 23, width: int = 17, seed: int = 0) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    return rng.integers(0, 9, size=(height, width)).astype(np.uint32)
+
+
+# --------------------------------------------------------------------------- #
+# Pixel conventions
+# --------------------------------------------------------------------------- #
+
+
+def test_corner_takes_the_floor_and_center_rounds() -> None:
+    """Pixel i covers [i*ps, (i+1)*ps) under corner; center rounds to nearest."""
+    x = np.array([0.0, 0.4 * PS, 0.6 * PS, 1.0 * PS, 2.3 * PS, 2.999 * PS])
+    y = np.zeros_like(x)
+    frame = ll.PixelFrame(PS)
+    corner, _ = ll.pixel_indices(x, y, frame, convention="corner")
+    center, _ = ll.pixel_indices(x, y, frame, convention="center")
+    assert corner.tolist() == [0, 0, 0, 1, 2, 2]
+    assert center.tolist() == [0, 0, 1, 1, 2, 3]
+
+
+def test_float32_precision_is_the_vendor_rule_on_pixel_edges() -> None:
+    """float32(x) * float32(1/ps), not x / ps, decides a near-edge transcript.
+
+    The coordinate is from the real crop (a QV 37.75 transcript the vendor
+    assigned to the cell on the next row): in float64 it lies 0.000125 px below
+    the edge, in the vendor's float32 arithmetic on it.
+    """
+    y = np.array([1706.3125])
+    frame32 = ll.PixelFrame(PS)
+    frame64 = ll.PixelFrame(PS, precision="float64")
+    row32 = ll.pixel_indices(y, y, frame32)[1]
+    row64 = ll.pixel_indices(y, y, frame64)[1]
+    assert row64.tolist() == [int(np.floor(1706.3125 / PS))]
+    assert row32.tolist() == [row64[0] + 1]
+    assert row32.tolist() == [
+        int(np.floor(np.float32(1706.3125) * np.float32(1.0 / PS)))
+    ]
+
+
+@pytest.mark.parametrize("precision", ["float32", "float64"])
+def test_pixel_indices_follow_the_precision_formula(precision: str) -> None:
+    rng = np.random.default_rng(9)
+    x = (rng.uniform(-5, 20000, 20000) * 64).round() / 64
+    column, _ = ll.pixel_indices(
+        x,
+        x,
+        ll.PixelFrame(PS, precision=precision),  # type: ignore[arg-type]
+    )
+    if precision == "float32":
+        expected = np.floor(x.astype(np.float32) * np.float32(1.0 / PS))
+    else:
+        expected = np.floor(x / PS)
+    np.testing.assert_array_equal(column, expected.astype(np.int64))
+
+
+def test_negative_coordinates_are_off_the_mask() -> None:
+    """Negative coordinates floor below 0 and get label 0; rint would not."""
+    labels = np.full((4, 4), 7, dtype=np.uint32)
+    x = np.array([-0.4 * PS, -0.01, 0.5 * PS])
+    y = np.array([0.5 * PS, 0.5 * PS, -0.125])
+    column, row = ll.pixel_indices(x, y, ll.PixelFrame(PS))
+    assert ll.lookup_labels(column, row, labels).tolist() == [0, 0, 0]
+    # The centre convention puts x in [-0.5 ps, 0) on column 0.
+    center = assign_labels_from_masks(
+        x[:1], y[:1], labels, np.eye(2) / PS, np.zeros(2), pixel_convention="center"
+    )
+    assert center.tolist() == [7]
+
+
+def test_float64_precision_upcasts_float32_coordinates() -> None:
+    """float32 x and y give the pixels of their float64 values divided by ps."""
+    rng = np.random.default_rng(3)
+    x32 = (rng.uniform(0, 50, 5000) * 64).round().astype(np.float32) / np.float32(64)
+    y32 = (rng.uniform(0, 50, 5000) * 64).round().astype(np.float32) / np.float32(64)
+    frame = ll.PixelFrame(PS, precision="float64")
+    column, row = ll.pixel_indices(x32, y32, frame)
+    np.testing.assert_array_equal(
+        column, np.floor(x32.astype(np.float64) / PS).astype(np.int64)
+    )
+    np.testing.assert_array_equal(
+        row, np.floor(y32.astype(np.float64) / PS).astype(np.int64)
+    )
+
+
+def test_float32_pixel_size_is_used_as_given() -> None:
+    """A float32 pixel size is widened exactly (not re-rounded to 8 digits)."""
+    ps32 = np.float32(PS)
+    frame = ll.PixelFrame(float(ps32), precision="float64")
+    assert frame.um_per_px == float(ps32)
+    x = np.array([float(ps32) * 10.5])
+    assert ll.pixel_indices(x, x, frame)[0].tolist() == [10]
+
+
+def test_an_origin_shifts_the_pixel_grid() -> None:
+    for precision in ("float32", "float64"):
+        frame = ll.PixelFrame(PS, origin_um=(10 * PS, -2 * PS), precision=precision)  # type: ignore[arg-type]
+        column, row = ll.pixel_indices(
+            np.array([10.5 * PS]), np.array([0.5 * PS]), frame
+        )
+        assert (column.tolist(), row.tolist()) == ([0], [2])
+    with pytest.raises(ValueError, match="precision"):
+        ll.PixelFrame(PS, precision="float16")  # type: ignore[arg-type]
+
+
+def test_non_finite_coordinates_map_off_the_mask() -> None:
+    labels = np.ones((3, 3), dtype=np.uint32)
+    x = np.array([np.nan, 0.1, np.inf])
+    column, row = ll.pixel_indices(x, np.full(3, 0.1), ll.PixelFrame(PS))
+    assert ll.lookup_labels(column, row, labels).tolist() == [0, 1, 0]
+
+
+def test_unknown_convention_and_pixel_size_are_refused() -> None:
+    with pytest.raises(ValueError, match="pixel_convention"):
+        ll.pixel_indices(np.zeros(1), np.zeros(1), ll.PixelFrame(PS), convention="x")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="positive"):
+        ll.PixelFrame(0.0)
+
+
+@pytest.mark.parametrize("block_px", [1, 4, 5, 4096])
+@pytest.mark.parametrize("lazy", [False, True])
+def test_blockwise_lookup_equals_direct_indexing(block_px: int, lazy: bool) -> None:
+    """Reading only touched blocks (numpy or dask) equals indexing the mask."""
+    labels = _labels()
+    rng = np.random.default_rng(1)
+    column = rng.integers(-3, labels.shape[1] + 3, 400)
+    row = rng.integers(-3, labels.shape[0] + 3, 400)
+    source = da.from_array(labels, chunks=(5, 4)) if lazy else labels
+    got = ll.lookup_labels(column, row, source, block_px=block_px)
+    inside = (
+        (column >= 0)
+        & (column < labels.shape[1])
+        & (row >= 0)
+        & (row < labels.shape[0])
+    )
+    expected = np.zeros(400, dtype=np.int64)
+    expected[inside] = labels[row[inside], column[inside]]
+    np.testing.assert_array_equal(got, expected)
+
+
+def test_corner_lookup_matches_assign_labels_from_masks() -> None:
+    """The streaming lookup equals the shared helper with pixel_convention=corner."""
+    labels = _labels(31, 29, seed=5)
+    rng = np.random.default_rng(2)
+    x = rng.uniform(-1, 29 * PS + 1, 2000)
+    y = rng.uniform(-1, 31 * PS + 1, 2000)
+    column, row = ll.pixel_indices(x, y, ll.PixelFrame(PS))
+    got = ll.lookup_labels(column, row, labels, block_px=7)
+    # The helper works in float64; compare off the pixel edges.
+    frac = np.minimum((x / PS) % 1.0, (y / PS) % 1.0)
+    away = (frac > 1e-6) & (frac < 1 - 1e-6)
+    helper = assign_labels_from_masks(
+        x, y, labels, np.eye(2) / PS, np.zeros(2), pixel_convention="corner"
+    )
+    np.testing.assert_array_equal(got[away], helper[away])
+
+
+# --------------------------------------------------------------------------- #
+# Streaming over partitions
+# --------------------------------------------------------------------------- #
+
+
+def _write_partitions(tmp_path: Path, frame: pd.DataFrame, n_parts: int) -> list[Path]:
+    paths = []
+    bounds = np.linspace(0, len(frame), n_parts + 1).astype(int)
+    for index, (start, stop) in enumerate(zip(bounds[:-1], bounds[1:], strict=True)):
+        path = tmp_path / f"part.{index}.parquet"
+        frame.iloc[start:stop].to_parquet(path)
+        paths.append(path)
+    return paths
+
+
+@pytest.mark.parametrize("n_workers", [1, 4])
+def test_stream_label_lookup_reads_parquet_partitions(
+    tmp_path: Path, n_workers: int
+) -> None:
+    """Every row is looked up once; partition results come back in order."""
+    labels = _labels(40, 40, seed=7)
+    rng = np.random.default_rng(4)
+    frame = pd.DataFrame(
+        {
+            "x": rng.uniform(-0.5, 40 * PS, 300).astype(np.float32),
+            "y": rng.uniform(-0.5, 40 * PS, 300).astype(np.float32),
+            "gene": rng.integers(0, 5, 300),
+        }
+    )
+    paths = _write_partitions(tmp_path, frame, 5)
+
+    def _reduce(part: pd.DataFrame, looked: dict[str, np.ndarray]) -> np.ndarray:
+        assert set(part.columns) == {"x", "y", "gene"}
+        return looked["cells"]
+
+    results = ll.stream_label_lookup(
+        paths,
+        {"cells": labels},
+        PS,
+        columns=["gene"],
+        reduce=_reduce,
+        n_workers=n_workers,
+        block_px=16,
+    )
+    column, row = ll.pixel_indices(
+        frame["x"].to_numpy(), frame["y"].to_numpy(), ll.PixelFrame(PS)
+    )
+    np.testing.assert_array_equal(
+        np.concatenate(results), ll.lookup_labels(column, row, labels)
+    )
+
+
+def test_stream_label_lookup_accepts_dask_and_pandas_points() -> None:
+    import dask.dataframe as dd
+
+    labels = _labels(20, 20, seed=8)
+    frame = pd.DataFrame({"x": np.linspace(0, 4, 50), "y": np.linspace(4, 0, 50)})
+
+    def _reduce(part: pd.DataFrame, looked: dict[str, np.ndarray]) -> np.ndarray:
+        return looked["m"]
+
+    from_pandas = ll.stream_label_lookup(
+        frame, {"m": labels}, PS, columns=[], reduce=_reduce
+    )
+    from_dask = ll.stream_label_lookup(
+        dd.from_pandas(frame, npartitions=3),
+        {"m": labels},
+        PS,
+        columns=[],
+        reduce=_reduce,
+        n_workers=2,
+    )
+    np.testing.assert_array_equal(
+        np.concatenate(from_pandas), np.concatenate(from_dask)
+    )
+
+
+def test_masks_of_different_shapes_are_refused() -> None:
+    with pytest.raises(ValueError, match="differ in shape"):
+        ll.stream_label_lookup(
+            pd.DataFrame({"x": [0.0], "y": [0.0]}),
+            {"a": np.zeros((2, 2)), "b": np.zeros((3, 2))},
+            PS,
+            columns=[],
+            reduce=lambda part, looked: None,
+        )
+
+
+def test_default_n_workers_reads_dask_num_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DASK_NUM_WORKERS", "3")
+    assert ll.default_n_workers() == 3
+    monkeypatch.setenv("DASK_NUM_WORKERS", "zero")
+    with pytest.raises(ValueError, match="DASK_NUM_WORKERS"):
+        ll.default_n_workers()
+    monkeypatch.delenv("DASK_NUM_WORKERS")
+    assert 1 <= ll.default_n_workers() <= 8
+
+
+# --------------------------------------------------------------------------- #
+# Native label check on a hand-made mask
+# --------------------------------------------------------------------------- #
+
+
+def _hand_store() -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
+    """Two cells; cell 2 owns nuclei 2 and 3; nucleus 1 belongs to cell 1."""
+    cells = np.zeros((6, 8), dtype=np.uint32)
+    cells[0:3, 0:3] = 1
+    cells[0:6, 4:8] = 2
+    nuclei = np.zeros_like(cells)
+    nuclei[1, 1] = 1
+    nuclei[1, 5] = 2
+    nuclei[4, 6] = 3
+    pixels = [(1, 1), (0, 0), (1, 5), (4, 6), (4, 6), (5, 7), (5, 0), (2, 2)]
+    rows = np.array([p[0] for p in pixels])
+    cols = np.array([p[1] for p in pixels])
+    assignment = cells[rows, cols].astype(float)
+    assignment[assignment == 0] = np.nan
+    frame = pd.DataFrame(
+        {
+            "x": ((cols + 0.5) * PS).astype(np.float32),
+            "y": ((rows + 0.5) * PS).astype(np.float32),
+            "original_assignment": pd.array(assignment, dtype="UInt64"),
+            "overlaps_nucleus": nuclei[rows, cols] > 0,
+            "is_gene": [True, True, True, False, True, True, True, True],
+        }
+    )
+    return cells, nuclei, frame
+
+
+def _check(
+    frame: pd.DataFrame, cells: np.ndarray, nuclei: np.ndarray, **kwargs: object
+) -> tuple[dict, dict]:
+    return ll.native_label_check(
+        frame,
+        cell_labels=cells,
+        nucleus_labels=nuclei,
+        nucleus_ids=np.array([1, 2, 3]),
+        nucleus_cell_ids=np.array([1, 2, 2]),
+        table_cell_ids=np.array([2, 1]),
+        um_per_px=PS,
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
+def test_native_check_counts_nuclear_transcripts_per_owning_cell() -> None:
+    """Both nuclei of cell 2 count for cell 2; nucleus ids never key cells."""
+    cells, nuclei, frame = _hand_store()
+    summary, per_cell = _check(frame, cells, nuclei)
+
+    assert summary["passed"] is True
+    assert summary["n_mismatch"] == 0
+    assert summary["n_rows"] == 8
+    # Table order is (cell 2, cell 1).
+    assert per_cell["cell"].tolist() == [4, 3]
+    assert per_cell["nucleus"].tolist() == [3, 1]
+    assert per_cell["nucleus_gene"].tolist() == [2, 1]
+    assert per_cell["cell_gene"].tolist() == [3, 3]
+    nucleus = summary["nucleus"]
+    assert nucleus["overlaps_agreement"] == 1.0
+    assert nucleus["n_nucleus_outside_own_cell"] == 0
+    assert nucleus["n_unknown_nucleus_labels"] == 0
+
+
+def test_native_check_reports_and_fails_on_vendor_disagreement() -> None:
+    cells, nuclei, frame = _hand_store()
+    frame.loc[1, "original_assignment"] = 2  # on cell 1's pixel
+    frame.loc[6, "original_assignment"] = 1  # off every cell
+    summary, _ = _check(frame, cells, nuclei)
+    assert summary["n_mismatch_label_differs"] == 2
+    assert summary["passed"] is False
+
+    frame2 = _hand_store()[2]
+    frame2.loc[0, "original_assignment"] = pd.NA  # vendor unassigned, on a cell
+    summary2, _ = _check(frame2, cells, nuclei, tolerance=0.2)
+    assert summary2["n_mismatch_vendor_unassigned"] == 1
+    assert summary2["mismatch_allowed"] == 1
+    assert summary2["passed"] is True
+
+
+def test_native_check_flags_unknown_nuclei_and_overlap_disagreement() -> None:
+    cells, nuclei, frame = _hand_store()
+    nuclei = nuclei.copy()
+    nuclei[2, 2] = 9  # a nucleus label without a shape row
+    frame.loc[0, "overlaps_nucleus"] = False
+    summary, per_cell = _check(frame, cells, nuclei)
+    assert summary["nucleus"]["n_unknown_nucleus_labels"] == 1
+    assert summary["nucleus"]["n_overlaps_vendor_only"] == 0
+    assert summary["nucleus"]["n_overlaps_lookup_only"] == 2
+    assert per_cell["nucleus"].tolist() == [3, 1]
+
+
+def test_native_check_without_optional_columns() -> None:
+    cells, nuclei, frame = _hand_store()
+    summary, per_cell = _check(
+        frame[["x", "y", "original_assignment"]],
+        cells,
+        nuclei,
+        available_columns=["x", "y", "original_assignment"],
+    )
+    assert set(per_cell) == {"cell", "nucleus"}
+    assert "overlaps_agreement" not in summary["nucleus"]
+
+
+def test_native_check_validates_the_nucleus_inputs() -> None:
+    cells, nuclei, frame = _hand_store()
+    with pytest.raises(ValueError, match="positive and unique"):
+        ll.native_label_check(
+            frame,
+            cell_labels=cells,
+            nucleus_labels=nuclei,
+            nucleus_ids=np.array([1, 1]),
+            nucleus_cell_ids=np.array([1, 2]),
+            table_cell_ids=np.array([1, 2]),
+            um_per_px=PS,
+        )
+    with pytest.raises(ValueError, match="needs nucleus_ids"):
+        ll.native_label_check(
+            frame,
+            cell_labels=cells,
+            nucleus_labels=nuclei,
+            nucleus_ids=None,
+            nucleus_cell_ids=None,
+            table_cell_ids=np.array([1, 2]),
+            um_per_px=PS,
+        )
