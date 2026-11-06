@@ -127,7 +127,11 @@ Native enrichment (`_enrich_native_in_place`):
 2. **Runs the label check.** This is one streaming pass over the points,
    partition by partition, in a thread pool bounded by `DASK_NUM_WORKERS`. It
    reads only the label blocks each partition touches, so it never loads a
-   whole mask. It uses the vendor's corner convention in the vendor's float32
+   whole mask. The partitions run in their natural (tile) order, and decoded
+   blocks are kept in a 3 GiB LRU shared by the partitions in flight, so each
+   block is decoded about once instead of once per partition. On the public
+   full section the pass takes about 1.5–2 min with 12 workers and 12.5 GB
+   peak memory. It uses the vendor's corner convention in the vendor's float32
    arithmetic: a transcript at `x` µm is on pixel
    `floor(float32(x) * float32(1 / ps))`. Float64 `x / ps` disagrees with the
    vendor on about 1.4e-5 of transcripts, all within 0.0012 px of a pixel
@@ -141,6 +145,20 @@ Native enrichment (`_enrich_native_in_place`):
      cell ids. A cell with two nuclei gets the transcripts of both.
    - **Vendor flag.** Agreement with the vendor's `overlaps_nucleus` flag is
      reported.
+   - **Pass rule.** The check passes only if every entry of `checks` holds:
+     - `cell_assignment`: at most 1e-6 of rows disagree with the vendor;
+     - `cell_labels_in_table`: no cell label lies beyond the table's ids;
+     - `nucleus_labels_known`: every nucleus label has a nucleus row with an
+       owning cell;
+     - `nuclei_inside_own_cell`: every nuclear transcript lies on its owning
+       cell's label, so a broken `cell_instance_id` join fails here;
+     - `nucleus_overlaps`: at most 1e-6 of rows disagree with
+       `overlaps_nucleus`;
+     - `points_scale`: the pixel size used is the one the store's points
+       transform records.
+
+     A failed check stops the stage before anything is written to the table.
+     `failures` in the summary names the failing checks.
 3. **Adds per-cell counts to `table_original`.** These are the only change to
    the table:
    - `merxen_cell_transcript_counts` and `merxen_nucleus_transcript_counts`
@@ -164,13 +182,15 @@ any route.
 
 The partial-enrichment cleanup of a native store removes only the derived
 `table_*` tables. The images, labels and points are payloads hardlinked from
-the source store, and the cleanup never touches them.
+the source store, and the cleanup never touches them. An unreadable raster in
+a native store (the `KeyError('ome')` of an interrupted write) is therefore not
+cleaned up: the stage stops and asks for a rebuild with `NATIVE_LATEST`.
 
 Native outputs in `enrich_out/`:
 
 | File | Contents |
 |------|----------|
-| `<dataset>_native_label_check.json` | Mismatch counts and tolerance, nucleus attribution and `overlaps_nucleus` agreement, the pixel size used and whether it agrees with the store's points transform. |
+| `<dataset>_native_label_check.json` | `passed`, `checks` and `failures`; mismatch counts and tolerance, nucleus attribution and `overlaps_nucleus` agreement, the pixel size and arithmetic used (`pixel_precision`) and whether the pixel size agrees with the store's points transform. |
 | `<dataset>_per_shape_assignment_summary.csv` | One `native_table_original` row. |
 
 ## What "per-shape" means

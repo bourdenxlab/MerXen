@@ -249,6 +249,132 @@ def test_stream_label_lookup_accepts_dask_and_pandas_points() -> None:
     )
 
 
+class _CountingMask:
+    """Numpy mask that counts the block reads (the cache misses)."""
+
+    def __init__(self, labels: np.ndarray) -> None:
+        self.labels = labels
+        self.shape = labels.shape
+        self.reads = 0
+
+    def __getitem__(self, key: object) -> np.ndarray:
+        self.reads += 1
+        return self.labels[key]  # type: ignore[index]
+
+
+@pytest.mark.parametrize("n_workers", [1, 4])
+def test_the_block_cache_decodes_each_block_once_across_partitions(
+    tmp_path: Path, n_workers: int
+) -> None:
+    """Partitions touching the same blocks share one decode per block."""
+    labels = _labels(40, 40, seed=7)
+    rng = np.random.default_rng(4)
+    frame = pd.DataFrame(
+        {
+            "x": rng.uniform(0, 40 * PS, 400).astype(np.float32),
+            "y": rng.uniform(0, 40 * PS, 400).astype(np.float32),
+        }
+    )
+    paths = _write_partitions(tmp_path, frame, 8)
+    expected = ll.lookup_labels(
+        *ll.pixel_indices(
+            frame["x"].to_numpy(), frame["y"].to_numpy(), ll.PixelFrame(PS)
+        ),
+        labels,
+    )
+
+    def _run(cache_bytes: int) -> tuple[np.ndarray, int]:
+        mask = _CountingMask(labels)
+        results = ll.stream_label_lookup(
+            paths,
+            {"cells": mask},
+            PS,
+            columns=[],
+            reduce=lambda part, looked: looked["cells"],
+            n_workers=n_workers,
+            block_px=16,
+            block_cache_bytes=cache_bytes,
+        )
+        return np.concatenate(results), mask.reads
+
+    cached, cached_reads = _run(ll.DEFAULT_BLOCK_CACHE_BYTES)
+    uncached, uncached_reads = _run(0)
+    np.testing.assert_array_equal(cached, expected)
+    np.testing.assert_array_equal(uncached, expected)
+    assert cached_reads == 9  # 3 x 3 blocks of 16 px over a 40 px mask
+    assert uncached_reads == 8 * 9
+
+
+def test_the_block_cache_evicts_least_recently_used_within_its_budget() -> None:
+    block = np.zeros(10, dtype=np.uint32)  # 40 bytes
+    cache = ll.BlockCache(100)
+    loads: list[str] = []
+
+    def _load(name: str) -> np.ndarray:
+        loads.append(name)
+        return block.copy()
+
+    for name in ("a", "b", "a", "c", "b"):
+        cache.get(name, lambda name=name: _load(name))
+    # "b" was evicted by "c" (a was used more recently), then decoded again.
+    assert loads == ["a", "b", "c", "b"]
+    assert (cache.hits, cache.misses) == (1, 4)
+    big = ll.BlockCache(10)
+    big.get("x", lambda: _load("x"))
+    big.get("x", lambda: _load("x"))
+    assert loads[-2:] == ["x", "x"]  # larger than the budget: never kept
+    with pytest.raises(ValueError, match="max_bytes"):
+        ll.BlockCache(-1)
+
+
+def test_the_block_cache_decodes_a_contended_block_once() -> None:
+    """Threads asking for one block at once share a single decode."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    cache = ll.BlockCache(1 << 20)
+    started = threading.Event()
+    release = threading.Event()
+    loads = []
+
+    def _load() -> np.ndarray:
+        loads.append(1)
+        started.set()
+        release.wait(5)
+        return np.ones(4, dtype=np.uint32)
+
+    with ThreadPoolExecutor(4) as pool:
+        first = pool.submit(cache.get, "k", _load)
+        assert started.wait(5)
+        others = [pool.submit(cache.get, "k", _load) for _ in range(3)]
+        release.set()
+        blocks = [first.result(), *(future.result() for future in others)]
+    assert len(loads) == 1
+    assert all(block is blocks[0] for block in blocks)
+
+
+def test_a_failed_block_decode_is_raised_and_not_kept() -> None:
+    cache = ll.BlockCache(1 << 20)
+
+    def _fail() -> np.ndarray:
+        raise OSError("unreadable chunk")
+
+    with pytest.raises(OSError, match="unreadable chunk"):
+        cache.get("k", _fail)
+    assert cache.get("k", lambda: np.ones(2, dtype=np.uint32)).tolist() == [1, 1]
+
+
+def test_partitions_are_ordered_naturally() -> None:
+    names = ["part.10.parquet", "part.2.parquet", "part.1.parquet", "part.0.parquet"]
+    ordered = ll.natural_partition_order([Path(name) for name in names])
+    assert [path.name for path in ordered] == [
+        "part.0.parquet",
+        "part.1.parquet",
+        "part.2.parquet",
+        "part.10.parquet",
+    ]
+
+
 def test_masks_of_different_shapes_are_refused() -> None:
     with pytest.raises(ValueError, match="differ in shape"):
         ll.stream_label_lookup(
@@ -335,6 +461,14 @@ def test_native_check_counts_nuclear_transcripts_per_owning_cell() -> None:
     assert nucleus["overlaps_agreement"] == 1.0
     assert nucleus["n_nucleus_outside_own_cell"] == 0
     assert nucleus["n_unknown_nucleus_labels"] == 0
+    assert summary["failures"] == []
+    assert set(summary["checks"]) == {
+        "cell_assignment",
+        "cell_labels_in_table",
+        "nucleus_labels_known",
+        "nuclei_inside_own_cell",
+        "nucleus_overlaps",
+    }
 
 
 def test_native_check_reports_and_fails_on_vendor_disagreement() -> None:
@@ -363,6 +497,62 @@ def test_native_check_flags_unknown_nuclei_and_overlap_disagreement() -> None:
     assert summary["nucleus"]["n_overlaps_vendor_only"] == 0
     assert summary["nucleus"]["n_overlaps_lookup_only"] == 2
     assert per_cell["nucleus"].tolist() == [3, 1]
+    assert summary["n_mismatch"] == 0
+    assert summary["passed"] is False
+    assert summary["failures"] == ["nucleus_labels_known", "nucleus_overlaps"]
+
+
+def test_a_nucleus_label_without_an_owning_cell_is_unknown() -> None:
+    """A nucleus row whose cell_instance_id is 0 is unknown, not cell 0's."""
+    cells, nuclei, frame = _hand_store()
+    nuclei = nuclei.copy()
+    nuclei[0, 0] = 4  # nucleus 4 exists but has no owning cell
+    frame.loc[1, "overlaps_nucleus"] = True  # the row on pixel (0, 0)
+    summary, per_cell = ll.native_label_check(
+        frame,
+        cell_labels=cells,
+        nucleus_labels=nuclei,
+        nucleus_ids=np.array([1, 2, 3, 4]),
+        nucleus_cell_ids=np.array([1, 2, 2, 0]),
+        table_cell_ids=np.array([2, 1]),
+        um_per_px=PS,
+    )
+    assert summary["nucleus"]["n_unknown_nucleus_labels"] == 1
+    assert summary["nucleus"]["n_nucleus_outside_own_cell"] == 0
+    assert per_cell["nucleus"].tolist() == [3, 1]
+    assert summary["failures"] == ["nucleus_labels_known"]
+    assert summary["passed"] is False
+
+
+def test_a_nucleus_on_another_cell_fails_the_check() -> None:
+    """A wrong cell_instance_id (nucleus 1 said to be cell 2's) is caught."""
+    cells, nuclei, frame = _hand_store()
+    summary, per_cell = ll.native_label_check(
+        frame,
+        cell_labels=cells,
+        nucleus_labels=nuclei,
+        nucleus_ids=np.array([1, 2, 3]),
+        nucleus_cell_ids=np.array([2, 2, 2]),
+        table_cell_ids=np.array([2, 1]),
+        um_per_px=PS,
+    )
+    assert summary["n_mismatch"] == 0
+    assert summary["nucleus"]["n_nucleus_outside_own_cell"] == 1
+    assert summary["checks"]["nuclei_inside_own_cell"] is False
+    assert summary["failures"] == ["nuclei_inside_own_cell"]
+    assert summary["passed"] is False
+
+
+def test_a_cell_label_above_the_table_fails_the_check() -> None:
+    cells, nuclei, frame = _hand_store()
+    cells = cells.copy()
+    cells[5, 0] = 7  # a cell label no table row has; row 6 sits on it
+    frame.loc[6, "original_assignment"] = 7
+    summary, _ = _check(frame, cells, nuclei)
+    assert summary["n_mismatch"] == 0
+    assert summary["n_cell_labels_outside_table"] == 1
+    assert summary["failures"] == ["cell_labels_in_table"]
+    assert summary["passed"] is False
 
 
 def test_native_check_without_optional_columns() -> None:

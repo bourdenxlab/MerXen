@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -21,6 +22,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 import spatialdata as sd
 from click.testing import CliRunner
@@ -306,6 +309,139 @@ def test_a_second_run_is_a_skip_and_rewrites_the_summary(
         enrich_single_latest(_config(stores), force_rerun=True)
 
 
+def _edge_transcript_y(labels: np.ndarray) -> tuple[float, int, int, int]:
+    """Find a float32 y on a row edge where the float32 and float64 rules differ.
+
+    Returns ``(y_um, column, row_float32, row_float64)`` for a column whose
+    labels differ between the two rows, so only the vendor's float32 rule
+    puts the transcript on the vendor's cell.
+    """
+    scale32 = np.float32(1.0 / PS)
+    for edge in range(1, labels.shape[0]):
+        centre = np.float32(edge * PS)
+        candidates = [centre]
+        up = down = centre
+        for _ in range(64):
+            up = np.nextafter(up, np.float32(np.inf))
+            down = np.nextafter(down, np.float32(-np.inf))
+            candidates += [up, down]
+        for y32 in candidates:
+            row32 = int(np.floor(np.float32(y32) * scale32))
+            row64 = int(np.floor(float(y32) / PS))
+            lowest, highest = min(row32, row64), max(row32, row64)
+            if row32 == row64 or lowest < 0 or highest >= labels.shape[0]:
+                continue
+            differs = np.flatnonzero(labels[row32] != labels[row64])
+            if differs.size:
+                return float(y32), int(differs[0]), row32, row64
+    raise AssertionError("no float32/float64 edge disagreement in the fixture")
+
+
+def _append_edge_transcript(store: Path) -> tuple[int, int]:
+    """Append one transcript the float64 rule puts on the wrong pixel.
+
+    Its vendor columns follow the vendor's float32 rule. Returns the vendor
+    cell (0 = unassigned) and the cell the float64 rule would give.
+    """
+    cells = _labels(store, "cell_labels")
+    nuclei = _labels(store, "nucleus_labels")
+    y_um, column, row32, row64 = _edge_transcript_y(cells)
+    x_um = float(np.float32((column + 0.5) * PS))
+    vendor_cell = int(cells[row32, column])
+    parts = sorted(points_parquet_dir(store).glob("*.parquet"))
+    last = parts[-1]
+    table = pq.read_table(last)
+    everything = _points(store)
+    row = table.slice(table.num_rows - 1, 1).to_pylist()[0]
+    row.update(
+        x=x_um,
+        y=y_um,
+        overlaps_nucleus=bool(nuclei[row32, column] > 0),
+        original_assignment=vendor_cell or None,
+        transcript_id=int(everything["transcript_id"].max()) + 1,
+    )
+    if "__null_dask_index__" in row:
+        row["__null_dask_index__"] = int(len(everything))
+    extra = pa.Table.from_pylist([row], schema=table.schema)
+    pq.write_table(pa.concat_tables([table, extra]), last)
+    return vendor_cell, int(cells[row64, column])
+
+
+@pytest.mark.integration
+def test_the_vendor_float32_rule_is_the_enrich_default(stores: Stores) -> None:
+    """A transcript on a pixel edge passes only with the vendor's float32 rule.
+
+    Under float64 division it lands on the neighbouring pixel, which is another
+    cell (or background): one mismatch, above the 0 the tolerance allows on a
+    store this small.
+    """
+    vendor_cell, float64_cell = _append_edge_transcript(stores.latest)
+    assert vendor_cell != float64_cell
+
+    enrich_single_latest(_config(stores))
+
+    summary = json.loads(
+        native_label_check_path(stores.output_dir, DATASET).read_text()
+    )
+    assert summary["pixel_precision"] == "float32"
+    assert summary["mismatch_allowed"] == 0
+    assert summary["n_mismatch"] == 0
+    assert summary["passed"] is True
+    points = _points(stores.latest)
+    assert summary["n_rows"] == len(points)
+    table = sd.read_zarr(stores.latest).tables[TABLE_KEY]
+    ids = table.obs["instance_id"].to_numpy(dtype=np.int64)
+    assigned = points["original_assignment"].fillna(0).to_numpy(np.int64)
+    np.testing.assert_array_equal(
+        table.obs[NATIVE_COUNT_COLUMNS["cell"]].to_numpy(),
+        np.array([(assigned == cell).sum() for cell in ids]),
+    )
+
+
+@pytest.mark.integration
+def test_a_broken_nucleus_to_cell_join_fails_the_check(stores: Stores) -> None:
+    """Nuclei pointed at the wrong cells fail the check before any write (R6)."""
+    sdata = sd.read_zarr(stores.latest)
+    nuclei = sdata.shapes[NUCLEUS_SHAPES_KEY].copy()
+    owners = nuclei[CELL_KEY].to_numpy()
+    nuclei[CELL_KEY] = np.roll(owners, 1)
+    assert (nuclei[CELL_KEY].to_numpy() != owners).any()
+    sdata.delete_element_from_disk(NUCLEUS_SHAPES_KEY)
+    sdata.shapes[NUCLEUS_SHAPES_KEY] = nuclei
+    sdata.write_element(NUCLEUS_SHAPES_KEY)
+    sdata.write_consolidated_metadata()
+
+    with pytest.raises(RuntimeError, match=r"failed \(.*nuclei_inside_own_cell"):
+        enrich_single_latest(_config(stores))
+
+    summary = json.loads(
+        native_label_check_path(stores.output_dir, DATASET).read_text()
+    )
+    assert summary["checks"]["cell_assignment"] is True
+    assert summary["checks"]["nuclei_inside_own_cell"] is False
+    assert summary["nucleus"]["n_nucleus_outside_own_cell"] > 0
+    assert summary["passed"] is False
+    after = sd.read_zarr(stores.latest)
+    assert not any(c.startswith("merxen_") for c in after.tables[TABLE_KEY].obs)
+    assert NATIVE_ENRICHMENT_ATTR not in after.attrs
+
+
+@pytest.mark.integration
+def test_a_points_scale_that_disagrees_fails_the_check(
+    stores: Stores, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lookup pixel size must be the one the store's points record."""
+    monkeypatch.setattr(enrich_module, "_points_scale_um_per_px", lambda _: PS * 2)
+    with pytest.raises(RuntimeError, match=r"failed \(points_scale\)"):
+        enrich_single_latest(_config(stores))
+    summary = json.loads(
+        native_label_check_path(stores.output_dir, DATASET).read_text()
+    )
+    assert summary["n_mismatch"] == 0
+    assert summary["failures"] == ["points_scale"]
+    assert NATIVE_ENRICHMENT_ATTR not in sd.read_zarr(stores.latest).attrs
+
+
 @pytest.mark.integration
 def test_the_label_check_can_be_switched_off(stores: Stores) -> None:
     enrich_single_latest(_config(stores, native_label_check=False))
@@ -392,6 +528,122 @@ def test_partial_cleanup_of_a_native_store_removes_only_derived_tables(
     assert _manifest(stores.source) == source_manifest
     sdata = sd.read_zarr(stores.latest)
     assert set(sdata.shapes) == {CELL_SHAPES_KEY, NUCLEUS_SHAPES_KEY}
+
+
+@pytest.mark.integration
+def test_an_unreadable_native_raster_is_refused_without_cleanup(
+    stores: Stores, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A native store's rasters are payloads: no cleanup, a NATIVE_LATEST hint."""
+    derived = stores.latest / "tables" / "table_atera_cell_boundaries_image_x"
+    derived.mkdir(parents=True)
+
+    def _unreadable(path: Path) -> None:
+        raise KeyError("ome")
+
+    monkeypatch.setattr(enrich_module.sd, "read_zarr", _unreadable)
+    with pytest.raises(RuntimeError, match="unreadable raster.*NATIVE_LATEST"):
+        enrich_single_latest(_config(stores))
+    assert derived.is_dir()
+
+
+def _is_payload(relative: Path) -> bool:
+    """Whether a store file is a payload NATIVE_LATEST hardlinks to the source."""
+    text = relative.as_posix()
+    if text.startswith("points/"):
+        return relative.suffix == ".parquet"
+    if text.startswith(("images/", "labels/")):
+        return relative.name not in {"zarr.json", ".zattrs", ".zgroup", ".zarray"}
+    return False
+
+
+def _hardlinked_latest(payload_source: Path, latest: Path) -> int:
+    """Lay out ``latest`` like NATIVE_LATEST: payloads linked read-only."""
+    n_linked = 0
+    for path in sorted(payload_source.rglob("*")):
+        relative = path.relative_to(payload_source)
+        target = latest / relative
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if _is_payload(relative):
+            os.chmod(path, 0o444)
+            os.link(path, target)
+            n_linked += 1
+        else:
+            shutil.copy2(path, target)
+    return n_linked
+
+
+def _payload_manifest(root: Path) -> dict[str, tuple[int, int, str]]:
+    return {
+        str(path.relative_to(root)): (
+            path.stat().st_ino,
+            path.stat().st_mtime_ns,
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+@pytest.mark.integration
+def test_enrich_assignment_and_miq_keep_hardlinked_payloads_intact(
+    reference: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The NATIVE_LATEST contract: shared payloads are never written.
+
+    The latest store's points, image and label chunks are read-only hardlinks
+    to a payload source; ENRICH, the per-shape assignment and label-backed MIQ
+    must leave every one linked and the source unchanged.
+    """
+    from merxen.config import MaskImageQuantificationConfig
+    from merxen.mask_image_quantification import run_mask_image_quantification
+
+    source, reference_latest = reference
+    payload_source = tmp_path / "payload_source.zarr"
+    shutil.copytree(reference_latest, payload_source)
+    latest = tmp_path / "latest" / "latest_spatialdata.zarr"
+    try:
+        assert _hardlinked_latest(payload_source, latest) > 0
+        before = _payload_manifest(payload_source)
+        stores = Stores(source=source, latest=latest, output_dir=tmp_path / "out")
+
+        enrich_single_latest(_config(stores))
+        run_per_shape_assignment_for_dataset(
+            DATASET, latest, platform="ATERA", segmentation_source="native"
+        )
+        run_mask_image_quantification(
+            MaskImageQuantificationConfig(
+                dataset_name=DATASET,
+                platform="ATERA",
+                latest_zarr_path=latest,
+                output_dir=tmp_path / "miq",
+                shape_key=CELL_SHAPES_KEY,
+                table_key=f"table_{CELL_SHAPES_KEY}_image_quantification",
+                tile_size=32,
+                mask_path=None,
+                mask_label_key="cell_labels",
+            )
+        )
+
+        assert _payload_manifest(payload_source) == before
+        unlinked = [
+            str(path.relative_to(latest))
+            for path in latest.rglob("*")
+            if path.is_file()
+            and _is_payload(path.relative_to(latest))
+            and path.stat().st_nlink < 2
+        ]
+        assert unlinked == []
+        after = sd.read_zarr(latest)
+        assert after.attrs[NATIVE_ENRICHMENT_ATTR]["label_check"]["passed"] is True
+        assert f"table_{CELL_SHAPES_KEY}_image_quantification" in after.tables
+    finally:
+        for path in payload_source.rglob("*"):
+            if path.is_file():
+                os.chmod(path, 0o644)
 
 
 def _namespace(attrs: dict[str, Any] | None = None, **missing: str) -> Any:

@@ -69,6 +69,7 @@ def build_mask_image_quantification_table(
     tile_size: int = 2048,
     bead_removal: Mapping[str, Any] | None = None,
     source_cell_ids: Mapping[int, str] | None = None,
+    mask_name: str = "Cellpose",
 ) -> MaskImageQuantificationResult:
     """Quantify every image channel over nonzero Cellpose mask labels.
 
@@ -81,6 +82,8 @@ def build_mask_image_quantification_table(
         table_key: SpatialData table key that will receive the result.
         shape_key: SpatialData shape region represented by the rows.
         tile_size: Square tile size used when streaming image and mask crops.
+            For a lazy mask it is rounded up to a whole number of the mask's
+            chunks, so every chunk is decoded once per pass.
         bead_removal: Table metadata of a bead-corrected source (see
             :func:`merxen.io.bead_removal.provenance.bead_removal_table_metadata`),
             recorded in the table's ``uns`` and the summary. ``None`` leaves
@@ -88,12 +91,16 @@ def build_mask_image_quantification_table(
         source_cell_ids: ``source_cell_id`` of each label, for a mask whose
             labels are vendor cells (labels without one get ``label_<id>``).
             ``None`` names the rows ``cellpose_<label>``.
+        mask_name: What the mask is, for log lines and errors (``"Cellpose"``
+            or the vendor label element of a native row).
 
     Returns:
         AnnData table plus a JSON-serializable summary.
     """
-    if _is_lazy_mask(mask):
+    lazy_mask = _is_lazy_mask(mask)
+    if lazy_mask:
         mask_arr = mask
+        tile_size = _chunk_aligned_tile_size(mask_arr, int(tile_size))
         label_ids, label_counts = _foreground_label_counts_tiled(
             mask_arr, tile_size=int(tile_size)
         )
@@ -101,7 +108,7 @@ def build_mask_image_quantification_table(
         mask_arr = np.asarray(mask)
         label_ids, label_counts = _foreground_label_counts(mask_arr)
     if label_ids.size == 0:
-        raise ValueError(f"[{dataset_name}] Cellpose mask contains no labels.")
+        raise ValueError(f"[{dataset_name}] {mask_name} mask contains no labels.")
 
     images = getattr(sdata_obj, "images", None)
     if not images:
@@ -116,7 +123,7 @@ def build_mask_image_quantification_table(
     skipped_cache_images = len(images) - len(image_keys)
     log_status(
         f"[{dataset_name}] Quantifying {len(image_keys)} source image element(s) "
-        f"over {label_ids.size:,} Cellpose masks; skipped "
+        f"over {label_ids.size:,} {mask_name} masks; skipped "
         f"{skipped_cache_images} private viewer-cache or aligned image(s)"
     )
 
@@ -132,6 +139,7 @@ def build_mask_image_quantification_table(
             label_ids=label_ids,
             dataset_name=dataset_name,
             tile_size=int(tile_size),
+            mask_name=mask_name,
         )
         matrix_parts.append(image_matrix)
         var_frames.append(image_var)
@@ -182,6 +190,8 @@ def build_mask_image_quantification_table(
     }
     if bead_removal is not None:
         summary["bead_removal"] = dict(bead_removal)
+    if lazy_mask:
+        summary["tile_size_px"] = int(tile_size)
     return MaskImageQuantificationResult(table=table, summary=summary)
 
 
@@ -275,8 +285,9 @@ def _quantify_store(
             )
             _update_sidecar_summary(paths["summary"], hybrid_join_summary)
             log_status(
-                f"[{config.dataset_name}] Reused existing Cellpose image "
-                "quantification and added the hybrid-cell feature join."
+                f"[{config.dataset_name}] Reused existing "
+                f"{'Cellpose' if config.mask_label_key is None else 'vendor-mask'} "
+                "image quantification and added the hybrid-cell feature join."
             )
             return {"latest_zarr": latest_path, **paths}
 
@@ -298,6 +309,11 @@ def _quantify_store(
             tile_size=config.tile_size,
             bead_removal=bead_removal,
             source_cell_ids=source_cell_ids,
+            mask_name=(
+                "Cellpose"
+                if config.mask_label_key is None
+                else f"vendor '{config.mask_label_key}'"
+            ),
         )
         if config.mask_label_key is not None:
             result.table.uns["mask_image_quantification"]["mask_label_key"] = str(
@@ -594,6 +610,7 @@ def _quantify_image_element(
     label_ids: np.ndarray,
     dataset_name: str,
     tile_size: int,
+    mask_name: str = "Cellpose",
 ) -> tuple[np.ndarray, pd.DataFrame, dict[str, Any]]:
     source = build_image_source(image_obj, requested_channels=None, as_float32=False)
     height, width, n_channels = source["shape"]
@@ -601,7 +618,7 @@ def _quantify_image_element(
     if (int(height), int(width)) != (int(mask_height), int(mask_width)):
         raise ValueError(
             f"[{dataset_name}] Image '{image_key}' shape {height}x{width} does not "
-            f"match Cellpose mask shape {mask_height}x{mask_width}."
+            f"match {mask_name} mask shape {mask_height}x{mask_width}."
         )
 
     channel_names = _unique_channel_names(source, n_channels)
@@ -752,7 +769,7 @@ def _foreground_label_counts_tiled(
         ValueError: If the mask is not 2D or holds negative labels.
     """
     if len(mask.shape) != 2:
-        raise ValueError(f"Cellpose mask must be 2D, got shape={tuple(mask.shape)}")
+        raise ValueError(f"Label mask must be 2D, got shape={tuple(mask.shape)}")
     height, width = (int(size) for size in mask.shape)
     counts: np.ndarray = np.zeros(1, dtype=np.int64)
     for y0, y1, x0, x1 in _iter_tiles(height, width, int(tile_size)):
@@ -760,7 +777,7 @@ def _foreground_label_counts_tiled(
         if tile.size == 0:
             continue
         if np.issubdtype(tile.dtype, np.signedinteger) and bool((tile < 0).any()):
-            raise ValueError("Cellpose mask labels must be non-negative")
+            raise ValueError("Label mask labels must be non-negative")
         tile_counts = np.bincount(tile.reshape(-1).astype(np.int64, copy=False))
         if tile_counts.size > counts.size:
             counts = np.pad(counts, (0, tile_counts.size - counts.size))
@@ -768,6 +785,38 @@ def _foreground_label_counts_tiled(
     label_ids = np.flatnonzero(counts)
     label_ids = label_ids[label_ids > 0].astype(np.int64, copy=False)
     return label_ids, counts[label_ids]
+
+
+def _chunk_aligned_tile_size(mask: Any, tile_size: int) -> int:
+    """Round ``tile_size`` up to a whole number of the mask's chunks.
+
+    A tile smaller than a chunk decodes that chunk once per tile (four times
+    for 2048 px tiles over 4096 px label chunks), in both passes.
+
+    Args:
+        mask: Lazy mask (dask ``chunks`` is per-axis tuples; zarr is ints).
+        tile_size: Requested tile edge.
+
+    Returns:
+        The smallest multiple of the chunk edges that is at least
+        ``tile_size`` (of the largest edge alone when the two edges have no
+        small common multiple); ``tile_size`` when the mask reports no chunks.
+    """
+    chunks = getattr(mask, "chunks", None)
+    if not chunks:
+        return int(tile_size)
+    edges: list[int] = []
+    for axis in tuple(chunks)[:2]:
+        first: Any = axis[0] if isinstance(axis, tuple) and axis else axis
+        if isinstance(first, (int, np.integer)) and int(first) > 0:
+            edges.append(int(first))
+    if not edges:
+        return int(tile_size)
+    step = int(np.lcm.reduce(np.asarray(edges, dtype=np.int64)))
+    if step > 4 * max(edges):
+        # Square tiles cannot follow both edges without becoming huge.
+        step = max(edges)
+    return int(-(-int(tile_size) // step) * step)
 
 
 def _label_element_level0(sdata_obj: Any, label_key: str, dataset_name: str) -> Any:

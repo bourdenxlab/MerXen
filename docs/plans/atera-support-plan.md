@@ -788,6 +788,12 @@ grow a third arm in every ternary.
   1/ps within `rtol=1e-6`.
 - **Pixel convention (ATERA vendor masks): corner/floor.** Any µm → mask-pixel lookup against vendor masks
   uses `floor(µm/ps)` (100.00% vendor agreement) [H].
+  - The vendor computes it in float32 as `floor(float32(µm) * float32(1/ps))`. Float64 `µm/ps` puts
+    about 1.4e-5 of transcripts, all within 0.0012 px of a pixel edge, on the neighbouring pixel; the
+    float32 rule has 0 mismatches over the whole public section (AT-6). The AT-6 native check uses
+    `merxen.enrichment.label_lookup.PixelFrame` (default `precision="float32"`); the later vendor-mask
+    lookups (AT-7 `assign_labels_from_masks(pixel_convention="corner")`, the AT-9 ProSeg prior) must use
+    the same `PixelFrame`, or they will disagree with the vendor at pixel edges.
   - `assign_labels_from_masks` uses `np.rint` (`segmentation/cellpose.py:896-897`), which disagrees on
     about 1.35% of transcripts.
   - Add a `pixel_convention: Literal["center", "corner"] = "center"` argument. The default keeps Xenium

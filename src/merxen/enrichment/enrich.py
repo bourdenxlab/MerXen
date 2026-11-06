@@ -25,7 +25,11 @@ from tqdm.auto import tqdm
 from merxen.alignment.manifest import invalidate_alignment_materialization
 from merxen.config import EnrichmentConfig
 from merxen.enrichment.assignment import clone_table_for_region
-from merxen.enrichment.label_lookup import NATIVE_COUNT_COLUMNS, native_label_check
+from merxen.enrichment.label_lookup import (
+    NATIVE_COUNT_COLUMNS,
+    native_label_check,
+    natural_partition_order,
+)
 from merxen.io.bead_removal.provenance import (
     IMAGE_PREPROCESSING_ATTR,
     check_store_segmentation_sidecar,
@@ -826,12 +830,30 @@ def _read_latest_zarr_for_enrichment(
     platform: str,
     dataset_name: str,
 ) -> Any:
-    """Read latest zarr, recovering from interrupted partial enrichment writes."""
+    """Read latest zarr, recovering from interrupted partial enrichment writes.
+
+    Raises:
+        RuntimeError: If a native store has an unreadable raster: its rasters
+            are payloads only NATIVE_LATEST can restore, so nothing is removed.
+    """
     try:
         return sd.read_zarr(write_path)
     except Exception as exc:
         if not _is_partial_enrichment_read_error(exc):
             raise
+        try:
+            attrs = read_root_attrs(Path(write_path))
+        except (OSError, ValueError):
+            attrs = {}
+        if _is_native_store(platform, attrs):
+            # A native store's rasters are payloads shared with the source
+            # store; deleting derived tables cannot make them readable.
+            raise RuntimeError(
+                f"[{dataset_name}] Native latest store has an unreadable raster "
+                f"element ({exc!r}); its images and labels are payloads shared "
+                "with the source store, so rebuild it with NATIVE_LATEST "
+                "(segment stage)."
+            ) from exc
         log_status(
             f"[{dataset_name}] Latest zarr contains an unreadable partial "
             "enrichment artifact; removing rebuildable enrichment artifacts."
@@ -1292,9 +1314,17 @@ def _points_scale_um_per_px(points: Any) -> float | None:
 
 
 def _points_source(write_path: Path, sdata_obj: Any, points_key: str) -> Any:
-    """Return the parquet files of a points element, or the element itself."""
+    """Return the parquet files of a points element, or the element itself.
+
+    The files come in natural name order (the writer's tile order), so the
+    partitions in flight together share decoded label blocks.
+    """
     parquet_dir = points_parquet_dir(write_path, points_key)
-    files = sorted(parquet_dir.glob("*.parquet")) if parquet_dir.is_dir() else []
+    files = (
+        natural_partition_order(list(parquet_dir.glob("*.parquet")))
+        if parquet_dir.is_dir()
+        else []
+    )
     if files:
         return files
     return sdata_obj.points[points_key]
@@ -1365,6 +1395,12 @@ def _run_native_label_check(
         store_um_per_px is not None
         and np.isclose(store_um_per_px, um_per_px, rtol=1e-6, atol=0.0)
     )
+    # The pixel size of the lookup must be the one the store's points record.
+    checks = dict(summary["checks"])
+    checks["points_scale"] = summary["store_points_scale_agrees"]
+    summary["checks"] = checks
+    summary["failures"] = sorted(name for name, ok in checks.items() if not ok)
+    summary["passed"] = all(checks.values())
     summary["count_columns"] = {
         key: NATIVE_COUNT_COLUMNS[key] for key in sorted(per_cell)
     }
@@ -1569,13 +1605,20 @@ def _enrich_native_in_place(
         )
         check_path = _write_native_label_check(label_check, config)
         if not label_check["passed"]:
+            nucleus = dict(label_check.get("nucleus", {}) or {})
             raise RuntimeError(
-                f"[{dataset_name}] Native label check failed: "
+                f"[{dataset_name}] Native label check failed "
+                f"({', '.join(label_check['failures'])}): "
                 f"{label_check['n_mismatch']:,} of {label_check['n_rows']:,} "
                 "transcripts disagree with the vendor assignment (at most "
-                f"{label_check['mismatch_allowed']:,} allowed). The pixel size "
-                f"({label_check['um_per_px']}) or the masks do not match the "
-                f"points; see {check_path.name}."
+                f"{label_check['mismatch_allowed']:,} allowed); "
+                f"{nucleus.get('n_unknown_nucleus_labels', 0):,} on unknown "
+                f"nucleus labels; {nucleus.get('n_nucleus_outside_own_cell', 0):,} "
+                "nuclear transcripts outside their own cell; store points "
+                f"scale {label_check['store_points_um_per_px']} um/px against "
+                f"{label_check['um_per_px']} um/px. The pixel size, the masks or "
+                f"the nucleus-to-cell join do not match the points; see "
+                f"{check_path.name}."
             )
         nucleus = label_check.get("nucleus", {})
         log_status(

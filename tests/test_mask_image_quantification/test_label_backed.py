@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import dask.array as da
 import numpy as np
@@ -12,6 +13,7 @@ import pandas as pd
 import pytest
 import spatialdata as sd
 import zarr
+from spatialdata.models import Image2DModel
 from test_io.atera_native_fixture import CELL_SHAPES_KEY, make_native_reference
 
 import merxen.mask_image_quantification as miq
@@ -89,6 +91,71 @@ def test_tiled_counts_never_load_the_whole_mask(
     monkeypatch.setattr(miq, "_read_mask_tile", _spy)
     miq._foreground_label_counts_tiled(mask, tile_size=32)
     assert max(sizes) <= 32 * 32
+
+
+@pytest.mark.parametrize(
+    ("chunks", "tile_size", "expected"),
+    [
+        ((4096, 4096), 2048, 4096),
+        ((4096, 4096), 4096, 4096),
+        ((4096, 4096), 5000, 8192),
+        ((16, 24), 20, 48),
+        ((97, 67), 32, 97),
+    ],
+)
+def test_lazy_mask_tiles_are_whole_chunks(
+    chunks: tuple[int, int], tile_size: int, expected: int
+) -> None:
+    """A tile never splits a label chunk, so each chunk is decoded once a pass."""
+    shape = (2 * chunks[0], 2 * chunks[1])
+    as_dask = da.zeros(shape, dtype=np.uint32, chunks=chunks)
+    as_zarr = zarr.zeros(shape, dtype=np.uint32, chunks=chunks)
+    for mask in (as_dask, as_zarr):
+        assert miq._chunk_aligned_tile_size(mask, tile_size) == expected
+    assert miq._chunk_aligned_tile_size(np.zeros((4, 4)), 3) == 3
+
+
+def test_lazy_mask_reads_follow_the_label_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tiles cover whole label chunks, so no chunk is split between reads."""
+    labels = np.zeros((64, 48), dtype=np.uint32)
+    labels[3:40, 5:30] = 1
+    labels[41:60, 31:47] = 2
+    mask = da.from_array(labels, chunks=(32, 24))
+    image = np.arange(64 * 48, dtype=np.float32).reshape(1, 64, 48)
+    sdata = SimpleNamespace(
+        images={"morphology_focus": Image2DModel.parse(image, dims=("c", "y", "x"))},
+        tables={},
+    )
+    reads: list[tuple[int, int]] = []
+    original = miq._read_mask_tile
+
+    def _spy(array: object, y0: int, y1: int, x0: int, x1: int) -> np.ndarray:
+        reads.append((y1 - y0, x1 - x0))
+        return original(array, y0, y1, x0, x1)
+
+    monkeypatch.setattr(miq, "_read_mask_tile", _spy)
+    result = miq.build_mask_image_quantification_table(
+        sdata, mask, "HA1", tile_size=8, mask_name="vendor 'cell_labels'"
+    )
+    assert result.summary["tile_size_px"] == 24 * 4  # lcm(32, 24) = 96
+    assert reads == [(64, 48)]
+    assert result.table.obs["mask_pixel_count"].tolist() == [
+        int((labels == 1).sum()),
+        int((labels == 2).sum()),
+    ]
+
+
+def test_an_empty_vendor_mask_names_the_label_element() -> None:
+    mask = da.zeros((8, 8), dtype=np.uint32, chunks=(4, 4))
+    with pytest.raises(ValueError, match="vendor 'cell_labels' mask contains no"):
+        miq.build_mask_image_quantification_table(
+            SimpleNamespace(images={}, tables={}),
+            mask,
+            "HA1",
+            mask_name="vendor 'cell_labels'",
+        )
 
 
 # --------------------------------------------------------------------------- #

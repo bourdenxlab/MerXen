@@ -61,7 +61,10 @@ the stage never reads.
 
 - **Lazy reads.** The level-0 label array is read lazily, tile by tile. The
   pixel counts use a tiled `bincount`, and the full mask is never loaded or
-  copied.
+  copied. `tile_size` is rounded up to whole label chunks (4096 px for
+  Atera), so no chunk is decoded more than once per pass; the summary records
+  the tile used as `tile_size_px`. Memory is set by the per-cell pixel value
+  lists of the second pass, as on the Cellpose path.
 - **Rows.** There is one row per vendor cell, named by its vendor
   `source_cell_id` from `atera_cell_boundaries`.
 - **Outputs.** The table is `table_atera_cell_boundaries_image_quantification`,

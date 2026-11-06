@@ -377,3 +377,43 @@ def test_xenium_assignment_still_clones_and_joins_its_nucleus_layer(
 def test_nucleus_row_shapes_are_never_assigned() -> None:
     """Only ATERA's per-nucleus shape is keyed by nucleus row."""
     assert frozenset({"atera_nucleus"}) == assignment_module.NUCLEUS_ROW_SHAPE_KEYS
+
+
+@pytest.mark.parametrize("segmentation_source", [None, "cellpose_only"])
+def test_atera_nucleus_rows_are_skipped_on_non_native_routes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    segmentation_source: str | None,
+) -> None:
+    """ATERA nuclei are keyed by nucleus row: never a per-shape table.
+
+    A table keyed by nucleus id would put nucleus k's transcripts on cell k.
+    Native stores skip every non-cell shape anyway, so this guards the
+    Cellpose routes (AT-7) that still see ``atera_nucleus``.
+    """
+    sdata = _xenium_store()
+    sdata.shapes = {
+        "atera_cell_boundaries": sdata.shapes["xenium_cell_boundaries"],
+        "atera_nucleus": gpd.GeoDataFrame(
+            {"instance_id": [1, 2], "cell_instance_id": [2, 1]},
+            geometry=[box(3.5, 0.5, 4.5, 1.5), box(0.5, 0.5, 1.5, 1.5)],
+        ),
+    }
+    monkeypatch.setattr(assignment_module.sd, "read_zarr", lambda path: sdata)
+    messages: list[str] = []
+    monkeypatch.setattr(assignment_module, "log_status", messages.append)
+
+    summaries = run_per_shape_assignment_for_dataset(
+        "HA1",
+        tmp_path / "latest.zarr",
+        platform="ATERA",
+        segmentation_source=segmentation_source,
+    )
+
+    assert [summary["shape_key"] for summary in summaries] == ["atera_cell_boundaries"]
+    assert "table_atera_nucleus" not in sdata.tables
+    assert "atera_nucleus" not in sdata.written
+    assert any(
+        "Skipping nucleus shapes keyed by nucleus row ['atera_nucleus']" in message
+        for message in messages
+    )

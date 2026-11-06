@@ -12,19 +12,24 @@ the vendor on about 1.35% of transcripts, so the lookups here default to
 Nothing here loads a whole mask or the whole points element. The points are
 read one partition (parquet file) at a time, only the requested columns; the
 label mask is read block by block, only the blocks the partition's
-transcripts touch. Partitions run in a thread pool bounded by
+transcripts touch. Decoded blocks are kept in a small LRU shared by the
+partitions (bounded in bytes), so neighbouring partitions of one tile decode
+each block once. Partitions run in a thread pool bounded by
 ``DASK_NUM_WORKERS``, and each one is reduced to a small result by the
 caller's ``reduce`` function, so memory is bounded by a few partitions and
-label blocks however large the section is.
+the block cache however large the section is.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import threading
-from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from collections import OrderedDict
+from collections.abc import Callable, Hashable, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Final, Literal, TypeVar
 
@@ -36,6 +41,13 @@ PixelConvention = Literal["center", "corner"]
 
 DEFAULT_BLOCK_PX: Final = 4096
 """Edge of the label blocks read at once (the Atera label chunk size)."""
+
+DEFAULT_BLOCK_CACHE_BYTES: Final = 3 * 1024**3
+"""Bytes of decoded label blocks kept for reuse across partitions.
+
+About 48 uint32 blocks of 4096 x 4096: the cell and nucleus blocks of the two
+or three tiles that the partitions in flight belong to.
+"""
 
 _T = TypeVar("_T")
 
@@ -143,12 +155,82 @@ def _read_block(labels: Any, y0: int, y1: int, x0: int, x1: int) -> np.ndarray:
     return np.asarray(block)
 
 
+class BlockCache:
+    """Thread-safe LRU of decoded label blocks, bounded in bytes.
+
+    A block requested by several threads at once is decoded once: the first
+    thread decodes it and the others wait for that result. Blocks larger than
+    the budget are returned without being kept.
+
+    Attributes:
+        max_bytes: Budget of the kept blocks.
+        hits: Requests served from the cache (or from a decode in flight).
+        misses: Requests that decoded a block.
+    """
+
+    def __init__(self, max_bytes: int) -> None:
+        """Create an empty cache.
+
+        Args:
+            max_bytes: Budget of the kept blocks; 0 keeps nothing.
+
+        Raises:
+            ValueError: If ``max_bytes`` is negative.
+        """
+        if int(max_bytes) < 0:
+            raise ValueError(f"max_bytes must be >= 0, got {max_bytes!r}")
+        self.max_bytes = int(max_bytes)
+        self.hits = 0
+        self.misses = 0
+        self._bytes = 0
+        self._blocks: OrderedDict[Hashable, np.ndarray] = OrderedDict()
+        self._pending: dict[Hashable, Future[np.ndarray]] = {}
+        self._lock = threading.Lock()
+
+    def get(self, key: Hashable, load: Callable[[], np.ndarray]) -> np.ndarray:
+        """Return the block of ``key``, decoding it with ``load`` on a miss."""
+        with self._lock:
+            block = self._blocks.get(key)
+            if block is not None:
+                self._blocks.move_to_end(key)
+                self.hits += 1
+                return block
+            pending = self._pending.get(key)
+            if pending is None:
+                future: Future[np.ndarray] = Future()
+                self._pending[key] = future
+                self.misses += 1
+            else:
+                self.hits += 1
+        if pending is not None:
+            return pending.result()
+        try:
+            block = load()
+        except BaseException as exc:
+            with self._lock:
+                del self._pending[key]
+            future.set_exception(exc)
+            raise
+        with self._lock:
+            del self._pending[key]
+            if 0 < block.nbytes <= self.max_bytes:
+                self._blocks[key] = block
+                self._bytes += block.nbytes
+                while self._bytes > self.max_bytes:
+                    _, evicted = self._blocks.popitem(last=False)
+                    self._bytes -= evicted.nbytes
+        future.set_result(block)
+        return block
+
+
 def lookup_labels(
     column: np.ndarray,
     row: np.ndarray,
     labels: Any,
     *,
     block_px: int = DEFAULT_BLOCK_PX,
+    cache: BlockCache | None = None,
+    cache_key: Hashable = None,
 ) -> np.ndarray:
     """Return the label under each pixel, reading only the blocks touched.
 
@@ -158,6 +240,8 @@ def lookup_labels(
         labels: Two-dimensional label array (numpy, zarr or dask) indexed
             ``[row, column]``.
         block_px: Edge of the blocks read at once.
+        cache: Decoded blocks shared with other lookups, or ``None``.
+        cache_key: Name of ``labels`` in ``cache`` (one per mask).
 
     Returns:
         The label of each pixel as int64; 0 for background and for pixels
@@ -182,7 +266,13 @@ def lookup_labels(
         by, bx = divmod(block_id, n_block_cols)
         y0, x0 = by * block_px, bx * block_px
         y1, x1 = min(height, y0 + block_px), min(width, x0 + block_px)
-        block = _read_block(labels, y0, y1, x0, x1)
+        if cache is None:
+            block = _read_block(labels, y0, y1, x0, x1)
+        else:
+            block = cache.get(
+                (cache_key, block_px, y0, x0),
+                partial(_read_block, labels, y0, y1, x0, x1),
+            )
         members = positions[order[start:stop]]
         out[members] = block[row[members] - y0, column[members] - x0].astype(
             np.int64, copy=False
@@ -208,6 +298,30 @@ def default_n_workers() -> int:
             raise ValueError(f"DASK_NUM_WORKERS must be positive, got {raw!r}")
         return value
     return max(1, min(8, os.cpu_count() or 1))
+
+
+def natural_partition_order(paths: Sequence[Path]) -> list[Path]:
+    """Return parquet partitions in natural name order (``part.2`` < ``part.10``).
+
+    The points writer numbers the partitions tile by tile, so in this order
+    neighbouring partitions (the ones in flight together in the thread pool)
+    touch the same label blocks and share the :class:`BlockCache`.
+
+    Args:
+        paths: Parquet files of one points element.
+
+    Returns:
+        The same files, sorted.
+    """
+
+    def _key(path: Path) -> tuple[tuple[int, int, str], ...]:
+        return tuple(
+            (0, int(token), "") if token.isdigit() else (1, 0, token)
+            for token in re.split(r"(\d+)", path.name)
+            if token
+        )
+
+    return sorted((Path(path) for path in paths), key=_key)
 
 
 def partition_readers(
@@ -264,6 +378,7 @@ def stream_label_lookup(
     x_column: str = "x",
     y_column: str = "y",
     block_px: int = DEFAULT_BLOCK_PX,
+    block_cache_bytes: int = DEFAULT_BLOCK_CACHE_BYTES,
     n_workers: int | None = None,
 ) -> list[_T]:
     """Look every transcript up in one or more label masks, partition by partition.
@@ -288,6 +403,9 @@ def stream_label_lookup(
         x_column: X coordinate column (microns).
         y_column: Y coordinate column (microns).
         block_px: Edge of the label blocks read at once.
+        block_cache_bytes: Bytes of decoded blocks kept for the following
+            partitions (:class:`BlockCache`); 0 decodes every block per
+            partition.
         n_workers: Threads; ``None`` uses :func:`default_n_workers`.
 
     Returns:
@@ -306,6 +424,7 @@ def stream_label_lookup(
     )
     wanted = list(dict.fromkeys([x_column, y_column, *columns]))
     readers = partition_readers(points, wanted)
+    cache = BlockCache(block_cache_bytes) if block_cache_bytes > 0 else None
 
     def _one(reader: Callable[[], pd.DataFrame]) -> _T:
         part = reader()
@@ -316,7 +435,9 @@ def stream_label_lookup(
             convention=convention,
         )
         looked_up = {
-            name: lookup_labels(column, row, array, block_px=block_px)
+            name: lookup_labels(
+                column, row, array, block_px=block_px, cache=cache, cache_key=name
+            )
             for name, array in labels_level0.items()
         }
         return reduce(part, looked_up)
@@ -413,6 +534,15 @@ def native_label_check(
     - when present, the vendor ``overlaps_column`` is compared with "on a
       nucleus label".
 
+    The check passes only when every entry of ``summary["checks"]`` holds:
+    ``cell_assignment`` (at most ``tolerance`` of the rows disagree with the
+    vendor), ``cell_labels_in_table`` (no cell label above the largest table
+    id), ``nucleus_labels_known`` (every nucleus label has a nucleus row with
+    an owning cell), ``nuclei_inside_own_cell`` (every nuclear transcript lies
+    on its owning cell's label: a broken ``cell_instance_id`` join fails here)
+    and ``nucleus_overlaps`` (at most ``tolerance`` of the rows disagree with
+    the vendor's nucleus flag). ``summary["failures"]`` names the failing ones.
+
     Args:
         points: Parquet files, a Dask DataFrame or a pandas DataFrame.
         cell_labels: Level-0 cell label mask (``[row, column]``).
@@ -434,8 +564,9 @@ def native_label_check(
 
     Returns:
         ``(summary, per_cell)``. ``summary`` is JSON-serialisable and has
-        ``passed``; ``per_cell`` maps each :data:`NATIVE_COUNT_COLUMNS` key to
-        counts aligned with ``table_cell_ids``.
+        ``passed``, ``checks`` and ``failures``; ``per_cell`` maps each
+        :data:`NATIVE_COUNT_COLUMNS` key to counts aligned with
+        ``table_cell_ids``.
 
     Raises:
         ValueError: If the nucleus inputs are inconsistent.
@@ -554,6 +685,18 @@ def native_label_check(
 
     n_mismatch = tally.n_mismatch_label_differs + tally.n_mismatch_vendor_unassigned
     allowed = int(np.floor(float(tolerance) * tally.n_rows))
+    checks: dict[str, bool] = {
+        "cell_assignment": bool(n_mismatch <= allowed),
+        "cell_labels_in_table": tally.n_cell_labels_outside_table == 0,
+    }
+    if nucleus_labels is not None:
+        checks["nucleus_labels_known"] = tally.n_unknown_nucleus_labels == 0
+        checks["nuclei_inside_own_cell"] = tally.n_nucleus_outside_own_cell == 0
+        if has_overlaps:
+            n_overlaps_disagree = (
+                tally.n_overlaps_vendor_only + tally.n_overlaps_lookup_only
+            )
+            checks["nucleus_overlaps"] = bool(n_overlaps_disagree <= allowed)
     summary: dict[str, Any] = {
         "pixel_convention": "corner",
         "pixel_precision": precision,
@@ -570,7 +713,9 @@ def native_label_check(
         "mismatch_allowed": allowed,
         "n_cell_labels_outside_table": tally.n_cell_labels_outside_table,
         "n_table_cells": int(table_ids.size),
-        "passed": bool(n_mismatch <= allowed),
+        "checks": checks,
+        "failures": sorted(name for name, ok in checks.items() if not ok),
+        "passed": all(checks.values()),
     }
     if nucleus_labels is not None:
         summary["nucleus"] = {
