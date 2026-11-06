@@ -1,0 +1,5 @@
+symbol,ensembl_id,reason
+H2AX,ENSG00000188486,"M0e: MERSCOPE declares H2AX without an ID; HGNC renamed H2AFX to H2AX; ID from the WHB-10Xv3 var (20240330), equal to the ID Xenium declares for H2AFX"
+LIF,ENSG00000128342,"M0e: MERSCOPE declares LIF without an ID and Xenium lacks it; ID from the WHB-10Xv3 var (20240330)"
+LIFR,ENSG00000113594,"M0e: MERSCOPE declares LIFR without an ID and Xenium lacks it; ID from the WHB-10Xv3 var (20240330)"
+SQSTM1,ENSG00000161011,"M0e: MERSCOPE declares SQSTM1 without an ID and Xenium lacks it; ID from the WHB-10Xv3 var (20240330)"

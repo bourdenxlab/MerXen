@@ -8,6 +8,8 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from merxen.annotation.samplesheet_columns import parse_optional_columns  # rca-hook:H9
+
 logger = logging.getLogger(__name__)
 
 
@@ -135,6 +137,10 @@ class SamplePair:
     gaston_keep_seed_models: bool | None = None
     gaston_keep_checkpoints: str | None = None
     gaston_max_genes: int | None = None
+    # rca-site:H9: optional annotation columns (plan §3.7); None inherits the param.
+    anatomical_region: str | None = None
+    mouse_section_regions: str | None = None
+    clustering_squidpy_mode: str | None = None
 
 
 def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
@@ -310,6 +316,16 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
                 ),
                 gaston_max_genes=_parse_optional_int(row.get("gaston_max_genes")),
             )
+            # rca-site:H9: blank or absent annotation columns stay None.
+            try:
+                annotation_columns = parse_optional_columns(row)
+            except ValueError as exc:
+                raise ValueError(
+                    f"[{pair.pair_id}] samplesheet row {row_num}: {exc}"
+                ) from exc
+            pair.anatomical_region = annotation_columns.anatomical_region
+            pair.mouse_section_regions = annotation_columns.mouse_section_regions
+            pair.clustering_squidpy_mode = annotation_columns.clustering_squidpy_mode
             pairs.append(pair)
             logger.info("Parsed sample pair %d: %s", row_num - 1, pair.pair_id)
 

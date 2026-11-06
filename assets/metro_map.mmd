@@ -140,10 +140,21 @@ graph LR
         mapmycells[MapMyCells]
         mapmycells_out[ ]
         mender[MENDER domains]
+        annotate_panel[Gene panel]
+        annotate_reference_prep[Reference prep]
+        clustering_squidpy_annotate_map[Map cells]
+        clustering_squidpy_annotate_resolve[Resolve labels]
+        clustering_squidpy_compute_cpu[Map-first tree]
+        annotation_report[Label report]
 
         compute_cortical_depth -->|optional| distance_from_object_annotate
         distance_from_object_annotate -->|optional| distance_from_object_cohort
         mapmycells -->|optional| mapmycells_out
+        annotate_panel -->|optional| annotate_reference_prep
+        annotate_reference_prep -->|optional| clustering_squidpy_annotate_map
+        clustering_squidpy_annotate_map -->|optional| clustering_squidpy_annotate_resolve
+        clustering_squidpy_annotate_resolve -->|optional| clustering_squidpy_compute_cpu
+        mender -->|optional| annotation_report
     end
 
     %% Inter-section edges
@@ -160,3 +171,4 @@ graph LR
     clustering_squidpy -->|optional| compute_cortical_depth
     clustering_squidpy -->|optional| mapmycells
     clustering_squidpy -->|optional| mender
+    clustering_squidpy -->|optional| annotate_panel

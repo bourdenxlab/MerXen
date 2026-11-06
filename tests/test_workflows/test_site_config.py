@@ -55,6 +55,7 @@ TASK_TMP_DIR = "/path/to/storage/MerXen/tmp"
 ALIAS_FILE = "/path/to/private_config/aliases.tsv"
 CACHE_DIR = "/path/to/legacy-disk/MerXen/mapmycells"
 MODEL_STORE = "/path/to/storage/MerXen/cellpose_models"
+STORE = "/path/to/storage/MerXen/annotation_references"
 
 # --- the templates ------------------------------------------------------------
 
@@ -68,7 +69,7 @@ def test_templates_hold_placeholders_only() -> None:
 
 
 def test_the_dwight_template_exports_the_task_environment() -> None:
-    """TMPDIR and the alias table reach every task."""
+    """TMPDIR and the alias table reach every task (the wmb_panel hash needs it)."""
     text = (WORKFLOWS / DWIGHT_SITE).read_text()
 
     assert "TMPDIR = params.task_tmp_dir" in text
@@ -81,7 +82,16 @@ def test_the_dwight_template_exports_the_task_environment() -> None:
 # private files must agree, so they cannot drift apart (RC9).
 ENV_TWINS = {
     "task_tmp_dir": "MERXEN_TASK_TMP_DIR",
+    "annotation_reference_store": "MERXEN_REFERENCE_STORE",
+    "annotation_reference_store_large": "MERXEN_REFERENCE_STORE_LARGE",
+    "annotation_whb_region_precompute_source": "MERXEN_WHB_REGION_PRECOMPUTE_SOURCE",
+    "annotation_whb_h5ad_dir": "MERXEN_WHB_EXPRESSION_DIR",
+    "annotation_whb_metadata_dir": "MERXEN_WHB_METADATA_DIR",
+    "annotation_wmb_mapping_stats_path": "MERXEN_WMB_MAPPING_STATS",
+    "annotation_human_gene_table": "MERXEN_HUMAN_GENE_TABLE",
     "annotation_gene_id_fallback_csv": "MERXEN_HUMAN_GENE_TABLE",
+    "annotation_mouse_gene_table": "MERXEN_MOUSE_GENE_TABLE",
+    "annotation_wmb_selfmap_test_cells_path": "MERXEN_WMB_SELFMAP_TEST_CELLS",
     "mecr_reference_cache_dir": "MERXEN_MAPMYCELLS_CACHE_DIR",
     "mapmycells_region_cache_dir": "MERXEN_MAPMYCELLS_CACHE_DIR",
     "clustering_squidpy_broad_reference_cache_dir": "MERXEN_MAPMYCELLS_CACHE_DIR",
@@ -157,6 +167,17 @@ def test_the_real_dwight_site_config_agrees_with_the_env_file(
 # --- the templates against the tracked configs -----------------------------------
 
 SITE_TEMPLATES = (SITE, DWIGHT_SITE)
+# The tracked configs that declare params (with their defaults), and those of
+# the Dwight profile; each annotation file is included right after its base.
+DECLARING_CONFIGS = ("nextflow.config", "conf/annotation.config")
+DWIGHT_TRACKED_CONFIGS = ("conf/dwight.config", "conf/dwight.annotation.config")
+
+
+def _names(
+    workflow_config_params: dict[str, dict[str, str]], *relatives: str
+) -> set[str]:
+    """The params the given workflow config files set, together."""
+    return {name for relative in relatives for name in workflow_config_params[relative]}
 
 
 def test_site_templates_set_only_params_a_tracked_config_declares(
@@ -164,7 +185,7 @@ def test_site_templates_set_only_params_a_tracked_config_declares(
 ) -> None:
     """A typo in a site config would set a param nothing reads; the template
     cannot carry one."""
-    declared = set(workflow_config_params["nextflow.config"])
+    declared = _names(workflow_config_params, *DECLARING_CONFIGS)
 
     for relative in SITE_TEMPLATES:
         assert not set(workflow_config_params[relative]) - declared, relative
@@ -183,7 +204,7 @@ def test_site_templates_do_not_repeat_a_tracked_profile_param(
     workflow_config_params: dict[str, dict[str, str]],
 ) -> None:
     """A param is either a tracked default or a site location, never both."""
-    dwight_tracked = set(workflow_config_params["conf/dwight.config"])
+    dwight_tracked = _names(workflow_config_params, *DWIGHT_TRACKED_CONFIGS)
 
     for relative in SITE_TEMPLATES:
         assert not set(workflow_config_params[relative]) & dwight_tracked, relative
@@ -194,8 +215,10 @@ def test_site_configs_are_included_after_the_params_they_override() -> None:
 
     The Nextflow config text is the only place the rule can live (Nextflow 26.04
     parses and lints this form; the tests below resolve it). nextflow.config
-    includes its site config once, after its params block and before the
-    profiles; dwight.config includes its own once, after its params block.
+    includes its site config once, after its params block and the annotation
+    defaults (conf/annotation.config) and before the profiles; dwight.config
+    includes its own once, after its params block and the Dwight annotation
+    file, and before its process block.
     """
     base_text = (WORKFLOWS / "nextflow.config").read_text()
     dwight_text = (WORKFLOWS / "conf" / "dwight.config").read_text()
@@ -215,12 +238,16 @@ def test_site_configs_are_included_after_the_params_they_override() -> None:
         assert params_start is not None
         # The params block closes at the first unindented brace after it.
         assert text.index("\n}\n", params_start.end()) < include
-    assert base_text.index("includeConfig (System.getenv('MERXEN_SITE_CONFIG')") < (
-        base_text.index("\nprofiles {")
-    )
-    assert dwight_text.index(
+    base_include = base_text.index("includeConfig (System.getenv('MERXEN_SITE_CONFIG')")
+    assert base_text.index("includeConfig 'conf/annotation.config'") < base_include
+    assert base_include < base_text.index("\nprofiles {")
+    dwight_include = dwight_text.index(
         "includeConfig (System.getenv('MERXEN_DWIGHT_SITE_CONFIG')"
-    ) < dwight_text.index("\nprocess {")
+    )
+    assert dwight_text.index("includeConfig 'dwight.annotation.config'") < (
+        dwight_include
+    )
+    assert dwight_include < dwight_text.index("\nprocess {")
 
 
 # --- what Nextflow resolves ----------------------------------------------------
@@ -441,6 +468,7 @@ def _site_params(config: dict[str, Any]) -> dict[str, Any]:
         "clustering_squidpy_gpu_container",
         "mender_container",
         "mecr_reference_cache_dir",
+        "annotation_reference_store",
     )
     return {name: config["params"][name] for name in names}
 
@@ -492,6 +520,7 @@ def test_the_templates_fill_the_site_params(configs: dict[str, _Launch]) -> None
     assert dwight["env"]["MERXEN_ALIAS_FILE"] == ALIAS_FILE
     assert dwight["params"]["mecr_reference_cache_dir"] == CACHE_DIR
     assert dwight["params"]["cellpose_model_store"] == MODEL_STORE
+    assert dwight["params"]["annotation_reference_store"] == STORE
     assert dwight["params"]["apptainer_container"] == IMAGE
     assert conda["params"]["apptainer_container"] == IMAGE
     assert conda["params"]["apptainer_bind_paths"] == BIND_PATHS
@@ -501,6 +530,7 @@ def test_the_templates_fill_the_site_params(configs: dict[str, _Launch]) -> None
     assert conda["params"]["task_tmp_dir"] is None
     assert conda["params"]["mecr_reference_cache_dir"] is None
     assert conda["params"]["cellpose_model_store"] is None
+    assert conda["params"]["annotation_reference_store"] is None
     assert "TMPDIR" not in conda.get("env", {})
 
 

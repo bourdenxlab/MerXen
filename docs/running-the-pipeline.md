@@ -19,6 +19,17 @@ command automatically receives Dwight's 72-CPU/640-GB local capacity,
 concurrency guards, GPU policy/locking, and local software and reference paths.
 `-profile dwight` is the explicit equivalent.
 
+The reference paths and the task temporary directory of Dwight are not in the
+repository: they come from the private `workflows/conf/dwight.site.config`
+(template `dwight.site.config.example`; found at `MERXEN_DWIGHT_SITE_CONFIG`
+when set). A `standard`, `dwight` or `local` launch without it stops at start-up
+with an error that names the variable, instead of silently rebuilding every
+reference bundle or filling the root disk with task temporary files; set
+`MERXEN_DWIGHT_SITE_CONFIG=none` to run without host locations on purpose. A
+worktree or a code export has no private file: export `MERXEN_ENV_FILE` and
+the site-config variables first (`scripts/annotation_dev/run_template.sh` does
+this from the `.env`). See [Configuration](configuration.md#site-configs-private-host-locations).
+
 Selecting any explicit profile suppresses the implicit `standard` profile. To
 combine Dwight with the Conda profile, use both names:
 
@@ -471,6 +482,16 @@ sheet and store problem is reported in one `Preflight checks failed:` block
 before any task starts. See [Manual landmark registration](stages/manual-registration.md)
 for the samplesheet, the params, the CZI runtime and the outputs.
 
+## Pre-building annotation references
+
+`--annotation_prepare_only true --annotation_panel_genes_path <genes>` builds
+the reference bundles of a declared panel into `annotation_reference_store`
+and runs no other stage; see
+[Reference-based annotation](stages/annotation.md#pre-building-references---annotation_prepare_only).
+On 8 CPUs a bundle takes about a minute (WHB or SEA-AD on the 296-gene human
+panel) to 40 minutes (WMB on a 500-gene mouse panel) and up to 2 GB of store
+space; later runs reuse it.
+
 ## Running on a cluster
 
 The default [Dwight profile](../workflows/conf/dwight.config) uses the local
@@ -490,8 +511,13 @@ nextflow run workflows/main.nf -profile dwight,conda \
 ```
 
 The existing Slurm/Apptainer profiles describe the current scheduler and
-container mechanics, but they deliberately do not inherit Dwight. Supply the
-remaining site-specific host/reference settings before using:
+container mechanics, but they deliberately do not inherit Dwight. The image
+and the host directories the `apptainer` profile mounts come from the private
+`workflows/conf/site.config` (template `site.config.example`; found at
+`MERXEN_SITE_CONFIG` when set); an `apptainer` launch without a site config
+stops at start-up (`MERXEN_SITE_CONFIG=none` runs without a container on
+purpose). Supply the remaining site-specific host/reference settings before
+using:
 
 ```bash
 nextflow run workflows/main.nf -profile apptainer,gpu,azure_slurm_hpc \

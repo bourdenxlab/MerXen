@@ -75,6 +75,11 @@ Use `--only_stage gaston` to consume already-published clustered H5ADs and
 latest zarrs. Missing files or clustered tables fail during preflight; the
 workflow does not silently recluster them.
 
+On a `map_first` row ([reference-based annotation](annotation.md)) GASTON
+reads that run's clustered table, `<...>_clustering_squidpy_<suffix>`, and
+its clustered H5AD under `clustering_squidpy_<suffix>/`, as MENDER does; a
+legacy row reads the unsuffixed ones.
+
 See [Configuration](../configuration.md) for all controls and
 [Outputs](../outputs.md) for the published layout.
 

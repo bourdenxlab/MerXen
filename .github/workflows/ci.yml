@@ -1,7 +1,9 @@
 name: CI
 on:
   push:
-    branches: [main]
+    # feature/robust-celltype-annotation: the integration branch of
+    # docs/plans/robust-celltype-annotation-plan.md (§2.2), gated like main.
+    branches: [main, feature/robust-celltype-annotation]
   # 'labeled' lets the full-ci label replace a PR's selected run with a full
   # one (docs/development.md, Test selection).
   pull_request:
@@ -17,7 +19,8 @@ permissions:
 # A new push (or the full-ci label) on a PR cancels that PR's run in
 # progress. Any other label gets a group of its own, so it cannot cancel the
 # PR's real run (its own run then just repeats the plan). Runs for pushes to
-# main, the nightly run and manual runs always finish.
+# main or the integration branch, the nightly run and manual runs always
+# finish.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}${{ (github.event.action == 'labeled' && github.event.label.name != 'full-ci') && format('-label-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -53,8 +56,11 @@ jobs:
         run: ruff check .
       - name: Format check
         run: ruff format --check .
-      # mypy starts from the cache of the latest push to main and rechecks
-      # only what changed since.
+      # nf-metro comes from the dev extra in the lockfile, as in the pre-push venv.
+      - name: Metro map
+        run: nf-metro validate assets/metro_map.mmd
+      # mypy starts from the cache of the latest push to the base branch (main
+      # or the integration branch) and rechecks only what changed since.
       - name: Restore mypy cache
         uses: actions/cache/restore@v6
         with:
@@ -233,6 +239,12 @@ jobs:
           curl -fsSL "https://github.com/nextflow-io/nextflow/releases/download/v${NXF_VER}/nextflow" -o "$HOME/.local/bin/nextflow"
           chmod +x "$HOME/.local/bin/nextflow"
           "$HOME/.local/bin/nextflow" -version
+          # The workflow tests run stub tasks with the pipeline's real resource
+          # directives (8+ CPUs, tens of GB), which the local executor refuses on
+          # a 4-vCPU runner. Raise its limits for every launch; the project and
+          # profile configs still take precedence over this home config.
+          mkdir -p "$HOME/.nextflow"
+          printf 'executor {\n    cpus = 128\n    memory = "2 TB"\n}\n' > "$HOME/.nextflow/config"
           echo "NXF_VER=${NXF_VER}" >> "$GITHUB_ENV"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - uses: actions/download-artifact@v8

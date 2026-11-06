@@ -65,6 +65,17 @@ reference assets.
 6. Write per-round UMAP/spatial plots, annotation heatmaps, marker tables,
    branch H5ADs, and a manifest under `<sample_id>_hierarchical/`.
 
+In `map_first` mode (the default of both species: human since M8, mouse
+since M9; a run selects `legacy` with `--clustering_squidpy_mode legacy` or
+`--clustering_squidpy_mode_<species> legacy`, and a row with its
+`clustering_squidpy_mode` column) the hierarchy comes from reference-based
+labels instead:
+`CLUSTERING_SQUIDPY_COMPUTE_CPU` replaces the GPU compute between the same
+PREPARE and FINALIZE, the branches and leaves are the confident mapped
+classes, and the clustered table gets the `_mapfirst` suffix before the
+species' flip. See
+[Map-first clustering runs](annotation.md#map-first-clustering-runs-m5).
+
 ## Nextflow process
 
 [`CLUSTERING_SQUIDPY`](../../workflows/modules/clustering_squidpy.nf) — one
