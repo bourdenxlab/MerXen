@@ -1746,6 +1746,33 @@ routes stay. ProSeg runs on AT-9's tiled route only, never as one whole-section 
   reads the registered assignment column of every ATERA layer.
 - **Exit:** the three layers on the crop through MENDER, then the full section; a comparison of
   Cellpose vs vendor and ProSeg(Cellpose prior) vs ProSeg(vendor prior) for the user.
+- **Crop run (ATERA_PUB_CROP, 18,824 × 9,412 px; evidence `$MERXEN_EVIDENCE_ROOT/atera_at7/`):**
+  all three layers ran through VIEWER_CACHE, MIQ, QC, VISUALIZE, spatial gene analysis,
+  clustering and MENDER; the source store is unchanged.
+
+  | Step | Result |
+  |---|---|
+  | Cellpose (GPU, 8 tiles of 6,144 px) | 7 min 56 s, 14.3 GB peak; 10,930 masks, 10,476 after the 5–400 µm² area filter (vendor: 3,013 cells); median area 31 µm² (vendor 67) |
+  | Alignment | 95.7% of the vendor nucleus centroids fall in a Cellpose cell; 33% after a 25 px shift, 19% after 50 px |
+  | Plan | 17 s; 2 tiles; whole-section automatic weight 38.8 (40.6 M gene rows / 10,476 labels / 100) |
+  | Tiles | 24 min and 33 min (16 threads, loaded host), 5.7 and 8.1 GB; reported weight 38.77 and 38.79, no restart; `--cellpose-cellprobs` passed |
+  | Stitch | 47 s, 10 GB; 811 seam conflicts (23 cells), 124 cross-tile overlap pixels; `cellpose_assignment` equals an independent corner lookup on all 40.6 M rows |
+  | ENRICH | Cellpose layer: table, shape and mask ids equal (10,476), 21.2 M gene rows on cells, counts equal the lookup |
+  | `-resume` | Cellpose, the plan and both tiles cached; the stitch only stages (12 s) |
+
+  | Layer | Cells | Median transcripts per cell | Cells with none | Gene rows assigned |
+  |---|---|---|---|---|
+  | `original_seg` (vendor) | 3,013 | 5,223 | 0 | 46.5% |
+  | `proseg_mask` (Cellpose) | 10,476 | 270 | 993 | 52.2% |
+  | `reseg` (ProSeg, Cellpose prior) | 10,476 (5,461 with transcripts) | 2,281 among those | 5,015 | 52.3% |
+
+  ProSeg empties the small, transcript-poor Cellpose objects (median 21 µm² and 29 transcripts)
+  and keeps the rest (median 51 µm², 2,294 Cellpose transcripts). Clustering kept 5,177 `reseg`,
+  8,372 `proseg_mask` and 3,012 vendor cells. The prior weight (38.8 against AT-9's 140) is a
+  candidate knob (`atera_cellpose_proseg_prior_weight`) if the user wants more Cellpose cells kept.
+  The run found one bug (a float32 table total past 2^24, fixed) and one environment slip (a
+  `-resume` launched from a shell with the base env first on `PATH` could not import MENDER;
+  relaunched from a clean shell).
 
 ### AT-8 `[feature]`: whole-transcriptome analysis paths (8 d)
 
