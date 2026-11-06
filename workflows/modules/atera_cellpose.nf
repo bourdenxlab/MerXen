@@ -1,7 +1,7 @@
 // ATERA Cellpose (segmentation_source=cellpose_proseg, plan AT-7).
 //
 // ATERA_CELLPOSE_SEGMENT runs the tiled Cellpose of the XENIUM route on the
-// morphology_focus image of the built ATERA store, on DAPI + 18S. It writes the
+// native morphology image of the built ATERA store, on DAPI + 18S. It writes the
 // masks, the cell-probability logits, the mask-to-micron transforms, the
 // stitching statistics and the model identity, but no ProSeg transcript CSV:
 // the tiled ATERA ProSeg route reads the store's parquet. A separate process

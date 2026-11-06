@@ -62,9 +62,12 @@ STATION_ALIASES = {
     },
     "atera_proseg": {
         "ATERA_PROSEG_PLAN",
+        "ATERA_PROSEG_PLAN_CELLPOSE",
         "ATERA_PROSEG_TILE",
         "ATERA_PROSEG_STITCH",
     },
+    # The ATERA Cellpose task (AT-7) is the same Cellpose-SAM segmentation.
+    "cellpose_segment": {"CELLPOSE_SEGMENT", "ATERA_CELLPOSE_SEGMENT"},
     "mender": {
         "MENDER_PREPARE",
         "MENDER_COMPUTE",

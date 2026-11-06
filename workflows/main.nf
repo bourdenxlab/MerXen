@@ -691,7 +691,7 @@ def segmentMetaForPlatform(row, platform, params) {
         ]
     }
 
-    // ATERA cellpose_proseg rows (AT-7): Cellpose on the morphology_focus image
+    // ATERA cellpose_proseg rows (AT-7): Cellpose on the native morphology image
     // of the built store, DAPI + 18S as on XENIUM. No transform or spec path:
     // the pixel size comes from the store's spec sidecars.
     if (platform == "ATERA") {
@@ -3807,7 +3807,7 @@ def validateMenderParams(params) {
 
 // The SegmentationConfig of one row and platform (CELLPOSE_SEGMENT,
 // CELLPOSE_NUCLEI_SEGMENT, PROSEG_SEGMENT and, for ATERA, ATERA_CELLPOSE_SEGMENT).
-// ATERA (AT-7) segments the morphology_focus image of its built store on its
+// ATERA (AT-7) segments the native morphology image of its built store on its
 // Cellpose channels (DAPI + 18S): no transform or spec path (the pixel size
 // comes from the store's spec sidecars), no ProSeg transcript CSV (the tiled
 // ProSeg route reads the store's parquet) and no Cellpose nuclei. The XENIUM
@@ -4196,7 +4196,7 @@ workflow {
     native_plain_ch = native_routed_ch.plain
 
     // ATERA Cellpose (segmentation_source=cellpose_proseg, plan AT-7): Cellpose
-    // segments the morphology_focus image of the built store on DAPI + 18S, as
+    // segments the native morphology image of the built store on DAPI + 18S, as
     // on XENIUM, under the GPU lock. It writes no ProSeg transcript CSV (the
     // tiled ProSeg route reads the store's parquet) and no Cellpose nuclei
     // (ATERA keeps the vendor nuclei).

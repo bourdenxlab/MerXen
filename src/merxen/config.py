@@ -483,7 +483,7 @@ class DatasetConfig(BaseModel):
     """Configuration for a single dataset (one half of a pair).
 
     ATERA (plan AT-7, ``cellpose_proseg``) runs Cellpose only: on the
-    ``morphology_focus`` image of its built store (``image_key`` required),
+    native morphology image of its built store (``image_key`` required),
     with every requested channel present (DAPI + 18S by default) and
     ``proseg_transcripts="none"``, because the tiled ATERA ProSeg route reads
     the store's parquet instead of a transcript CSV.
@@ -527,7 +527,9 @@ class DatasetConfig(BaseModel):
                     "store's parquet)"
                 )
             if self.image_key is None:
-                raise ValueError("ATERA Cellpose needs image_key (morphology_focus)")
+                raise ValueError(
+                    "ATERA Cellpose needs image_key (the native morphology image)"
+                )
             if not self.channels:
                 raise ValueError("ATERA Cellpose needs at least one channel")
         elif self.proseg_transcripts != "csv":

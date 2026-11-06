@@ -153,7 +153,7 @@ def read_cellpose_cells(
         raise AteraProsegError(
             f"The Cellpose mask is {mask.shape[0]} x {mask.shape[1]} pixels; the "
             f"store's mask grid is {n_rows} x {n_cols}. Cellpose must segment the "
-            "store's morphology_focus image"
+            "store's native morphology image"
         )
     return label_stats(mask, pixel_size_um)
 

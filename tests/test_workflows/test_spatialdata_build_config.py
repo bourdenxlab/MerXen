@@ -255,14 +255,17 @@ def test_bead_mask_veto_key_only_reaches_the_config_of_bead_removal_rows() -> No
 
     # In the segmentation config it is copied from the meta when present, and is
     # not part of the base config that every row gets.
+    # (segmentationConfigMap, which the workflow block calls since AT-7).
+    builder = _function_text(main_text, "segmentationConfigMap")
+    base = builder.index("def baseConfig = [")
+    base_end = builder.index("// hitl-hook:C4", base)
+    assert "bead_mask_veto" not in builder[base:base_end]
+    copy = builder.index("if (meta.bead_mask_veto) {")
+    assert builder.index("baseConfig.bead_mask_veto = meta.bead_mask_veto") > copy
+    assert base_end < copy < builder.index("def segmentConfig = baseConfig + [")
+    assert builder.count("bead_mask_veto") == 3  # check, assignment, source
     workflow = main_text[main_text.index("\nworkflow {") :]
-    base = workflow.index("def baseConfig = [")
-    base_end = workflow.index("// hitl-hook:C4", base)
-    assert "bead_mask_veto" not in workflow[base:base_end]
-    copy = workflow.index("if (meta.bead_mask_veto) {")
-    assert workflow.index("baseConfig.bead_mask_veto = meta.bead_mask_veto") > copy
-    assert base_end < copy < workflow.index("def segmentConfig = baseConfig + [")
-    assert workflow.count("bead_mask_veto") == 3  # check, assignment, source
+    assert "bead_mask_veto" not in workflow
 
 
 def test_bead_removal_fill_mode_helper_defaults_to_hybrid_and_normalises() -> None:
