@@ -113,7 +113,10 @@ Each listed `.png` plot is also written as a same-stem `.pdf`.
 ## ATERA figures: density over every transcript
 
 A whole-transcriptome section holds more than a billion transcripts. MerXen
-neither caps nor subsamples them: platforms whose registry entry sets
+neither caps nor subsamples them ("every transcript" means every row of the
+points element, which the build has already restricted to QV >= 20 with
+`atera_min_qv`; the public section keeps 1,409,601,228 of 1,640,508,930
+vendor rows): platforms whose registry entry sets
 `rasterised_transcript_plots` (ATERA) draw their transcripts as density rasters
 binned over all of them. XENIUM and MERSCOPE figures are unchanged. On the
 public full section VISUALIZE bins all 1,409,601,228 transcripts in about

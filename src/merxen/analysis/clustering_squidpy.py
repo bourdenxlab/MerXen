@@ -51,11 +51,13 @@ logger = logging.getLogger(__name__)
 GPU_SPARSE_PCA_CHUNK_SIZE = 2048
 EXPECTED_PANEL_GENE_COUNT = 300
 # Panels wider than this (whole-transcriptome ATERA) take the sparse
-# indicator-matrix path for per-group means; the 300-gene panels never do, so
-# their summaries keep the dense path and stay byte-identical.
+# indicator-matrix path for per-group means. This is a panel-width rule, not a
+# platform rule: the 300-gene XENIUM/MERSCOPE panels never reach it and keep
+# the dense path byte for byte, while a wider panel of any platform takes it.
 DENSE_SUMMARY_MAX_GENES = 1000
-# Dotplots draw at most this many genes. Wider panels plot the union of each
-# group's top genes (cluster-mean z-score); the CSV tables keep every gene.
+# Dotplots draw at most this many genes (a panel-width rule like the one
+# above). Wider panels plot the union of each group's top genes (cluster-mean
+# z-score); the CSV tables keep every gene.
 DOTPLOT_MAX_GENES = 400
 DOTPLOT_TOP_GENES_PER_GROUP = 5
 # A gene is a candidate for a group's top genes only when at least this

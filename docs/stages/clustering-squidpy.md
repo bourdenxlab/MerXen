@@ -157,6 +157,17 @@ ATERA rows (AT-6, native segmentation) cluster the vendor cells of
 300-gene XENIUM and MERSCOPE panels; each is switched by a sample key or a
 panel size those panels never reach, so their outputs are unchanged.
 
+**The broad atlas labels of ATERA rows are provisional.** On the public human
+hippocampus section the WHB supercluster markers (`CCN202210140_SUPC`) call
+mature oligodendrocytes (MOBP, PLP1 and MOG high, PDGFRA near zero)
+"Oligodendrocyte precursor", give the PDGFRA/VCAN-high cluster "Committed
+oligodendrocyte precursor", and give cerebellar labels ("Upper rhombic lip",
+"Cerebellar inhibitory") to PROX1/CALB1/SLC17A7-positive excitatory neurons.
+The names carry into `broad_class`, the subcluster names and the MENDER cell
+states. Treat them as cluster names to be checked against markers, not as
+cell types, until the robust annotation work restricts the atlas classes by
+region and adds a marker sanity gate.
+
 - **Nucleus metrics are joined through the owning cell.** ATERA nuclei are one
   row per nucleus (`atera_nucleus`, id = nucleus row + 1, the same integer
   range as cell ids), so they are never keyed by their own id. The stage reads
@@ -184,7 +195,10 @@ panel size those panels never reach, so their outputs are unchanged.
 - **No 300-gene panel check.** `expected_panel_gene_count` is `null` for ATERA,
   so the "Expected 300 genes" warning and the `has_expected_panel_gene_count*`
   flags of the control-filter summary are left out.
-- **Bounded summaries and dotplots.** Above 1,000 genes the per-cluster means
+- **Bounded summaries and dotplots.** These are panel-width rules, not
+  platform rules: they apply to any panel past the limits (a XENIUM 5K panel
+  would take them too; before AT-6 its dotplot exceeded the 65,000 px render
+  limit), and the 300-gene panels never reach them. Above 1,000 genes the per-cluster means
   and fractions expressing (atlas scoring and dotplot tables) come from one
   sparse group-indicator product accumulated in float64; the matrix is never
   densified. Above 400 genes a branch dotplot draws the union of each group's
@@ -194,7 +208,9 @@ panel size those panels never reach, so their outputs are unchanged.
   group's candidates (z ties go to the higher fraction expressing), so a gene
   with a few transcripts in one cluster cannot take a marker's place; if no
   gene reaches the floor in any group, the floor is dropped and recorded as 0. The branch H5AD records the selection in
-  `uns["merxen_dotplot_gene_selection"][<prefix>]`.
+  `uns["merxen_dotplot_gene_selection"][<prefix>]`. This selects genes, not
+  transcripts or cells: an 18,000-gene dotplot cannot be rendered, and the
+  axis label says how many of the panel's genes are shown.
 
 ## Outputs
 
