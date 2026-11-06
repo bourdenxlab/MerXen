@@ -530,14 +530,20 @@ shares its source inode and that no other file does.
 **Build, reuse and replacement.**
 
 - The store is built under `<target>.partial-<uuid>` and moved into place with
-  `os.replace`; a failed build leaves no partial store behind.
+  `os.replace`; a failed build leaves no partial store behind. A killed run
+  (timeout, out of memory) can leave `<target>.partial-*` or `<target>.stale-*`
+  folders; the next run removes them first.
 - A target whose `merxen_native_latest.json` names the same source build
   fingerprint, link mode and format version is reused as it is (ENRICH writes
   into it in place). Missing renamed elements or registry entries are
   re-created first (`ensure_native_elements`, which ENRICH also calls after a
-  partial cleanup).
+  partial cleanup). A store built with `readonly_payloads: false` that is
+  reused with the default `true` has its linked payloads made read-only then.
 - A native store of another source build is rebuilt. A target that is not a
-  native store is refused unless `force` is set.
+  native store is refused; remove it, or run `merxen native-latest` by hand
+  with `force: true` in its config (the pipeline has no force flag).
+- A source that holds a symlinked directory is refused, since the file walk
+  would leave its files out.
 - Hardlinks need the source and the target on one filesystem. Otherwise the
   build stops and names `native_latest_link_mode=copy`, which copies every
   payload instead (no shared inodes, no read-only payloads).

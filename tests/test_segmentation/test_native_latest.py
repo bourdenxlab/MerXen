@@ -454,6 +454,88 @@ def test_the_target_must_not_overlap_the_source(source: Path, tmp_path: Path) ->
         native.build_native_latest(cfg)
 
 
+def test_the_self_check_refuses_a_shared_non_payload(
+    source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_copy_tree = native._copy_tree
+    shared: list[str] = []
+
+    def _leaky_copy_tree(src: Path, dst: Path, **kwargs: Any) -> Any:
+        # A copy step that wrongly hardlinks one copied (non-payload) file.
+        tree = real_copy_tree(src, dst, **kwargs)
+        rel = next(
+            rel for rel in tree.copied if not rel.endswith(("zarr.json", ".zattrs"))
+        )
+        (dst / rel).unlink()
+        os.link(src / rel, dst / rel)
+        shared.append(rel)
+        return tree
+
+    monkeypatch.setattr(native, "_copy_tree", _leaky_copy_tree)
+    cfg = _config(source, tmp_path)
+    with pytest.raises(native.NativeLatestError, match="self-check failed") as info:
+        native.build_native_latest(cfg)
+    assert shared and shared[0] in str(info.value)
+    assert list(cfg.persistent_latest_zarr_path.parent.iterdir()) == []
+
+
+def test_leftovers_of_a_killed_run_are_removed(source: Path, tmp_path: Path) -> None:
+    cfg = _config(source, tmp_path)
+    target = cfg.persistent_latest_zarr_path
+    target.parent.mkdir(parents=True)
+    leftovers = [
+        target.with_name(f"{target.name}.partial-0123"),
+        target.with_name(f"{target.name}.stale-4567"),
+    ]
+    for path in leftovers:
+        (path / "points").mkdir(parents=True)
+        (path / "points" / "part.0.parquet").write_bytes(b"x")
+    unrelated = target.with_name("other_spatialdata.zarr.partial-89ab")
+    unrelated.mkdir()
+
+    native.build_native_latest(cfg)
+    assert not any(path.exists() for path in leftovers)
+    assert unrelated.is_dir()
+    assert (target / native.NATIVE_LATEST_MARKER_NAME).is_file()
+
+
+def test_reuse_makes_writable_payloads_read_only(source: Path, tmp_path: Path) -> None:
+    first = native.build_native_latest(
+        _config(source, tmp_path, readonly_payloads=False)
+    )
+    latest = first.latest_path
+    payloads = [
+        path for path in _files(latest) if _is_payload(str(path.relative_to(latest)))
+    ]
+    assert payloads and all(path.stat().st_mode & 0o200 for path in payloads)
+
+    second = native.build_native_latest(_config(source, tmp_path))
+    assert second.reused
+    assert second.extra["payloads_made_readonly"] == len(payloads)
+    assert not any(path.stat().st_mode & 0o222 for path in payloads)
+    marker = json.loads((latest / native.NATIVE_LATEST_MARKER_NAME).read_text())
+    assert marker["readonly_payloads"] is True
+    # The payloads still share their source inodes: nothing was rebuilt.
+    for path in payloads:
+        rel = path.relative_to(latest)
+        assert path.stat().st_ino == (source / rel).stat().st_ino
+
+    third = native.build_native_latest(_config(source, tmp_path))
+    assert third.reused and third.extra["payloads_made_readonly"] == 0
+
+
+def test_a_symlinked_source_directory_is_refused(source: Path, tmp_path: Path) -> None:
+    points = source / "points" / "transcripts"
+    moved = tmp_path / "elsewhere" / "transcripts"
+    moved.parent.mkdir()
+    shutil.move(points, moved)
+    points.symlink_to(moved, target_is_directory=True)
+    cfg = _config(source, tmp_path)
+    with pytest.raises(native.NativeLatestError, match="symlinked directory"):
+        native.build_native_latest(cfg)
+    assert list(cfg.persistent_latest_zarr_path.parent.iterdir()) == []
+
+
 # --------------------------------------------------------------------------- #
 # ensure_native_elements
 # --------------------------------------------------------------------------- #

@@ -186,9 +186,11 @@ def build_native_latest(cfg: NativeLatestConfig) -> NativeLatestReport:
     marker = _check_source(source, cfg)
     fingerprint = str(marker["build_fingerprint"])
     _check_target_is_not_the_source(source, target)
+    _remove_leftover_builds(target, cfg.dataset_name)
 
     existing = _read_native_marker(target)
     if existing is not None and _is_reusable(existing, fingerprint, cfg.link_mode):
+        hardened = _harden_reused_payloads(target, source, existing, cfg)
         recreated = ensure_native_elements(target, source)
         logger.info(
             "[%s] Reusing the native latest store of source build %s%s",
@@ -204,14 +206,14 @@ def build_native_latest(cfg: NativeLatestConfig) -> NativeLatestReport:
             source_build_fingerprint=fingerprint,
             link_mode=cfg.link_mode,
             elements_written=recreated,
-            extra={"previous_build": existing},
+            extra={"previous_build": existing, "payloads_made_readonly": hardened},
         )
     if _target_occupied(target):
         if existing is None and not cfg.force:
             raise NativeLatestError(
                 f"[{cfg.dataset_name}] The latest-store target exists and is not a "
-                "native latest store; refusing to replace it. Remove it or set "
-                "force=true."
+                "native latest store; refusing to replace it. Remove it (or run "
+                "`merxen native-latest` by hand with force: true in its config)."
             )
         logger.info(
             "[%s] Replacing the latest store at the target (%s)",
@@ -376,6 +378,76 @@ def _target_occupied(target: Path) -> bool:
     return target.is_dir() and any(target.iterdir())
 
 
+def _remove_leftover_builds(target: Path, dataset_name: str) -> None:
+    """Remove ``.partial-*`` and ``.stale-*`` folders of killed earlier runs.
+
+    A SIGKILL (a Nextflow timeout, the OOM killer) skips the cleanup of
+    :func:`build_native_latest`, and a kill between the two renames of
+    :func:`_move_into_place` leaves the previous store as ``.stale-*``.
+    """
+    if not target.parent.is_dir():
+        return
+    leftovers = sorted(
+        path
+        for pattern in (f"{target.name}.partial-*", f"{target.name}.stale-*")
+        for path in target.parent.glob(pattern)
+    )
+    if leftovers:
+        logger.warning(
+            "[%s] Removing %d leftover folder(s) of an interrupted NATIVE_LATEST run",
+            dataset_name,
+            len(leftovers),
+        )
+    for path in leftovers:
+        remove_path(path)
+
+
+def _harden_reused_payloads(
+    target: Path,
+    source: Path,
+    marker: dict[str, Any],
+    cfg: NativeLatestConfig,
+) -> int:
+    """Make the linked payloads of a reused store read-only when requested.
+
+    A store built with ``readonly_payloads=false`` is reused as it is, so the
+    write bits are removed here (and the marker updated) instead of rebuilding
+    it, which would discard ENRICH's work. The reverse needs nothing: the read-
+    only bit lives on the inode the source shares and is left in place.
+
+    Returns:
+        How many payload files lost their write bits.
+    """
+    if cfg.link_mode != "hardlink" or not cfg.readonly_payloads:
+        return 0
+    changed = 0
+    for parts in _walk_files(target):
+        if not _is_payload(parts):
+            continue
+        path = target.joinpath(*parts)
+        source_path = source.joinpath(*parts)
+        try:
+            info, source_info = path.stat(), source_path.stat()
+        except FileNotFoundError:
+            continue
+        if (info.st_dev, info.st_ino) != (source_info.st_dev, source_info.st_ino):
+            continue
+        if info.st_mode & _WRITE_BITS:
+            _make_readonly(path)
+            changed += 1
+    if not marker.get("readonly_payloads"):
+        updated = {**marker, "readonly_payloads": True}
+        _replace_file_text(
+            target / NATIVE_LATEST_MARKER_NAME, json.dumps(updated, indent=2) + "\n"
+        )
+        logger.info(
+            "[%s] Reused store made read-only (%d payload files)",
+            cfg.dataset_name,
+            changed,
+        )
+    return changed
+
+
 # --------------------------------------------------------------------------- #
 # Build
 # --------------------------------------------------------------------------- #
@@ -464,10 +536,22 @@ def _is_payload(parts: tuple[str, ...]) -> bool:
 
 
 def _walk_files(root: Path) -> Iterator[tuple[str, ...]]:
-    """Yield the store-relative parts of every file below ``root``, sorted."""
+    """Yield the store-relative parts of every file below ``root``, sorted.
+
+    Raises:
+        NativeLatestError: If a directory below ``root`` is a symlink. The walk
+            does not follow it, so its files would be silently left out.
+    """
     for directory, dirnames, filenames in os.walk(root):
         dirnames.sort()
         rel_dir = Path(directory).relative_to(root).parts
+        linked = [name for name in dirnames if os.path.islink(Path(directory, name))]
+        if linked:
+            shown = "/".join((*rel_dir, linked[0]))
+            raise NativeLatestError(
+                f"The store holds a symlinked directory ({shown}); NATIVE_LATEST "
+                "needs real directories so that no element is left out"
+            )
         for filename in sorted(filenames):
             yield (*rel_dir, filename)
 
@@ -559,10 +643,14 @@ def _replace_file_text(path: Path, text: str) -> None:
 
 
 def _native_table(table: Any) -> Any:
-    """Return a copy of the vendor table annotating the renamed cell shapes."""
+    """Return the vendor table annotating the renamed cell shapes.
+
+    The table is changed in place: it comes from a source read that is thrown
+    away, and copying it would hold it twice in memory.
+    """
     import pandas as pd
 
-    result = table.copy()
+    result = table
     attrs = dict(result.uns.get("spatialdata_attrs", {}))
     region_key = str(attrs.get("region_key", "region"))
     result.obs[region_key] = pd.Categorical([NATIVE_CELL_SHAPES_KEY] * result.n_obs)
