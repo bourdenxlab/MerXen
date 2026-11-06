@@ -380,7 +380,7 @@ def test_tile_refuses_another_source_build(
 def test_tile_refuses_two_proseg_cells_with_one_label(
     stores: tuple[Path, Path, dict], tmp_path: Path
 ) -> None:
-    with pytest.raises(AteraProsegError, match="share a vendor label"):
+    with pytest.raises(AteraProsegError, match="share a prior label"):
         _run(stores, tmp_path, "c0_r0", FAKE_PROSEG_DUPLICATE_LABEL="1")
 
 

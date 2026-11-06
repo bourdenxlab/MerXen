@@ -52,9 +52,11 @@ SegmentationSource = Literal[
 ``"native"`` keeps the vendor segmentation (masks, shapes and table) and runs
 no Cellpose or ProSeg; ``"native_proseg"`` keeps it as the original layer and
 adds ProSeg cells refined from the vendor masks as prior (tiled, AT-9; no
-Cellpose); ``"cellpose_only"`` runs Cellpose without ProSeg (reserved for
-AT-7); ``"cellpose_proseg"`` is the Cellpose prior refined by ProSeg that
-XENIUM and MERSCOPE rows run.
+Cellpose; layer ``proseg_vendor``); ``"cellpose_only"`` runs Cellpose without
+ProSeg (reserved, refused everywhere); ``"cellpose_proseg"`` is the Cellpose
+prior refined by ProSeg that XENIUM and MERSCOPE rows run and, tiled, ATERA
+rows (AT-7; layers ``reseg`` and ``proseg_mask`` beside the vendor
+``original_seg``).
 """
 
 VENDOR_SEGMENTATION_SOURCES: Final[frozenset[str]] = frozenset(
@@ -65,7 +67,7 @@ VENDOR_SEGMENTATION_SOURCES: Final[frozenset[str]] = frozenset(
 _SEGMENTATION_LAYERS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
     {
         "native": ("original_seg",),
-        "native_proseg": ("reseg", "original_seg"),
+        "native_proseg": ("proseg_vendor", "original_seg"),
         "cellpose_proseg": ("reseg", "original_seg", "proseg_mask", "proseg_hybrid"),
         "cellpose_only": ("proseg_mask", "original_seg"),
     }
@@ -114,9 +116,12 @@ class PlatformSpec:
         rasterised_transcript_plots: Whether static transcript figures are
             drawn as density rasters over every transcript instead of point
             scatters (whole-transcriptome panels).
-        proseg_label_key: Label element holding the ProSeg cells rasterised
-            on the morphology grid (``native_proseg`` rows), or ``None`` when
-            the platform's ProSeg layer has no label element.
+        native_latest_base: Whether every route of the platform builds its
+            latest store from the vendor segmentation (NATIVE_LATEST), so the
+            vendor ``original_seg`` layer always comes from it (ATERA, also
+            for ``cellpose_proseg`` rows).
+        proseg_hybrid: Whether ``cellpose_proseg`` rows of the platform build
+            the ``proseg_hybrid`` layer.
     """
 
     name: str
@@ -134,7 +139,8 @@ class PlatformSpec:
     default_segmentation_source: SegmentationSource = "cellpose_proseg"
     original_label_keys: tuple[str, ...] = ()
     rasterised_transcript_plots: bool = False
-    proseg_label_key: str | None = None
+    native_latest_base: bool = False
+    proseg_hybrid: bool = True
 
     @property
     def original_shape_keys(self) -> tuple[str, ...]:
@@ -189,11 +195,12 @@ PLATFORM_SPECS: Final[Mapping[str, PlatformSpec]] = MappingProxyType(
                 "experiment.spatial",
             ),
             mask_pixel_convention="corner",
-            segmentation_sources=("native", "native_proseg"),
+            segmentation_sources=("native", "native_proseg", "cellpose_proseg"),
             default_segmentation_source="native",
             original_label_keys=("cell_labels", "nucleus_labels"),
             rasterised_transcript_plots=True,
-            proseg_label_key="proseg_cell_labels",
+            native_latest_base=True,
+            proseg_hybrid=False,
         ),
     }
 )
@@ -237,12 +244,39 @@ def uses_vendor_segmentation(source: SegmentationSource | str | None) -> bool:
     return str(source) in VENDOR_SEGMENTATION_SOURCES
 
 
-def segmentation_layers(source: SegmentationSource | str) -> tuple[str, ...]:
+def uses_native_latest(
+    source: SegmentationSource | str | None, platform: str | None
+) -> bool:
+    """Return whether a row builds its latest store with NATIVE_LATEST.
+
+    Vendor-segmentation sources always do; every ATERA route does
+    (``native_latest_base``), so its vendor ``original_seg`` layer and the
+    native enrichment are shared by ``cellpose_proseg`` rows.
+
+    Args:
+        source: The row's segmentation source.
+        platform: The row's platform, or ``None``.
+
+    Returns:
+        ``True`` when the latest store is a NATIVE_LATEST store.
+    """
+    if uses_vendor_segmentation(source):
+        return True
+    spec = find_platform_spec(platform)
+    return spec is not None and spec.native_latest_base
+
+
+def segmentation_layers(
+    source: SegmentationSource | str, platform: str | None = None
+) -> tuple[str, ...]:
     """Return the analysis layers a segmentation source produces.
 
     Args:
         source: A segmentation source (``native``, ``native_proseg``,
             ``cellpose_only`` or ``cellpose_proseg``).
+        platform: The row's platform; a platform without the hybrid layer
+            (``proseg_hybrid=False``, ATERA) drops ``proseg_hybrid``.
+            ``None`` gives the platform-independent list.
 
     Returns:
         The analysis segmentations (``analysis_segmentation`` values) the
@@ -250,6 +284,7 @@ def segmentation_layers(source: SegmentationSource | str) -> tuple[str, ...]:
 
     Raises:
         ValueError: If the source is not a known segmentation source.
+        UnknownPlatformError: If the platform is not registered.
     """
     layers = _SEGMENTATION_LAYERS.get(str(source))
     if layers is None:
@@ -257,6 +292,8 @@ def segmentation_layers(source: SegmentationSource | str) -> tuple[str, ...]:
             f"Unknown segmentation source: {source!r}. "
             f"Known: {', '.join(_SEGMENTATION_LAYERS)}"
         )
+    if platform is not None and not platform_spec(platform).proseg_hybrid:
+        layers = tuple(layer for layer in layers if layer != "proseg_hybrid")
     return layers
 
 

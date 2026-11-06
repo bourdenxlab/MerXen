@@ -119,9 +119,9 @@ def test_miq_extra_layers_default_empty_and_need_distinct_tables() -> None:
     }
     assert MaskImageQuantificationConfig(**values).extra_layers == []
     layer = MiqLayer(
-        mask_label_key="proseg_cell_labels",
-        shape_key="MOSAIK_proseg",
-        table_key="table_MOSAIK_proseg_image_quantification",
+        mask_label_key="proseg_vendor_cell_labels",
+        shape_key="MOSAIK_proseg_vendor",
+        table_key="table_MOSAIK_proseg_vendor_image_quantification",
     )
     assert MaskImageQuantificationConfig(**values, extra_layers=[layer]).extra_layers
     clash = layer.model_copy(update={"table_key": values["table_key"]})

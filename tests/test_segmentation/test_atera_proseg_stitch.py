@@ -206,7 +206,7 @@ def test_identity_stitch_reproduces_the_vendor_counts(
     assert fingerprint_matches(built.latest)
 
     sdata = sd.read_zarr(built.latest)
-    table = sdata.tables["table_MOSAIK_proseg"]
+    table = sdata.tables["table_MOSAIK_proseg_vendor"]
     original = sdata.tables["table_original"]
     assert list(table.var_names) == list(original.var_names)
     assert table.var.equals(original.var)
@@ -245,17 +245,17 @@ def test_identity_stitch_reproduces_the_vendor_counts(
     for cell, count in zip(table.obs["instance_id"].astype(int), per_cell, strict=True):
         assert count == vendor_controls.get(cell, 0)
     assert np.array_equal(
-        np.asarray(sdata.labels["proseg_cell_labels"]["scale0"]["image"]),
+        np.asarray(sdata.labels["proseg_vendor_cell_labels"]["scale0"]["image"]),
         np.asarray(sdata.labels["cell_labels"]["scale0"]["image"]),
     )
-    entry = sdata.attrs[MERXEN_SCHEMA_ATTR]["segmentations"]["proseg"]
-    assert entry["shape"] == "MOSAIK_proseg"
-    assert entry["table"] == "table_MOSAIK_proseg"
+    entry = sdata.attrs[MERXEN_SCHEMA_ATTR]["segmentations"]["proseg_vendor"]
+    assert entry["shape"] == "MOSAIK_proseg_vendor"
+    assert entry["table"] == "table_MOSAIK_proseg_vendor"
     assert entry["assignment_column"] == "assignment"
     assert entry["background_column"] == "background"
     assert entry["id_namespace"] == "source_segmentation_v1"
-    assert entry["legacy_aliases"] == ["reseg"]
-    assert entry["label"] == "proseg_cell_labels"
+    assert entry["legacy_aliases"] == ["vendor_proseg", "native_proseg"]
+    assert entry["label"] == "proseg_vendor_cell_labels"
     assert entry["prior"] == "vendor_cell_labels"
     assert entry["model_identity"]["tool"] == "proseg"
     assert sdata.attrs[MERXEN_SCHEMA_ATTR]["segmentation_source"] == "native"
@@ -275,9 +275,9 @@ def test_identity_stitch_reproduces_the_vendor_counts(
         validate_analysis_layer(
             built.latest,
             platform="ATERA",
-            segmentation="reseg",
-            table_key="table_MOSAIK_proseg",
-            shape_key="MOSAIK_proseg",
+            segmentation="proseg_vendor",
+            table_key="table_MOSAIK_proseg_vendor",
+            shape_key="MOSAIK_proseg_vendor",
         )["n_cells"]
         == table.n_obs
     )
@@ -299,7 +299,7 @@ def test_greedy_halo_stitch_counts_conflicts(greedy: Built, tmp_path: Path) -> N
         report["claim_conflicts_by_tile_pair"].values()
     )
     sdata = sd.read_zarr(built.latest)
-    table = sdata.tables["table_MOSAIK_proseg"]
+    table = sdata.tables["table_MOSAIK_proseg_vendor"]
     points = sdata.points["transcripts"].compute()
     counted = points[
         points["is_gene"] & ~points["background"] & points["assignment"].notna()
@@ -424,9 +424,9 @@ def test_changed_tiles_restitch_and_drop_the_old_derived_tables(
     sdata = sd.read_zarr(built.latest, selection=("tables",))
     write_or_replace_element(
         sdata,
-        "table_MOSAIK_proseg_image_quantification",
+        "table_MOSAIK_proseg_vendor_image_quantification",
         "tables",
-        sdata.tables["table_MOSAIK_proseg"].copy(),
+        sdata.tables["table_MOSAIK_proseg_vendor"].copy(),
     )
     write_or_replace_element(
         sdata,
@@ -447,12 +447,12 @@ def test_changed_tiles_restitch_and_drop_the_old_derived_tables(
     assert second["skipped"] is False
     assert second["fingerprint"] != first["fingerprint"]
     assert second["deleted_derived_tables"] == [
-        "table_MOSAIK_proseg_image_quantification"
+        "table_MOSAIK_proseg_vendor_image_quantification"
     ]
     sdata = sd.read_zarr(built.latest)
-    assert "table_MOSAIK_proseg_image_quantification" not in sdata.tables
+    assert "table_MOSAIK_proseg_vendor_image_quantification" not in sdata.tables
     assert "table_original_clustering_squidpy" in sdata.tables
-    assert "table_MOSAIK_proseg" in sdata.tables
+    assert "table_MOSAIK_proseg_vendor" in sdata.tables
     assert sdata.attrs["merxen_atera_proseg"]["fingerprint"] == second["fingerprint"]
     # The same tiles once more: a skip.
     third = stitch(
@@ -492,5 +492,5 @@ def test_two_tiles_owning_one_label_are_refused(
         second.set_column(column, "instance_id", pa.array(ids, pa.uint64())),
         tile_dirs[1] / "cells.parquet",
     )
-    with pytest.raises(AteraProsegError, match="Two tiles own the same vendor label"):
+    with pytest.raises(AteraProsegError, match="Two tiles own the same prior label"):
         stitch(stitch_config(built.latest, built.plan_path, tile_dirs, tmp_path / "o"))

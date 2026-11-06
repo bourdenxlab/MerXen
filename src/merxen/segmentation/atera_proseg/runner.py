@@ -87,13 +87,14 @@ def build_command(
     col0: int,
     row0: int,
     num_threads: int,
+    cellprob_path: str | Path | None = None,
 ) -> list[str]:
     """Return the ProSeg argument list of one tile.
 
     Args:
         binary: The ProSeg executable.
         parquet_path: The Xenium-layout input.
-        prior_path: The uint32 vendor mask of the window.
+        prior_path: The uint32 prior mask of the window.
         output_dir: ProSeg ``--output-path``.
         model: Model and schedule.
         prior_weight: ``--prior-weight`` (the multiplier).
@@ -101,6 +102,9 @@ def build_command(
         col0: First column of the window.
         row0: First row of the window.
         num_threads: ``--nthreads``.
+        cellprob_path: The float32 Cellpose logits of the window
+            (``--cellpose-cellprobs``, as the XENIUM route passes them), or
+            ``None`` (the vendor prior has none).
 
     Returns:
         The argument list (``binary`` first).
@@ -164,9 +168,10 @@ def build_command(
         ]
     if model.use_cell_initialization:
         command.append("--use-cell-initialization")
+    command += ["--cellpose-masks", str(prior_path)]
+    if cellprob_path is not None:
+        command += ["--cellpose-cellprobs", str(cellprob_path)]
     command += [
-        "--cellpose-masks",
-        str(prior_path),
         "--cellpose-x-transform",
         _number(ps),
         "0",
@@ -449,10 +454,17 @@ def check_prior_weight(
 ) -> None:
     """Fail when ProSeg's effective prior weight is not the requested one.
 
+    ProSeg prints the weight only when it exceeds 1 (``main.rs``), so a
+    missing line is accepted for a requested weight of at most
+    ``1 + tolerance`` (a Cellpose plan's automatic weight of a sparse section
+    is 1, AT-7).
+
     Raises:
         PriorWeightMismatchError: When the weight is missing or off by more
             than ``tolerance`` (relative).
     """
+    if reported is None and requested <= 1.0 + tolerance:
+        return
     if reported is None:
         raise PriorWeightMismatchError(
             "ProSeg printed no prior weight; the effective weight could not be "

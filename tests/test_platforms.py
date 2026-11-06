@@ -100,11 +100,12 @@ def test_atera_fields() -> None:
             "experiment.spatial",
         ),
         mask_pixel_convention="corner",
-        segmentation_sources=("native", "native_proseg"),
+        segmentation_sources=("native", "native_proseg", "cellpose_proseg"),
         default_segmentation_source="native",
         original_label_keys=("cell_labels", "nucleus_labels"),
         rasterised_transcript_plots=True,
-        proseg_label_key="proseg_cell_labels",
+        native_latest_base=True,
+        proseg_hybrid=False,
     )
     assert spec.original_shape_keys == ("atera_cell_boundaries", "atera_nucleus")
     assert len(spec.original_label_keys) == len(spec.original_shape_keys)
@@ -118,7 +119,8 @@ def test_cellpose_platforms_keep_the_new_field_defaults(platform: str) -> None:
     assert spec.default_segmentation_source == "cellpose_proseg"
     assert spec.original_label_keys == ()
     assert spec.rasterised_transcript_plots is False
-    assert spec.proseg_label_key is None
+    assert spec.native_latest_base is False
+    assert spec.proseg_hybrid is True
 
 
 def test_segmentation_layers_per_source() -> None:
@@ -131,8 +133,8 @@ def test_segmentation_layers_per_source() -> None:
         "proseg_hybrid",
     )
     assert segmentation_layers("cellpose_only") == ("proseg_mask", "original_seg")
-    # AT-9: the ProSeg layer first, as the "all" order of XENIUM and MERSCOPE.
-    assert segmentation_layers("native_proseg") == ("reseg", "original_seg")
+    # AT-9 (renamed in AT-7): the vendor-prior ProSeg layer first.
+    assert segmentation_layers("native_proseg") == ("proseg_vendor", "original_seg")
     for spec in PLATFORM_SPECS.values():
         assert spec.default_segmentation_source in spec.segmentation_sources
     with pytest.raises(ValueError, match="Unknown segmentation source"):
@@ -205,6 +207,7 @@ def test_find_platform_spec_accepts_none() -> None:
 _WIDENED_MODELS: tuple[str, ...] = (
     "SpatialDataBuildConfig",
     "EnrichmentConfig",
+    "DatasetConfig",
     "ViewerCacheConfig",
     "MaskImageQuantificationConfig",
     "VisualizationSampleConfig",
@@ -212,11 +215,11 @@ _WIDENED_MODELS: tuple[str, ...] = (
     "MenderConfig",
     "SpatialGeneAnalysisSampleConfig",
 )
+# DatasetConfig (Cellpose segmentation) takes ATERA since AT-7.
 # Stages that stay XENIUM/MERSCOPE only: Pydantic is the second-line refusal
-# behind the workflow preflight (Cellpose segmentation, registration, cortical
+# behind the workflow preflight (registration, cortical
 # depth, distance from object, alignment, GASTON, MECR, MapMyCells, pciSeq).
 _NOT_WIDENED_MODELS: tuple[str, ...] = (
-    "DatasetConfig",
     "ImageRegistrationConfig",
     "CorticalDepthConfig",
     "DistanceFromObjectConfig",
@@ -328,3 +331,31 @@ def test_spec_file_pixel_size(
 def test_uses_vendor_segmentation(source: str | None, expected: bool) -> None:
     """Both vendor sources keep NATIVE_LATEST; the Cellpose sources do not."""
     assert uses_vendor_segmentation(source) is expected
+
+
+def test_platform_aware_segmentation_layers() -> None:
+    """ATERA has no hybrid layer; XENIUM and MERSCOPE keep all four (AT-7)."""
+    assert segmentation_layers("cellpose_proseg", "ATERA") == (
+        "reseg",
+        "original_seg",
+        "proseg_mask",
+    )
+    for platform in ("XENIUM", "MERSCOPE"):
+        assert segmentation_layers("cellpose_proseg", platform) == (
+            segmentation_layers("cellpose_proseg")
+        )
+    assert segmentation_layers("native_proseg", "ATERA") == (
+        "proseg_vendor",
+        "original_seg",
+    )
+
+
+def test_every_atera_route_builds_a_native_latest_store() -> None:
+    """NATIVE_LATEST is the base of every ATERA route, never of XENIUM's."""
+    from merxen.platforms import uses_native_latest
+
+    for source in ("native", "native_proseg", "cellpose_proseg"):
+        assert uses_native_latest(source, "ATERA")
+    assert not uses_native_latest("cellpose_proseg", "XENIUM")
+    assert not uses_native_latest("cellpose_proseg", None)
+    assert uses_native_latest("native", None)

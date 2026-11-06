@@ -971,14 +971,23 @@ def enrich_single_latest(
     # Enrichment adds and replaces elements and rewrites the store's attrs, so
     # the store lock is held from the read until the metadata is persisted.
     with spatialdata_write_lock(write_path):
-        if config.segmentation_source in ("native", "native_proseg"):
+        if config.segmentation_source in ("native", "native_proseg") or (
+            _is_atera_cellpose_row(config)
+        ):
             _enrich_native_in_place(
                 config,
                 write_path=write_path,
                 force_rerun=force_rerun,
             )
-            if config.segmentation_source == "native_proseg":
+            if config.segmentation_source in ("native_proseg", "cellpose_proseg"):
                 _check_atera_proseg_layer(config, write_path=write_path)
+            if _is_atera_cellpose_row(config):
+                _enrich_atera_cellpose_layer(
+                    config,
+                    write_path=write_path,
+                    force_rerun=force_rerun,
+                    polygon_n_jobs=polygon_n_jobs,
+                )
         else:
             _enrich_store_in_place(
                 config,
@@ -998,8 +1007,52 @@ def enrich_single_latest(
     return write_path
 
 
+def _is_atera_cellpose_row(config: EnrichmentConfig) -> bool:
+    """Whether a config enriches an ATERA ``cellpose_proseg`` store (AT-7)."""
+    return (
+        config.segmentation_source == "cellpose_proseg"
+        and platform_spec(config.platform).native_latest_base
+    )
+
+
+def _enrich_atera_cellpose_layer(
+    config: EnrichmentConfig,
+    *,
+    write_path: Path,
+    force_rerun: bool,
+    polygon_n_jobs: int,
+) -> None:
+    """Build the Cellpose layer (``proseg_mask``) of an ATERA store (AT-7).
+
+    The caller holds the store's write lock.
+    """
+    from merxen.enrichment.atera_cellpose_layer import build_atera_cellpose_layer
+
+    assert config.mask_path is not None
+    mask_path = Path(config.mask_path)
+    identity = (
+        None
+        if find_model_identity_path(mask_path) is None
+        else read_model_identity(mask_path).model_dump(mode="json")
+    )
+    record = build_atera_cellpose_layer(
+        write_path,
+        mask_path,
+        pixel_size_um=_native_pixel_size(config, platform_spec(config.platform)),
+        dataset_name=str(config.dataset_name).upper(),
+        n_jobs=polygon_n_jobs,
+        model_identity=identity,
+        force=force_rerun,
+    )
+    output_dir = Path(config.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "atera_cellpose_layer_check.json").write_text(
+        json.dumps(record, indent=2) + "\n"
+    )
+
+
 def _check_atera_proseg_layer(config: EnrichmentConfig, *, write_path: Path) -> None:
-    """Check the stitched ProSeg layer of a ``native_proseg`` row (AT-9).
+    """Check the stitched ProSeg layer of a tiled ATERA ProSeg row (AT-9, AT-7).
 
     The layer is written by ATERA_PROSEG_STITCH, not by enrichment; this runs
     its streaming check (table and shape ids, assignments, per-cell counts,
@@ -1023,8 +1076,12 @@ def _check_atera_proseg_layer(config: EnrichmentConfig, *, write_path: Path) -> 
     ):
         log_status(f"[{dataset_name}] ProSeg layer already checked; skipping.")
         return
+    from merxen.segmentation.atera_proseg import SOURCE_PRIOR_KIND
+
     try:
-        result = check_proseg_layer(write_path)
+        result = check_proseg_layer(
+            write_path, prior_kind=SOURCE_PRIOR_KIND[config.segmentation_source]
+        )
     except AteraProsegError as error:
         raise RuntimeError(f"[{dataset_name}] {error}") from error
     output_dir = Path(config.output_dir)

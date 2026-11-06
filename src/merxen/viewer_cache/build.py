@@ -474,7 +474,8 @@ def vendor_label_keys(sdata: Any, platform: str) -> dict[str, str]:
     original shapes (``PlatformSpec.original_label_keys``, ATERA) gets its
     viewer base masks from those labels: their values are the shapes'
     ``instance_id``. On such a platform a registry branch with a ``label``
-    element (the stitched ProSeg layer of a ``native_proseg`` row) is backed
+    element (the stitched ProSeg layer of a ``native_proseg`` or
+    ``cellpose_proseg`` row, the Cellpose layer of a ``cellpose_proseg`` row) is backed
     by that element in the same way. Only pairs whose shape and label are both
     in the store are returned; XENIUM and MERSCOPE declare none.
 
@@ -498,7 +499,8 @@ def vendor_label_keys(sdata: Any, platform: str) -> dict[str, str]:
         if shape_key in shapes and label_key in labels
     }
     # Registry branches that carry their own label element on the image grid
-    # (the stitched ATERA ProSeg layer: MOSAIK_proseg -> proseg_cell_labels).
+    # (the stitched ATERA ProSeg layers, e.g. MOSAIK_proseg -> proseg_cell_labels,
+    # and the ATERA Cellpose layer MOSAIK_cellpose -> cellpose_cell_labels).
     registry = (sdata.attrs.get(MERXEN_SCHEMA_ATTR) or {}).get("segmentations") or {}
     for entry in registry.values():
         if not isinstance(entry, dict) or entry.get("coordinate_variant_of"):

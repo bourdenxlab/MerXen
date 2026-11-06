@@ -1,13 +1,22 @@
 """ATERA_PROSEG_PLAN: the tile grid, label ownership and windows of a section.
 
 The plan reads only small parts of the source store: the build marker and
-pixel size, the vendor table's ``instance_id`` and centroid, the vendor cell
-polygons' bounding boxes and the build's 100 micron density grid (a row
-estimate per tile). It never scans the transcripts or the masks.
+pixel size, the build's 100 micron density grid (a row estimate per tile) and
+the prior's cells. For the vendor prior (``native_proseg``) these are the
+vendor table's ``instance_id`` and centroid and the vendor cell polygons'
+bounding boxes; for a Cellpose prior (``cellpose_proseg``, AT-7) they are
+streamed from the Cellpose mask (:func:`.prior.label_stats`), whose files the
+plan also fingerprints. It never scans the transcripts.
+
+A Cellpose plan also fixes the effective prior weight of every tile: the
+configured one, else the weight ProSeg would choose for one whole-section run,
+``max(gene rows / labels / 100, 1)`` (ProSeg 3.2.0 multiplies its
+``--prior-weight`` by ``max(mean transcripts per cell / 100, 1)``), so every
+tile gets the weight a single Xenium-style run of the section would get.
 
 - Cores are ``[c T, (c + 1) T) x [r T, (r + 1) T)`` microns from origin
   ``(0, 0)`` with ids ``c{c}_r{r}``.
-- A vendor label belongs to the tile whose half-open core holds its centroid.
+- A prior label belongs to the tile whose half-open core holds its centroid.
 - A window starts as the core grown by the halo and is then grown to cover
   the bounding box of every owned cell plus ``owned_margin_um``; it may reach
   at most ``max_window_extension_um`` beyond the halo. It is clipped to the
@@ -36,6 +45,11 @@ from merxen.segmentation.atera_proseg import (
     PLAN_FORMAT_VERSION,
     AteraProsegError,
     tile_id,
+)
+from merxen.segmentation.atera_proseg.prior import (
+    describe_cellpose_prior,
+    label_stats,
+    open_mask,
 )
 
 logger = logging.getLogger(__name__)
@@ -117,6 +131,85 @@ def read_vendor_cells(store: Path) -> dict[str, np.ndarray]:
     return {"instance_id": ids, "centroid": spatial[:, :2], "bounds": bounds}
 
 
+def read_cellpose_cells(
+    mask_path: Path, n_rows: int, n_cols: int, pixel_size_um: float
+) -> dict[str, np.ndarray]:
+    """Return the Cellpose cells' ids, centroids and pixel bounds.
+
+    Args:
+        mask_path: The Cellpose label mask.
+        n_rows: Rows of the store's mask grid.
+        n_cols: Columns of the store's mask grid.
+        pixel_size_um: Microns per pixel.
+
+    Returns:
+        As :func:`read_vendor_cells`, plus ``area_px``.
+
+    Raises:
+        AteraProsegError: If the mask is not on the store's grid.
+    """
+    mask = open_mask(mask_path)
+    if tuple(int(v) for v in mask.shape) != (n_rows, n_cols):
+        raise AteraProsegError(
+            f"The Cellpose mask is {mask.shape[0]} x {mask.shape[1]} pixels; the "
+            f"store's mask grid is {n_rows} x {n_cols}. Cellpose must segment the "
+            "store's morphology_focus image"
+        )
+    return label_stats(mask, pixel_size_um)
+
+
+def _check_cellprob(path: Path, shape: tuple[int, int]) -> None:
+    """Refuse cell probabilities that are not float32 on the mask grid."""
+    cellprob = np.load(Path(path), mmap_mode="r")
+    if tuple(cellprob.shape) != shape or cellprob.dtype != np.float32:
+        raise AteraProsegError(
+            f"The Cellpose cell probabilities are {cellprob.shape} {cellprob.dtype}; "
+            f"ProSeg needs float32 on the {shape[0]} x {shape[1]} mask grid"
+        )
+
+
+def whole_section_prior_weight(store: Path, n_labels: int) -> dict[str, Any]:
+    """Return ProSeg's automatic effective prior weight for one whole-section run.
+
+    Args:
+        store: The source store (its build aggregates count the gene rows).
+        n_labels: Prior cells of the section.
+
+    Returns:
+        ``effective`` (``max(gene rows / labels / 100, 1)``), ``n_gene_rows``
+        and ``n_labels``.
+
+    Raises:
+        AteraProsegError: If the store has no build aggregates.
+    """
+    import anndata as ad
+
+    aggregates = read_points_aggregates(store)
+    if aggregates is None:
+        raise AteraProsegError(
+            "The source store has no build aggregates; the automatic prior weight "
+            "needs its gene row counts (set atera_cellpose_proseg_prior_weight)"
+        )
+    group = zarr.open_group(str(Path(store) / "tables" / SOURCE_TABLE_KEY), mode="r")
+    genes = {str(name) for name in ad.io.read_elem(group["var"]).index}
+    n_gene_rows = int(
+        sum(
+            int(count)
+            for name, count in zip(
+                aggregates.feature_names, aggregates.gene_counts_kept, strict=True
+            )
+            if name in genes
+        )
+    )
+    mean = n_gene_rows / max(int(n_labels), 1)
+    return {
+        "rule": "whole_section_auto",
+        "effective": float(max(mean / 100.0, 1.0)),
+        "n_gene_rows": n_gene_rows,
+        "n_labels": int(n_labels),
+    }
+
+
 def _core_index(values: np.ndarray, tile_um: float) -> np.ndarray:
     """Grid index of each coordinate under half-open cores ``[k T, (k + 1) T)``."""
     index = np.floor(values / tile_um).astype(np.int64)
@@ -189,7 +282,32 @@ def build_plan(cfg: AteraProsegPlanConfig) -> dict[str, Any]:
     pixel_size = float(find_um_per_px(source, "ATERA"))
     n_rows, n_cols = mask_shape(source)
     extent_um = (0.0, 0.0, n_cols * pixel_size, n_rows * pixel_size)
-    cells = read_vendor_cells(source)
+    prior_entry: dict[str, Any] | None = None
+    weight_entry: dict[str, Any] | None = None
+    if cfg.prior is not None and cfg.prior.kind == "cellpose":
+        assert cfg.prior.mask_path is not None
+        cells = read_cellpose_cells(cfg.prior.mask_path, n_rows, n_cols, pixel_size)
+        if cfg.prior.cellprob_path is not None:
+            _check_cellprob(cfg.prior.cellprob_path, (n_rows, n_cols))
+        if not cells["instance_id"].size:
+            raise AteraProsegError(
+                f"[{cfg.dataset_name}] The Cellpose mask holds no cell"
+            )
+        prior_entry = describe_cellpose_prior(
+            cfg.prior.mask_path, cfg.prior.cellprob_path
+        )
+        if cfg.prior_weight_effective is None:
+            weight_entry = whole_section_prior_weight(
+                source, int(cells["instance_id"].size)
+            )
+        else:
+            weight_entry = {
+                "rule": "configured",
+                "effective": float(cfg.prior_weight_effective),
+            }
+    else:
+        cells = read_vendor_cells(source)
+    prior_word = "vendor" if prior_entry is None else "Cellpose"
     tile_um = float(cfg.tile_um)
     halo = float(cfg.halo_um)
     margin = float(cfg.owned_margin_um)
@@ -279,7 +397,7 @@ def build_plan(cfg: AteraProsegPlanConfig) -> dict[str, Any]:
             run = bool(owned_labels.size) and col1 > col0 and row1 > row0
             reason = None
             if not owned_labels.size:
-                reason = "no vendor cell centroid in the core"
+                reason = f"no {prior_word} cell centroid in the core"
             elif not run:
                 reason = "the window lies outside the mask"
             if run and subset is not None and tid not in subset:
@@ -304,7 +422,7 @@ def build_plan(cfg: AteraProsegPlanConfig) -> dict[str, Any]:
     if n_owned_total != cells["instance_id"].size:
         raise AteraProsegError(
             f"[{cfg.dataset_name}] {cells['instance_id'].size - n_owned_total} "
-            "vendor labels have no owning tile"
+            "prior labels have no owning tile"
         )
     plan = {
         "format_version": PLAN_FORMAT_VERSION,
@@ -325,12 +443,28 @@ def build_plan(cfg: AteraProsegPlanConfig) -> dict[str, Any]:
         "n_tiles_run": sum(1 for tile in tiles if tile["run"]),
         "tiles": tiles,
     }
+    # Only for a Cellpose prior, so a vendor plan is unchanged (AT-9).
+    if prior_entry is not None:
+        plan["prior"] = prior_entry
+        plan["prior_weight"] = weight_entry
+        area = cells["area_px"].astype(np.float64) * pixel_size**2
+        plan["prior_cells"] = {
+            "n_labels": int(cells["instance_id"].size),
+            "area_um2_quantiles": {
+                str(q): float(np.quantile(area, q))
+                for q in (0.05, 0.25, 0.5, 0.75, 0.95)
+            },
+        }
     logger.info(
-        "[%s] Tile plan: %d tiles, %d run, %d vendor labels",
+        "[%s] Tile plan: %d tiles, %d run, %d %s labels%s",
         cfg.dataset_name,
         len(tiles),
         plan["n_tiles_run"],
         plan["n_labels"],
+        "Cellpose" if prior_entry is not None else "vendor",
+        ""
+        if weight_entry is None
+        else f", effective prior weight {weight_entry['effective']:.2f}",
     )
     return plan
 
