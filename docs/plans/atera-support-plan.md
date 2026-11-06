@@ -1545,6 +1545,13 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
   `feature/atera-<wp>-<slug>`. `main` is merged in regularly; the branch is never rebased.
 - This needs a CLAUDE.md exception line like the RCA one (Q13).
 - Acceptance-gate PRs merge into `main` after AT-5 and AT-6.
+- **RCA merged in (2026-11-06, user decision):** `feature/robust-celltype-annotation` was merged into
+  `feature/atera-support` (never the other way) and is frozen; it never merges into `main` by itself.
+  RCA work continues on this branch (branches `feature/rca-m<N>-<slug>`, CLAUDE.md exception line). The
+  next Atera acceptance-gate PR into `main` therefore also carries RCA: the human and mouse `map_first`
+  default for XENIUM and MERSCOPE rows (RCA gates H and M) and version 0.2.0. It needs RCA's gate H/M
+  sign-off as well as the Atera exit checks; RCA plan §2.2 left that flip to merge into `main` "only
+  when you say so" (U10).
 
 **Conventions:** commit prefixes follow Agents.md; PR text goes through
 `scripts/privacy/check_private_text.py --stdin`.
@@ -1552,7 +1559,10 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
 **Coordination:**
 - `feature/manual-registration` and `feature/robust-celltype-annotation` both edit the `config.py`
   Literals and `main.nf`. Land AT-1 after manual-registration.
-- Do AT-8 clustering on top of RCA.
+- Do AT-8 clustering on top of RCA (RCA is on this branch since the merge above).
+- ATERA rows are held off RCA's `map_first` annotation until AT-11 (below): a row without its own
+  `clustering_squidpy_mode` clusters in `legacy` mode, `map_first` on the row is refused, and
+  `--annotation_prepare_only` builds no reference bundle for ATERA rows.
 
 **Cache invariant (every milestone):**
 - Existing XENIUM and MERSCOPE configs and process `script:` text stay byte-identical.
@@ -1717,6 +1727,21 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
     matches the floor convention of the vendor masks.
   - The short schedule (100 burn-in + 200 samples) by default, after checking it on one dense tile.
   - Report the number of cells left with no transcripts.
+
+### AT-11 `[feature]`: RCA on Atera (map_first annotation for ATERA rows)
+
+- **Why:** since the RCA merge, `map_first` is the human and mouse default, but its panel, reference and
+  gate steps (ANNOTATE_PANEL, ANNOTATE_REFERENCE_PREP, MAP, RESOLVE, COMPUTE_CPU, ANNOTATION_REPORT) are
+  built for the targeted MERSCOPE and XENIUM panels and have never run on a whole-transcriptome ATERA
+  section. ATERA rows are gated off until this milestone (`main.nf` `annotationModeRow`, the ATERA
+  preflight, `ateraPrepareOnlyRow`; `docs/configuration.md#atera-rows`).
+- **Scope (to be planned with RCA):** an ATERA panel mode for the 18,049-gene panel (§1.3 fact 6; gene
+  set shared with AT-8's "analysis gene set"); reference prep, MAP and RESOLVE resources at that panel
+  size; pairing rules for ATERA rows; then lift the gate and the deprecation exception for ATERA
+  rows.
+- **Depends on:** AT-8 (analysis gene set, lean MapMyCells query).
+- **Exit:** a mixed samplesheet stub run (XENIUM `map_first` + ATERA) reaches ANNOTATION_REPORT for both
+  rows, then the crop and the full section run `map_first` through MENDER within their resources.
 
 ### AT-10 optional, on request
 

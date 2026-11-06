@@ -1740,8 +1740,11 @@ selects its mode with `--clustering_squidpy_mode` (both species) or
 for that row (§20 D15), so one run can opt single datasets in or out. The
 launch log lists every row's resolved mode ("Clustering mode per samplesheet
 row", also under `-preview`). `legacy` still works for either species but is
-deprecated and logs a warning. After a species' flip its `map_first` rows
-write the unsuffixed clustered tables (the legacy tables are replaced; keep a
+deprecated and logs a warning. ATERA rows are the exception: they cluster in
+`legacy` mode whatever the run's mode, a row that sets `map_first` is refused,
+and they log no deprecation warning (AT-11; see
+[ATERA rows](../configuration.md#atera-rows)). After a species' flip its
+`map_first` rows write the unsuffixed clustered tables (the legacy tables are replaced; keep a
 snapshot, or set `--clustering_squidpy_table_key_suffix mapfirst`, if you
 need them), MENDER
 uses the `exclude_from_features` policy for unassigned cells, the legacy

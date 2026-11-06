@@ -22,6 +22,10 @@
 - **Unchanged.** The mouse MENDER segmentation stays `proseg_hybrid` (U8 keeps it). A section estimated at AP < 6.0 mm keeps the report's MO11 banner until the first real anterior section passes MO11. Mouse real-data QC stays warn-only until gate M merges into `main` (D20 (b)).
 - Docs: [the mouse switch](docs/stages/annotation.md#the-mouse-switch-m9), [configuration](docs/configuration.md), [samplesheet](docs/samplesheet.md), [overview](docs/annotation-overview.md).
 
+### ATERA rows stay on legacy clustering (until AT-11)
+
+- The map-first default of both species applies to MERSCOPE and XENIUM rows. ATERA rows (10x Atera, `docs/plans/atera-support-plan.md`) cluster in `legacy` mode whatever the species default or a global `--clustering_squidpy_mode`, a row that sets `clustering_squidpy_mode=map_first` is refused before any task starts, `--annotation_prepare_only` builds no reference bundle for them, and they log no deprecation warning. The launch log marks them `legacy (ATERA)`. map_first on Atera is milestone AT-11 ([ATERA rows](docs/configuration.md#atera-rows)).
+
 ### Added
 
 - **Per-row mode.** A `clustering_squidpy_mode` samplesheet column (`legacy` / `map_first`; blank follows the run), so one run can opt single datasets in or out. A header that only resembles the column is reported. In a run with any `map_first` row, legacy rows also take the MENDER barrier's `combine`, so they run MENDER where a legacy-only run's `join` would skip it.

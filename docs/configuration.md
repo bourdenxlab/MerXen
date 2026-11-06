@@ -394,7 +394,7 @@ and no Cellpose or ProSeg task runs. See
 | `enrich` | Native enrichment: no Cellpose masks. |
 | `build_viewer_caches` | Vendor label masks on `morphology_focus`. |
 | `mask_image_quantification` | Quantifies the vendor `cell_labels`. |
-| `qc`, `visualize`, `spatial_gene_analysis`, `clustering_squidpy` | Run on the `original_seg` layer. `clustering_squidpy` runs in legacy mode: map_first annotation ([Cell-type annotation overview](annotation-overview.md)) is not covered for ATERA rows yet (RCA on Atera is the next milestone). |
+| `qc`, `visualize`, `spatial_gene_analysis`, `clustering_squidpy` | Run on the `original_seg` layer. `clustering_squidpy` runs in legacy mode: map_first annotation ([Cell-type annotation overview](annotation-overview.md)) is not covered for ATERA rows yet (AT-11, RCA on Atera; [Atera plan §8](plans/atera-support-plan.md)). |
 | `mender` | Runs when `mender_enabled` (on `original_seg`). An explicit `stop_stage=mender` passes over the standalone `mapmycells` stage, which ATERA rows do not run. |
 
 Native rows have one analysis layer, `original_seg`. A global
@@ -417,7 +417,7 @@ with "remove `<setting>` from row `<pair>` or set it to false"):
 | row `enable_alignment` or `xenium_registered_images_csv` | image registration and alignment are not covered for ATERA rows (AT-10) |
 | `segmentation_source=cellpose_only` or `cellpose_proseg` | segmentation_source=… is not available for ATERA rows yet; ATERA supports: native |
 | `start_stage`, `stop_stage` or `only_stage` naming a stage ATERA rows do not run (such as `pciseq`, `gaston`, `mecr`) | … is not active for this run. ATERA rows run only build_spatialdata, segment, … |
-| row `clustering_squidpy_mode=map_first` | map_first annotation is not covered for ATERA rows yet (RCA on Atera is the next milestone); remove clustering_squidpy_mode from row `<pair>` or set it to legacy |
+| row `clustering_squidpy_mode=map_first` | map_first annotation is not covered for ATERA rows yet (AT-11, RCA on Atera); remove clustering_squidpy_mode from row `<pair>` or set it to legacy |
 
 The global `pciseq_enabled`, `gaston_enabled`, `mecr_enabled`,
 `cortical_depth_enabled`, `distance_from_object_enabled` and

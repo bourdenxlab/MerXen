@@ -96,8 +96,9 @@ and intend to fix it before the PR is reviewed.
 ## Continuous integration
 
 [.github/workflows/ci.yml](../.github/workflows/ci.yml) runs on every push
-to `main` and to the integration branch `feature/robust-celltype-annotation`
-([plan §2.2](plans/robust-celltype-annotation-plan.md)), every PR (opened,
+to `main` and to the integration branch `feature/atera-support`
+([Atera plan §8](plans/atera-support-plan.md)),
+which also carries the robust cell-type annotation work, every PR (opened,
 pushed, reopened or labelled), nightly on `main` and on demand
 (`workflow_dispatch`). Its jobs:
 
@@ -484,13 +485,20 @@ written approval in the gate PR.
 
 ### Integration branch
 
-Work lands on the long-lived integration branch
-`feature/robust-celltype-annotation` (plan §2.2). Each milestone is a branch
-`feature/rca-m<N>-<slug>` cut from its head and merged back by PR; merge the
-integration head into the milestone branch before its PR. The integration
-branch is kept current by merging `main` into it, never by rebasing it, and
-only the acceptance-gate PRs merge it into `main`. Data-integrity fixes go to
-`main` first. Until a species flips, no milestone may change legacy results.
+The work was developed on the integration branch
+`feature/robust-celltype-annotation` (plan §2.2). That branch has been merged
+into the Atera integration branch `feature/atera-support` and is now frozen:
+it gets no more commits and never merges into `main` by itself, so it has no
+gate PR. Further RCA work, including AT-11 (map_first annotation for ATERA
+rows, [Atera plan §8](plans/atera-support-plan.md)), lands on
+`feature/atera-support`. Each milestone is a branch `feature/rca-m<N>-<slug>`
+cut from its head and merged back by PR; merge the integration head into the
+milestone branch before its PR. The integration branch is kept current by
+merging `main` into it, never by rebasing it, and only the Atera
+acceptance-gate PRs merge it into `main`; the first of them carries RCA too
+(the human and mouse map_first default and version 0.2.0), so it also needs
+RCA's gate H/M sign-off. Data-integrity fixes go to `main` first. Until a
+species flips, no milestone may change legacy results.
 
 ### Hook points shared with `feature/gaston`
 

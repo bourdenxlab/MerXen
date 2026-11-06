@@ -1,7 +1,9 @@
 # Cell-type annotation: overview and method
 
 This page explains the reference-based cell-type annotation that the
-`feature/robust-celltype-annotation` integration branch adds to MerXen. It is
+robust cell-type annotation effort (developed on
+`feature/robust-celltype-annotation`, now merged into the Atera integration
+branch `feature/atera-support`) adds to MerXen. It is
 written for two readers:
 
 - a **scientist who runs the pipeline** and wants to know what a label means
@@ -39,8 +41,8 @@ for the targeted MERSCOPE and XENIUM panels. An ATERA row clusters in
 `legacy` mode whatever the species default or a global
 `clustering_squidpy_mode` (without the deprecation warning), and a row that
 sets `clustering_squidpy_mode=map_first` is refused before any task starts
-([ATERA rows](configuration.md#atera-rows)). Annotation on Atera is the next
-milestone.
+([ATERA rows](configuration.md#atera-rows)). Annotation on Atera is
+milestone AT-11 of the [Atera plan](plans/atera-support-plan.md) (§8).
 
 ---
 

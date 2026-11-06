@@ -68,8 +68,9 @@ reference assets.
 In `map_first` mode (the default of both species: human since M8, mouse
 since M9; a run selects `legacy` with `--clustering_squidpy_mode legacy` or
 `--clustering_squidpy_mode_<species> legacy`, and a row with its
-`clustering_squidpy_mode` column) the hierarchy comes from reference-based
-labels instead:
+`clustering_squidpy_mode` column; ATERA rows always cluster in `legacy`
+mode for now, see [ATERA rows](../configuration.md#atera-rows)) the hierarchy
+comes from reference-based labels instead:
 `CLUSTERING_SQUIDPY_COMPUTE_CPU` replaces the GPU compute between the same
 PREPARE and FINALIZE, the branches and leaves are the confident mapped
 classes, and the clustered table gets the `_mapfirst` suffix before the

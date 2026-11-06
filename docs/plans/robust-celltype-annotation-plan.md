@@ -171,6 +171,14 @@ Effort estimates are [L] with about 30% contingency (the draft's M4 and M7 were 
 
 ### 2.2 Branches and PRs (OD-D5, decided 2026-09-26)
 
+> **Superseded in part (2026-11-06, user decision):** the integration branch was merged into the Atera
+> integration branch `feature/atera-support` (never the other way) and is frozen: it gets no more
+> commits and no gate PR merges it into `main`. RCA work continues on `feature/atera-support`
+> (milestone branches `feature/rca-m<N>-<slug>` are cut from it), and RCA reaches `main` only with the
+> Atera acceptance-gate PRs, which then also need the gate H/M sign-off below (Atera plan §8). ATERA
+> rows stay on `legacy` until Atera milestone AT-11. The model below is kept as the record of how the
+> work was run until then.
+
 **Model.**
 - **Integration branch** `feature/robust-celltype-annotation`, cut from `main` after the M0-docs PR (this plan + the convention notes, below) merges; it holds all rca work except M0 and plan revisions.
 - **Milestone sub-branches** `feature/rca-m<N>-<slug>` from the integration head; one PR each into the integration branch; CI (the `pull_request:` trigger already covers any base) and your review; merge commit (prefixed commits kept); sub-branch deleted. A sub-branch merges the integration head before its PR (merge once pushed; rebase only while local).
