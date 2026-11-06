@@ -99,7 +99,11 @@ def _run(tmp_path: Path, rows: str, name: str) -> tuple[str, dict[str, list[dict
     for path in sorted(work.glob("*/*/merxen_call.json")):
         call = json.loads(path.read_text())
         calls.setdefault(call["command"], []).append(call["config"])
-    return result.stdout, calls
+    # On the GitHub runners the workflow's log.info lines can be missing from
+    # stdout (as test_gaston_stage.py found), so read this launch's run log too.
+    run_log = tmp_path / ".nextflow.log"
+    log_text = run_log.read_text() if run_log.is_file() else ""
+    return result.stdout + result.stderr + log_text, calls
 
 
 @pytest.mark.nextflow

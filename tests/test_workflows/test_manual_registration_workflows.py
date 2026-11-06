@@ -611,6 +611,38 @@ def test_register_stub_run_fans_out_presets_and_compares(tmp_path: Path) -> None
 
 # --- tiny end to end through both workflows --------------------------------
 
+# The smallest synthetic pair that still takes every path this test checks:
+# 384 px at 2.0 um (768 um of tissue field; the moving image is 480 px at
+# 1.6 um). Run time is mostly the non-rigid flow of same_section at 2 um, so it
+# scales with the pixel count. At this size same_section still applies its
+# refinement (26 windows of 200 um, minimum 20; 352 px leaves 22 and saves under
+# a second), the non-rigid stage applies in both presets, serial_section measures
+# its nucleus QC and all 20 landmark grid points lie 64 px inside the reference
+# (at 320 px only 11 do). The images are smaller than the default
+# viewer_cache_min_size (1024 px), which would leave them without a ds4 level,
+# so the prepare launches lower it. The register step's result-store pyramids
+# keep the fixed 1024 px minimum, so they and the comparison's overview overlay
+# (drawn from them) are skipped here; test_register_integration's 2048 px pairs
+# build and check both. The non-rigid residual pass no longer applies at this
+# size (it did at 1280 px only by a negligible gain);
+# test_nonrigid_registration's
+# test_residual_pass_improves_an_undercorrected_translation covers that path.
+# The stage statuses this size relies on are asserted from the run summaries.
+#
+# The fitted landmark matrix lands 0.31 px from the true one at the corners
+# (seed 0, the same in every run). The bound is 1.0 px rather than the 2.0 px
+# used at 1280 px: on this smaller field 2.0 px would let through a rotation of
+# 0.37 deg or a scale error of 0.8 %, while 1.0 px fails on 0.15 deg, 0.4 % or a
+# 0.7 px shift and still leaves over 3x headroom.
+E2E_REFERENCE_SHAPE_YX = (384, 384)
+E2E_PREPARE_PARAMS = ("--viewer_cache_min_size", "256")
+E2E_LANDMARK_MARGIN_PX = 64
+E2E_CORNER_ERROR_BOUND_PX = 1.0
+E2E_EXPECTED_STAGE_STATUS = {
+    "same_section": {"refinement": "applied", "nonrigid": "applied"},
+    "serial_section": {"nonrigid": "applied", "nucleus_qc": "measured"},
+}
+
 
 @needs_nextflow
 @pytest.mark.nextflow
@@ -629,7 +661,7 @@ def test_tiny_end_to_end_through_both_workflows(tmp_path: Path) -> None:
     )
 
     pair = make_synthetic_pair(
-        tmp_path / "data", reference_shape_yx=(1280, 1280), seed=0
+        tmp_path / "data", reference_shape_yx=E2E_REFERENCE_SHAPE_YX, seed=0
     )
     outdir = tmp_path / "out"
     sheet = _write_sheet(
@@ -649,6 +681,7 @@ def test_tiny_end_to_end_through_both_workflows(tmp_path: Path) -> None:
         "manual_registration_prepare.nf",
         sheet,
         outdir,
+        *E2E_PREPARE_PARAMS,
         launch_name="launch_prepare",
     )
     assert first.returncode == 0, first.stdout + first.stderr
@@ -670,14 +703,16 @@ def test_tiny_end_to_end_through_both_workflows(tmp_path: Path) -> None:
     ys = np.linspace(0.2 * height, 0.8 * height, 4)
     points = np.array([(x, y) for y in ys for x in xs])
     mapped = pair.moving_to_reference(points)
-    inside = np.all((mapped >= 64) & (mapped < 1280 - 64), axis=1)
+    margin = E2E_LANDMARK_MARGIN_PX
+    limit = np.array(pair.reference_shape_yx[::-1]) - margin
+    inside = np.all((mapped >= margin) & (mapped < limit), axis=1)
     points = points[inside][:12]
     assert len(points) == 12
     landmarks = simulate_landmark_pairs(
         points,
         pair.moving_to_reference,
         noise_um=0.5,
-        reference_pixel_size_um=2.0,
+        reference_pixel_size_um=pair.reference_pixel_size_um,
         seed=0,
         disabled=[11, 12],
     )
@@ -711,12 +746,19 @@ def test_tiny_end_to_end_through_both_workflows(tmp_path: Path) -> None:
         load_alignment_matrix(folder / f"{run_id}_final_matrix.csv")
         with (folder / f"{run_id}_landmarks.csv").open() as handle:
             assert len(list(csv.DictReader(handle))) == 12
-        assert (folder / f"{run_id}_manual_registration_summary.json").is_file()
+        summary = json.loads(
+            (folder / f"{run_id}_manual_registration_summary.json").read_text()
+        )
+        statuses = {
+            stage: summary[stage]["status"]
+            for stage in E2E_EXPECTED_STAGE_STATUS[preset]
+        }
+        assert statuses == E2E_EXPECTED_STAGE_STATUS[preset], preset
         assert (folder / f"{run_id}_tissue_qc.png").is_file()
         error = np.linalg.norm(
             apply(landmark, corners) - apply(pair.true_matrix, corners), axis=1
         ).max()
-        assert error <= 2.0, (preset, error)
+        assert error <= E2E_CORNER_ERROR_BOUND_PX, (preset, error)
         summaries.append(preset)
     comparison = outdir / "SYN1" / "registered" / "SYN1_run_comparison.csv"
     with comparison.open() as handle:
@@ -735,6 +777,7 @@ def test_tiny_end_to_end_through_both_workflows(tmp_path: Path) -> None:
         "manual_registration_prepare.nf",
         sheet,
         outdir,
+        *E2E_PREPARE_PARAMS,
         launch_name="launch_prepare_again",
     )
     assert third.returncode == 0, third.stdout + third.stderr
