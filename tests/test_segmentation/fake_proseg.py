@@ -107,13 +107,22 @@ def _parser() -> argparse.ArgumentParser:
 def _outlines(
     prior: np.ndarray, labels: np.ndarray, x_t: list[float], y_t: list[float]
 ) -> dict[int, dict]:
-    from rasterio import features
-    from shapely.geometry import mapping, shape
+    # Each label's pixels as the union of its row runs (pixel corners in
+    # (col, row) units), the outline a raster polygonizer gives; numpy and
+    # shapely only, so the fake runs where rasterio is not installed.
+    from shapely.geometry import box, mapping
     from shapely.ops import unary_union
 
     found: dict[int, list] = {int(label): [] for label in labels}
-    for geometry, value in features.shapes(prior.astype(np.int32), mask=prior > 0):
-        found[int(value)].append(shape(geometry))
+    for row in range(prior.shape[0]):
+        values = prior[row]
+        edges = np.flatnonzero(np.diff(values)) + 1
+        starts = np.concatenate([[0], edges])
+        stops = np.concatenate([edges, [values.size]])
+        for start, stop in zip(starts.tolist(), stops.tolist(), strict=True):
+            value = int(values[start])
+            if value:
+                found[value].append(box(start, row, stop, row + 1))
     result = {}
     for label, parts in found.items():
         merged = unary_union(parts)
