@@ -233,20 +233,33 @@ def points_files(
     bbox: BBox | None = None,
     *,
     use_index: bool = True,
+    x_col: str = "x",
+    y_col: str = "y",
 ) -> tuple[list[Path], int, bool]:
     """Return the parquet files to scan for a window.
+
+    Only stores whose points index still matches the files (names and row
+    counts) are pruned. Each indexed file's box is then read afresh from the
+    ``x_col`` / ``y_col`` statistics of its footer, not taken from the index,
+    so a rewrite that moved rows between files while keeping every file's row
+    count cannot hide transcripts from a window (as QC's
+    ``window_parquet_files``). A file without such statistics is always read.
 
     Args:
         zarr_path: SpatialData store.
         points_key: Points element.
-        bbox: Window ``(x0, y0, x1, y1)``; ``None`` keeps every file.
-        use_index: Prune through the points index when it matches the files.
+        bbox: Window ``(x0, y0, x1, y1)`` (edges inclusive); ``None`` keeps
+            every file.
+        use_index: Prune when the points index matches the files.
+        x_col: Micron x column.
+        y_col: Micron y column.
 
     Returns:
         ``(files, n_files_total, pruned)``.
 
     Raises:
         FileNotFoundError: If the points element has no parquet files.
+        ValueError: If the window is empty.
     """
     directory = points_parquet_dir(Path(zarr_path), points_key)
     if directory.is_file():
@@ -262,7 +275,21 @@ def points_files(
     aggregates = read_points_aggregates(Path(zarr_path), points_key)
     if aggregates is None or not aggregates.fingerprint_matches():
         return every, len(every), False
-    selected = aggregates.files_intersecting(bbox)
+    x0, y0, x1, y1 = (float(value) for value in bbox)
+    if x1 < x0 or y1 < y0:
+        raise ValueError(f"empty window {bbox}: need x0 <= x1 and y0 <= y1")
+    selected = []
+    for entry in aggregates.files:
+        path = aggregates.points_dir / entry.name
+        ranges = _file_column_range(path, (x_col, y_col))
+        # A file with no rows has the empty range (inf, -inf) and is skipped.
+        if ranges is None or (
+            ranges[0][0] <= x1
+            and ranges[0][1] >= x0
+            and ranges[1][0] <= y1
+            and ranges[1][1] >= y0
+        ):
+            selected.append(path)
     return selected, len(every), True
 
 
@@ -352,7 +379,7 @@ def stream_hist2d(
     n_y, n_x = grid_shape(bbox, bin_um)
     x0, y0 = float(bbox[0]), float(bbox[1])
     files, n_total, pruned = points_files(
-        zarr_path, points_key, bbox, use_index=use_index
+        zarr_path, points_key, bbox, use_index=use_index, x_col=x_col, y_col=y_col
     )
     columns = [x_col, y_col] + ([category] if category is not None else [])
     if category is None:
@@ -424,8 +451,9 @@ def points_bounds(
 ) -> BBox:
     """Return ``(x0, y0, x1, y1)`` of the transcripts of a store.
 
-    Uses the build aggregates when they still match the files; otherwise the
-    parquet row-group statistics; a file without statistics is streamed.
+    Taken from the parquet row-group statistics of every file (a footer read
+    each); a file without statistics is streamed. The build's recorded
+    ``bounds_um`` is not used: it can be wider than the rows kept.
 
     Args:
         zarr_path: SpatialData store.
@@ -441,17 +469,6 @@ def points_bounds(
         ValueError: If no finite coordinate exists.
     """
     zarr_path = Path(zarr_path)
-    aggregates = read_points_aggregates(zarr_path, points_key)
-    if aggregates is not None and aggregates.fingerprint_matches():
-        bounds = aggregates.bounds_um
-        keys = ("x_min", "y_min", "x_max", "y_max")
-        if all(key in bounds for key in keys):
-            return (
-                bounds["x_min"],
-                bounds["y_min"],
-                bounds["x_max"],
-                bounds["y_max"],
-            )
     files, _, _ = points_files(zarr_path, points_key, None, use_index=False)
     low = [math.inf, math.inf]
     high = [-math.inf, -math.inf]

@@ -6,6 +6,7 @@ sample the points, and every transcript in a window is counted.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import shutil
 from pathlib import Path
@@ -15,6 +16,7 @@ import dask.dataframe as dd
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import xarray as xr
@@ -23,7 +25,7 @@ from test_io.atera_native_fixture import make_native_reference
 
 from merxen.cli.run_visualization import _sanity_assignment_column, visualize_command
 from merxen.config import VisualizationSampleConfig
-from merxen.io.points_aggregates import points_parquet_dir
+from merxen.io.points_aggregates import points_parquet_dir, read_points_aggregates
 from merxen.visualization import raster_density
 from merxen.visualization.density_overview import plot_single_transcript_overview
 from merxen.visualization.raster_density import (
@@ -166,23 +168,87 @@ def test_stream_hist2d_value_layers(latest: Path) -> None:
     }
 
 
-def test_points_bounds_use_aggregates_or_statistics(latest: Path) -> None:
-    from_attrs = points_bounds(latest, "transcripts")
-    assert from_attrs == (-8.0625, -0.125, 9.625, 19.28125)
-    # A stale index (a file removed from the listing) falls back to the files.
-    index_path = latest / "merxen_atera_points_index.json"
-    index = json.loads(index_path.read_text())
-    index["points"]["transcripts"]["fingerprint"]["n_rows"] += 1
-    index_path.write_text(json.dumps(index))
+def test_points_bounds_come_from_the_files(
+    latest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bounds are the rows' own extent, not the build's recorded bounds_um."""
     points = _all_points(latest)
-    assert points_bounds(latest, "transcripts") == (
+    expected = (
         float(points["x"].min()),
         float(points["y"].min()),
         float(points["x"].max()),
         float(points["y"].max()),
     )
+    assert points_bounds(latest, "transcripts") == expected
+    # A recorded bounds_um wider than the rows (as on a full section, whose
+    # build bounds include rows the QV filter dropped) is not used.
+    aggregates = read_points_aggregates(latest, "transcripts")
+    assert aggregates is not None and aggregates.bounds_um
+    wider = dataclasses.replace(
+        aggregates, bounds_um={**aggregates.bounds_um, "y_max": expected[3] + 5.0}
+    )
+    monkeypatch.setattr(raster_density, "read_points_aggregates", lambda *_a: wider)
+    assert points_bounds(latest, "transcripts") == expected
+    monkeypatch.undo()
+    # A stale index (a file removed from the listing) gives the same bounds.
+    index_path = latest / "merxen_atera_points_index.json"
+    index = json.loads(index_path.read_text())
+    index["points"]["transcripts"]["fingerprint"]["n_rows"] += 1
+    index_path.write_text(json.dumps(index))
+    assert points_bounds(latest, "transcripts") == expected
     raster = stream_hist2d(latest, "transcripts", (2.0, 10.0, 6.0, 16.0), 0.5)
     assert raster.pruned is False
+
+
+def test_pruning_reads_footers_not_the_indexed_boxes(latest: Path) -> None:
+    """A rewrite that moves a row but keeps every file's row count loses nothing.
+
+    The fingerprint (names and row counts) still matches, so the store is
+    pruned; the files are chosen by their footer statistics, so the moved row
+    is still counted (the indexed boxes would skip its file).
+    """
+    aggregates = read_points_aggregates(latest, "transcripts")
+    assert aggregates is not None and aggregates.fingerprint_matches()
+    boxes = {entry.name: entry.bbox_um for entry in aggregates.files}
+    names = [name for name, box in boxes.items() if box is not None]
+    source, target = (
+        names[0],
+        next(name for name in names[1:] if boxes[name] != boxes[names[0]]),
+    )
+    tx0, ty0, tx1, ty1 = boxes[target]
+    sx0, sy0, sx1, sy1 = boxes[source]
+    # A spot inside the target's box but outside the source's indexed box.
+    spot = next(
+        (x, y)
+        for x in np.linspace(tx0, tx1, 9)
+        for y in np.linspace(ty0, ty1, 9)
+        if not (sx0 <= x <= sx1 and sy0 <= y <= sy1)
+    )
+    path = aggregates.points_dir / source
+    table = pq.read_table(path)
+    for column, value in zip(("x", "y"), spot, strict=True):
+        position = table.schema.get_field_index(column)
+        values = table.column(column).to_numpy().copy()
+        values[0] = value
+        table = table.set_column(
+            position, table.schema.field(position), pa.array(values)
+        )
+    pq.write_table(table, path, write_statistics=True)
+    after = read_points_aggregates(latest, "transcripts")
+    assert after is not None and after.fingerprint_matches()
+    window = (spot[0] - 0.01, spot[1] - 0.01, spot[0] + 0.01, spot[1] + 0.01)
+    assert path not in after.files_intersecting(window)
+
+    files, _, pruned = raster_density.points_files(latest, "transcripts", window)
+    raster = stream_hist2d(latest, "transcripts", window, 0.01)
+
+    assert pruned is True and path in files
+    points = _all_points(latest)
+    inside = points[
+        points["x"].between(window[0], window[2])
+        & points["y"].between(window[1], window[3])
+    ]
+    assert raster.total() == len(inside) >= 1
 
 
 def test_coarsen_sums_blocks_and_keeps_every_count(latest: Path) -> None:

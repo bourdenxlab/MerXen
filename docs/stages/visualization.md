@@ -125,10 +125,14 @@ public full section VISUALIZE bins all 1,409,601,228 transcripts in about
   Memory is bounded by one batch plus the grid. Bins follow `np.histogram2d`:
   each holds `[edge, next edge)` and the last also holds its right edge.
 - **Pruning.** When the build's points index still matches the parquet
-  listing and footers (`points_aggregates.fingerprint_matches`), only the
-  files whose indexed bounding box meets the window are read; otherwise every
-  file is. Section bounds come from the build aggregates, else from the
-  parquet column statistics.
+  listing and footers (`points_aggregates.fingerprint_matches`: file names and
+  row counts), only the files whose x/y range meets the window are read;
+  otherwise every file is. Each file's range is read from its own parquet
+  footer statistics, not from the index, so a rewrite that moves rows between
+  files while keeping their row counts cannot drop transcripts from a window
+  (QC's registration windows do the same). Section bounds also come from the
+  footer statistics (a file without them is streamed); the build's recorded
+  `bounds_um` can be wider than the rows the QV filter kept.
 - **Transcript overview** (`<sample_id>_transcript_overview.png`), from one
   pass over the section and one pruned pass over the crop:
   1. density over the section in about `heatmap_bins` (400) square bins per
