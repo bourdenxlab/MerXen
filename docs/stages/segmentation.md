@@ -673,9 +673,23 @@ proseg tile.parquet xenium -x x_location -y y_location -z z_location
 - **Cells without label pixels.** A ProSeg polygon smaller than a pixel
   centre, or covered by cells drawn after it, keeps its table row, shape and
   transcripts but has no pixel in `proseg_cell_labels`. Mask-based stages
-  leave it out (image quantification has no row for it) and its control
-  counts are zero. The full public section has 9 such cells of 91,431
-  (0.25–4 µm²); the crop has 1.
+  leave it out and its control counts are zero. Image quantification has no
+  row for it and lists it in its table's `uns` and summary
+  (`shapes_without_label_pixels`, with a warning). The full public section
+  has 9 such cells of 91,431 (0.25–4 µm²); the crop has 1. Stores stitched
+  before the stitch report gained `cells_without_label_pixels` (commit
+  9b13ba3) lack it there, and the unchanged stitch fingerprint means a
+  re-run does not re-stitch them; MIQ adds the list to an existing table
+  without quantifying again.
+- **Seam polygons.** A cell that loses a seam conflict keeps its full
+  polygon, so two cells of neighbouring tiles can overlap (full section: 174
+  cross-tile pairs over 1 µm², the largest 91.5 µm²). The label raster
+  settles such pixels by ascending `instance_id` (last wins), not by the core
+  rule of the transcripts, so image quantification and the control counts
+  can give a pixel to another cell than its transcripts went to. The seam
+  conflicts behind this are 0.028% of the assigned rows (1,592 cells).
+  Pending with the user's decision on the halo claim rule (plan, AT-9
+  reviews).
 - **Idempotency.** A store that already carries the fingerprint of the same
   plan and tile manifests is not re-stitched (a `-resume` re-runs the stitch
   task, which then only stages its output). Tiles are cached by their config
@@ -701,9 +715,12 @@ grows by 29.5 GB, 25.4 GB of it the rewritten points (plan §6.2).
 
 **Outputs** (under `<outdir>/<pair>/atera/segmentation/`): `atera_proseg/plan_out/tile_plan.json`,
 `atera_proseg/tiles/tile_<id>/` (cells, claims, `tile_manifest.json`, ProSeg's
-logs, cell metadata, polygons and `proseg.zarr` table), and
-`stitch_out/` (`proseg_latest.zarr` link, `atera_proseg_report.json`, the three
-placeholders).
+logs, cell metadata, polygons and `proseg.zarr` table; copied, 2.7 GB on the
+full section, so a re-stitch does not depend on the work directory), and
+`stitch_out/` (`atera_proseg_report.json`, copied; the `proseg_latest.zarr`
+link and the three placeholders, linked like NATIVE_LATEST's). Runs before
+this layout published the tiles and the report as links into the work
+directory; cleaning it lost them, and the next run re-runs the tiles.
 
 ## Memory guardrails
 

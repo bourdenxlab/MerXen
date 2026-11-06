@@ -20,7 +20,11 @@ cases; the XENIUM and MERSCOPE cases are unchanged). AT-6 added the ATERA
 native-route cases (the ``native`` file and ATERA ids in ``enrich``,
 ``viewer_cache`` and ``analysis_layers``); again only case ids were added.
 AT-9 added the ``atera_proseg`` file (the ATERA ProSeg route) and changed the
-text of two ATERA-only error cases of ``native`` (the list of sources).
+error text of two ``native`` cases (the list of sources): the ATERA-only
+``atera_cellpose_only_error`` and the platform-independent ``unknown_error``,
+so an unknown ``segmentation_source`` on a XENIUM or MERSCOPE row now lists
+``native_proseg`` among the valid values. Only the message changes; no task
+input or hash does.
 
 Goldens hold the compact ``JsonOutput.toJson`` text of each case (the task input
 is its deterministic ``prettyPrint``) with the launch directory written as

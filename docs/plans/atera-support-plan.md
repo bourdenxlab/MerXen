@@ -21,7 +21,7 @@
 > `reseg` layer) runs end to end on the crop and on the full public section through MENDER on both
 > layers (full section: 30 tiles, 91,431 cells, 8 h 41 min on a busy host, every check passed), and
 > the short ProSeg schedule is confirmed on the densest tile (§6.2, §8 AT-9, Appendix A "AT-9
-> implementation and crop run" and "AT-9 full-section run").
+> implementation and crop run", "AT-9 full-section run" and "AT-9 final review").
 
 *Names and paths (2026-11-04).* The only dataset used here is the public 10x Atera whole-transcriptome
 dataset of a human hippocampus section (atera-1.1.1, fresh frozen); its name is not written here, and the
@@ -1844,7 +1844,9 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
     points (572,765,066), registry entry `proseg` (label `proseg_cell_labels`, prior
     `vendor_cell_labels`, ProSeg 3.2.0 identity), ENRICH layer check recorded, viewer pyramids of
     both layers, MIQ and clustering tables of both layers, and VISUALIZE, spatial gene analysis,
-    clustering, MENDER and QC outputs for both layers.
+    clustering, MENDER and QC outputs for both layers (QC as `atera/<layer>/qc/qc_out`, 5 files each; the
+    first version of the check looked in a folder that does not exist and is replaced by the
+    final review's re-run).
   - **ProSeg against the vendor layer (full section, `layer_compare_full.json`):** ProSeg assigns
     **40.6% of gene transcripts (vendor 45.3%)**; it absorbs 12.9% of the vendor-unassigned ones and
     releases 25.9% of the vendor-assigned ones (66.0% stay in the same cell, 8.1% move to another);
@@ -1866,7 +1868,10 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
     has 91,422 rows; the crop has 1. Found by this run and now reported by the stitch
     (`cells_without_label_pixels`, with a warning); the full-section store was stitched before
     the change and skips a re-stitch (same fingerprint), so its count comes from
-    `label_pixels_full.json`.
+    `label_pixels_full.json`. After the final review, MIQ also lists the shapes without a row
+    in its table's `uns` and summary (`shapes_without_label_pixels`, with a warning) and adds
+    the list to an older table without quantifying again; the full-section store got it that
+    way (the 9 ids, checked by `verify_full.json`).
 
 ### AT-10 optional, on request
 
@@ -2202,7 +2207,7 @@ stores through MENDER (§1.4, §6.2). Findings and changes:
 | A failed ENRICH's partial cleanup would delete `table_MOSAIK_proseg`, which ENRICH cannot rebuild | Tables of registry branches with a `prior` are never derived tables |
 | ATERA refused to draw any mask that is not a vendor label element | A registry branch with a `label` element is backed by it (`MOSAIK_proseg` -> `proseg_cell_labels`) |
 | `sanity_plots._crop_points` and `qc.gene_comparison` use a points `background` column whenever one exists, whatever the assignment column | Not reached on ATERA (overlays use the rasterised path with the registry column; `assigned_only` has no caller); a grep test lists every generic `assignment` pick with its reason |
-| Changed test text | The `native` golden changes the text of two ATERA-only error cases (the list of sources); the ENSURE_PROSEG trigger pin of `test_analysis_segmentation_branches.py` follows the new trigger (same value). No process script, pin or XENIUM/MERSCOPE golden value changed |
+| Changed test text | The `native` golden changes the error text of two cases (the list of sources): the ATERA-only `atera_cellpose_only_error` and the platform-independent `unknown_error`, so an unknown `segmentation_source` on a XENIUM or MERSCOPE row now also lists `native_proseg` (message only; no task input or hash changes; corrected by the final review, which found the second case is not ATERA-only; for the user's OK). The ENSURE_PROSEG trigger pin of `test_analysis_segmentation_branches.py` follows the new trigger (same value). No process script or pin changed |
 | The Xenium parquet layout turns on ProSeg's nuclear compartment model, untested at the full schedule | Crop and dense tile agree with the CSV benchmark (above); kept on, `atera_proseg_nuclear_compartment=false` is the fallback |
 | `-resume` | No tile re-runs (their inputs are values); the stitch task re-runs and skips by fingerprint; ENRICH and its layer check skip |
 
@@ -2225,7 +2230,7 @@ convention, the parquet layout, the filtering or the layer registration. Finding
 | Surviving mutants: claims naming points files the store lacks, two tiles owning one label, two ProSeg cells of one label, the export QV filter, the float-rounding correction of the core index, the prior-weight multiplier (killed only by the real-ProSeg test) | One test each (the multiplier on a synthetic store with more than 100 transcripts per cell); all seven mutants are now killed |
 | The `nextflow.config` comment gave the dense tile's peak as 21.7 GB | 24.2 GB (16 threads) and 25 GB (32 threads) against the 32 GB reservation; the watchdog cap (40 GB) sits above the reservation, so an executor that enforces memory kills first and the retry gets 64 GB |
 | A failed tile keeps its inputs in the work folder (1–2 GB of parquet, up to 430 MB of prior) | Kept: they are what a failure is diagnosed from; finished tiles drop them unless `atera_proseg_keep_tile_inputs` |
-| A halo tile's claim on a transcript beats the core tile's background; the core rule settles only two claims | As designed: in effect the tile that owns the cell decides, which is the requirement "transcripts assigned in halos resolved by the owning tile". For the user to confirm |
+| A halo tile's claim on a transcript beats the core tile's background; the core rule settles only two claims | As designed: in effect the tile that owns the cell decides, which is the requirement "transcripts assigned in halos resolved by the owning tile". For the user to confirm, together with the seam polygons of cells that lose a conflict (AT-9 final review) |
 | The effective prior weight is 140 on every tile; ProSeg's automatic weight follows local density (about 113 and 152 on the two crop tiles) | Open question for the user with Q1–Q8 of the design. Crop and dense tile agree with the benchmark; sparse tiles get a stronger prior than the benchmark's automatic one |
 | A `-resume` re-runs 8 tasks (the stitch, ENRICH, VIEWER_CACHE, MIQ, both layer validations, both QC); QC recomputes in full | Recorded with AT-6's ENRICH `-resume` finding for the AT-7 restart work; the full-section stitch (30 tiles, a 42,548 x 61,369 raster) has not run yet |
 | Changed test text missing from the implementation entry above | The golden harness span signatures gained `rowSource = null`; the process-pin count went from 44 to 47 (three new pins, none changed); the rule that a default keeping no layer resolves to every layer also applies to `cellpose_only`, which no platform allows today. All need the user's OK |
@@ -2244,6 +2249,20 @@ changes:
 | Tile phase 7 h 26 min on a host at load up to 345, with 4 tiles at once and the schedule check beside them; the largest pending tile started last | Concurrency default kept (4). Largest-first ordering is a possible improvement; Nextflow's release order under `maxForks` is not the emission order |
 | The ProSeg route adds 29.5 GB to the latest store (25.4 GB of rewritten points) against 2.6 GB for the native route | As designed (the points carry the second assignment column); recorded in §6.2 |
 | ProSeg cells carry fewer counts (median 4,323 against 4,812); clustering QC drops 2,471 ProSeg cells against 50 vendor cells | Recorded; follows from the 25.9% release and the 806 empty cells. No threshold change |
+
+**AT-9 final review (2026-11-06).** An independent check of the full-section outputs against
+the report (source store, trace, tiles, table, shapes, points, labels, downstream, clustering
+numbers, AT-1 guards) found no blocking problem. Findings and changes:
+
+| Finding | Change or decision |
+|---|---|
+| The label-pixel fix does not reach the existing store (the stitch format version and fingerprint are unchanged), and MIQ of the ProSeg layer left out the 9 cells without a label pixel without saying so | MIQ of an extra layer lists the shapes it has no row for in its table's `uns` and summary (`shapes_without_label_pixels`, `n_shapes_without_label_pixels`) and warns; a table without the field gets it on the next run without quantifying again. Tests with a blanked label and an older table. The full-section store was updated that way; the docs say stores stitched before the report field lack it there |
+| A cell that loses a seam conflict keeps its full polygon: 174 cross-tile polygon pairs overlap by more than 1 µm² (48 by more than 10 µm², at most 91.5 µm²); the label raster settles their pixels by ascending id, not by the transcripts' core rule, so MIQ and control counts can give a pixel to another cell than its transcripts | Added to the pending "halo tile claim vs owning tile" decision (AT-9 reviews). Options: clip the losing polygon, or rasterise cross-tile overlap pixels by the core rule. Scale: the 160,659 conflicts are 0.028% of the assigned rows (1,592 cells). Documented in the segmentation stage doc |
+| `verify_full.json` never checked QC (it looked in `atera/qc`), but §8 cites it for QC outputs of both layers | The check looks in `atera/<layer>/qc/qc_out` (5 files per layer) and also checks the MIQ field above; re-run (`verify_full.json`, previous result kept as `verify_full_v2.json`) |
+| The evidence `manifests/full_tile_plan.json` was the dense-tile check's plan (`tile_subset: ["c2_r1"]`) | Renamed `dense_tile_plan.json`; `full_tile_plan.json` is now the full run's published plan |
+| The `native` golden's `unknown_error` case is not ATERA-only, so XENIUM/MERSCOPE rows see the new error text | Docstring and the AT-9 entry above corrected; listed for the user (message only, no hash change) |
+| The tiles (2.7 GB) and the stitch report were published as links into the work directory; cleaning it would lose what a re-stitch needs | Tiles and the report are published by copy (publishDir only: no script pin or task hash changes); the store link and placeholders stay links. The full run's published tiles and report were materialised the same way |
+| Tiles do not start largest-first (`c2_r2` started last and set the end of the tile phase) | Already recorded (AT-9 full-section run); not a defect |
 
 **AT-6 reviews (2026-11-06).** An end-to-end data review and a code review of the AT-6 branch.
 Findings and changes:

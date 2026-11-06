@@ -85,7 +85,11 @@ re-run like the main layer. `extra_layers` is empty for every other row.
 ProSeg cells with no pixel in `proseg_cell_labels` (tiny polygons or polygons
 covered by later cells; the stitch report lists them as
 `cells_without_label_pixels`) have no row in that table: 9 of 91,431 on the
-full public section.
+full public section. The stage lists their `instance_id` in the table's
+`uns["mask_image_quantification"]["shapes_without_label_pixels"]` and in the
+summary (with `n_shapes_without_label_pixels`) and logs a warning. A table
+written before the field existed gets it on the next run without the images
+being quantified again.
 
 On the public full section (91,431 cells, 4-channel 42,548 × 61,369 image) the
 task takes about 3 min at 9.6 GB peak memory (AT-6 exit run), far under the
