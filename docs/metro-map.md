@@ -241,7 +241,7 @@ way against nf-metro 1.1.0:
 - `--x-spacing` and `--font-scale` are not independent, and the intuitive move
   is the wrong one: **widening the spacing makes the on-screen text smaller**,
   because the figure grows faster than the type does. The narrowest wrap-free
-  configuration wins. At the current labels that is `--x-spacing 90
+  configuration wins. At the current labels that is `--x-spacing 88
   --font-scale 1.4`; raising the font further hyphenates `Cellpose-SAM cells`.
   Sweep both together and check `test_station_labels_are_not_wrapped` rather
   than nudging one value.
