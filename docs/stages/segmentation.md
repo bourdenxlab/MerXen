@@ -667,8 +667,15 @@ proseg tile.parquet xenium -x x_location -y y_location -z z_location
   the stitch counts (cells, zero-transcript cells, vendor labels without a
   ProSeg cell and owned cells without a polygon, both listed and warned
   about since their transcripts become background, assigned and foreground
-  rows, conflicts, and polygon overlap pixels within one tile and across
-  tiles). A compact copy is in the table's `uns`.
+  rows, conflicts, polygon overlap pixels within one tile and across
+  tiles, and the cells left with no pixel in `proseg_cell_labels`, listed
+  and warned about). A compact copy is in the table's `uns`.
+- **Cells without label pixels.** A ProSeg polygon smaller than a pixel
+  centre, or covered by cells drawn after it, keeps its table row, shape and
+  transcripts but has no pixel in `proseg_cell_labels`. Mask-based stages
+  leave it out (image quantification has no row for it) and its control
+  counts are zero. The full public section has 9 such cells of 91,431
+  (0.25–4 µm²); the crop has 1.
 - **Idempotency.** A store that already carries the fingerprint of the same
   plan and tile manifests is not re-stitched (a `-resume` re-runs the stitch
   task, which then only stages its output). Tiles are cached by their config

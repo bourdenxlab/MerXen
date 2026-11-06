@@ -350,10 +350,16 @@ class RasterOverlap:
         total: Every such pixel.
         cross_group: Those whose two polygons belong to different groups
             (cells of two tiles: an overlap across a tile seam).
+        pixel_counts: Pixels each geometry holds once every polygon is drawn
+            (input order). Zero for a polygon that holds no pixel centre or
+            whose pixels later polygons took: such a cell has no pixel in the
+            label raster, so mask-based stages (image quantification) cannot
+            see it.
     """
 
     total: int = 0
     cross_group: int = 0
+    pixel_counts: np.ndarray = field(default_factory=lambda: np.zeros(0, np.int64))
 
     @property
     def within_group(self) -> int:
@@ -401,6 +407,7 @@ def rasterise_cells(
         else np.asarray(groups, dtype=np.int64)
     )
     sorted_groups = group_of[order]
+    sorted_counts = np.zeros(ids.size, dtype=np.int64)
     for geometry, label, group in zip(geometries, ids, group_of, strict=True):
         if geometry is None or geometry.is_empty:
             continue
@@ -430,7 +437,15 @@ def rasterise_cells(
             previous = window[taken].astype(np.uint64)
             position = np.searchsorted(sorted_ids, previous)
             overlap.cross_group += int((sorted_groups[position] != group).sum())
+            lost, n_lost = np.unique(position, return_counts=True)
+            sorted_counts[lost] -= n_lost
+        sorted_counts[np.searchsorted(sorted_ids, label)] += int(
+            (local & (window != label)).sum()
+        )
         window[local] = np.uint32(label)
+    counts = np.zeros(ids.size, dtype=np.int64)
+    counts[order] = sorted_counts
+    overlap.pixel_counts = counts
     return overlap
 
 
@@ -867,6 +882,19 @@ def _stitch_into(
         overlap.total,
         overlap.cross_group,
     )
+    without_pixels = sorted(int(v) for v in instance_ids[overlap.pixel_counts == 0])
+    if without_pixels:
+        # Tiny polygons or polygons covered by later cells: they keep their
+        # table row and transcripts but have no pixel in the label raster, so
+        # mask-based stages (image quantification) and the control
+        # attribution do not see them.
+        logger.warning(
+            "[%s] %d ProSeg cells have no pixel in %s (tiny or covered by "
+            "other cells); mask-based stages leave them out",
+            cfg.dataset_name,
+            len(without_pixels),
+            PROSEG_LABEL_KEY,
+        )
 
     # Points: rewrite every file with the resolved assignment.
     directory = points_parquet_dir(latest, POINTS_KEY)
@@ -998,6 +1026,8 @@ def _stitch_into(
         "cells_losing_most_conflicts": [
             [int(cell), int(count)] for cell, count in losing.most_common(20)
         ],
+        "n_cells_without_label_pixels": len(without_pixels),
+        "cells_without_label_pixels": without_pixels,
         "overlap_pixels_within_tile": int(overlap.within_group),
         "overlap_pixels_across_tiles": int(overlap.cross_group),
         "owned_cells_near_interior_window_edge": int(

@@ -141,6 +141,32 @@ def test_rasterise_uses_pixel_centres_and_last_wins() -> None:
     assert out[0, 0] == 1 and out[2, 2] == 2 and out[4, 4] == 2
     assert out[5, 5] == 0 and out[0, 4] == 0
     assert overlap.total == 1 and overlap.cross_group == 0
+    assert overlap.pixel_counts.tolist() == [8, 9]
+    for label, count in zip([1, 2], overlap.pixel_counts, strict=True):
+        assert int((out == label).sum()) == count
+
+
+def test_rasterise_counts_cells_left_without_pixels() -> None:
+    from shapely.geometry import box
+
+    out = np.zeros((6, 6), dtype=np.uint32)
+    # Label 7 (drawn first) is covered by label 3; label 5 holds no pixel
+    # centre; label 9 lies outside the grid. Counts follow the input order.
+    overlap = rasterise_cells(
+        [
+            box(1.0, 1.0, 2.0, 2.0),
+            box(0.0, 0.0, 4.0, 4.0),
+            box(4.6, 4.6, 4.9, 4.9),
+            box(10.0, 10.0, 12.0, 12.0),
+        ],
+        np.asarray([7, 3, 5, 9]),
+        (6, 6),
+        1.0,
+        out,
+    )
+    assert overlap.pixel_counts.tolist() == [0, 16, 0, 0]
+    assert int((out == 3).sum()) == 16
+    assert overlap.total == 1
 
 
 def test_rasterise_splits_overlap_within_and_across_groups() -> None:
@@ -160,6 +186,8 @@ def test_rasterise_splits_overlap_within_and_across_groups() -> None:
     assert overlap.total == 2
     assert overlap.cross_group == 1
     assert overlap.within_group == 1
+    for label, count in zip([1, 3, 2], overlap.pixel_counts, strict=True):
+        assert int((out == label).sum()) == count
 
 
 # --------------------------------------------------------------------------- #
@@ -267,8 +295,10 @@ def test_identity_stitch_reproduces_the_vendor_counts(
         "n_owned_cells_without_polygon",
         "overlap_pixels_within_tile",
         "overlap_pixels_across_tiles",
+        "n_cells_without_label_pixels",
     ):
         assert report[key] == 0, key
+    assert report["cells_without_label_pixels"] == []
     assert report["deleted_derived_tables"] == []
     assert not (tmp_path / "out" / "scratch").exists()
     assert (

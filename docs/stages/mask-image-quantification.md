@@ -82,6 +82,10 @@ same task (one writer per store): the config lists them in `extra_layers`
 its own table (region `MOSAIK_proseg`) and its own sidecar files
 (`<dataset>_mosaik_proseg_mask_image_quantification.*`), and is skipped on a
 re-run like the main layer. `extra_layers` is empty for every other row.
+ProSeg cells with no pixel in `proseg_cell_labels` (tiny polygons or polygons
+covered by later cells; the stitch report lists them as
+`cells_without_label_pixels`) have no row in that table: 9 of 91,431 on the
+full public section.
 
 On the public full section (91,431 cells, 4-channel 42,548 × 61,369 image) the
 task takes about 3 min at 9.6 GB peak memory (AT-6 exit run), far under the
