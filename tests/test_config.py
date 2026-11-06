@@ -8,9 +8,17 @@ import pytest
 from pydantic import ValidationError
 
 from merxen.config import (
+    ClusteringSquidpySampleConfig,
+    EnrichmentConfig,
+    MaskImageQuantificationConfig,
+    MenderConfig,
     MerscopeBeadRemovalConfig,
     MerscopeBuildConfig,
+    NativeLatestConfig,
     SpatialDataBuildConfig,
+    SpatialGeneAnalysisSampleConfig,
+    ViewerCacheConfig,
+    VisualizationSampleConfig,
 )
 
 
@@ -238,3 +246,193 @@ def test_spatialdata_build_config_refuses_a_fill_mode_without_the_fill(
 
     with pytest.raises(ValidationError, match="requires fill=True"):
         SpatialDataBuildConfig.model_validate(raw)
+
+
+# --------------------------------------------------------------------------- #
+# AT-6: native (vendor-mask) segmentation route
+# --------------------------------------------------------------------------- #
+
+
+def _enrich(**overrides: object) -> EnrichmentConfig:
+    values: dict[str, object] = {
+        "dataset_name": "PAIR_A_XENIUM",
+        "platform": "XENIUM",
+        "latest_zarr_path": "latest_input.zarr",
+        "mask_path": "enrich_input_mask.npy",
+        "nuclei_mask_path": "enrich_input_nuclei_mask.npy",
+        "original_data_path": "source.zarr",
+        "output_dir": "enrich_out",
+    }
+    values.update(overrides)
+    return EnrichmentConfig.model_validate(values)
+
+
+def test_enrichment_defaults_keep_the_cellpose_route() -> None:
+    """A XENIUM/MERSCOPE enrich JSON without the new keys validates as before."""
+    config = _enrich()
+    assert config.segmentation_source == "cellpose_proseg"
+    assert config.native_label_check is True
+    assert config.mask_path == Path("enrich_input_mask.npy")
+
+
+def test_native_enrichment_takes_no_masks() -> None:
+    config = _enrich(
+        dataset_name="PAIR_A_ATERA",
+        platform="ATERA",
+        segmentation_source="native",
+        mask_path=None,
+        nuclei_mask_path=None,
+    )
+    assert config.mask_path is None and config.nuclei_mask_path is None
+
+
+@pytest.mark.parametrize("missing", ["mask_path", "nuclei_mask_path"])
+def test_cellpose_enrichment_needs_both_masks(missing: str) -> None:
+    with pytest.raises(ValidationError, match=f"{missing} required"):
+        _enrich(**{missing: None})
+
+
+def test_native_enrichment_is_atera_only() -> None:
+    with pytest.raises(ValidationError, match="ATERA rows only"):
+        _enrich(segmentation_source="native", mask_path=None, nuclei_mask_path=None)
+
+
+def test_enrichment_refuses_an_unknown_segmentation_source() -> None:
+    with pytest.raises(ValidationError):
+        _enrich(segmentation_source="vendor")
+
+
+def test_viewer_cache_base_image_key_defaults_to_none() -> None:
+    values = {
+        "dataset_name": "PAIR_A_ATERA",
+        "platform": "ATERA",
+        "latest_zarr_path": "latest_input.zarr",
+        "original_data_path": "latest_input.zarr",
+        "output_dir": "viewer_cache_out",
+    }
+    assert ViewerCacheConfig.model_validate(values).base_image_key is None
+    config = ViewerCacheConfig.model_validate(
+        {**values, "base_image_key": "morphology_focus"}
+    )
+    assert config.base_image_key == "morphology_focus"
+
+
+def _quant(**overrides: object) -> MaskImageQuantificationConfig:
+    values: dict[str, object] = {
+        "dataset_name": "PAIR_A_XENIUM",
+        "platform": "XENIUM",
+        "latest_zarr_path": "latest_input.zarr",
+        "mask_path": "mask_image_quantification_input_mask.npy",
+        "output_dir": "mask_image_quantification_out",
+    }
+    values.update(overrides)
+    return MaskImageQuantificationConfig.model_validate(values)
+
+
+def test_mask_quantification_defaults_are_unchanged() -> None:
+    config = _quant()
+    assert config.mask_label_key is None
+    assert config.shape_key == "MOSAIK_cellpose"
+    assert config.table_key == "table_MOSAIK_cellpose_image_quantification"
+
+
+def test_mask_quantification_reads_a_label_element() -> None:
+    config = _quant(
+        platform="ATERA",
+        mask_path=None,
+        mask_label_key="cell_labels",
+        shape_key="atera_cell_boundaries",
+        table_key="table_atera_cell_boundaries_image_quantification",
+    )
+    assert config.mask_label_key == "cell_labels"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"mask_path": None}, {"mask_label_key": "cell_labels"}],
+    ids=["neither", "both"],
+)
+def test_mask_quantification_needs_exactly_one_mask(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError, match="exactly one"):
+        _quant(**overrides)
+
+
+def test_clustering_sample_defaults_keep_the_panel_check() -> None:
+    sample = ClusteringSquidpySampleConfig.model_validate(
+        {"sample_id": "PAIR_A_XENIUM", "platform": "XENIUM", "zarr_path": "x.zarr"}
+    )
+    assert sample.expected_panel_gene_count == 300
+    assert sample.hvg_n_top_genes is None
+    atera = ClusteringSquidpySampleConfig.model_validate(
+        {
+            "sample_id": "PAIR_A_ATERA",
+            "platform": "ATERA",
+            "zarr_path": "x.zarr",
+            "expected_panel_gene_count": None,
+            "hvg_n_top_genes": 2000,
+        }
+    )
+    assert atera.expected_panel_gene_count is None
+    assert atera.hvg_n_top_genes == 2000
+
+
+@pytest.mark.parametrize(
+    "model",
+    [VisualizationSampleConfig, SpatialGeneAnalysisSampleConfig],
+)
+def test_native_route_sample_models_take_atera(model: type) -> None:
+    sample = model.model_validate(
+        {"sample_id": "PAIR_A_ATERA", "platform": "ATERA", "zarr_path": "x.zarr"}
+    )
+    assert sample.platform == "ATERA"
+
+
+def test_mender_takes_atera() -> None:
+    config = MenderConfig.model_validate(
+        {
+            "pair_id": "PAIR_A",
+            "sample_id": "PAIR_A_ATERA",
+            "platform": "ATERA",
+            "segmentation": "original_seg",
+            "source_h5ad": "clustered.h5ad",
+            "spatialdata_path": "latest.zarr",
+            "source_spatialdata_table": "table_original_clustering_squidpy",
+            "native_shape_key": "atera_cell_boundaries",
+            "output_dir": "mender_out",
+        }
+    )
+    assert config.platform == "ATERA"
+
+
+def test_native_latest_config_defaults() -> None:
+    config = NativeLatestConfig.model_validate(
+        {
+            "dataset_name": "PAIR_A_ATERA",
+            "platform": "ATERA",
+            "source_zarr_path": "native_source.zarr",
+            "output_dir": "native_out",
+            "persistent_latest_zarr_path": "results/latest_spatialdata.zarr",
+        }
+    )
+    assert config.link_mode == "hardlink"
+    assert config.readonly_payloads is True
+    assert config.force is False
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"platform": "XENIUM"}, {"link_mode": "symlink"}],
+    ids=["xenium", "symlink"],
+)
+def test_native_latest_config_refuses(overrides: dict[str, object]) -> None:
+    values: dict[str, object] = {
+        "dataset_name": "PAIR_A_ATERA",
+        "platform": "ATERA",
+        "source_zarr_path": "native_source.zarr",
+        "output_dir": "native_out",
+        "persistent_latest_zarr_path": "results/latest_spatialdata.zarr",
+    }
+    with pytest.raises(ValidationError):
+        NativeLatestConfig.model_validate({**values, **overrides})

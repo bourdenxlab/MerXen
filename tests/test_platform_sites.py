@@ -138,6 +138,10 @@ REASONS: dict[str, dict[str, str]] = {
         ),
         "src/merxen/io/builders/xenium.py": "Xenium reader option",
         "src/merxen/masks.py": "ordered mask-branch discovery list (AT-6)",
+        "src/merxen/segmentation/native.py": (
+            "NATIVE_LATEST renames the source nucleus shapes to the registry's "
+            "atera_nucleus; the source name must not reach the latest store (AT-6)"
+        ),
         "src/merxen/segmentation/pipeline.py": "Xenium reader option",
     },
     "nucleus_joins": {
@@ -319,6 +323,10 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         ),
         "src/merxen/masks.py": (
             '("original_nucleus", "xenium_nucleus", ("nucleus_boundaries",)),',
+        ),
+        "src/merxen/segmentation/native.py": (
+            '("shapes", "nucleus_boundaries"): ("shapes", NATIVE_NUCLEUS_SHAPES_KEY),',
+            "``cell_boundaries`` -> ``atera_cell_boundaries``, ``nucleus_boundaries`` ->",  # noqa: E501
         ),
         "src/merxen/segmentation/pipeline.py": ("nucleus_boundaries=False,",),
     },

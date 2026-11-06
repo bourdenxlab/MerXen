@@ -135,9 +135,9 @@ def test_main_nf_defines_no_process() -> None:
 
 
 def test_pinned_inventory(pinned: dict[str, str]) -> None:
-    """Today's inventory: 43 processes, 43 ``script:`` and 7 ``stub:`` sections."""
+    """Today's inventory: 44 processes, 44 ``script:`` and 7 ``stub:`` sections."""
     labels = [key.rsplit("::", 1)[1] for key in pinned]
-    assert labels.count("script") == 43
+    assert labels.count("script") == 44
     assert labels.count("stub") == 7
     assert {key for key in pinned if key.endswith("::stub")} == {
         f"workflows/modules/pciseq.nf::{name}::stub"

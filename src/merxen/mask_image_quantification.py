@@ -172,6 +172,11 @@ def run_mask_image_quantification(
     force_rerun: bool = False,
 ) -> dict[str, Path]:
     """Read a SpatialData zarr, quantify image channels, and persist outputs."""
+    if config.mask_path is None:
+        raise NotImplementedError(
+            f"label-backed masks (mask_label_key={config.mask_label_key!r}) land "
+            "in AT-6 WP-B"
+        )
     latest_path = Path(config.latest_zarr_path)
     mask_path = Path(config.mask_path)
     output_dir = Path(config.output_dir)

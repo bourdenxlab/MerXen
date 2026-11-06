@@ -34,6 +34,8 @@ _PYTHON_FIELDS = (
     "original_cell_shape_key",
     "original_nucleus_shape_key",
     "default_channels",
+    "segmentation_sources",
+    "default_segmentation_source",
 )
 # Samplesheet fields of each platform, as main.nf read them before the registry.
 _SAMPLESHEET_FIELDS: dict[str, dict[str, list[str]]] = {
@@ -138,6 +140,7 @@ def test_groovy_registry_matches_python(groovy_output: dict[str, Any]) -> None:
     for name, spec in PLATFORM_SPECS.items():
         python = dataclasses.asdict(spec)
         python["default_channels"] = list(spec.default_channels)
+        python["segmentation_sources"] = list(spec.segmentation_sources)
         shared = {field: groovy[name][field] for field in _PYTHON_FIELDS}
         assert shared == {field: python[field] for field in _PYTHON_FIELDS}, name
 

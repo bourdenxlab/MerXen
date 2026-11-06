@@ -36,7 +36,7 @@
 %% map still parses in greyscale.
 %%metro line: merscope | MERSCOPE (Vizgen) | #8350FF
 %%metro line: xenium | Xenium (10x) | #17BCAC
-%%metro line: atera | Atera (10x, build only) | #C8385A
+%%metro line: atera | Atera (10x, vendor cells) | #C8385A
 %%metro line: paired | Paired-section analysis | #3980BE
 %%metro line: optional | Toggleable stages | #EE7733 | dashed
 
@@ -53,7 +53,7 @@
 
 graph LR
     subgraph ingest [Ingest and build]
-        %%metro exit: right | merscope, xenium
+        %%metro exit: right | merscope, xenium, atera
         merscope_in[ ]
         xenium_in[ ]
         atera_in[ ]
@@ -65,12 +65,13 @@ graph LR
     end
 
     subgraph segmentation [Segmentation]
-        %%metro entry: left | merscope, xenium
-        %%metro exit: right | merscope, xenium, optional
+        %%metro entry: left | merscope, xenium, atera
+        %%metro exit: right | merscope, xenium, optional, atera
         cellpose_nuclei_segment[Cellpose nuclei]
         cellpose_segment[Cellpose-SAM cells]
         proseg_segment[ProSeg refine]
         proseg_hybrid[ProSeg hybrid]
+        native_latest[Vendor masks]
 
         cellpose_nuclei_segment -->|merscope,xenium| cellpose_segment
         cellpose_segment -->|merscope,xenium| proseg_segment
@@ -78,18 +79,18 @@ graph LR
     end
 
     subgraph tables [Enrichment and QC]
-        %%metro entry: left | merscope, xenium, optional
-        %%metro exit: bottom | merscope, xenium
+        %%metro entry: left | merscope, xenium, optional, atera
+        %%metro exit: bottom | merscope, xenium, atera
         %%metro exit: right | optional
         enrich[Enrich]
         register_images[Register images]
         mask_image_quantification[Mask image quant.]
         qc[QC]
 
-        enrich -->|merscope,xenium| mask_image_quantification
+        enrich -->|merscope,xenium,atera| mask_image_quantification
         enrich -->|optional| register_images
         register_images -->|optional| mask_image_quantification
-        mask_image_quantification -->|merscope,xenium,optional| qc
+        mask_image_quantification -->|merscope,xenium,atera,optional| qc
     end
 
     subgraph coexpression [MECR rates]
@@ -117,7 +118,7 @@ graph LR
 
     subgraph comparative [Comparative analysis]
         %%metro direction: RL
-        %%metro entry: right | paired
+        %%metro entry: right | paired, atera
         %%metro exit: left | optional
         compare[Compare]
         compare_out[ ]
@@ -126,8 +127,8 @@ graph LR
         clustering_squidpy[Clustering]
 
         compare -->|paired| compare_out
-        visualize -->|paired| spatial_gene_analysis
-        spatial_gene_analysis -->|paired,optional| clustering_squidpy
+        visualize -->|paired,atera| spatial_gene_analysis
+        spatial_gene_analysis -->|paired,atera,optional| clustering_squidpy
     end
 
     subgraph annotation [Annotation and DE]
@@ -147,10 +148,13 @@ graph LR
 
     %% Inter-section edges
     build_spatialdata -->|merscope,xenium| cellpose_nuclei_segment
+    build_spatialdata -->|atera| native_latest
+    native_latest -->|atera| enrich
     proseg_segment -->|merscope,xenium| enrich
     proseg_hybrid -->|optional| enrich
     qc -->|optional| mecr_reference
     qc -->|merscope,xenium| align
+    qc -->|atera| visualize
     align_qc -->|paired| compare
     align_qc -->|paired| visualize
     clustering_squidpy -->|optional| compute_cortical_depth

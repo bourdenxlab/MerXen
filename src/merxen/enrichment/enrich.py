@@ -48,7 +48,12 @@ from merxen.io.spatialdata_schema import (
 from merxen.masks import register_missing_mask_branches
 from merxen.memory import force_release, log_status
 from merxen.path_utils import remove_path, stage_existing_output
-from merxen.platforms import find_um_per_px, platform_spec, spec_file_pixel_size
+from merxen.platforms import (
+    find_platform_spec,
+    find_um_per_px,
+    platform_spec,
+    spec_file_pixel_size,
+)
 from merxen.segmentation.cellpose import build_cellpose_affine_to_microns
 from merxen.segmentation.mask_geometry import masks_to_labeled_polygons
 from merxen.segmentation.model_identity import (
@@ -322,6 +327,19 @@ def _find_xenium_pixel_size(config: EnrichmentConfig | _TransformInputs) -> floa
     An explicit ``transform_path`` (a micron->pixel matrix or a spec file) comes
     first; then the platform's spec sidecars (``find_um_per_px``).
     """
+    return _find_10x_pixel_size(config, "XENIUM")
+
+
+def _find_10x_pixel_size(
+    config: EnrichmentConfig | _TransformInputs, platform: str
+) -> float:
+    """Find the micron-per-pixel value of a 10x-family platform.
+
+    An explicit ``transform_path`` (a micron->pixel matrix or a spec file) comes
+    first; then the platform's spec sidecars under ``original_data_path``
+    (``find_um_per_px``: ``experiment.xenium`` for XENIUM, the
+    ``atera/experiment*.spatial`` sidecars of a built store for ATERA).
+    """
     if config.transform_path is not None:
         candidate = Path(config.transform_path)
         if candidate.exists():
@@ -336,10 +354,10 @@ def _find_xenium_pixel_size(config: EnrichmentConfig | _TransformInputs) -> floa
             if pixel_size is not None:
                 return pixel_size
     try:
-        return find_um_per_px(Path(config.original_data_path), "XENIUM")
+        return find_um_per_px(Path(config.original_data_path), platform)
     except FileNotFoundError:
         raise FileNotFoundError(
-            "Could not determine Xenium pixel_size from "
+            f"Could not determine {platform.title()} pixel_size from "
             "transform_path/original_data_path."
         ) from None
 
@@ -395,6 +413,26 @@ def _dataset_cellpose_transform(
 
     if platform == "XENIUM":
         mpp = _find_xenium_pixel_size(config)
+        matrix = np.array(
+            [
+                [1.0 / mpp, 0.0, 0.0],
+                [0.0, 1.0 / mpp, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=float,
+        )
+        return build_cellpose_affine_to_microns(
+            matrix,
+            scale_factor=1.0,
+            x0=0.0,
+            y0=0.0,
+        )
+
+    # Other 10x-family platforms (ATERA): the pixel size of the spec sidecars
+    # the build copied into the store, with transform_path still first.
+    spec = find_platform_spec(platform)
+    if spec is not None and spec.family == "10X":
+        mpp = _find_10x_pixel_size(config, spec.name)
         matrix = np.array(
             [
                 [1.0 / mpp, 0.0, 0.0],
@@ -810,6 +848,10 @@ def _record_mask_model_identities(dst: Any, config: EnrichmentConfig) -> bool:
         ("cellpose", config.mask_path),
         ("cellpose_nuclei", config.nuclei_mask_path),
     ):
+        if mask_path is None:
+            raise ValueError(
+                f"{branch} needs a Cellpose mask; native rows record no mask model"
+            )
         existing = registry.get(branch, {}).get(
             "model_identity", identities.get(branch)
         )
@@ -835,6 +877,13 @@ def _enrich_store_in_place(
     polygon_show_progress: bool,
 ) -> None:
     """Enrich the store at ``write_path``; the caller holds its write lock."""
+    if config.mask_path is None or config.nuclei_mask_path is None:
+        # The config validator allows this only for segmentation_source=native,
+        # whose enrichment lands in AT-6 WP-B.
+        raise NotImplementedError(
+            "native (vendor-mask) enrichment lands in AT-6 WP-B; this path needs "
+            "mask_path and nuclei_mask_path"
+        )
     mask_path = Path(config.mask_path)
     nuclei_mask_path = Path(config.nuclei_mask_path)
     dataset_name = str(config.dataset_name).upper()

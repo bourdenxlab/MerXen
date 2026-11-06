@@ -17,6 +17,8 @@ class PlatformSpec {
     final List<String> inputDirFields
     final List<String> spatialdataPathFields
     final List<String> transformPathFields
+    final List<String> segmentationSources
+    final String defaultSegmentationSource
 
     static final Map<String, PlatformSpec> REGISTRY = Collections.unmodifiableMap([
         MERSCOPE: new PlatformSpec(
@@ -29,6 +31,8 @@ class PlatformSpec {
             ['merscope_dir'],
             ['merscope_spatialdata_path', 'merscope_zarr_path'],
             ['merscope_transform_path'],
+            ['cellpose_proseg'],
+            'cellpose_proseg',
         ),
         XENIUM: new PlatformSpec(
             'XENIUM',
@@ -40,6 +44,8 @@ class PlatformSpec {
             ['xenium_dir'],
             ['xenium_spatialdata_path'],
             ['xenium_spec_path'],
+            ['cellpose_proseg'],
+            'cellpose_proseg',
         ),
         ATERA: new PlatformSpec(
             'ATERA',
@@ -51,6 +57,8 @@ class PlatformSpec {
             ['atera_dir'],
             ['atera_spatialdata_path'],
             ['atera_spec_path'],
+            ['native'],
+            'native',
         ),
     ] as LinkedHashMap<String, PlatformSpec>)
 
@@ -63,7 +71,9 @@ class PlatformSpec {
         List<String> defaultChannels,
         List<String> inputDirFields,
         List<String> spatialdataPathFields,
-        List<String> transformPathFields
+        List<String> transformPathFields,
+        List<String> segmentationSources,
+        String defaultSegmentationSource
     ) {
         this.name = name
         this.family = family
@@ -76,6 +86,9 @@ class PlatformSpec {
             new ArrayList<String>(spatialdataPathFields))
         this.transformPathFields = Collections.unmodifiableList(
             new ArrayList<String>(transformPathFields))
+        this.segmentationSources = Collections.unmodifiableList(
+            new ArrayList<String>(segmentationSources))
+        this.defaultSegmentationSource = defaultSegmentationSource
     }
 
     /**
@@ -113,6 +126,8 @@ class PlatformSpec {
             input_dir_fields: new ArrayList<String>(inputDirFields),
             spatialdata_path_fields: new ArrayList<String>(spatialdataPathFields),
             transform_path_fields: new ArrayList<String>(transformPathFields),
+            segmentation_sources: new ArrayList<String>(segmentationSources),
+            default_segmentation_source: defaultSegmentationSource,
         ]
     }
 }

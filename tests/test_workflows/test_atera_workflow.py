@@ -111,9 +111,39 @@ def test_preflight_checks_atera_stages_first() -> None:
     main = _main_text()
     start = main.index("def runPreflightChecks(")
     body = main[start : main.index("\n}\n", start)]
-    assert body.index("appendAteraStagePreflightChecks") < body.index(
+    assert body.index("appendAteraPreflightChecks") < body.index(
         "CellposeSettings.preflight"
     )
+
+
+def test_native_params_are_declared() -> None:
+    text = _config_text()
+    assert "    segmentation_source = null\n" in text
+    assert '    native_latest_link_mode = "hardlink"\n' in text
+    assert "    atera_clustering_hvg_n_top_genes = 2000\n" in text
+
+
+def test_native_resources_are_atera_only_closures() -> None:
+    """Directives are not hashed; XENIUM/MERSCOPE keep their former values."""
+    text = _config_text()
+    expected = {
+        "NATIVE_LATEST": ('memory = "32 GB"',),
+        "ENRICH": ("memory = { platform == 'ATERA' ? 64.GB : 300.GB }",),
+        "QC": ("memory = { platform == 'ATERA' ? 48.GB : 24.GB }",),
+        "VISUALIZE": (
+            "memory = { samples_json.toString().contains('\"ATERA\"') "
+            "? 64.GB : 32.GB }",
+        ),
+        "CLUSTERING_SQUIDPY_COMPUTE": (
+            "memory = { samples_json.toString().contains('\"ATERA\"') "
+            "? 96.GB : 32.GB }",
+        ),
+    }
+    for name, lines in expected.items():
+        start = text.index(f'withName: "{name}" {{')
+        block = text[start : text.index("withName:", start + 10)]
+        for line in lines:
+            assert line in block, (name, line)
 
 
 # --------------------------------------------------------------------------- #
@@ -164,31 +194,153 @@ def _preflight_cases(work_dir: Path, *params: str) -> dict[str, dict[str, Any]]:
     return cases
 
 
+_ATERA_FULL_STAGES = [
+    "build_spatialdata",
+    "segment",
+    "enrich",
+    "build_viewer_caches",
+    "mask_image_quantification",
+    "qc",
+    "visualize",
+    "spatial_gene_analysis",
+    "clustering_squidpy",
+]
+
+_REFUSALS = {
+    "atera/stop_mapmycells": "standalone MapMyCells is not covered for ATERA rows",
+    "atera/pciseq": "pciSeq is off for ATERA rows",
+    "atera/gaston": "GASTON is not covered for ATERA rows",
+    "atera/mecr": "MECR is off for ATERA rows until it streams its reference",
+    "atera/transcript_analysis": "transcript spatial patterns are off for ATERA rows",
+    "atera/cortical_depth": "off for non-cortical ATERA sections",
+    "atera/distance_from_object": "off for non-cortical ATERA sections",
+    "atera/alignment": "AT-10",
+    "atera/cellpose_only": (
+        "segmentation_source=cellpose_only is not available for ATERA rows yet; "
+        "ATERA supports: native"
+    ),
+    "atera/unknown_source": "Unknown segmentation_source 'magic'",
+    "atera/analysis_reseg": (
+        "analysis_segmentation=reseg for PAIR_A is not available with "
+        "segmentation_source=native"
+    ),
+    "atera/mender_hybrid": (
+        "mender_segmentations=proseg_hybrid for PAIR_A is not available with "
+        "segmentation_source=native"
+    ),
+    "atera/segment_nuclei": "keep the vendor nuclei and run no Cellpose nuclei stage",
+    "mixed/xenium_native": (
+        "segmentation_source=native is not available for XENIUM rows yet; "
+        "XENIUM supports: cellpose_proseg"
+    ),
+}
+
+
+def _clustering_reference_params(tmp_path: Path) -> list[str]:
+    """Reference files the clustering preflight checks (contents unread)."""
+    marker = tmp_path / "markers.json"
+    taxonomy = tmp_path / "cluster_annotation_term.csv"
+    marker.write_text("{}")
+    taxonomy.write_text("")
+    return [
+        "--clustering_squidpy_broad_marker_lookup_path",
+        str(marker),
+        "--clustering_squidpy_broad_taxonomy_metadata_path",
+        str(taxonomy),
+    ]
+
+
+@pytest.fixture(scope="module")
+def preflight_cases(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> dict[str, dict[str, Any]]:
+    if shutil.which("nextflow") is None:
+        pytest.skip("nextflow is unavailable")
+    root = tmp_path_factory.mktemp("atera_preflight")
+    work_dir = root / "launch"
+    work_dir.mkdir()
+    return _preflight_cases(work_dir, *_clustering_reference_params(root))
+
+
 @pytest.mark.nextflow
-@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
-def test_atera_rows_must_stop_at_the_build(tmp_path: Path) -> None:
-    cases = _preflight_cases(tmp_path)
-    for ok in ("atera/stop_build", "atera/only_build", "mixed/atera_stop_build"):
-        assert cases[ok]["result"] == "OK", cases[ok]
-        assert cases[ok]["active_platforms"] == ["ATERA"]
-        assert cases[ok]["selected_stages"] == ["build_spatialdata"]
-    for failing in (
-        "atera/no_stop_stage",
+def test_atera_rows_run_the_native_route(
+    preflight_cases: dict[str, dict[str, Any]],
+) -> None:
+    full = preflight_cases["atera/no_stop_stage"]
+    assert full["result"] == "OK", full
+    assert full["active_platforms"] == ["ATERA"]
+    assert full["segmentation_source"] == "native"
+    assert full["selected_stages"] == _ATERA_FULL_STAGES
+    assert "segment_nuclei" not in full["stage_order"]
+    assert full["run_native_segment"] is True
+    assert full["run_segment_nuclei"] is False
+    assert full["analysis_segmentations"] == ["original_seg"]
+    # MECR and the transcript patterns default off for ATERA rows.
+    assert full["run_mecr"] is False
+    assert full["transcript_analysis"] is False
+    mender = preflight_cases["atera/mender"]
+    assert mender["result"] == "OK", mender
+    assert mender["selected_stages"] == [*_ATERA_FULL_STAGES, "mender"]
+    # The global mender default (proseg_hybrid) resolves to the vendor layer.
+    assert mender["mender_segmentations"] == ["original_seg"]
+    assert (
+        "mender_segmentations proseg_hybrid resolves to original_seg "
+        "(segmentation_source=native has original_seg)"
+    ) in mender["setting_notes"]
+    assert any(
+        note.startswith("analysis_segmentation reseg, original_seg")
+        for note in full["setting_notes"]
+    )
+    for case in (
+        "atera/stop_build",
         "atera/only_segment",
-        "atera/stop_segment",
-        "mixed/atera",
+        "atera/start_enrich",
+        "atera/segmentation_source_native",
+        "atera/analysis_original",
+        "atera/analysis_all",
+        "atera/mecr_off",
     ):
-        record = cases[failing]
-        assert record.get("error_class") == "java.lang.IllegalArgumentException"
-        assert "ATERA rows run only build_spatialdata" in record["message"]
-        assert "Set stop_stage=build_spatialdata" in record["message"]
-    # The other row of a mixed samplesheet passes on its own; the workflow
-    # still aborts the run, because it checks every row before any task.
-    assert cases["mixed/xenium"]["result"] == "OK"
-    assert cases["mixed/xenium"]["active_platforms"] == ["XENIUM"]
-    assert "PAIR_C" in cases["mixed/atera"]["message"]
-    (empty,) = cases["atera/no_stage"]["errors"]
-    assert "this row selects no stage" in empty
+        record = preflight_cases[case]
+        assert record["result"] == "OK", (case, record)
+        assert record["segmentation_source"] == "native"
+        assert record["analysis_segmentations"] == ["original_seg"]
+    assert preflight_cases["atera/only_segment"]["selected_stages"] == ["segment"]
+    assert preflight_cases["atera/start_enrich"]["selected_stages"] == ["enrich"]
+
+
+@pytest.mark.nextflow
+@pytest.mark.parametrize("case", sorted(_REFUSALS))
+def test_atera_refusals(preflight_cases: dict[str, dict[str, Any]], case: str) -> None:
+    record = preflight_cases[case]
+    assert record.get("error_class") == "java.lang.IllegalArgumentException", record
+    assert _REFUSALS[case] in record["message"], record["message"]
+
+
+@pytest.mark.nextflow
+def test_mixed_samplesheet_keeps_the_xenium_route(
+    preflight_cases: dict[str, dict[str, Any]],
+) -> None:
+    for case in ("mixed/xenium", "mixed/xenium_enrich"):
+        record = preflight_cases[case]
+        assert record["result"] == "OK", record
+        assert record["active_platforms"] == ["XENIUM"]
+        assert record["segmentation_source"] == "cellpose_proseg"
+        assert record["setting_notes"] == []
+        assert record["analysis_segmentations"] == [
+            "reseg",
+            "original_seg",
+            "proseg_mask",
+            "proseg_hybrid",
+        ]
+    assert preflight_cases["mixed/xenium_enrich"]["selected_stages"] == [
+        "build_spatialdata",
+        "segment_nuclei",
+        "segment",
+        "enrich",
+    ]
+    assert preflight_cases["mixed/atera"]["result"] == "OK"
+    (empty,) = preflight_cases["atera/no_stage"]["errors"]
+    assert "selects no stage" in empty
 
 
 @pytest.mark.nextflow
@@ -196,7 +348,26 @@ def test_atera_rows_must_stop_at_the_build(tmp_path: Path) -> None:
 def test_a_global_build_only_stop_also_passes(tmp_path: Path) -> None:
     cases = _preflight_cases(tmp_path, "--stop_stage", "build_spatialdata")
     assert cases["atera/no_stop_stage"]["result"] == "OK"
+    assert cases["atera/no_stop_stage"]["selected_stages"] == ["build_spatialdata"]
     assert cases["mixed/atera"]["result"] == "OK"
+
+
+@pytest.mark.nextflow
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
+def test_global_mecr_and_transcripts_are_ignored_for_atera(tmp_path: Path) -> None:
+    cases = _preflight_cases(
+        tmp_path,
+        "--stop_stage",
+        "enrich",
+        "--mecr_enabled",
+        "true",
+        "--spatial_gene_analysis_transcript_analysis_enabled",
+        "true",
+    )
+    record = cases["atera/no_stop_stage"]
+    assert record["result"] == "OK", record
+    assert record["run_mecr"] is False and record["transcript_analysis"] is False
+    assert "mecr" not in record["stage_order"]
 
 
 # --------------------------------------------------------------------------- #

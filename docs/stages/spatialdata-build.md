@@ -621,9 +621,10 @@ re-quantified. Tables of uncorrected samples are unchanged.
 
 10x Atera is a near-whole-transcriptome platform (18,049 genes; about 1.6
 billion transcripts per section). MerXen builds one ROI per samplesheet row
-with `analysis_mode=atera`; until the native segmentation route lands (plan
-AT-6) an ATERA row runs **only** `build_spatialdata`, and preflight stops the
-run unless the row sets `stop_stage=build_spatialdata`. The format, decisions
+with `analysis_mode=atera`. After the build, an ATERA row runs the native
+segmentation route (plan AT-6): the vendor segmentation becomes the latest
+store and no Cellpose or ProSeg task runs (see
+[ATERA rows](../configuration.md#atera-rows)). The format, decisions
 and their evidence are in the
 [Atera support plan](../plans/atera-support-plan.md).
 

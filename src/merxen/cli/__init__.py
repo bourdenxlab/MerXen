@@ -40,6 +40,7 @@ from merxen.cli.run_mask_image_quantification import (
     mask_image_quantification_command,
 )
 from merxen.cli.run_mecr import mecr_command, mecr_reference_command
+from merxen.cli.run_native_latest import native_latest_command
 from merxen.cli.run_pciseq import pciseq_command, publish_pciseq_viewer_command
 from merxen.cli.run_pciseq_reference import prepare_pciseq_reference_command
 from merxen.cli.run_qc import qc_command
@@ -71,6 +72,7 @@ main.add_command(segment_command)
 main.add_command(cellpose_segment_command)
 main.add_command(cellpose_nuclei_segment_command)
 main.add_command(proseg_segment_command)
+main.add_command(native_latest_command)
 main.add_command(enrich_command)
 main.add_command(register_images_command)
 main.add_command(build_viewer_caches_command)

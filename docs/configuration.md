@@ -111,8 +111,10 @@ to `none` or `/dev/null` on purpose:
 |-------|---------|-------------|
 | `outdir` | `./results` | Output root. |
 | `species` | `human` | Dataset species for the whole invocation: `human` or `mouse`. Controls reference-backed defaults; mixed-species samplesheets are not supported. |
-| `analysis_mode` | `paired` | Fallback row mode: `paired`, `merscope`, `xenium` or `atera` (alias `a`; build only for now). A non-empty samplesheet `analysis_mode` value overrides this per row. |
+| `analysis_mode` | `paired` | Fallback row mode: `paired`, `merscope`, `xenium` or `atera` (alias `a`; the native segmentation route, see [ATERA rows](#atera-rows)). A non-empty samplesheet `analysis_mode` value overrides this per row. |
 | `enable_alignment` | `false` | Fallback row alignment switch. A non-empty samplesheet `enable_alignment` value overrides this per row; alignment only applies to paired rows. |
+| `segmentation_source` | `null` | Where the cells of a row come from: `native` (the vendor segmentation; aliases `vendor`, `instrument`), `cellpose_only` (alias `cellpose`) or `cellpose_proseg` (alias `proseg`). `null` uses the platform default: `native` for ATERA, `cellpose_proseg` for XENIUM and MERSCOPE. These are also the only values each platform accepts for now; any other is refused before a task starts. A non-empty samplesheet `segmentation_source` overrides this per row. |
+| `native_latest_link_mode` | `hardlink` | How `NATIVE_LATEST` brings image, label and transcript payload files into the latest store of a native row: `hardlink` (shared with the source store and made read-only) or `copy` (when the latest store is on another filesystem). |
 | `analysis_segmentation` | `all` | Fallback downstream analysis branches after enrichment. Valid values: `all`, `both`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, `proseg_hybrid`; comma-separated combinations are accepted. `all` includes all four branches, while `both` restricts analysis to `reseg,original_seg`. A non-empty samplesheet value overrides this per row. |
 | `register_images_refine_affine` | `true` | Refine each Xenium Explorer matrix with a robust DAPI-to-DAPI affine fit before resampling registered images. The stage itself is enabled per row by `xenium_registered_images_csv`; see [stages/register-images.md](stages/register-images.md). |
 | `register_post_xenium_if_nonrigid` | `false` | Fallback switch for guarded post-Xenium IF DAPI TV-L1 refinement after the affine fit. A samplesheet value overrides this per row. |
@@ -370,10 +372,50 @@ install paths trigger a `sudo` prompt.
 | `atera_build_memory_gb` | `64` | Memory reservation of an ATERA build task, doubled on its one retry after an external kill (exit 137 or 140). Other platforms keep 80 GB. |
 | `atera_build_max_rss_gb` | `48` | Watchdog cap on the ATERA build's anonymous memory; above it the build exits with status 99 (not retried). Raise it together with `atera_build_memory_gb`. |
 | `default_atera_voxel_layers` | `2` | ProSeg voxel layers for ATERA (used once ProSeg supports ATERA). |
-| `atera_cellpose_model`, `atera_cellpose_cellprob`, `atera_cellpose_flow_threshold`, `atera_cellpose_diameter`, `atera_cellpose_final_max_area_um2`, `atera_mask_max_eccentricity` | `null` | The ATERA twins of the per-platform Cellpose overrides. They are declared because Cellpose preflight reads them for every active platform; ATERA rows do not segment yet. |
+| `atera_cellpose_model`, `atera_cellpose_cellprob`, `atera_cellpose_flow_threshold`, `atera_cellpose_diameter`, `atera_cellpose_final_max_area_um2`, `atera_mask_max_eccentricity` | `null` | The ATERA twins of the per-platform Cellpose overrides. They are declared because Cellpose preflight reads them for every active platform; native ATERA rows run no Cellpose. |
+| `atera_clustering_hvg_n_top_genes` | `2000` | Highly variable genes the clustering PCA of an ATERA (whole-transcriptome) sample uses. ATERA samples also skip the 300-gene panel check; XENIUM and MERSCOPE samples are unchanged. |
 
-ATERA rows run only `build_spatialdata` for now; see
-[Stage 1 — Atera](stages/spatialdata-build.md#atera).
+#### ATERA rows
+
+ATERA rows run the native segmentation route (`segmentation_source=native`):
+the vendor cell and nucleus segmentation of the build becomes the latest store,
+and no Cellpose or ProSeg task runs. See
+[Stage 1 — Atera](stages/spatialdata-build.md#atera) for the build.
+
+| Stage | ATERA native row |
+|-------|------------------|
+| `build_spatialdata` | Runs (or reuses the store). |
+| `segment_nuclei` | Not a stage of native rows; asking for it is refused. |
+| `segment` | `NATIVE_LATEST`: builds `<outdir>/<pair>/atera/latest/latest_spatialdata.zarr` from the source store (payloads hardlinked read-only, metadata copied, vendor shapes and table renamed to `atera_cell_boundaries`, `atera_nucleus` and `table_original`). |
+| `enrich` | Native enrichment: no Cellpose masks. |
+| `build_viewer_caches` | Vendor label masks on `morphology_focus`. |
+| `mask_image_quantification` | Quantifies the vendor `cell_labels`. |
+| `qc`, `visualize`, `spatial_gene_analysis`, `clustering_squidpy` | Run on the `original_seg` layer. |
+| `mender` | Runs when `mender_enabled` (on `original_seg`). |
+
+Native rows have one analysis layer, `original_seg`. A global
+`analysis_segmentation` (such as the default `all`) or `mender_segmentations`
+(default `proseg_hybrid`) resolves to the layers the row has, and the run log
+says so; a samplesheet value that names `reseg`, `proseg_mask` or
+`proseg_hybrid` on a native row is an error.
+
+Refused for ATERA rows, before any task starts:
+
+| Request | Message |
+|---------|---------|
+| `mapmycells` selected (`stop_stage=mapmycells`) | standalone MapMyCells is not covered for ATERA rows; stop at clustering_squidpy or mender |
+| `gaston_enabled` | GASTON is not covered for ATERA rows |
+| `pciseq_enabled` | pciSeq is off for ATERA rows |
+| row `mecr_enabled=true` | MECR is off for ATERA rows until it streams its reference |
+| row `spatial_gene_analysis_transcript_analysis_enabled=true` | transcript spatial patterns are off for ATERA rows |
+| `cortical_depth_enabled` or `distance_from_object_enabled` | cortical depth and distance from object are off for non-cortical ATERA sections |
+| row `enable_alignment` or `xenium_registered_images_csv` | image registration and alignment are not covered for ATERA rows (AT-10) |
+| `segmentation_source=cellpose_only` or `cellpose_proseg` | segmentation_source=… is not available for ATERA rows yet; ATERA supports: native |
+
+The global `mecr_enabled` and `spatial_gene_analysis_transcript_analysis_enabled`
+do not apply to ATERA rows (they default off there; the run log says when a
+global value is ignored), so a mixed samplesheet keeps them for its XENIUM and
+MERSCOPE rows.
 
 ### Alignment
 

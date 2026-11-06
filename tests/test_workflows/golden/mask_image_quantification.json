@@ -1,0 +1,5 @@
+{
+  "L0/ATERA": "{\"dataset_name\":\"PAIR_A_ATERA\",\"platform\":\"ATERA\",\"latest_zarr_path\":\"latest_input.zarr\",\"mask_path\":null,\"output_dir\":\"mask_image_quantification_out\",\"mask_label_key\":\"cell_labels\",\"shape_key\":\"atera_cell_boundaries\",\"table_key\":\"table_atera_cell_boundaries_image_quantification\"}",
+  "L0/MERSCOPE": "{\"dataset_name\":\"PAIR_A_MERSCOPE\",\"platform\":\"MERSCOPE\",\"latest_zarr_path\":\"latest_input.zarr\",\"mask_path\":\"mask_image_quantification_input_mask.npy\",\"output_dir\":\"mask_image_quantification_out\"}",
+  "L0/XENIUM": "{\"dataset_name\":\"PAIR_A_XENIUM\",\"platform\":\"XENIUM\",\"latest_zarr_path\":\"latest_input.zarr\",\"mask_path\":\"mask_image_quantification_input_mask.npy\",\"output_dir\":\"mask_image_quantification_out\"}"
+}

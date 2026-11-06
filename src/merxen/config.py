@@ -14,7 +14,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
-from merxen.platforms import PlatformName
+from merxen.platforms import PlatformName, SegmentationSource
 
 
 class CellposeConfig(BaseModel):
@@ -507,6 +507,36 @@ class DatasetConfig(BaseModel):
     proseg_overrides: dict[str, Any] = Field(default_factory=dict)
 
 
+class NativeLatestConfig(BaseModel):
+    """Configuration of NATIVE_LATEST, the vendor-segmentation latest store.
+
+    The latest store of a native ATERA row is built from the source store:
+    immutable payloads (image, label and transcript chunks) are hardlinked
+    (``link_mode="hardlink"``) or copied, metadata is copied, and the renamed
+    vendor shapes and ``table_original`` are written fresh.
+
+    Attributes:
+        dataset_name: Dataset alias used in log lines and provenance.
+        platform: Platform of the row (ATERA only).
+        source_zarr_path: The built source store (``BUILD_SPATIALDATA``).
+        output_dir: Task output folder (report, staged latest link).
+        persistent_latest_zarr_path: Where the latest store is built.
+        link_mode: How payload files reach the latest store.
+        readonly_payloads: Remove write permission from linked payloads, so
+            an in-place write fails instead of changing the source.
+        force: Rebuild a target that is not a reusable native latest store.
+    """
+
+    dataset_name: str
+    platform: Literal["ATERA"]
+    source_zarr_path: Path
+    output_dir: Path
+    persistent_latest_zarr_path: Path
+    link_mode: Literal["hardlink", "copy"] = "hardlink"
+    readonly_payloads: bool = True
+    force: bool = False
+
+
 class CellposeModelPolicy(BaseModel):
     """Explicit custom-model opt-in and protected published output roots."""
 
@@ -535,17 +565,46 @@ class SegmentationConfig(BaseModel):
 
 
 class EnrichmentConfig(BaseModel):
-    """Configuration for the SpatialData enrichment step."""
+    """Configuration for the SpatialData enrichment step.
+
+    ``segmentation_source="native"`` (ATERA only) enriches the vendor
+    segmentation of a NATIVE_LATEST store: no Cellpose masks are read, so
+    ``mask_path`` and ``nuclei_mask_path`` may be ``None``. Every other source
+    needs both masks.
+    """
 
     dataset_name: str
-    platform: Literal["MERSCOPE", "XENIUM"]
+    platform: PlatformName
     latest_zarr_path: Path
-    mask_path: Path
-    nuclei_mask_path: Path
+    mask_path: Path | None
+    nuclei_mask_path: Path | None
     original_data_path: Path
     output_dir: Path
     persistent_output_path: Path | None = None
     transform_path: Path | None = None
+    segmentation_source: SegmentationSource = "cellpose_proseg"
+    native_label_check: bool = True
+
+    @model_validator(mode="after")
+    def _validate_segmentation_source(self: EnrichmentConfig) -> EnrichmentConfig:
+        if self.segmentation_source == "native":
+            if self.platform != "ATERA":
+                raise ValueError(
+                    "segmentation_source=native enriches the vendor segmentation "
+                    f"of ATERA rows only, not {self.platform}"
+                )
+            return self
+        missing = [
+            name
+            for name in ("mask_path", "nuclei_mask_path")
+            if getattr(self, name) is None
+        ]
+        if missing:
+            raise ValueError(
+                f"{' and '.join(missing)} required for segmentation_source="
+                f"{self.segmentation_source}"
+            )
+        return self
 
 
 class ViewerCacheConfig(BaseModel):
@@ -563,7 +622,7 @@ class ViewerCacheConfig(BaseModel):
     """
 
     dataset_name: str
-    platform: Literal["MERSCOPE", "XENIUM"] | None = None
+    platform: PlatformName | None = None
     latest_zarr_path: Path
     original_data_path: Path | None = None
     output_dir: Path
@@ -576,6 +635,8 @@ class ViewerCacheConfig(BaseModel):
     build_image_pyramid: bool = True
     image_only: bool = False
     image_keys: list[str] | None = None
+    # Image the base masks are drawn on; None keeps the built-in selection.
+    base_image_key: str | None = None
 
     @model_validator(mode="after")
     def _validate_mode(self: ViewerCacheConfig) -> ViewerCacheConfig:
@@ -596,16 +657,22 @@ class ViewerCacheConfig(BaseModel):
 
 
 class MaskImageQuantificationConfig(BaseModel):
-    """Configuration for Cellpose-mask image-channel quantification."""
+    """Configuration for mask image-channel quantification.
+
+    The mask is either a Cellpose ``.npy`` label image (``mask_path``) or a
+    label element of the store (``mask_label_key``, such as the vendor
+    ``cell_labels`` of a native ATERA row); exactly one of the two is set.
+    """
 
     dataset_name: str
-    platform: Literal["MERSCOPE", "XENIUM"]
+    platform: PlatformName
     latest_zarr_path: Path
-    mask_path: Path
+    mask_path: Path | None
     output_dir: Path
     table_key: str = "table_MOSAIK_cellpose_image_quantification"
     shape_key: str = "MOSAIK_cellpose"
     tile_size: int = 2048
+    mask_label_key: str | None = None
 
     @field_validator("tile_size")
     @classmethod
@@ -616,6 +683,17 @@ class MaskImageQuantificationConfig(BaseModel):
         if int(value) <= 0:
             raise ValueError("tile_size must be positive")
         return int(value)
+
+    @model_validator(mode="after")
+    def _validate_mask_source(
+        self: MaskImageQuantificationConfig,
+    ) -> MaskImageQuantificationConfig:
+        if (self.mask_path is None) == (self.mask_label_key is None):
+            raise ValueError(
+                "set exactly one of mask_path (a .npy label image) and "
+                "mask_label_key (a label element of the store)"
+            )
+        return self
 
 
 _IMAGE_KEY_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
@@ -1324,7 +1402,7 @@ class VisualizationSampleConfig(BaseModel):
     """One SpatialData sample to include in visualization output."""
 
     sample_id: str
-    platform: Literal["MERSCOPE", "XENIUM"]
+    platform: PlatformName
     zarr_path: Path
     segmentation: str | None = None
     table_key: str | None = None
@@ -1380,14 +1458,22 @@ class VisualizationConfig(BaseModel):
 
 
 class ClusteringSquidpySampleConfig(BaseModel):
-    """One SpatialData sample to cluster with Scanpy/Squidpy."""
+    """One SpatialData sample to cluster with Scanpy/Squidpy.
+
+    ``expected_panel_gene_count`` is the gene count the panel check expects
+    (``None`` skips it, for whole-transcriptome panels); ``hvg_n_top_genes``
+    selects that many highly variable genes for the PCA (``None`` uses every
+    gene, as XENIUM and MERSCOPE rows do).
+    """
 
     sample_id: str
-    platform: Literal["MERSCOPE", "XENIUM"]
+    platform: PlatformName
     zarr_path: Path
     segmentation: str | None = None
     table_key: str | None = None
     shape_key: str | None = None
+    expected_panel_gene_count: int | None = Field(default=300, gt=0)
+    hvg_n_top_genes: int | None = Field(default=None, gt=0)
 
 
 class ClusteringSquidpyRoundConfig(BaseModel):
@@ -1483,7 +1569,7 @@ class MenderConfig(BaseModel):
 
     pair_id: str
     sample_id: str
-    platform: Literal["MERSCOPE", "XENIUM"]
+    platform: PlatformName
     segmentation: str
     source_h5ad: Path
     source_h5ad_origin: Path | None = None
@@ -1595,7 +1681,7 @@ class SpatialGeneAnalysisSampleConfig(BaseModel):
     """One SpatialData sample for per-gene spatial autocorrelation."""
 
     sample_id: str
-    platform: Literal["MERSCOPE", "XENIUM"]
+    platform: PlatformName
     zarr_path: Path
     segmentation: str | None = None
     table_key: str | None = None
