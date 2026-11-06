@@ -3,10 +3,11 @@
 The platform registry (``src/merxen/platforms.py`` and its twin
 ``workflows/lib/PlatformSpec.groovy``) is the one place that names a platform's
 original shape layers and native image. Some sites still spell them out: ordered
-priority lists, display code, dispatch that already raises for an unknown
-platform, and the ``qc.nf`` script, whose text is part of the Nextflow task hash.
-Each category below pins those sites by line text (not line number, so the pin
-survives unrelated edits) together with the reason they are not converted yet.
+priority lists, display code and dispatch that already raises for an unknown
+platform (the ``qc.nf`` script has looked its reference shape up in the
+registry since AT-6). Each category below pins those sites by line text (not
+line number, so the pin survives unrelated edits) together with the reason
+they are not converted yet.
 
 A new matching line fails the test. Look the value up in the registry instead,
 or, when the line must name the platform, add it to the pin with a reason. A
@@ -109,9 +110,6 @@ REASONS: dict[str, dict[str, str]] = {
         ),
         "src/merxen/visualization/sanity_plots.py": (
             "display styles and draw order of the original layers"
-        ),
-        "workflows/modules/qc.nf": (
-            "inside the QC script: section; editing it changes task hashes (AT-6)"
         ),
     },
     "built_shape_names": {
@@ -228,9 +226,6 @@ REASONS: dict[str, dict[str, str]] = {
             "features, paired roles and the analysis_mode map (kept in step by "
             "test_analysis_mode_parity)"
         ),
-        "workflows/modules/qc.nf": (
-            "inside the QC script: section; editing it changes task hashes (AT-6)"
-        ),
     },
     "native_image_names": {
         "scripts/acceptance/hitl0_tile_check.py": "acceptance check of a Xenium arm",
@@ -284,10 +279,6 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
             '"xenium_cell_boundaries",',
             '"xenium_cell_boundaries",',
             '"xenium_cell_boundaries": ("Original segmentation", "#ff7f0e"),',
-        ),
-        "workflows/modules/qc.nf": (
-            ': "xenium_cell_boundaries"',
-            '? "merscope_cell_boundaries"',
         ),
     },
     "built_shape_names": {
@@ -472,9 +463,6 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
             'if (platform == "XENIUM") {',
             'settings.paired_mode && platform == "MERSCOPE"',
             'settings.paired_mode && platform == "XENIUM"',
-        ),
-        "workflows/modules/qc.nf": (
-            'def registrationReferenceShapeKey = platform == "MERSCOPE"',
         ),
     },
     "native_image_names": {

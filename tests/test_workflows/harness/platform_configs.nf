@@ -366,6 +366,26 @@ def platformCases(String launch, String platform) {
     }
 }
 
+// AT-6 QC of native ATERA rows: the registration reference is the registry's
+// original cell shape (atera_cell_boundaries), so the original layers render
+// a reference equal to the tested shape, which the QC check then skips.
+def ateraQcCases(String launch) {
+    ["original", "original_seg"].each { segmentation ->
+        attempt("qc", "${launch}/ATERA/${segmentation}") {
+            def keys = analysisLayerKeys("ATERA", segmentation)
+            qcHeredoc(renderQcScript(
+                "PAIR_A",
+                "ATERA",
+                segmentation,
+                "latest_input.zarr",
+                keys.table_key,
+                keys.shape_key,
+                [cpus: 4],
+            ).toString())
+        }
+    }
+}
+
 def samplesCases(String launch) {
     def paths = [
         MERSCOPE: "results/PAIR_A/merscope/latest/latest_spatialdata.zarr",
@@ -448,6 +468,7 @@ workflow {
         modeCases(launch)
         ateraBuildCases(launch)
         ateraNativeCases(launch)
+        ateraQcCases(launch)
     } else if (launch == "L4") {
         ateraBuildCases(launch)
     } else {
