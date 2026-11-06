@@ -4,6 +4,7 @@ include { BUILD_SPATIALDATA } from "./modules/spatialdata_build"
 include { ENSURE_PROSEG } from "./modules/proseg_bootstrap"
 include { CELLPOSE_NUCLEI_SEGMENT; SEGMENT } from "./modules/segmentation"
 include { NATIVE_LATEST } from "./modules/native_segmentation"
+include { ATERA_PROSEG_PLAN; ATERA_PROSEG_TILE; ATERA_PROSEG_STITCH } from "./modules/atera_proseg"
 include { ENRICH } from "./modules/enrichment"
 include { VIEWER_CACHE } from "./modules/viewer_cache"
 include { MASK_IMAGE_QUANTIFICATION } from "./modules/mask_image_quantification"
@@ -3740,7 +3741,7 @@ workflow {
         // native platform arm).
         if (
             !(settings.run_segment_nuclei || settings.run_segment) ||
-            settings.segmentation_source == "native"
+            usesVendorSegmentation(settings.segmentation_source)
         ) {
             []
         } else {
@@ -3758,20 +3759,21 @@ workflow {
     // Native rows (plan AT-6): NATIVE_LATEST turns the vendor segmentation of
     // the source store into the latest store and emits the SEGMENT tuple shape
     // with empty placeholders in the Cellpose mask, transcript CSV and nuclei
-    // mask slots.
+    // mask slots. The gate carries the row's source: a native_proseg row's
+    // latest store goes on to the ATERA ProSeg stitch (AT-9) instead.
     native_latest_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!settings.run_native_segment) {
             []
         } else {
             settings.active_platforms.collect { platform ->
-                tuple("${pairId}|${platform}", true)
+                tuple("${pairId}|${platform}", settings.segmentation_source)
             }
         }
     }
 
     native_latest_inputs_ch = build_results_ch
         .join(native_latest_gate_ch)
-        .map { key, pairId, platform, sourceSpatialdata, _runFlag ->
+        .map { key, pairId, platform, sourceSpatialdata, _rowSource ->
             tuple(
                 key,
                 pairId,
@@ -3786,6 +3788,92 @@ workflow {
         }
 
     native_task_results_ch = NATIVE_LATEST(native_latest_inputs_ch).segmentation
+
+    native_routed_ch = native_task_results_ch
+        .join(native_latest_gate_ch)
+        .branch {
+            key, pairId, platform, latestZarr, maskPath, transcriptsCsv,
+            nucleiMaskPath, rowSource ->
+                proseg: rowSource == "native_proseg"
+                    return tuple(
+                        key, pairId, platform, latestZarr, maskPath, transcriptsCsv,
+                        nucleiMaskPath,
+                    )
+                plain: true
+                    return tuple(
+                        key, pairId, platform, latestZarr, maskPath, transcriptsCsv,
+                        nucleiMaskPath,
+                    )
+        }
+    native_plain_ch = native_routed_ch.plain
+
+    // ATERA ProSeg route (segmentation_source=native_proseg, plan AT-9): the
+    // plan reads the source store; one ATERA_PROSEG_TILE task per tile runs
+    // ProSeg with the vendor cell mask as prior (bounded by
+    // atera_proseg_tile_max_forks); ATERA_PROSEG_STITCH writes the stitched
+    // cells into the latest store NATIVE_LATEST built and emits the SEGMENT
+    // tuple, so ENRICH and the later stages take it as they take
+    // NATIVE_LATEST's output.
+    atera_proseg_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
+        if (!settings.run_atera_proseg) {
+            []
+        } else {
+            settings.active_platforms.collect { platform ->
+                tuple("${pairId}|${platform}", true)
+            }
+        }
+    }
+
+    atera_proseg_plan_inputs_ch = build_results_ch
+        .join(atera_proseg_gate_ch)
+        .map { key, pairId, platform, sourceSpatialdata, _runFlag ->
+            tuple(
+                key,
+                pairId,
+                platform,
+                groovy.json.JsonOutput.prettyPrint(
+                    groovy.json.JsonOutput.toJson(
+                        ateraProsegPlanConfig(pairId, platform, params)
+                    )
+                ),
+                sourceSpatialdata,
+            )
+        }
+
+    atera_proseg_plan_ch = ATERA_PROSEG_PLAN(atera_proseg_plan_inputs_ch).plan
+
+    // One tile task per tile the plan runs. The tile config is a value holding
+    // the real path of the source store, so a re-run plan with the same
+    // content leaves finished tiles cached.
+    atera_proseg_tile_specs_ch = atera_proseg_plan_ch
+        .join(build_results_ch)
+        .flatMap { key, pairId, platform, planFile, _buildPairId, _buildPlatform, sourceSpatialdata ->
+            def sourcePath = java.nio.file.Paths
+                .get(sourceSpatialdata.toString())
+                .toRealPath()
+                .toString()
+            def specs = ateraProsegTileSpecs(
+                planFile.text, pairId, platform, sourcePath, params,
+            )
+            if (!specs) {
+                log.warn(
+                    "${pairId}:${platform}: the ATERA ProSeg plan runs no tile; " +
+                    "the ProSeg layer is not built"
+                )
+            }
+            specs.collect { tileId, tileConfig ->
+                tuple(
+                    key,
+                    pairId,
+                    platform,
+                    specs.size(),
+                    tileId,
+                    groovy.json.JsonOutput.prettyPrint(
+                        groovy.json.JsonOutput.toJson(tileConfig)
+                    ),
+                )
+            }
+        }
 
     segmentation_config_inputs_ch = build_results_ch
         .join(segment_meta_ch)
@@ -4038,7 +4126,10 @@ workflow {
         }
 
     nuclei_results_ch = nuclei_task_results_ch.mix(nuclei_published_results_ch)
-    proseg_trigger_ch = cellpose_segment_inputs_ch.map { true }.take(1)
+    proseg_trigger_ch = cellpose_segment_inputs_ch
+        .map { true }
+        .mix(atera_proseg_plan_inputs_ch.map { true })
+        .take(1)
     proseg_path_ch = ENSURE_PROSEG(proseg_trigger_ch)
     segment_task_results_ch = SEGMENT(
         cellpose_segment_inputs_ch,
@@ -4046,9 +4137,74 @@ workflow {
         proseg_path_ch,
     )
 
+    // A failed tile leaves its group incomplete: groupTuple drops it, so the
+    // row's stitch (and its later stages) does not run.
+    atera_proseg_tiles_ch = ATERA_PROSEG_TILE(
+        atera_proseg_tile_specs_ch.combine(proseg_path_ch)
+    ).tile
+        .map { key, nTiles, tileId, tileDir ->
+            tuple(groupKey(key, nTiles), tileId, tileDir)
+        }
+        .groupTuple()
+        .map { groupedKey, tileIds, tileDirs ->
+            // Tiles finish in any order; sorting keeps the stitch inputs (and
+            // its task hash) stable across runs.
+            def pairs = [tileIds, tileDirs].transpose().sort { pair -> pair[0].toString() }
+            tuple(
+                groupedKey.getGroupTarget(),
+                pairs.collect { pair -> pair[0] },
+                pairs.collect { pair -> pair[1] },
+            )
+        }
+
+    // A tile subset is a check run of single tiles: it is never stitched.
+    if (ateraProsegTileSubset(params) != null) {
+        log.info(
+            "atera_proseg_tile_subset=${ateraProsegTileSubset(params).join(',')}: " +
+            "the ATERA ProSeg tiles run as a check and are not stitched"
+        )
+    }
+    atera_proseg_stitch_inputs_ch = native_routed_ch.proseg
+        .join(atera_proseg_plan_ch)
+        .join(atera_proseg_tiles_ch)
+        .filter { ateraProsegTileSubset(params) == null }
+        .map {
+            key, pairId, platform, latestZarr, _maskPath, _transcriptsCsv,
+            _nucleiMaskPath, _planPairId, _planPlatform, planFile, tileIds,
+            tileDirs ->
+                tuple(
+                    key,
+                    pairId,
+                    platform,
+                    groovy.json.JsonOutput.prettyPrint(
+                        groovy.json.JsonOutput.toJson(
+                            ateraProsegStitchConfig(pairId, platform, tileIds, params)
+                        )
+                    ),
+                    latestZarr,
+                    planFile,
+                    tileDirs,
+                )
+        }
+
+    atera_proseg_stitch_ch = ATERA_PROSEG_STITCH(atera_proseg_stitch_inputs_ch).segmentation
+
     segment_published_results_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!(settings.run_enrich && !settings.run_segment)) {
             []
+        } else if (settings.segmentation_source == "native_proseg") {
+            settings.active_platforms.collect { platform ->
+                def key = "${pairId}|${platform}"
+                tuple(
+                    key,
+                    pairId,
+                    platform,
+                    publishedAteraProsegOutput(params, pairId, platform, "proseg_latest.zarr"),
+                    publishedAteraProsegOutput(params, pairId, platform, "NO_CELLPOSE_MASK"),
+                    publishedAteraProsegOutput(params, pairId, platform, "NO_TRANSCRIPTS_CSV"),
+                    publishedAteraProsegOutput(params, pairId, platform, "NO_NUCLEI_MASK"),
+                )
+            }
         } else if (settings.segmentation_source == "native") {
             settings.active_platforms.collect { platform ->
                 def key = "${pairId}|${platform}"
@@ -4115,7 +4271,8 @@ workflow {
     }
 
     segment_results_ch = segment_task_results_ch
-        .mix(native_task_results_ch)
+        .mix(native_plain_ch)
+        .mix(atera_proseg_stitch_ch)
         .mix(segment_published_results_ch)
 
     metadata_ch = build_results_ch.map { key, pairId, platform, sourceSpatialdata ->
@@ -4127,7 +4284,7 @@ workflow {
             []
         } else {
             settings.active_platforms.collect { platform ->
-                tuple("${pairId}|${platform}", true)
+                tuple("${pairId}|${platform}", settings.segmentation_source)
             }
         }
     }
@@ -4138,7 +4295,7 @@ workflow {
         .map {
             key, pairId, platform, latestZarr, maskPath, _transcriptsCsv,
             nucleiMaskPath,
-            pairMeta, platformMeta, originalDataPath, _runFlag ->
+            pairMeta, platformMeta, originalDataPath, rowSource ->
             if (pairId != pairMeta || platform != platformMeta) {
                 error(
                     "Internal channel mismatch for key=${key}: " +
@@ -4175,6 +4332,10 @@ workflow {
                 enrichConfig.segmentation_source = "native"
                 enrichConfig.mask_path = null
                 enrichConfig.nuclei_mask_path = null
+            }
+            // A native_proseg row also checks its stitched ProSeg layer (AT-9).
+            if (rowSource == "native_proseg") {
+                enrichConfig.segmentation_source = "native_proseg"
             }
 
             tuple(
@@ -4429,13 +4590,14 @@ workflow {
                 []
             } else {
                 settings.active_platforms.collect { platform ->
-                    tuple("${pairId}|${platform}", true)
+                    tuple("${pairId}|${platform}", settings.segmentation_source)
                 }
             }
     }
 
     mask_image_quantification_task_masks_ch = segment_task_results_ch
-        .mix(native_task_results_ch)
+        .mix(native_plain_ch)
+        .mix(atera_proseg_stitch_ch)
         .map {
             key, _pairId, _platform, _latestZarr, maskPath, _transcriptsCsv,
             _nucleiMaskPath ->
@@ -4454,7 +4616,9 @@ workflow {
                     def key = "${pairId}|${platform}"
                     // Native rows quantify the vendor label element; the slot
                     // holds the NATIVE_LATEST placeholder.
-                    def maskPath = settings.segmentation_source == "native"
+                    def maskPath = settings.segmentation_source == "native_proseg"
+                        ? publishedAteraProsegOutput(params, pairId, platform, "NO_CELLPOSE_MASK")
+                        : settings.segmentation_source == "native"
                         ? publishedNativeOutput(params, pairId, platform, "NO_CELLPOSE_MASK")
                         : requireExistingPath(
                             publishedDatasetPath(
@@ -4478,7 +4642,7 @@ workflow {
     mask_image_quantification_inputs_ch = post_enrich_zarrs_ch
         .join(mask_image_quantification_masks_ch)
         .join(mask_image_quantification_gate_ch)
-        .map { key, pairId, platform, enrichedLatestZarr, maskPath, _runFlag ->
+        .map { key, pairId, platform, enrichedLatestZarr, maskPath, rowSource ->
             def quantConfig = [
                 dataset_name: "${pairId}_${platform}",
                 platform: platform,
@@ -4495,6 +4659,17 @@ workflow {
                 quantConfig.shape_key = quantSpec.originalCellShapeKey
                 quantConfig.table_key =
                     "table_${quantSpec.originalCellShapeKey}_image_quantification"
+            }
+            // A native_proseg row also quantifies its stitched ProSeg cells in
+            // the same task (one writer per store).
+            if (rowSource == "native_proseg") {
+                quantConfig.extra_layers = [
+                    [
+                        mask_label_key: quantSpec.prosegLabelKey,
+                        shape_key: "MOSAIK_proseg",
+                        table_key: "table_MOSAIK_proseg_image_quantification",
+                    ],
+                ]
             }
 
             tuple(

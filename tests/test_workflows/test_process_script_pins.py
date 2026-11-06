@@ -22,6 +22,8 @@ Changes made so far:
   ``qc`` golden), but the edited source text changes the hash of every QC task
   once: the published XENIUM/MERSCOPE QC results get an announced one-time
   re-run (docs/plans/atera-support-plan.md, AT-6).
+- AT-9 added the pins of ATERA_PROSEG_PLAN, ATERA_PROSEG_TILE and
+  ATERA_PROSEG_STITCH (``modules/atera_proseg.nf``); no existing pin changed.
 """
 
 from __future__ import annotations
@@ -145,9 +147,13 @@ def test_main_nf_defines_no_process() -> None:
 
 
 def test_pinned_inventory(pinned: dict[str, str]) -> None:
-    """Today's inventory: 44 processes, 44 ``script:`` and 7 ``stub:`` sections."""
+    """Today's inventory: 47 processes, 47 ``script:`` and 7 ``stub:`` sections.
+
+    AT-9 added the three ATERA ProSeg processes (``modules/atera_proseg.nf``);
+    no existing pin changed.
+    """
     labels = [key.rsplit("::", 1)[1] for key in pinned]
-    assert labels.count("script") == 44
+    assert labels.count("script") == 47
     assert labels.count("stub") == 7
     assert {key for key in pinned if key.endswith("::stub")} == {
         f"workflows/modules/pciseq.nf::{name}::stub"

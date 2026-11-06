@@ -248,6 +248,111 @@ def ateraNativeCases(String launch) {
     }
 }
 
+// AT-9 ATERA ProSeg route (segmentation_source=native_proseg): plan, tile and
+// stitch configs, the ENRICH and MIQ configs of a native_proseg row, the
+// source and layer helpers. XENIUM and MERSCOPE cases are untouched.
+def ateraProsegPlanText() {
+    return groovy.json.JsonOutput.toJson([
+        format_version: 1,
+        source_build_fingerprint: "f" * 64,
+        pixel_size_um: 0.21249222,
+        mask_shape_px: [42548, 61369],
+        tile_subset: null,
+        tiles: [
+            [tile_id: "c0_r0", grid: [0, 0], core_um: [0.0, 0.0, 2000.0, 2000.0],
+             window_px: [0, 9883, 0, 9883], owned_labels: [1, 2, 5], run: true],
+            [tile_id: "c1_r0", grid: [1, 0], core_um: [2000.0, 0.0, 4000.0, 2000.0],
+             window_px: [8941, 19295, 0, 9883], owned_labels: [], run: false],
+            [tile_id: "c0_r1", grid: [0, 1], core_um: [0.0, 2000.0, 2000.0, 4000.0],
+             window_px: [0, 9883, 8941, 19295], owned_labels: [3, 4], run: true],
+        ],
+    ])
+}
+
+def ateraProsegCases(String launch) {
+    def id = "${launch}/ATERA/native_proseg"
+    attempt("atera_proseg", "${id}/plan") {
+        ateraProsegPlanConfig("PAIR_A", "ATERA", params)
+    }
+    attempt("atera_proseg", "${id}/model") { ateraProsegModelParams(params) }
+    attempt("atera_proseg", "${id}/tile_specs") {
+        ateraProsegTileSpecs(
+            ateraProsegPlanText(), "PAIR_A", "ATERA", "data/atera_source.zarr", params,
+        )
+    }
+    attempt("atera_proseg", "${id}/stitch") {
+        ateraProsegStitchConfig("PAIR_A", "ATERA", ["c0_r1", "c0_r0"], params)
+    }
+    attempt("atera_proseg", "${id}/enrich") {
+        renderEnrich(
+            "PAIR_A|ATERA",
+            "PAIR_A",
+            "ATERA",
+            "proseg_latest.zarr",
+            "NO_CELLPOSE_MASK",
+            "NO_NUCLEI_MASK",
+            "source_spatialdata.zarr",
+            "native_proseg",
+        )
+    }
+    attempt("atera_proseg", "${id}/enrich_native_row") {
+        renderEnrich(
+            "PAIR_A|ATERA",
+            "PAIR_A",
+            "ATERA",
+            "native_latest.zarr",
+            "NO_CELLPOSE_MASK",
+            "NO_NUCLEI_MASK",
+            "source_spatialdata.zarr",
+            "native",
+        )
+    }
+    attempt("atera_proseg", "${id}/mask_image_quantification") {
+        renderMaskImageQuantification(
+            "PAIR_A|ATERA", "PAIR_A", "ATERA", "latest.zarr", "NO_CELLPOSE_MASK",
+            "native_proseg",
+        )
+    }
+    attempt("atera_proseg", "${id}/layers") { availableSegmentationLayers("native_proseg") }
+    attempt("atera_proseg", "${id}/stage_order") {
+        activeStageOrder(
+            false, false, true, true, false, false, true, false, true, false,
+            false, false, "native_proseg",
+        )
+    }
+    ["native_proseg", "vendor_proseg", "instrument_proseg", "Vendor-ProSeg", "proseg"].each {
+        raw ->
+            attempt("atera_proseg", "${launch}/segmentation_source/[${raw}]") {
+                normalizeSegmentationSource(raw)
+            }
+    }
+    attempt("atera_proseg", "${id}/row_source") {
+        segmentationSourceForRow(
+            [pair_id: "PAIR_A", segmentation_source: "native_proseg"], ["ATERA"], params
+        )
+    }
+    attempt("atera_proseg", "${launch}/segmentation_source/xenium_native_proseg_error") {
+        segmentationSourceForRow(
+            [pair_id: "PAIR_A", segmentation_source: "native_proseg"], ["XENIUM"], params
+        )
+    }
+    ["reseg", "proseg"].each { segmentation ->
+        attempt("atera_proseg", "${id}/layer_keys/${segmentation}") {
+            analysisLayerKeys("ATERA", segmentation)
+        }
+    }
+    def notes = []
+    attempt("atera_proseg", "${id}/mender_default") {
+        filterSegmentationsForSource(
+            ["proseg_hybrid"], "native_proseg", false, "mender_segmentations", "PAIR_A",
+            notes,
+        ) + notes
+    }
+    attempt("atera_proseg", "${id}/published_restart_error") {
+        publishedAteraProsegOutput(params, "PAIR_A", "ATERA", "proseg_latest.zarr")
+    }
+}
+
 def rowsFor(String platform) {
     return platform == "MERSCOPE" ? merscopeRows() : xeniumRows()
 }
@@ -469,6 +574,7 @@ workflow {
         ateraBuildCases(launch)
         ateraNativeCases(launch)
         ateraQcCases(launch)
+        ateraProsegCases(launch)
     } else if (launch == "L4") {
         ateraBuildCases(launch)
     } else {

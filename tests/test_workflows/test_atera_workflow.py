@@ -519,3 +519,115 @@ def test_build_task_builds_an_atera_row(tmp_path: Path) -> None:
     assert (store / "atera" / "experiment.spatial").read_bytes() == (
         synth.root / "experiment.spatial"
     ).read_bytes()
+
+
+# --------------------------------------------------------------------------- #
+# AT-9: the ATERA ProSeg route (segmentation_source=native_proseg)
+# --------------------------------------------------------------------------- #
+
+_PROSEG_REFUSALS = {
+    "proseg/hybrid": (
+        "analysis_segmentation=proseg_hybrid for PAIR_A is not available with "
+        "segmentation_source=native_proseg; available: reseg, original_seg"
+    ),
+    "proseg/mender_hybrid": (
+        "mender_segmentations=proseg_hybrid for PAIR_A is not available with "
+        "segmentation_source=native_proseg"
+    ),
+    "proseg/segment_nuclei": (
+        "Rows with segmentation_source=native_proseg keep the vendor nuclei"
+    ),
+    "proseg/xenium": (
+        "segmentation_source=native_proseg is not available for XENIUM rows yet; "
+        "XENIUM supports: cellpose_proseg"
+    ),
+}
+
+
+@pytest.mark.nextflow
+def test_native_proseg_rows_run_both_layers(
+    preflight_cases: dict[str, dict[str, Any]],
+) -> None:
+    full = preflight_cases["proseg/default"]
+    assert full["result"] == "OK", full
+    assert full["segmentation_source"] == "native_proseg"
+    assert full["selected_stages"] == _ATERA_FULL_STAGES
+    assert "segment_nuclei" not in full["stage_order"]
+    assert full["run_native_segment"] is True and full["run_atera_proseg"] is True
+    assert full["analysis_segmentations"] == ["reseg", "original_seg"]
+    mender = preflight_cases["proseg/all_mender"]
+    assert mender["result"] == "OK", mender
+    assert mender["analysis_segmentations"] == ["reseg", "original_seg"]
+    # The global MENDER default (proseg_hybrid) resolves to both layers.
+    assert mender["mender_segmentations"] == ["reseg", "original_seg"]
+    assert (
+        "mender_segmentations proseg_hybrid resolves to reseg, original_seg "
+        "(segmentation_source=native_proseg has reseg, original_seg)"
+    ) in mender["setting_notes"]
+    assert preflight_cases["proseg/stop_segment"]["selected_stages"] == [
+        "build_spatialdata",
+        "segment",
+    ]
+    start = preflight_cases["proseg/start_enrich"]
+    assert start["selected_stages"] == ["enrich"]
+    assert start["run_atera_proseg"] is False
+    assert preflight_cases["proseg/alias"]["segmentation_source"] == "native_proseg"
+    assert preflight_cases["proseg/reseg_only"]["analysis_segmentations"] == ["reseg"]
+    # The native route is unchanged by the second source.
+    assert preflight_cases["atera/no_stop_stage"]["run_atera_proseg"] is False
+
+
+@pytest.mark.nextflow
+@pytest.mark.parametrize("case", sorted(_PROSEG_REFUSALS))
+def test_native_proseg_refusals(
+    preflight_cases: dict[str, dict[str, Any]], case: str
+) -> None:
+    record = preflight_cases[case]
+    assert record.get("error_class") == "java.lang.IllegalArgumentException", record
+    assert _PROSEG_REFUSALS[case] in record["message"], record["message"]
+
+
+@pytest.mark.nextflow
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
+@pytest.mark.parametrize(
+    ("params", "message"),
+    [
+        (("--atera_proseg_halo_um", "50"), "below the minimum of 100 microns"),
+        (("--atera_proseg_tile_um", "150"), "must exceed twice the halo"),
+        (
+            ("--atera_proseg_samples", "50", "--atera_proseg_recorded_samples", "60"),
+            "exceeds atera_proseg_samples=50",
+        ),
+        (("--atera_proseg_prior_weight", "0"), "atera_proseg_prior_weight must be"),
+        (("--proseg_version", "3.3.0"), "verified with ProSeg 3.2.0 only"),
+        (
+            ("--atera_proseg_tile_subset", "c2_r1"),
+            "atera_proseg_tile_subset (c2_r1) is a check run",
+        ),
+    ],
+)
+def test_native_proseg_param_refusals(
+    tmp_path: Path, params: tuple[str, ...], message: str
+) -> None:
+    references = _clustering_reference_params(tmp_path)
+    launch = tmp_path / "launch"
+    launch.mkdir()
+    cases = _preflight_cases(launch, *params, *references)
+    record = cases["proseg/default"]
+    assert record.get("error_class") == "java.lang.IllegalArgumentException", record
+    assert message in record["message"], record["message"]
+    # Native rows ignore every ATERA ProSeg param.
+    assert cases["atera/no_stop_stage"]["result"] == "OK"
+    if "--atera_proseg_tile_subset" in params:
+        assert cases["proseg/stop_segment"]["result"] == "OK"
+    if "--proseg_version" in params:
+        allowed_launch = tmp_path / "allowed"
+        allowed_launch.mkdir()
+        allowed = _preflight_cases(
+            allowed_launch,
+            *params,
+            "--atera_proseg_allow_untested_version",
+            "true",
+            *references,
+        )
+        assert allowed["proseg/default"]["result"] == "OK"
