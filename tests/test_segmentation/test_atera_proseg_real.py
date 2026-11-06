@@ -3,8 +3,8 @@
 - ``integration``: a synthetic bundle of about 40 cells and 50k transcripts in
   two tiles, a 5 + 5 + 0 schedule. ProSeg must accept the Xenium-layout
   parquet, its outputs must parse, the recount must equal its count matrix and
-  the stitched store must pass the layer check. Needs ``PROSEG_BINARY``
-  (``.env`` or the environment) pointing at ProSeg 3.2.0.
+  the stitched store must pass the layer check. Needs ProSeg 3.2.0: the
+  ``PROSEG_BINARY`` environment variable, else ``proseg`` on the ``PATH``.
 - ``slow``: a 300 x 300 micron core of a built ATERA source store
   (``MERXEN_ATERA_SOURCE_STORE``, ``.env``), schedule 20 + 20 + 5, checked
   against the AT-5(b) benchmark ranges.
@@ -13,15 +13,16 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
 import pyarrow.parquet as pq
 import pytest
 
-from merxen import local_config
 from merxen.config import AteraProsegTileConfig, NativeLatestConfig
 from merxen.segmentation.atera_proseg.plan import read_vendor_cells, write_plan
 from merxen.segmentation.atera_proseg.stitch import check_proseg_layer, stitch
@@ -38,10 +39,10 @@ _SCHEDULE = {"burnin_samples": 5, "samples": 5, "hillclimb": 0, "recorded_sample
 
 
 def _proseg_binary() -> Path:
-    raw = local_config.get("PROSEG_BINARY")
+    raw = os.environ.get("PROSEG_BINARY") or shutil.which("proseg")
     binary = Path(raw) if raw else None
     if binary is None or not binary.is_file():
-        pytest.skip("PROSEG_BINARY is not set to an existing ProSeg binary")
+        pytest.skip("no ProSeg binary (PROSEG_BINARY or proseg on the PATH)")
     result = subprocess.run(
         [str(binary), "--version"], capture_output=True, text=True, check=False
     )
@@ -96,11 +97,11 @@ def test_real_proseg_on_a_synthetic_two_tile_bundle(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
-def test_real_proseg_on_a_window_of_a_real_store(tmp_path: Path) -> None:
+def test_real_proseg_on_a_window_of_a_real_store(
+    tmp_path: Path, real_path: Callable[[str], Path]
+) -> None:
     binary = _proseg_binary()
-    store = local_config.path("MERXEN_ATERA_SOURCE_STORE")
-    if store is None or not store.is_dir():
-        pytest.skip("MERXEN_ATERA_SOURCE_STORE is not set to a built ATERA store")
+    store = real_path("MERXEN_ATERA_SOURCE_STORE")
     plan = json.loads(
         write_plan(plan_config(store, tmp_path / "plan", tile_um=2000.0, halo_um=100.0,
                                min_halo_um=100.0, owned_margin_um=20.0)).read_text()
