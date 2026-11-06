@@ -24,6 +24,7 @@ def check(String id, Map row) {
             run_native_segment: settings.run_native_segment,
             run_segment_nuclei: settings.run_segment_nuclei,
             run_mecr: settings.run_mecr,
+            run_mapmycells: settings.run_mapmycells,
             transcript_analysis: settings.spatial_gene_analysis_transcript_analysis_enabled,
             setting_notes: settings.setting_notes,
         ]
@@ -44,6 +45,8 @@ workflow {
     // Passing rows: the native route through clustering (and MENDER).
     check("atera/no_stop_stage", atera)
     check("atera/mender", atera + [mender_enabled: "true"])
+    // An explicit stop at MENDER passes over the standalone MapMyCells stage.
+    check("atera/stop_mender", atera + [mender_enabled: "true", stop_stage: "mender"])
     check("atera/stop_build", atera + [stop_stage: "build_spatialdata"])
     check("atera/only_segment", atera + [only_stage: "segment"])
     check("atera/start_enrich", atera + [start_stage: "enrich", stop_stage: "enrich"])
@@ -53,6 +56,11 @@ workflow {
     check("atera/mecr_off", atera + [mecr_enabled: "false"])
     // Refused rows, one message each.
     check("atera/stop_mapmycells", atera + [stop_stage: "mapmycells"])
+    check("atera/only_mapmycells", atera + [only_stage: "mapmycells"])
+    check(
+        "atera/start_mapmycells",
+        atera + [mender_enabled: "true", start_stage: "mapmycells", stop_stage: "mender"],
+    )
     check("atera/pciseq", atera + [pciseq_enabled: "true"])
     check("atera/gaston", atera + [gaston_enabled: "true"])
     check("atera/mecr", atera + [mecr_enabled: "true"])

@@ -208,6 +208,8 @@ _ATERA_FULL_STAGES = [
 
 _REFUSALS = {
     "atera/stop_mapmycells": "standalone MapMyCells is not covered for ATERA rows",
+    "atera/only_mapmycells": "standalone MapMyCells is not covered for ATERA rows",
+    "atera/start_mapmycells": "standalone MapMyCells is not covered for ATERA rows",
     "atera/pciseq": "pciSeq is off for ATERA rows",
     "atera/gaston": "GASTON is not covered for ATERA rows",
     "atera/mecr": "MECR is off for ATERA rows until it streams its reference",
@@ -281,6 +283,12 @@ def test_atera_rows_run_the_native_route(
     mender = preflight_cases["atera/mender"]
     assert mender["result"] == "OK", mender
     assert mender["selected_stages"] == [*_ATERA_FULL_STAGES, "mender"]
+    # The stop the refusal message suggests: an explicit stop_stage=mender passes
+    # over the standalone MapMyCells stage instead of selecting it.
+    stop_mender = preflight_cases["atera/stop_mender"]
+    assert stop_mender["result"] == "OK", stop_mender
+    assert stop_mender["selected_stages"] == [*_ATERA_FULL_STAGES, "mender"]
+    assert stop_mender["run_mapmycells"] is False
     # The global mender default (proseg_hybrid) resolves to the vendor layer.
     assert mender["mender_segmentations"] == ["original_seg"]
     assert (

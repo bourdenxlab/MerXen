@@ -3013,6 +3013,16 @@ def rowSampleSettings(row, params) {
     if (autoExtendedToMender || autoExtendedToGaston) {
         runMapMyCells = false
     }
+    // ATERA rows have no standalone MapMyCells; an explicit stop at MENDER
+    // passes over it like the extended clustering stop above. A row that names
+    // mapmycells itself as its start or stop stage still selects it, and the
+    // ATERA preflight refuses it.
+    def ateraSkipsMapMyCells = (
+        ateraRow && startStage != "mapmycells" && stopStage != "mapmycells"
+    )
+    if (ateraSkipsMapMyCells) {
+        runMapMyCells = false
+    }
     def runGaston = stageInRange("gaston", startStage, stopStage, stageOrder)
     def runMender = stageInRange("mender", startStage, stopStage, stageOrder)
     def requiredClusteringSegmentations = (
@@ -3091,7 +3101,10 @@ def rowSampleSettings(row, params) {
         stop_stage: stopStage,
         selected_stages: stageOrder.findAll { stage ->
             stageInRange(stage, startStage, stopStage, stageOrder) &&
-                !((autoExtendedToMender || autoExtendedToGaston) && stage == "mapmycells")
+                !(
+                    (autoExtendedToMender || autoExtendedToGaston || ateraSkipsMapMyCells) &&
+                    stage == "mapmycells"
+                )
         },
         run_build: runBuild,
         run_segment_nuclei: runSegmentNuclei,
