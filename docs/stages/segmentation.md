@@ -660,7 +660,7 @@ proseg tile.parquet xenium -x x_location -y y_location -z z_location
 
 | Element | Contents |
 |---|---|
-| `shapes/MOSAIK_proseg_vendor` | Every owned ProSeg consensus polygon, unclipped, in microns, with the vendor shapes' `Scale(1/ps)` transform; `instance_id`, `source_cell_id`, `proseg_internal_id`, `proseg_tile`. |
+| `shapes/MOSAIK_proseg_vendor` | Every owned ProSeg consensus polygon (MultiPolygon), clipped at tile seams (below), in microns, with the vendor shapes' `Scale(1/ps)` transform; `instance_id`, `source_cell_id`, `proseg_internal_id`, `proseg_tile`. |
 | `labels/proseg_vendor_cell_labels` | The polygons rasterised on the morphology grid (pixel-centre rule, ascending `instance_id`, last wins), vendor pyramid, `Identity` transform. |
 | `tables/table_MOSAIK_proseg_vendor` | Cells × genes foreground counts (`var` copied from `table_original`, genes only). `obs`: `instance_id`, `source_cell_id`, ProSeg's `proseg_internal_id`, `proseg_tile`, centroid, `volume`, `surface_area`, `scale`, `proseg_cluster`, `cell_area`, `transcript_counts`, `proseg_zero_transcripts` and the control counts (`genomic_control_counts`, `unassigned_codeword_counts`, `deprecated_codeword_counts`, `control_codeword_counts`, `control_probe_counts`, `other_control_counts`), attributed geometrically through `proseg_vendor_cell_labels`. |
 | `points/transcripts` | Every file rewritten with two more columns, `assignment` (nullable uint64: the vendor label of the ProSeg cell) and `background`. Names, row counts, row order and the other columns are kept, so the build's points index and aggregates still describe the files. Controls, vendor and ProSeg background and the rows ProSeg dropped have no assignment. |
@@ -672,6 +672,21 @@ proseg tile.parquet xenium -x x_location -y y_location -z z_location
 - **Seams.** A transcript claimed by two tiles for different cells goes to the
   tile whose core holds it, else to the first tile in plan order. Conflicts are
   counted per tile pair and per losing cell, not hidden.
+- **Seam clip** (stitch format 2, `merxen.segmentation.atera_proseg.seams`).
+  Each tile draws only the cells it owns, so cells of two tiles can overlap
+  across a seam (AT-9's full section: 279 pairs, 174 above 1 µm², largest
+  91.5 µm²). The overlap is split by the same rule as the transcripts: the
+  part inside a tile's core goes to that tile's cell, the rest to the tile
+  earlier in plan order, and each cell loses the parts it does not win
+  (`shapely` difference against the neighbours' original polygons). Only
+  cells that lose area change; they stay MultiPolygons with every part of
+  positive area. A cell left with no area is not in the layer and its rows
+  become background, like an owned cell without a polygon. The stitch then
+  refuses any cross-tile pair overlapping by more than 0.01 µm². The report's
+  `seam_clip` holds the overlap stats before and after, every clipped cell
+  (area before and after, the cells it ceded to, its rows lost in conflicts)
+  and the emptied cells. Overlaps of two cells of one tile are ProSeg's own
+  and stay (`overlap_pixels_within_tile`).
 - **Registry.** Branch `proseg_vendor` (aliases `vendor_proseg`,
   `native_proseg`) with `assignment`, `background`,
   `label: proseg_vendor_cell_labels`, `prior: vendor_cell_labels` and the
