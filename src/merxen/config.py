@@ -1722,7 +1722,8 @@ class ClusteringSquidpySampleConfig(BaseModel):
     ``expected_panel_gene_count`` is the gene count the panel check expects
     (``None`` skips it, for whole-transcriptome panels); ``hvg_n_top_genes``
     selects that many highly variable genes for the PCA (``None`` uses every
-    gene, as XENIUM and MERSCOPE rows do).
+    gene for panels of up to 5,000 genes, as the 300-gene XENIUM and MERSCOPE
+    rows do, and 2,000 highly variable genes for wider panels).
     """
 
     sample_id: str
@@ -2336,6 +2337,7 @@ class PciSeqReferenceConfig(BaseModel):
     verify_checksums: bool = True
     chunk_rows: int = Field(default=2048, ge=1)
     gene_id_mode: Literal["symbol", "ensembl"] = "symbol"
+    # Required (atlas sources) when the pciSeq panel is whole-transcriptome.
     gene_names: list[str] | None = None
     output_dir: Path = Path("pciseq_reference_out")
 

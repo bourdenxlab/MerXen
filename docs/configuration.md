@@ -390,7 +390,7 @@ install paths trigger a `sudo` prompt.
 | `atera_proseg_tile_subset` | `null` | Comma list of tile ids (`c2_r1`) to run as a check; no stitch, and any stage after `segment` is refused. |
 | `atera_proseg_allow_untested_version` | `false` | Allow a `proseg_version` other than 3.2.0 (the only one whose Xenium-layout reader and flags were verified) on `native_proseg` rows; the preflight and every tile then run it with a warning. |
 | `atera_cellpose_model`, `atera_cellpose_cellprob`, `atera_cellpose_flow_threshold`, `atera_cellpose_diameter`, `atera_cellpose_final_max_area_um2`, `atera_mask_max_eccentricity` | `null` | The ATERA twins of the per-platform Cellpose overrides. They are declared because Cellpose preflight reads them for every active platform; native ATERA rows run no Cellpose. |
-| `atera_clustering_hvg_n_top_genes` | `2000` | Highly variable genes the clustering PCA of an ATERA (whole-transcriptome) sample uses. ATERA samples also skip the 300-gene panel check; XENIUM and MERSCOPE samples are unchanged. |
+| `atera_clustering_hvg_n_top_genes` | `2000` | Highly variable genes the clustering PCA of an ATERA (whole-transcriptome) sample uses. ATERA samples also skip the 300-gene panel check; XENIUM and MERSCOPE samples are unchanged. `null` leaves the choice to the panel-width rule, which also selects 2,000 genes for any panel above 5,000 genes ([clustering](stages/clustering-squidpy.md#whole-transcriptome-panels-more-than-5000-genes)). |
 
 #### ATERA rows
 
