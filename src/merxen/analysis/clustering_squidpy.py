@@ -16,6 +16,7 @@ import logging
 import re
 import sys
 import textwrap
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -42,6 +43,7 @@ from merxen.clustering.cellset import restrict_to_table_cells, select_table_cell
 from merxen.config import ClusteringSquidpyConfig
 from merxen.control_features import CONTROL_TOKENS, control_token_mask
 from merxen.gene_ids import is_ensembl_gene_id
+from merxen.gene_sets import WHOLE_TRANSCRIPTOME_MIN_GENES, is_whole_transcriptome
 from merxen.io.transcript_io import first_existing_col
 from merxen.memory import force_release, log_status
 from merxen.platforms import platform_spec
@@ -81,6 +83,11 @@ DOTPLOT_GENE_SELECTION_UNS_KEY = "merxen_dotplot_gene_selection"
 # log-normalised matrix.
 HVG_FLAVOR = "cell_ranger"
 HVG_VAR_KEY = "merxen_highly_variable"
+# Highly variable genes the PCA uses when a sample sets no ``hvg_n_top_genes``
+# but its panel is whole-transcriptome (more than WHOLE_TRANSCRIPTOME_MIN_GENES
+# non-control genes, e.g. Xenium Prime 5K). Equal to the workflow default
+# ``params.atera_clustering_hvg_n_top_genes`` (a test keeps them in step).
+WHOLE_TRANSCRIPTOME_HVG_N_TOP_GENES = 2000
 # Owning-cell column of a nucleus layer whose ids are not cell ids (ATERA: one
 # row per nucleus). A registry entry's ``cell_key`` takes precedence.
 NUCLEUS_CELL_KEY_DEFAULT = "cell_instance_id"
@@ -336,7 +343,9 @@ class SampleClusteringOptions:
             control and min-cell filtering; ``None`` skips the check (whole-
             transcriptome panels).
         hvg_n_top_genes: Highly variable genes the PCA runs on; ``None`` runs
-            it on every gene, as XENIUM and MERSCOPE rows do.
+            it on every gene for panels of up to 5,000 genes (the 300-gene
+            XENIUM and MERSCOPE rows) and on
+            :data:`WHOLE_TRANSCRIPTOME_HVG_N_TOP_GENES` genes for wider ones.
     """
 
     expected_panel_gene_count: int | None = EXPECTED_PANEL_GENE_COUNT
@@ -599,7 +608,12 @@ def run_scanpy_clustering(
         hvg_n_top_genes: When set, select this many highly variable genes
             (:data:`HVG_FLAVOR` on the log-normalised matrix) into
             ``.var["merxen_highly_variable"]`` and run the PCA on them only.
-            ``None`` runs the PCA exactly as before, on every gene.
+            ``None`` runs the PCA on every gene, unless the panel is
+            whole-transcriptome (more than
+            :data:`~merxen.gene_sets.WHOLE_TRANSCRIPTOME_MIN_GENES` non-control
+            genes before the min-cell filter): then
+            :data:`WHOLE_TRANSCRIPTOME_HVG_N_TOP_GENES` genes are selected and
+            the reason is recorded in the round's ``uns`` parameters.
 
     Returns:
         Clustered AnnData with Leiden labels in ``.obs[key_added]``. The
@@ -616,6 +630,8 @@ def run_scanpy_clustering(
                 f"Available layers: {list(clustered.layers.keys())}"
             )
         clustered.X = _copy_matrix(clustered.layers[input_layer])
+
+    hvg_selection = _resolve_hvg_selection(clustered, hvg_n_top_genes)
 
     if drop_control_features:
         clustered = remove_control_features(
@@ -678,10 +694,12 @@ def run_scanpy_clustering(
     hvg_summary: dict[str, Any] | None = None
     pca_mask_var: str | None = None
     n_pca_vars = int(clustered.n_vars)
-    if hvg_n_top_genes is not None:
-        hvg_summary = _select_highly_variable_genes(
-            clustered, n_top_genes=int(hvg_n_top_genes)
-        )
+    if hvg_selection is not None:
+        n_top_genes, selection_record = hvg_selection
+        hvg_summary = {
+            **_select_highly_variable_genes(clustered, n_top_genes=n_top_genes),
+            **selection_record,
+        }
         pca_mask_var = HVG_VAR_KEY
         n_pca_vars = int(hvg_summary["n_highly_variable_genes"])
 
@@ -789,6 +807,64 @@ def run_scanpy_clustering(
         key_added: provenance.to_json(key_added=key_added),
     }
     return clustered
+
+
+def _resolve_hvg_selection(
+    adata: ad.AnnData,
+    hvg_n_top_genes: int | None,
+) -> tuple[int, dict[str, Any]] | None:
+    """Decide how many highly variable genes the PCA uses, and why.
+
+    The panel width is counted before the min-cell filter and without control
+    features, so a 5,001-gene panel stays whole-transcriptome even when a few
+    of its genes are detected in too few cells. Branch and neuron rounds get
+    a matrix the broad round already filtered; they inherit the panel width
+    the broad round recorded, so every round of a sample follows one rule.
+
+    Args:
+        adata: Clustering input (raw counts; controls may still be present).
+        hvg_n_top_genes: The sample's explicit request, or ``None``.
+
+    Returns:
+        ``None`` when the PCA runs on every gene; otherwise the number of
+        genes to select and scalar ``uns`` provenance for the reason.
+    """
+    if hvg_n_top_genes is not None:
+        return int(hvg_n_top_genes), {"hvg_selection_reason": "requested"}
+    n_panel_genes = max(
+        int(np.count_nonzero(~_control_feature_mask(adata))),
+        _recorded_panel_gene_count(adata),
+    )
+    if not is_whole_transcriptome(n_panel_genes):
+        return None
+    logger.info(
+        "Panel has %d non-control genes (more than %d): the PCA runs on %d "
+        "highly variable genes.",
+        n_panel_genes,
+        WHOLE_TRANSCRIPTOME_MIN_GENES,
+        WHOLE_TRANSCRIPTOME_HVG_N_TOP_GENES,
+    )
+    return WHOLE_TRANSCRIPTOME_HVG_N_TOP_GENES, {
+        "hvg_selection_reason": "whole_transcriptome_panel",
+        "n_panel_genes": n_panel_genes,
+        "whole_transcriptome_min_genes": WHOLE_TRANSCRIPTOME_MIN_GENES,
+    }
+
+
+def _recorded_panel_gene_count(adata: ad.AnnData) -> int:
+    """Return the widest panel an earlier round of this matrix recorded.
+
+    Only rounds that took the whole-transcriptome rule record
+    ``n_panel_genes``; anything else gives 0.
+    """
+    widths = [
+        int(params["n_panel_genes"])
+        for key, params in adata.uns.items()
+        if str(key).startswith("merxen_clustering_params")
+        and isinstance(params, Mapping)
+        and "n_panel_genes" in params
+    ]
+    return max(widths, default=0)
 
 
 def _select_highly_variable_genes(

@@ -605,6 +605,10 @@ HIERARCHY_IMPORT_EXEMPTIONS = {
         "samplesheet column parsers (their values are in samples_json)"
     ),
     "merxen.gene_ids": "Ensembl ID pattern (PREPARE's var metadata)",
+    "merxen.gene_sets": (
+        "panel-width rule of legacy run_scanpy_clustering's HVG selection; the "
+        "map_first hierarchy never runs it (its QC embedding has its own rule)"
+    ),
     "merxen.io.spatialdata_io": "SpatialData writes (FINALIZE, PREPARE)",
     "merxen.io.transcript_io": "column lookups (PREPARE's SpatialData reads)",
     "merxen.memory": "memory logging",

@@ -21,6 +21,8 @@ from spatialdata.models import PointsModel, ShapesModel, TableModel
 from spatialdata.transformations import Affine, Identity, set_transformation
 
 from merxen.analysis.pciseq import (
+    PciSeqInputs,
+    _reference_gene_list_is_explicit,
     finalize_pciseq,
     prepare_pciseq,
     prepare_pciseq_inputs,
@@ -754,6 +756,115 @@ def test_reference_manifest_checksum_fails_before_spatialdata_read(
     with pytest.raises(ValueError):
         prepare_pciseq(config, tmp_path / "prepared")
     assert not (tmp_path / "prepared").exists()
+
+
+def _panel_points(n_panel_genes: int) -> pd.DataFrame:
+    """One transcript per panel gene inside cell 17, plus the reference genes."""
+    genes = ["A", "B", *(f"Gene{i}" for i in range(n_panel_genes - 2))]
+    genes.append("Blank-1")  # a control never counts as a panel gene
+    return pd.DataFrame(
+        {
+            "x": np.full(len(genes), 1.0),
+            "y": np.full(len(genes), 1.0),
+            "gene": genes,
+            "transcript_id": np.arange(1, len(genes) + 1, dtype=np.uint64),
+        }
+    )
+
+
+def _atlas_origin(reference_path: Path, gene_names: list[str] | None) -> dict:
+    return {
+        "resolved_source": "whb",
+        "reference_sha256": hashlib.sha256(reference_path.read_bytes()).hexdigest(),
+        "specification": {
+            "source": "whb",
+            "configuration": {"source": "whb", "gene_names": gene_names},
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("origin", "expected"),
+    [
+        (None, True),
+        ({"resolved_source": "custom", "specification": {}}, True),
+        (
+            {
+                "resolved_source": "whb",
+                "specification": {"configuration": {"gene_names": None}},
+            },
+            False,
+        ),
+        (
+            {
+                "resolved_source": "wmb",
+                "specification": {"configuration": {"gene_names": ["A"]}},
+            },
+            True,
+        ),
+        ({"source": "whb"}, False),
+    ],
+)
+def test_reference_gene_list_is_explicit(
+    origin: dict[str, Any] | None, expected: bool
+) -> None:
+    assert _reference_gene_list_is_explicit(origin) is expected
+
+
+@pytest.mark.parametrize(
+    ("n_panel_genes", "explicit", "refused"),
+    [
+        (5001, False, True),
+        (5001, True, False),
+        (5000, False, False),
+    ],
+)
+def test_whole_transcriptome_panel_needs_an_explicit_reference_gene_list(
+    tmp_path: Path, n_panel_genes: int, explicit: bool, refused: bool
+) -> None:
+    data = _data(point_frame=_panel_points(n_panel_genes))
+    config = _config(tmp_path)
+
+    def prepare() -> object:
+        return prepare_pciseq_inputs(
+            data,
+            config=config,
+            reference=_reference(),
+            reference_gene_list_is_explicit=explicit,
+        )
+
+    if refused:
+        with pytest.raises(ValueError, match="5001 non-control genes"):
+            prepare()
+    else:
+        inputs = prepare()
+        assert isinstance(inputs, PciSeqInputs)
+        assert set(inputs.spots["gene_name"]) == {"A", "B"}
+
+
+@pytest.mark.parametrize("gene_names", [None, ["A", "B"]])
+def test_prepare_refuses_a_whole_atlas_reference_for_a_wide_panel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gene_names: list[str] | None
+) -> None:
+    """The prepared reference manifest decides whether the gene list is explicit."""
+    import spatialdata as sd
+
+    origin_path = tmp_path / "reference_origin.json"
+    config = _config(tmp_path, reference_manifest_path=origin_path)
+    _source(config.source_h5ad)
+    _reference().to_csv(config.reference_path)
+    origin_path.write_text(json.dumps(_atlas_origin(config.reference_path, gene_names)))
+    monkeypatch.setattr(
+        sd, "read_zarr", lambda path: _data(point_frame=_panel_points(5001))
+    )
+
+    if gene_names is None:
+        with pytest.raises(ValueError, match="gene_names is None"):
+            prepare_pciseq(config, tmp_path / "prepared")
+        assert not (tmp_path / "prepared").exists()
+    else:
+        prepare_pciseq(config, tmp_path / "prepared")
+        assert (tmp_path / "prepared" / "manifest.json").is_file()
 
 
 def test_empty_reported_class_summary_becomes_uncertain(
