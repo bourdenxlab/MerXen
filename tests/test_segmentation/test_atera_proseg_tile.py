@@ -16,6 +16,7 @@ from merxen.config import AteraProsegModelParams
 from merxen.segmentation.atera_proseg import (
     AteraProsegError,
     PriorWeightMismatchError,
+    ProsegRunError,
 )
 from merxen.segmentation.atera_proseg.export import (
     XENIUM_SCHEMA,
@@ -28,6 +29,7 @@ from merxen.segmentation.atera_proseg.runner import (
     build_command,
     check_prior_weight,
     check_version,
+    is_empty_feature_selection,
     parse_prior_weight,
     parse_timings,
     prior_weight_multiplier,
@@ -366,6 +368,91 @@ def test_tile_prior_weight_still_off_after_the_restart_fails(
 ) -> None:
     with pytest.raises(PriorWeightMismatchError, match="effective prior weight"):
         _run(stores, tmp_path, "c0_r0", FAKE_PROSEG_WEIGHT_OFFSET="50")
+
+
+# The tail of ProSeg 3.2.0's stderr on AT-7's full-section tile c0_r3 (a section
+# edge: 228 Cellpose objects, 11,962 rows over 4,957 genes in the window).
+_EMPTY_FEATURES_STDERR = (
+    "[2026-11-07T03:30:19Z INFO  proseg] loaded transcripts: 24.294155ms\n"
+    "\n"
+    "thread 'main' (2070653) panicked at src/sampler/featureselection.rs:308:54:\n"
+    "called `Result::unwrap()` on an `Err` value: EmptyInput\n"
+    "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+)
+
+
+def test_empty_feature_selection_is_recognised() -> None:
+    assert is_empty_feature_selection(_EMPTY_FEATURES_STDERR)
+    assert not is_empty_feature_selection(
+        _EMPTY_FEATURES_STDERR.replace("EmptyInput", "ShapeError")
+    )
+    assert not is_empty_feature_selection(
+        _EMPTY_FEATURES_STDERR.replace("featureselection.rs", "sampler.rs")
+    )
+    assert not is_empty_feature_selection("memory allocation failed\n")
+
+
+def test_command_no_factorization_flag_only_when_asked() -> None:
+    kwargs: dict[str, Any] = dict(
+        parquet_path="t.parquet",
+        prior_path="p.npy",
+        output_dir="o",
+        model=AteraProsegModelParams(),
+        prior_weight=140.0,
+        pixel_size_um=0.2125,
+        col0=0,
+        row0=0,
+        num_threads=4,
+    )
+    default = build_command("proseg", **kwargs)
+    assert "--no-factorization" not in default
+    assert build_command("proseg", factorization=True, **kwargs) == default
+    sparse = build_command("proseg", factorization=False, **kwargs)
+    assert sparse.count("--no-factorization") == 1
+    assert [arg for arg in sparse if arg != "--no-factorization"] == default
+
+
+def test_tile_too_sparse_for_gene_selection_runs_without_factorization(
+    stores: tuple[Path, Path, dict], tmp_path: Path
+) -> None:
+    _, _, plan = stores
+    tile = next(t for t in plan["tiles"] if t["tile_id"] == "c0_r0")
+    manifest = _run(stores, tmp_path, "c0_r0", FAKE_PROSEG_EMPTY_FEATURES="1")
+    assert "--no-factorization" in manifest["proseg"]["arguments"]
+    assert manifest["factorization"]["enabled"] is False
+    assert "gene selection" in manifest["factorization"]["reason"]
+    cells = pq.read_table(Path(manifest["_dir"]) / "cells.parquet").to_pandas()
+    assert sorted(cells["instance_id"].tolist()) == tile["owned_labels"]
+    assert manifest["prior_weight"]["reported"] == pytest.approx(140.0, rel=0.02)
+    json.dumps(manifest)
+
+
+def test_tile_with_gene_selection_keeps_factorization_and_its_manifest(
+    stores: tuple[Path, Path, dict], tmp_path: Path
+) -> None:
+    manifest = _run(stores, tmp_path, "c0_r0")
+    assert "--no-factorization" not in manifest["proseg"]["arguments"]
+    assert "factorization" not in manifest
+
+
+def test_tile_other_proseg_failure_is_not_retried_without_factorization(
+    stores: tuple[Path, Path, dict], tmp_path: Path
+) -> None:
+    crashing = tmp_path / "crash" / "proseg"
+    crashing.parent.mkdir()
+    crashing.write_text(
+        '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "proseg 3.2.0"; '
+        'exit 0; fi\necho "$@" >> "$(dirname "$0")/calls"\n'
+        "echo \"thread 'main' panicked at src/sampler/sampler.rs:1:1:\" >&2\n"
+        "exit 101\n"
+    )
+    crashing.chmod(0o755)
+    config = _config(stores, tmp_path, "c0_r0")
+    with pytest.raises(ProsegRunError, match="status 101"):
+        run_tile(config, crashing)
+    calls = (crashing.parent / "calls").read_text().splitlines()
+    assert len(calls) == 1
+    assert "--no-factorization" not in calls[0]
 
 
 def test_tile_refuses_another_source_build(

@@ -45,6 +45,7 @@ from merxen.segmentation.atera_proseg import (
     TILE_MANIFEST_NAME,
     AteraProsegError,
     PriorWeightMismatchError,
+    ProsegRunError,
 )
 from merxen.segmentation.atera_proseg.export import (
     export_tile,
@@ -58,6 +59,7 @@ from merxen.segmentation.atera_proseg.runner import (
     build_command,
     check_prior_weight,
     check_version,
+    is_empty_feature_selection,
     prior_weight_multiplier,
     run_proseg,
 )
@@ -475,6 +477,11 @@ def run_tile(cfg: AteraProsegTileConfig, proseg_binary: Path) -> dict[str, Any]:
         model.prior_weight_effective, export.n_rows, export.n_labels_in_window
     )
     restarts: list[dict[str, float]] = []
+    # ProSeg's gene selection fails on a nearly empty tile; the tile then runs
+    # once more without factorization (genes modelled directly, as ProSeg
+    # itself does for a panel smaller than --nunfactored).
+    factorization = True
+    factorization_reason: str | None = None
     # ProSeg refuses an output path that does not exist.
     proseg_dir.mkdir(parents=True, exist_ok=True)
     while True:
@@ -490,6 +497,7 @@ def run_tile(cfg: AteraProsegTileConfig, proseg_binary: Path) -> dict[str, Any]:
             row0=cfg.window_px[2],
             num_threads=cfg.num_threads,
             cellprob_path=export.cellprob_path,
+            factorization=factorization,
         )
         logger.info("[%s] Tile %s: running ProSeg", cfg.dataset_name, cfg.tile_id)
         try:
@@ -510,6 +518,23 @@ def run_tile(cfg: AteraProsegTileConfig, proseg_binary: Path) -> dict[str, Any]:
                 model.prior_weight_tolerance,
             )
             break
+        except ProsegRunError:
+            stderr = (out / "proseg.stderr.log").read_text(
+                encoding="utf-8", errors="replace"
+            )
+            if not factorization or not is_empty_feature_selection(stderr):
+                raise
+            factorization = False
+            factorization_reason = (
+                "ProSeg's gene selection found no gene above its expression floor "
+                f"({export.n_rows} rows, {export.n_genes} genes in the window)"
+            )
+            logger.warning(
+                "[%s] Tile %s: %s; running ProSeg again with --no-factorization",
+                cfg.dataset_name,
+                cfg.tile_id,
+                factorization_reason,
+            )
         except PriorWeightMismatchError as error:
             if restarts or not error.reported:
                 raise
@@ -562,6 +587,11 @@ def run_tile(cfg: AteraProsegTileConfig, proseg_binary: Path) -> dict[str, Any]:
             ],
         },
         "model": cfg.model.model_dump(mode="json"),
+        **(
+            {}
+            if factorization
+            else {"factorization": {"enabled": False, "reason": factorization_reason}}
+        ),
         "num_threads": cfg.num_threads,
         "export": {
             "n_rows": export.n_rows,

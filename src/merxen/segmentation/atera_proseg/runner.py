@@ -88,6 +88,7 @@ def build_command(
     row0: int,
     num_threads: int,
     cellprob_path: str | Path | None = None,
+    factorization: bool = True,
 ) -> list[str]:
     """Return the ProSeg argument list of one tile.
 
@@ -105,6 +106,9 @@ def build_command(
         cellprob_path: The float32 Cellpose logits of the window
             (``--cellpose-cellprobs``, as the XENIUM route passes them), or
             ``None`` (the vendor prior has none).
+        factorization: ``False`` adds ``--no-factorization`` (genes modelled
+            directly), for a tile too sparse for ProSeg's gene selection
+            (:func:`is_empty_feature_selection`).
 
     Returns:
         The argument list (``binary`` first).
@@ -168,6 +172,8 @@ def build_command(
         ]
     if model.use_cell_initialization:
         command.append("--use-cell-initialization")
+    if not factorization:
+        command.append("--no-factorization")
     command += ["--cellpose-masks", str(prior_path)]
     if cellprob_path is not None:
         command += ["--cellpose-cellprobs", str(cellprob_path)]
@@ -196,6 +202,25 @@ def build_command(
         "--overwrite",
     ]
     return command
+
+
+_EMPTY_FEATURE_SELECTION = re.compile(
+    r"panicked at src/sampler/featureselection\.rs:\d+:\d+:\s*\n"
+    r"called `Result::unwrap\(\)` on an `Err` value: EmptyInput"
+)
+
+
+def is_empty_feature_selection(stderr: str) -> bool:
+    """Return whether ProSeg stopped in its gene selection for lack of genes.
+
+    With factorization on (ProSeg's default when the panel has more genes than
+    ``--nunfactored``), ProSeg 3.2.0 picks the genes it models directly from
+    10,000 random 20 µm regions and keeps only genes averaging at least 0.05
+    transcripts per region (``featureselection.rs``). On a nearly empty tile
+    (a section edge whose core holds Cellpose objects but few transcripts) no
+    gene reaches that and ProSeg panics with ``EmptyInput`` before sampling.
+    """
+    return bool(_EMPTY_FEATURE_SELECTION.search(stderr))
 
 
 def proseg_version(binary: str | Path) -> str:

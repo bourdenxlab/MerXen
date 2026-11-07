@@ -103,6 +103,7 @@ def _parser() -> argparse.ArgumentParser:
         "--exclude-spatialdata-transcripts",
         "--overwrite",
         "--use-cell-initialization",
+        "--no-factorization",
     ):
         parser.add_argument(flag, action="store_true")
     return parser
@@ -154,6 +155,17 @@ def main() -> int:
     assert schema == EXPECTED, schema
     assert set(table.column("fov_name").to_pylist()) == {"0"}
     _log("loaded transcripts: 0.01s")
+    empty_features = os.environ.get("FAKE_PROSEG_EMPTY_FEATURES") == "1"
+    if empty_features and not args.no_factorization:
+        # ProSeg 3.2.0 on a tile where no gene reaches its expression floor
+        # for the factorization's gene selection (featureselection.rs).
+        print(
+            "\nthread 'main' (1) panicked at src/sampler/featureselection.rs:308:54:\n"
+            "called `Result::unwrap()` on an `Err` value: EmptyInput",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 101
     prior = np.load(args.cellpose_masks)
     if args.cellpose_cellprobs is not None:
         # As ProSeg 3.2.0 (voxelcheckerboard.rs): float32 on the mask's grid.
