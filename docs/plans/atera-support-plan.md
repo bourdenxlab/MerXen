@@ -1728,7 +1728,9 @@ routes stay. ProSeg runs on AT-9's tiled route only, never as one whole-section 
   ProSeg names. It is now `proseg_vendor` (`MOSAIK_proseg_vendor`, `table_MOSAIK_proseg_vendor`,
   `proseg_vendor_cell_labels`, branch `proseg_vendor`), so `reseg`/`MOSAIK_proseg` mean the
   Cellpose-prior ProSeg layer as on XENIUM. The stitch config gained `prior_kind`: an AT-9 store
-  re-stitches once on `-resume` (tiles cached) and the stitch removes the old-named elements.
+  re-stitches once on `-resume` (tiles cached) and the stitch removes the old-named elements
+  (and VIEWER_CACHE's labels of them); the later stages re-run under the new layer name (F4 run,
+  below).
 - **Cellpose:** `ATERA_CELLPOSE_SEGMENT` (GPU lock) runs the XENIUM tiled Cellpose on
   `morphology_focus` of the built store; zarr only, `image_key` required, every requested channel
   must be present; transforms from the spec sidecars; **no transcript CSV**
@@ -1837,10 +1839,49 @@ routes stay. ProSeg runs on AT-9's tiled route only, never as one whole-section 
   | R2-2, R2-3 (surviving mutants P12, P4): `table_MOSAIK_cellpose` was not told apart from ProSeg's table (identity fake ProSeg); the tile window of the cell probabilities was not checked | The route fixture's fake ProSeg moves rows (`greedy_halo`) and the test asserts the Cellpose table differs from ProSeg's; the probabilities of a tile off the origin equal the source slice. Both mutants killed |
   | R2-5: a `native_proseg` re-stitch of a store a `cellpose_proseg` run had enriched kept `MOSAIK_cellpose`, its table, labels, registry entry and attrs, but dropped the `cellpose_assignment` column they read | A vendor stitch removes them (and counts them as foreign for its skip); test |
 
+  **F4 run: the AT-9 crop row on the AT-7 code** (`segmentation_source=native_proseg`, `-resume`
+  in a copy of the AT-9 launch folder and crop outdir; evidence `verify_f4_vendor_crop.json`,
+  `trace_f4_vendor_crop*.tsv`): 27 tasks ran and 5 were cached (the build, the plan, ENSURE_PROSEG
+  and both tiles: no ProSeg re-run). The stitch removed the old-named layer (`MOSAIK_proseg`, its
+  table, labels, two derived tables and registry branch) and wrote `proseg_vendor`; the seam clip
+  removed the crop's one cross-tile overlap (0.71 µm²); 3,013 cells and 18,138,163 assigned rows as
+  in AT-9; the layer check passes. `proseg_vendor` then ran through VIEWER_CACHE, MIQ, layer
+  validation, QC, VISUALIZE, spatial gene analysis, clustering and MENDER. The run found two
+  defects, both fixed: VIEWER_CACHE's alias of the removed layer (`MOSAIK_proseg_labels` and its
+  pyramid and outline) stayed in the store; and the first fix made a store holding such leftovers
+  re-stitch its current layer on the next `-resume`, which deleted the layer's derived tables while
+  the cached clustering task did not write its table back. Leftovers of another layer are now
+  removed without a re-stitch. The outdir keeps AT-9's published `reseg/` result folders beside
+  the new `proseg_vendor/` ones; the workflow does not delete published folders, so they are to be
+  removed by hand in an AT-9 outdir that is resumed.
+
+  **Cellpose crop re-run with the follow-ups** (`-resume`, evidence
+  `nextflow_crop_w140_clip.log`): the plan changed (weight 140), so both tiles re-ran (reported
+  139.91 and 139.99, no restart; Cellpose cached). 10,476 cells, 4,973 without transcripts
+  (38.8: 5,015), 20.9 M assigned rows, 739 seam conflicts. The clip removed 9 cross-tile overlaps
+  (4 above 1 µm², largest 1.54 µm²) from 10 cells and none emptied; cross-tile overlap pixels
+  124 → 0.
+
+  **`-resume` after a re-stitch leaves later stages stale (found here, not fixed).** The
+  re-stitch rewrote `reseg` and deleted its derived tables, ENRICH, VIEWER_CACHE, MIQ, layer
+  validation and QC re-ran, but VISUALIZE, spatial gene analysis, clustering and MENDER were
+  cached: their inputs are values (`samples_json`) that do not change when the cells do, so their
+  published outputs describe the previous cells and `table_MOSAIK_proseg_clustering_squidpy` is
+  missing from the store. The same holds for XENIUM/MERSCOPE rows whose segmentation re-runs in
+  place (the persistent latest store), so a fix (a segmentation token in the downstream inputs)
+  would change their task hashes; it is left for the user to decide. Workaround: re-run the row
+  without `-resume` from `--start_stage visualize` (done for the crop: 30 tasks, VISUALIZE to
+  MENDER on all three layers, no failure; `nextflow_crop_w140_downstream.log`). It affects a
+  re-stitch that keeps the layer's name: an AT-7 `cellpose_proseg` outdir, or a `native_proseg`
+  outdir already stitched under `proseg_vendor`; an AT-9 outdir re-runs its later stages anyway
+  because the layer is renamed (F4 run).
+
   **Open decisions for the user:** Q1 accept the `proseg_vendor` rename; Q2 keep `native` as the
   ATERA default until the full-section comparison; Q5 pass the Cellpose cell probabilities to
   ProSeg as XENIUM does (default on); Q6 the Cellpose-numbered layers carry no nucleus metrics
-  (a geometric match to the vendor nuclei would add them). Q3 and Q4 are withdrawn (above).
+  (a geometric match to the vendor nuclei would add them); Q7 whether downstream stages should be
+  invalidated by a segmentation change under `-resume` (above; changes XENIUM/MERSCOPE task
+  hashes). Q3 and Q4 are withdrawn (above).
   **Not done:** the full-section `cellpose_proseg` run and the Cellpose-vs-vendor and
   Cellpose-prior-vs-vendor-prior comparison figures.
 
