@@ -93,6 +93,17 @@ def test_accuracy_includes_unseen_truth_and_unassigned_calls() -> None:
     assert high.n_called == 2 and high.coverage == 0.5 and high.precision == 0.5
 
 
+def test_support_without_an_assignment_is_not_a_confident_call() -> None:
+    truth = pd.DataFrame({"cell_id": ["a", "b"], "truth": ["X", "Y"]})
+    calls = pd.DataFrame(
+        {"cell_id": ["a", "b"], "assignment": ["X", None], "bp": [0.95, 0.99]}
+    )
+    result = score_holdout(truth, calls, training_labels=["X", "Y"])
+    high = next(s for s in result.support if s.threshold == 0.9)
+    assert high.n_called == 1 and high.coverage == 0.5 and high.precision == 1.0
+    assert result.accuracy == 0.5
+
+
 @pytest.mark.parametrize("invalid", ["missing", "extra", "duplicate", "bad_support"])
 def test_prediction_integrity_errors_cannot_improve_measured_accuracy(
     invalid: str,

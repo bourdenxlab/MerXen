@@ -232,7 +232,7 @@ def score_holdout(
         )
     support = []
     for cut in support_thresholds:
-        confident = np.isfinite(bp) & (bp >= cut)
+        confident = calls.notna().to_numpy() & np.isfinite(bp) & (bp >= cut)
         n_called = int(confident.sum())
         support.append(
             SupportScore(
