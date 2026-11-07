@@ -201,6 +201,7 @@ _ATERA_FULL_STAGES = [
     "build_viewer_caches",
     "mask_image_quantification",
     "qc",
+    "mecr",
     "visualize",
     "spatial_gene_analysis",
     "clustering_squidpy",
@@ -212,7 +213,6 @@ _REFUSALS = {
     "atera/start_mapmycells": "standalone MapMyCells is not covered for ATERA rows",
     "atera/pciseq": "pciSeq is off for ATERA rows",
     "atera/gaston": "GASTON is not covered for ATERA rows",
-    "atera/mecr": "MECR is off for ATERA rows until it streams its reference",
     "atera/transcript_analysis": "transcript spatial patterns are off for ATERA rows",
     "atera/cortical_depth": "off for non-cortical ATERA sections",
     "atera/distance_from_object": "off for non-cortical ATERA sections",
@@ -233,7 +233,6 @@ _REFUSALS = {
     "atera/segment_nuclei": "keep the vendor nuclei and run no Cellpose nuclei stage",
     "atera/only_pciseq": "'pciseq' is not active for this run. ATERA rows run only",
     "atera/stop_gaston": "'gaston' is not active for this run. ATERA rows run only",
-    "atera/only_mecr": "'mecr' is not active for this run. ATERA rows run only",
     "atera/map_first_row": (
         "map_first annotation is not covered for ATERA rows yet (AT-11, RCA on "
         "Atera); remove clustering_squidpy_mode from row PAIR_A"
@@ -246,17 +245,32 @@ _REFUSALS = {
 
 
 def _clustering_reference_params(tmp_path: Path) -> list[str]:
-    """Reference files the clustering preflight checks (contents unread)."""
+    """Reference files the clustering and MECR preflights check (contents unread).
+
+    MECR runs by default on human ATERA rows (AT-8), so its WHB reference
+    files are checked like the clustering ones.
+    """
     marker = tmp_path / "markers.json"
     taxonomy = tmp_path / "cluster_annotation_term.csv"
     marker.write_text("{}")
     taxonomy.write_text("")
-    return [
+    params = [
         "--clustering_squidpy_broad_marker_lookup_path",
         str(marker),
         "--clustering_squidpy_broad_taxonomy_metadata_path",
         str(taxonomy),
     ]
+    for name in (
+        "neurons_h5ad",
+        "nonneurons_h5ad",
+        "cell_metadata",
+        "taxonomy_metadata",
+        "cluster_membership",
+    ):
+        path = tmp_path / f"whb_{name}"
+        path.write_text("")
+        params += [f"--mecr_whb_{name}_path", str(path)]
+    return params
 
 
 @pytest.fixture(scope="module")
@@ -284,8 +298,9 @@ def test_atera_rows_run_the_native_route(
     assert full["run_native_segment"] is True
     assert full["run_segment_nuclei"] is False
     assert full["analysis_segmentations"] == ["original_seg"]
-    # MECR and the transcript patterns default off for ATERA rows.
-    assert full["run_mecr"] is False
+    # MECR runs by default on human ATERA rows (its streaming reference,
+    # Atera plan AT-8); the transcript patterns stay off.
+    assert full["run_mecr"] is True
     assert full["transcript_analysis"] is False
     mender = preflight_cases["atera/mender"]
     assert mender["result"] == "OK", mender
@@ -314,12 +329,19 @@ def test_atera_rows_run_the_native_route(
         "atera/analysis_original",
         "atera/analysis_all",
         "atera/mecr_off",
+        "atera/mecr",
+        "atera/only_mecr",
     ):
         record = preflight_cases[case]
         assert record["result"] == "OK", (case, record)
         assert record["segmentation_source"] == "native"
         assert record["analysis_segmentations"] == ["original_seg"]
     assert preflight_cases["atera/only_segment"]["selected_stages"] == ["segment"]
+    # MECR (Atera plan AT-8): a row may switch it on, off, or run it alone.
+    assert preflight_cases["atera/mecr"]["run_mecr"] is True
+    assert preflight_cases["atera/only_mecr"]["selected_stages"] == ["mecr"]
+    assert preflight_cases["atera/mecr_off"]["run_mecr"] is False
+    assert "mecr" not in preflight_cases["atera/mecr_off"]["stage_order"]
     assert preflight_cases["atera/start_enrich"]["selected_stages"] == ["enrich"]
 
 
@@ -432,7 +454,6 @@ def test_atera_refusals(preflight_cases: dict[str, dict[str, Any]], case: str) -
 _ROW_SWITCH_REFUSALS = {
     "atera/pciseq": "pciseq_enabled",
     "atera/gaston": "gaston_enabled",
-    "atera/mecr": "mecr_enabled",
     "atera/transcript_analysis": "spatial_gene_analysis_transcript_analysis_enabled",
     "atera/cortical_depth": "cortical_depth_enabled",
     "atera/distance_from_object": "distance_from_object_enabled",
@@ -488,7 +509,10 @@ def test_a_global_build_only_stop_also_passes(tmp_path: Path) -> None:
 
 @pytest.mark.nextflow
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
-def test_global_mecr_and_transcripts_are_ignored_for_atera(tmp_path: Path) -> None:
+def test_global_mecr_applies_and_transcripts_are_ignored_for_atera(
+    tmp_path: Path,
+) -> None:
+    """--mecr_enabled acts on ATERA rows; the transcript switch is still ignored."""
     cases = _preflight_cases(
         tmp_path,
         "--stop_stage",
@@ -500,8 +524,15 @@ def test_global_mecr_and_transcripts_are_ignored_for_atera(tmp_path: Path) -> No
     )
     record = cases["atera/no_stop_stage"]
     assert record["result"] == "OK", record
-    assert record["run_mecr"] is False and record["transcript_analysis"] is False
-    assert "mecr" not in record["stage_order"]
+    assert record["run_mecr"] is False  # The stop at enrich is before MECR.
+    assert record["transcript_analysis"] is False
+    assert "mecr" in record["stage_order"]
+    assert not any("mecr_enabled" in note for note in record["setting_notes"])
+    (tmp_path / "off").mkdir()
+    off = _preflight_cases(
+        tmp_path / "off", "--stop_stage", "enrich", "--mecr_enabled", "false"
+    )
+    assert "mecr" not in off["atera/no_stop_stage"]["stage_order"]
 
 
 @pytest.mark.nextflow

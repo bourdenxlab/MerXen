@@ -407,6 +407,7 @@ and no Cellpose or ProSeg task runs. See
 | `enrich` | Native enrichment: no Cellpose masks. |
 | `build_viewer_caches` | Vendor label masks on `morphology_focus`. |
 | `mask_image_quantification` | Quantifies the vendor `cell_labels`. |
+| `mecr` | Runs by default on human rows (as for XENIUM and MERSCOPE), with the ATERA streaming reference `MECR_REFERENCE_ATERA` ([MECR](stages/mecr.md#whole-transcriptome-panels-and-atera-rows)); a row `mecr_enabled=false` switches it off. |
 | `qc`, `visualize`, `spatial_gene_analysis`, `clustering_squidpy` | Run on the `original_seg` layer. `clustering_squidpy` runs in legacy mode: map_first annotation ([Cell-type annotation overview](annotation-overview.md)) is not covered for ATERA rows yet (AT-11, RCA on Atera; [Atera plan §8](plans/atera-support-plan.md)). |
 | `mender` | Runs when `mender_enabled` (on `original_seg`). An explicit `stop_stage=mender` passes over the standalone `mapmycells` stage, which ATERA rows do not run. |
 
@@ -422,7 +423,7 @@ adds the ProSeg layer `reseg` (shapes `MOSAIK_proseg`, table
 `ATERA_PROSEG_PLAN`, one `ATERA_PROSEG_TILE` task per 2 mm tile and
 `ATERA_PROSEG_STITCH` ([segmentation](stages/segmentation.md#atera-proseg-route-native_proseg-at-9)).
 `analysis_segmentation=all` resolves to `reseg, original_seg`, and QC,
-VISUALIZE, spatial gene analysis, clustering and MENDER run on both layers; the
+VISUALIZE, MECR, spatial gene analysis, clustering and MENDER run on both layers; the
 MENDER default resolves to both layers too. ENRICH checks the stitched layer,
 MIQ quantifies both label elements in one task and the viewer cache draws both
 masks. `proseg_mask` and `proseg_hybrid` are not layers of such a row (a
@@ -437,18 +438,18 @@ with "remove `<setting>` from row `<pair>` or set it to false"):
 | `mapmycells` selected (`stop_stage=mapmycells`) | standalone MapMyCells is not covered for ATERA rows; stop at clustering_squidpy or mender |
 | row `gaston_enabled=true` | GASTON is not covered for ATERA rows |
 | row `pciseq_enabled=true` | pciSeq is off for ATERA rows |
-| row `mecr_enabled=true` | MECR is off for ATERA rows until it streams its reference |
 | row `spatial_gene_analysis_transcript_analysis_enabled=true` | transcript spatial patterns are off for ATERA rows |
 | row `cortical_depth_enabled=true` or `distance_from_object_enabled=true` | cortical depth and distance from object are off for non-cortical ATERA sections |
 | row `enable_alignment` or `xenium_registered_images_csv` | image registration and alignment are not covered for ATERA rows (AT-10) |
 | `segmentation_source=cellpose_only` or `cellpose_proseg` | segmentation_source=… is not available for ATERA rows yet; ATERA supports: native, native_proseg |
 | `native_proseg` with `atera_proseg_halo_um` below 100, a tile no wider than twice the halo, an invalid schedule or prior weight, `proseg_version` other than 3.2.0, or `atera_proseg_tile_subset` with a stage after `segment` | one message each, naming the param |
-| `start_stage`, `stop_stage` or `only_stage` naming a stage ATERA rows do not run (such as `pciseq`, `gaston`, `mecr`) | … is not active for this run. ATERA rows run only build_spatialdata, segment, … |
+| `start_stage`, `stop_stage` or `only_stage` naming a stage ATERA rows do not run (such as `pciseq`, `gaston`) | … is not active for this run. ATERA rows run only build_spatialdata, segment, … |
 | row `clustering_squidpy_mode=map_first` | map_first annotation is not covered for ATERA rows yet (AT-11, RCA on Atera); remove clustering_squidpy_mode from row `<pair>` or set it to legacy |
 
-The global `pciseq_enabled`, `gaston_enabled`, `mecr_enabled`,
+The global `pciseq_enabled`, `gaston_enabled`,
 `cortical_depth_enabled`, `distance_from_object_enabled` and
-`spatial_gene_analysis_transcript_analysis_enabled` do not apply to ATERA rows:
+`spatial_gene_analysis_transcript_analysis_enabled` do not apply to ATERA rows
+(the global `mecr_enabled` does, since AT-8):
 the stages stay off there and the run log says when a global `true` is ignored,
 so a mixed samplesheet keeps them for its XENIUM and MERSCOPE rows. Only a
 value set on the ATERA row itself is refused. The clustering mode follows the
@@ -764,13 +765,14 @@ contracts.
 | `mecr_marker_max_other_fraction` | `0.01` | A marker must be detected in strictly less than this fraction of the remaining retained cells. |
 | `mecr_normalize_target_sum` | `10000.0` | Full-library per-cell normalization target before `log1p` and Wilcoxon. |
 | `mecr_reference_chunk_rows` | `5000` | Reference rows streamed from each raw H5AD at a time. |
+| (no param) `reference_mode` | `auto` (`MECR_REFERENCE`); `streaming` (`MECR_REFERENCE_ATERA`) | Config key of the reference task, not a workflow param. `auto` streams the reference when the panel has more than 5,000 non-control genes (`merxen.gene_sets.WHOLE_TRANSCRIPTOME_MIN_GENES`); see [MECR](stages/mecr.md#whole-transcriptome-panels-and-atera-rows). |
 | `mecr_wilcoxon_tie_correct` | `true` | Enable tie correction in Scanpy's Python Wilcoxon implementation. |
 | `mecr_figure_dpi` | `180` | Pair-rate distribution plot DPI. |
 | `mecr_barnyard_top_n_pairs` | `6` | Maximum canonical/high-MECR/high-detection pairs selected for barnyard count plots. Set to `0` to disable them. |
-| `mecr_barnyard_max_points` | `50000` | Deterministic maximum plotted cells per platform and barnyard pair; exact MECR still uses every cell. |
+| `mecr_barnyard_max_points` | `50000` | Deterministic maximum plotted cells per platform and barnyard pair for XENIUM and MERSCOPE; exact MECR still uses every cell. ATERA barnyard plots draw every cell as a binned density and ignore it. |
 | `mecr_barnyard_random_seed` | `0` | Seed for barnyard display-point downsampling. |
 | `mecr_barnyard_log1p` | `false` | Plot barnyard axes in natural count space by default. Set to `true` for `log1p`-transformed display coordinates. |
-| `mecr_max_forks` | Dwight: `4` | Maximum concurrent branch-scoring tasks. The shared reference task always has one fork. |
+| `mecr_max_forks` | Dwight: `4` | Maximum concurrent branch-scoring tasks. Each reference task (`MECR_REFERENCE`, `MECR_REFERENCE_ATERA`) always has one fork. |
 
 The reference task uses the union of genes in all selected spatial panels,
 runs once, and is shared across all samples and segmentation branches. See

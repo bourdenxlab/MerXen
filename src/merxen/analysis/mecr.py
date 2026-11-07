@@ -11,7 +11,11 @@ from __future__ import annotations
 
 import json
 import logging
+import multiprocessing
 import sys
+from collections.abc import Iterator
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -26,13 +30,18 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import seaborn as sns
+from matplotlib.colors import LinearSegmentedColormap, LogNorm
 from scipy import sparse
 
+from merxen import palette
 from merxen.analysis.clustering_squidpy import (
     collapse_atlas_label_to_broad_class,
 )
 from merxen.config import MecrConfig, MecrReferenceConfig, MecrSampleConfig
+from merxen.control_features import is_registered_control_name
+from merxen.gene_sets import WHOLE_TRANSCRIPTOME_MIN_GENES, is_whole_transcriptome
 from merxen.memory import force_release, log_status
+from merxen.platforms import PLATFORM_SPECS
 from merxen.plotting import prepare_plot_output, save_figure
 
 logger = logging.getLogger(__name__)
@@ -49,7 +58,17 @@ BARNYARD_CANONICAL_PAIRS = (
     ("GAD1", "GFAP"),
     ("SLC17A7", "GAD1"),
 )
-PLATFORM_COLORS = {"MERSCOPE": "#2878B5", "XENIUM": "#D95F02"}
+PLATFORM_COLORS = {
+    "MERSCOPE": "#2878B5",
+    "XENIUM": "#D95F02",
+    "ATERA": palette.ATERA,
+}
+# Platforms whose barnyard plots draw every cell as a binned density instead
+# of a random scatter subsample (no subsampling in static plots, Atera plan
+# AT-8). The XENIUM/MERSCOPE plots keep their scatter subsample.
+BARNYARD_DENSITY_PLATFORMS = frozenset({"ATERA"})
+REFERENCE_MODE_IN_MEMORY = "in_memory"
+REFERENCE_MODE_STREAMING = "streaming"
 
 
 def run_mecr_reference(config: MecrReferenceConfig) -> dict[str, Path]:
@@ -69,21 +88,67 @@ def run_mecr_reference(config: MecrReferenceConfig) -> dict[str, Path]:
 
     panel_path = config.output_dir / MECR_REFERENCE_PANEL_NAME
     pd.DataFrame({"gene": panel_genes}).to_csv(panel_path, index=False)
-    reference_name = "WMB" if config.reference_atlas == "wmb" else "WHB"
+    reference_name = _reference_name(config)
+    reference_mode, mode_reason = resolve_reference_mode(config, panel_genes)
     log_status(
         f"Preparing {reference_name} MECR reference for "
-        f"{len(panel_genes):,} spatial panel genes"
+        f"{len(panel_genes):,} spatial panel genes "
+        f"(reference_mode={reference_mode}; {mode_reason})"
     )
-    reference = load_atlas_panel_reference(config, panel_genes=panel_genes)
+    reference: ad.AnnData | None = None
+    streamed: StreamingReference | None = None
     try:
-        statistics, markers = discover_reference_markers(
-            reference,
-            class_key="broad_class",
-            target_classes=config.target_broad_classes,
-            min_target_fraction=config.marker_min_target_fraction,
-            max_other_fraction=config.marker_max_other_fraction,
-            tie_correct=config.wilcoxon_tie_correct,
-        )
+        if reference_mode == REFERENCE_MODE_STREAMING:
+            streamed = stream_atlas_panel_reference(config, panel_genes=panel_genes)
+            statistics, markers = discover_streaming_reference_markers(
+                streamed,
+                min_target_fraction=config.marker_min_target_fraction,
+                max_other_fraction=config.marker_max_other_fraction,
+                tie_correct=config.wilcoxon_tie_correct,
+            )
+            detection = streamed.detection
+            pair_reference = streamed.candidates
+            class_counts = _class_count_record(detection.classes, detection.class_sizes)
+            n_reference_panel_genes = len(detection.genes)
+            n_reference_cells = int(detection.class_sizes.sum())
+            n_missing_metadata = detection.n_missing_metadata
+            n_tested = 0 if pair_reference is None else int(pair_reference.n_vars)
+            wilcoxon_genes = {
+                "genes": (
+                    "panel genes passing the detection thresholds in at least "
+                    "one class; NaN statistics for the other genes"
+                ),
+                "n_tested_genes": n_tested,
+                "p_value_adjusted": "Benjamini-Hochberg over the tested genes",
+            }
+        else:
+            reference = load_atlas_panel_reference(config, panel_genes=panel_genes)
+            statistics, markers = discover_reference_markers(
+                reference,
+                class_key="broad_class",
+                target_classes=config.target_broad_classes,
+                min_target_fraction=config.marker_min_target_fraction,
+                max_other_fraction=config.marker_max_other_fraction,
+                tie_correct=config.wilcoxon_tie_correct,
+            )
+            pair_reference = reference
+            class_counts = {
+                str(label): int(count)
+                for label, count in reference.obs["broad_class"].value_counts().items()
+            }
+            n_reference_panel_genes = int(reference.n_vars)
+            n_reference_cells = int(reference.n_obs)
+            n_missing_metadata = int(
+                reference.uns.get("merxen_mecr_reference", {}).get(
+                    "n_raw_cells_without_taxonomy_metadata",
+                    0,
+                )
+            )
+            wilcoxon_genes = {
+                "genes": "all panel genes",
+                "n_tested_genes": n_reference_panel_genes,
+                "p_value_adjusted": "Benjamini-Hochberg over the tested genes",
+            }
         stats_path = config.output_dir / MECR_REFERENCE_STATS_NAME
         markers_path = config.output_dir / MECR_REFERENCE_MARKERS_NAME
         reference_pairs_path = config.output_dir / MECR_REFERENCE_PAIRS_NAME
@@ -92,7 +157,11 @@ def run_mecr_reference(config: MecrReferenceConfig) -> dict[str, Path]:
         )
         statistics.to_csv(stats_path, index=False)
         markers.to_csv(markers_path, index=False)
-        reference_pairs = compute_mecr_pair_metrics(reference, markers)
+        if pair_reference is None:
+            # No detection candidate, so no marker (as the in-memory path).
+            _validate_marker_table(markers)
+            raise ValueError("MECR reference has no detection candidate genes")
+        reference_pairs = compute_mecr_pair_metrics(pair_reference, markers)
         reference_pairs.to_csv(reference_pairs_path, index=False)
         plot_reference_mecr_histogram(
             reference_pairs,
@@ -100,10 +169,6 @@ def run_mecr_reference(config: MecrReferenceConfig) -> dict[str, Path]:
             dpi=config.figure_dpi,
         )
 
-        class_counts = {
-            str(label): int(count)
-            for label, count in reference.obs["broad_class"].value_counts().items()
-        }
         manifest_path = config.output_dir / MECR_REFERENCE_MANIFEST_NAME
         manifest = {
             "method": "paper_standard_mecr",
@@ -132,20 +197,25 @@ def run_mecr_reference(config: MecrReferenceConfig) -> dict[str, Path]:
                 "method": "full_library_normalize_total_log1p",
                 "target_sum": config.normalize_target_sum,
             },
+            "reference_mode": {
+                "requested": config.reference_mode,
+                "resolved": reference_mode,
+                "reason": mode_reason,
+                "n_non_control_panel_genes": count_non_control_genes(panel_genes),
+                "whole_transcriptome_min_genes": WHOLE_TRANSCRIPTOME_MIN_GENES,
+                "reference_workers": config.reference_workers,
+                "reference_chunk_rows": config.reference_chunk_rows,
+            },
             "wilcoxon": {
                 "implementation": "scanpy.tl.rank_genes_groups",
                 "tie_correct": config.wilcoxon_tie_correct,
                 "cells": "all retained whole-brain reference cells",
+                **wilcoxon_genes,
             },
             "n_panel_genes": len(panel_genes),
-            "n_reference_panel_genes": reference.n_vars,
-            "n_reference_cells": reference.n_obs,
-            "n_raw_cells_without_taxonomy_metadata": int(
-                reference.uns.get("merxen_mecr_reference", {}).get(
-                    "n_raw_cells_without_taxonomy_metadata",
-                    0,
-                )
-            ),
+            "n_reference_panel_genes": n_reference_panel_genes,
+            "n_reference_cells": n_reference_cells,
+            "n_raw_cells_without_taxonomy_metadata": int(n_missing_metadata),
             "reference_class_counts": class_counts,
             "n_unique_markers": len(markers),
             "n_reference_marker_pairs": len(reference_pairs),
@@ -159,7 +229,7 @@ def run_mecr_reference(config: MecrReferenceConfig) -> dict[str, Path]:
         }
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     finally:
-        del reference
+        del reference, streamed
         force_release(note=f"after {reference_name} MECR reference preparation")
 
     return {
@@ -170,6 +240,15 @@ def run_mecr_reference(config: MecrReferenceConfig) -> dict[str, Path]:
         "reference_distribution_plot": reference_distribution_path,
         "manifest": manifest_path,
     }
+
+
+def _class_count_record(classes: list[str], sizes: np.ndarray) -> dict[str, int]:
+    """Class sizes, largest first, as ``value_counts`` orders them."""
+    counts = pd.Series(
+        [int(size) for size in sizes], index=list(classes), dtype=np.int64
+    )
+    counts = counts[counts > 0].sort_values(ascending=False, kind="stable")
+    return {str(label): int(count) for label, count in counts.items()}
 
 
 def run_mecr(config: MecrConfig) -> dict[str, Path]:
@@ -303,19 +382,52 @@ def collect_spatial_panel_genes(samples: list[MecrSampleConfig]) -> list[str]:
     """Return the sorted union of gene names in configured SpatialData tables."""
     genes: dict[str, str] = {}
     for sample in samples:
-        import spatialdata as sd
-
-        sdata_obj = sd.read_zarr(sample.zarr_path)
-        try:
-            table_key = _resolve_table_key(sdata_obj, sample.table_key)
-            table = sdata_obj.tables[table_key]
-            for gene in table.var_names.astype(str):
-                token = _normalize_gene(gene)
-                if token:
-                    genes.setdefault(token, str(gene))
-        finally:
-            del sdata_obj
+        for gene in _spatial_table_var_names(sample):
+            token = _normalize_gene(gene)
+            if token:
+                genes.setdefault(token, str(gene))
     return sorted(genes.values(), key=str.casefold)
+
+
+def _spatial_table_group(sample: MecrSampleConfig) -> Path | None:
+    """The zarr group of the sample's table, when it can be read on its own.
+
+    Reading one table directly skips parsing every element of the store (on a
+    whole-transcriptome store, minutes of labels, shapes and other tables).
+    ``None`` defers to SpatialData, which also reports a missing table.
+    """
+    tables = Path(sample.zarr_path) / "tables"
+    if not tables.is_dir():
+        return None
+    if sample.table_key is not None:
+        candidate = tables / sample.table_key
+    elif (tables / "table").is_dir():
+        candidate = tables / "table"
+    else:
+        keys = [path for path in tables.iterdir() if path.is_dir()]
+        if len(keys) != 1:
+            return None
+        candidate = keys[0]
+    is_group = (candidate / "zarr.json").is_file() or (candidate / ".zgroup").is_file()
+    return candidate if is_group else None
+
+
+def _spatial_table_var_names(sample: MecrSampleConfig) -> list[str]:
+    group_path = _spatial_table_group(sample)
+    if group_path is not None:
+        import zarr
+        from anndata.io import read_elem
+
+        var = read_elem(zarr.open_group(str(group_path), mode="r")["var"])
+        return [str(gene) for gene in var.index]
+    import spatialdata as sd
+
+    sdata_obj = sd.read_zarr(sample.zarr_path)
+    try:
+        table_key = _resolve_table_key(sdata_obj, sample.table_key)
+        return [str(gene) for gene in sdata_obj.tables[table_key].var_names]
+    finally:
+        del sdata_obj
 
 
 def _mecr_reference_h5ad_paths(config: MecrReferenceConfig) -> list[Path]:
@@ -382,103 +494,184 @@ def _resolve_mecr_reference_inputs(config: MecrReferenceConfig) -> list[Path]:
     return h5ad_paths
 
 
+@dataclass(frozen=True)
+class _ReferenceShard:
+    """One reference expression H5AD, with its symbols and per-cell classes."""
+
+    path: Path
+    n_obs: int
+    symbols: np.ndarray
+    # Index into ``target_broad_classes`` per cell; -1 = not retained.
+    class_codes: np.ndarray
+
+
+@dataclass(frozen=True)
+class _ChunkTask:
+    """A row chunk of one reference shard, as sent to a decode worker."""
+
+    path: str
+    start: int
+    stop: int
+    class_codes: np.ndarray
+    selected_indices: np.ndarray
+    selector: sparse.csr_matrix
+    normalize_target_sum: float
+    n_classes: int
+    # "count": per-class detection counts; "collect": the normalised chunk.
+    mode: str
+
+
+@dataclass(frozen=True)
+class ReferenceDetection:
+    """Per-class detection counts of every panel gene (streaming pass 1).
+
+    Attributes:
+        genes: Panel genes resolved in the reference, in output order.
+        classes: Target broad classes, in configuration order.
+        detected: ``(n_classes, n_genes)`` count of cells of each class in
+            which each gene is detected.
+        class_sizes: Retained cells per class.
+        n_missing_metadata: Raw cells without taxonomy metadata.
+        rest_detected: Detections in retained cells outside every target
+            class (zeros for an atlas reference, which keeps target classes
+            only).
+        n_rest_cells: Retained cells outside every target class.
+    """
+
+    genes: list[str]
+    classes: list[str]
+    detected: np.ndarray
+    class_sizes: np.ndarray
+    n_missing_metadata: int
+    rest_detected: np.ndarray | None = None
+    n_rest_cells: int = 0
+
+
+@dataclass(frozen=True)
+class StreamingReference:
+    """What the streaming reference keeps instead of the full panel matrix.
+
+    Attributes:
+        detection: Pass-1 detection counts over every panel gene.
+        candidates: Pass-2 reference restricted to the genes that pass the
+            detection thresholds in at least one class (``None`` when no gene
+            does). Its ``X`` is CSC, for the per-gene Wilcoxon ranking.
+    """
+
+    detection: ReferenceDetection
+    candidates: ad.AnnData | None
+
+
+def count_non_control_genes(genes: list[str]) -> int:
+    """Count panel genes that are not control features of any platform."""
+    return sum(1 for gene in genes if not is_registered_control_name(str(gene)))
+
+
+def resolve_reference_mode(
+    config: MecrReferenceConfig,
+    panel_genes: list[str],
+) -> tuple[str, str]:
+    """Return the reference mode to run and why.
+
+    ``auto`` streams when the panel has more than
+    :data:`~merxen.gene_sets.WHOLE_TRANSCRIPTOME_MIN_GENES` non-control genes
+    (Atera plan AT-8, Q22), whatever the platform.
+    """
+    if config.reference_mode != "auto":
+        return config.reference_mode, "requested"
+    n_genes = count_non_control_genes(panel_genes)
+    if is_whole_transcriptome(n_genes):
+        return (
+            REFERENCE_MODE_STREAMING,
+            f"auto: {n_genes:,} non-control panel genes > "
+            f"{WHOLE_TRANSCRIPTOME_MIN_GENES:,}",
+        )
+    return (
+        REFERENCE_MODE_IN_MEMORY,
+        f"auto: {n_genes:,} non-control panel genes <= "
+        f"{WHOLE_TRANSCRIPTOME_MIN_GENES:,}",
+    )
+
+
 def load_atlas_panel_reference(
     config: MecrReferenceConfig,
     *,
     panel_genes: list[str],
 ) -> ad.AnnData:
-    """Load a panel-restricted whole-brain reference in bounded row chunks."""
-    reference_name = "WMB" if config.reference_atlas == "wmb" else "WHB"
-    h5ad_paths = _resolve_mecr_reference_inputs(config)
-    class_by_cell = _load_atlas_broad_classes(config)
-    panel_lookup = {_normalize_gene(gene): str(gene) for gene in panel_genes}
-    matrices: list[sparse.csr_matrix] = []
-    labels: list[np.ndarray] = []
-    resolved_gene_order: list[str] | None = None
-    missing_metadata = 0
+    """Load a panel-restricted whole-brain reference in bounded row chunks.
 
-    for h5ad_path in h5ad_paths:
-        if not h5ad_path.exists():
-            raise FileNotFoundError(
-                f"{reference_name} reference H5AD does not exist: {h5ad_path}"
-            )
-        reference = ad.read_h5ad(h5ad_path, backed="r")
-        try:
-            if config.gene_symbol_column not in reference.var:
-                raise KeyError(f"{h5ad_path} lacks var[{config.gene_symbol_column!r}]")
-            symbols = reference.var[config.gene_symbol_column].astype(str).to_numpy()
-            selected_indices, selector, gene_order = _reference_panel_selector(
-                symbols,
-                panel_lookup,
-            )
-            if resolved_gene_order is None:
-                resolved_gene_order = gene_order
-            elif resolved_gene_order != gene_order:
-                raise ValueError(
-                    f"{reference_name} reference shards resolved different panels"
-                )
-
-            for start in range(0, reference.n_obs, config.reference_chunk_rows):
-                stop = min(start + config.reference_chunk_rows, reference.n_obs)
-                obs_names = reference.obs_names[start:stop].astype(str)
-                chunk_labels = class_by_cell.reindex(obs_names)
-                missing_metadata += int(chunk_labels.isna().sum())
-                keep = chunk_labels.isin(config.target_broad_classes).to_numpy()
-                if not np.any(keep):
-                    continue
-
-                raw = sparse.csr_matrix(reference.X[start:stop])
-                raw = raw[keep]
-                totals = np.asarray(raw.sum(axis=1)).ravel().astype(np.float64)
-                panel = raw[:, selected_indices].astype(np.float32)
-                panel = sparse.csr_matrix(panel @ selector)
-                scale = np.divide(
-                    float(config.normalize_target_sum),
-                    totals,
-                    out=np.zeros_like(totals),
-                    where=totals > 0,
-                )
-                panel = sparse.diags(scale.astype(np.float32)) @ panel
-                panel = sparse.csr_matrix(panel)
-                panel.data = np.log1p(panel.data)
-                panel.eliminate_zeros()
-                matrices.append(panel)
-                labels.append(chunk_labels.to_numpy(dtype=str)[keep])
-                logger.info(
-                    "Loaded %s MECR rows %s:%s from %s (%s retained)",
-                    reference_name,
-                    start,
-                    stop,
-                    h5ad_path.name,
-                    int(np.count_nonzero(keep)),
-                )
-        finally:
-            reference.file.close()
-
-    if missing_metadata and config.reference_atlas == "whb":
-        raise ValueError(
-            f"{reference_name} cell metadata was missing for "
-            f"{missing_metadata:,} reference cells"
-        )
-    if missing_metadata:
-        logger.warning(
-            "Skipped %d WMB raw reference cells absent from taxonomy metadata",
-            missing_metadata,
-        )
-    if not matrices or resolved_gene_order is None:
-        raise ValueError(f"No {reference_name} cells or panel genes remained for MECR")
-    matrix = sparse.vstack(matrices, format="csr", dtype=np.float32)
-    obs = pd.DataFrame(
-        {"broad_class": pd.Categorical(np.concatenate(labels))},
-        index=pd.RangeIndex(matrix.shape[0]).astype(str),
+    The whole panel-restricted matrix of every retained cell is kept; whole-
+    transcriptome panels use :func:`stream_atlas_panel_reference` instead.
+    """
+    shards, missing_metadata = _open_reference_shards(config)
+    return _collect_panel_reference(
+        config,
+        shards,
+        panel_genes=panel_genes,
+        missing_metadata=missing_metadata,
     )
-    var = pd.DataFrame(index=pd.Index(resolved_gene_order, name=None))
-    result = ad.AnnData(X=matrix, obs=obs, var=var)
-    result.uns["merxen_mecr_reference"] = {
-        "reference_atlas": config.reference_atlas,
-        "n_raw_cells_without_taxonomy_metadata": int(missing_metadata),
-    }
-    return result
+
+
+def stream_atlas_panel_reference(
+    config: MecrReferenceConfig,
+    *,
+    panel_genes: list[str],
+) -> StreamingReference:
+    """Read the reference twice without keeping the panel matrix.
+
+    Pass 1 counts, per broad class, the cells in which each panel gene is
+    detected. Pass 2 keeps only the genes that pass the marker detection
+    thresholds in at least one class (normalised as in
+    :func:`load_atlas_panel_reference`), for the Wilcoxon test and the
+    reference marker co-occurrence.
+    """
+    reference_name = _reference_name(config)
+    shards, missing_metadata = _open_reference_shards(config)
+    detection = _count_reference_detection(
+        config,
+        shards,
+        panel_genes=panel_genes,
+        missing_metadata=missing_metadata,
+    )
+    candidate_genes = detection_candidate_genes(
+        detection,
+        min_target_fraction=config.marker_min_target_fraction,
+        max_other_fraction=config.marker_max_other_fraction,
+    )
+    log_status(
+        f"{reference_name} MECR streaming pass 1: {len(detection.genes):,} panel "
+        f"genes, {int(detection.class_sizes.sum()):,} cells, "
+        f"{len(candidate_genes):,} detection candidates"
+    )
+    if not candidate_genes:
+        return StreamingReference(detection=detection, candidates=None)
+    candidates = _collect_panel_reference(
+        config,
+        shards,
+        panel_genes=candidate_genes,
+        missing_metadata=missing_metadata,
+    )
+    if list(candidates.var_names.astype(str)) != candidate_genes:
+        raise ValueError(
+            f"{reference_name} streaming pass 2 resolved a different gene order"
+        )
+    candidates.X = sparse.csc_matrix(candidates.X)
+    return StreamingReference(detection=detection, candidates=candidates)
+
+
+def detection_candidate_genes(
+    detection: ReferenceDetection,
+    *,
+    min_target_fraction: float,
+    max_other_fraction: float,
+) -> list[str]:
+    """Genes that pass the marker detection thresholds in at least one class."""
+    target_fraction, other_fraction = _detection_fractions(detection)
+    passes = (target_fraction > float(min_target_fraction)) & (
+        other_fraction < float(max_other_fraction)
+    )
+    keep = np.any(passes, axis=0)
+    return [gene for gene, kept in zip(detection.genes, keep, strict=True) if kept]
 
 
 def load_whb_panel_reference(
@@ -507,65 +700,150 @@ def discover_reference_markers(
     """
     if class_key not in reference.obs:
         raise KeyError(f"Reference lacks obs[{class_key!r}]")
-    classes = reference.obs[class_key].astype(str)
+    classes = reference.obs[class_key].astype(str).to_numpy()
     missing = [label for label in target_classes if label not in set(classes)]
     if missing:
         raise ValueError(f"Reference is missing target broad classes: {missing}")
 
-    sc.tl.rank_genes_groups(
+    wilcoxon = _wilcoxon_by_class(
         reference,
-        groupby=class_key,
-        groups=target_classes,
-        reference="rest",
-        method="wilcoxon",
-        n_genes=reference.n_vars,
-        use_raw=False,
-        tie_correct=bool(tie_correct),
-        pts=True,
-        key_added="mecr_wilcoxon",
+        class_key=class_key,
+        target_classes=target_classes,
+        tie_correct=tie_correct,
     )
     binary = sparse.csr_matrix(reference.X)
     binary.data = np.ones(binary.nnz, dtype=np.int64)
     binary.eliminate_zeros()
+    # Cells outside every target class count as "other" for every class.
+    n_classes = len(target_classes)
+    codes = np.full(len(classes), n_classes, dtype=np.int64)
+    for index, label in enumerate(target_classes):
+        codes[classes == label] = index
+    detected, class_sizes = _class_detection_counts(
+        binary, codes, n_classes=n_classes + 1
+    )
+    detection = ReferenceDetection(
+        genes=list(reference.var_names.astype(str)),
+        classes=list(target_classes),
+        detected=detected[:n_classes],
+        class_sizes=class_sizes[:n_classes],
+        n_missing_metadata=0,
+        rest_detected=detected[n_classes],
+        n_rest_cells=int(class_sizes[n_classes]),
+    )
+    return reference_marker_tables(
+        detection,
+        wilcoxon,
+        min_target_fraction=min_target_fraction,
+        max_other_fraction=max_other_fraction,
+    )
 
-    rows: list[dict[str, Any]] = []
-    for broad_class in target_classes:
-        target_mask = classes.to_numpy() == broad_class
-        n_target = int(np.count_nonzero(target_mask))
-        n_other = int(len(target_mask) - n_target)
+
+def discover_streaming_reference_markers(
+    streamed: StreamingReference,
+    *,
+    min_target_fraction: float = 0.25,
+    max_other_fraction: float = 0.01,
+    tie_correct: bool = True,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Marker tables of a streaming reference.
+
+    Detection fractions cover every panel gene. The Wilcoxon test runs on the
+    detection candidates only, so its columns are NaN for the other genes and
+    ``p_value_adjusted`` is Benjamini-Hochberg over the candidates. Marker
+    eligibility uses detection only, so the markers equal the in-memory ones.
+    """
+    detection = streamed.detection
+    missing = [
+        label
+        for label, size in zip(detection.classes, detection.class_sizes, strict=True)
+        if int(size) == 0
+    ]
+    if missing:
+        raise ValueError(f"Reference is missing target broad classes: {missing}")
+    wilcoxon: dict[str, pd.DataFrame] = {}
+    if streamed.candidates is not None:
+        wilcoxon = _wilcoxon_by_class(
+            streamed.candidates,
+            class_key="broad_class",
+            target_classes=detection.classes,
+            tie_correct=tie_correct,
+        )
+    return reference_marker_tables(
+        detection,
+        wilcoxon,
+        min_target_fraction=min_target_fraction,
+        max_other_fraction=max_other_fraction,
+    )
+
+
+def reference_marker_tables(
+    detection: ReferenceDetection,
+    wilcoxon: dict[str, pd.DataFrame],
+    *,
+    min_target_fraction: float,
+    max_other_fraction: float,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build the gene statistics and unique-marker tables from detection counts.
+
+    Args:
+        detection: Per-class detection counts of every panel gene.
+        wilcoxon: Per class, the scanpy one-vs-rest table indexed by gene;
+            genes it lacks get NaN Wilcoxon columns.
+        min_target_fraction: Strict lower bound on the target-class fraction.
+        max_other_fraction: Strict upper bound on the other-class fraction.
+
+    Returns:
+        ``(statistics, markers)`` with one statistics row per class and gene.
+    """
+    genes = pd.Index(detection.genes, dtype=object)
+    target_fraction, other_fraction = _detection_fractions(detection)
+    total_cells = int(detection.class_sizes.sum()) + int(detection.n_rest_cells)
+    frames: list[pd.DataFrame] = []
+    for class_index, broad_class in enumerate(detection.classes):
+        n_target = int(detection.class_sizes[class_index])
+        n_other = total_cells - n_target
         if n_target == 0 or n_other == 0:
             raise ValueError(f"Invalid one-vs-rest group size for {broad_class}")
-        target_detected = np.asarray(binary[target_mask].sum(axis=0)).ravel()
-        other_detected = np.asarray(binary[~target_mask].sum(axis=0)).ravel()
-        wilcoxon = sc.get.rank_genes_groups_df(
-            reference,
-            group=broad_class,
-            key="mecr_wilcoxon",
-        ).set_index("names")
-        for gene_index, gene in enumerate(reference.var_names.astype(str)):
-            target_fraction = float(target_detected[gene_index] / n_target)
-            other_fraction = float(other_detected[gene_index] / n_other)
-            stat = wilcoxon.loc[gene]
-            rows.append(
+        table = wilcoxon.get(broad_class)
+        stats = (
+            table.reindex(genes)
+            if table is not None
+            else pd.DataFrame(index=genes, dtype=float)
+        )
+
+        def column(name: str, stats: pd.DataFrame = stats) -> np.ndarray:
+            if name not in stats:
+                return np.full(len(genes), np.nan, dtype=np.float64)
+            return np.asarray(
+                stats[name].to_numpy(dtype=np.float64, na_value=np.nan),
+                dtype=np.float64,
+            )
+
+        target = target_fraction[class_index]
+        other = other_fraction[class_index]
+        frames.append(
+            pd.DataFrame(
                 {
-                    "gene": gene,
+                    "gene": genes.to_numpy(),
                     "broad_class": broad_class,
-                    "target_fraction": target_fraction,
-                    "other_fraction": other_fraction,
+                    "target_fraction": target,
+                    "other_fraction": other,
                     "n_target_cells": n_target,
                     "n_other_cells": n_other,
-                    "wilcoxon_score": float(stat.get("scores", np.nan)),
-                    "logfoldchange": float(stat.get("logfoldchanges", np.nan)),
-                    "p_value": float(stat.get("pvals", np.nan)),
-                    "p_value_adjusted": float(stat.get("pvals_adj", np.nan)),
+                    "wilcoxon_score": column("scores"),
+                    "logfoldchange": column("logfoldchanges"),
+                    "p_value": column("pvals"),
+                    "p_value_adjusted": column("pvals_adj"),
                     "passes_detection_thresholds": (
-                        target_fraction > float(min_target_fraction)
-                        and other_fraction < float(max_other_fraction)
+                        (target > float(min_target_fraction))
+                        & (other < float(max_other_fraction))
                     ),
                 }
             )
+        )
 
-    statistics = pd.DataFrame(rows)
+    statistics = pd.concat(frames, ignore_index=True)
     candidates = statistics[statistics["passes_detection_thresholds"]].copy()
     qualifying_class_counts = candidates.groupby("gene")["broad_class"].nunique()
     unique_genes = qualifying_class_counts[qualifying_class_counts == 1].index
@@ -582,6 +860,342 @@ def discover_reference_markers(
         ascending=[True, False, True, True],
     ).reset_index(drop=True)
     return statistics, markers
+
+
+def _detection_fractions(
+    detection: ReferenceDetection,
+) -> tuple[np.ndarray, np.ndarray]:
+    detected = np.asarray(detection.detected, dtype=np.int64)
+    sizes = np.asarray(detection.class_sizes, dtype=np.int64)
+    total_detected = detected.sum(axis=0)
+    if detection.rest_detected is not None:
+        total_detected = total_detected + np.asarray(
+            detection.rest_detected, dtype=np.int64
+        )
+    other_detected = total_detected[None, :] - detected
+    other_sizes = int(sizes.sum()) + int(detection.n_rest_cells) - sizes
+    with np.errstate(divide="ignore", invalid="ignore"):
+        target_fraction = detected / sizes[:, None]
+        other_fraction = other_detected / other_sizes[:, None]
+    return target_fraction, other_fraction
+
+
+def _wilcoxon_by_class(
+    reference: ad.AnnData,
+    *,
+    class_key: str,
+    target_classes: list[str],
+    tie_correct: bool,
+) -> dict[str, pd.DataFrame]:
+    sc.tl.rank_genes_groups(
+        reference,
+        groupby=class_key,
+        groups=target_classes,
+        reference="rest",
+        method="wilcoxon",
+        n_genes=reference.n_vars,
+        use_raw=False,
+        tie_correct=bool(tie_correct),
+        pts=True,
+        key_added="mecr_wilcoxon",
+    )
+    return {
+        broad_class: sc.get.rank_genes_groups_df(
+            reference,
+            group=broad_class,
+            key="mecr_wilcoxon",
+        ).set_index("names")
+        for broad_class in target_classes
+    }
+
+
+def _class_detection_counts(
+    binary: sparse.csr_matrix,
+    codes: np.ndarray,
+    *,
+    n_classes: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-class detected-cell counts of a binary cell x gene matrix."""
+    keep = codes >= 0
+    rows = np.flatnonzero(keep)
+    indicator = sparse.csr_matrix(
+        (np.ones(len(rows), dtype=np.int64), (codes[keep], rows)),
+        shape=(n_classes, binary.shape[0]),
+    )
+    detected = np.asarray((indicator @ binary).toarray(), dtype=np.int64)
+    class_sizes = np.bincount(codes[keep], minlength=n_classes).astype(np.int64)
+    return detected, class_sizes
+
+
+def _reference_name(config: MecrReferenceConfig) -> str:
+    return "WMB" if config.reference_atlas == "wmb" else "WHB"
+
+
+def _open_reference_shards(
+    config: MecrReferenceConfig,
+) -> tuple[list[_ReferenceShard], int]:
+    """Resolve the reference shards, their symbols and per-cell class codes."""
+    reference_name = _reference_name(config)
+    h5ad_paths = _resolve_mecr_reference_inputs(config)
+    class_by_cell = _load_atlas_broad_classes(config)
+    class_index = {
+        label: index for index, label in enumerate(config.target_broad_classes)
+    }
+    shards: list[_ReferenceShard] = []
+    missing_metadata = 0
+    for h5ad_path in h5ad_paths:
+        if not h5ad_path.exists():
+            raise FileNotFoundError(
+                f"{reference_name} reference H5AD does not exist: {h5ad_path}"
+            )
+        reference = ad.read_h5ad(h5ad_path, backed="r")
+        try:
+            if config.gene_symbol_column not in reference.var:
+                raise KeyError(f"{h5ad_path} lacks var[{config.gene_symbol_column!r}]")
+            symbols = reference.var[config.gene_symbol_column].astype(str).to_numpy()
+            labels = class_by_cell.reindex(reference.obs_names.astype(str))
+            missing_metadata += int(labels.isna().sum())
+            codes = (
+                labels.map(class_index).fillna(-1).to_numpy(dtype=np.int16)
+                if len(labels)
+                else np.zeros(0, dtype=np.int16)
+            )
+            shards.append(
+                _ReferenceShard(
+                    path=Path(h5ad_path),
+                    n_obs=int(reference.n_obs),
+                    symbols=symbols,
+                    class_codes=codes,
+                )
+            )
+        finally:
+            reference.file.close()
+    if missing_metadata and config.reference_atlas == "whb":
+        raise ValueError(
+            f"{reference_name} cell metadata was missing for "
+            f"{missing_metadata:,} reference cells"
+        )
+    if missing_metadata:
+        logger.warning(
+            "Skipped %d WMB raw reference cells absent from taxonomy metadata",
+            missing_metadata,
+        )
+    return shards, missing_metadata
+
+
+def _chunk_tasks(
+    config: MecrReferenceConfig,
+    shards: list[_ReferenceShard],
+    *,
+    panel_genes: list[str],
+    mode: str,
+) -> tuple[list[_ChunkTask], list[str]]:
+    """Row-chunk tasks over every shard, and the resolved panel gene order."""
+    reference_name = _reference_name(config)
+    panel_lookup = {_normalize_gene(gene): str(gene) for gene in panel_genes}
+    resolved_gene_order: list[str] | None = None
+    tasks: list[_ChunkTask] = []
+    for shard in shards:
+        selected_indices, selector, gene_order = _reference_panel_selector(
+            shard.symbols,
+            panel_lookup,
+        )
+        if resolved_gene_order is None:
+            resolved_gene_order = gene_order
+        elif resolved_gene_order != gene_order:
+            raise ValueError(
+                f"{reference_name} reference shards resolved different panels"
+            )
+        for start in range(0, shard.n_obs, config.reference_chunk_rows):
+            stop = min(start + config.reference_chunk_rows, shard.n_obs)
+            codes = shard.class_codes[start:stop]
+            if not np.any(codes >= 0):
+                continue
+            tasks.append(
+                _ChunkTask(
+                    path=str(shard.path),
+                    start=start,
+                    stop=stop,
+                    class_codes=codes,
+                    selected_indices=selected_indices,
+                    selector=selector,
+                    normalize_target_sum=float(config.normalize_target_sum),
+                    n_classes=len(config.target_broad_classes),
+                    mode=mode,
+                )
+            )
+    if resolved_gene_order is None:
+        raise ValueError(f"No {reference_name} cells or panel genes remained for MECR")
+    return tasks, resolved_gene_order
+
+
+def _count_reference_detection(
+    config: MecrReferenceConfig,
+    shards: list[_ReferenceShard],
+    *,
+    panel_genes: list[str],
+    missing_metadata: int,
+) -> ReferenceDetection:
+    tasks, gene_order = _chunk_tasks(
+        config, shards, panel_genes=panel_genes, mode="count"
+    )
+    n_classes = len(config.target_broad_classes)
+    detected = np.zeros((n_classes, len(gene_order)), dtype=np.int64)
+    class_sizes = np.zeros(n_classes, dtype=np.int64)
+    for task, (chunk_detected, chunk_sizes) in zip(
+        tasks,
+        _map_reference_chunks(tasks, workers=config.reference_workers),
+        strict=True,
+    ):
+        detected += chunk_detected
+        class_sizes += chunk_sizes
+        logger.info(
+            "Counted %s MECR rows %s:%s from %s (%s retained)",
+            _reference_name(config),
+            task.start,
+            task.stop,
+            Path(task.path).name,
+            int(chunk_sizes.sum()),
+        )
+    if not class_sizes.sum():
+        raise ValueError(
+            f"No {_reference_name(config)} cells or panel genes remained for MECR"
+        )
+    return ReferenceDetection(
+        genes=gene_order,
+        classes=list(config.target_broad_classes),
+        detected=detected,
+        class_sizes=class_sizes,
+        n_missing_metadata=int(missing_metadata),
+    )
+
+
+def _collect_panel_reference(
+    config: MecrReferenceConfig,
+    shards: list[_ReferenceShard],
+    *,
+    panel_genes: list[str],
+    missing_metadata: int,
+) -> ad.AnnData:
+    reference_name = _reference_name(config)
+    tasks, gene_order = _chunk_tasks(
+        config, shards, panel_genes=panel_genes, mode="collect"
+    )
+    target_classes = np.asarray(config.target_broad_classes, dtype=object)
+    matrices: list[sparse.csr_matrix] = []
+    labels: list[np.ndarray] = []
+    for task, (panel, codes) in zip(
+        tasks,
+        _map_reference_chunks(tasks, workers=config.reference_workers),
+        strict=True,
+    ):
+        matrices.append(panel)
+        labels.append(target_classes[codes].astype(str))
+        logger.info(
+            "Loaded %s MECR rows %s:%s from %s (%s retained)",
+            reference_name,
+            task.start,
+            task.stop,
+            Path(task.path).name,
+            len(codes),
+        )
+    if not matrices:
+        raise ValueError(f"No {reference_name} cells or panel genes remained for MECR")
+    matrix = sparse.vstack(matrices, format="csr", dtype=np.float32)
+    obs = pd.DataFrame(
+        {"broad_class": pd.Categorical(np.concatenate(labels))},
+        index=pd.RangeIndex(matrix.shape[0]).astype(str),
+    )
+    var = pd.DataFrame(index=pd.Index(gene_order, name=None))
+    result = ad.AnnData(X=matrix, obs=obs, var=var)
+    result.uns["merxen_mecr_reference"] = {
+        "reference_atlas": config.reference_atlas,
+        "n_raw_cells_without_taxonomy_metadata": int(missing_metadata),
+    }
+    return result
+
+
+def _map_reference_chunks(
+    tasks: list[_ChunkTask],
+    *,
+    workers: int,
+) -> Iterator[Any]:
+    """Decode chunk tasks in order, in-process or in ``workers`` processes."""
+    if workers <= 1 or len(tasks) <= 1:
+        reader = _ReferenceRowReader()
+        try:
+            for task in tasks:
+                yield _process_reference_chunk(task, reader)
+        finally:
+            reader.close()
+        return
+    context = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(
+        max_workers=min(int(workers), len(tasks)),
+        mp_context=context,
+    ) as executor:
+        yield from executor.map(_process_reference_chunk_in_worker, tasks)
+
+
+class _ReferenceRowReader:
+    """Read CSR row ranges of reference H5ADs, keeping each file open."""
+
+    def __init__(self) -> None:
+        self._handles: dict[str, Any] = {}
+
+    def rows(self, path: str, start: int, stop: int) -> sparse.csr_matrix:
+        import h5py
+        from anndata.io import sparse_dataset
+
+        handle = self._handles.get(path)
+        if handle is None:
+            handle = h5py.File(path, "r")
+            self._handles[path] = handle
+        matrix = handle["X"]
+        if isinstance(matrix, h5py.Group):
+            return sparse.csr_matrix(sparse_dataset(matrix)[start:stop])
+        return sparse.csr_matrix(matrix[start:stop])
+
+    def close(self) -> None:
+        for handle in self._handles.values():
+            handle.close()
+        self._handles.clear()
+
+
+_WORKER_READER: _ReferenceRowReader | None = None
+
+
+def _process_reference_chunk_in_worker(task: _ChunkTask) -> Any:
+    global _WORKER_READER
+    if _WORKER_READER is None:
+        _WORKER_READER = _ReferenceRowReader()
+    return _process_reference_chunk(task, _WORKER_READER)
+
+
+def _process_reference_chunk(task: _ChunkTask, reader: _ReferenceRowReader) -> Any:
+    """Normalise one row chunk; count detections or return the panel chunk."""
+    keep = task.class_codes >= 0
+    raw = reader.rows(task.path, task.start, task.stop)
+    raw = raw[keep]
+    codes = task.class_codes[keep].astype(np.int64)
+    totals = np.asarray(raw.sum(axis=1)).ravel().astype(np.float64)
+    panel = raw[:, task.selected_indices].astype(np.float32)
+    panel = sparse.csr_matrix(panel @ task.selector)
+    scale = np.divide(
+        float(task.normalize_target_sum),
+        totals,
+        out=np.zeros_like(totals),
+        where=totals > 0,
+    )
+    panel = sparse.diags(scale.astype(np.float32)) @ panel
+    panel = sparse.csr_matrix(panel)
+    panel.data = np.log1p(panel.data)
+    panel.eliminate_zeros()
+    if task.mode == "collect":
+        return panel, codes
+    binary = panel
+    binary.data = np.ones(binary.nnz, dtype=np.int64)
+    return _class_detection_counts(binary, codes, n_classes=task.n_classes)
 
 
 def compute_mecr_pair_metrics(
@@ -690,6 +1304,9 @@ def summarize_mecr_pair_metrics(
 
 def load_spatial_count_table(sample: MecrSampleConfig) -> ad.AnnData:
     """Load the selected raw cell-count table from a SpatialData zarr."""
+    group_path = _spatial_table_group(sample)
+    if group_path is not None:
+        return ad.read_zarr(group_path)
     import spatialdata as sd
 
     sdata_obj = sd.read_zarr(sample.zarr_path)
@@ -1007,7 +1624,12 @@ def plot_barnyard_pairs(
     random_seed: int = 0,
     log1p_counts: bool = False,
 ) -> list[Path]:
-    """Plot cell counts for selected mutually exclusive gene pairs."""
+    """Plot cell counts for selected mutually exclusive gene pairs.
+
+    XENIUM and MERSCOPE panels scatter at most ``max_points`` randomly chosen
+    cells. Platforms in :data:`BARNYARD_DENSITY_PLATFORMS` (ATERA) draw every
+    cell as a binned density with a logarithmic colour scale instead.
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     if selected_pairs.empty:
@@ -1038,12 +1660,14 @@ def plot_barnyard_pairs(
                 both = int(np.count_nonzero(detected_1 & detected_2))
                 either = int(np.count_nonzero(detected_1 | detected_2))
                 indices = np.arange(len(counts_1))
-                if len(indices) > max_points:
+                density = sample.platform in BARNYARD_DENSITY_PLATFORMS
+                if not density and len(indices) > max_points:
                     indices = np.sort(
                         rng.choice(indices, size=max_points, replace=False)
                     )
                 plot_data[(gene_1, gene_2)][sample.sample_id] = {
                     "platform": sample.platform,
+                    "density": density,
                     "counts_1": counts_1[indices],
                     "counts_2": counts_2[indices],
                     "n_cells": len(counts_1),
@@ -1081,14 +1705,25 @@ def plot_barnyard_pairs(
                 x_values = np.log1p(x_values)
                 y_values = np.log1p(y_values)
                 axis_prefix = "log1p "
-            ax.scatter(
-                x_values,
-                y_values,
-                s=5,
-                alpha=0.22,
-                color=PLATFORM_COLORS.get(str(panel["platform"]), "#555555"),
-                edgecolors="none",
-            )
+            color = PLATFORM_COLORS.get(str(panel["platform"]), "#555555")
+            if panel["density"]:
+                _draw_barnyard_density(
+                    fig,
+                    ax,
+                    x_values,
+                    y_values,
+                    color=color,
+                    integer_counts=not log1p_counts,
+                )
+            else:
+                ax.scatter(
+                    x_values,
+                    y_values,
+                    s=5,
+                    alpha=0.22,
+                    color=color,
+                    edgecolors="none",
+                )
             mecr_label = f"{panel['mecr']:.4f}" if np.isfinite(panel["mecr"]) else "NaN"
             ax.set_title(
                 f"{panel['platform']}\nMECR={mecr_label}; "
@@ -1109,11 +1744,65 @@ def plot_barnyard_pairs(
     return output_paths
 
 
+def _draw_barnyard_density(
+    fig: Any,
+    ax: Any,
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    *,
+    color: str,
+    integer_counts: bool,
+    max_bins: int = 120,
+) -> None:
+    """Draw every cell as a 2D histogram of the two genes' counts.
+
+    Integer counts get one bin per count up to ``max_bins`` bins per axis
+    (wider bins beyond); log1p values get ``max_bins`` equal bins. Bins hold
+    cell counts on a log colour scale; empty bins stay blank.
+    """
+    x_values = np.asarray(x_values, dtype=float)
+    y_values = np.asarray(y_values, dtype=float)
+    upper = max(
+        float(np.max(x_values, initial=0.0)), float(np.max(y_values, initial=0.0))
+    )
+    edges: np.ndarray
+    if integer_counts and upper + 1 <= max_bins:
+        edges = np.arange(-0.5, upper + 1.5, 1.0)
+    elif integer_counts:
+        edges = np.linspace(-0.5, upper + 0.5, max_bins + 1)
+    else:
+        edges = np.linspace(0.0, max(upper, 1e-6), max_bins + 1)
+    histogram, x_edges, y_edges = np.histogram2d(
+        x_values, y_values, bins=[edges, edges]
+    )
+    masked = np.ma.masked_equal(histogram.T, 0)
+    cmap = LinearSegmentedColormap.from_list(
+        "merxen_barnyard_density", ["#F2F2F2", color, "#1A1A1A"]
+    )
+    mesh = ax.pcolormesh(
+        x_edges,
+        y_edges,
+        masked,
+        cmap=cmap,
+        norm=LogNorm(vmin=1.0, vmax=max(float(histogram.max()), 2.0)),
+        rasterized=True,
+    )
+    fig.colorbar(mesh, ax=ax, label="cells", fraction=0.046, pad=0.04)
+    ax.text(
+        0.98,
+        0.98,
+        f"all {len(x_values):,} cells",
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=7,
+    )
+
+
 def _ordered_platforms(values: pd.Series) -> list[str]:
     platforms = [str(value) for value in pd.unique(values.astype(str)) if str(value)]
-    preferred = [
-        platform for platform in ("MERSCOPE", "XENIUM") if platform in platforms
-    ]
+    # Registry order (MERSCOPE, XENIUM, ATERA), then any other label.
+    preferred = [platform for platform in PLATFORM_SPECS if platform in platforms]
     return preferred + sorted(set(platforms).difference(preferred), key=str.casefold)
 
 

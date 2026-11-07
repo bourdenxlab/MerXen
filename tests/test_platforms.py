@@ -201,7 +201,8 @@ def test_find_platform_spec_accepts_none() -> None:
     assert find_platform_spec(None) is None
 
 
-# Stages whose ``platform`` Literal takes ATERA since AT-6 (the native route).
+# Stages whose ``platform`` Literal takes ATERA since AT-6 (the native route),
+# and MECR since AT-8 (its streaming reference).
 _WIDENED_MODELS: tuple[str, ...] = (
     "SpatialDataBuildConfig",
     "EnrichmentConfig",
@@ -211,10 +212,11 @@ _WIDENED_MODELS: tuple[str, ...] = (
     "ClusteringSquidpySampleConfig",
     "MenderConfig",
     "SpatialGeneAnalysisSampleConfig",
+    "MecrSampleConfig",
 )
 # Stages that stay XENIUM/MERSCOPE only: Pydantic is the second-line refusal
 # behind the workflow preflight (Cellpose segmentation, registration, cortical
-# depth, distance from object, alignment, GASTON, MECR, MapMyCells, pciSeq).
+# depth, distance from object, alignment, GASTON, MapMyCells, pciSeq).
 _NOT_WIDENED_MODELS: tuple[str, ...] = (
     "DatasetConfig",
     "ImageRegistrationConfig",
@@ -222,7 +224,6 @@ _NOT_WIDENED_MODELS: tuple[str, ...] = (
     "DistanceFromObjectConfig",
     "DistanceFromObjectCohortConfig",
     "GastonConfig",
-    "MecrSampleConfig",
     "MapMyCellsSampleConfig",
     "PciSeqConfig",
 )

@@ -1,8 +1,9 @@
 # 10x Atera support: build stage and downstream plan
 
-> **Status:** revision 4, 2026-11-04. This is a plan only; no code has changed. Decisions marked
-> *Recommended* in §3 and §10 are the defaults the plan adopts until the user overrides them. Milestone 1
-> (§1) covers the build stage. Everything after it in §8 is sequenced but has not started. Revision 4
+> **Status:** implementation in progress; milestone 1 is met. The design baseline is revision 4,
+> 2026-11-04; §8 records implementation progress and Appendix A records later decisions. Decisions marked
+> *Recommended* in §3 and §10 apply unless superseded by those decisions. Milestone 1 (§1) covers the
+> build stage; downstream work is underway. Revision 4
 > applies the fidelity, scale, docs-conformance and completeness reviews. Each accepted or rejected point
 > is listed in the Review log (Appendix A). **User decision 2026-11-05 (metadata retention):** the store
 > keeps all vendor metadata verbatim; privacy rules apply only to what is committed to git and to
@@ -1768,6 +1769,27 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
   (`HIERARCHY_SOURCES`) changes, so the annotation `COMPUTE_CPU` task of every row re-runs once (same
   labels expected: the hierarchy does not run the legacy HVG rule). The map_first QC embedding's own HVG rule (`seurat`, above 1,000 genes) is
   unchanged.
+
+- **WP2 (analysis gene set) merged:** PR #119 provides the panel-stable gene-set model, CLI and
+  annotation-panel CSV hand-off. The ATERA identity recipe retains all 18,049 genes; the same gene IDs
+  produce the same hash across layers and crop/full-section stores. Independent continuation checks
+  passed all 30 gene-set tests, and the PR's CI passed before merging.
+- **WP3 (streaming MECR), continuation verification (2026-11-07):** the recovered implementation
+  splits ATERA reference preparation from the existing XENIUM/MERSCOPE reference task. Automatic
+  streaming applies above 5,000 non-control genes on every platform. ATERA barnyard figures use all
+  cells in density plots. The saved full-panel WHB run retained 3,030,703 reference cells and matched
+  17,777 of 18,049 panel genes, yielding 190 unique markers and 11,754 reference marker pairs. It took
+  31 min 26 s, with a sampled process-tree peak RSS of 11.01 GB. Scoring completed on both full-section
+  AT-9 layers. On the real 354-gene comparison panel, streaming and in-memory modes produced identical
+  detection statistics, markers and MECR pairs. Wilcoxon scores and unadjusted p-values also matched;
+  adjusted p-values intentionally cover only candidate genes in streaming mode. Evidence is under
+  `$MERXEN_EVIDENCE_ROOT/atera_at8/wp3/`; the comparison is in
+  `$MERXEN_STORAGE_ROOT/results/atera_pilot/at8_wp3/equivalence_hd_union/comparison.json`.
+  The continuation's full local CI passed: 6,592 tests passed and 56 skipped, with lint, formatting,
+  mypy and Nextflow lint also passing. Existing process-script and configuration guards pass.
+- **Published dotplots (2026-11-07):** the user declined a clustering rerun solely to regenerate
+  dotplots. The exact-total refresh runs validation and QC only; existing clustering and its figures
+  are retained.
 
 ### AT-9 `[feature]`: ProSeg for Atera, conditional on AT-5b (8–12 d)
 
