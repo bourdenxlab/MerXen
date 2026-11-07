@@ -33,6 +33,7 @@ import json
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
@@ -169,6 +170,49 @@ def _count_file(
         int(table.num_rows),
         int(genes.sum()),
         int(controls.sum()),
+    )
+
+
+@dataclass
+class _ReducedFile:
+    keys: np.ndarray
+    counts: np.ndarray
+    control_rows: np.ndarray
+    control_category: np.ndarray
+    n_rows: int
+    n_gene_rows: int
+    n_control_rows: int
+    n_unknown: int
+
+
+def _reduce_file(
+    path: Path, gene_position: dict[str, int], index_of: np.ndarray, n_genes: int
+) -> _ReducedFile:
+    """Count one file per (table row, gene); labels not in the mask are counted."""
+    cell, gene, ctrl_cell, ctrl_cat, rows, genes, controls = _count_file(
+        path, gene_position
+    )
+    n_max = index_of.size - 1
+    unknown = 0
+    for values in (cell, ctrl_cell):
+        outside = values > n_max
+        unknown += int(outside.sum())
+        unknown += int((index_of[values[~outside].astype(np.int64)] < 0).sum())
+    empty = np.zeros(0, np.int64)
+    if unknown:
+        return _ReducedFile(empty, empty, empty, empty, rows, genes, controls, unknown)
+    keys, counts = np.unique(
+        index_of[cell.astype(np.int64)] * n_genes + gene, return_counts=True
+    )
+    return _ReducedFile(
+        keys,
+        counts,
+        index_of[ctrl_cell.astype(np.int64)],
+        ctrl_cat,
+        rows,
+        genes,
+        controls,
+        0,
     )
 
 
@@ -311,42 +355,46 @@ def build_atera_cellpose_layer(
     n_genes = len(gene_position)
     n_categories = len(CONTROL_COUNT_PREFIXES) + 1
     workers = max(n_workers or int(os.environ.get("DASK_NUM_WORKERS", "4") or 4), 1)
-    gene_keys: list[np.ndarray] = []
+    # Each worker reduces its file to (cell, gene) counts, so the peak holds a
+    # few files' rows, not one key per gene row of the section (about 0.7 G on
+    # a full section).
+    file_keys: list[np.ndarray] = []
+    file_counts: list[np.ndarray] = []
     control_matrix = np.zeros((labels.size, n_categories), dtype=np.int64)
     n_rows = n_gene_rows = n_control_rows = 0
     unknown = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for cell, gene, ctrl_cell, ctrl_cat, rows, genes, controls in pool.map(
-            lambda path: _count_file(path, gene_position), files
+        for reduced in pool.map(
+            lambda path: _reduce_file(path, gene_position, index_of, n_genes), files
         ):
-            n_rows += rows
-            n_gene_rows += genes
-            n_control_rows += controls
-            for values in (cell, ctrl_cell):
-                outside = values > n_max
-                unknown += int(outside.sum())
-                inside = values[~outside].astype(np.int64)
-                unknown += int((index_of[inside] < 0).sum())
-            gene_keys.append(index_of[cell.astype(np.int64)] * n_genes + gene)
-            if ctrl_cell.size:
+            n_rows += reduced.n_rows
+            n_gene_rows += reduced.n_gene_rows
+            n_control_rows += reduced.n_control_rows
+            unknown += reduced.n_unknown
+            if reduced.n_unknown:
+                continue  # refused below, once every file is read
+            file_keys.append(reduced.keys)
+            file_counts.append(reduced.counts)
+            if reduced.control_rows.size:
                 np.add.at(
-                    control_matrix,
-                    (index_of[ctrl_cell.astype(np.int64)], ctrl_cat),
-                    1,
+                    control_matrix, (reduced.control_rows, reduced.control_category), 1
                 )
     if unknown:
         raise RuntimeError(
             f"[{dataset_name}] {unknown} points carry a {CELLPOSE_ASSIGNMENT_COLUMN} "
             "that is not a label of the Cellpose mask"
         )
-    keys, key_counts = np.unique(
-        np.concatenate(gene_keys) if gene_keys else np.zeros(0, np.int64),
-        return_counts=True,
+    keys = np.concatenate(file_keys) if file_keys else np.zeros(0, np.int64)
+    key_counts = np.concatenate(file_counts) if file_counts else np.zeros(0, np.int64)
+    # Duplicate keys (a cell and gene in several files) are summed in int64.
+    matrix = (
+        sparse.coo_matrix(
+            (key_counts.astype(np.int64), (keys // n_genes, keys % n_genes)),
+            shape=(labels.size, n_genes),
+        )
+        .tocsr()
+        .astype(np.float32)
     )
-    matrix = sparse.coo_matrix(
-        (key_counts.astype(np.float32), (keys // n_genes, keys % n_genes)),
-        shape=(labels.size, n_genes),
-    ).tocsr()
     # Sums in float64: a float32 total loses integers past 2**24 (a crop already
     # holds 21 M gene rows on cells).
     transcript_counts = np.rint(

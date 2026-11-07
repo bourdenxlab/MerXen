@@ -103,7 +103,9 @@ def route(tmp_path_factory: pytest.TempPathFactory) -> Route:
     mask, cellprob, _ = _fake_cellpose(source, root / "segmentation")
     plan_path = write_plan(_cellpose_plan_config(root, source, mask, cellprob))
     plan = read_plan(plan_path)
-    binary = fake_proseg_binary(root / "bin")
+    # greedy_halo: ProSeg also gives rows off the Cellpose cells to nearby
+    # cells, so its assignment differs from the Cellpose mask's.
+    binary = fake_proseg_binary(root / "bin", FAKE_PROSEG_MODE="greedy_halo")
     dirs = []
     for config in tile_configs(
         plan,
@@ -239,14 +241,20 @@ def test_tiles_seed_cell_id_from_the_cellpose_mask(
     route: Route, tmp_path: Path
 ) -> None:
     plan = read_plan(route.plan_path)
-    (config, *_) = tile_configs(
-        plan,
-        route.source,
-        tmp_path / "tiles",
-        prior=_tile_prior(plan),
-        model=_model(plan),
-        keep_inputs=True,
+    # The tile farthest from the origin: its window starts off row and column
+    # 0, so a window cut from the wrong place shows.
+    config = max(
+        tile_configs(
+            plan,
+            route.source,
+            tmp_path / "tiles",
+            prior=_tile_prior(plan),
+            model=_model(plan),
+            keep_inputs=True,
+        ),
+        key=lambda item: item.window_px[0] + item.window_px[2],
     )
+    assert config.window_px[0] > 0 and config.window_px[2] > 0
     manifest = run_tile(config, fake_proseg_binary(tmp_path / "bin"))
     assert manifest["prior"]["kind"] == "cellpose"
     assert "--cellpose-cellprobs" in manifest["proseg"]["arguments"]
@@ -266,6 +274,9 @@ def test_tiles_seed_cell_id_from_the_cellpose_mask(
     np.testing.assert_array_equal(window, mask[row0:row1, col0:col1])
     cellprob = np.load(inputs / "prior_cellprob.npy")
     assert cellprob.dtype == np.float32 and cellprob.shape == window.shape
+    np.testing.assert_array_equal(
+        cellprob, np.load(route.cellprob_path)[row0:row1, col0:col1]
+    )
 
 
 def test_vendor_command_is_unchanged_and_cellprobs_follow_the_masks() -> None:
@@ -389,13 +400,33 @@ def test_a_vendor_stitch_replaces_the_cellpose_layer(
                 store, vendor_plan, dirs, tmp_path / "wrong", prior_kind="cellpose"
             )
         )
+    # The row ran ENRICH as cellpose_proseg first: its proseg_mask layer reads
+    # cellpose_assignment, which the vendor stitch drops (review 2, F5).
+    enrich_single_latest(
+        _enrich_config(route, store, tmp_path / "enrich_out"), polygon_n_jobs=2
+    )
+    assert "MOSAIK_cellpose" in sd.read_zarr(store).shapes
     report = stitch(stitch_config(store, vendor_plan, dirs, tmp_path / "vendor_out"))
-    assert "shapes/MOSAIK_proseg" in report["removed_foreign_layer"]
+    removed = report["removed_foreign_layer"]
+    assert "shapes/MOSAIK_proseg" in removed
+    for element in (
+        "shapes/MOSAIK_cellpose",
+        "tables/table_MOSAIK_cellpose",
+        "labels/cellpose_cell_labels",
+        "registry/cellpose",
+        "attrs/merxen_atera_cellpose_layer",
+    ):
+        assert element in removed, element
     sdata = sd.read_zarr(store)
     assert "MOSAIK_proseg" not in sdata.shapes
+    assert "MOSAIK_cellpose" not in sdata.shapes
+    assert "table_MOSAIK_cellpose" not in sdata.tables
+    assert "cellpose_cell_labels" not in sdata.labels
+    assert "merxen_atera_cellpose_layer" not in sdata.attrs
     assert "MOSAIK_proseg_vendor" in sdata.shapes
     registry = sdata.attrs[MERXEN_SCHEMA_ATTR]["segmentations"]
     assert "proseg" not in registry and "proseg_vendor" in registry
+    assert "cellpose" not in registry
     schema = pq.read_schema(
         next(points_parquet_dir(store, "transcripts").glob("*.parquet"))
     )
@@ -476,6 +507,14 @@ def test_enrich_builds_the_cellpose_layer(
             if label and gene:
                 expected[row_of[int(label)], gene_position[name]] += 1
     np.testing.assert_array_equal(np.asarray(table.X.todense()), expected)
+    # ProSeg moved rows (greedy_halo), so a table counted from its assignment
+    # instead of the Cellpose mask's would differ.
+    proseg = sdata.tables["table_MOSAIK_proseg"]
+    proseg_rows = {int(v): i for i, v in enumerate(proseg.obs["instance_id"])}
+    order = [proseg_rows[int(v)] for v in table.obs["instance_id"]]
+    assert not np.array_equal(
+        np.asarray(proseg.X[order].todense()), np.asarray(table.X.todense())
+    )
     entry = sdata.attrs[MERXEN_SCHEMA_ATTR]["segmentations"]["cellpose"]
     assert entry["assignment_column"] == CELLPOSE_ASSIGNMENT_COLUMN
     assert entry["id_namespace"] == PROSEG_ID_NAMESPACE
@@ -579,3 +618,44 @@ def test_a_rebuilt_cellpose_layer_drops_its_derived_tables(
     tables = sd.read_zarr(store, selection=("tables",)).tables
     assert "table_MOSAIK_cellpose_image_quantification" not in tables
     assert "table_MOSAIK_cellpose" in tables
+
+
+def test_points_labels_off_the_mask_are_counted_not_indexed(tmp_path: Path) -> None:
+    # Review of AT-7 (F7): a cellpose_assignment above the mask's largest label
+    # is reported as unknown instead of raising an IndexError.
+    from merxen.enrichment.atera_cellpose_layer import _reduce_file
+
+    path = tmp_path / "points.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                CELLPOSE_ASSIGNMENT_COLUMN: pa.array([1, 3, 99, None, 1], pa.uint64()),
+                "is_gene": [True, True, True, True, False],
+                "feature_name": ["A", "B", "A", "A", "NegControlProbe_1"],
+            }
+        ),
+        path,
+    )
+    index_of = np.asarray([-1, 0, -1, 1])  # labels 1 and 3 are table rows 0, 1
+    reduced = _reduce_file(path, {"A": 0, "B": 1}, index_of, 2)
+    assert reduced.n_unknown == 1 and reduced.n_rows == 5
+    good = _reduce_file(
+        _rewrite(path, tmp_path / "good.parquet"), {"A": 0, "B": 1}, index_of, 2
+    )
+    assert good.n_unknown == 0
+    assert good.keys.tolist() == [0, 3] and good.counts.tolist() == [1, 1]
+    assert good.control_rows.tolist() == [0]
+
+
+def _rewrite(source: Path, target: Path) -> Path:
+    table = pq.read_table(source)
+    labels = table.column(CELLPOSE_ASSIGNMENT_COLUMN).to_pylist()
+    fixed = [None if value == 99 else value for value in labels]
+    index = table.column_names.index(CELLPOSE_ASSIGNMENT_COLUMN)
+    pq.write_table(
+        table.set_column(
+            index, CELLPOSE_ASSIGNMENT_COLUMN, pa.array(fixed, pa.uint64())
+        ),
+        target,
+    )
+    return target

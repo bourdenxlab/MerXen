@@ -856,6 +856,70 @@ def _foreign_layers(latest: Path, layer: ProsegLayer) -> list[ProsegLayer]:
     return found
 
 
+def _stale_cellpose_mask_elements(
+    latest: Path, layer: ProsegLayer
+) -> list[tuple[str, str]]:
+    """Return the Cellpose mask layer's elements a vendor stitch must remove.
+
+    ENRICH of a ``cellpose_proseg`` row builds ``proseg_mask`` from the
+    Cellpose mask and its ``cellpose_assignment`` column; a vendor stitch drops
+    that column, so the layer would point at a column that is gone.
+    """
+    from merxen.enrichment.atera_cellpose_layer import (
+        CELLPOSE_LABEL_KEY,
+        CELLPOSE_SHAPES_KEY,
+        CELLPOSE_TABLE_KEY,
+    )
+
+    if layer.prior_kind == "cellpose":
+        return []
+    return [
+        (kind, name)
+        for kind, name in (
+            ("tables", CELLPOSE_TABLE_KEY),
+            ("shapes", CELLPOSE_SHAPES_KEY),
+            ("labels", CELLPOSE_LABEL_KEY),
+        )
+        if _element_exists(latest, kind, name)
+    ]
+
+
+def _remove_stale_cellpose_mask_layer(
+    sdata: Any, latest: Path, layer: ProsegLayer
+) -> list[str]:
+    """Delete the Cellpose mask layer, its derived tables and registry entry."""
+    from merxen.enrichment.atera_cellpose_layer import (
+        CELLPOSE_BRANCH,
+        CELLPOSE_SHAPES_KEY,
+        CELLPOSE_TABLE_KEY,
+        LAYER_ATTR,
+    )
+    from merxen.io.spatialdata_io import delete_element
+
+    elements = _stale_cellpose_mask_elements(latest, layer)
+    if not elements:
+        return []
+    deleted: list[str] = []
+    for key in derived_tables(latest, CELLPOSE_SHAPES_KEY, CELLPOSE_TABLE_KEY):
+        delete_element(sdata, key, "tables")
+        deleted.append(f"tables/{key}")
+    for kind, name in elements:
+        delete_element(sdata, name, kind)
+        deleted.append(f"{kind}/{name}")
+    schema = dict(sdata.attrs.get(MERXEN_SCHEMA_ATTR) or {})
+    registry = dict(schema.get("segmentations") or {})
+    entry = registry.get(CELLPOSE_BRANCH)
+    if isinstance(entry, dict) and entry.get("shape") == CELLPOSE_SHAPES_KEY:
+        registry.pop(CELLPOSE_BRANCH)
+        schema["segmentations"] = registry
+        sdata.attrs[MERXEN_SCHEMA_ATTR] = schema
+        deleted.append(f"registry/{CELLPOSE_BRANCH}")
+    if LAYER_ATTR in sdata.attrs:
+        sdata.attrs.pop(LAYER_ATTR)
+        deleted.append(f"attrs/{LAYER_ATTR}")
+    return deleted
+
+
 def _remove_foreign_layers(
     sdata: Any, latest: Path, layer: ProsegLayer, dataset: str
 ) -> list[str]:
@@ -864,7 +928,8 @@ def _remove_foreign_layers(
     A store has one ProSeg layer: the other kind's elements are left by a row
     whose source changed or by a stitch from before the vendor layer was
     renamed (it used the Cellpose layer's names), and would be read as the
-    current layer.
+    current layer. A vendor stitch also removes the Cellpose mask layer
+    (``proseg_mask``) of an earlier ``cellpose_proseg`` run.
 
     Returns:
         The deleted elements as ``kind/name``.
@@ -892,6 +957,7 @@ def _remove_foreign_layers(
             schema["segmentations"] = registry
             sdata.attrs[MERXEN_SCHEMA_ATTR] = schema
             deleted.append(f"registry/{other.branch}")
+    deleted.extend(_remove_stale_cellpose_mask_layer(sdata, latest, layer))
     if deleted:
         logger.warning(
             "[%s] Removed the other prior's ProSeg layer from the store: %s",
@@ -1017,6 +1083,7 @@ def stitch(cfg: AteraProsegStitchConfig) -> dict[str, Any]:
             and _layer_complete(latest, tiles.layer)
             and _points_have_assignment(latest, tiles.layer)
             and not _foreign_layers(latest, tiles.layer)
+            and not _stale_cellpose_mask_elements(latest, tiles.layer)
         ):
             logger.info(
                 "[%s] ProSeg layer already stitched from these tiles (%s); skipping",
