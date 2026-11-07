@@ -1765,6 +1765,13 @@ PREPARE -> ANNOTATE_PANEL -> ANNOTATE_REFERENCE_PREP (per unique bundle)
         -> CLUSTERING_SQUIDPY_COMPUTE_CPU -> FINALIZE -> cortical depth, MENDER, ...
 ```
 
+- **Plots.** `CLUSTERING_SQUIDPY_COMPUTE_CPU` writes UMAP and spatial maps
+  by `broad_class`, `ct_leaf` and `ct_final_level` and, per branch, a dotplot
+  of each mapped leaf's top 5 genes, the same selection as the legacy branch
+  dotplots ([branch dotplots](clustering-squidpy.md#branch-dotplots-top-5-genes-per-cluster));
+  the selection is recorded in the clustered table's
+  `uns["merxen_dotplot_gene_selection"]`, and the dotplot tables keep every
+  panel gene.
 - **Preflight.** A `map_first` row gets no legacy marker, taxonomy or
   membership check; it is checked for the annotation settings, the
   references' source params (one full alternative of each required set),

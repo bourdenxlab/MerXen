@@ -29,7 +29,7 @@
 ### Changed: exact QC totals and top-gene dotplots on every platform
 
 - **QC totals are exact.** QC sums each cell's counts in float64 and totals them in int64 on XENIUM and MERSCOPE as on ATERA. The float32 sums used before drift once a section passes 2^24 assigned counts, so `n_transcripts_assigned` and `pct_assigned` of large sections can differ slightly from older QC outputs ([QC](docs/stages/qc.md)).
-- **Branch dotplots show the top 5 genes per subcluster** for every panel size, deduplicated and in subcluster order; panels up to 400 genes used to plot every panel gene. The dotplot CSV tables still hold every gene, and the selection is recorded in the branch H5AD for every panel ([branch dotplots](docs/stages/clustering-squidpy.md#branch-dotplots-top-5-genes-per-cluster)).
+- **Branch dotplots show the top 5 genes per subcluster** for every panel size and in both clustering modes, deduplicated and in subcluster order (in `map_first` mode the subclusters are a branch's mapped leaves). Legacy panels up to 400 genes used to plot every panel gene; `map_first` plotted every gene up to 300 genes and the 300 most variable above. The dotplot CSV tables hold every gene, and the selection is recorded in `uns["merxen_dotplot_gene_selection"]` (the branch H5AD in legacy mode, the clustered table in `map_first` mode) ([branch dotplots](docs/stages/clustering-squidpy.md#branch-dotplots-top-5-genes-per-cluster)).
 
 ### Added
 

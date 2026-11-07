@@ -510,6 +510,8 @@ def test_plots_and_tables_are_written(tmp_path: Path) -> None:
     assert int(leaves["n_cells"].sum()) == clustered.n_obs
     listed = json.loads(clustered.uns[HIERARCHICAL_UNS_KEY]["artifacts_json"])
     assert set(listed) == set(artifacts)
+    selection = clustered.uns["merxen_dotplot_gene_selection"]
+    assert f"{SAMPLE}_map_first_branch_neurons_excitatory" in selection
     # Branch UMAPs are opt-in.
     default = write_map_first_plots(
         clustered,
@@ -523,6 +525,75 @@ def test_plots_and_tables_are_written(tmp_path: Path) -> None:
     assert not [
         name for name in default if name.endswith("_umap") and "_branch_" in name
     ]
+
+
+def test_branch_dotplots_draw_each_leafs_top_genes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """map_first branch dotplots use the legacy top-5 selection (any panel)."""
+    import merxen.analysis.clustering_squidpy as legacy
+
+    section = make_section("human")
+    clustered, result = _run(section, tmp_path)
+    summaries: dict[str, tuple[pd.DataFrame, pd.DataFrame]] = {}
+    drawn: dict[str, tuple[list[str], list[str]]] = {}
+    real_helper = legacy.plot_top_gene_dotplot
+
+    def spy_helper(
+        adata: ad.AnnData,
+        mean: pd.DataFrame,
+        fraction: pd.DataFrame,
+        path: Path,
+        **kw: Any,
+    ) -> list[str]:
+        summaries[kw["selection_name"]] = (mean.copy(), fraction.copy())
+        return real_helper(adata, mean, fraction, path, **kw)
+
+    def capture(
+        mean: pd.DataFrame, fraction: pd.DataFrame, path: Path, **kw: Any
+    ) -> Path:
+        drawn[Path(path).stem] = (list(kw["gene_order"]), list(mean.index))
+        return Path(path)
+
+    for name in ("plot_umap", "plot_spatial_scatter", "plot_spatial_cluster_grid"):
+        monkeypatch.setattr(legacy, name, lambda _adata, path, **_kw: Path(path))
+    monkeypatch.setattr(legacy, "plot_group_gene_dotplot", capture)
+    monkeypatch.setattr(legacy, "plot_top_gene_dotplot", spy_helper)
+
+    paths = write_map_first_plots(
+        clustered,
+        output_dir=tmp_path / "plots_out",
+        sample_id=SAMPLE,
+        hierarchy=result.hierarchy,
+        config=make_config(tmp_path),
+    )
+
+    selections = clustered.uns[legacy.DOTPLOT_GENE_SELECTION_UNS_KEY]
+    branch_prefixes = [
+        name.removesuffix("_gene_dotplot")
+        for name in paths
+        if name.endswith("_gene_dotplot")
+    ]
+    assert branch_prefixes
+    assert set(selections) == set(branch_prefixes) == set(summaries)
+    panel = [str(gene) for gene in clustered.var_names]
+    for prefix in branch_prefixes:
+        # The tables keep every panel gene in var order.
+        table = pd.read_csv(paths[f"{prefix}_gene_mean_expression"], index_col=0)
+        assert list(table.columns) == panel
+        mean, fraction = summaries[prefix]
+        assert list(mean.columns) == panel
+        gene_order, groups = drawn[f"{prefix}_gene_dotplot"]
+        assert groups == [str(group) for group in mean.index]
+        assert gene_order == legacy.select_dotplot_genes(mean, fraction)
+        assert len(gene_order) == len(set(gene_order))
+        assert len(gene_order) <= legacy.DOTPLOT_TOP_GENES_PER_GROUP * len(groups)
+        record = selections[prefix]
+        assert list(record["plotted_genes"]) == gene_order
+        assert record["n_panel_genes"] == clustered.n_vars
+        assert record["top_genes_per_group"] == legacy.DOTPLOT_TOP_GENES_PER_GROUP
+        assert record["max_genes"] == legacy.DOTPLOT_MAX_GENES
+        assert record["table_gene_order"] == "var"
 
 
 def test_build_hierarchy_rejects_bad_branches() -> None:

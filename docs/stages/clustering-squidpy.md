@@ -218,8 +218,10 @@ region and adds a marker sanity gate.
 ## Branch dotplots: top 5 genes per cluster
 
 Every branch dotplot (`plots/dotplot/<prefix>_gene_dotplot.png`), whatever the
-panel size, draws the top 5 genes of each subcluster by cluster-mean z-score
-(z over subclusters, per gene):
+panel size and in both clustering modes, draws the top 5 genes of each
+subcluster by cluster-mean z-score (z over subclusters, per gene). In
+`map_first` mode the subclusters are a branch's mapped leaves; legacy and
+`map_first` share one helper (`clustering_squidpy.plot_top_gene_dotplot`):
 
 - Only genes expressed in at least 10% of a subcluster's cells are its
   candidates (z ties go to the higher fraction expressing, then panel order),
@@ -233,15 +235,19 @@ panel size, draws the top 5 genes of each subcluster by cluster-mean z-score
 - At most 400 genes are drawn (only reached with more than 80 subclusters);
   subclusters then take turns adding their next best gene, so each keeps its
   best ones. The axis label says how many of the panel's genes are shown.
-- The dotplot CSV tables keep every gene: in hierarchically clustered order
-  for panels up to 400 genes, in var order for wider panels.
-- The branch H5AD records the selection in
-  `uns["merxen_dotplot_gene_selection"][<prefix>]` (rule, floor, plotted genes
-  and table order).
+- The dotplot CSV tables keep every gene. Legacy writes them in
+  hierarchically clustered order for panels up to 400 genes and in var order
+  for wider panels; `map_first` writes them in var order.
+- The selection (rule, floor, plotted genes and table order) is recorded in
+  `uns["merxen_dotplot_gene_selection"][<prefix>]`: in the branch H5AD in
+  legacy mode, in the clustered table in `map_first` mode (one record per
+  `<sample_id>_map_first_branch_<token>`).
 
-Before 2026-11 panels up to 400 genes plotted every panel gene in clustered
-order; only wider panels took the top-5 selection (then ordered
-hierarchically).
+Before 2026-11 legacy panels up to 400 genes plotted every panel gene in
+clustered order, and only wider panels took the top-5 selection (then ordered
+hierarchically). `map_first` plotted every gene of panels up to 300 genes and
+the 300 most variable genes of wider panels (hierarchically ordered), and its
+tables of wider panels held only those 300 genes.
 
 ## Outputs
 

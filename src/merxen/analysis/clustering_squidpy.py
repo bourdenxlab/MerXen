@@ -57,7 +57,7 @@ EXPECTED_PANEL_GENE_COUNT = 300
 # platform rule: the 300-gene XENIUM/MERSCOPE panels never reach it and keep
 # the dense path byte for byte, while a wider panel of any platform takes it.
 DENSE_SUMMARY_MAX_GENES = 1000
-# Every branch dotplot shows the union of each group's top
+# Every branch dotplot (legacy and map_first) shows the union of each group's top
 # DOTPLOT_TOP_GENES_PER_GROUP genes (cluster-mean z-score), whatever the panel
 # width, and never more than DOTPLOT_MAX_GENES of them (a render-size cap that
 # only bites with over 80 groups); the CSV tables keep every gene.
@@ -2676,13 +2676,71 @@ def _save_branch_gene_dotplot(
         table_gene_order = "var"
         mean_expression.to_csv(mean_path)
         fraction_expression.to_csv(fraction_path)
+    plot_top_gene_dotplot(
+        adata,
+        mean_expression,
+        fraction_expression,
+        dotplot_path,
+        selection_name=prefix,
+        x_axis_label=group_key,
+        title=f"{prefix} top gene expression by subcluster",
+        dpi=plot_dpi,
+        table_gene_order=table_gene_order,
+    )
+    return {
+        f"{prefix}_gene_dotplot": dotplot_path,
+        f"{prefix}_gene_mean_expression": mean_path,
+        f"{prefix}_gene_fraction_expressing": fraction_path,
+    }
+
+
+def plot_top_gene_dotplot(
+    adata: ad.AnnData,
+    mean_expression: pd.DataFrame,
+    fraction_expression: pd.DataFrame,
+    output_path: Path,
+    *,
+    selection_name: str,
+    x_axis_label: str,
+    title: str,
+    dpi: int,
+    table_gene_order: str,
+) -> list[str]:
+    """Draw a dotplot of each group's top genes and record the selection.
+
+    The genes are :func:`select_dotplot_genes` with the
+    :data:`DOTPLOT_MIN_GROUP_FRACTION` floor; when no gene reaches the floor
+    in any group, the floor is dropped (recorded as 0) rather than drawing an
+    empty figure. The figure keeps the groups in the row order of
+    ``mean_expression`` and the genes in selection order. The selection is
+    recorded in ``adata.uns[DOTPLOT_GENE_SELECTION_UNS_KEY][selection_name]``.
+    Shared by the legacy branch dotplots and the map_first branch dotplots.
+
+    Args:
+        adata: The object that records the selection in ``uns``.
+        mean_expression: Groups-by-genes mean expression of every panel gene.
+        fraction_expression: Groups-by-genes fraction of cells expressing,
+            with the same index and columns as ``mean_expression``.
+        output_path: The figure path.
+        selection_name: Key of the record in the ``uns`` selection mapping.
+        x_axis_label: Label of the group axis.
+        title: Figure title.
+        dpi: Output resolution.
+        table_gene_order: Gene order of the caller's CSV tables, recorded as
+            given (``"clustered"`` or ``"var"``).
+
+    Returns:
+        The plotted genes in plot order.
+
+    Raises:
+        ValueError: If the figure would exceed the render limit.
+    """
+    n_panel_genes = int(mean_expression.shape[1])
     min_group_fraction = DOTPLOT_MIN_GROUP_FRACTION
     gene_order = select_dotplot_genes(
         mean_expression, fraction_expression, min_fraction=min_group_fraction
     )
     if not gene_order:
-        # No gene reaches the floor in any group: plot the z-score ranking
-        # without it rather than an empty figure.
         min_group_fraction = 0.0
         gene_order = select_dotplot_genes(
             mean_expression, fraction_expression, min_fraction=min_group_fraction
@@ -2690,24 +2748,24 @@ def _save_branch_gene_dotplot(
     _check_dotplot_render_size(
         n_groups=mean_expression.shape[0],
         n_genes=len(gene_order),
-        dpi=plot_dpi,
+        dpi=int(dpi),
     )
     plot_group_gene_dotplot(
         mean_expression.loc[:, gene_order],
         fraction_expression.loc[:, gene_order],
-        dotplot_path,
+        output_path,
         gene_order=gene_order,
         cluster_genes=False,
-        x_axis_label=group_key,
+        x_axis_label=x_axis_label,
         y_axis_label=(
             f"Top {DOTPLOT_TOP_GENES_PER_GROUP} genes per group "
             f"({len(gene_order)} of {n_panel_genes})"
         ),
-        title=f"{prefix} top gene expression by subcluster",
-        dpi=plot_dpi,
+        title=title,
+        dpi=int(dpi),
     )
     selections = dict(adata.uns.get(DOTPLOT_GENE_SELECTION_UNS_KEY, {}))
-    selections[prefix] = {
+    selections[selection_name] = {
         "rule": (
             "union of the top genes per group by cluster-mean z-score "
             "(ties: fraction expressing), among genes expressed in at "
@@ -2720,14 +2778,10 @@ def _save_branch_gene_dotplot(
         "n_panel_genes": n_panel_genes,
         "n_plotted_genes": len(gene_order),
         "plotted_genes": [str(gene) for gene in gene_order],
-        "table_gene_order": table_gene_order,
+        "table_gene_order": str(table_gene_order),
     }
     adata.uns[DOTPLOT_GENE_SELECTION_UNS_KEY] = selections
-    return {
-        f"{prefix}_gene_dotplot": dotplot_path,
-        f"{prefix}_gene_mean_expression": mean_path,
-        f"{prefix}_gene_fraction_expressing": fraction_path,
-    }
+    return gene_order
 
 
 def _check_dotplot_render_size(*, n_groups: int, n_genes: int, dpi: int) -> None:
