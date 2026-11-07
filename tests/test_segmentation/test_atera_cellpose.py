@@ -185,3 +185,76 @@ def test_cellpose_run_writes_no_csv_and_reuses_masks(
     again = run_cellpose_segmentation(config)
     assert calls == [1]
     assert "transcripts_csv" not in again
+
+
+def test_an_interrupted_cellpose_run_is_not_reused(
+    source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Review of AT-7: the masks are written in place, tile by tile, and an
+    # ATERA run has no CSV to mark completion, so a run killed part-way left
+    # files that the next run reused as finished.
+    calls: list[str] = []
+
+    def killed(
+        *,
+        output_mask_path: Path,
+        output_cellprob_path: Path,
+        height: int,
+        width: int,
+        before_overwrite: Any = None,
+        **_: Any,
+    ) -> Path:
+        calls.append("killed")
+        if before_overwrite is not None:
+            before_overwrite()
+        output_mask_path.parent.mkdir(parents=True, exist_ok=True)
+        mask = np.lib.format.open_memmap(
+            output_mask_path, mode="w+", dtype=np.uint32, shape=(height, width)
+        )
+        np.lib.format.open_memmap(
+            output_cellprob_path, mode="w+", dtype=np.float32, shape=(height, width)
+        )
+        mask[2:8, 2:8] = 1  # one tile stitched, then the process dies
+        mask.flush()
+        raise KeyboardInterrupt
+
+    def complete(
+        *,
+        output_mask_path: Path,
+        output_cellprob_path: Path,
+        output_stitching_stats_path: Path,
+        height: int,
+        width: int,
+        before_overwrite: Any = None,
+        **_: Any,
+    ) -> Path:
+        calls.append("complete")
+        if before_overwrite is not None:
+            before_overwrite()
+        mask = np.zeros((height, width), dtype=np.uint32)
+        mask[2:8, 2:8] = 1
+        mask[10:16, 10:16] = 2
+        np.save(output_mask_path, mask)
+        np.save(output_cellprob_path, np.zeros(mask.shape, dtype=np.float32))
+        output_stitching_stats_path.write_text("{}\n")
+        return output_mask_path
+
+    config = _config(source, tmp_path)
+    monkeypatch.setattr(pipeline, "run_tiled_cellpose", killed)
+    with pytest.raises(KeyboardInterrupt):
+        run_cellpose_segmentation(config)
+    mask_path = tmp_path / "seg" / "cellpose_masks_tiled.npy"
+    assert mask_path.exists() and int(np.load(mask_path).max()) == 1
+    monkeypatch.setattr(pipeline, "run_tiled_cellpose", complete)
+    outputs = run_cellpose_segmentation(config)
+    assert calls == ["killed", "complete"]
+    assert int(np.load(outputs["cellpose_mask_path"]).max()) == 2
+    # The finished run is reused; a run killed after a finished one is not.
+    run_cellpose_segmentation(config)
+    assert calls == ["killed", "complete"]
+    monkeypatch.setattr(pipeline, "run_tiled_cellpose", killed)
+    with pytest.raises(KeyboardInterrupt):
+        run_cellpose_segmentation(config, force_rerun=True)
+    monkeypatch.setattr(pipeline, "run_tiled_cellpose", complete)
+    run_cellpose_segmentation(config)
+    assert calls == ["killed", "complete", "killed", "complete"]

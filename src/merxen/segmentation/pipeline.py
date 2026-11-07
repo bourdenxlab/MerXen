@@ -21,6 +21,7 @@ from merxen.io.bead_removal.provenance import (
     check_store_segmentation_sidecar,
     read_image_preprocessing_attr,
     remove_segmentation_sidecar,
+    segmentation_sidecar_path,
     write_segmentation_sidecar,
     write_store_segmentation_sidecar,
 )
@@ -769,8 +770,17 @@ def run_cellpose_segmentation(
             },
         )
 
+    # The masks and probabilities are written in place, tile by tile, so their
+    # existence does not mean a finished run. With a CSV, the CSV (written
+    # after Cellpose) marks completion; without one (ATERA), the segmentation
+    # sidecar does: _finish_cellpose_without_csv writes it last and
+    # run_tiled_cellpose removes it (before_overwrite) before it opens them.
     reusable_outputs_exist = (
-        (transcripts_csv.exists() or not writes_csv)
+        (
+            transcripts_csv.exists()
+            if writes_csv
+            else segmentation_sidecar_path(mask_path).exists()
+        )
         and mask_path.exists()
         and cellprob_path.exists()
         and not force_rerun
