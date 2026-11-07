@@ -437,6 +437,20 @@ def test_a_vendor_stitch_replaces_the_cellpose_layer(
     assert "proseg" not in registry and "proseg_vendor" in registry
     assert "cellpose" not in registry
     assert not set(viewer_labels) & set(sdata.labels)
+    # Leftovers in a store whose layer is current (same tiles) are removed
+    # without a re-stitch, so the tables derived from the layer stay.
+    _write_viewer_labels(store, viewer_labels[:2])
+    derived = sdata.tables["table_MOSAIK_proseg_vendor"].copy()
+    sdata.tables["table_MOSAIK_proseg_vendor_image_quantification"] = derived
+    sdata.write_element("table_MOSAIK_proseg_vendor_image_quantification")
+    again = stitch(stitch_config(store, vendor_plan, dirs, tmp_path / "again_out"))
+    assert again["skipped"] is True
+    assert sorted(again["removed_foreign_layer_without_restitch"]) == sorted(
+        f"labels/{name}" for name in viewer_labels[:2]
+    )
+    after = sd.read_zarr(store)
+    assert not set(viewer_labels) & set(after.labels)
+    assert "table_MOSAIK_proseg_vendor_image_quantification" in after.tables
     schema = pq.read_schema(
         next(points_parquet_dir(store, "transcripts").glob("*.parquet"))
     )

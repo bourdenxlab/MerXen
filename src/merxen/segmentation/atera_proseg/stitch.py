@@ -997,6 +997,21 @@ def _remove_foreign_layers(
     return deleted
 
 
+def _remove_leftovers_only(latest: Path, layer: ProsegLayer, dataset: str) -> list[str]:
+    """Remove another layer's elements from a store whose layer is current."""
+    if not _foreign_layers(latest, layer) and not _stale_cellpose_mask_elements(
+        latest, layer
+    ):
+        return []
+    import spatialdata as sd
+
+    sdata = sd.read_zarr(latest, selection=("shapes", "tables", "labels"))
+    removed = _remove_foreign_layers(sdata, latest, layer, dataset)
+    sdata.write_attrs()
+    sdata.write_consolidated_metadata()
+    return removed
+
+
 def _clip_seams(
     cells: pd.DataFrame, tiles: _Tiles, tile_um: float
 ) -> tuple[pd.DataFrame, list[Any], dict[str, Any]]:
@@ -1112,8 +1127,6 @@ def stitch(cfg: AteraProsegStitchConfig) -> dict[str, Any]:
             and recorded.get("fingerprint") == fingerprint
             and _layer_complete(latest, tiles.layer)
             and _points_have_assignment(latest, tiles.layer)
-            and not _foreign_layers(latest, tiles.layer)
-            and not _stale_cellpose_mask_elements(latest, tiles.layer)
         ):
             logger.info(
                 "[%s] ProSeg layer already stitched from these tiles (%s); skipping",
@@ -1125,6 +1138,11 @@ def stitch(cfg: AteraProsegStitchConfig) -> dict[str, Any]:
                 "fingerprint": fingerprint,
                 **recorded.get("stitch", {}),
             }
+            # The current layer stays as it is (with the tables derived from
+            # it); only another layer's leftovers are removed.
+            removed = _remove_leftovers_only(latest, tiles.layer, cfg.dataset_name)
+            if removed:
+                report["removed_foreign_layer_without_restitch"] = removed
         else:
             try:
                 report = _stitch_into(cfg, latest, tiles, fingerprint)
