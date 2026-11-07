@@ -61,6 +61,83 @@ gene for pair calculations; full points are still used for compartments and
 signed distances. Up to 12 pair-correlation worker threads are used per
 sample.
 
+### Engine selection
+
+The transcript-level analysis has two engines. Python picks one per sample by
+capability, before the cell-level work starts:
+
+| The layer… | Engine |
+|------------|--------|
+| has cell and nucleus label elements (ATERA: its registered cell-label raster, with `nucleus_labels`) | label-raster engine (below) |
+| has none, and its table has more than 5,000 non-control genes (`merxen.gene_sets.WHOLE_TRANSCRIPTOME_MIN_GENES`, e.g. a Xenium Prime 5K row) | refused with a message: the polygon engine keeps every transcript in memory. Set `spatial_gene_analysis_transcript_analysis_enabled=false` for the row. |
+| has none (the 300-gene XENIUM and MERSCOPE layers) | the polygon engine described above, unchanged |
+
+Both engines reduce their transcripts to the same per-gene counts
+(`GenePatternCounts`) and share the statistics that turn them into the
+summary and signed-distance tables, so a XENIUM or MERSCOPE table is
+byte-identical to the one before the label-raster engine existed (a test
+compares them with a frozen copy of the former code).
+
+### Label-raster engine (ATERA)
+
+Whole-transcriptome sections hold more than a billion transcripts, so this
+engine streams every transcript instead of keeping points:
+
+1. **Tissue support.** When the row names tissue annotations (the GeoJSON
+   columns above), they win: the polygon is rasterised on a 10 µm grid and
+   transcripts in grid bins its boundary crosses get an exact
+   point-in-polygon test. Otherwise the tissue comes from the density of
+   every transcript (controls included) on a 10 µm grid: a threshold (Otsu
+   on log10 of the positive bins, which separates the off-tissue background
+   of a few transcripts per bin from the tissue; capped at 1% of their 99th
+   percentile so a window inside the tissue is not split into dense and
+   sparse tissue) applied to every bin, a closing with a 50 µm disk, hole
+   filling, and
+   removal of components smaller than 0.05 mm². The manifest records the
+   method, the threshold and the areas; the mask itself is written as
+   `<sample_id>_transcript_tissue_mask.npz` and drawn over the density in
+   `plots/transcript_patterns/<sample_id>_tissue_support.png`.
+2. **Compartments.** Each transcript's pixel in the layer's cell labels and
+   the nucleus labels, with the platform's pixel rule (the vendor's float32
+   corner rule for ATERA, `PlatformSpec.mask_pixel_convention`): nuclear on a
+   nucleus label, else cytoplasmic on a cell label, else extracellular. Label
+   rasters cannot overlap, so the overlap counters are 0 by construction.
+3. **Signed distances.** For each label raster, a tiled exact Euclidean
+   distance transform (`scipy.ndimage.distance_transform_edt`, 4,096-pixel
+   tiles) of the pixels that touch a label change (8-connected), with a halo
+   just above the largest distance a statistic needs (200 µm by default, 944
+   pixels on ATERA). A pixel's distance is the distance from its centre to
+   the nearest such pixel centre plus half a pixel, so it is within one pixel
+   of the point-to-boundary distance of the polygon engine (a test checks
+   this on pixel-aligned shapes). Distances are stored as `uint16`
+   (0.01 µm steps) in memory-mapped files in task scratch (about 5 GB per
+   raster on a full ATERA section) and removed at the end; a distance beyond
+   the halo is reported as beyond the outermost bin edge.
+4. **One streaming pass** adds every finite, in-tissue, non-control
+   transcript (controls by `is_gene`, else by the control-name rules of
+   `merxen.control_features`) to per-gene compartment counts, signed-distance
+   bin counts, 0.05 µm distance histograms for the medians, and the
+   pericellular and membrane-proximal counters. Nothing is thinned:
+   `n_transcripts_used` in the manifest is every such transcript.
+5. **Pair correlation is not computed** on this engine (AT-8 decision; an
+   all-transcript method is a follow-up). The summary's `paircorr_status`
+   column says `not_computed_label_raster_engine`, the pair-correlation table
+   is empty, and the manifest records it under `transcript_engine.paircorr`.
+6. **Diagnostics** are rasterised over every transcript of the selected
+   genes, never scattered or subsampled: the gene's in-tissue density on the
+   10 µm grid with the tissue outline; its densest 250 µm window (chosen from
+   that raster) at 1 µm as a three-colour nuclear / cytoplasmic /
+   extracellular composite over the cell and nucleus label edges; the
+   signed-distance profile; and the compartment fractions against all
+   transcripts.
+
+The manifest's `transcript_counts` adds, on this engine, the vendor-layer
+consistency counters: `n_gene_transcripts_on_cell_label` (gene transcripts
+on any cell label, in or out of the tissue: on the vendor layer this equals
+the gene total of `table_original`) and its in-tissue part, plus the
+transcripts outside the label grid. `transcript_engine` records the pixel
+rule, the distance encoding, tile counts, timings and the scratch size.
+
 ## Nextflow process
 
 [`SPATIAL_GENE_ANALYSIS`](../../workflows/modules/spatial_gene_analysis.nf) —
@@ -85,13 +162,17 @@ and MapMyCells. Set
 cell-level autocorrelation outputs but skip the annotation-dependent
 transcript-level analysis.
 
-ATERA rows (native segmentation, `original_seg` only) run the cell-level
-autocorrelation on every retained gene of `table_original` and plot only the
-top-N ranked genes. Transcript-level analysis is off for ATERA rows: the
-workflow turns `spatial_gene_analysis_transcript_analysis_enabled` off for them
-(logging when a global `true` is ignored) and preflight refuses a row that sets
-it to `true`. The sample's `nuclei_shape_key` is the registry's nucleus layer
-(`atera_nucleus`), which the transcript analysis would need once it is enabled.
+ATERA rows run the cell-level autocorrelation on every retained gene of the
+layer's table and plot only the top-N ranked genes. Their transcript-level
+analysis runs on the [label-raster engine](#label-raster-engine-atera), on
+every layer the row analyses: `original_seg`; `proseg_vendor` on
+`native_proseg` rows; and `proseg_mask` (Cellpose) plus `reseg` (Cellpose-prior
+ProSeg) on `cellpose_proseg` rows. Tissue annotations are optional. Cell-label
+elements are resolved through the segmentation registry and its aliases. Older
+AT-9 stores whose vendor-prior layer was called `reseg` are recognized by their
+recorded `vendor_cell_labels` prior, without rewriting the store. Vendor
+nucleus masks are used spatially for each layer; nucleus and Cellpose IDs are
+never joined.
 
 The process requests 12 CPUs and 120 GB. Under the implicit `standard`
 (Dwight) profile, `spatial_gene_analysis_max_forks = 4`, so four samples may
@@ -101,8 +182,10 @@ profile must supply limits appropriate to its own host.
 
 ## Tissue annotation requirement
 
-Transcript analysis requires a bounded native-coordinate tissue area for each
-active platform. Supply either a combined role-labelled GeoJSON containing
+On XENIUM and MERSCOPE rows, transcript analysis requires a bounded
+native-coordinate tissue area for each active platform (ATERA rows do not:
+they fall back to the density-derived tissue, and preflight only checks the
+annotation files a row names). Supply either a combined role-labelled GeoJSON containing
 `pia` and `tissue_edge` features, or separate pial and tissue-edge GeoJSONs.
 The same platform-specific and shared samplesheet column aliases used by
 cortical depth are accepted. White-matter lines are not used as the outer
@@ -122,6 +205,9 @@ They are not required when the row's effective
 | `run_transcript_pattern_analysis` | [analysis/transcript_spatial_patterns.py](../../src/merxen/analysis/transcript_spatial_patterns.py) |
 | `compute_signed_distance_enrichment` | [analysis/transcript_spatial_patterns.py](../../src/merxen/analysis/transcript_spatial_patterns.py) |
 | `compute_multiscale_pair_correlation` | [analysis/transcript_spatial_patterns.py](../../src/merxen/analysis/transcript_spatial_patterns.py) |
+| `select_transcript_engine` | [analysis/spatial_gene_analysis.py](../../src/merxen/analysis/spatial_gene_analysis.py) |
+| `run_raster_transcript_pattern_analysis` | [analysis/transcript_patterns_raster.py](../../src/merxen/analysis/transcript_patterns_raster.py) |
+| `density_tissue_mask` | [analysis/transcript_patterns_raster.py](../../src/merxen/analysis/transcript_patterns_raster.py) |
 
 ## Config schema
 
@@ -150,6 +236,16 @@ They are not required when the row's effective
 | `pericellular_distance_um` / `membrane_distance_um` | Convenience proximity summaries. Defaults 5/2 µm. |
 | `transcript_diagnostic_*` | Representative gene plot count, cap, local window size, and point cap. |
 
+The label-raster engine's own parameters (tissue grid 10 µm, smoothing sigma
+0 (off), closing radius 50 µm, smallest kept component 50,000 µm², threshold cap
+0.01 of the 99th percentile, distance tile 4,096 px, median bin 0.05 µm, fine
+diagnostic bin 1 µm, scratch directory, worker threads from
+`DASK_NUM_WORKERS`) are `RasterEngineSettings` in
+[analysis/transcript_patterns_raster.py](../../src/merxen/analysis/transcript_patterns_raster.py),
+not config fields: the Nextflow JSON never sets them, and `merxen/config.py`
+is part of the map_first hierarchy fingerprint, so a field there would re-run
+every row's annotation `COMPUTE_CPU` task.
+
 ## Outputs
 
 Written under `spatial_gene_analysis_out/<platform>/`:
@@ -164,7 +260,9 @@ Each listed `.png` plot is also written as a same-stem `.pdf`.
 | Spatial gene plots | `plots/spatial_genes/<metric>/<top_or_bottom>/*.png` | One plot per ranked gene, colored by log-normalized expression. |
 | Transcript summary | `<sample_id>_transcript_spatial_patterns.csv` | Per-gene compartment counts/enrichment, signed-distance summaries, pair-band summaries, overlap QC, and conservative pattern label. |
 | Signed-distance table | `<sample_id>_transcript_signed_distance.parquet` | Long table for every gene × boundary × signed-distance bin, including fractions, log2 odds, p-values, and BH FDR. |
-| Pair-correlation table | `<sample_id>_transcript_pair_correlation.parquet` | Long table for every eligible gene × null model × distance band, including thinning, null envelope, enrichment, empirical p-values, and BH FDR. |
+| Pair-correlation table | `<sample_id>_transcript_pair_correlation.parquet` | Long table for every eligible gene × null model × distance band, including thinning, null envelope, enrichment, empirical p-values, and BH FDR. Empty (same columns) on the label-raster engine. |
 | Transcript rankings | `<sample_id>_transcript_spatial_pattern_rankings.csv` | Separate rankings for compartments, proximity, signed-distance bands, and both pair nulls. |
-| Transcript diagnostics | `plots/transcript_patterns/*.png` | Tissue map, local cell/nuclear outline view, signed-distance profile, and both pair-null profiles for representative genes. |
-| Manifest | `<sample_id>_spatial_gene_analysis_manifest.json` | Parameters, retained counts, and output paths. |
+| Transcript diagnostics | `plots/transcript_patterns/*.png` | Polygon engine: tissue map, local cell/nuclear outline view, signed-distance profile, and both pair-null profiles for representative genes. Label-raster engine: density rasters over every transcript (see above). |
+| Tissue mask (label-raster engine) | `<sample_id>_transcript_tissue_mask.npz` | `inside` (bool grid, row = y), `origin_um`, `bin_um`. |
+| Tissue support plot (label-raster engine) | `plots/transcript_patterns/<sample_id>_tissue_support.png` | The tissue outline over the all-transcript density. |
+| Manifest | `<sample_id>_spatial_gene_analysis_manifest.json` | Parameters, retained counts, output paths and, on the label-raster engine, `transcript_engine` (method, tissue support, pair-correlation status, timings). |

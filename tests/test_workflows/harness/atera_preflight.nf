@@ -89,9 +89,22 @@ workflow {
     )
     check("atera/pciseq", atera + [pciseq_enabled: "true"])
     check("atera/gaston", atera + [gaston_enabled: "true"])
+    // Transcript patterns run on ATERA rows (label-raster engine, AT-8);
+    // annotations are optional, but a named one must exist.
     check(
         "atera/transcript_analysis",
         atera + [spatial_gene_analysis_transcript_analysis_enabled: "true"],
+    )
+    check(
+        "atera/transcript_analysis_off",
+        atera + [spatial_gene_analysis_transcript_analysis_enabled: "false"],
+    )
+    check(
+        "atera/transcript_missing_annotation",
+        atera + [
+            spatial_gene_analysis_transcript_analysis_enabled: "true",
+            atera_cortical_depth_annotation_geojson: "missing/annotation.geojson",
+        ],
     )
     check("atera/cortical_depth", atera + [cortical_depth_enabled: "true"])
     check("atera/distance_from_object", atera + [distance_from_object_enabled: "true"])
