@@ -40,6 +40,7 @@
   "workflows/modules/mask_image_quantification.nf::MASK_IMAGE_QUANTIFICATION::script": "e2f071c54087c1341e7222467e5add52c22ce615c19ba66b015e9aefca4d9adf",
   "workflows/modules/mecr.nf::MECR::script": "caec0a7d36a69220ba8889595ffc254338ba9321b53e3b45c9ec44bf37de29f0",
   "workflows/modules/mecr.nf::MECR_REFERENCE::script": "366eba8ba12e778814d344aa18f092f20305817441f017c333fe3f73b507488e",
+  "workflows/modules/mecr.nf::MECR_REFERENCE_ATERA::script": "718fd64029f88923539d756dba7100ead7fb9e86d71d2b73454cde41d324ba8d",
   "workflows/modules/mender.nf::MENDER_COMPUTE::script": "26414a1d03307b191593b322ec97c13864b729e68e9a3f80be90b2b5eec18292",
   "workflows/modules/mender.nf::MENDER_FINALIZE::script": "e8218bd64901324ab7a3ba6502eb58dff7682f643bd587ef4bb05474ac27daad",
   "workflows/modules/mender.nf::MENDER_IMPORT::script": "8466f96404740be98c6637c6c70f4953c59eade8c363aa4ca7f6af8ccf8f5eee",

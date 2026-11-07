@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Fake merxen for the MECR wiring harness: keeps the config JSON it is given and
+# says which reference a MECR task was handed.
+set -euo pipefail
+command=$1
+config=$3
+case "$command" in
+    mecr-reference)
+        mkdir -p mecr_reference_out
+        cp "$config" mecr_reference_out/
+        if grep -q '"platform": "ATERA"' "$config"; then
+            echo "atera reference" > mecr_reference_out/mecr_reference_markers.csv
+        else
+            echo "standard reference" > mecr_reference_out/mecr_reference_markers.csv
+        fi
+        ;;
+    mecr)
+        mkdir -p mecr_out
+        cp "$config" mecr_out/
+        cp mecr_reference_out/mecr_reference_markers.csv mecr_out/reference_used.txt
+        ;;
+    *)
+        echo "unexpected merxen command $command" >&2
+        exit 2
+        ;;
+esac

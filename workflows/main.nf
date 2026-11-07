@@ -19,7 +19,7 @@ include { ALIGN; MATERIALIZE_ALIGNMENT; ALIGN_QC } from "./modules/alignment"
 include { COMPARE } from "./modules/comparison"
 include { VISUALIZE } from "./modules/visualization"
 include { SPATIAL_GENE_ANALYSIS } from "./modules/spatial_gene_analysis"
-include { MECR_REFERENCE; MECR } from "./modules/mecr"
+include { MECR_REFERENCE; MECR_REFERENCE_ATERA; MECR } from "./modules/mecr"
 include {
     CLUSTERING_SQUIDPY_PREPARE;
     CLUSTERING_SQUIDPY_COMPUTE;
@@ -884,6 +884,29 @@ def mergeMecrSamplesJson(samplesJsonValues) {
     return groovy.json.JsonOutput.prettyPrint(
         groovy.json.JsonOutput.toJson(mergedSamples)
     )
+}
+
+// Whether a MECR sample list belongs to an ATERA row, whose reference streams
+// (MECR_REFERENCE_ATERA). ATERA rows analyse one platform, so no list mixes
+// ATERA with XENIUM or MERSCOPE samples.
+def mecrSamplesUseAteraReference(samplesJson) {
+    def samples = new groovy.json.JsonSlurper().parseText(samplesJson.toString())
+    return samples.any { sample -> sample.platform?.toString() == "ATERA" }
+}
+
+// One reference task over every MECR sample list of a channel (none when it is
+// empty): the atlas for the run's species and the merged sample JSON.
+def mecrReferenceInputs(samplesChannel) {
+    return samplesChannel
+        .map { _pairId, _segmentation, samplesJson -> samplesJson }
+        .collect()
+        .filter { samplesJsonValues -> !samplesJsonValues.isEmpty() }
+        .map { samplesJsonValues ->
+            def referenceAtlas = normalizeSpecies(params.species) == "mouse"
+                ? "wmb"
+                : "whb"
+            tuple(referenceAtlas, mergeMecrSamplesJson(samplesJsonValues))
+        }
 }
 
 def spatialGeneSamplesJson(samplesJson, row) {
@@ -2361,6 +2384,7 @@ def ateraNativeStages() {
         "qc",
         "visualize",
         "spatial_gene_analysis",
+        "mecr",
         "clustering_squidpy",
         "mender",
     ]
@@ -2496,12 +2520,6 @@ def appendAteraPreflightChecks(errors, row, settings, params) {
         errors.add(
             "pciSeq is off for ATERA rows; remove pciseq_enabled from row " +
             "${settings.pair_id} or set it to false"
-        )
-    }
-    if (stageOrder.contains("mecr")) {
-        errors.add(
-            "MECR is off for ATERA rows until it streams its reference; remove " +
-            "mecr_enabled from row ${settings.pair_id} or set it to false"
         )
     }
     if (settings.spatial_gene_analysis_transcript_analysis_enabled) {
@@ -2951,8 +2969,9 @@ def rowSampleSettings(row, params) {
     def activePlatforms = activePlatformsForMode(analysisMode)
     def segmentationSource = segmentationSourceForRow(row, activePlatforms, params)
     def nativeSegmentation = usesVendorSegmentation(segmentationSource)
-    // MECR and the transcript spatial patterns read whole panels into memory;
-    // they stay off for ATERA (whole-transcriptome) rows until they stream.
+    // The transcript spatial patterns read whole panels into memory; they stay
+    // off for ATERA (whole-transcriptome) rows until they stream. MECR runs:
+    // ATERA rows get their own streaming reference (MECR_REFERENCE_ATERA).
     def ateraRow = activePlatforms.contains("ATERA")
     // Settings resolved differently from what was asked, logged per row.
     def settingNotes = []
@@ -3088,13 +3107,6 @@ def rowSampleSettings(row, params) {
         species == "human",
         "mecr_enabled for ${pairId}",
     )
-    if (ateraRow && chooseField(row, ["mecr_enabled"]) == null) {
-        // Only a samplesheet value reaches the preflight, which refuses it.
-        if (mecrEnabled && params.mecr_enabled != null) {
-            settingNotes << "MECR is off for ATERA rows; the global mecr_enabled is ignored"
-        }
-        mecrEnabled = false
-    }
     def menderEnabled = boolOrDefault(
         rowFieldOrDefault(row, "mender_enabled", params.mender_enabled),
         false,
@@ -5108,22 +5120,35 @@ workflow {
                 )
         }
 
-    mecr_reference_inputs_ch = mecr_samples_ch
-        .map { _pairId, _segmentation, samplesJson -> samplesJson }
-        .collect()
-        .filter { samplesJsonValues -> !samplesJsonValues.isEmpty() }
-        .map { samplesJsonValues ->
-            def referenceAtlas = normalizeSpecies(params.species) == "mouse"
-                ? "wmb"
-                : "whb"
-            tuple(referenceAtlas, mergeMecrSamplesJson(samplesJsonValues))
+    // XENIUM and MERSCOPE rows share one reference over their merged panels
+    // (MECR_REFERENCE, its JSON unchanged by ATERA rows). ATERA rows get their
+    // own streaming reference over the whole-transcriptome panel (Atera plan
+    // AT-8).
+    mecr_samples_by_reference_ch = mecr_samples_ch
+        .branch { _pairId, _segmentation, samplesJson ->
+            atera: mecrSamplesUseAteraReference(samplesJson)
+            standard: true
         }
+    mecr_reference_inputs_ch = mecrReferenceInputs(mecr_samples_by_reference_ch.standard)
     mecr_reference_results_ch = MECR_REFERENCE(mecr_reference_inputs_ch)
-    mecr_inputs_ch = mecr_samples_ch
+    mecr_atera_reference_inputs_ch = mecrReferenceInputs(
+        mecr_samples_by_reference_ch.atera
+    )
+    mecr_atera_reference_results_ch = MECR_REFERENCE_ATERA(
+        mecr_atera_reference_inputs_ch
+    )
+    mecr_inputs_ch = mecr_samples_by_reference_ch.standard
         .combine(mecr_reference_results_ch)
         .map { pairId, segmentation, samplesJson, referenceOut ->
             tuple(pairId, segmentation, samplesJson, referenceOut)
         }
+        .mix(
+            mecr_samples_by_reference_ch.atera
+                .combine(mecr_atera_reference_results_ch)
+                .map { pairId, segmentation, samplesJson, referenceOut ->
+                    tuple(pairId, segmentation, samplesJson, referenceOut)
+                }
+        )
     mecr_results_ch = MECR(mecr_inputs_ch)
 
     merscope_zarr_ch = analysis_ready_zarrs_ch

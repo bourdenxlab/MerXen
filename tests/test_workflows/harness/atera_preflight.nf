@@ -71,6 +71,9 @@ workflow {
     check("atera/analysis_original", atera + [analysis_segmentation: "original"])
     check("atera/analysis_all", atera + [analysis_segmentation: "all"])
     check("atera/mecr_off", atera + [mecr_enabled: "false"])
+    // MECR runs on ATERA rows with its streaming reference (AT-8).
+    check("atera/mecr", atera + [mecr_enabled: "true"])
+    check("atera/only_mecr", atera + [only_stage: "mecr"])
     // map_first annotation is gated off for ATERA rows (AT-11, RCA on Atera):
     // a row without its own mode clusters in legacy mode, a row that names
     // legacy keeps it, and a row that names map_first is refused.
@@ -85,7 +88,6 @@ workflow {
     )
     check("atera/pciseq", atera + [pciseq_enabled: "true"])
     check("atera/gaston", atera + [gaston_enabled: "true"])
-    check("atera/mecr", atera + [mecr_enabled: "true"])
     check(
         "atera/transcript_analysis",
         atera + [spatial_gene_analysis_transcript_analysis_enabled: "true"],
@@ -102,7 +104,6 @@ workflow {
     // that would only lead into the refusal above.
     check("atera/only_pciseq", atera + [only_stage: "pciseq"])
     check("atera/stop_gaston", atera + [stop_stage: "gaston"])
-    check("atera/only_mecr", atera + [only_stage: "mecr"])
     // AT-9: the ATERA ProSeg route (segmentation_source=native_proseg).
     def proseg = atera + [segmentation_source: "native_proseg"]
     check("proseg/default", proseg)
