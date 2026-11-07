@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -81,6 +82,9 @@ def _launch(root: Path, rows: str, outdir: Path) -> dict[str, list[list[str]]]:
     (work_dir / "h.nf").write_text(_script())
     (work_dir / "lib").symlink_to(_WORKFLOWS / "lib", target_is_directory=True)
     (work_dir / "modules").symlink_to(_WORKFLOWS / "modules", target_is_directory=True)
+    env = _golden_module().hermetic_env()
+    # Nextflow appends project bin to PATH; an installed merxen would win in CI.
+    env["PATH"] = f"{work_dir / 'bin'}{os.pathsep}{env.get('PATH', '')}"
     result = subprocess.run(
         [
             nextflow,
@@ -100,11 +104,16 @@ def _launch(root: Path, rows: str, outdir: Path) -> dict[str, list[list[str]]]:
         cwd=work_dir,
         capture_output=True,
         text=True,
-        env=_golden_module().hermetic_env(),
+        env=env,
         timeout=600,
         check=False,
     )
-    assert result.returncode == 0, f"{result.stdout[-3000:]}\n{result.stderr[-2000:]}"
+    if result.returncode:
+        task_errors = "\n".join(
+            f"{path.relative_to(work_dir)}:\n{path.read_text()[-2000:]}"
+            for path in sorted((work_dir / "work").glob("*/*/.command.err"))
+        )
+        pytest.fail(f"{result.stdout[-3000:]}\n{result.stderr[-2000:]}\n{task_errors}")
     outputs: dict[str, list[list[str]]] = {}
     for line in result.stdout.splitlines():
         if line.startswith("OUT\t"):
