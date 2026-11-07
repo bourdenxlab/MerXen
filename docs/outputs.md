@@ -13,6 +13,8 @@ ${outdir}/
 │   └── trace.tsv
 ├── mecr_reference/
 │   └── mecr_reference_out/
+├── mecr_reference_atera/           # ATERA rows only
+│   └── mecr_reference_out/
 ├── <pair_id_1>/
 │   ├── merscope/
 │   │   ├── spatialdata/
@@ -387,7 +389,11 @@ maps of area growth and rejected external transcripts.
 
 ### MECR
 
-Shared reference path: `${outdir}/mecr_reference/mecr_reference_out/`
+Shared reference path: `${outdir}/mecr_reference/mecr_reference_out/` for
+XENIUM and MERSCOPE rows, `${outdir}/mecr_reference_atera/mecr_reference_out/`
+for ATERA rows (the streaming reference; same files, with NaN Wilcoxon columns
+for genes that are not detection candidates, see
+[MECR](stages/mecr.md#whole-transcriptome-panels-and-atera-rows)).
 
 | File | Contents |
 |------|----------|
@@ -396,7 +402,7 @@ Shared reference path: `${outdir}/mecr_reference/mecr_reference_out/`
 | `mecr_reference_markers.csv` | Unique broad-class markers that pass the paper's strict detection thresholds. |
 | `mecr_reference_pairs.csv` | Reference intersection, union, and MECR for every eligible cross-class marker pair. |
 | `mecr_reference_distribution.png` | Whole-brain reference pair-MECR histogram with descriptive mean and median lines; neither line is used for pair selection. |
-| `mecr_reference_manifest.json` | Reference paths, normalization, thresholds, class/cell counts, Wilcoxon settings, and output paths. |
+| `mecr_reference_manifest.json` | Reference paths, normalization, thresholds, reference mode (requested, resolved and why), class/cell counts, Wilcoxon settings (tested genes, BH scope), and output paths. |
 
 Per-branch path: `${outdir}/<pair_id>/<analysis_segmentation>/mecr/mecr_out/`
 

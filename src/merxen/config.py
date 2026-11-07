@@ -2065,7 +2065,7 @@ class MecrSampleConfig(BaseModel):
     """One SpatialData cell-count table to score with MECR."""
 
     sample_id: str
-    platform: Literal["MERSCOPE", "XENIUM"]
+    platform: PlatformName
     zarr_path: Path
     segmentation: str | None = None
     table_key: str | None = None
@@ -2092,6 +2092,17 @@ class MecrReferenceConfig(BaseModel):
     marker_max_other_fraction: float = Field(default=0.01, ge=0.0, le=1.0)
     normalize_target_sum: float = Field(default=10_000.0, gt=0.0)
     reference_chunk_rows: int = Field(default=5_000, ge=1)
+    # How the reference is held (Atera plan AT-8, Q22). ``in_memory`` keeps
+    # the panel-restricted matrix of every retained cell and runs the
+    # Wilcoxon test on every panel gene. ``streaming`` reads the reference
+    # twice: the first pass counts detections per broad class without keeping
+    # the matrix; the second keeps only the genes that pass the detection
+    # thresholds and runs the Wilcoxon test on them. ``auto`` streams when the
+    # panel has more than ``merxen.gene_sets.WHOLE_TRANSCRIPTOME_MIN_GENES``
+    # non-control genes. Markers and MECR values do not depend on the mode.
+    reference_mode: Literal["auto", "in_memory", "streaming"] = "auto"
+    # Processes that decode reference row chunks in parallel (1 = in-process).
+    reference_workers: int = Field(default=1, ge=1)
     wilcoxon_tie_correct: bool = True
     figure_dpi: int = Field(default=180, ge=72)
 

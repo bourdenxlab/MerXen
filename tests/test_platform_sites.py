@@ -208,7 +208,6 @@ REASONS: dict[str, dict[str, str]] = {
         "src/merxen/analysis/clustering_squidpy.py": (
             "MERSCOPE-moving aligned layers (pairing role)"
         ),
-        "src/merxen/analysis/mecr.py": "display order of the paired platforms",
         "src/merxen/config.py": "pairing roles of AlignmentConfig",
         "src/merxen/distance_from_object/pipeline.py": (
             "MERSCOPE-moving aligned layers (pairing role)"
@@ -445,9 +444,6 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         "src/merxen/analysis/clustering_squidpy.py": (
             'if platform.upper() == "MERSCOPE" and aligned_preferred in sdata_obj.shapes:',  # noqa: E501
             'if platform.upper() == "MERSCOPE" and aligned_region in sdata_obj.shapes:',
-        ),
-        "src/merxen/analysis/mecr.py": (
-            'platform for platform in ("MERSCOPE", "XENIUM") if platform in platforms',
         ),
         "src/merxen/config.py": (
             'self.fixed_platform != "XENIUM" or self.moving_platform != "MERSCOPE"',

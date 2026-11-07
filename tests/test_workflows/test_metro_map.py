@@ -65,6 +65,8 @@ STATION_ALIASES = {
         "ATERA_PROSEG_TILE",
         "ATERA_PROSEG_STITCH",
     },
+    # The XENIUM/MERSCOPE reference and the ATERA streaming reference (AT-8).
+    "mecr_reference": {"MECR_REFERENCE", "MECR_REFERENCE_ATERA"},
     "mender": {
         "MENDER_PREPARE",
         "MENDER_COMPUTE",
