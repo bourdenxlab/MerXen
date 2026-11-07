@@ -311,8 +311,11 @@ def runsAteraCellpose(segmentationSource, platforms) {
 // source has (AT-9; native has one). The layers are those of the row's
 // platforms (ATERA has no proseg_hybrid, AT-7). A group value drops
 // proseg_vendor, the layer of the native_proseg route only, without a note
-// (XENIUM and MERSCOPE rows keep their notes as they were). null returns
-// `selected` as is.
+// (XENIUM and MERSCOPE rows keep their notes as they were). `strict` is a
+// boolean (every missing layer is an error) or the list of layers the row
+// named explicitly: only those are errors, so a group word mixed with names
+// ("all,original_seg") still falls back for the members the source lacks.
+// Kept layers stay in the order asked. null returns `selected` as is.
 def filterSegmentationsForSource(
     selected,
     segmentationSource,
@@ -330,15 +333,17 @@ def filterSegmentationsForSource(
     if (!missing) {
         return selected
     }
-    if (strict) {
+    def missingNamed = strict instanceof Collection
+        ? missing.findAll { segmentation -> strict.contains(segmentation) }
+        : (strict ? missing : [])
+    if (missingNamed) {
         throw new IllegalArgumentException(
-            "${label}=${missing.join(',')} for ${pairId} is not available with " +
+            "${label}=${missingNamed.join(',')} for ${pairId} is not available with " +
             "segmentation_source=${segmentationSource}; available: " +
             "${available.join(', ')}"
         )
     }
-    // In the source's order, so "all" lists the layers as the source does.
-    def kept = available.findAll { segmentation -> selected.contains(segmentation) }
+    def kept = selected.findAll { segmentation -> available.contains(segmentation) }
     if (!kept) {
         kept = available
     }
@@ -358,8 +363,8 @@ def normalizeAnalysisSegmentation(rawValue) {
         raw = "all"
     }
     def aliases = [
-        "both": ["reseg", "original_seg", "proseg_vendor"],
-        "all": ["reseg", "original_seg", "proseg_mask", "proseg_hybrid", "proseg_vendor"],
+        "both": ["reseg", "proseg_vendor", "original_seg"],
+        "all": ["reseg", "proseg_vendor", "original_seg", "proseg_mask", "proseg_hybrid"],
         "reseg": ["reseg"],
         "resegmented": ["reseg"],
         "proseg": ["reseg"],
@@ -417,7 +422,7 @@ def normalizeMenderSegmentations(rawValue) {
         ? rawValue
         : rawValue.toString().split(",")
     def aliases = [
-        "all": ["reseg", "original_seg", "proseg_mask", "proseg_hybrid", "proseg_vendor"],
+        "all": ["reseg", "proseg_vendor", "original_seg", "proseg_mask", "proseg_hybrid"],
         "reseg": ["reseg"],
         "resegmented": ["reseg"],
         "proseg": ["reseg"],
@@ -459,6 +464,51 @@ def normalizeMenderSegmentations(rawValue) {
         throw new IllegalArgumentException("mender_segmentations must not be empty")
     }
     return selected
+}
+
+// The layers a samplesheet value names explicitly: every token but the group
+// words "all" and "both", normalised by `normalizer` (null: none named).
+def explicitlyNamedSegmentations(rawValue, normalizer) {
+    if (rawValue == null) {
+        return []
+    }
+    def named = []
+    rawValue.toString().split(",").each { token ->
+        def key = token.trim().toLowerCase()
+        if (!key || key in ["all", "both"]) {
+            return
+        }
+        normalizer.call(key).each { segmentation ->
+            if (!named.contains(segmentation)) {
+                named << segmentation
+            }
+        }
+    }
+    return named
+}
+
+// The layers of a row setting (analysis_segmentation, mender_segmentations):
+// `value` (the row's value, else the global param) normalised and filtered for
+// the row's source; only the layers the samplesheet value names are strict.
+def resolveRowSegmentations(
+    rowValue,
+    value,
+    normalizer,
+    segmentationSource,
+    label,
+    pairId,
+    notes,
+    platforms
+) {
+    return filterSegmentationsForSource(
+        normalizer.call(value),
+        segmentationSource,
+        explicitlyNamedSegmentations(rowValue, normalizer),
+        label,
+        pairId,
+        notes,
+        platforms,
+    )
 }
 
 def normalizeGastonSegmentations(rawValue) {
@@ -3009,13 +3059,11 @@ def rowSampleSettings(row, params) {
     // Settings resolved differently from what was asked, logged per row.
     def settingNotes = []
     def rowAnalysisSegmentation = chooseField(row, ["analysis_segmentation"])
-    def analysisSegmentations = filterSegmentationsForSource(
-        normalizeAnalysisSegmentation(
-            rowFieldOrDefault(row, "analysis_segmentation", params.analysis_segmentation)
-        ),
+    def analysisSegmentations = resolveRowSegmentations(
+        rowAnalysisSegmentation,
+        rowFieldOrDefault(row, "analysis_segmentation", params.analysis_segmentation),
+        { value -> normalizeAnalysisSegmentation(value) },
         segmentationSource,
-        rowAnalysisSegmentation != null &&
-            !(rowAnalysisSegmentation.toLowerCase() in ["all", "both"]),
         "analysis_segmentation",
         pairId,
         settingNotes,
@@ -3154,13 +3202,11 @@ def rowSampleSettings(row, params) {
         "mender_enabled for ${pairId}",
     )
     def rowMenderSegmentations = chooseField(row, ["mender_segmentations"])
-    def menderSegmentations = filterSegmentationsForSource(
-        normalizeMenderSegmentations(
-            rowFieldOrDefault(row, "mender_segmentations", params.mender_segmentations)
-        ),
+    def menderSegmentations = resolveRowSegmentations(
+        rowMenderSegmentations,
+        rowFieldOrDefault(row, "mender_segmentations", params.mender_segmentations),
+        { value -> normalizeMenderSegmentations(value) },
         segmentationSource,
-        rowMenderSegmentations != null &&
-            rowMenderSegmentations.toLowerCase() != "all",
         "mender_segmentations",
         pairId,
         settingNotes,

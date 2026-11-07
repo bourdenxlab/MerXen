@@ -493,6 +493,49 @@ def ateraCellposeCases(String launch) {
     attempt(group, "${id}/published_mask_error") {
         publishedAteraCellposeMask(params, "PAIR_A", "ATERA")
     }
+    mixedSegmentationCases(group, launch)
+}
+
+// A group word mixed with layer names in a samplesheet value (review of AT-7):
+// the group's members a source lacks fall back silently, the named ones are
+// strict. One case per platform, source, setting and value.
+def mixedSegmentationCases(String group, String launch) {
+    def routes = [
+        XENIUM: ["cellpose_proseg"],
+        MERSCOPE: ["cellpose_proseg"],
+        ATERA: ["native", "native_proseg", "cellpose_proseg"],
+    ]
+    def settings = [
+        analysis_segmentation: [
+            values: [
+                "all,original_seg", "both,proseg_mask", "original_seg,all",
+                "all,proseg_hybrid", "both,proseg_vendor",
+            ],
+            normalizer: { value -> normalizeAnalysisSegmentation(value) },
+        ],
+        mender_segmentations: [
+            values: ["all,reseg", "all,original_seg", "all,proseg_vendor"],
+            normalizer: { value -> normalizeMenderSegmentations(value) },
+        ],
+    ]
+    routes.each { platform, sources ->
+        sources.each { source ->
+            settings.each { label, setting ->
+                setting.values.each { value ->
+                    def notes = []
+                    def named = explicitlyNamedSegmentations(value, setting.normalizer)
+                    def lacking = named - availableSegmentationLayers(source, [platform])
+                    def key = value.replace(",", "+") + (lacking ? "_error" : "")
+                    attempt(group, "${launch}/mixed/${platform}/${source}/${label}/${key}") {
+                        resolveRowSegmentations(
+                            value, value, setting.normalizer, source, label, "PAIR_A",
+                            notes, [platform],
+                        ) + notes
+                    }
+                }
+            }
+        }
+    }
 }
 
 def rowsFor(String platform) {
