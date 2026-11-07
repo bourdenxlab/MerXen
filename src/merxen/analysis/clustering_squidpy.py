@@ -57,11 +57,16 @@ EXPECTED_PANEL_GENE_COUNT = 300
 # platform rule: the 300-gene XENIUM/MERSCOPE panels never reach it and keep
 # the dense path byte for byte, while a wider panel of any platform takes it.
 DENSE_SUMMARY_MAX_GENES = 1000
-# Dotplots draw at most this many genes (a panel-width rule like the one
-# above). Wider panels plot the union of each group's top genes (cluster-mean
-# z-score); the CSV tables keep every gene.
+# Every branch dotplot shows the union of each group's top
+# DOTPLOT_TOP_GENES_PER_GROUP genes (cluster-mean z-score), whatever the panel
+# width, and never more than DOTPLOT_MAX_GENES of them (a render-size cap that
+# only bites with over 80 groups); the CSV tables keep every gene.
 DOTPLOT_MAX_GENES = 400
 DOTPLOT_TOP_GENES_PER_GROUP = 5
+# Tables of panels up to this width are written in hierarchically clustered
+# gene order; wider panels (whole-transcriptome ATERA) keep var order, as
+# clustering every gene of such a panel is too costly.
+DOTPLOT_CLUSTERED_TABLE_MAX_GENES = 400
 # A gene is a candidate for a group's top genes only when at least this
 # fraction of the group's cells express it. The z-score ignores expression
 # level, so without the floor a gene with a handful of transcripts in one
@@ -1724,15 +1729,20 @@ def select_dotplot_genes(
     max_genes: int = DOTPLOT_MAX_GENES,
     min_fraction: float = DOTPLOT_MIN_GROUP_FRACTION,
 ) -> list[str]:
-    """Pick a bounded gene set for a dotplot of a wide panel.
+    """Pick each group's top genes for a dotplot, in group order.
 
     Within each group, only genes expressed in at least ``min_fraction`` of
     the group's cells are candidates; they are ranked by their cluster-mean
     z-score (z over groups, per gene), then by the group's fraction
-    expressing, then var order. A group with fewer candidates adds fewer
-    genes. Groups take turns adding their next best gene until every group
-    has added ``top_k`` genes or ``max_genes`` are chosen, so a cap that
-    bites still leaves every group its best genes.
+    expressing, then var order. A group with fewer than ``top_k`` candidates
+    adds only those it has. Groups take turns adding their next best gene
+    until every group has added ``top_k`` genes or ``max_genes`` are chosen,
+    so a cap that bites still leaves every group its best genes. A gene that
+    ranks in several groups is kept once.
+
+    The result is ordered by group (the row order of ``mean_expression``),
+    each group's genes best first, a shared gene sitting with the first group
+    that ranks it, so a dotplot drawn in this order runs along the diagonal.
 
     Args:
         mean_expression: Groups-by-genes mean expression.
@@ -1744,7 +1754,7 @@ def select_dotplot_genes(
             for that gene to be one of the group's candidates.
 
     Returns:
-        The selected genes in selection order.
+        The selected genes in group order, without duplicates.
 
     Raises:
         ValueError: If the two tables do not share index and columns.
@@ -1767,20 +1777,30 @@ def select_dotplot_genes(
             (var_order[candidates], -fraction_row[candidates], -z_row[candidates])
         )
         rankings.append(candidates[order][: int(top_k)])
-    selected: list[str] = []
-    seen: set[int] = set()
-    for rank in range(int(top_k)):
+    chosen = _take_group_turns(rankings, top_k=int(top_k), max_genes=int(max_genes))
+    ordered: list[str] = []
+    placed: set[int] = set()
+    for ranking in rankings:
+        for index in map(int, ranking):
+            if index in chosen and index not in placed:
+                placed.add(index)
+                ordered.append(genes[index])
+    return ordered
+
+
+def _take_group_turns(
+    rankings: list[np.ndarray], *, top_k: int, max_genes: int
+) -> set[int]:
+    """Return the genes chosen when groups take turns adding their next best."""
+    chosen: set[int] = set()
+    for rank in range(top_k):
         for ranking in rankings:
             if rank >= len(ranking):
                 continue
-            index = int(ranking[rank])
-            if index in seen:
-                continue
-            seen.add(index)
-            selected.append(genes[index])
-            if len(selected) >= int(max_genes):
-                return selected
-    return selected
+            chosen.add(int(ranking[rank]))
+            if len(chosen) >= max_genes:
+                return chosen
+    return chosen
 
 
 def _cluster_gene_order(
@@ -2645,74 +2665,64 @@ def _save_branch_gene_dotplot(
     fraction_path = table_dir / f"{prefix}_gene_fraction_expressing.csv"
     dotplot_path = plot_dir / f"{prefix}_gene_dotplot.png"
     plot_dpi = max(int(dpi), 220)
-    if mean_expression.shape[1] <= DOTPLOT_MAX_GENES:
-        gene_order = _cluster_gene_order(mean_expression)
-        mean_expression.loc[:, gene_order].to_csv(mean_path)
-        fraction_expression.loc[:, gene_order].to_csv(fraction_path)
-        plot_group_gene_dotplot(
-            mean_expression,
-            fraction_expression,
-            dotplot_path,
-            gene_order=gene_order,
-            cluster_genes=False,
-            x_axis_label=group_key,
-            y_axis_label="Panel genes",
-            title=f"{prefix} panel gene expression by subcluster",
-            dpi=plot_dpi,
-        )
+    n_panel_genes = int(mean_expression.shape[1])
+    # The tables keep every gene; the figure shows each group's top genes.
+    if n_panel_genes <= DOTPLOT_CLUSTERED_TABLE_MAX_GENES:
+        table_gene_order = "clustered"
+        clustered_order = _cluster_gene_order(mean_expression)
+        mean_expression.loc[:, clustered_order].to_csv(mean_path)
+        fraction_expression.loc[:, clustered_order].to_csv(fraction_path)
     else:
-        # Wide panel: the tables keep every gene in var order; the figure
-        # shows a bounded, hierarchically ordered selection.
+        table_gene_order = "var"
         mean_expression.to_csv(mean_path)
         fraction_expression.to_csv(fraction_path)
-        min_group_fraction = DOTPLOT_MIN_GROUP_FRACTION
-        plotted = select_dotplot_genes(
+    min_group_fraction = DOTPLOT_MIN_GROUP_FRACTION
+    gene_order = select_dotplot_genes(
+        mean_expression, fraction_expression, min_fraction=min_group_fraction
+    )
+    if not gene_order:
+        # No gene reaches the floor in any group: plot the z-score ranking
+        # without it rather than an empty figure.
+        min_group_fraction = 0.0
+        gene_order = select_dotplot_genes(
             mean_expression, fraction_expression, min_fraction=min_group_fraction
         )
-        if not plotted:
-            # No gene reaches the floor in any group: plot the z-score
-            # ranking without it rather than an empty figure.
-            min_group_fraction = 0.0
-            plotted = select_dotplot_genes(
-                mean_expression, fraction_expression, min_fraction=min_group_fraction
-            )
-        gene_order = _cluster_gene_order(mean_expression.loc[:, plotted])
-        _check_dotplot_render_size(
-            n_groups=mean_expression.shape[0],
-            n_genes=len(gene_order),
-            dpi=plot_dpi,
-        )
-        plot_group_gene_dotplot(
-            mean_expression.loc[:, gene_order],
-            fraction_expression.loc[:, gene_order],
-            dotplot_path,
-            gene_order=gene_order,
-            cluster_genes=False,
-            x_axis_label=group_key,
-            y_axis_label=(
-                f"Top {DOTPLOT_TOP_GENES_PER_GROUP} genes per group "
-                f"({len(gene_order)} of {mean_expression.shape[1]})"
-            ),
-            title=f"{prefix} top gene expression by subcluster",
-            dpi=plot_dpi,
-        )
-        selections = dict(adata.uns.get(DOTPLOT_GENE_SELECTION_UNS_KEY, {}))
-        selections[prefix] = {
-            "rule": (
-                "union of the top genes per group by cluster-mean z-score "
-                "(ties: fraction expressing), among genes expressed in at "
-                "least min_group_fraction of the group's cells; groups taking "
-                "turns; hierarchically ordered"
-            ),
-            "top_genes_per_group": int(DOTPLOT_TOP_GENES_PER_GROUP),
-            "max_genes": int(DOTPLOT_MAX_GENES),
-            "min_group_fraction": float(min_group_fraction),
-            "n_panel_genes": int(mean_expression.shape[1]),
-            "n_plotted_genes": len(gene_order),
-            "plotted_genes": [str(gene) for gene in gene_order],
-            "table_gene_order": "var",
-        }
-        adata.uns[DOTPLOT_GENE_SELECTION_UNS_KEY] = selections
+    _check_dotplot_render_size(
+        n_groups=mean_expression.shape[0],
+        n_genes=len(gene_order),
+        dpi=plot_dpi,
+    )
+    plot_group_gene_dotplot(
+        mean_expression.loc[:, gene_order],
+        fraction_expression.loc[:, gene_order],
+        dotplot_path,
+        gene_order=gene_order,
+        cluster_genes=False,
+        x_axis_label=group_key,
+        y_axis_label=(
+            f"Top {DOTPLOT_TOP_GENES_PER_GROUP} genes per group "
+            f"({len(gene_order)} of {n_panel_genes})"
+        ),
+        title=f"{prefix} top gene expression by subcluster",
+        dpi=plot_dpi,
+    )
+    selections = dict(adata.uns.get(DOTPLOT_GENE_SELECTION_UNS_KEY, {}))
+    selections[prefix] = {
+        "rule": (
+            "union of the top genes per group by cluster-mean z-score "
+            "(ties: fraction expressing), among genes expressed in at "
+            "least min_group_fraction of the group's cells; groups taking "
+            "turns under max_genes; ordered by group, best first"
+        ),
+        "top_genes_per_group": int(DOTPLOT_TOP_GENES_PER_GROUP),
+        "max_genes": int(DOTPLOT_MAX_GENES),
+        "min_group_fraction": float(min_group_fraction),
+        "n_panel_genes": n_panel_genes,
+        "n_plotted_genes": len(gene_order),
+        "plotted_genes": [str(gene) for gene in gene_order],
+        "table_gene_order": table_gene_order,
+    }
+    adata.uns[DOTPLOT_GENE_SELECTION_UNS_KEY] = selections
     return {
         f"{prefix}_gene_dotplot": dotplot_path,
         f"{prefix}_gene_mean_expression": mean_path,

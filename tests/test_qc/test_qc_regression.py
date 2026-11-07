@@ -5,7 +5,9 @@ store (dask points, a cell table, platform shapes) and is compared with a
 stored result. The golden was generated with the code before AT-6 (the
 aggregates fast paths, window pruning and the dask re-raise); those changes
 apply only to stores whose build recorded transcript aggregates, so the
-result must stay the same.
+result must stay the same. The exact (float64/int64) table totals later made
+the default for every platform agree with the float32 sums far below 2**24
+counts, so they leave this fixture unchanged too.
 
 Regenerate after an intended change with::
 
