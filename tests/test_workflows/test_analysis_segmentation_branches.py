@@ -299,7 +299,9 @@ def test_segment_bootstraps_proseg_from_configured_paths(
         # The ATERA ProSeg plan (AT-9) also triggers the bootstrap; the value
         # ENSURE_PROSEG receives is the same ``true``.
         "proseg_trigger_ch = cellpose_segment_inputs_ch\n        .map { true }\n"
-        "        .mix(atera_proseg_plan_inputs_ch.map { true })\n        .take(1)",
+        "        .mix(atera_proseg_plan_inputs_ch.map { true })\n"
+        "        .mix(atera_proseg_cellpose_plan_inputs_ch.map { true })\n"
+        "        .take(1)",
         "proseg_path_ch = ENSURE_PROSEG(proseg_trigger_ch)",
         "nuclei_task_results_ch = CELLPOSE_NUCLEI_SEGMENT(",
         "segment_task_results_ch = SEGMENT(",

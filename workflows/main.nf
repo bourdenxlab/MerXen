@@ -4,7 +4,8 @@ include { BUILD_SPATIALDATA } from "./modules/spatialdata_build"
 include { ENSURE_PROSEG } from "./modules/proseg_bootstrap"
 include { CELLPOSE_NUCLEI_SEGMENT; SEGMENT } from "./modules/segmentation"
 include { NATIVE_LATEST } from "./modules/native_segmentation"
-include { ATERA_PROSEG_PLAN; ATERA_PROSEG_TILE; ATERA_PROSEG_STITCH } from "./modules/atera_proseg"
+include { ATERA_PROSEG_PLAN; ATERA_PROSEG_PLAN_CELLPOSE; ATERA_PROSEG_TILE; ATERA_PROSEG_STITCH } from "./modules/atera_proseg"
+include { ATERA_CELLPOSE_SEGMENT } from "./modules/atera_cellpose"
 include { ENRICH } from "./modules/enrichment"
 include { VIEWER_CACHE } from "./modules/viewer_cache"
 include { MASK_IMAGE_QUANTIFICATION } from "./modules/mask_image_quantification"
@@ -179,10 +180,13 @@ def activePlatformsForMode(analysisMode) {
 
 // Where the cells of a row come from (plan AT-6): "native" keeps the vendor
 // segmentation (ATERA), "native_proseg" also adds ProSeg cells refined from
-// the vendor masks (ATERA, AT-9; no Cellpose), "cellpose_only" runs Cellpose
-// without ProSeg (AT-7), "cellpose_proseg" is the XENIUM/MERSCOPE route. null
-// or blank means the platform default of the registry. The bare word "proseg"
-// keeps meaning cellpose_proseg.
+// the vendor masks (ATERA, AT-9; no Cellpose; layer proseg_vendor),
+// "cellpose_only" runs Cellpose without ProSeg (reserved; no platform allows
+// it), "cellpose_proseg" refines Cellpose masks with ProSeg: the
+// XENIUM/MERSCOPE route and, tiled on DAPI + 18S Cellpose masks, the ATERA
+// route of AT-7 (layers reseg and proseg_mask beside the vendor original_seg).
+// null or blank means the platform default of the registry. The bare word
+// "proseg" keeps meaning cellpose_proseg.
 def normalizeSegmentationSource(rawValue) {
     if (rawValue == null || !rawValue.toString().trim()) {
         return null
@@ -245,11 +249,14 @@ def segmentationSourceForRow(row, activePlatforms, params) {
     return source
 }
 
-// Analysis layers a segmentation source produces (merxen.platforms.segmentation_layers).
-def availableSegmentationLayers(segmentationSource) {
+// Analysis layers a segmentation source produces
+// (merxen.platforms.segmentation_layers). With platforms, a platform without
+// the hybrid layer (ATERA) drops proseg_hybrid; null gives the
+// platform-independent list.
+def availableSegmentationLayers(segmentationSource, platforms = null) {
     def layers = [
         "native": ["original_seg"],
-        "native_proseg": ["reseg", "original_seg"],
+        "native_proseg": ["proseg_vendor", "original_seg"],
         "cellpose_proseg": ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"],
         "cellpose_only": ["proseg_mask", "original_seg"],
     ]
@@ -258,7 +265,14 @@ def availableSegmentationLayers(segmentationSource) {
             "Unknown segmentation source: ${segmentationSource}"
         )
     }
-    return layers[segmentationSource]
+    def available = layers[segmentationSource]
+    def withoutHybrid = (platforms ?: []).any { platform ->
+        !PlatformSpec.forName(platform).prosegHybrid
+    }
+    if (withoutHybrid) {
+        available = available.findAll { layer -> layer != "proseg_hybrid" }
+    }
+    return available
 }
 
 // Sources whose original layer is the vendor segmentation: their segment stage
@@ -268,32 +282,67 @@ def usesVendorSegmentation(segmentationSource) {
     return segmentationSource in ["native", "native_proseg"]
 }
 
+// Whether a row builds its latest store with NATIVE_LATEST: vendor sources,
+// and every ATERA route (registry nativeLatestBase), so the vendor
+// original_seg layer of an ATERA cellpose_proseg row comes from it too
+// (merxen.platforms.uses_native_latest).
+def usesNativeLatest(segmentationSource, platforms) {
+    return usesVendorSegmentation(segmentationSource) || (platforms ?: []).any { platform ->
+        PlatformSpec.forName(platform).nativeLatestBase
+    }
+}
+
+// Whether a row runs the tiled ATERA ProSeg route (plan, tiles, stitch): the
+// vendor prior (native_proseg, AT-9) or ATERA Cellpose masks (cellpose_proseg,
+// AT-7).
+def runsAteraProseg(segmentationSource, platforms) {
+    if (segmentationSource == "native_proseg") {
+        return true
+    }
+    return segmentationSource == "cellpose_proseg" && (platforms ?: []).contains("ATERA")
+}
+
+// Whether a row runs Cellpose on the ATERA morphology image (DAPI + 18S, AT-7).
+def runsAteraCellpose(segmentationSource, platforms) {
+    return segmentationSource == "cellpose_proseg" && (platforms ?: []).contains("ATERA")
+}
+
 // Keep the layers a source has (AT-6 rule): a default or group value ("all",
 // a global param) falls back to the layers the source has, adding a note on
 // what was dropped (the workflow logs the notes of each row); a samplesheet
 // value naming a layer the source lacks is an error. A default that keeps no
 // layer at all (the MENDER default proseg_hybrid) resolves to every layer the
-// source has (AT-9; native has one). Sources with every layer
-// (cellpose_proseg, or null) return `selected` as is.
+// source has (AT-9; native has one). The layers are those of the row's
+// platforms (ATERA has no proseg_hybrid, AT-7). A group value drops
+// proseg_vendor, the layer of the native_proseg route only, without a note
+// (XENIUM and MERSCOPE rows keep their notes as they were). `strict` is a
+// boolean (every missing layer is an error) or the list of layers the row
+// named explicitly: only those are errors, so a group word mixed with names
+// ("all,original_seg") still falls back for the members the source lacks.
+// Kept layers stay in the order asked. null returns `selected` as is.
 def filterSegmentationsForSource(
     selected,
     segmentationSource,
     strict,
     label,
     pairId,
-    notes
+    notes,
+    platforms = null
 ) {
-    if (segmentationSource == null || segmentationSource == "cellpose_proseg") {
+    if (segmentationSource == null) {
         return selected
     }
-    def available = availableSegmentationLayers(segmentationSource)
+    def available = availableSegmentationLayers(segmentationSource, platforms)
     def missing = selected.findAll { segmentation -> !available.contains(segmentation) }
     if (!missing) {
         return selected
     }
-    if (strict) {
+    def missingNamed = strict instanceof Collection
+        ? missing.findAll { segmentation -> strict.contains(segmentation) }
+        : (strict ? missing : [])
+    if (missingNamed) {
         throw new IllegalArgumentException(
-            "${label}=${missing.join(',')} for ${pairId} is not available with " +
+            "${label}=${missingNamed.join(',')} for ${pairId} is not available with " +
             "segmentation_source=${segmentationSource}; available: " +
             "${available.join(', ')}"
         )
@@ -302,10 +351,13 @@ def filterSegmentationsForSource(
     if (!kept) {
         kept = available
     }
-    notes << (
-        "${label} ${selected.join(', ')} resolves to ${kept.join(', ')} " +
-        "(segmentation_source=${segmentationSource} has ${available.join(', ')})"
-    )
+    def asked = selected.findAll { segmentation -> segmentation != "proseg_vendor" }
+    if (asked != kept) {
+        notes << (
+            "${label} ${asked.join(', ')} resolves to ${kept.join(', ')} " +
+            "(segmentation_source=${segmentationSource} has ${available.join(', ')})"
+        )
+    }
     return kept
 }
 
@@ -315,12 +367,15 @@ def normalizeAnalysisSegmentation(rawValue) {
         raw = "all"
     }
     def aliases = [
-        "both": ["reseg", "original_seg"],
-        "all": ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"],
+        "both": ["reseg", "proseg_vendor", "original_seg"],
+        "all": ["reseg", "proseg_vendor", "original_seg", "proseg_mask", "proseg_hybrid"],
         "reseg": ["reseg"],
         "resegmented": ["reseg"],
         "proseg": ["reseg"],
         "mosaik": ["reseg"],
+        "proseg_vendor": ["proseg_vendor"],
+        "vendor_proseg": ["proseg_vendor"],
+        "native_proseg": ["proseg_vendor"],
         "proseg_mask": ["proseg_mask"],
         "cellpose": ["proseg_mask"],
         "cellpose_mask": ["proseg_mask"],
@@ -349,7 +404,7 @@ def normalizeAnalysisSegmentation(rawValue) {
                 throw new IllegalArgumentException(
                     "Unknown analysis_segmentation '${value}'. Valid values: " +
                     "both, all, reseg, original_seg, proseg_mask, " +
-                    "cellpose, proseg_hybrid"
+                    "cellpose, proseg_hybrid, proseg_vendor"
                 )
             }
             aliases[key].each { segmentation ->
@@ -371,10 +426,12 @@ def normalizeMenderSegmentations(rawValue) {
         ? rawValue
         : rawValue.toString().split(",")
     def aliases = [
-        "all": ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"],
+        "all": ["reseg", "proseg_vendor", "original_seg", "proseg_mask", "proseg_hybrid"],
         "reseg": ["reseg"],
         "resegmented": ["reseg"],
         "proseg": ["reseg"],
+        "proseg_vendor": ["proseg_vendor"],
+        "vendor_proseg": ["proseg_vendor"],
         "original": ["original_seg"],
         "original_seg": ["original_seg"],
         "instrument": ["original_seg"],
@@ -398,7 +455,7 @@ def normalizeMenderSegmentations(rawValue) {
         if (!aliases.containsKey(key)) {
             throw new IllegalArgumentException(
                 "Unknown mender segmentation '${value}'. Valid values: " +
-                "all, reseg, original_seg, proseg_mask, proseg_hybrid"
+                "all, reseg, original_seg, proseg_mask, proseg_hybrid, proseg_vendor"
             )
         }
         aliases[key].each { segmentation ->
@@ -411,6 +468,51 @@ def normalizeMenderSegmentations(rawValue) {
         throw new IllegalArgumentException("mender_segmentations must not be empty")
     }
     return selected
+}
+
+// The layers a samplesheet value names explicitly: every token but the group
+// words "all" and "both", normalised by `normalizer` (null: none named).
+def explicitlyNamedSegmentations(rawValue, normalizer) {
+    if (rawValue == null) {
+        return []
+    }
+    def named = []
+    rawValue.toString().split(",").each { token ->
+        def key = token.trim().toLowerCase()
+        if (!key || key in ["all", "both"]) {
+            return
+        }
+        normalizer.call(key).each { segmentation ->
+            if (!named.contains(segmentation)) {
+                named << segmentation
+            }
+        }
+    }
+    return named
+}
+
+// The layers of a row setting (analysis_segmentation, mender_segmentations):
+// `value` (the row's value, else the global param) normalised and filtered for
+// the row's source; only the layers the samplesheet value names are strict.
+def resolveRowSegmentations(
+    rowValue,
+    value,
+    normalizer,
+    segmentationSource,
+    label,
+    pairId,
+    notes,
+    platforms
+) {
+    return filterSegmentationsForSource(
+        normalizer.call(value),
+        segmentationSource,
+        explicitlyNamedSegmentations(rowValue, normalizer),
+        label,
+        pairId,
+        notes,
+        platforms,
+    )
 }
 
 def normalizeGastonSegmentations(rawValue) {
@@ -643,6 +745,21 @@ def segmentMetaForPlatform(row, platform, params) {
         ]
     }
 
+    // ATERA cellpose_proseg rows (AT-7): Cellpose on the native morphology image
+    // of the built store, DAPI + 18S as on XENIUM. No transform or spec path:
+    // the pixel size comes from the store's spec sidecars.
+    if (platform == "ATERA") {
+        def spec = PlatformSpec.forName(platform)
+        return extra + [
+            channels: parseChannels(row.atera_channels, spec.defaultChannels),
+            image_key: spec.nativeImageKey,
+            voxel_layers: intOrDefault(
+                row.atera_voxel_layers,
+                params.default_atera_voxel_layers
+            ),
+        ]
+    }
+
     throw new IllegalArgumentException("Unknown platform: ${platform}")
 }
 
@@ -662,6 +779,14 @@ def samplesJsonForPlatforms(pairId, platforms, platformPaths = [:]) {
 
 def analysisLayerKeys(platform, segmentation) {
     def spec = PlatformSpec.forName(platform)
+    // The vendor-prior ProSeg layer of native_proseg rows (AT-9, renamed in AT-7).
+    if (segmentation in ["proseg_vendor", "vendor_proseg"]) {
+        def layer = AteraProsegLayers.forKind("vendor")
+        return [
+            table_key: layer.table_key,
+            shape_key: layer.shapes_key,
+        ]
+    }
     if (segmentation in ["proseg", "reseg"]) {
         return [
             table_key: "table_MOSAIK_proseg",
@@ -1148,13 +1273,14 @@ def activeStageOrder(
     registerImagesEnabled,
     gastonEnabled = false,
     pciseqEnabled = false,
-    segmentationSource = "cellpose_proseg"
+    segmentationSource = "cellpose_proseg",
+    platforms = null
 ) {
     def stages = ["build_spatialdata", "segment_nuclei", "segment", "enrich"]
-    // Native rows keep the vendor nuclei: "segment" is NATIVE_LATEST (and,
-    // for native_proseg, the tiled ProSeg tasks) and no Cellpose nuclei stage
-    // runs.
-    if (usesVendorSegmentation(segmentationSource)) {
+    // Native rows and every ATERA row keep the vendor nuclei: "segment" is
+    // NATIVE_LATEST (and, for native_proseg and ATERA cellpose_proseg, the
+    // ATERA Cellpose and tiled ProSeg tasks) and no Cellpose nuclei stage runs.
+    if (usesNativeLatest(segmentationSource, platforms)) {
         stages = ["build_spatialdata", "segment", "enrich"]
     }
     // Registered images join the zarr before the viewer cache and quantification
@@ -1221,6 +1347,11 @@ def validateStage(
             hint = (
                 " Rows with segmentation_source=${segmentationSource} keep the vendor " +
                 "nuclei and run no Cellpose nuclei stage; use segment (NATIVE_LATEST)."
+            )
+        } else if (stage == "segment_nuclei" && ateraRow) {
+            hint = (
+                " ATERA rows keep the vendor nuclei and run no Cellpose nuclei stage; " +
+                "use segment."
             )
         }
         if (stage in ["align", "align_qc"] && !alignmentEnabled) {
@@ -2496,7 +2627,7 @@ def appendAteraPreflightChecks(errors, row, settings, params) {
         return
     }
     def stageOrder = settings.stage_order
-    appendAteraProsegPreflightChecks(errors, settings, params)
+    appendAteraProsegPreflightChecks(errors, row, settings, params)
     if (settings.run_mapmycells) {
         errors.add(
             "standalone MapMyCells is not covered for ATERA rows; stop at " +
@@ -2637,8 +2768,25 @@ def ateraProsegTileSubset(params) {
     return ids ? ids : null
 }
 
-// ProSeg model and schedule of every tile (AteraProsegModelParams).
-def ateraProsegModelParams(params) {
+// ProSeg model and schedule of every tile (AteraProsegModelParams). The
+// Cellpose prior (AT-7) takes its effective prior weight from the plan (the
+// vendor one stays atera_proseg_prior_weight) and its own nuclear-compartment
+// switch (off by default: no vendor segmentation feeds the Cellpose route, as
+// the XENIUM CSV route has no compartment).
+def ateraProsegModelParams(params, priorKind = "vendor") {
+    def model = ateraProsegVendorModelParams(params)
+    if (priorKind == "cellpose") {
+        model.prior_weight_effective = null
+        model.nuclear_compartment = boolOrDefault(
+            params.atera_cellpose_proseg_nuclear_compartment,
+            false,
+            "atera_cellpose_proseg_nuclear_compartment",
+        )
+    }
+    return model
+}
+
+def ateraProsegVendorModelParams(params) {
     return [
         voxel_size: ateraProsegNumber(params, "proseg_voxel_size", false),
         burnin_voxel_size: ateraProsegNumber(params, "proseg_burnin_voxel_size", false),
@@ -2664,13 +2812,39 @@ def ateraProsegModelParams(params) {
     ]
 }
 
-// Refusals of a native_proseg row that the Pydantic models would only raise
-// inside a task (plan AT-9 §2.2).
-def appendAteraProsegPreflightChecks(errors, settings, params) {
-    if (settings.segmentation_source != "native_proseg") {
+// Refusals of a tiled ATERA ProSeg row (native_proseg, AT-9; ATERA
+// cellpose_proseg, AT-7) that the Pydantic models would only raise inside a
+// task (plan AT-9 §2.2).
+def appendAteraProsegPreflightChecks(errors, row, settings, params) {
+    if (!runsAteraProseg(settings.segmentation_source, settings.active_platforms)) {
         return
     }
+    def cellposePrior = settings.segmentation_source == "cellpose_proseg"
     def checks = []
+    if (cellposePrior) {
+        def channels = parseChannels(row.atera_channels, [])
+        if (row.atera_channels != null && !channels) {
+            checks << "atera_channels of ${settings.pair_id} names no channel"
+        }
+        def weight = params.atera_cellpose_proseg_prior_weight
+        if (weight != null && !(weight instanceof Boolean) && weight.toString().trim()) {
+            try {
+                if (ateraProsegNumber(params, "atera_cellpose_proseg_prior_weight", false) <= 0) {
+                    checks << "atera_cellpose_proseg_prior_weight must be positive"
+                }
+            } catch (IllegalArgumentException error) {
+                checks << error.getMessage()
+            }
+        }
+        ["atera_cellpose_proseg_nuclear_compartment", "atera_cellpose_proseg_cellprobs"].each {
+            name ->
+                try {
+                    boolOrDefault(params[name], true, name)
+                } catch (IllegalArgumentException error) {
+                    checks << error.getMessage()
+                }
+        }
+    }
     try {
         def halo = ateraProsegNumber(params, "atera_proseg_halo_um", false)
         def tile = ateraProsegNumber(params, "atera_proseg_tile_um", false)
@@ -2698,7 +2872,7 @@ def appendAteraProsegPreflightChecks(errors, settings, params) {
                 "atera_proseg_samples=${model.samples}"
             )
         }
-        if (model.prior_weight_effective <= 0) {
+        if (!cellposePrior && model.prior_weight_effective <= 0) {
             checks << "atera_proseg_prior_weight must be positive"
         }
         if (ateraProsegNumber(params, "atera_proseg_tile_cpus", true) < 1) {
@@ -2736,8 +2910,11 @@ def appendAteraProsegPreflightChecks(errors, settings, params) {
     errors.addAll(checks)
 }
 
-// ATERA_PROSEG_PLAN config: the plan reads the staged source store.
-def ateraProsegPlanConfig(pairId, platform, params) {
+// ATERA_PROSEG_PLAN config: the plan reads the staged source store. A
+// Cellpose plan (AT-7) also reads the staged Cellpose mask and logits and fixes
+// the effective prior weight of every tile (null: the whole-section automatic
+// weight).
+def ateraProsegPlanConfig(pairId, platform, params, priorKind = "vendor") {
     def config = [
         dataset_name: "${pairId}_${platform}",
         platform: platform,
@@ -2751,6 +2928,24 @@ def ateraProsegPlanConfig(pairId, platform, params) {
     if (subset != null) {
         config.tile_subset = subset
     }
+    // Only for a Cellpose plan, so the vendor plan config (and its task hash)
+    // is unchanged.
+    if (priorKind == "cellpose") {
+        def cellprobs = boolOrDefault(
+            params.atera_cellpose_proseg_cellprobs,
+            true,
+            "atera_cellpose_proseg_cellprobs",
+        )
+        config.prior = [
+            kind: "cellpose",
+            mask_path: "prior_mask.npy",
+            cellprob_path: cellprobs ? "prior_cellprob.npy" : null,
+        ]
+        def weight = params.atera_cellpose_proseg_prior_weight
+        config.prior_weight_effective = (
+            weight == null || weight instanceof Boolean || !weight.toString().trim()
+        ) ? null : ateraProsegNumber(params, "atera_cellpose_proseg_prior_weight", false)
+    }
     return config
 }
 
@@ -2759,7 +2954,11 @@ def ateraProsegPlanConfig(pairId, platform, params) {
 // content does not invalidate finished tiles.
 def ateraProsegTileSpecs(planText, pairId, platform, sourceZarrPath, params) {
     def plan = new groovy.json.JsonSlurper().parseText(planText)
-    def model = ateraProsegModelParams(params)
+    def priorKind = plan.prior ? plan.prior.kind.toString() : "vendor"
+    def model = ateraProsegModelParams(params, priorKind)
+    if (priorKind == "cellpose") {
+        model.prior_weight_effective = plan.prior_weight.effective as double
+    }
     def gitRev = params.proseg_git_rev?.toString()?.trim()
     return plan.tiles.findAll { tile -> tile.run }.collect { tile ->
         def config = [
@@ -2793,13 +2992,27 @@ def ateraProsegTileSpecs(planText, pairId, platform, sourceZarrPath, params) {
         )) {
             config.allow_untested_version = true
         }
+        // The Cellpose prior (AT-7): the files the plan fingerprinted, by real
+        // path; a vendor tile config has no entry (its task hash is unchanged).
+        if (priorKind == "cellpose") {
+            config.prior = [
+                kind: "cellpose",
+                mask_path: plan.prior.mask_path,
+                cellprob_path: plan.prior.cellprob_path,
+                mask_stat: plan.prior.mask_stat,
+                cellprob_stat: plan.prior.cellprob_stat,
+                fingerprint: plan.prior.fingerprint,
+            ]
+        }
         [tile.tile_id.toString(), config]
     }
 }
 
-// ATERA_PROSEG_STITCH config: the stitch writes the ProSeg layer into the
-// persistent latest store of the row.
-def ateraProsegStitchConfig(pairId, platform, tileIds, params) {
+// ATERA_PROSEG_STITCH config: the stitch writes the ProSeg layer of the prior
+// kind (proseg_vendor or, for a Cellpose prior, reseg) into the persistent
+// latest store of the row. prior_kind is always set: it entered the config with
+// the AT-7 rename of the vendor layer, so stitches made before it re-run.
+def ateraProsegStitchConfig(pairId, platform, tileIds, params, priorKind = "vendor") {
     return [
         dataset_name: "${pairId}_${platform}",
         platform: platform,
@@ -2815,7 +3028,22 @@ def ateraProsegStitchConfig(pairId, platform, tileIds, params) {
         plan_path: "tile_plan.json",
         tile_dirs: tileIds.collect { tileId -> "tile_${tileId}".toString() }.sort(),
         output_dir: "stitch_out",
+        prior_kind: priorKind,
     ]
+}
+
+// The published ATERA Cellpose mask of a cellpose_proseg row (restart from a
+// later stage).
+def publishedAteraCellposeMask(params, pairId, platform) {
+    return requireExistingPath(
+        publishedDatasetPath(
+            params.outdir,
+            pairId,
+            platform,
+            "segmentation/cellpose_masks_tiled.npy",
+        ),
+        "ATERA_CELLPOSE_SEGMENT Cellpose mask for ${pairId}:${platform}",
+    )
 }
 
 // A published ATERA_PROSEG_STITCH output (restart from a later stage).
@@ -2968,7 +3196,8 @@ def rowSampleSettings(row, params) {
     def pairedMode = analysisMode == "paired"
     def activePlatforms = activePlatformsForMode(analysisMode)
     def segmentationSource = segmentationSourceForRow(row, activePlatforms, params)
-    def nativeSegmentation = usesVendorSegmentation(segmentationSource)
+    // Every ATERA route builds its latest store with NATIVE_LATEST (AT-7).
+    def nativeSegmentation = usesNativeLatest(segmentationSource, activePlatforms)
     // The transcript spatial patterns read whole panels into memory; they stay
     // off for ATERA (whole-transcriptome) rows until they stream. MECR runs:
     // ATERA rows get their own streaming reference (MECR_REFERENCE_ATERA).
@@ -2976,16 +3205,15 @@ def rowSampleSettings(row, params) {
     // Settings resolved differently from what was asked, logged per row.
     def settingNotes = []
     def rowAnalysisSegmentation = chooseField(row, ["analysis_segmentation"])
-    def analysisSegmentations = filterSegmentationsForSource(
-        normalizeAnalysisSegmentation(
-            rowFieldOrDefault(row, "analysis_segmentation", params.analysis_segmentation)
-        ),
+    def analysisSegmentations = resolveRowSegmentations(
+        rowAnalysisSegmentation,
+        rowFieldOrDefault(row, "analysis_segmentation", params.analysis_segmentation),
+        { value -> normalizeAnalysisSegmentation(value) },
         segmentationSource,
-        rowAnalysisSegmentation != null &&
-            !(rowAnalysisSegmentation.toLowerCase() in ["all", "both"]),
         "analysis_segmentation",
         pairId,
         settingNotes,
+        activePlatforms,
     )
     def pciseqEnabled = ateraIgnoresGlobalSwitch(
         boolOrDefault(
@@ -3113,16 +3341,15 @@ def rowSampleSettings(row, params) {
         "mender_enabled for ${pairId}",
     )
     def rowMenderSegmentations = chooseField(row, ["mender_segmentations"])
-    def menderSegmentations = filterSegmentationsForSource(
-        normalizeMenderSegmentations(
-            rowFieldOrDefault(row, "mender_segmentations", params.mender_segmentations)
-        ),
+    def menderSegmentations = resolveRowSegmentations(
+        rowMenderSegmentations,
+        rowFieldOrDefault(row, "mender_segmentations", params.mender_segmentations),
+        { value -> normalizeMenderSegmentations(value) },
         segmentationSource,
-        rowMenderSegmentations != null &&
-            rowMenderSegmentations.toLowerCase() != "all",
         "mender_segmentations",
         pairId,
         settingNotes,
+        activePlatforms,
     )
     def gastonEnabled = ateraIgnoresGlobalSwitch(
         boolOrDefault(
@@ -3357,6 +3584,7 @@ def rowSampleSettings(row, params) {
         gastonEnabled,
         pciseqEnabled,
         segmentationSource,
+        activePlatforms,
     )
     def startStage = normalizeStage(startStageRaw, startParamName)
     def stopStage = normalizeStage(stopStageRaw, stopParamName)
@@ -3573,7 +3801,8 @@ def rowSampleSettings(row, params) {
         run_segment_nuclei: runSegmentNuclei,
         run_segment: runSegment,
         run_native_segment: runSegment && nativeSegmentation,
-        run_atera_proseg: runSegment && segmentationSource == "native_proseg",
+        run_atera_cellpose: runSegment && runsAteraCellpose(segmentationSource, activePlatforms),
+        run_atera_proseg: runSegment && runsAteraProseg(segmentationSource, activePlatforms),
         run_enrich: runEnrich,
         run_register_images: runRegisterImages,
         registered_images_csv: registeredImagesCsv,
@@ -3767,6 +3996,201 @@ def validateMenderParams(params) {
     }
 }
 
+// The SegmentationConfig of one row and platform (CELLPOSE_SEGMENT,
+// CELLPOSE_NUCLEI_SEGMENT, PROSEG_SEGMENT and, for ATERA, ATERA_CELLPOSE_SEGMENT).
+// ATERA (AT-7) segments the native morphology image of its built store on its
+// Cellpose channels (DAPI + 18S): no transform or spec path (the pixel size
+// comes from the store's spec sidecars), no ProSeg transcript CSV (the tiled
+// ProSeg route reads the store's parquet) and no Cellpose nuclei. The XENIUM
+// and MERSCOPE maps are built as before, key for key.
+def segmentationConfigMap(pairId, platform, sourceSpatialdata, meta, params) {
+    def persistentLatestZarrPath = file(
+        publishedDatasetPath(
+            params.outdir,
+            pairId,
+            platform,
+            "latest/latest_spatialdata.zarr",
+        )
+    ).toAbsolutePath().toString()
+    def persistentMaskPath = file(
+        publishedDatasetPath(
+            params.outdir,
+            pairId,
+            platform,
+            "segmentation/cellpose_masks_tiled.npy",
+        )
+    ).toAbsolutePath().toString()
+    def persistentCellprobPath = file(
+        publishedDatasetPath(
+            params.outdir,
+            pairId,
+            platform,
+            "segmentation/cellpose_cellprobs_tiled.npy",
+        )
+    ).toAbsolutePath().toString()
+    def persistentTranscriptsPath = file(
+        publishedDatasetPath(
+            params.outdir,
+            pairId,
+            platform,
+            "segmentation/transcripts_for_proseg.csv",
+        )
+    ).toAbsolutePath().toString()
+    def persistentStitchingStatsPath = file(
+        publishedDatasetPath(
+            params.outdir,
+            pairId,
+            platform,
+            "segmentation/cellpose_stitching_stats.json",
+        )
+    ).toAbsolutePath().toString()
+    def persistentNucleiMaskPath = file(
+        publishedDatasetPath(
+            params.outdir,
+            pairId,
+            platform,
+            "segmentation/cellpose_nuclei_masks_tiled.npy",
+        )
+    ).toAbsolutePath().toString()
+    def persistentNucleiStitchingStatsPath = file(
+        publishedDatasetPath(
+            params.outdir,
+            pairId,
+            platform,
+            "segmentation/cellpose_nuclei_stitching_stats.json",
+        )
+    ).toAbsolutePath().toString()
+    def baseConfig = [
+        cellpose: [
+            model_type: params.cellpose_model_type,
+            gpu: params.cellpose_gpu,
+            diameter: params.cellpose_diameter,
+            flow_threshold: params.cellpose_flow_threshold,
+            cellprob_threshold: params.cellpose_cellprob,
+            tile_overlap: params.cellpose_tile_overlap,
+            bsize: params.cellpose_bsize,
+            factor_rescale: 1.0,
+            use_bfloat16: params.cellpose_use_bfloat16,
+        ],
+        nuclei_cellpose: [
+            model_type: "nuclei",
+            gpu: params.cellpose_gpu,
+            diameter: params.cellpose_diameter,
+            flow_threshold: params.cellpose_flow_threshold,
+            cellprob_threshold: params.cellpose_cellprob,
+            tile_overlap: params.cellpose_tile_overlap,
+            bsize: params.cellpose_bsize,
+            factor_rescale: 1.0,
+            use_bfloat16: params.cellpose_use_bfloat16,
+        ],
+        tiling: [
+            tile_size_candidates: params.cellpose_tile_size_candidates,
+            stitch_overlap_px: params.cellpose_stitch_overlap_px,
+            min_tile_size: params.cellpose_min_tile_size,
+            status_every_tiles: params.cellpose_stitch_status_every_tiles,
+            filter_per_tile: params.cellpose_filter_per_tile,
+            duplicate_iou_threshold: params.cellpose_duplicate_iou_threshold,
+            duplicate_overlap_fraction: params.cellpose_duplicate_overlap_fraction,
+            min_remaining_fraction: params.cellpose_min_remaining_fraction,
+            edge_touch_policy: params.cellpose_edge_touch_policy,
+            write_stitching_stats: params.cellpose_write_stitching_stats,
+        ],
+        mask_filter: [
+            final_min_area_um2: params.cellpose_final_min_area_um2,
+            final_max_area_um2: params.cellpose_final_max_area_um2,
+            final_filter_chunk_mb: params.cellpose_final_filter_chunk_mb,
+        ],
+        nuclei_mask_filter: [
+            final_min_area_um2: params.cellpose_final_min_area_um2,
+            final_max_area_um2: params.cellpose_final_max_area_um2,
+            final_filter_chunk_mb: params.cellpose_final_filter_chunk_mb,
+        ],
+        proseg: [
+            binary_path: params.proseg_binary,
+            samples: params.proseg_samples,
+            voxel_size: params.proseg_voxel_size,
+            burnin_voxel_size: params.proseg_burnin_voxel_size,
+            nuclear_reassignment_prob: params.proseg_nuclear_reassignment_prob,
+            diffusion_probability: params.proseg_diffusion_probability,
+            cell_compactness: params.proseg_cell_compactness,
+            num_threads: params.proseg_num_threads,
+            voxel_layers: 2,
+        ],
+        proseg_hybrid: [
+            enabled: params.proseg_hybrid_enabled,
+            min_transcripts: params.proseg_hybrid_min_transcripts,
+            outlier_neighbors: params.proseg_hybrid_outlier_neighbors,
+            outlier_mad_multiplier: params.proseg_hybrid_outlier_mad_multiplier,
+            minimum_external_group: params.proseg_hybrid_minimum_external_group,
+            chain_radius_scale: params.proseg_hybrid_chain_radius_scale,
+            near_surface_radius_fraction: params.proseg_hybrid_near_surface_radius_fraction,
+            maximum_expansion_radius_fraction: params.proseg_hybrid_maximum_expansion_radius_fraction,
+            attachment_arc_width_scale: params.proseg_hybrid_attachment_arc_width_scale,
+            rounding_radius_fraction: params.proseg_hybrid_rounding_radius_fraction,
+            smoothing_radius_um: params.proseg_hybrid_smoothing_radius_um,
+            outward_rounding_um: params.proseg_hybrid_outward_rounding_um,
+            smoothing_quad_segs: params.proseg_hybrid_smoothing_quad_segs,
+            containment_tolerance_um: params.proseg_hybrid_containment_tolerance_um,
+        ],
+        memory: [
+            max_system_ram_gb: params.max_ram_gb,
+            memory_warn_gb: params.warn_ram_gb,
+            transcript_chunk_rows: params.transcript_chunk_rows,
+        ],
+    ]
+
+    // hitl-hook:C4
+    if (meta.cellpose_settings) {
+        baseConfig.cellpose.putAll(meta.cellpose_settings.cellpose)
+        baseConfig.mask_filter.putAll(meta.cellpose_settings.mask_filter)
+        if (meta.cellpose_settings.cellpose_model_policy) {
+            baseConfig.cellpose_model_policy = meta.cellpose_settings.cellpose_model_policy
+        }
+    }
+
+    // Only present for rows with bead removal on (see segmentMetaForPlatform).
+    if (meta.bead_mask_veto) {
+        baseConfig.bead_mask_veto = meta.bead_mask_veto
+    }
+
+    def segmentConfig = baseConfig + [
+        dataset: [
+            name: "${pairId}_${platform}",
+            platform: platform,
+            data_path: sourceSpatialdata.toString(),
+            channels: meta.channels,
+            output_dir: "segment_out",
+            persistent_latest_zarr_path: persistentLatestZarrPath,
+            persistent_mask_path: persistentMaskPath,
+            persistent_cellpose_cellprob_path: persistentCellprobPath,
+            persistent_transcripts_path: persistentTranscriptsPath,
+            persistent_cellpose_stitching_stats_path: persistentStitchingStatsPath,
+            persistent_nuclei_mask_path: persistentNucleiMaskPath,
+            persistent_nuclei_stitching_stats_path: persistentNucleiStitchingStatsPath,
+            image_prefix: meta.image_prefix,
+            z_range: meta.z_range,
+            transform_path: meta.transform_path,
+            xenium_spec_path: meta.xenium_spec_path,
+            min_qv: meta.min_qv,
+            proseg_overrides: [voxel_layers: meta.voxel_layers],
+        ],
+    ]
+    if (platform == "ATERA") {
+        def dataset = segmentConfig.dataset
+        ["persistent_transcripts_path", "persistent_nuclei_mask_path",
+            "persistent_nuclei_stitching_stats_path", "image_prefix", "z_range",
+            "transform_path", "xenium_spec_path", "min_qv"].each { name ->
+            dataset.remove(name)
+        }
+        dataset.image_key = meta.image_key
+        dataset.proseg_transcripts = "none"
+        segmentConfig.remove("nuclei_cellpose")
+        segmentConfig.remove("nuclei_mask_filter")
+        segmentConfig.remove("proseg_hybrid")
+    }
+    return segmentConfig
+}
+
 workflow {
     // Private site configs (docs/local-configuration.md): stop a launch whose
     // site locations are missing instead of letting null params fall back.
@@ -3943,11 +4367,12 @@ workflow {
     build_results_ch = build_task_results_ch.mix(build_published_results_ch)
 
     segment_meta_ch = sample_rows_ch.flatMap { pairId, row, settings ->
-        // Native rows run NATIVE_LATEST instead (segmentMetaForPlatform has no
-        // native platform arm).
+        // Native rows and every ATERA row run NATIVE_LATEST instead (an ATERA
+        // cellpose_proseg row runs ATERA_CELLPOSE_SEGMENT and the tiled ProSeg
+        // route below, never SEGMENT).
         if (
             !(settings.run_segment_nuclei || settings.run_segment) ||
-            usesVendorSegmentation(settings.segmentation_source)
+            usesNativeLatest(settings.segmentation_source, settings.active_platforms)
         ) {
             []
         } else {
@@ -4000,10 +4425,10 @@ workflow {
         .branch {
             key, pairId, platform, latestZarr, maskPath, transcriptsCsv,
             nucleiMaskPath, rowSource ->
-                proseg: rowSource == "native_proseg"
+                proseg: runsAteraProseg(rowSource, [platform])
                     return tuple(
                         key, pairId, platform, latestZarr, maskPath, transcriptsCsv,
-                        nucleiMaskPath,
+                        nucleiMaskPath, rowSource,
                     )
                 plain: true
                     return tuple(
@@ -4013,26 +4438,68 @@ workflow {
         }
     native_plain_ch = native_routed_ch.plain
 
-    // ATERA ProSeg route (segmentation_source=native_proseg, plan AT-9): the
-    // plan reads the source store; one ATERA_PROSEG_TILE task per tile runs
-    // ProSeg with the vendor cell mask as prior (bounded by
-    // atera_proseg_tile_max_forks); ATERA_PROSEG_STITCH writes the stitched
-    // cells into the latest store NATIVE_LATEST built and emits the SEGMENT
-    // tuple, so ENRICH and the later stages take it as they take
-    // NATIVE_LATEST's output.
+    // ATERA Cellpose (segmentation_source=cellpose_proseg, plan AT-7): Cellpose
+    // segments the native morphology image of the built store on DAPI + 18S, as
+    // on XENIUM, under the GPU lock. It writes no ProSeg transcript CSV (the
+    // tiled ProSeg route reads the store's parquet) and no Cellpose nuclei
+    // (ATERA keeps the vendor nuclei).
+    atera_cellpose_meta_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!settings.run_atera_cellpose) {
+            []
+        } else {
+            settings.active_platforms.findAll { platform -> platform == "ATERA" }
+                .collect { platform ->
+                    tuple(
+                        "${pairId}|${platform}",
+                        segmentMetaForPlatform(row, platform, params),
+                    )
+                }
+        }
+    }
+
+    atera_cellpose_inputs_ch = build_results_ch
+        .join(atera_cellpose_meta_ch)
+        .map { key, pairId, platform, sourceSpatialdata, meta ->
+            tuple(
+                key,
+                pairId,
+                platform,
+                groovy.json.JsonOutput.prettyPrint(
+                    groovy.json.JsonOutput.toJson(
+                        segmentationConfigMap(
+                            pairId, platform, sourceSpatialdata, meta, params,
+                        )
+                    )
+                ),
+            )
+        }
+
+    atera_cellpose_ch = ATERA_CELLPOSE_SEGMENT(atera_cellpose_inputs_ch).segmentation
+
+    // ATERA ProSeg route (plan AT-9; tiled, 2 mm tiles): the plan reads the
+    // source store and the prior: the vendor cell mask (native_proseg, layer
+    // proseg_vendor) or the ATERA Cellpose mask and logits (cellpose_proseg,
+    // AT-7, layer reseg). One ATERA_PROSEG_TILE task per tile runs ProSeg on
+    // its window (bounded by atera_proseg_tile_max_forks); ATERA_PROSEG_STITCH
+    // writes the stitched cells into the latest store NATIVE_LATEST built and
+    // emits the SEGMENT tuple, so ENRICH and the later stages take it as they
+    // take NATIVE_LATEST's output. The gate carries the prior kind.
     atera_proseg_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!settings.run_atera_proseg) {
             []
         } else {
             settings.active_platforms.collect { platform ->
-                tuple("${pairId}|${platform}", true)
+                tuple(
+                    "${pairId}|${platform}",
+                    AteraProsegLayers.priorKindForSource(settings.segmentation_source),
+                )
             }
         }
     }
 
     atera_proseg_plan_inputs_ch = build_results_ch
-        .join(atera_proseg_gate_ch)
-        .map { key, pairId, platform, sourceSpatialdata, _runFlag ->
+        .join(atera_proseg_gate_ch.filter { _key, priorKind -> priorKind == "vendor" })
+        .map { key, pairId, platform, sourceSpatialdata, _priorKind ->
             tuple(
                 key,
                 pairId,
@@ -4046,7 +4513,32 @@ workflow {
             )
         }
 
+    // A Cellpose plan stages the Cellpose mask and logits as path inputs, so
+    // a re-run Cellpose invalidates the plan (and, through the files' identity
+    // in the tile configs, every tile).
+    atera_proseg_cellpose_plan_inputs_ch = build_results_ch
+        .join(atera_proseg_gate_ch.filter { _key, priorKind -> priorKind == "cellpose" })
+        .join(atera_cellpose_ch)
+        .map {
+            key, pairId, platform, sourceSpatialdata, _priorKind, _segPairId,
+            _segPlatform, cellposeMask, cellposeCellprob, _transforms, _stats ->
+                tuple(
+                    key,
+                    pairId,
+                    platform,
+                    groovy.json.JsonOutput.prettyPrint(
+                        groovy.json.JsonOutput.toJson(
+                            ateraProsegPlanConfig(pairId, platform, params, "cellpose")
+                        )
+                    ),
+                    sourceSpatialdata,
+                    cellposeMask,
+                    cellposeCellprob,
+                )
+        }
+
     atera_proseg_plan_ch = ATERA_PROSEG_PLAN(atera_proseg_plan_inputs_ch).plan
+        .mix(ATERA_PROSEG_PLAN_CELLPOSE(atera_proseg_cellpose_plan_inputs_ch).plan)
 
     // One tile task per tile the plan runs. The tile config is a value holding
     // the real path of the source store, so a re-run plan with the same
@@ -4086,177 +4578,9 @@ workflow {
         .map {
             key, pairId, platform, sourceSpatialdata, meta,
             runSegmentNuclei, runSegment ->
-            def persistentLatestZarrPath = file(
-                publishedDatasetPath(
-                    params.outdir,
-                    pairId,
-                    platform,
-                    "latest/latest_spatialdata.zarr",
-                )
-            ).toAbsolutePath().toString()
-            def persistentMaskPath = file(
-                publishedDatasetPath(
-                    params.outdir,
-                    pairId,
-                    platform,
-                    "segmentation/cellpose_masks_tiled.npy",
-                )
-            ).toAbsolutePath().toString()
-            def persistentCellprobPath = file(
-                publishedDatasetPath(
-                    params.outdir,
-                    pairId,
-                    platform,
-                    "segmentation/cellpose_cellprobs_tiled.npy",
-                )
-            ).toAbsolutePath().toString()
-            def persistentTranscriptsPath = file(
-                publishedDatasetPath(
-                    params.outdir,
-                    pairId,
-                    platform,
-                    "segmentation/transcripts_for_proseg.csv",
-                )
-            ).toAbsolutePath().toString()
-            def persistentStitchingStatsPath = file(
-                publishedDatasetPath(
-                    params.outdir,
-                    pairId,
-                    platform,
-                    "segmentation/cellpose_stitching_stats.json",
-                )
-            ).toAbsolutePath().toString()
-            def persistentNucleiMaskPath = file(
-                publishedDatasetPath(
-                    params.outdir,
-                    pairId,
-                    platform,
-                    "segmentation/cellpose_nuclei_masks_tiled.npy",
-                )
-            ).toAbsolutePath().toString()
-            def persistentNucleiStitchingStatsPath = file(
-                publishedDatasetPath(
-                    params.outdir,
-                    pairId,
-                    platform,
-                    "segmentation/cellpose_nuclei_stitching_stats.json",
-                )
-            ).toAbsolutePath().toString()
-            def baseConfig = [
-                cellpose: [
-                    model_type: params.cellpose_model_type,
-                    gpu: params.cellpose_gpu,
-                    diameter: params.cellpose_diameter,
-                    flow_threshold: params.cellpose_flow_threshold,
-                    cellprob_threshold: params.cellpose_cellprob,
-                    tile_overlap: params.cellpose_tile_overlap,
-                    bsize: params.cellpose_bsize,
-                    factor_rescale: 1.0,
-                    use_bfloat16: params.cellpose_use_bfloat16,
-                ],
-                nuclei_cellpose: [
-                    model_type: "nuclei",
-                    gpu: params.cellpose_gpu,
-                    diameter: params.cellpose_diameter,
-                    flow_threshold: params.cellpose_flow_threshold,
-                    cellprob_threshold: params.cellpose_cellprob,
-                    tile_overlap: params.cellpose_tile_overlap,
-                    bsize: params.cellpose_bsize,
-                    factor_rescale: 1.0,
-                    use_bfloat16: params.cellpose_use_bfloat16,
-                ],
-                tiling: [
-                    tile_size_candidates: params.cellpose_tile_size_candidates,
-                    stitch_overlap_px: params.cellpose_stitch_overlap_px,
-                    min_tile_size: params.cellpose_min_tile_size,
-                    status_every_tiles: params.cellpose_stitch_status_every_tiles,
-                    filter_per_tile: params.cellpose_filter_per_tile,
-                    duplicate_iou_threshold: params.cellpose_duplicate_iou_threshold,
-                    duplicate_overlap_fraction: params.cellpose_duplicate_overlap_fraction,
-                    min_remaining_fraction: params.cellpose_min_remaining_fraction,
-                    edge_touch_policy: params.cellpose_edge_touch_policy,
-                    write_stitching_stats: params.cellpose_write_stitching_stats,
-                ],
-                mask_filter: [
-                    final_min_area_um2: params.cellpose_final_min_area_um2,
-                    final_max_area_um2: params.cellpose_final_max_area_um2,
-                    final_filter_chunk_mb: params.cellpose_final_filter_chunk_mb,
-                ],
-                nuclei_mask_filter: [
-                    final_min_area_um2: params.cellpose_final_min_area_um2,
-                    final_max_area_um2: params.cellpose_final_max_area_um2,
-                    final_filter_chunk_mb: params.cellpose_final_filter_chunk_mb,
-                ],
-                proseg: [
-                    binary_path: params.proseg_binary,
-                    samples: params.proseg_samples,
-                    voxel_size: params.proseg_voxel_size,
-                    burnin_voxel_size: params.proseg_burnin_voxel_size,
-                    nuclear_reassignment_prob: params.proseg_nuclear_reassignment_prob,
-                    diffusion_probability: params.proseg_diffusion_probability,
-                    cell_compactness: params.proseg_cell_compactness,
-                    num_threads: params.proseg_num_threads,
-                    voxel_layers: 2,
-                ],
-                proseg_hybrid: [
-                    enabled: params.proseg_hybrid_enabled,
-                    min_transcripts: params.proseg_hybrid_min_transcripts,
-                    outlier_neighbors: params.proseg_hybrid_outlier_neighbors,
-                    outlier_mad_multiplier: params.proseg_hybrid_outlier_mad_multiplier,
-                    minimum_external_group: params.proseg_hybrid_minimum_external_group,
-                    chain_radius_scale: params.proseg_hybrid_chain_radius_scale,
-                    near_surface_radius_fraction: params.proseg_hybrid_near_surface_radius_fraction,
-                    maximum_expansion_radius_fraction: params.proseg_hybrid_maximum_expansion_radius_fraction,
-                    attachment_arc_width_scale: params.proseg_hybrid_attachment_arc_width_scale,
-                    rounding_radius_fraction: params.proseg_hybrid_rounding_radius_fraction,
-                    smoothing_radius_um: params.proseg_hybrid_smoothing_radius_um,
-                    outward_rounding_um: params.proseg_hybrid_outward_rounding_um,
-                    smoothing_quad_segs: params.proseg_hybrid_smoothing_quad_segs,
-                    containment_tolerance_um: params.proseg_hybrid_containment_tolerance_um,
-                ],
-                memory: [
-                    max_system_ram_gb: params.max_ram_gb,
-                    memory_warn_gb: params.warn_ram_gb,
-                    transcript_chunk_rows: params.transcript_chunk_rows,
-                ],
-            ]
-
-            // hitl-hook:C4
-            if (meta.cellpose_settings) {
-                baseConfig.cellpose.putAll(meta.cellpose_settings.cellpose)
-                baseConfig.mask_filter.putAll(meta.cellpose_settings.mask_filter)
-                if (meta.cellpose_settings.cellpose_model_policy) {
-                    baseConfig.cellpose_model_policy = meta.cellpose_settings.cellpose_model_policy
-                }
-            }
-
-            // Only present for rows with bead removal on (see segmentMetaForPlatform).
-            if (meta.bead_mask_veto) {
-                baseConfig.bead_mask_veto = meta.bead_mask_veto
-            }
-
-            def segmentConfig = baseConfig + [
-                dataset: [
-                    name: "${pairId}_${platform}",
-                    platform: platform,
-                    data_path: sourceSpatialdata.toString(),
-                    channels: meta.channels,
-                    output_dir: "segment_out",
-                    persistent_latest_zarr_path: persistentLatestZarrPath,
-                    persistent_mask_path: persistentMaskPath,
-                    persistent_cellpose_cellprob_path: persistentCellprobPath,
-                    persistent_transcripts_path: persistentTranscriptsPath,
-                    persistent_cellpose_stitching_stats_path: persistentStitchingStatsPath,
-                    persistent_nuclei_mask_path: persistentNucleiMaskPath,
-                    persistent_nuclei_stitching_stats_path: persistentNucleiStitchingStatsPath,
-                    image_prefix: meta.image_prefix,
-                    z_range: meta.z_range,
-                    transform_path: meta.transform_path,
-                    xenium_spec_path: meta.xenium_spec_path,
-                    min_qv: meta.min_qv,
-                    proseg_overrides: [voxel_layers: meta.voxel_layers],
-                ],
-            ]
+            def segmentConfig = segmentationConfigMap(
+                pairId, platform, sourceSpatialdata, meta, params,
+            )
 
             tuple(
                 key,
@@ -4335,6 +4659,7 @@ workflow {
     proseg_trigger_ch = cellpose_segment_inputs_ch
         .map { true }
         .mix(atera_proseg_plan_inputs_ch.map { true })
+        .mix(atera_proseg_cellpose_plan_inputs_ch.map { true })
         .take(1)
     proseg_path_ch = ENSURE_PROSEG(proseg_trigger_ch)
     segment_task_results_ch = SEGMENT(
@@ -4406,7 +4731,7 @@ workflow {
         .filter { ateraProsegTileSubset(params) == null }
         .map {
             key, pairId, platform, latestZarr, _maskPath, _transcriptsCsv,
-            _nucleiMaskPath, _planPairId, _planPlatform, planFile, tileIds,
+            _nucleiMaskPath, rowSource, _planPairId, _planPlatform, planFile, tileIds,
             tileDirs ->
                 tuple(
                     key,
@@ -4414,7 +4739,13 @@ workflow {
                     platform,
                     groovy.json.JsonOutput.prettyPrint(
                         groovy.json.JsonOutput.toJson(
-                            ateraProsegStitchConfig(pairId, platform, tileIds, params)
+                            ateraProsegStitchConfig(
+                                pairId,
+                                platform,
+                                tileIds,
+                                params,
+                                AteraProsegLayers.priorKindForSource(rowSource),
+                            )
                         )
                     ),
                     latestZarr,
@@ -4423,12 +4754,36 @@ workflow {
                 )
         }
 
+    // An ATERA cellpose_proseg row's SEGMENT tuple carries its Cellpose mask in
+    // the mask slot (as a XENIUM row's does), for ENRICH's proseg_mask layer
+    // and the image quantification; a native_proseg row keeps the placeholder.
     atera_proseg_stitch_ch = ATERA_PROSEG_STITCH(atera_proseg_stitch_inputs_ch).segmentation
+        .join(
+            atera_cellpose_ch.map {
+                key, _pairId, _platform, cellposeMask, _cellprob, _transforms, _stats ->
+                    tuple(key, cellposeMask)
+            },
+            remainder: true,
+        )
+        .filter { values -> values.size() == 8 && values[1] != null }
+        .map {
+            key, pairId, platform, latestZarr, placeholderMask, transcriptsCsv,
+            nucleiMaskPath, cellposeMask ->
+                tuple(
+                    key,
+                    pairId,
+                    platform,
+                    latestZarr,
+                    cellposeMask ?: placeholderMask,
+                    transcriptsCsv,
+                    nucleiMaskPath,
+                )
+        }
 
     segment_published_results_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!(settings.run_enrich && !settings.run_segment)) {
             []
-        } else if (settings.segmentation_source == "native_proseg") {
+        } else if (runsAteraProseg(settings.segmentation_source, settings.active_platforms)) {
             settings.active_platforms.collect { platform ->
                 def key = "${pairId}|${platform}"
                 tuple(
@@ -4436,7 +4791,9 @@ workflow {
                     pairId,
                     platform,
                     publishedAteraProsegOutput(params, pairId, platform, "proseg_latest.zarr"),
-                    publishedAteraProsegOutput(params, pairId, platform, "NO_CELLPOSE_MASK"),
+                    settings.segmentation_source == "cellpose_proseg"
+                        ? publishedAteraCellposeMask(params, pairId, platform)
+                        : publishedAteraProsegOutput(params, pairId, platform, "NO_CELLPOSE_MASK"),
                     publishedAteraProsegOutput(params, pairId, platform, "NO_TRANSCRIPTS_CSV"),
                     publishedAteraProsegOutput(params, pairId, platform, "NO_NUCLEI_MASK"),
                 )
@@ -4560,11 +4917,11 @@ workflow {
                 transform_path: null,
             ]
             // Native rows enrich the vendor segmentation; no Cellpose mask is
-            // read (the mask slots hold NATIVE_LATEST placeholders). In AT-6
-            // the source is fixed per platform, so it is derived from the
-            // registry; AT-7 (cellpose_only for ATERA) must thread the row's
-            // segmentation_source through the tuple instead.
-            if (PlatformSpec.forName(platform).defaultSegmentationSource == "native") {
+            // read (the mask slots hold NATIVE_LATEST placeholders). Every
+            // ATERA row has a NATIVE_LATEST store, so the vendor enrichment
+            // runs for each; the row's source (carried by the gate) adds the
+            // rest.
+            if (PlatformSpec.forName(platform).nativeLatestBase) {
                 enrichConfig.segmentation_source = "native"
                 enrichConfig.mask_path = null
                 enrichConfig.nuclei_mask_path = null
@@ -4572,6 +4929,13 @@ workflow {
             // A native_proseg row also checks its stitched ProSeg layer (AT-9).
             if (rowSource == "native_proseg") {
                 enrichConfig.segmentation_source = "native_proseg"
+            }
+            // An ATERA cellpose_proseg row (AT-7) checks its stitched ProSeg
+            // layer (reseg) and builds its Cellpose layer (proseg_mask) from
+            // the Cellpose mask in the mask slot; it has no Cellpose nuclei.
+            if (rowSource == "cellpose_proseg" && PlatformSpec.forName(platform).nativeLatestBase) {
+                enrichConfig.segmentation_source = "cellpose_proseg"
+                enrichConfig.mask_path = "enrich_input_mask.npy"
             }
 
             tuple(
@@ -4889,23 +5253,37 @@ workflow {
             // Native rows quantify the vendor cell labels of the store; the
             // linked mask slot is an empty placeholder.
             def quantSpec = PlatformSpec.forName(platform)
-            if (quantSpec.defaultSegmentationSource == "native") {
+            if (quantSpec.nativeLatestBase) {
                 quantConfig.mask_path = null
                 quantConfig.mask_label_key = "cell_labels"
                 quantConfig.shape_key = quantSpec.originalCellShapeKey
                 quantConfig.table_key =
                     "table_${quantSpec.originalCellShapeKey}_image_quantification"
             }
-            // A native_proseg row also quantifies its stitched ProSeg cells in
-            // the same task (one writer per store).
-            if (rowSource == "native_proseg") {
+            // A tiled ProSeg row also quantifies its stitched ProSeg cells in
+            // the same task (one writer per store), by their label element; an
+            // ATERA cellpose_proseg row also its Cellpose cells (the label
+            // element ENRICH writes: the global frame of an ATERA store is in
+            // pixels, so every ATERA layer is quantified from labels).
+            def prosegPriorKind = quantSpec.nativeLatestBase
+                ? AteraProsegLayers.priorKindForSource(rowSource)
+                : null
+            if (prosegPriorKind != null) {
+                def prosegLayer = AteraProsegLayers.forKind(prosegPriorKind)
                 quantConfig.extra_layers = [
                     [
-                        mask_label_key: quantSpec.prosegLabelKey,
-                        shape_key: "MOSAIK_proseg",
-                        table_key: "table_MOSAIK_proseg_image_quantification",
+                        mask_label_key: prosegLayer.label_key,
+                        shape_key: prosegLayer.shapes_key,
+                        table_key: "${prosegLayer.table_key}_image_quantification",
                     ],
                 ]
+                if (prosegPriorKind == "cellpose") {
+                    quantConfig.extra_layers << [
+                        mask_label_key: "cellpose_cell_labels",
+                        shape_key: "MOSAIK_cellpose",
+                        table_key: "table_MOSAIK_cellpose_image_quantification",
+                    ]
+                }
             }
 
             tuple(

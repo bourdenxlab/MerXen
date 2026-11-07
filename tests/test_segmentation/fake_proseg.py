@@ -5,13 +5,16 @@ It accepts the command of ``merxen.segmentation.atera_proseg.runner`` and:
 
 - prints ``proseg 3.2.0`` for ``--version`` (``FAKE_PROSEG_VERSION`` changes it);
 - reads the Xenium-layout parquet and **asserts** its schema (plain strings,
-  uint64 ids, uint8 compartment, float32 coordinates and QV, constant fov);
+  uint64 ids, uint8 compartment, float32 coordinates and QV, constant fov),
+  and asserts that ``--cellpose-cellprobs`` (AT-7) is float32 on the mask's
+  grid;
 - makes one cell per non-zero label of the prior mask, keyed by the label
   (``original_cell_id``), with the pixel outline of the label as its polygon;
 - assigns each row to its ``cell_id`` (``FAKE_PROSEG_MODE=identity``) or also
   gives unassigned rows within ``FAKE_PROSEG_GREEDY_UM`` microns (default 2) of
   a cell's pixels to the nearest cell (``greedy_halo``, which makes two tiles
-  claim one halo row);
+  claim one halo row); ``FAKE_PROSEG_DILATE_UM`` grows every polygon by that
+  many microns, so polygons of neighbouring tiles overlap across a seam;
 - prints the dataset summary with ProSeg's prior-weight scaling
   (``FAKE_PROSEG_WEIGHT_FACTOR`` multiplies it, as ProSeg's own filters do;
   ``FAKE_PROSEG_WEIGHT_OFFSET`` adds to it, which no rescaling corrects) and
@@ -84,6 +87,7 @@ def _parser() -> argparse.ArgumentParser:
         "--recorded-samples",
         "--prior-weight",
         "--cellpose-masks",
+        "--cellpose-cellprobs",
         "--nthreads",
         "--output-path",
         "--output-spatialdata",
@@ -99,6 +103,7 @@ def _parser() -> argparse.ArgumentParser:
         "--exclude-spatialdata-transcripts",
         "--overwrite",
         "--use-cell-initialization",
+        "--no-factorization",
     ):
         parser.add_argument(flag, action="store_true")
     return parser
@@ -138,7 +143,12 @@ def _outlines(
 
         from shapely import transform as shp_transform
 
-        result[label] = mapping(shp_transform(merged, transform))
+        outline = shp_transform(merged, transform)
+        dilate = float(os.environ.get("FAKE_PROSEG_DILATE_UM", "0"))
+        if dilate > 0:
+            # Grown outlines overlap their neighbours, also across tile seams.
+            outline = outline.buffer(dilate, join_style="mitre")
+        result[label] = mapping(outline)
     return result
 
 
@@ -154,7 +164,23 @@ def main() -> int:
     assert schema == EXPECTED, schema
     assert set(table.column("fov_name").to_pylist()) == {"0"}
     _log("loaded transcripts: 0.01s")
+    empty_features = os.environ.get("FAKE_PROSEG_EMPTY_FEATURES") == "1"
+    if empty_features and not args.no_factorization:
+        # ProSeg 3.2.0 on a tile where no gene reaches its expression floor
+        # for the factorization's gene selection (featureselection.rs).
+        print(
+            "\nthread 'main' (1) panicked at src/sampler/featureselection.rs:308:54:\n"
+            "called `Result::unwrap()` on an `Err` value: EmptyInput",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 101
     prior = np.load(args.cellpose_masks)
+    if args.cellpose_cellprobs is not None:
+        # As ProSeg 3.2.0 (voxelcheckerboard.rs): float32 on the mask's grid.
+        cellprobs = np.load(args.cellpose_cellprobs)
+        assert cellprobs.dtype == np.float32, cellprobs.dtype
+        assert cellprobs.shape == prior.shape, (cellprobs.shape, prior.shape)
     labels = np.unique(prior)
     labels = labels[labels != 0]
     cell_of_label = {int(label): index for index, label in enumerate(labels)}

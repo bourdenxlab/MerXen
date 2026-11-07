@@ -1,12 +1,15 @@
-// ATERA ProSeg route (segmentation_source=native_proseg, plan AT-9).
+// ATERA ProSeg route (plans AT-9 and AT-7).
 //
-// ATERA_PROSEG_PLAN cuts the section into tiles; ATERA_PROSEG_TILE runs ProSeg
-// on one tile (the vendor cell mask is the prior) and keeps the cells the tile
-// owns; ATERA_PROSEG_STITCH writes the stitched cells into the row's latest
-// store as the reseg layer (MOSAIK_proseg, table_MOSAIK_proseg,
-// proseg_cell_labels, points assignment/background) and emits the SEGMENT
-// tuple shape with NATIVE_LATEST's empty placeholders, so ENRICH and every
-// later stage take it as they take NATIVE_LATEST's output.
+// ATERA_PROSEG_PLAN (vendor prior, segmentation_source=native_proseg) or
+// ATERA_PROSEG_PLAN_CELLPOSE (the ATERA Cellpose masks, cellpose_proseg) cuts
+// the section into tiles; ATERA_PROSEG_TILE runs ProSeg on one tile and keeps
+// the cells the tile owns; ATERA_PROSEG_STITCH writes the stitched cells into
+// the row's latest store as the layer of the plan's prior (proseg_vendor:
+// MOSAIK_proseg_vendor, ...; Cellpose: reseg with MOSAIK_proseg,
+// table_MOSAIK_proseg, proseg_cell_labels) and emits the SEGMENT tuple shape
+// with NATIVE_LATEST's empty placeholders, so ENRICH and every later stage
+// take it as they take NATIVE_LATEST's output. The script sections of the AT-9
+// processes are unchanged.
 
 process ATERA_PROSEG_PLAN {
     tag "${pair_id}:${platform}"
@@ -15,6 +18,32 @@ process ATERA_PROSEG_PLAN {
 
     input:
     tuple val(key), val(pair_id), val(platform), val(plan_config_json), path(source_zarr, stageAs: "proseg_source.zarr")
+
+    output:
+    tuple val(key), val(pair_id), val(platform), path("plan_out/tile_plan.json"), emit: plan
+
+    script:
+    """
+    set -euo pipefail
+    export OMP_NUM_THREADS="${task.cpus}"
+    export POLARS_MAX_THREADS="${task.cpus}"
+    export DASK_NUM_WORKERS="${task.cpus}"
+
+    cat > plan_config.json <<'JSON'
+${plan_config_json}
+JSON
+
+    merxen atera-proseg-plan --config plan_config.json
+    """
+}
+
+process ATERA_PROSEG_PLAN_CELLPOSE {
+    tag "${pair_id}:${platform}"
+
+    publishDir { "${params.outdir}/${pair_id}/${platform.toLowerCase()}/segmentation/atera_proseg" }, mode: "copy", overwrite: true
+
+    input:
+    tuple val(key), val(pair_id), val(platform), val(plan_config_json), path(source_zarr, stageAs: "proseg_source.zarr"), path(prior_mask, stageAs: "prior_mask.npy"), path(prior_cellprob, stageAs: "prior_cellprob.npy")
 
     output:
     tuple val(key), val(pair_id), val(platform), path("plan_out/tile_plan.json"), emit: plan

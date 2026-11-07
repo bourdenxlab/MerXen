@@ -56,6 +56,9 @@ def _platform_independent(
 
 
 _PROSEG_KEYS = _platform_independent(PROSEG_TABLE_KEY, "MOSAIK_proseg")
+_VENDOR_PROSEG_KEYS = _platform_independent(
+    "table_MOSAIK_proseg_vendor", "MOSAIK_proseg_vendor"
+)
 _ORIGINAL_KEYS: Mapping[str, AnalysisLayerKeys] = MappingProxyType(
     {
         name: AnalysisLayerKeys(ORIGINAL_TABLE_KEY, spec.original_cell_shape_key)
@@ -70,6 +73,8 @@ ANALYSIS_LAYER_KEYS: Final[Mapping[str, Mapping[str, AnalysisLayerKeys]]] = (
         {
             "proseg": _PROSEG_KEYS,
             "reseg": _PROSEG_KEYS,
+            "proseg_vendor": _VENDOR_PROSEG_KEYS,
+            "vendor_proseg": _VENDOR_PROSEG_KEYS,
             "original": _ORIGINAL_KEYS,
             "original_seg": _ORIGINAL_KEYS,
             "proseg_hybrid": _platform_independent(

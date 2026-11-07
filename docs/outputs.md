@@ -211,8 +211,10 @@ vendor element rebuilds the alias, its pyramid and its outline), `link_mode`
 (`original_nucleus_row_v1`, nucleus row + 1), not cell ids: its marker names
 `cell_join_key: cell_instance_id`, the nucleus-shape column that joins a
 nucleus to its cell. The stitched ProSeg layer of a `native_proseg` row is
-backed the same way by its registered label element: `MOSAIK_proseg_labels` is
-an alias of `proseg_cell_labels`. A registered ATERA shape without a label
+backed the same way by its registered label element: `MOSAIK_proseg_vendor_labels`
+is an alias of `proseg_vendor_cell_labels`; an ATERA `cellpose_proseg` row's
+`MOSAIK_proseg` and `MOSAIK_cellpose` are backed by `proseg_cell_labels` and
+`cellpose_cell_labels` (AT-7). A registered ATERA shape without a label
 element is refused
 (a rasterized mask would be misplaced in ATERA's pixel `global` system). The pyramids and outlines carry the vendor
 labels' own transform. The base image is the platform's native image

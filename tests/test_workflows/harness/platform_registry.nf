@@ -3,6 +3,7 @@
 // (enrichRestartField, viewerTransformField, ...). It prints
 //
 //     REGISTRY <TAB> <compact JSON of PlatformSpec.REGISTRY>
+//     PROSEG_LAYERS <TAB> <compact JSON of AteraProsegLayers>
 //     UNKNOWN  <TAB> <case id> <TAB> <compact JSON of the result or error>
 //
 // The REGISTRY line feeds the parity test with src/merxen/platforms.py. The
@@ -16,6 +17,10 @@
 def printRegistry() {
     def registry = PlatformSpec.REGISTRY.collectEntries { name, spec -> [name, spec.toMap()] }
     println "REGISTRY\t" + groovy.json.JsonOutput.toJson(registry)
+    println "PROSEG_LAYERS\t" + groovy.json.JsonOutput.toJson([
+        layers: AteraProsegLayers.REGISTRY,
+        source_prior_kind: AteraProsegLayers.SOURCE_PRIOR_KIND,
+    ])
 }
 
 def recordUnknown(String id, Closure body) {

@@ -493,10 +493,17 @@ class SpatialDataBuildConfig(BaseModel):
 
 
 class DatasetConfig(BaseModel):
-    """Configuration for a single dataset (one half of a pair)."""
+    """Configuration for a single dataset (one half of a pair).
+
+    ATERA (plan AT-7, ``cellpose_proseg``) runs Cellpose only: on the
+    native morphology image of its built store (``image_key`` required),
+    with every requested channel present (DAPI + 18S by default) and
+    ``proseg_transcripts="none"``, because the tiled ATERA ProSeg route reads
+    the store's parquet instead of a transcript CSV.
+    """
 
     name: str
-    platform: Literal["MERSCOPE", "XENIUM"]
+    platform: PlatformName
     data_path: Path
     channels: list[str]
     output_dir: Path
@@ -518,6 +525,32 @@ class DatasetConfig(BaseModel):
     xenium_spec_path: Path | None = None
     min_qv: float | None = None
     proseg_overrides: dict[str, Any] = Field(default_factory=dict)
+
+    # "csv" seeds the ProSeg transcript CSV from the masks (XENIUM, MERSCOPE);
+    # "none" writes no CSV (ATERA: tiled ProSeg reads the store's parquet).
+    proseg_transcripts: Literal["csv", "none"] = "csv"
+
+    @model_validator(mode="after")
+    def _validate_atera(self: DatasetConfig) -> DatasetConfig:
+        if self.platform == "ATERA":
+            if self.proseg_transcripts != "none":
+                raise ValueError(
+                    "ATERA Cellpose writes no ProSeg transcript CSV; set "
+                    "proseg_transcripts='none' (the tiled ProSeg route reads the "
+                    "store's parquet)"
+                )
+            if self.image_key is None:
+                raise ValueError(
+                    "ATERA Cellpose needs image_key (the native morphology image)"
+                )
+            if not self.channels:
+                raise ValueError("ATERA Cellpose needs at least one channel")
+        elif self.proseg_transcripts != "csv":
+            raise ValueError(
+                f"{self.platform} Cellpose seeds the ProSeg transcript CSV; "
+                "proseg_transcripts='none' is for ATERA"
+            )
+        return self
 
 
 class NativeLatestConfig(BaseModel):
@@ -629,8 +662,55 @@ ATERA_PROSEG_MIN_HALO_UM = 100.0
 """Smallest halo of the ATERA ProSeg tiles (plan AT-9; tests lower it)."""
 
 
+class AteraProsegPrior(BaseModel):
+    """The prior of a tiled ATERA ProSeg run (plans AT-9 and AT-7).
+
+    Attributes:
+        kind: ``"vendor"`` (``native_proseg``: the store's vendor cell labels)
+            or ``"cellpose"`` (``cellpose_proseg``: MerXen's Cellpose masks).
+        mask_path: The Cellpose label mask (``.npy``); required for a
+            Cellpose prior, refused for the vendor prior.
+        cellprob_path: The Cellpose cell-probability logits (``.npy``,
+            float32) given to ProSeg (``--cellpose-cellprobs``), or ``None``.
+    """
+
+    kind: Literal["vendor", "cellpose"] = "vendor"
+    mask_path: Path | None = None
+    cellprob_path: Path | None = None
+
+    @model_validator(mode="after")
+    def _validate_files(self: AteraProsegPrior) -> AteraProsegPrior:
+        if self.kind == "cellpose" and self.mask_path is None:
+            raise ValueError("a Cellpose prior needs mask_path")
+        if self.kind == "vendor" and (
+            self.mask_path is not None or self.cellprob_path is not None
+        ):
+            raise ValueError("the vendor prior is read from the store; give no files")
+        return self
+
+
+class AteraProsegTilePrior(BaseModel):
+    """The Cellpose prior of one tile, copied from the plan (AT-7).
+
+    Attributes:
+        kind: Always ``"cellpose"`` (a vendor-prior tile has no entry).
+        mask_path: Real path of the Cellpose label mask.
+        cellprob_path: Real path of the logits, or ``None``.
+        mask_stat: ``[size, mtime_ns]`` of the mask when the plan was made.
+        cellprob_stat: The same for the logits.
+        fingerprint: SHA-256 over the two files' SHA-256 (provenance).
+    """
+
+    kind: Literal["cellpose"] = "cellpose"
+    mask_path: Path
+    cellprob_path: Path | None = None
+    mask_stat: list[int]
+    cellprob_stat: list[int] | None = None
+    fingerprint: str
+
+
 class AteraProsegPlanConfig(BaseModel):
-    """Configuration of ATERA_PROSEG_PLAN, the tile plan of a ``native_proseg`` row.
+    """Configuration of ATERA_PROSEG_PLAN, the tile plan of a tiled ProSeg row.
 
     Attributes:
         dataset_name: Dataset alias used in logs and provenance.
@@ -646,6 +726,10 @@ class AteraProsegPlanConfig(BaseModel):
             halo to cover owned cells; ``None`` means ``halo_um``.
         tile_subset: Tile ids to run (a check run); ``None`` runs every tile
             that owns cells. A plan with a subset cannot be stitched.
+        prior: The prior; ``None`` is the vendor prior (``native_proseg``).
+        prior_weight_effective: Effective prior weight of every tile of a
+            Cellpose plan; ``None`` uses the weight ProSeg would choose for
+            one whole-section run (``max(gene rows / labels / 100, 1)``).
     """
 
     dataset_name: str
@@ -658,6 +742,8 @@ class AteraProsegPlanConfig(BaseModel):
     owned_margin_um: float = 20.0
     max_window_extension_um: float | None = None
     tile_subset: list[str] | None = None
+    prior: AteraProsegPrior | None = None
+    prior_weight_effective: float | None = None
 
     @model_validator(mode="after")
     def _validate_grid(self: AteraProsegPlanConfig) -> AteraProsegPlanConfig:
@@ -677,6 +763,15 @@ class AteraProsegPlanConfig(BaseModel):
             raise ValueError("max_window_extension_um must be at least 0")
         if self.tile_subset is not None and not self.tile_subset:
             raise ValueError("tile_subset must name at least one tile")
+        weight = self.prior_weight_effective
+        if weight is not None:
+            if self.prior is None or self.prior.kind != "cellpose":
+                raise ValueError(
+                    "prior_weight_effective belongs to a Cellpose plan; the vendor "
+                    "prior's weight is a tile model parameter"
+                )
+            if not isfinite(weight) or weight <= 0:
+                raise ValueError("prior_weight_effective must be a positive number")
         return self
 
 
@@ -695,8 +790,8 @@ class AteraProsegTileConfig(BaseModel):
         pixel_size_um: Microns per morphology pixel.
         core_um: ``[x0, y0, x1, y1]`` of the tile core (half-open).
         window_px: ``[col0, col1, row0, row1]`` of the window (end-exclusive).
-        mask_shape_px: ``[n_rows, n_cols]`` of the vendor cell mask.
-        owned_labels: Vendor labels whose centroid lies in the core.
+        mask_shape_px: ``[n_rows, n_cols]`` of the prior mask.
+        owned_labels: Prior labels whose centroid lies in the core.
         output_dir: Folder of the tile result (``tile_<id>``).
         num_threads: ProSeg ``--nthreads``.
         max_rss_gb: Cap on the anonymous memory of the task's process tree.
@@ -707,6 +802,8 @@ class AteraProsegTileConfig(BaseModel):
             edge at which an owned polygon is reported.
         allow_untested_version: Run a ProSeg version other than the verified
             one (``atera_proseg_allow_untested_version``), with a warning.
+        prior: The Cellpose prior (``cellpose_proseg``); ``None`` takes the
+            vendor ``labels/cell_labels`` of the store (``native_proseg``).
     """
 
     dataset_name: str
@@ -727,6 +824,7 @@ class AteraProsegTileConfig(BaseModel):
     keep_inputs: bool = False
     edge_tolerance_voxels: float = 1.0
     allow_untested_version: bool = False
+    prior: AteraProsegTilePrior | None = None
 
     @model_validator(mode="after")
     def _validate_window(self: AteraProsegTileConfig) -> AteraProsegTileConfig:
@@ -759,6 +857,9 @@ class AteraProsegStitchConfig(BaseModel):
         n_workers: Worker threads; ``None`` uses ``DASK_NUM_WORKERS``.
         edge_tolerance_voxels: As in :class:`AteraProsegTileConfig`.
         force: Re-stitch even when the store records the same fingerprint.
+        prior_kind: The plan's prior kind, which names the layer written
+            (``proseg_vendor`` or ``reseg``); a plan of another kind is
+            refused.
     """
 
     dataset_name: str
@@ -771,6 +872,7 @@ class AteraProsegStitchConfig(BaseModel):
     n_workers: int | None = None
     edge_tolerance_voxels: float = 1.0
     force: bool = False
+    prior_kind: Literal["vendor", "cellpose"] = "vendor"
 
 
 class CellposeModelPolicy(BaseModel):
@@ -807,7 +909,10 @@ class EnrichmentConfig(BaseModel):
     segmentation of a NATIVE_LATEST store: no Cellpose masks are read, so
     ``mask_path`` and ``nuclei_mask_path`` may be ``None``.
     ``"native_proseg"`` does the same and also checks the stitched ProSeg
-    layer of the store (AT-9). Every other source needs both masks.
+    layer of the store (AT-9). ATERA ``"cellpose_proseg"`` (AT-7) enriches
+    the vendor layer natively, checks the stitched ProSeg layer and builds the
+    Cellpose layer from ``mask_path``; it has no ``nuclei_mask_path``. Every
+    other source needs both masks.
     """
 
     dataset_name: str
@@ -829,6 +934,15 @@ class EnrichmentConfig(BaseModel):
                 raise ValueError(
                     f"segmentation_source={self.segmentation_source} enriches the "
                     f"vendor segmentation of ATERA rows only, not {self.platform}"
+                )
+            return self
+        if self.platform == "ATERA" and self.segmentation_source == "cellpose_proseg":
+            # AT-7: the Cellpose mask builds the proseg_mask layer; ATERA keeps
+            # the vendor nuclei, so no Cellpose nuclei mask exists.
+            if self.mask_path is None:
+                raise ValueError(
+                    "mask_path (the ATERA Cellpose mask) required for "
+                    "segmentation_source=cellpose_proseg"
                 )
             return self
         missing = [

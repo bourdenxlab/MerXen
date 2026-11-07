@@ -36,7 +36,8 @@ _PYTHON_FIELDS = (
     "default_channels",
     "segmentation_sources",
     "default_segmentation_source",
-    "proseg_label_key",
+    "native_latest_base",
+    "proseg_hybrid",
 )
 # Samplesheet fields of each platform, as main.nf read them before the registry.
 _SAMPLESHEET_FIELDS: dict[str, dict[str, list[str]]] = {
@@ -115,10 +116,12 @@ def groovy_output(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     assert result.returncode == 0 and "DONE" in result.stdout, (
         f"{result.stdout[-3000:]}\n{result.stderr[-2000:]}"
     )
-    output: dict[str, Any] = {"registry": None, "unknown": {}}
+    output: dict[str, Any] = {"registry": None, "unknown": {}, "proseg_layers": None}
     for line in result.stdout.splitlines():
         if line.startswith("REGISTRY\t"):
             output["registry"] = json.loads(line.split("\t", 1)[1])
+        elif line.startswith("PROSEG_LAYERS\t"):
+            output["proseg_layers"] = json.loads(line.split("\t", 1)[1])
         elif line.startswith("UNKNOWN\t"):
             _, case_id, value = line.split("\t", 2)
             output["unknown"][case_id] = json.loads(value)
@@ -144,6 +147,24 @@ def test_groovy_registry_matches_python(groovy_output: dict[str, Any]) -> None:
         python["segmentation_sources"] = list(spec.segmentation_sources)
         shared = {field: groovy[name][field] for field in _PYTHON_FIELDS}
         assert shared == {field: python[field] for field in _PYTHON_FIELDS}, name
+
+
+@pytest.mark.nextflow
+def test_groovy_proseg_layers_match_python(groovy_output: dict[str, Any]) -> None:
+    """AteraProsegLayers.groovy equals PROSEG_LAYERS and SOURCE_PRIOR_KIND (AT-7)."""
+    from merxen.segmentation.atera_proseg import PROSEG_LAYERS, SOURCE_PRIOR_KIND
+
+    groovy = groovy_output["proseg_layers"]
+    assert groovy is not None
+    python = {
+        kind: {
+            **dataclasses.asdict(layer),
+            "legacy_aliases": list(layer.legacy_aliases),
+        }
+        for kind, layer in PROSEG_LAYERS.items()
+    }
+    assert groovy["layers"] == python
+    assert groovy["source_prior_kind"] == dict(SOURCE_PRIOR_KIND)
 
 
 @pytest.mark.nextflow

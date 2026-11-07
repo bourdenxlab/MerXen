@@ -194,27 +194,43 @@ Native outputs in `enrich_out/`:
 | `<dataset>_native_label_check.json` | `passed`, `checks` and `failures`; mismatch counts and tolerance, nucleus attribution and `overlaps_nucleus` agreement, the pixel size and arithmetic used (`pixel_precision`) and whether the pixel size agrees with the store's points transform. |
 | `<dataset>_per_shape_assignment_summary.csv` | One `native_table_original` row. |
 
-## ATERA ProSeg rows (`segmentation_source=native_proseg`)
+## ATERA ProSeg rows (`native_proseg`, ATERA `cellpose_proseg`)
 
-The ProSeg layer of a `native_proseg` row is written by `ATERA_PROSEG_STITCH`
+The ProSeg layer of a `native_proseg` row (`proseg_vendor`) or an ATERA
+`cellpose_proseg` row (`reseg`) is written by `ATERA_PROSEG_STITCH`
 ([segmentation](segmentation.md#atera-proseg-route-native_proseg-at-9)), not by
 `ENRICH`. ENRICH runs the native enrichment above and then checks the layer in
 one streaming pass over the points:
 
-- the ids of `table_MOSAIK_proseg` and `MOSAIK_proseg` are equal;
+- the ids of the layer's table and shapes (`table_MOSAIK_proseg_vendor` and
+  `MOSAIK_proseg_vendor`, or `table_MOSAIK_proseg` and `MOSAIK_proseg`) are equal;
 - every non-null `assignment` is a table id;
 - per cell, the count of gene rows with that `assignment` and not
   `background` equals the table's row sum (int64);
-- the registry entry `proseg` has the expected shape, table, columns, id
-  namespace, `label` and `prior`.
+- the registry entry (`proseg_vendor` or `proseg`) has the expected shape,
+  table, columns, id namespace, `label` and `prior`, and the store holds no
+  layer of the other prior.
 
 The result is written to `enrich_out/atera_proseg_layer_check.json` and to
 `attrs["merxen_atera_proseg"]["enrich_check"]`; it is not repeated while the
 stitch fingerprint is the same. A row whose store has no stitched layer stops
-with "native_proseg row without a stitched ProSeg layer". Per-shape assignment
-treats the row as native, so `MOSAIK_proseg` keeps the stitched table, and the
+with "Row without a stitched ProSeg layer". Per-shape assignment treats the row
+as native, so the ProSeg shapes keep the stitched table, and the
 partial-enrichment cleanup never removes the table of a registry branch that
-records a `prior` (`table_MOSAIK_proseg`): enrichment cannot rebuild it.
+records a `prior`: enrichment cannot rebuild it.
+
+An ATERA `cellpose_proseg` row (AT-7; `mask_path` is the Cellpose mask,
+`nuclei_mask_path` is null) then builds the Cellpose layer `proseg_mask`
+(`enrichment/atera_cellpose_layer.py`): `MOSAIK_cellpose` traced by the AT-3
+polygoniser (corner convention, `Scale(1/ps)`), `labels/cellpose_cell_labels`
+(the mask on the morphology grid) and `table_MOSAIK_cellpose`, counted from
+the points column `cellpose_assignment` the stitch wrote (every gene row on a
+Cellpose cell; controls in `obs`), registered as branch `cellpose` with the
+mask's model identity. Table, shape and mask ids must be one set and the table
+must hold every gene row on a cell; the record is
+`enrich_out/atera_cellpose_layer_check.json` and
+`attrs["merxen_atera_cellpose_layer"]`. It is rebuilt only when the mask or the
+stitch changes. A mask other than the one the stitch used is refused.
 
 ## What "per-shape" means
 

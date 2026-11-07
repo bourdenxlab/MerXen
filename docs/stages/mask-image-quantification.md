@@ -77,12 +77,15 @@ check applies unchanged.
 
 A `native_proseg` row (AT-9) also quantifies its stitched ProSeg cells in the
 same task (one writer per store): the config lists them in `extra_layers`
-(`mask_label_key: proseg_cell_labels`, `shape_key: MOSAIK_proseg`,
-`table_key: table_MOSAIK_proseg_image_quantification`). Each extra layer gets
-its own table (region `MOSAIK_proseg`) and its own sidecar files
-(`<dataset>_mosaik_proseg_mask_image_quantification.*`), and is skipped on a
-re-run like the main layer. `extra_layers` is empty for every other row.
-ProSeg cells with no pixel in `proseg_cell_labels` (tiny polygons or polygons
+(`mask_label_key: proseg_vendor_cell_labels`, `shape_key: MOSAIK_proseg_vendor`,
+`table_key: table_MOSAIK_proseg_vendor_image_quantification`). An ATERA
+`cellpose_proseg` row (AT-7) lists its ProSeg cells (`proseg_cell_labels`,
+`MOSAIK_proseg`) and its Cellpose cells (`cellpose_cell_labels`,
+`MOSAIK_cellpose`); ATERA layers are always quantified from label elements.
+Each extra layer gets its own table (region: its shapes) and its own sidecar
+files, and is skipped on a re-run like the main layer. `extra_layers` is empty
+for every other row.
+ProSeg cells with no pixel in the corresponding label element (tiny polygons or polygons
 covered by later cells; the stitch report lists them as
 `cells_without_label_pixels`) have no row in that table: 9 of 91,431 on the
 full public section. The stage lists their `instance_id` in the table's

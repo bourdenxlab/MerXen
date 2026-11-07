@@ -44,6 +44,7 @@ from merxen.config import ClusteringSquidpyConfig
 from merxen.control_features import CONTROL_TOKENS, control_token_mask
 from merxen.gene_ids import is_ensembl_gene_id
 from merxen.gene_sets import WHOLE_TRANSCRIPTOME_MIN_GENES, is_whole_transcriptome
+from merxen.io.spatialdata_schema import ORIGINAL_ID_NAMESPACE
 from merxen.io.transcript_io import first_existing_col
 from merxen.memory import force_release, log_status
 from merxen.platforms import platform_spec
@@ -454,6 +455,19 @@ def adata_from_spatialdata(
     nucleus_shape_key, nucleus_join = _choose_nucleus_shape_key(
         sdata_obj, platform=platform
     )
+    nucleus_skip_reason = None
+    if nucleus_join is not None:
+        # The owning-cell column of a cell-keyed nucleus layer (ATERA) holds
+        # vendor cell ids: joining it to a table of another id namespace (the
+        # Cellpose labels of an ATERA cellpose_proseg row, AT-7) would give
+        # Cellpose cell k the nuclei of vendor cell k.
+        namespace = _table_id_namespace(sdata_obj, resolved_table_key)
+        if namespace is not None and namespace != ORIGINAL_ID_NAMESPACE:
+            nucleus_skip_reason = (
+                f"{nucleus_shape_key} joins vendor cell ids through {nucleus_join}; "
+                f"{resolved_table_key} has ids of namespace {namespace}"
+            )
+            nucleus_shape_key, nucleus_join = None, None
     if nucleus_shape_key is not None and nucleus_join is not None:
         _apply_nucleus_metrics_by_cell(
             adata,
@@ -481,7 +495,26 @@ def adata_from_spatialdata(
     }
     if nucleus_join is not None:
         adata.uns["merxen_clustering_squidpy"]["nucleus_join"] = nucleus_join
+    if nucleus_skip_reason is not None:
+        adata.uns["merxen_clustering_squidpy"]["nucleus_metrics_skipped"] = (
+            nucleus_skip_reason
+        )
     return adata
+
+
+def _table_id_namespace(sdata_obj: Any, table_key: str | None) -> str | None:
+    """Return the registered id namespace of a table, or ``None`` if unregistered."""
+    if table_key is None:
+        return None
+    schema = dict(getattr(sdata_obj, "attrs", {}).get("merxen_schema", {}) or {})
+    registry = schema.get("segmentations") or {}
+    if not isinstance(registry, dict):
+        return None
+    for entry in registry.values():
+        if isinstance(entry, dict) and entry.get("table") == table_key:
+            namespace = entry.get("id_namespace")
+            return None if namespace is None else str(namespace)
+    return None
 
 
 def add_qc_metrics(adata: ad.AnnData) -> ad.AnnData:

@@ -38,9 +38,8 @@ def _defaults() -> dict:
 
 def _run_cases(tmp_path: Path, cases: list[dict]) -> list[dict]:
     text = (ROOT / "workflows/main.nf").read_text()
-    block = re.search(
-        r"def baseConfig = \[.*?^            \]", text, re.MULTILINE | re.DOTALL
-    )
+    # The builder lives in segmentationConfigMap since AT-7 (4-space body).
+    block = re.search(r"def baseConfig = \[.*?^    \]$", text, re.MULTILINE | re.DOTALL)
     assert block is not None
     base = block.group().replace("params.", "opts.")
     hook = text.split("// hitl-hook:C4\n", 1)[1].split("def segmentConfig =", 1)[0]

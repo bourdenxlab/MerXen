@@ -70,6 +70,7 @@ GOLDEN_FILES: tuple[str, ...] = (
     "native",
     "mask_image_quantification",
     "atera_proseg",
+    "atera_cellpose_proseg",
 )
 
 # Launch id -> extra command-line params (params are global per run).
@@ -129,9 +130,9 @@ SPANS: tuple[Span, ...] = (
         "renderSegment(key, pairId, platform, sourceSpatialdata, meta, "
         "runSegmentNuclei, runSegment)",
         "segmentation_config_inputs_ch = build_results_ch",
-        "def persistentLatestZarrPath",
+        "def segmentConfig = segmentationConfigMap(",
         "\n            tuple(",
-        "def segmentConfig = baseConfig + [",
+        "segmentationConfigMap(",
         "segmentConfig",
     ),
     Span(

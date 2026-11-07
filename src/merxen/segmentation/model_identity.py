@@ -22,7 +22,7 @@ CPSAM_V2_SHA256 = "0f1cc3f7ecdd8a037a57c6c48d9d8921391be4cbce3fa9f13c3e3a2e1253c
 class CellposeInferenceContext(BaseModel):
     """Image and filtering contract required for verified custom-model reuse."""
 
-    platform: Literal["MERSCOPE", "XENIUM"]
+    platform: Literal["MERSCOPE", "XENIUM", "ATERA"]
     species: Literal["human", "mouse"]
     channels: list[str]
     image_key: str
