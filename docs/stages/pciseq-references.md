@@ -227,5 +227,7 @@ JSON uses `PciSeqReferenceConfig` fields: `level`, `min_cells_per_type`,
 `normalization_target_sum`, `donor_balance`, `auto_download`, `verify_checksums`,
 `custom_metadata_path`, and the other names without the `pciseq_` prefix.
 It also supports `chunk_rows` (default 2048) and optional `gene_names`.
+An atlas reference used with a panel of more than 5,000 genes must set
+`gene_names` (see [pciSeq](pciseq.md#whole-transcriptome-panels)).
 Use the resulting matrix and manifest as `reference_path` and
 `reference_manifest_path` for the direct typing CLI.

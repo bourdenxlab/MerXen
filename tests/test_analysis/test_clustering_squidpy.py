@@ -2090,6 +2090,132 @@ def test_unset_hvg_and_default_panel_keep_the_xenium_records(
     assert "Expected 300 genes" in caplog.text
 
 
+def _with_controls(adata: ad.AnnData, names: list[str]) -> ad.AnnData:
+    """Append all-zero control features (they never count as panel genes)."""
+    controls = ad.AnnData(
+        X=sparse.csr_matrix((adata.n_obs, len(names)), dtype=np.float32),
+        obs=adata.obs[[]],
+        var=pd.DataFrame(index=names),
+    )
+    joined = ad.concat([adata, controls], axis=1, merge="first")
+    joined.obs = adata.obs.copy()
+    joined.obsm["spatial"] = adata.obsm["spatial"]
+    return joined
+
+
+def test_whole_transcriptome_panel_selects_hvgs_without_a_request(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A 5,001-gene panel (Xenium Prime 5K) runs the PCA on 2,000 HVGs.
+
+    The panel width is counted before the min-cell filter, so genes detected
+    in no cell do not move the panel back under the threshold.
+    """
+    adata = _wide_adata(150, 5001, seed=11)
+    keep = np.ones(adata.n_vars, dtype=np.float32)
+    keep[:20] = 0  # genes detected in no cell
+    adata.X = sparse.csr_matrix(adata.X.multiply(keep[None, :]))
+    adata.X.eliminate_zeros()
+    adata = _with_controls(adata, ["NegControlProbe_1", "BLANK_0001"])
+    with caplog.at_level("INFO", logger=clustering_mod.__name__):
+        out = run_scanpy_clustering(
+            adata,
+            min_counts=1,
+            min_cells=1,
+            n_pcs=5,
+            n_neighbors=10,
+            use_gpu=False,
+            expected_panel_gene_count=None,
+        )
+
+    assert out.n_vars < 5001
+    mask = out.var[clustering_mod.HVG_VAR_KEY].to_numpy(bool)
+    params = out.uns["merxen_clustering_params"]
+    assert params["hvg_selection_reason"] == "whole_transcriptome_panel"
+    assert params["n_panel_genes"] == 5001
+    assert params["whole_transcriptome_min_genes"] == 5000
+    assert params["hvg_n_top_genes"] == (
+        clustering_mod.WHOLE_TRANSCRIPTOME_HVG_N_TOP_GENES
+    )
+    assert params["hvg_method"] == clustering_mod.HVG_FLAVOR
+    assert params["pca_mask_var"] == clustering_mod.HVG_VAR_KEY
+    assert params["n_highly_variable_genes"] == int(mask.sum())
+    assert 1900 <= int(mask.sum()) <= 2100
+    assert np.all(out.varm["PCs"][~mask] == 0)
+    assert "highly variable genes" in caplog.text
+
+
+def test_later_rounds_inherit_the_whole_transcriptome_rule() -> None:
+    """A branch round gets the broad round's gene-filtered matrix (under 5,001
+    genes here) and still runs the PCA on highly variable genes."""
+    adata = _wide_adata(150, 5001, seed=14)
+    keep = np.ones(adata.n_vars, dtype=np.float32)
+    keep[:20] = 0
+    adata.X = sparse.csr_matrix(adata.X.multiply(keep[None, :]))
+    adata.X.eliminate_zeros()
+    broad = run_scanpy_clustering(
+        adata,
+        min_counts=1,
+        min_cells=1,
+        n_pcs=5,
+        n_neighbors=10,
+        use_gpu=False,
+        expected_panel_gene_count=None,
+        key_added="leiden_broad",
+    )
+    assert broad.n_vars < 5001
+
+    branch = run_scanpy_clustering(
+        broad[:100].copy(),
+        min_counts=1,
+        min_cells=1,
+        n_pcs=5,
+        n_neighbors=10,
+        use_gpu=False,
+        expected_panel_gene_count=None,
+        key_added="leiden_subcluster",
+        input_layer="counts",
+        drop_control_features=False,
+    )
+
+    params = branch.uns["merxen_clustering_params_leiden_subcluster"]
+    assert params["hvg_selection_reason"] == "whole_transcriptome_panel"
+    assert params["n_panel_genes"] == 5001
+    assert params["pca_mask_var"] == clustering_mod.HVG_VAR_KEY
+
+
+def test_panel_of_5000_genes_keeps_the_all_gene_pca() -> None:
+    """At the threshold (controls excluded) nothing changes, records included."""
+    adata = _with_controls(
+        _wide_adata(80, 5000, seed=12), ["NegControlProbe_1", "BLANK_0001"]
+    )
+    out = run_scanpy_clustering(
+        adata, min_counts=1, min_cells=1, n_pcs=3, n_neighbors=4, use_gpu=False
+    )
+
+    assert set(out.uns["merxen_clustering_params"]) == _PRE_AT6_ROUND_PARAM_KEYS
+    assert clustering_mod.HVG_VAR_KEY not in out.var
+    assert np.any(out.varm["PCs"] != 0, axis=1).mean() > 0.9
+
+
+def test_explicit_hvg_request_is_recorded_as_requested() -> None:
+    out = run_scanpy_clustering(
+        _wide_adata(120, 5001, seed=13),
+        min_counts=1,
+        min_cells=1,
+        n_pcs=5,
+        n_neighbors=10,
+        use_gpu=False,
+        expected_panel_gene_count=None,
+        hvg_n_top_genes=500,
+    )
+
+    params = out.uns["merxen_clustering_params"]
+    assert params["hvg_selection_reason"] == "requested"
+    assert params["hvg_n_top_genes"] == 500
+    assert "n_panel_genes" not in params
+
+
 def test_expected_panel_gene_count_none_skips_the_check(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
