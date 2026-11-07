@@ -142,7 +142,8 @@ REQUIRED_PROSEG_VERSION: Final = "3.2.0"
 
 PLAN_FORMAT_VERSION: Final = 1
 TILE_FORMAT_VERSION: Final = 1
-STITCH_FORMAT_VERSION: Final = 1
+STITCH_FORMAT_VERSION: Final = 2
+"""2 (AT-7): cross-tile polygon overlaps are clipped by the core rule."""
 
 
 def tile_id(column: int, row: int) -> str:

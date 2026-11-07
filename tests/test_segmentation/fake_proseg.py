@@ -13,7 +13,8 @@ It accepts the command of ``merxen.segmentation.atera_proseg.runner`` and:
 - assigns each row to its ``cell_id`` (``FAKE_PROSEG_MODE=identity``) or also
   gives unassigned rows within ``FAKE_PROSEG_GREEDY_UM`` microns (default 2) of
   a cell's pixels to the nearest cell (``greedy_halo``, which makes two tiles
-  claim one halo row);
+  claim one halo row); ``FAKE_PROSEG_DILATE_UM`` grows every polygon by that
+  many microns, so polygons of neighbouring tiles overlap across a seam;
 - prints the dataset summary with ProSeg's prior-weight scaling
   (``FAKE_PROSEG_WEIGHT_FACTOR`` multiplies it, as ProSeg's own filters do;
   ``FAKE_PROSEG_WEIGHT_OFFSET`` adds to it, which no rescaling corrects) and
@@ -132,7 +133,12 @@ def _outlines(
 
         from shapely import transform as shp_transform
 
-        result[label] = mapping(shp_transform(merged, transform))
+        outline = shp_transform(merged, transform)
+        dilate = float(os.environ.get("FAKE_PROSEG_DILATE_UM", "0"))
+        if dilate > 0:
+            # Grown outlines overlap their neighbours, also across tile seams.
+            outline = outline.buffer(dilate, join_style="mitre")
+        result[label] = mapping(outline)
     return result
 
 

@@ -8,8 +8,11 @@ Cellpose prior (``cellpose_proseg``). The stitch writes, in place under the
 store's write lock (names of the vendor layer, then of the Cellpose layer):
 
 - ``shapes/MOSAIK_proseg_vendor`` | ``shapes/MOSAIK_proseg``: every owned
-  ProSeg polygon, unclipped, in microns, with the vendor shapes'
-  ``Scale(1 / ps)`` transform to ``global``;
+  ProSeg polygon in microns, with the vendor shapes' ``Scale(1 / ps)``
+  transform to ``global``; where two cells of different tiles overlap across
+  a seam, the overlap is clipped by the transcripts' core rule
+  (:mod:`merxen.segmentation.atera_proseg.seams`), a cell left with no area is
+  dropped (its rows become background) and the report lists both;
 - ``labels/proseg_vendor_cell_labels`` | ``labels/proseg_cell_labels``: the
   polygons rasterised on the morphology grid (pixel-centre rule, ascending
   ``instance_id``, last wins), with the vendor labels' pyramid and
@@ -94,6 +97,12 @@ from merxen.segmentation.atera_proseg.prior import (
     lookup_labels,
     open_mask,
     plan_prior_kind,
+)
+from merxen.segmentation.atera_proseg.seams import (
+    SEAM_CLIP_RULE,
+    SEAM_OVERLAP_TOLERANCE_UM2,
+    clip_seam_overlaps,
+    core_box,
 )
 from merxen.segmentation.atera_proseg.tile import read_tile_manifest
 
@@ -480,6 +489,7 @@ class _FileResult:
     n_foreground: int
     n_controls: int
     n_genes_unclaimed: int
+    n_released: int
     conflicts: Counter[str]
     losing_cells: Counter[int]
     gene_keys: np.ndarray
@@ -535,6 +545,7 @@ def _rewrite_points_file(
     labels: np.ndarray,
     pixel_size_um: float,
     cellpose_mask: np.ndarray | None = None,
+    released_cells: np.ndarray | None = None,
 ) -> _FileResult:
     from merxen.enrichment.label_lookup import PixelFrame, pixel_indices
 
@@ -576,6 +587,15 @@ def _rewrite_points_file(
             )
         )
     resolution = resolve_claims(n_rows, x, y, tile_um, claim_sets)
+    n_released = 0
+    if released_cells is not None and released_cells.size:
+        # Cells the seam clip emptied are not in the layer: their rows are
+        # background, as for an owned cell ProSeg gave no polygon.
+        released = resolution.claimed & np.isin(resolution.assignment, released_cells)
+        n_released = int(released.sum())
+        resolution.claimed[released] = False
+        resolution.assignment[released] = 0
+        resolution.background[released] = True
     claimed = resolution.claimed
     is_gene = table.column("is_gene").to_numpy(zero_copy_only=False).astype(bool)
 
@@ -677,6 +697,7 @@ def _rewrite_points_file(
         n_foreground=int((claimed & ~resolution.background).sum()),
         n_controls=int(control.sum()),
         n_genes_unclaimed=int((~claimed & is_gene).sum()),
+        n_released=n_released,
         conflicts=resolution.conflicts,
         losing_cells=resolution.losing_cells,
         gene_keys=gene_keys,
@@ -880,6 +901,94 @@ def _remove_foreign_layers(
     return deleted
 
 
+def _clip_seams(
+    cells: pd.DataFrame, tiles: _Tiles, tile_um: float
+) -> tuple[pd.DataFrame, list[Any], dict[str, Any]]:
+    """Clip cross-tile polygon overlaps; drop the cells left with no area.
+
+    Returns:
+        The kept cells, their geometries and the clip record (before the
+        points pass adds the rows the clipped cells lost or released).
+    """
+    import shapely
+
+    geometries = list(shapely.from_wkb(cells["geometry_wkb"].to_numpy()))
+    groups = np.asarray(
+        pd.Categorical(cells["proseg_tile"], categories=tiles.order).codes,
+        dtype=np.int64,
+    )
+    cores = [core_box(tiles.grid[tid], tile_um) for tid in tiles.order]
+    clip = clip_seam_overlaps(geometries, groups, cores)
+    ids = cells["instance_id"].to_numpy(dtype=np.uint64)
+    tile_of = cells["proseg_tile"].to_numpy()
+    clipped = [
+        {
+            "instance_id": int(ids[record["position"]]),
+            "proseg_tile": str(tile_of[record["position"]]),
+            "area_before_um2": record["area_before_um2"],
+            "area_after_um2": record["area_after_um2"],
+            "clipped_area_um2": record["clipped_area_um2"],
+            "against": [int(ids[other]) for other in record["against"]],
+        }
+        for record in clip.clipped
+    ]
+    emptied = [int(ids[position]) for position in clip.emptied]
+    assert clip.before is not None and clip.after is not None
+    record: dict[str, Any] = {
+        "rule": SEAM_CLIP_RULE,
+        "tolerance_um2": SEAM_OVERLAP_TOLERANCE_UM2,
+        "overlaps_before": clip.before.as_dict(),
+        "overlaps_after": clip.after.as_dict(),
+        "n_cells_clipped": len(clipped),
+        "clipped_area_um2_total": float(
+            sum(entry["clipped_area_um2"] for entry in clipped)
+        ),
+        "clipped_cells": clipped,
+        "n_cells_emptied": len(emptied),
+        "emptied_instance_ids": emptied,
+    }
+    if emptied:
+        logger.warning(
+            "The seam clip left %d ProSeg cells with no area; they are not in the "
+            "layer and their transcripts are background: %s",
+            len(emptied),
+            ", ".join(str(v) for v in emptied[:20]),
+        )
+    logger.info(
+        "Seam clip: %d cross-tile overlaps before (%d above 1 um^2, largest "
+        "%.2f um^2), %d after (largest %.4f um^2); %d cells clipped, %d emptied",
+        clip.before.n_pairs,
+        clip.before.n_pairs_over_1um2,
+        clip.before.max_area_um2,
+        clip.after.n_pairs,
+        clip.after.max_area_um2,
+        len(clipped),
+        len(emptied),
+    )
+    keep = np.ones(len(cells), dtype=bool)
+    keep[clip.emptied] = False
+    kept_geometries = [g for g, ok in zip(clip.geometries, keep, strict=True) if ok]
+    return cells[keep].reset_index(drop=True), kept_geometries, record
+
+
+def _finish_clip_record(
+    record: dict[str, Any], losing: Counter[int], results: list[_FileResult]
+) -> dict[str, Any]:
+    """Add the conflict rows of each clipped cell and the released rows."""
+    finished = dict(record)
+    finished["clipped_cells"] = [
+        {**entry, "rows_lost_in_conflicts": int(losing.get(entry["instance_id"], 0))}
+        for entry in record["clipped_cells"]
+    ]
+    finished["n_clipped_cells_losing_conflicts"] = sum(
+        1 for entry in finished["clipped_cells"] if entry["rows_lost_in_conflicts"]
+    )
+    finished["n_rows_released_by_emptied_cells"] = int(
+        sum(result.n_released for result in results)
+    )
+    return finished
+
+
 def stitch(cfg: AteraProsegStitchConfig) -> dict[str, Any]:
     """Stitch the tiles of a plan into the latest store (or skip if current).
 
@@ -956,8 +1065,11 @@ def _stitch_into(
     tile_um = float(plan["grid"]["tile_um"])
     n_rows_px, n_cols_px = (int(v) for v in plan["mask_shape_px"])
     cells = _load_cells(tiles)
+    cells, geometries, clip_record = _clip_seams(cells, tiles, tile_um)
+    released_cells = np.asarray(
+        sorted(int(v) for v in clip_record["emptied_instance_ids"]), dtype=np.uint64
+    )
     instance_ids = cells["instance_id"].to_numpy(dtype=np.uint64)
-    geometries = list(shapely.from_wkb(cells["geometry_wkb"].to_numpy()))
     n_workers = cfg.n_workers or int(os.environ.get("DASK_NUM_WORKERS", "4") or 4)
 
     # Table identity from table_original (genes and vendor cell ids).
@@ -1032,6 +1144,7 @@ def _stitch_into(
         labels=read_only,
         pixel_size_um=ps,
         cellpose_mask=cellpose_mask,
+        released_cells=released_cells,
     )
     try:
         with ThreadPoolExecutor(max_workers=max(n_workers, 1)) as pool:
@@ -1143,6 +1256,7 @@ def _stitch_into(
         "cells_losing_most_conflicts": [
             [int(cell), int(count)] for cell, count in losing.most_common(20)
         ],
+        "seam_clip": _finish_clip_record(clip_record, losing, results),
         "overlap_pixels_within_tile": int(overlap.within_group),
         "overlap_pixels_across_tiles": int(overlap.cross_group),
         "owned_cells_near_interior_window_edge": int(
