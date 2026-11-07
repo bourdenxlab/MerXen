@@ -27,8 +27,12 @@ shape:
 Aligned shapes and `obsm["spatial"]` are deliberately ignored. Preparation
 rejects duplicate or unmatched cell IDs, non-finite coordinates, invalid
 counts, and empty expression matrices. It uses all cells surviving clustering,
-retains eligible non-control genes up to `gaston_max_genes`, and writes a
-checksum-bearing portable input bundle. Multiple substantial spatial
+keeps every eligible non-control gene, and writes a checksum-bearing portable
+input bundle. When the eligible genes exceed `gaston_max_genes` (default
+10,000) preparation stops with an error naming both counts: raise
+`gaston_max_genes` or turn GASTON off for the row. Before AT-8 it silently kept
+the first `gaston_max_genes` genes in var order, which depends on the vendor's
+feature table rather than on the biology. Multiple substantial spatial
 components produce a warning but are never cropped automatically.
 
 ## Process graph
