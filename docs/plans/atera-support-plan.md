@@ -1911,6 +1911,33 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
 - **Depends on:** AT-8 (analysis gene set, lean MapMyCells query).
 - **Exit:** a mixed samplesheet stub run (XENIUM `map_first` + ATERA) reaches ANNOTATION_REPORT for both
   rows, then the crop and the full section run `map_first` through MENDER within their resources.
+- **Notes from AT-8 for AT-11 (2026-11-07):**
+  - **Gene set.** AT-8 built the analysis gene set: `merxen analysis-gene-set`
+    (`merxen.analysis_gene_set`, `docs/cli.md`). ATERA defaults to the recipe `all_panel_genes`,
+    every one of the 18,049 panel genes (user decision of 2026-11-07: maximum accuracy, compute
+    cost accepted); `intersect_public_panel:<key>` and `explicit:<path>` exist but are not the
+    default. The set depends only on the panel (both layers of a store, and the crop, give the same
+    `gene_set_hash`), so one reference preparation serves every ATERA section of the panel. Its
+    `analysis_gene_set.csv` is the `annotation-panel --panel-genes-path` layout, and
+    `gene_set_hash` equals the `panel_hash` that command gives it. Wire the command beside
+    ANNOTATE_PANEL for ATERA rows. The Atera ∩ Xenium Prime 5K human overlap (4,874 of 5,001) is
+    recorded for information only. The user's rule of 2026-11-07 (RCA on Atera is a new rule set:
+    no existing RCA rule, such as family trust inheritance, the large-panel marker prefilter,
+    marker caps, gates or thresholds, is kept where it would cost accuracy, and each departure is
+    shown by a comparison) applies to everything built on this set.
+  - **Query rule 1: the MapMyCells query is the full gene set, never trimmed to marker genes.**
+    `cell_type_mapper` 1.7.2 turns a raw query into log2 CPM using the row sums of the genes in
+    the query file (`cell_by_gene/cell_by_gene.py`), so trimming the query to the bundle's marker
+    genes changes every cell's CPM and therefore the mapping. The query columns must equal the
+    bundle panel, which is the analysis gene set; RCA's `build_sample_query` and
+    `write_query_h5ad` already do this, and AT-8 tests it on an ATERA-shaped fixture
+    (`tests/test_analysis_gene_set.py`).
+  - **Query rule 2: decide which depth RESOLVE uses.** `SampleQuery.total_counts` counts every
+    non-control feature of the sample (`annotation/pipeline.py`, `load_samples`), not the panel's
+    genes. On the 300-gene panels the two are the same; on ATERA with `all_panel_genes` they are
+    also the same, but with any smaller gene set they differ (the whole transcriptome against the
+    set). AT-11 must decide which depth the RESOLVE depth bins use, so that it matches the depth the
+    bundle's simulations assume, and record the choice.
 
 ### AT-10 optional, on request
 

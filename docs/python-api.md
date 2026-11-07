@@ -176,6 +176,18 @@ never the correction code, and the package imports no GPU code. Configured by `M
 - `matches_control_name_pattern(name, platform)` /
   `control_token_mask(values)` — the anchored and substring name rules.
 
+### `merxen.analysis_gene_set` — [analysis_gene_set.py](../src/merxen/analysis_gene_set.py)
+- `read_source_panel(path, species=..., platform=..., table_key=...)` — a
+  panel from a SpatialData table `var` or a panel file, resolved as
+  `ANNOTATE_PANEL` resolves it.
+- `build_analysis_gene_set(source, recipe, species=...)` — apply
+  `all_panel_genes`, `intersect_public_panel:<key>` or `explicit:<path>`;
+  joins on Ensembl gene IDs only (`join_on_gene_ids`).
+- `AnalysisGeneSet` — the frozen record; `gene_set_hash` equals the
+  `panel_hash` `annotation-panel --panel-genes-path` gives its CSV.
+- `write_analysis_gene_set(gene_set, output_dir)` — `analysis_gene_set.json`,
+  `analysis_gene_set.csv` and `analysis_gene_set_missing.csv`.
+
 ### `io.image_source` — [image_source.py](../src/merxen/io/image_source.py)
 - `build_image_source(image, as_float32)` — lazy image reader.
 - `fetch_tile(source, y0, y1, x0, x1)` — crop a tile for Cellpose.

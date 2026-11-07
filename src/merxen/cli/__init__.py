@@ -13,6 +13,7 @@ from merxen.cli.run_alignment import (
     check_alignment_deps_command,
     materialize_alignment_command,
 )
+from merxen.cli.run_analysis_gene_set import analysis_gene_set_command
 from merxen.cli.run_analysis_layer_validation import (
     validate_analysis_layer_command,
 )
@@ -121,6 +122,7 @@ main.add_command(manual_registration_prepare_command)
 main.add_command(manual_registration_register_command)
 main.add_command(manual_registration_fit_command)
 main.add_command(manual_registration_compare_command)
+main.add_command(analysis_gene_set_command)
 main.add_command(annotation_panel_command)
 main.add_command(annotation_reference_prep_command)
 main.add_command(annotation_store_group)

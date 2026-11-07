@@ -58,6 +58,7 @@ Commands:
                      Fit the saved landmarks and print what register would flag
   manual-registration-compare
                      Compare several manual-registration runs of one pair
+  analysis-gene-set  Build the analysis gene set of a panel (joined on...
   annotation-panel   Resolve the declared panels of a pair and...
   annotation-reference-prep
                       Get or build one reference bundle and...
@@ -532,6 +533,68 @@ merxen manual-registration-compare --config compare_config.json
 Details: [Manual landmark registration](stages/manual-registration.md#reading-the-qc).
 
 ---
+
+## `merxen analysis-gene-set`
+
+Builds the **analysis gene set** of a panel (Atera plan AT-8;
+[`merxen.analysis_gene_set`](../src/merxen/analysis_gene_set.py)): a fixed
+list of Ensembl gene IDs that depends only on the panel and pinned inputs,
+never on one section's data, so every section of a panel gets the same set and
+the same hash. No Nextflow process runs it yet (AT-11 wires it beside
+`ANNOTATE_PANEL` for ATERA rows).
+
+```bash
+merxen analysis-gene-set --source latest_spatialdata.zarr --table-key table_original \
+  --species human --platform ATERA --output-dir analysis_gene_set
+merxen analysis-gene-set --source latest_spatialdata.zarr --species human --platform ATERA \
+  --recipe intersect_public_panel:xenium_prime_5k_human --output-dir prime5k_overlap
+```
+
+| Option | Description |
+|--------|-------------|
+| `--source PATH` | A SpatialData store or one table group (only the table `var` is read), or a panel file `annotation-panel` reads (`.h5ad` var, gene table, Xenium `gene_panel.json`, MERSCOPE codebook). |
+| `--table-key KEY` | Table of a store (default `table_original`, the vendor layer; every layer of a store has the same `var`). |
+| `--species human\|mouse` | Run species; requested IDs must be its Ensembl gene IDs. |
+| `--platform NAME` | The panel's platform: control name patterns, and recorded. |
+| `--recipe TEXT` | `all_panel_genes` (default for every platform), `intersect_public_panel:<key>` or `explicit:<path>`. |
+| `--name`, `--version N` | Name (default: from the recipe) and definition version of the set. |
+| `--public-panel-dir DIR` | `annotation-panel-fetch` output for `intersect_public_panel` (symbols and IDs, checked against the manifest and the pinned gene count). Default: the packaged Prime 5K lists (IDs only). |
+| `--annotation-config PATH` | `AnnotationConfig` JSON whose panel settings resolve IDs (gene tables, aliases, overrides); default: species defaults. |
+| `--output-dir PATH` | Where the three files go. |
+
+The panel is read as `annotation-panel` reads it: controls removed, every
+feature resolved to an unversioned Ensembl gene ID; a refused resolution ends
+the command. Recipes:
+
+- `all_panel_genes`: every panel gene (the identity). The default for every
+  platform; for ATERA, the user's decision of 2026-11-07 (RCA on Atera uses
+  all 18,049 panel genes).
+- `intersect_public_panel:<key>`: the panel genes in a pinned public list
+  (`annotation-panel-fetch` keys).
+- `explicit:<path>`: the panel genes in a list of Ensembl gene IDs (CSV / TSV
+  with an `ensembl_id`, `gene_ids`, `gene_id` or `feature_id` column, a JSON
+  list, a `panel_genes*.json`, an `analysis_gene_set.json` or one ID per
+  line). A list of symbols is refused.
+
+Recipes join on Ensembl gene IDs, **never on symbols**: the Atera panel has
+17 genes whose symbol is an Ensembl ID, and a symbol can name different genes
+in two releases. A requested gene the panel lacks is listed as missing; a panel
+gene that only shares its symbol is reported, not selected.
+
+Outputs:
+
+- `analysis_gene_set.json`: the frozen record (`AnalysisGeneSet`): name,
+  version, species, platform, recipe, the inputs with their sha256 (for a
+  SpatialData table, an order-independent sha256 of its declared features),
+  the source panel (features, genes, `panel_hash`, controls removed,
+  unresolved features, ID sources), the genes, the missing genes and symbol
+  matches, `whole_transcriptome` (more than 5,000 genes) and `gene_set_hash`.
+- `analysis_gene_set.csv`: `gene_symbol`, `gene_id`, sorted by ID: the layout
+  `annotation-panel --panel-genes-path` reads. `gene_set_hash` is the
+  `panel_hash` that command gives it (the sha256 of the sorted IDs), so
+  symbols, order and cells never change it.
+- `analysis_gene_set_missing.csv`: requested genes the panel lacks, with the
+  panel gene that has the same symbol, if any.
 
 ## `merxen annotation-panel`
 
