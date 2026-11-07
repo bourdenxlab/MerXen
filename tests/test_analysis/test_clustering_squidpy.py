@@ -2509,12 +2509,29 @@ def test_wide_panel_dotplot_is_bounded_and_tables_keep_every_gene(
     assert list(selection["plotted_genes"]) == gene_order
     assert selection["table_gene_order"] == "var"
     assert selection["min_group_fraction"] == clustering_mod.DOTPLOT_MIN_GROUP_FRACTION
+    mean, fraction = compute_group_gene_summary(
+        adata, list(adata.var_names), groupby="leiden_subcluster"
+    )
+    assert gene_order == clustering_mod.select_dotplot_genes(mean, fraction)
 
 
-def test_panel_sized_dotplot_keeps_the_clustered_table_order(tmp_path: Path) -> None:
-    """XENIUM-sized panels: tables in clustered order, no selection record."""
+def test_panel_sized_dotplot_plots_top_genes_and_keeps_clustered_tables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """XENIUM-sized panels: top genes per group plotted, tables clustered."""
     adata = _wide_adata(150, 300, seed=15)
     adata.obs["leiden_subcluster"] = adata.obs["group"].astype(str)
+    captured: dict[str, object] = {}
+    real_plot = clustering_mod.plot_group_gene_dotplot
+
+    def spy(
+        mean: pd.DataFrame, fraction: pd.DataFrame, path: Path, **kw: object
+    ) -> Path:
+        captured["gene_order"] = kw["gene_order"]
+        captured["columns"] = list(mean.columns)
+        return real_plot(mean, fraction, path, **kw)
+
+    monkeypatch.setattr(clustering_mod, "plot_group_gene_dotplot", spy)
     paths = clustering_mod._save_branch_gene_dotplot(
         adata,
         output_dir=tmp_path,
@@ -2522,12 +2539,53 @@ def test_panel_sized_dotplot_keeps_the_clustered_table_order(tmp_path: Path) -> 
         group_key="leiden_subcluster",
         dpi=72,
     )
-    mean, _ = compute_group_gene_summary(
+    mean, fraction = compute_group_gene_summary(
         adata, list(adata.var_names), groupby="leiden_subcluster"
     )
     table = pd.read_csv(paths["x_gene_mean_expression"], index_col=0)
     assert list(table.columns) == clustering_mod._cluster_gene_order(mean)
-    assert clustering_mod.DOTPLOT_GENE_SELECTION_UNS_KEY not in adata.uns
+
+    expected = clustering_mod.select_dotplot_genes(mean, fraction)
+    top_k = clustering_mod.DOTPLOT_TOP_GENES_PER_GROUP
+    assert captured["gene_order"] == expected
+    assert captured["columns"] == expected
+    assert 0 < len(expected) <= mean.shape[0] * top_k
+    selection = adata.uns[clustering_mod.DOTPLOT_GENE_SELECTION_UNS_KEY]["x"]
+    assert selection["n_panel_genes"] == 300
+    assert list(selection["plotted_genes"]) == expected
+    assert selection["top_genes_per_group"] == top_k
+    assert selection["table_gene_order"] == "clustered"
+
+
+def test_select_dotplot_genes_orders_by_group_and_deduplicates() -> None:
+    """Group blocks in row order, best first; a shared gene sits once, first."""
+    groups = ["a", "b", "c"]
+    genes = ["A1", "A2", "SHARED", "B1", "C1", "OFF"]
+    means = pd.DataFrame(
+        [
+            [5.0, 4.0, 3.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 3.0, 5.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 5.0, 0.0],
+        ],
+        index=groups,
+        columns=genes,
+    )
+    fractions = (means > 0).astype(float) * 0.8
+
+    selected = clustering_mod.select_dotplot_genes(means, fractions)
+
+    # c has one candidate above the floor and adds only that one; OFF is
+    # expressed nowhere and is never drawn.
+    assert selected == ["A1", "A2", "SHARED", "B1", "C1"]
+
+
+def test_select_dotplot_genes_handles_panels_smaller_than_top_k() -> None:
+    groups = ["a", "b"]
+    genes = ["G1", "G2"]
+    means = pd.DataFrame([[2.0, 0.5], [0.5, 2.0]], index=groups, columns=genes)
+    fractions = pd.DataFrame(0.9, index=groups, columns=genes)
+
+    assert clustering_mod.select_dotplot_genes(means, fractions) == ["G1", "G2"]
 
 
 def test_dotplot_render_guard_refuses_oversized_figures() -> None:

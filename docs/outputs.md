@@ -572,10 +572,10 @@ Additional QC artifacts are written under
 | `<sample_id>_broad_annotation_scores.csv` | Cluster-by-atlas score table. |
 | `<sample_id>_broad_resolved_markers.csv` | Panel-overlapping markers selected for each atlas label. |
 | `plots/annotation/<sample_id>_broad_annotation_score_heatmap.png` | Broad annotation score heatmap. |
-| `branch_<class>/...` | Per-branch H5AD plus UMAP, spatial scatter, spatial grid, and panel-gene dotplot in `plots/` subfolders for non-neuron broad classes and extra atlas classes. |
+| `branch_<class>/...` | Per-branch H5AD plus UMAP, spatial scatter, spatial grid, and top-gene dotplot (top 5 genes per subcluster) in `plots/` subfolders for non-neuron broad classes and extra atlas classes. |
 | `branch_<class>/tables/dotplot/...` | Mean-expression and fraction-expressing summaries used for branch panel-gene dotplots. |
 | `branch_neurons/<sample_id>_neurons_split_*` | Neuron Excitatory/Inhibitory/Other annotation tables, heatmap, plots, and split H5AD. |
-| `branch_neurons/split_<label>/...` | Per-neuron-split subtype H5AD plus UMAP, spatial scatter, spatial grid, panel-gene dotplot, and dotplot summary tables. |
+| `branch_neurons/split_<label>/...` | Per-neuron-split subtype H5AD plus UMAP, spatial scatter, spatial grid, top-gene dotplot, and dotplot summary tables. |
 
 ### MENDER spatial domains
 

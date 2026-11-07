@@ -240,22 +240,47 @@ region and adds a marker sanity gate.
 - **No 300-gene panel check.** `expected_panel_gene_count` is `null` for ATERA,
   so the "Expected 300 genes" warning and the `has_expected_panel_gene_count*`
   flags of the control-filter summary are left out.
-- **Bounded summaries and dotplots.** These are panel-width rules, not
-  platform rules: they apply to any panel past the limits (a XENIUM 5K panel
-  would take them too; before AT-6 its dotplot exceeded the 65,000 px render
-  limit), and the 300-gene panels never reach them. Above 1,000 genes the per-cluster means
-  and fractions expressing (atlas scoring and dotplot tables) come from one
-  sparse group-indicator product accumulated in float64; the matrix is never
-  densified. Above 400 genes a branch dotplot draws the union of each group's
-  top 5 genes by cluster-mean z-score (groups take turns; at most 400 genes),
-  ordered hierarchically, while the dotplot CSV tables keep every gene in var
-  order. Only genes expressed in at least 10% of a group's cells are that
-  group's candidates (z ties go to the higher fraction expressing), so a gene
-  with a few transcripts in one cluster cannot take a marker's place; if no
-  gene reaches the floor in any group, the floor is dropped and recorded as 0. The branch H5AD records the selection in
-  `uns["merxen_dotplot_gene_selection"][<prefix>]`. This selects genes, not
-  transcripts or cells: an 18,000-gene dotplot cannot be rendered, and the
-  axis label says how many of the panel's genes are shown.
+- **Bounded summaries.** This is a panel-width rule, not a platform rule: it
+  applies to any panel past the limit (a XENIUM 5K panel would take it too),
+  and the 300-gene panels never reach it. Above 1,000 genes the per-cluster
+  means and fractions expressing (atlas scoring and dotplot tables) come from
+  one sparse group-indicator product accumulated in float64; the matrix is
+  never densified. Dotplots (below) select genes for every panel size; before
+  AT-6 an ATERA dotplot of every gene exceeded the 65,000 px render limit.
+
+## Branch dotplots: top 5 genes per cluster
+
+Every branch dotplot (`plots/dotplot/<prefix>_gene_dotplot.png`), whatever the
+panel size and in both clustering modes, draws the top 5 genes of each
+subcluster by cluster-mean z-score (z over subclusters, per gene). In
+`map_first` mode the subclusters are a branch's mapped leaves; legacy and
+`map_first` share one helper (`clustering_squidpy.plot_top_gene_dotplot`):
+
+- Only genes expressed in at least 10% of a subcluster's cells are its
+  candidates (z ties go to the higher fraction expressing, then panel order),
+  so a gene with a few transcripts in one cluster cannot take a marker's
+  place. A subcluster with fewer than 5 candidates contributes only those it
+  has; if no gene reaches the floor in any subcluster, the floor is dropped
+  and recorded as 0.
+- Genes are deduplicated and drawn in subcluster order (each subcluster's
+  genes best first; a gene shared by several subclusters sits with the first),
+  so the plot runs along the diagonal.
+- At most 400 genes are drawn (only reached with more than 80 subclusters);
+  subclusters then take turns adding their next best gene, so each keeps its
+  best ones. The axis label says how many of the panel's genes are shown.
+- The dotplot CSV tables keep every gene. Legacy writes them in
+  hierarchically clustered order for panels up to 400 genes and in var order
+  for wider panels; `map_first` writes them in var order.
+- The selection (rule, floor, plotted genes and table order) is recorded in
+  `uns["merxen_dotplot_gene_selection"][<prefix>]`: in the branch H5AD in
+  legacy mode, in the clustered table in `map_first` mode (one record per
+  `<sample_id>_map_first_branch_<token>`).
+
+Before 2026-11 legacy panels up to 400 genes plotted every panel gene in
+clustered order, and only wider panels took the top-5 selection (then ordered
+hierarchically). `map_first` plotted every gene of panels up to 300 genes and
+the 300 most variable genes of wider panels (hierarchically ordered), and its
+tables of wider panels held only those 300 genes.
 
 ## Outputs
 
@@ -329,10 +354,10 @@ With hierarchical mode enabled, additional artifacts are written under
 | Broad scores | `<sample_id>_broad_annotation_scores.csv` | Cluster-by-atlas marker z-score table. |
 | Broad markers | `<sample_id>_broad_resolved_markers.csv` | Reference markers that overlapped the query panel. |
 | Broad heatmap | `plots/annotation/<sample_id>_broad_annotation_score_heatmap.png` | QC heatmap of broad cluster marker scores. |
-| Branch plots/H5ADs | `branch_<class>/...` | Per-class `.h5ad`, UMAP under `plots/umap/`, spatial plot under `plots/spatial/`, spatial grid under `plots/spatial_grid/`, and panel-gene dotplot under `plots/dotplot/`. |
+| Branch plots/H5ADs | `branch_<class>/...` | Per-class `.h5ad`, UMAP under `plots/umap/`, spatial plot under `plots/spatial/`, spatial grid under `plots/spatial_grid/`, and top-gene dotplot under `plots/dotplot/`. |
 | Branch dotplot tables | `branch_<class>/tables/dotplot/...` | Per-subcluster mean expression and fraction-expressing summaries for panel genes. |
 | Neuron split | `branch_neurons/<sample_id>_neurons_split_*` | Excitatory/Inhibitory/Other annotation tables, split `.h5ad`, heatmap under `plots/annotation/`, and plots under `plots/*/`. |
-| Neuron subclusters | `branch_neurons/split_<label>/...` | Per-split neuron subtype `.h5ad`, UMAP, spatial plot, spatial grid, panel-gene dotplot, and dotplot tables. |
+| Neuron subclusters | `branch_neurons/split_<label>/...` | Per-split neuron subtype `.h5ad`, UMAP, spatial plot, spatial grid, top-gene dotplot, and dotplot tables. |
 
 ## CPU and GPU engines
 

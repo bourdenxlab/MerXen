@@ -5,6 +5,8 @@ from __future__ import annotations
 import anndata as ad
 import numpy as np
 import pandas as pd
+import pytest
+import scipy.sparse as sp
 
 from merxen.qc.metrics import (
     _compute_cell_metrics_from_points,
@@ -86,3 +88,32 @@ def test_compute_cell_metrics_from_table_uses_instance_key() -> None:
     assert cell_metrics["cell_id_norm"].tolist() == ["a", "b"]
     assert cell_metrics["transcripts_per_cell"].tolist() == [4.0, 2.0]
     assert cell_metrics["genes_per_cell"].tolist() == [2.0, 1.0]
+
+
+@pytest.mark.parametrize("is_sparse", [True, False])
+def test_compute_cell_metrics_from_table_totals_are_exact_past_float32(
+    is_sparse: bool,
+) -> None:
+    """Assigned totals past 2**24 stay exact for a float32 ``X`` on any platform.
+
+    Summing this fixture in float32 gives 240,333,536 against the exact
+    240,333,534, so the float64 per-cell sums and int64 total are what keep it
+    right.
+    """
+    rng = np.random.default_rng(7)
+    counts = rng.integers(1, 2_000, size=(60_000, 4)).astype(np.float32)
+    table = ad.AnnData(X=sp.csr_matrix(counts) if is_sparse else counts)
+    exact_total = int(counts.astype(np.int64).sum())
+    assert exact_total > 2**24
+    float32_total = int(np.nansum(np.asarray(sp.csr_matrix(counts).sum(axis=1))))
+    assert float32_total != exact_total
+
+    n_assigned, cell_metrics = _compute_cell_metrics_from_table(table)
+
+    assert isinstance(n_assigned, int)
+    assert n_assigned == exact_total
+    assert np.array_equal(
+        cell_metrics["transcripts_per_cell"].to_numpy(),
+        counts.astype(np.int64).sum(axis=1).astype(float),
+    )
+    assert cell_metrics["transcripts_per_cell"].dtype == np.float64

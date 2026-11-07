@@ -166,8 +166,6 @@ OBS_COMPANION_COLUMNS: Final[tuple[str, ...]] = (
 # Missing numbers in ``uns`` scalars (h5ad cannot store ``None``).
 MISSING_INT: Final = -1
 MISSING_TEXT: Final = "unknown"
-# Panels above this many genes get dotplots of the most variable genes only.
-DOTPLOT_MAX_GENES: Final = 300
 # Fields of ``uns["merxen_hierarchical_clustering"]`` that downstream stages
 # read back from a map_first table (plan §4.8, §4.9, §8.5): FINALIZE's and
 # MENDER_PREPARE's Nextflow scripts are those of legacy runs (their text is
@@ -1392,22 +1390,6 @@ def _write_tables(
 # Plots
 
 
-def _dotplot_genes(branch: ad.AnnData, max_genes: int) -> list[str]:
-    genes = [str(name) for name in branch.var_names]
-    if len(genes) <= max_genes:
-        return genes
-    matrix = branch.X
-    means = np.asarray(matrix.mean(axis=0)).ravel()
-    squares = (
-        np.asarray(matrix.multiply(matrix).mean(axis=0)).ravel()
-        if hasattr(matrix, "multiply")
-        else np.asarray((np.asarray(matrix) ** 2).mean(axis=0)).ravel()
-    )
-    variance = squares - means**2
-    order = np.argsort(-variance, kind="stable")[:max_genes]
-    return [genes[index] for index in sorted(order)]
-
-
 def write_map_first_plots(
     clustered: ad.AnnData,
     *,
@@ -1421,8 +1403,10 @@ def write_map_first_plots(
 
     UMAP and spatial maps by ``broad_class``, ``ct_leaf`` and
     ``ct_final_level`` (with the QC Leiden for comparison), and per branch a
-    dotplot of the panel genes by leaf; with ``branch_umaps``, also a branch
-    UMAP by leaf for branches of at least ``min_branch_cells`` cells. The
+    dotplot of each leaf's top genes (``clustering_squidpy``'s
+    ``plot_top_gene_dotplot``, recorded in ``clustered.uns``) with tables of
+    every panel gene by leaf; with ``branch_umaps``, also a branch UMAP by
+    leaf for branches of at least ``min_branch_cells`` cells. The
     plot helpers are legacy ``clustering_squidpy``'s, imported here so the
     module itself stays light.
 
@@ -1484,7 +1468,7 @@ def write_map_first_plots(
         branch.obs[SUBCLUSTER_LABEL_KEY] = branch.obs[
             SUBCLUSTER_LABEL_KEY
         ].cat.remove_unused_categories()
-        genes = _dotplot_genes(branch, DOTPLOT_MAX_GENES)
+        genes = [str(name) for name in branch.var_names]
         mean, fraction = legacy.compute_group_gene_summary(
             branch, genes, groupby=SUBCLUSTER_LABEL_KEY
         )
@@ -1497,16 +1481,21 @@ def write_map_first_plots(
         fraction.to_csv(fraction_path)
         paths[f"{branch_prefix}_gene_mean_expression"] = mean_path
         paths[f"{branch_prefix}_gene_fraction_expressing"] = fraction_path
-        paths[f"{branch_prefix}_gene_dotplot"] = legacy.plot_group_gene_dotplot(
+        # The tables keep every gene (var order); the figure shows each
+        # leaf's top genes, recorded in the clustered table's uns.
+        dotplot_path = plots / "dotplot" / f"{branch_prefix}_gene_dotplot.png"
+        legacy.plot_top_gene_dotplot(
+            clustered,
             mean,
             fraction,
-            plots / "dotplot" / f"{branch_prefix}_gene_dotplot.png",
-            cluster_genes=True,
+            dotplot_path,
+            selection_name=branch_prefix,
             x_axis_label="Leaf",
-            y_axis_label="Panel genes",
-            title=f"{sample_id} {record['branch']}: panel genes by mapped leaf",
+            title=f"{sample_id} {record['branch']}: top genes by mapped leaf",
             dpi=max(int(config.figure_dpi), 220),
+            table_gene_order="var",
         )
+        paths[f"{branch_prefix}_gene_dotplot"] = dotplot_path
         if branch_umaps and int(rows.sum()) >= int(config.min_branch_cells):
             embedded = branch_embedding(
                 clustered,

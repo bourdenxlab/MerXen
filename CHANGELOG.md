@@ -26,6 +26,11 @@
 
 - The map-first default of both species applies to MERSCOPE and XENIUM rows. ATERA rows (10x Atera, `docs/plans/atera-support-plan.md`) cluster in `legacy` mode whatever the species default or a global `--clustering_squidpy_mode`, a row that sets `clustering_squidpy_mode=map_first` is refused before any task starts, `--annotation_prepare_only` builds no reference bundle for them, and they log no deprecation warning. The launch log marks them `legacy (ATERA)`. map_first on Atera is milestone AT-11 ([ATERA rows](docs/configuration.md#atera-rows)).
 
+### Changed: exact QC totals and top-gene dotplots on every platform
+
+- **QC totals are exact.** QC sums each cell's counts in float64 and totals them in int64 on XENIUM and MERSCOPE as on ATERA. The float32 sums used before drift once a section passes 2^24 assigned counts, so `n_transcripts_assigned` and `pct_assigned` of large sections can differ slightly from older QC outputs ([QC](docs/stages/qc.md)).
+- **Branch dotplots show the top 5 genes per subcluster** for every panel size and in both clustering modes, deduplicated and in subcluster order (in `map_first` mode the subclusters are a branch's mapped leaves). Legacy panels up to 400 genes used to plot every panel gene; `map_first` plotted every gene up to 300 genes and the 300 most variable above. The dotplot CSV tables hold every gene, and the selection is recorded in `uns["merxen_dotplot_gene_selection"]` (the branch H5AD in legacy mode, the clustered table in `map_first` mode) ([branch dotplots](docs/stages/clustering-squidpy.md#branch-dotplots-top-5-genes-per-cluster)).
+
 ### Added
 
 - **Per-row mode.** A `clustering_squidpy_mode` samplesheet column (`legacy` / `map_first`; blank follows the run), so one run can opt single datasets in or out. A header that only resembles the column is reported. In a run with any `map_first` row, legacy rows also take the MENDER barrier's `combine`, so they run MENDER where a legacy-only run's `join` would skip it.

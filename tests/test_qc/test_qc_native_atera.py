@@ -525,40 +525,6 @@ def test_pruning_without_coordinate_statistics_reads_every_file(latest: Path) ->
     assert files == [aggregates.points_dir / entry.name for entry in aggregates.files]
 
 
-def test_exact_counts_survive_float32_totals() -> None:
-    """Assigned totals past 2**24 stay exact on ATERA stores (crop: off by one).
-
-    A float32 ``X`` summed in float32 drifts once the total leaves float32's
-    exact integer range; the exact path sums in float64 and totals in int64,
-    and the default path keeps the historical float32 sum.
-    """
-    import anndata as ad
-    import scipy.sparse as sp
-
-    rng = np.random.default_rng(7)
-    counts = rng.integers(1, 2_000, size=(60_000, 4)).astype(np.float32)
-    table = ad.AnnData(X=sp.csr_matrix(counts))
-    exact_total = int(counts.astype(np.int64).sum())
-    assert exact_total > 2**24
-
-    n_exact, cells = metrics._compute_cell_metrics_from_table(table, exact_counts=True)
-    n_legacy, legacy_cells = metrics._compute_cell_metrics_from_table(table)
-
-    assert n_exact == exact_total
-    # The fixture does drift on the legacy float32 path (240,333,536 against
-    # 240,333,534), so the exact path is what keeps the total right.
-    assert n_legacy != exact_total
-    assert np.array_equal(
-        cells["transcripts_per_cell"].to_numpy(),
-        counts.astype(np.int64).sum(axis=1).astype(float),
-    )
-    legacy_sums = np.asarray(table.X.sum(axis=1)).ravel()
-    assert n_legacy == int(np.nansum(legacy_sums))
-    assert np.array_equal(
-        legacy_cells["transcripts_per_cell"].to_numpy(), legacy_sums.astype(float)
-    )
-
-
 def test_native_qc_assigned_total_is_exact(latest: Path) -> None:
     result = compute_dataset_qc(
         latest,

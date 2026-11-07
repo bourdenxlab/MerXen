@@ -13,6 +13,10 @@ For the branch-specific shape/table pair selected by Nextflow:
   solidity, eccentricity, aspect ratio, log10 area.
 - **Transcript metrics per cell** — transcripts per cell and unique genes
   per cell, derived from the selected AnnData table when `table_key` is set.
+  Totals are exact on every platform: each cell's counts are summed in
+  float64 and `n_transcripts_assigned` is the int64 sum of the rounded
+  per-cell sums. A float32 table summed in float32 drifts once the total
+  passes 2^24 counts, which large XENIUM, MERSCOPE and ATERA sections reach.
 - **Summary statistics** — n cells, n transcripts total/assigned, percent
   assigned, medians for area, eccentricity, transcripts/cell, genes/cell.
 - **Hybrid diagnostics** — for `proseg_hybrid`, Cellpose/ProSeg count deltas,
@@ -68,11 +72,11 @@ the parquet files on disk (file names, footer row counts, total):
 - `n_transcripts_total` is the build's `n_points_written`;
 - per-gene totals (`gene_totals_from_points` with `assigned_only=False`, used
   by gene summaries and comparisons) are the build's `gene_counts_kept`;
-- the registration windows read only the overlapping files;
-- `n_transcripts_assigned` and the per-cell `transcripts_per_cell` are summed
-  from the table in float64 and totalled in int64. The vendor matrix is
-  float32, and a float32 total drifts past 2^24 counts (one count on the
-  public crop, tens on a full section).
+- the registration windows read only the overlapping files.
+
+`n_transcripts_assigned` comes from the table as on every platform (exact, see
+above); without the exact sum the float32 vendor matrix would be off by one
+count on the public crop and by tens on a full section.
 
 The QC log says which path each figure took ("from the build aggregates",
 "the windows read k of n indexed parquet files"). The fingerprint checks file
@@ -81,9 +85,11 @@ file's rows and feature names or drop the index. A stale index falls back to
 streaming the points with dask. QC never loads
 every transcript of an ATERA store into pandas: if a dask aggregation fails it
 raises with the cause instead of retrying in memory. XENIUM and MERSCOPE stores
-carry no aggregates, so their QC is unchanged: their table totals stay the
-historical float32 sums, and a failed dask aggregation still logs a warning
-and retries in pandas.
+carry no aggregates, so they take the full passes, and a failed dask
+aggregation still logs a warning and retries in pandas. Their table totals
+were float32 sums before 2026-11, so on a large section `n_transcripts_assigned`
+and `pct_assigned` from an older QC output can differ slightly from a rerun
+(per-cell sums stay well inside float32's exact range and do not change).
 
 A warning is logged and written to the outputs; the task still succeeds.
 With `--qc_registration_strict true` a `warn` makes `merxen qc` exit non-zero
