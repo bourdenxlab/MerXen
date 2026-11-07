@@ -1753,6 +1753,20 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
   guardrails; capped transcript patterns; MECR streaming reference; shared "analysis gene set". Guards key
   on gene count, not only the platform (Q22).
 - **Exit:** the default analysis stages run on the full section within their resources.
+- **Status (2026-11-07): in progress, in five work packages** (gene-count guards; analysis gene set; MECR
+  streaming reference; raster transcript patterns; exit run). User decisions of 2026-11-07 in Appendix A
+  ("AT-8 user decisions"). **WP1 (gene-count guards) done:** `merxen.gene_sets` holds the shared rule
+  (more than 5,000 non-control genes is whole-transcriptome, so Xenium Prime 5K counts). Legacy clustering
+  runs the PCA on 2,000 `cell_ranger` highly variable genes for such a panel when the sample sets no
+  `hvg_n_top_genes`, and records why in `uns`; GASTON raises instead of keeping the first
+  `gaston_max_genes` genes; pciSeq refuses an atlas reference without an explicit `gene_names` list on such
+  a panel. The rules live in Python: no sample JSON or process script changes, so the clustering, GASTON
+  and pciSeq task hashes of every row are unchanged and the 300-gene XENIUM/MERSCOPE outputs are unchanged.
+  A cached 5K clustering task is not re-run by `-resume`. As with any edit of
+  `analysis/clustering_squidpy.py` or `config.py`, the map_first hierarchy fingerprint
+  (`HIERARCHY_SOURCES`) changes, so the annotation `COMPUTE_CPU` task of every row re-runs once (same
+  labels expected: the hierarchy does not run the legacy HVG rule). The map_first QC embedding's own HVG rule (`seurat`, above 1,000 genes) is
+  unchanged.
 
 ### AT-9 `[feature]`: ProSeg for Atera, conditional on AT-5b (8–12 d)
 
@@ -2334,3 +2348,12 @@ Findings and changes:
 | "All transcripts" means all QV >= 20 transcripts (1,409,601,228 of 1,640,508,930 vendor rows on the full section; D3, `atera_min_qv`) | Stated in the visualization doc and in AT-6's status |
 | The resumed viewer-cache summary records the mask, label and image pyramids as skipped (built in the first attempt) | Noted; the pyramids were built at 03:26–03:29 in the first attempt. Part of the AT-7 restart work with the `-resume` rerun of ENRICH |
 | The source stores' hardlinked payloads are now read-only (143 crop, 1,543 full-section files) | Announced to whoever shares the AT-5 stores (exit report) |
+
+**AT-8 user decisions (2026-11-07).** Taken on the AT-8 design report (remaining scope after AT-6 and AT-9):
+
+| Question | Decision |
+|---|---|
+| Transcript pair correlation on ATERA | Off on the ATERA (label-raster) transcript-pattern engine in AT-8, and recorded in its summary. An all-transcript method (raster FFT plus an analytic null) is a follow-up; it may later replace the 5,000-transcripts-per-gene cap of the XENIUM/MERSCOPE engine |
+| Q22, panels above 5,000 genes | The whole-transcriptome rules apply automatically to any panel with more than 5,000 genes, whatever the platform: HVG-only PCA in legacy clustering, the streaming MECR reference (`reference_mode` auto), the pciSeq refusal without an explicit gene list, and GASTON raising instead of truncating. Not warn-only. Outputs of 5K-panel Xenium rows change (accepted); task hashes of the ~300-gene XENIUM/MERSCOPE rows stay unchanged |
+| Analysis gene set | RCA on ATERA uses all 18,049 panel genes (recipe `all_panel_genes`, the identity), not a subset, for the best achievable accuracy even at a much higher compute cost. AT-8 builds the analysis-gene-set machinery with ATERA defaulting to `all_panel_genes`. The overlap with the Xenium Prime 5K human panel (4,874 of 5,001 genes) is information only. (This supersedes an earlier decision the same day to leave the choice to AT-11.) |
+| Tissue support for non-cortical sections | A mask from the all-transcript density (10 µm raster, threshold, morphological close, hole fill), with the method recorded; hand-drawn tissue annotations take precedence when present |
