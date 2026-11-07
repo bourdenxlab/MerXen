@@ -93,8 +93,9 @@ def run_transcript_pattern_analysis(
         sample_id=sample.sample_id,
     )
     _prepare_gene_index(data)
-    summary = summarize_signed_distance_enrichment(data, config=config)
-    signed_distance = compute_signed_distance_enrichment(data, config=config)
+    counts = gene_pattern_counts(data, config=config)
+    summary = summarize_gene_pattern_counts(counts, config=config)
+    signed_distance = signed_distance_enrichment_from_counts(counts, config=config)
     summary = add_signed_distance_summary(summary, signed_distance)
     paircorr = compute_multiscale_pair_correlation(data, config=config)
     summary = add_paircorr_summary(summary, paircorr)
@@ -260,90 +261,243 @@ def load_and_classify_transcripts(
     )
 
 
+@dataclass
+class GenePatternCounts:
+    """Per-gene counts that the compartment and signed-distance statistics need.
+
+    Both transcript engines reduce their transcripts to these arrays: the
+    polygon engine from the retained points (:func:`gene_pattern_counts`), the
+    label-raster engine (:mod:`merxen.analysis.transcript_patterns_raster`) by
+    streaming accumulation over every transcript. The statistics functions
+    below only read these arrays, so both engines share them.
+
+    Attributes:
+        gene_names: Gene of each row, in output order.
+        compartment_counts: ``(n_genes, len(COMPARTMENTS))`` transcripts per
+            compartment (nuclear, cytoplasmic, extracellular).
+        distance_bin_counts: Boundary (``"cell"``, ``"nucleus"``) to
+            ``(n_genes, len(edges) + 1)`` transcripts per signed-distance bin
+            (bins of ``np.searchsorted(edges, d, side="right")``).
+        median_signed_cell_distance_um: Median signed cell distance per gene.
+        median_signed_nucleus_distance_um: Median signed nucleus distance.
+        n_pericellular: Transcripts with ``-pericellular <= d_cell < 0``.
+        n_membrane_proximal: Cytoplasmic transcripts with
+            ``d_cell <= membrane_distance_um``.
+        n_cell_overlap_ambiguous: Transcripts inside more than one cell.
+        n_nucleus_overlap_ambiguous: Transcripts inside more than one nucleus.
+    """
+
+    gene_names: list[str]
+    compartment_counts: np.ndarray
+    distance_bin_counts: dict[str, np.ndarray]
+    median_signed_cell_distance_um: np.ndarray
+    median_signed_nucleus_distance_um: np.ndarray
+    n_pericellular: np.ndarray
+    n_membrane_proximal: np.ndarray
+    n_cell_overlap_ambiguous: np.ndarray
+    n_nucleus_overlap_ambiguous: np.ndarray
+
+    @property
+    def n_transcripts(self) -> np.ndarray:
+        """Return the transcripts of each gene (``int64``)."""
+        totals: np.ndarray = np.asarray(self.compartment_counts, dtype=np.int64).sum(
+            axis=1
+        )
+        return totals
+
+
+SIGNED_DISTANCE_BOUNDARIES: tuple[str, ...] = ("cell", "nucleus")
+"""Boundaries of the signed-distance statistics, in output order."""
+
+
+def gene_pattern_counts(
+    data: TranscriptPatternData,
+    *,
+    config: SpatialGeneAnalysisConfig,
+) -> GenePatternCounts:
+    """Reduce the retained transcripts of the polygon engine to per-gene counts.
+
+    Args:
+        data: Classified transcripts (:func:`load_and_classify_transcripts`).
+        config: Analysis parameters (signed-distance edges, proximity widths).
+
+    Returns:
+        The counts, one row per gene of ``data.gene_names`` in that order.
+    """
+    edges = np.asarray(config.signed_distance_edges_um, dtype=float)
+    n_genes = len(data.gene_names)
+    compartment_counts = np.zeros((n_genes, len(COMPARTMENTS)), dtype=np.int64)
+    bin_counts = {
+        boundary: np.zeros((n_genes, len(edges) + 1), dtype=np.int64)
+        for boundary in SIGNED_DISTANCE_BOUNDARIES
+    }
+    all_bins = {
+        "cell": _signed_distance_bin_codes(data.signed_cell_distance_um, edges),
+        "nucleus": _signed_distance_bin_codes(data.signed_nucleus_distance_um, edges),
+    }
+    medians = {boundary: np.zeros(n_genes) for boundary in SIGNED_DISTANCE_BOUNDARIES}
+    n_pericellular = np.zeros(n_genes, dtype=np.int64)
+    n_membrane = np.zeros(n_genes, dtype=np.int64)
+    n_cell_overlap = np.zeros(n_genes, dtype=np.int64)
+    n_nucleus_overlap = np.zeros(n_genes, dtype=np.int64)
+    for code in range(n_genes):
+        gene_indices = _gene_indices(data, code)
+        compartments = data.compartments[gene_indices]
+        compartment_counts[code] = np.bincount(
+            compartments, minlength=len(COMPARTMENTS)
+        )
+        for boundary in SIGNED_DISTANCE_BOUNDARIES:
+            bin_counts[boundary][code] = np.bincount(
+                all_bins[boundary][gene_indices], minlength=len(edges) + 1
+            )
+        cell_dist = data.signed_cell_distance_um[gene_indices]
+        nucleus_dist = data.signed_nucleus_distance_um[gene_indices]
+        medians["cell"][code] = float(np.median(cell_dist))
+        medians["nucleus"][code] = float(np.median(nucleus_dist))
+        n_pericellular[code] = np.count_nonzero(
+            (cell_dist < 0) & (cell_dist >= -config.pericellular_distance_um)
+        )
+        n_membrane[code] = np.count_nonzero(
+            (compartments == COMPARTMENT_CODES["cytoplasmic"])
+            & (cell_dist <= config.membrane_distance_um)
+        )
+        n_cell_overlap[code] = np.count_nonzero(
+            data.cell_overlap_count[gene_indices] > 1
+        )
+        n_nucleus_overlap[code] = np.count_nonzero(
+            data.nucleus_overlap_count[gene_indices] > 1
+        )
+    return GenePatternCounts(
+        gene_names=list(data.gene_names),
+        compartment_counts=compartment_counts,
+        distance_bin_counts=bin_counts,
+        median_signed_cell_distance_um=medians["cell"],
+        median_signed_nucleus_distance_um=medians["nucleus"],
+        n_pericellular=n_pericellular,
+        n_membrane_proximal=n_membrane,
+        n_cell_overlap_ambiguous=n_cell_overlap,
+        n_nucleus_overlap_ambiguous=n_nucleus_overlap,
+    )
+
+
 def summarize_signed_distance_enrichment(
     data: TranscriptPatternData,
     *,
     config: SpatialGeneAnalysisConfig,
 ) -> pd.DataFrame:
     """Summarize compartment membership and signed-distance enrichment by gene."""
-    total_by_compartment = np.bincount(
-        data.compartments,
-        minlength=len(COMPARTMENTS),
+    return summarize_gene_pattern_counts(
+        gene_pattern_counts(data, config=config), config=config
     )
-    rows: list[dict[str, Any]] = []
-    n_total = len(data.coordinates)
-    for code, gene in enumerate(data.gene_names):
-        gene_indices = _gene_indices(data, code)
-        n_gene = len(gene_indices)
-        eligible = n_gene >= config.transcript_min_count
-        row: dict[str, Any] = {"gene": gene, "n_transcripts": n_gene}
-        counts = np.bincount(
-            data.compartments[gene_indices],
-            minlength=len(COMPARTMENTS),
-        )
-        for compartment_code, compartment in enumerate(COMPARTMENTS):
-            count = int(counts[compartment_code])
-            row[f"n_{compartment}"] = count
-            row[f"fraction_{compartment}"] = count / n_gene if n_gene else np.nan
-            a = count
-            b = int(total_by_compartment[compartment_code] - count)
-            c = n_gene - count
-            d = int((n_total - total_by_compartment[compartment_code]) - c)
-            row[f"{compartment}_enrichment_log2_odds"] = float(
-                np.log2(((a + 0.5) * (d + 0.5)) / ((b + 0.5) * (c + 0.5)))
-            )
-            row[f"{compartment}_pval_clustered"] = (
-                float(
-                    hypergeom.sf(
-                        a - 1,
-                        n_total,
-                        int(total_by_compartment[compartment_code]),
-                        n_gene,
-                    )
-                )
-                if eligible
-                else np.nan
-            )
-            row[f"{compartment}_pval_depleted"] = (
-                float(
-                    hypergeom.cdf(
-                        a,
-                        n_total,
-                        int(total_by_compartment[compartment_code]),
-                        n_gene,
-                    )
-                )
-                if eligible
-                else np.nan
-            )
 
-        cell_dist = data.signed_cell_distance_um[gene_indices]
-        nucleus_dist = data.signed_nucleus_distance_um[gene_indices]
-        row["median_signed_cell_distance_um"] = float(np.median(cell_dist))
-        row["median_signed_nucleus_distance_um"] = float(np.median(nucleus_dist))
-        row["fraction_pericellular"] = float(
-            np.mean((cell_dist < 0) & (cell_dist >= -config.pericellular_distance_um))
-        )
-        row["fraction_membrane_proximal"] = float(
-            np.mean(
-                (data.compartments[gene_indices] == COMPARTMENT_CODES["cytoplasmic"])
-                & (cell_dist <= config.membrane_distance_um)
+
+def summarize_gene_pattern_counts(
+    counts: GenePatternCounts,
+    *,
+    config: SpatialGeneAnalysisConfig,
+) -> pd.DataFrame:
+    """Summarize compartment membership and proximity by gene from counts.
+
+    Vectorised over genes (whole-transcriptome panels have 18,000), with the
+    same arithmetic per value as the former per-row loop, so the polygon
+    engine's tables are unchanged (``tests/test_analysis/
+    test_transcript_patterns_raster.py`` checks them byte for byte).
+
+    Args:
+        counts: Per-gene counts of either transcript engine.
+        config: Analysis parameters (``transcript_min_count``).
+
+    Returns:
+        One row per gene: compartment counts, fractions, log2 odds against all
+        other genes, hypergeometric tails with BH FDR, the median signed
+        distances, the proximity fractions and the overlap counters.
+    """
+    compartment_counts = np.asarray(counts.compartment_counts, dtype=np.int64)
+    compartment_counts = compartment_counts.reshape(-1, len(COMPARTMENTS))
+    total_by_compartment = compartment_counts.sum(axis=0)
+    n_by_gene = compartment_counts.sum(axis=1)
+    n_total = int(n_by_gene.sum())
+    eligible = n_by_gene >= config.transcript_min_count
+    columns: dict[str, Any] = {
+        "gene": pd.Series(list(counts.gene_names), dtype=object),
+        "n_transcripts": n_by_gene,
+    }
+    with np.errstate(divide="ignore", invalid="ignore"):
+        for compartment_code, compartment in enumerate(COMPARTMENTS):
+            a = compartment_counts[:, compartment_code]
+            total = int(total_by_compartment[compartment_code])
+            b = total - a
+            c = n_by_gene - a
+            d = (n_total - total) - c
+            columns[f"n_{compartment}"] = a
+            columns[f"fraction_{compartment}"] = np.where(
+                n_by_gene > 0, a / np.maximum(n_by_gene, 1), np.nan
             )
+            columns[f"{compartment}_enrichment_log2_odds"] = _log2_odds(a, b, c, d)
+            columns[f"{compartment}_pval_clustered"] = _hypergeom_tail(
+                "sf", a - 1, n_total, total, n_by_gene, eligible
+            )
+            columns[f"{compartment}_pval_depleted"] = _hypergeom_tail(
+                "cdf", a, n_total, total, n_by_gene, eligible
+            )
+        columns["median_signed_cell_distance_um"] = np.asarray(
+            counts.median_signed_cell_distance_um, dtype=np.float64
         )
-        row["n_cell_overlap_ambiguous"] = int(
-            np.count_nonzero(data.cell_overlap_count[gene_indices] > 1)
+        columns["median_signed_nucleus_distance_um"] = np.asarray(
+            counts.median_signed_nucleus_distance_um, dtype=np.float64
         )
-        row["n_nucleus_overlap_ambiguous"] = int(
-            np.count_nonzero(data.nucleus_overlap_count[gene_indices] > 1)
-        )
-        row["signed_distance_eligible"] = eligible
-        rows.append(row)
-    result = pd.DataFrame(rows)
+        for name, values in (
+            ("fraction_pericellular", counts.n_pericellular),
+            ("fraction_membrane_proximal", counts.n_membrane_proximal),
+        ):
+            numerator = np.asarray(values, dtype=np.int64)
+            columns[name] = np.where(
+                n_by_gene > 0, numerator / np.maximum(n_by_gene, 1), np.nan
+            )
+    columns["n_cell_overlap_ambiguous"] = np.asarray(
+        counts.n_cell_overlap_ambiguous, dtype=np.int64
+    )
+    columns["n_nucleus_overlap_ambiguous"] = np.asarray(
+        counts.n_nucleus_overlap_ambiguous, dtype=np.int64
+    )
+    columns["signed_distance_eligible"] = eligible.astype(bool)
+    result = pd.DataFrame(columns)
     for compartment in COMPARTMENTS:
         for tail in ("clustered", "depleted"):
             pval_col = f"{compartment}_pval_{tail}"
             qval_col = f"{compartment}_pval_{tail}_fdr_bh"
             result[qval_col] = _fdr(result[pval_col].to_numpy(float))
+    return result
+
+
+def _log2_odds(
+    a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray
+) -> np.ndarray:
+    """Return ``log2((a + .5)(d + .5) / ((b + .5)(c + .5)))`` element-wise."""
+    a_f, b_f, c_f, d_f = (np.asarray(v, dtype=np.float64) + 0.5 for v in (a, b, c, d))
+    odds: np.ndarray = np.log2((a_f * d_f) / (b_f * c_f))
+    return odds
+
+
+def _hypergeom_tail(
+    tail: str,
+    k: np.ndarray,
+    population: int,
+    successes: np.ndarray | int,
+    draws: np.ndarray,
+    eligible: np.ndarray,
+) -> np.ndarray:
+    """Return hypergeometric ``sf`` or ``cdf`` values where eligible, else NaN."""
+    k = np.asarray(k, dtype=np.int64)
+    successes_arr = np.broadcast_to(np.asarray(successes, dtype=np.int64), k.shape)
+    draws = np.broadcast_to(np.asarray(draws, dtype=np.int64), k.shape)
+    result = np.full(k.shape, np.nan, dtype=np.float64)
+    take = np.asarray(eligible, dtype=bool)
+    if take.any():
+        function = hypergeom.sf if tail == "sf" else hypergeom.cdf
+        result[take] = function(
+            k[take], int(population), successes_arr[take], draws[take]
+        )
     return result
 
 
@@ -353,77 +507,90 @@ def compute_signed_distance_enrichment(
     config: SpatialGeneAnalysisConfig,
 ) -> pd.DataFrame:
     """Compare each gene's signed boundary-distance distribution to background."""
+    return signed_distance_enrichment_from_counts(
+        gene_pattern_counts(data, config=config), config=config
+    )
+
+
+def signed_distance_enrichment_from_counts(
+    counts: GenePatternCounts,
+    *,
+    config: SpatialGeneAnalysisConfig,
+) -> pd.DataFrame:
+    """Compare each gene's signed-distance bin counts to all transcripts.
+
+    Vectorised over genes and bins with the per-value arithmetic of the
+    former row loop (rows ordered boundary, gene, bin).
+
+    Args:
+        counts: Per-gene counts of either transcript engine.
+        config: Analysis parameters (edges, ``transcript_min_count``).
+
+    Returns:
+        A long table: gene x boundary x bin, with observed and background
+        fractions, log2 odds, hypergeometric tails and their BH FDR per
+        boundary and bin.
+    """
     edges = np.asarray(config.signed_distance_edges_um, dtype=float)
-    rows: list[dict[str, Any]] = []
-    n_total = len(data.coordinates)
-    for boundary, all_distances in (
-        ("cell", data.signed_cell_distance_um),
-        ("nucleus", data.signed_nucleus_distance_um),
-    ):
-        all_bins = _signed_distance_bin_codes(all_distances, edges)
-        total_counts = np.bincount(all_bins, minlength=len(edges) + 1)
-        for code, gene in enumerate(data.gene_names):
-            gene_indices = _gene_indices(data, code)
-            n_gene = len(gene_indices)
-            eligible = n_gene >= config.transcript_min_count
-            gene_counts = np.bincount(
-                all_bins[gene_indices],
-                minlength=len(edges) + 1,
-            )
-            for bin_index, count in enumerate(gene_counts):
-                background_count = int(total_counts[bin_index])
-                a = int(count)
-                b = background_count - a
-                c = n_gene - a
-                d = (n_total - background_count) - c
-                rows.append(
+    n_bins = len(edges) + 1
+    n_by_gene = counts.n_transcripts
+    n_genes = len(counts.gene_names)
+    n_total = int(n_by_gene.sum())
+    eligible_gene = n_by_gene >= config.transcript_min_count
+    bin_index = np.arange(n_bins, dtype=np.int64)
+    distance_min = np.asarray(
+        [-np.inf if i == 0 else edges[i - 1] for i in range(n_bins)], dtype=np.float64
+    )
+    distance_max = np.asarray(
+        [np.inf if i == len(edges) else edges[i] for i in range(n_bins)],
+        dtype=np.float64,
+    )
+    labels = [_signed_bin_label(i, edges) for i in range(n_bins)]
+    parts: list[pd.DataFrame] = []
+    for boundary in SIGNED_DISTANCE_BOUNDARIES:
+        gene_bins = np.asarray(counts.distance_bin_counts[boundary], dtype=np.int64)
+        gene_bins = gene_bins.reshape(n_genes, n_bins)
+        total_counts = gene_bins.sum(axis=0)
+        a = gene_bins.reshape(-1)
+        n_gene = np.repeat(n_by_gene, n_bins)
+        background = np.tile(total_counts, n_genes)
+        eligible = np.repeat(eligible_gene, n_bins)
+        b = background - a
+        c = n_gene - a
+        d = (n_total - background) - c
+        with np.errstate(divide="ignore", invalid="ignore"):
+            parts.append(
+                pd.DataFrame(
                     {
-                        "gene": gene,
-                        "boundary": boundary,
-                        "bin_index": bin_index,
-                        "distance_min_um": (
-                            -np.inf if bin_index == 0 else edges[bin_index - 1]
+                        "gene": pd.Series(
+                            np.repeat(
+                                np.asarray(list(counts.gene_names), dtype=object),
+                                n_bins,
+                            ),
+                            dtype=object,
                         ),
-                        "distance_max_um": (
-                            np.inf if bin_index == len(edges) else edges[bin_index]
-                        ),
-                        "bin_label": _signed_bin_label(bin_index, edges),
+                        "boundary": pd.Series([boundary] * a.size, dtype=object),
+                        "bin_index": np.tile(bin_index, n_genes),
+                        "distance_min_um": np.tile(distance_min, n_genes),
+                        "distance_max_um": np.tile(distance_max, n_genes),
+                        "bin_label": pd.Series(labels * n_genes, dtype=object),
                         "n_transcripts": n_gene,
                         "eligible": eligible,
                         "observed_count": a,
                         "observed_fraction": a / n_gene,
-                        "background_count": background_count,
-                        "background_fraction": background_count / n_total,
-                        "enrichment_log2_odds": float(
-                            np.log2(((a + 0.5) * (d + 0.5)) / ((b + 0.5) * (c + 0.5)))
+                        "background_count": background,
+                        "background_fraction": background / n_total,
+                        "enrichment_log2_odds": _log2_odds(a, b, c, d),
+                        "pval_enriched": _hypergeom_tail(
+                            "sf", a - 1, n_total, background, n_gene, eligible
                         ),
-                        "pval_enriched": (
-                            float(
-                                hypergeom.sf(
-                                    a - 1,
-                                    n_total,
-                                    background_count,
-                                    n_gene,
-                                )
-                            )
-                            if eligible
-                            else np.nan
-                        ),
-                        "pval_depleted": (
-                            float(
-                                hypergeom.cdf(
-                                    a,
-                                    n_total,
-                                    background_count,
-                                    n_gene,
-                                )
-                            )
-                            if eligible
-                            else np.nan
+                        "pval_depleted": _hypergeom_tail(
+                            "cdf", a, n_total, background, n_gene, eligible
                         ),
                     }
                 )
-    result = pd.DataFrame(rows)
+            )
+    result = pd.concat(parts, ignore_index=True)
     result["pval_enriched_fdr_bh"] = np.nan
     result["pval_depleted_fdr_bh"] = np.nan
     for _, indices in result.groupby(
@@ -444,15 +611,31 @@ def add_signed_distance_summary(
     summary: pd.DataFrame,
     signed_distance: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Add transparent per-bin signed-distance metrics to the gene summary."""
+    """Add transparent per-bin signed-distance metrics to the gene summary.
+
+    One column triple per boundary and bin, in the order the bins first
+    appear in ``signed_distance``; genes without a row get NaN.
+    """
     result = summary.copy()
-    for row in signed_distance.itertuples(index=False):
-        take = result["gene"] == row.gene
-        prefix = f"signed_distance_{row.boundary}_{row.bin_label}"
-        result.loc[take, f"{prefix}_enrichment_log2_odds"] = row.enrichment_log2_odds
-        result.loc[take, f"{prefix}_enriched_fdr_bh"] = row.pval_enriched_fdr_bh
-        result.loc[take, f"{prefix}_depleted_fdr_bh"] = row.pval_depleted_fdr_bh
-    return result
+    if signed_distance.empty:
+        return result
+    new_columns: dict[str, pd.Series] = {}
+    genes = result["gene"]
+    for (boundary, label), group in signed_distance.groupby(
+        ["boundary", "bin_label"], sort=False
+    ):
+        prefix = f"signed_distance_{boundary}_{label}"
+        by_gene = group.drop_duplicates("gene", keep="last").set_index("gene")
+        for source, suffix in (
+            ("enrichment_log2_odds", "enrichment_log2_odds"),
+            ("pval_enriched_fdr_bh", "enriched_fdr_bh"),
+            ("pval_depleted_fdr_bh", "depleted_fdr_bh"),
+        ):
+            values = genes.map(by_gene[source]).astype(np.float64)
+            new_columns[f"{prefix}_{suffix}"] = values
+    added = pd.DataFrame(new_columns, index=result.index)
+    added = added.loc[:, [c for c in added.columns if c not in result.columns]]
+    return pd.concat([result, added], axis=1)
 
 
 def compute_multiscale_pair_correlation(

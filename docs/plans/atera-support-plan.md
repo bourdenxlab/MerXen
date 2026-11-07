@@ -2590,3 +2590,23 @@ but `AnnotationReferences.HIERARCHY_SOURCES` hashes all of `merxen/config.py` an
 platforms. This continuation has not launched any published clustering refresh.
 The vendor-prior layer rename intentionally refreshes the Atera stitch and its
 derived stages when that route is relaunched.
+
+**AT-8 WP4 continuation (2026-11-07).** The label-raster transcript-pattern
+engine is integrated with the Cellpose route. Cell-label elements resolve from
+the store registry for original, Cellpose, Cellpose-prior ProSeg and vendor-prior
+ProSeg layers, including historical vendor-prior stores with the old `reseg`
+name. Missing registered masks do not silently select another route's mask.
+The recovered vendor/native-prior crop and full-section runs all completed with
+reconciled transcript accounting. The three analysis modules' function/class
+bodies match their measured source snapshot except for the layer resolver.
+
+The combined branch passes 157 focused engine, statistics and workflow checks,
+plus 154 annotation-contract and table-key checks after the AT-7 synchronization.
+The legacy polygon statistics retain their parity checks. Real full-section
+Cellpose and Cellpose-prior MECR scoring both completed: 235,917 objects, all
+190 reference markers and all 11,754 eligible pairs scored on each layer. Store
+file comparisons after both stages found no changes. Transcript-pattern exit
+runs for those two layers are in progress, sequentially and at low priority,
+with fresh output directories and an immutable code snapshot. Their status and
+source/store manifests are under the continuation evidence directory in
+`MERXEN_EVIDENCE_ROOT`. No clustering or dotplot regeneration is scheduled.
