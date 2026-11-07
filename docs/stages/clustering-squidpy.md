@@ -162,6 +162,36 @@ nextflow run workflows/main.nf \
     --clustering_squidpy_broad_reference_cache_dir /durable/mapmycells-cache
 ```
 
+## Whole-transcriptome panels (more than 5,000 genes)
+
+A sample whose panel has more than 5,000 non-control genes
+(`merxen.gene_sets.WHOLE_TRANSCRIPTOME_MIN_GENES`; Xenium Prime 5K with 5,001
+or 5,006 genes counts, as does ATERA) runs the PCA on highly variable genes even
+when its sample JSON sets no `hvg_n_top_genes` (Atera plan AT-8, user decision
+of 2026-11-07). The rule is the panel width, whatever the platform:
+
+- The width is counted on the clustering input before the min-cell filter and
+  without control features, so genes detected in no cell do not move a 5,001-gene
+  panel back under the threshold. Branch and neuron rounds, which receive the
+  broad round's gene-filtered matrix, inherit the width the broad round
+  recorded, so all rounds of a sample follow the same rule.
+- The automatic count is `WHOLE_TRANSCRIPTOME_HVG_N_TOP_GENES` = 2,000
+  (`cell_ranger`, the same selection as below), equal to the default of
+  `params.atera_clustering_hvg_n_top_genes`; a test keeps the two in step.
+- The round's `uns` parameters add `hvg_selection_reason`
+  (`whole_transcriptome_panel`, or `requested` when the sample set
+  `hvg_n_top_genes`), `n_panel_genes` and `whole_transcriptome_min_genes`.
+- The rule lives in Python, not in the workflow: no sample JSON or process
+  script changes, so the task hashes of every row are unchanged. The 300-gene
+  XENIUM and MERSCOPE rows keep the all-gene PCA and their exact `uns` records.
+  A cached 5K clustering task is therefore not re-run by `-resume`; re-run it
+  (or clear its work directory) to get the HVG PCA.
+- An explicit `hvg_n_top_genes` always wins. There is no opt-out back to the
+  all-gene PCA for a wide panel; setting `atera_clustering_hvg_n_top_genes` to
+  `null` now gives ATERA rows the same automatic 2,000 genes.
+- The map_first QC embedding (`clustering/representation.py`: `seurat` flavour,
+  panels above 1,000 genes) is a separate rule and is unchanged.
+
 ## ATERA (whole-transcriptome) samples
 
 ATERA rows (AT-6, native segmentation) cluster the vendor cells of

@@ -1020,7 +1020,15 @@ def _eligible_counts(
     eligible_indices = np.flatnonzero(~control_mask)
     if eligible_indices.size == 0:
         raise ValueError("No eligible non-control genes remain for GASTON")
-    eligible_indices = eligible_indices[: int(max_genes)]
+    if eligible_indices.size > int(max_genes):
+        # Truncating would silently keep the first genes in var order, which
+        # depends on the vendor's feature table rather than on biology.
+        raise ValueError(
+            f"GASTON has {eligible_indices.size} eligible non-control genes, more "
+            f"than gaston_max_genes={int(max_genes)}. Raise gaston_max_genes to "
+            "at least the panel size or turn GASTON off for this row; GASTON "
+            "no longer keeps the first genes in var order."
+        )
     matrix = clustered.layers["counts"][:, eligible_indices]
     counts = sparse.csr_matrix(matrix)
     counts.eliminate_zeros()
