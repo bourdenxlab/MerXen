@@ -619,7 +619,10 @@ proseg tile.parquet xenium -x x_location -y y_location -z z_location
   `fov_name` and float32 coordinates and QV. Controls are not exported.
 - ProSeg scales `--prior-weight` by `max(mean transcripts per cell / 100, 1)`.
   `atera_proseg_prior_weight` (140) is the *effective* weight: each tile's
-  multiplier `m` undoes that scaling. ProSeg takes the mean after its own
+  multiplier `m` undoes that scaling. It is fixed because ProSeg's automatic
+  value follows each tile's density (about 113 to 152 over the full section's
+  tiles, falling towards 1 on sparse edge tiles), so tiles would weigh the
+  same prior differently. ProSeg takes the mean after its own
   cell-free filter, so the weight it prints is lower by the share of rows that
   filter drops (0.3% on the crop, at most 0.7% per tile on the full section).
   A run that prints a weight more than 2% off is stopped as soon as it prints
@@ -743,10 +746,16 @@ The segment stage runs:
   (morphology grid), so they follow the vendor's corner rule everywhere:
   `floor(x / ps)` lookups, ProSeg transforms `[ps, 0, col0 ps]`, polygons at
   pixel centres + 0.5 px. XENIUM keeps its own rule.
-- **Prior weight.** `atera_cellpose_proseg_prior_weight=null` (default) gives
-  every tile ProSeg's automatic weight of one whole-section run,
-  `max(gene rows / Cellpose cells / 100, 1)`, as a single XENIUM run gets it;
-  a number fixes it. A weight of 1 is not printed by ProSeg and is accepted.
+- **Prior weight.** `atera_cellpose_proseg_prior_weight` (140, as
+  `atera_proseg_prior_weight`) is the effective weight of every tile. A fixed
+  weight treats every tile alike: ProSeg's own value,
+  `max(mean transcripts per cell / 100, 1)` per tile, varied from about 113 to
+  152 with density over AT-9's tiles and collapses towards 1 on sparse edge
+  tiles. `null` gives every tile the automatic weight of one whole-section
+  run, `max(gene rows / Cellpose cells / 100, 1)` (38.8 on the crop). On the
+  crop's dense tile 140 and 38.8 gave the same cells (1,381 and 1,382 of
+  3,141 owned cells without transcripts). A weight of 1 is not printed by
+  ProSeg and is accepted.
 - **Nuclear compartment** off (`atera_cellpose_proseg_nuclear_compartment`):
   no vendor segmentation feeds the Cellpose route, and the XENIUM CSV has none.
 - **ENRICH** enriches the vendor layer natively, checks the stitched `reseg`

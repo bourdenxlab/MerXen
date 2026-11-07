@@ -381,7 +381,8 @@ def test_atera_cellpose_route_and_its_restart_arm(tmp_path: Path) -> None:
         "mask_path": "prior_mask.npy",
         "cellprob_path": "prior_cellprob.npy",
     }
-    assert plan["prior_weight_effective"] is None
+    # The fixed effective weight of the vendor route (AT-9 follow-up).
+    assert plan["prior_weight_effective"] == 140.0
     published = tmp_path / "results" / "PAIR_A" / "atera" / "segmentation"
     for tile in calls["atera-proseg-tile"]:
         assert tile["prior"]["kind"] == "cellpose"
