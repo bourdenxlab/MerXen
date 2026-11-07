@@ -182,8 +182,11 @@ of 2026-11-07). The rule is the panel width, whatever the platform:
   (`whole_transcriptome_panel`, or `requested` when the sample set
   `hvg_n_top_genes`), `n_panel_genes` and `whole_transcriptome_min_genes`.
 - The rule lives in Python, not in the workflow: no sample JSON or process
-  script changes, so the task hashes of every row are unchanged. The 300-gene
-  XENIUM and MERSCOPE rows keep the all-gene PCA and their exact `uns` records.
+  script changes, so the clustering task hashes of every row are unchanged.
+  The 300-gene XENIUM and MERSCOPE rows keep the all-gene PCA and their exact
+  `uns` records. (Like any edit of this module, the change does alter the
+  map_first hierarchy fingerprint, so the annotation `COMPUTE_CPU` task re-runs
+  once under `-resume`.)
   A cached 5K clustering task is therefore not re-run by `-resume`; re-run it
   (or clear its work directory) to get the HVG PCA.
 - An explicit `hvg_n_top_genes` always wins. There is no opt-out back to the

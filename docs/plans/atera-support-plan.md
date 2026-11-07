@@ -1760,9 +1760,12 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
   runs the PCA on 2,000 `cell_ranger` highly variable genes for such a panel when the sample sets no
   `hvg_n_top_genes`, and records why in `uns`; GASTON raises instead of keeping the first
   `gaston_max_genes` genes; pciSeq refuses an atlas reference without an explicit `gene_names` list on such
-  a panel. The rules live in Python: no sample JSON or process script changes, so every row's task hashes
-  are unchanged and the 300-gene XENIUM/MERSCOPE outputs are unchanged. A cached 5K clustering task is not
-  re-run by `-resume`. The map_first QC embedding's own HVG rule (`seurat`, above 1,000 genes) is
+  a panel. The rules live in Python: no sample JSON or process script changes, so the clustering, GASTON
+  and pciSeq task hashes of every row are unchanged and the 300-gene XENIUM/MERSCOPE outputs are unchanged.
+  A cached 5K clustering task is not re-run by `-resume`. As with any edit of
+  `analysis/clustering_squidpy.py` or `config.py`, the map_first hierarchy fingerprint
+  (`HIERARCHY_SOURCES`) changes, so the annotation `COMPUTE_CPU` task of every row re-runs once (same
+  labels expected: the hierarchy does not run the legacy HVG rule). The map_first QC embedding's own HVG rule (`seurat`, above 1,000 genes) is
   unchanged.
 
 ### AT-9 `[feature]`: ProSeg for Atera, conditional on AT-5b (8–12 d)
