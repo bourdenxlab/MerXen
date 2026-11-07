@@ -2606,7 +2606,25 @@ The legacy polygon statistics retain their parity checks. Real full-section
 Cellpose and Cellpose-prior MECR scoring both completed: 235,917 objects, all
 190 reference markers and all 11,754 eligible pairs scored on each layer. Store
 file comparisons after both stages found no changes. Transcript-pattern exit
-runs for those two layers are in progress, sequentially and at low priority,
-with fresh output directories and an immutable code snapshot. Their status and
+runs for those two layers completed, sequentially and at low priority, with
+fresh output directories and an immutable code snapshot. Independent checks
+reconciled all 1,409,601,228 input rows on each layer and all 18,049 gene
+summaries. Both use the same tissue-support mask. Each layer's 72 PNG outputs
+passed image-file verification; the source store remained unchanged. Geometric
+mask counts are distinct from ProSeg's probabilistic transcript assignments and
+are not expected to equal those assignments. The legacy signed-distance plot
+formula can show large log odds in bins with no observations; these bins have
+non-significant p-values and must not be interpreted as enrichment evidence.
+PR #122 is merged into `feature/atera-support` after its CI passed. Status and
 source/store manifests are under the continuation evidence directory in
 `MERXEN_EVIDENCE_ROOT`. No clustering or dotplot regeneration is scheduled.
+
+**AT-11 continuation (2026-11-07).** Cell-type annotation is the next priority.
+The [annotation execution plan](atera-celltype-annotation-plan.md) separates
+donor-held-out reference selection, independent donor confirmation, a spatial
+pilot and production integration. The recovered all-donor hippocampal probe
+establishes feasibility, not held-out accuracy. New validation helpers enforce
+donor exclusion before reference statistics, retain unseen truth classes in
+accuracy denominators and refuse lost or duplicated prediction IDs. The
+experimental queries keep all 18,049 panel columns. Existing broad-class labels
+remain provisional while the new hippocampal evidence is collected.
