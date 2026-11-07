@@ -406,6 +406,14 @@ def test_a_vendor_stitch_replaces_the_cellpose_layer(
         _enrich_config(route, store, tmp_path / "enrich_out"), polygon_n_jobs=2
     )
     assert "MOSAIK_cellpose" in sd.read_zarr(store).shapes
+    # And VIEWER_CACHE: base masks of both layers and a derived level.
+    viewer_labels = (
+        "MOSAIK_proseg_labels",
+        "_napari_compare_outline__MOSAIK_proseg_labels__w1",
+        "MOSAIK_cellpose_labels",
+        "_napari_compare_labelpyr__MOSAIK_cellpose_labels__ds4",
+    )
+    _write_viewer_labels(store, viewer_labels)
     report = stitch(stitch_config(store, vendor_plan, dirs, tmp_path / "vendor_out"))
     removed = report["removed_foreign_layer"]
     assert "shapes/MOSAIK_proseg" in removed
@@ -415,6 +423,7 @@ def test_a_vendor_stitch_replaces_the_cellpose_layer(
         "labels/cellpose_cell_labels",
         "registry/cellpose",
         "attrs/merxen_atera_cellpose_layer",
+        *(f"labels/{name}" for name in viewer_labels),
     ):
         assert element in removed, element
     sdata = sd.read_zarr(store)
@@ -427,11 +436,23 @@ def test_a_vendor_stitch_replaces_the_cellpose_layer(
     registry = sdata.attrs[MERXEN_SCHEMA_ATTR]["segmentations"]
     assert "proseg" not in registry and "proseg_vendor" in registry
     assert "cellpose" not in registry
+    assert not set(viewer_labels) & set(sdata.labels)
     schema = pq.read_schema(
         next(points_parquet_dir(store, "transcripts").glob("*.parquet"))
     )
     assert CELLPOSE_ASSIGNMENT_COLUMN not in schema.names
     assert check_proseg_layer(store)["passed"]
+
+
+def _write_viewer_labels(store: Path, names: tuple[str, ...]) -> None:
+    from spatialdata.models import Labels2DModel
+
+    sdata = sd.read_zarr(store, selection=("labels",))
+    for name in names:
+        sdata[name] = Labels2DModel.parse(
+            np.zeros((4, 4), dtype=np.uint32), dims=("y", "x")
+        )
+        sdata.write_element(name)
 
 
 # --------------------------------------------------------------------------- #

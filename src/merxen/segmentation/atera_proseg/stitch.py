@@ -105,6 +105,11 @@ from merxen.segmentation.atera_proseg.seams import (
     core_box,
 )
 from merxen.segmentation.atera_proseg.tile import read_tile_manifest
+from merxen.viewer_cache.format import (
+    DERIVED_CACHE_PREFIX,
+    label_key_for_shape_key,
+    safe_cache_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -838,6 +843,28 @@ def derived_tables(latest: Path, shapes_key: str, table_key: str) -> list[str]:
     return found
 
 
+def viewer_cache_labels(latest: Path, shape_key: str) -> list[str]:
+    """Return the viewer cache's label elements of a shape that a store holds.
+
+    VIEWER_CACHE writes the base mask ``<shape>_labels`` (for a ProSeg layer, an
+    alias of its label element) and that mask's pyramid and outline levels.
+    """
+    root = latest / "labels"
+    if not root.is_dir():
+        return []
+    base = label_key_for_shape_key(shape_key, set())
+    token = safe_cache_token(base)
+    derived = (
+        f"{DERIVED_CACHE_PREFIX}labelpyr__{token}__ds",
+        f"{DERIVED_CACHE_PREFIX}outline__{token}__w",
+    )
+    return sorted(
+        path.name
+        for path in root.iterdir()
+        if path.is_dir() and (path.name == base or path.name.startswith(derived))
+    )
+
+
 def _foreign_layers(latest: Path, layer: ProsegLayer) -> list[ProsegLayer]:
     """Return the other prior kinds' layers present in a store."""
     found = []
@@ -851,7 +878,7 @@ def _foreign_layers(latest: Path, layer: ProsegLayer) -> list[ProsegLayer]:
                 ("tables", other.table_key),
                 ("labels", other.label_key),
             )
-        ):
+        ) or viewer_cache_labels(latest, other.shapes_key):
             found.append(other)
     return found
 
@@ -881,7 +908,7 @@ def _stale_cellpose_mask_elements(
             ("labels", CELLPOSE_LABEL_KEY),
         )
         if _element_exists(latest, kind, name)
-    ]
+    ] + [("labels", name) for name in viewer_cache_labels(latest, CELLPOSE_SHAPES_KEY)]
 
 
 def _remove_stale_cellpose_mask_layer(
@@ -929,7 +956,9 @@ def _remove_foreign_layers(
     whose source changed or by a stitch from before the vendor layer was
     renamed (it used the Cellpose layer's names), and would be read as the
     current layer. A vendor stitch also removes the Cellpose mask layer
-    (``proseg_mask``) of an earlier ``cellpose_proseg`` run.
+    (``proseg_mask``) of an earlier ``cellpose_proseg`` run. The viewer cache's
+    labels of a removed shape (its ``<shape>_labels`` alias, pyramid and
+    outline) go with it.
 
     Returns:
         The deleted elements as ``kind/name``.
@@ -945,6 +974,7 @@ def _remove_foreign_layers(
             ("tables", other.table_key),
             ("shapes", other.shapes_key),
             ("labels", other.label_key),
+            *(("labels", key) for key in viewer_cache_labels(latest, other.shapes_key)),
         ):
             if _element_exists(latest, kind, name):
                 delete_element(sdata, name, kind)
