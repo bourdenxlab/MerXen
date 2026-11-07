@@ -28,6 +28,7 @@ def check(String id, Map row) {
             run_mapmycells: settings.run_mapmycells,
             transcript_analysis: settings.spatial_gene_analysis_transcript_analysis_enabled,
             setting_notes: settings.setting_notes,
+            clustering_squidpy_mode: AnnotationSettings.mode(settings),
         ]
     } catch (Throwable error) {
         value = [error_class: error.getClass().getName(), message: error.getMessage()]
@@ -39,6 +40,21 @@ def checkStages(String id, Map row, Map settings) {
     def errors = []
     appendAteraPreflightChecks(errors, row, settings, params)
     println "CASE\t${id}\t" + groovy.json.JsonOutput.toJson([errors: errors])
+}
+
+// The launch-log lines of a samplesheet's annotation modes (main.nf
+// annotationModeLaunchLog).
+def checkLaunchLog(String id, List rows) {
+    println "CASE\t${id}\t" + groovy.json.JsonOutput.toJson(annotationModeLaunchLog(rows, params))
+}
+
+// Whether --annotation_prepare_only leaves the row out (main.nf
+// ateraPrepareOnlyRow).
+def checkPrepareOnly(String id, Map row) {
+    def settings = rowSampleSettings(row, params)
+    def leftOut = ateraPrepareOnlyRow([settings.pair_id, row, settings])
+    // A line of its own: the log line above may end without a newline.
+    println "\nCASE\t${id}\t" + groovy.json.JsonOutput.toJson([left_out: leftOut])
 }
 
 workflow {
@@ -55,6 +71,11 @@ workflow {
     check("atera/analysis_original", atera + [analysis_segmentation: "original"])
     check("atera/analysis_all", atera + [analysis_segmentation: "all"])
     check("atera/mecr_off", atera + [mecr_enabled: "false"])
+    // map_first annotation is gated off for ATERA rows (AT-11, RCA on Atera):
+    // a row without its own mode clusters in legacy mode, a row that names
+    // legacy keeps it, and a row that names map_first is refused.
+    check("atera/legacy_row", atera + [clustering_squidpy_mode: "legacy"])
+    check("atera/map_first_row", atera + [clustering_squidpy_mode: "map_first"])
     // Refused rows, one message each.
     check("atera/stop_mapmycells", atera + [stop_stage: "mapmycells"])
     check("atera/only_mapmycells", atera + [only_stage: "mapmycells"])
@@ -116,5 +137,18 @@ workflow {
         atera + [pair_id: "PAIR_E"],
         [pair_id: "PAIR_E", active_platforms: ["ATERA"], selected_stages: [], stage_order: []],
     )
+    // Launch log: the mode summary labels ATERA rows held in legacy mode, and
+    // no ATERA row (held in legacy mode or naming legacy itself) raises the
+    // legacy deprecation warning.
+    def ateraLegacy = atera + [clustering_squidpy_mode: "legacy"]
+    def xeniumLegacy = xenium + [pair_id: "PAIR_D", clustering_squidpy_mode: "legacy"]
+    checkLaunchLog("log/atera", [atera])
+    checkLaunchLog("log/atera_legacy_row", [ateraLegacy])
+    checkLaunchLog("log/mixed", [xenium, atera + [pair_id: "PAIR_C"]])
+    checkLaunchLog("log/mixed_atera_legacy_row", [xenium, ateraLegacy])
+    checkLaunchLog("log/mixed_xenium_legacy_row", [xenium, atera + [pair_id: "PAIR_C"], xeniumLegacy])
+    // --annotation_prepare_only builds no reference bundle for ATERA rows.
+    checkPrepareOnly("prepare_only/atera", atera)
+    checkPrepareOnly("prepare_only/xenium", xenium + [stop_stage: "build_spatialdata"])
     println "DONE"
 }

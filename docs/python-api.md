@@ -485,6 +485,181 @@ See [Mutually exclusive co-expression rate](stages/mecr.md).
 
 See [MapMyCells](stages/mapmycells.md).
 
+## `merxen.annotation` (in development)
+
+Reference-based annotation (plan `docs/plans/robust-celltype-annotation-plan.md`).
+`schema`, `vocab` and `config` import only numpy, pandas and pydantic;
+`reference` imports `cell_type_mapper`, `h5py` and `anndata` lazily.
+
+### `annotation.store` — [store.py](../src/merxen/annotation/store.py)
+
+- `ReferenceStore.get_or_build(spec, panel)` — content-addressed bundles
+  (`<store>/<reference_id>/<build_hash>/`), built once under `flock` and
+  renamed atomically; `list()`, `prune(dry_run=True)` never delete.
+- `build_hash_payload`, `compute_build_hash`, `ANNOTATION_BUILDER_VERSION`.
+
+### `annotation.panel` — [panel.py](../src/merxen/annotation/panel.py)
+
+- `compute_panel(prepared_dir, species, platforms)`, `panel_from_gene_list` —
+  declared panels, set a / set c, `required_bundles.json`.
+
+### `annotation.reference` — [reference.py](../src/merxen/annotation/reference.py)
+
+- Builders registered with the store: `build_whb_frontal`, `build_seaad_mr`,
+  `build_wmb_panel`, `build_wmb_region_share`, `build_whb_whole_ctx`;
+  `builder_for(spec)`, `build_reference_bundle(store, spec, panel)`.
+- `prepare_reference_spec(spec, SourceOptions(...))` — expands source
+  directories and fills pinned SEA-AD files before `build_hash`;
+  `ensure_seaad_multiregion_inputs`, `ensure_pinned_file`.
+- `TaxonomyTreeView`, `mapping_tree`, `filter_lookup_to_tree`,
+  `validate_lookup` (auto-collapse of parents without markers) — lookup
+  handling without `cell_type_mapper`.
+- `read_precomputed_stats`, `reference_profiles_from_stats`,
+  `broad_class_detection`, `negative_gene_table`, `node_vocab_table`,
+  `write_panel_stub_h5ad`, `merfish_region`, `region_share_tables`.
+
+### `annotation.mapmycells_engine` — [mapmycells_engine.py](../src/merxen/annotation/mapmycells_engine.py)
+
+The MapMyCells engine of the MAP step (plan §3.3); `cell_type_mapper` runs
+in a subprocess (`merxen.analysis.mapmycells_entrypoint`) and is never
+imported here.
+
+- `MmcEngineParams` — bootstrap factor 0.5, 100 iterations, seed 0, raw
+  normalisation, `n_processors`; `reuse_key()` is the reuse identity;
+  `from_reference_spec(spec, n_processors=...)`.
+- `MmcBundle` — a complete store bundle (`from_dir`, `from_bundle_ref`):
+  precompute, tree, lookup, levels, `drop_level`, vocab snapshot.
+- `run_mmc(query_h5ad, bundle, params, output_parquet=..., work_dir=...,
+  expected_ctm_version=...)` — one mapping with one BLAS / numba thread per
+  worker and no GPU; checks the recorded settings, writes the tidy parquet
+  and deletes the extended JSON (or keeps it gzipped).
+- `check_ctm_version`, `installed_ctm_version`, `ctm_commit`,
+  `mmc_environment`, `build_mmc_command`.
+- `query_fingerprint(cell_ids, total_counts, gene_ids)` — the reuse key of a
+  query; `write_query_h5ad`; `restrict_lookup` (a lookup restricted to the
+  genes a dataset has, parents without markers auto-collapsed).
+- `parse_extended_json_tidy`, `write_tidy_parquet`, `read_tidy_parquet`,
+  `level_frame`, `TIDY_SCHEMA_VERSION` — the tidy per cell × level table;
+  `aggregate_parent_probability` (lineage / broad / NT mass over the
+  assigned node's class).
+
+### `annotation.pipeline` — [pipeline.py](../src/merxen/annotation/pipeline.py)
+
+`annotate_map` and its inputs (`merxen annotate`, `CLUSTERING_SQUIDPY_ANNOTATE_MAP`):
+
+- `annotate_map(samples, runs, config, output_dir=..., reuse_from=...)` —
+  maps every sample on the runs that apply to its platform, writes the tidy
+  parquets, the provisional `ct_*` parquet and `map_manifest.json`
+  (`MapManifest`, `MapSampleRecord`, `MapRunRecord`); reuses identical
+  published runs; maps a query shared by two runs once.
+- `map_bundles(required, panel_dir, bundles, config)` — one `MapBundle` per
+  use of a required bundle (annotation, `_setc`, `_xpanel`).
+- `load_samples`, `build_sample_query` (`SampleQuery`), `read_h5ad_counts`;
+  `locate_bundle(store, reference_id, panel_hash)`, `bundle_ref_bundle`.
+- `provisional_labels`, `engine_columns`, `write_provisional_parquet` — the
+  raw-threshold labels (provisional until RESOLVE).
+- `load_map_manifest`, `load_published_manifest` (reuse source; an
+  unreadable manifest returns `None`), `load_required`,
+  `write_refused_manifest`, `refused_platforms`.
+- `published_layout`, `results_root_of`, `check_output_outside_inputs` —
+  the standalone command never writes into a results tree.
+
+`annotate_resolve` and its inputs (`merxen annotate-resolve`,
+`CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE`):
+
+- `annotate_resolve(map_dir, config, output_dir=..., samples=...,
+  bundle_finder=..., alignment_dir=..., lookup_alignment=True)` — per
+  sample the label table, the annotation manifest and the pair's
+  `<pair>_resolve_summary.json` (`ResolveResult`, `SampleResolution`).
+- `load_resolve_runs` (`ResolveRun`) — the tidy parquets (sha256 checked)
+  and the bundle of each run; `current_store_bundles(store)` (the store's
+  current bundle per reference and panel) and
+  `staged_bundle_finder(ref_paths, manifest, require=...)` (the bundles of
+  staged `bundle_ref.json` files; with `require`, every run must have one of
+  the build it mapped with) pick the bundles.
+- `human_calls_from_runs`, `resolve_human_sample`, `human_branch_columns`,
+  `write_label_table`, `read_label_table`.
+
+### `annotation.shadow` — [shadow.py](../src/merxen/annotation/shadow.py)
+
+M3 shadow evaluation (plan §5.2–§5.5, §14):
+
+- Compositions: `soft_broad_matrix`, `soft_matrix_from_provisional`,
+  `one_hot_broad_matrix`, `argmax_broad_names`, `composition_shares`,
+  `jensen_shannon_distance`.
+- Spatial CIs: `tile_codes`, `shared_tile_codes` (one grid over two
+  co-registered sections), `tile_sums`, `block_bootstrap_jsd`
+  (`resampling="joint"`, the registered method: one draw of tile locations
+  for both sections; `"independent"` as a sensitivity).
+- SEA-AD 7-class calls: `seaad_broad_calls` (E2's definition with
+  `class_level`: class bp for neurons, class bp × subclass mass otherwise).
+- Shadow v1 human rules: `evaluate_human_rules` (with `HumanRuleInputs`,
+  `rule_inputs_from_provisional`, `FloorLookup`, `SECOND_VOTE_VARIANTS`) and
+  `dataset_gate`.
+- `label_agreement`, `marker_class_scores`, `marker_referee` (the E1
+  referee).
+- Shadow items 2–7: `seaad_soft_broad_matrix`,
+  `paired_block_bootstrap_jsd_difference` (paired CIs of JSD differences;
+  `GLIAL_COLUMNS`); held-out genes `select_heldout_markers`,
+  `heldout_enrichment`, `auroc`; X1 `profile_matrix`,
+  `reference_pseudobulk_log2_factors`, `rescale_counts`; flag prototypes
+  `negative_gene_mask`, `negative_counts`, `fit_beta_binomial`,
+  `beta_binomial_upper_tail`, `contamination_flags`, `class_profiles`,
+  `depth_grid`, `distinct_gene_quantiles`, `expected_genes_quantile`,
+  `realised_rates`; E8 `occupied_area_mm2`, `foreign_marker_fraction`,
+  `mouse_confidence`; variant re-maps `published_queries`,
+  `map_query_variant` (reuses a parquet only when its metadata records the
+  same variant, `variant_sha256`), `whb_labels_from_tidy`. The `seaad_or_ll` second vote
+  is the v1.1 degraded-mode row (§5.3); `HumanRuleInputs.ll_scheme` selects
+  E2's or the 7-class LL comparison.
+
+See [Reference-based annotation](stages/annotation.md).
+
+### `annotation.report` — [report.py](../src/merxen/annotation/report.py)
+
+The annotation QC report (plan §9; M7):
+
+- `build_annotation_report(sources, out_dir, options=..., allow_results_output=False)`
+  (`ReportResult`); `check_output_dir` and `guarded_directories` (the output
+  stays out of every input's results tree, the store, the recorded bundles
+  and the held-out CSV's directory); `ITEM_BUILDERS`.
+- Inputs (`report_inputs`): `discover_sources` (the published layout),
+  `ReportSources`, `load_report_inputs` (`ReportInputs`, `SampleData`),
+  `read_clustered_table`, `load_heldout`, `depth_cells_file` (a
+  segmentation's cell table in a `compute_cortical_depth_out`),
+  `report_results_root` (the results root of any published input),
+  `recorded_bundle_dirs`.
+- Metrics (`report_metrics`, numpy / pandas only): `soft_level_matrix`,
+  `one_hot_matrix`, `block_bootstrap_shares` (`ShareResult`),
+  `jensen_shannon_distance`, `aligned_bin_density_correlation`,
+  `median_block_ci` (`MedianCi`), `depth_ordering` (`OrderingResult`),
+  `depth_replication` (`ReplicationResult`), `share_contrast`,
+  `depth_profile`, `profile_gradient`, `platform_gene_log2_ratios`,
+  `group_mean_counts`, `log_cpm`, `nearest_centroid`,
+  `agreement_by_quantile`, `histogram_2d`, `tile_mean_map`,
+  `self_thinning_eligibility`, `tangential_block_codes` (the H12 bootstrap
+  unit), `depth_input_agreement` (`DepthAgreement`; the label-free depth
+  check).
+- Panel card (`report_panel`): `build_panel_card` (`PanelCard`),
+  `trust_banners` (`Banner`), `resolvability_curves`, `resolvability_bins`,
+  `bundle_marker_rows`, `v7_notes`.
+- Items: `report_items` (1, 2, 3, 5, 6, 8, 11, 12; `sink_rows_of`,
+  `reference_node_shares`), `report_expression` (4, 7; `broad_profiles`,
+  `canonical_marker_genes`, `cross_platform_basis`), `report_depth` (9;
+  `depth_validity`), `report_mouse` (10; `ap_fields`,
+  `subclass_region_table`, `window_composition`).
+- Model (`report_model`): `AcceptanceMetrics`, `MetricRecord`, `metric`,
+  `CriterionCoverage`, `ReportItem`, `ReportOptions`.
+
+### `annotation.likelihood` — [likelihood.py](../src/merxen/annotation/likelihood.py)
+
+The LL (vii) count-likelihood typer (E1 `14_ll_contam.py`) on a bundle's
+`profiles.parquet`: `reference_from_profiles` (leaf profiles, prior,
+contaminant class profiles), `platform_log2_factors` (EM factors, optional
+±2 log2 cap), `mixture_posterior` (spill-over mixture), `summarize_posterior`
+(supercluster / broad / lineage) and `run_ll_vii`. Used by the M3 LL value
+test; not part of v1 (OD-B8).
+
 ## `merxen.memory`
 
 Process-wide RAM monitoring. Not user-facing but useful when writing

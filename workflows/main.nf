@@ -45,6 +45,10 @@ include {
     GASTON_POSTPROCESS;
     GASTON_IMPORT
 } from "./modules/gaston"
+// rca-hook:H1: reference-based annotation (plan §2.4); nothing runs in legacy mode.
+include { ANNOTATION_PREPARE_ONLY } from "./subworkflows/annotation_references"
+include { CLUSTERING_MAP_FIRST } from "./subworkflows/clustering_map_first"
+include { ANNOTATION_REPORTING } from "./subworkflows/annotation_report"
 
 def parseChannels(rawValue, defaults) {
     if (rawValue == null) {
@@ -691,14 +695,18 @@ def analysisLayerKeys(platform, segmentation) {
     throw new IllegalArgumentException("Unknown analysis segmentation: ${segmentation}")
 }
 
-def clusteredSpatialdataTableKey(sourceTableKey, segmentation) {
+// rca-hook:H2: a map_first suffix (plan §4.8) is appended on every path; a null or
+// blank suffix (legacy rows) keeps the unsuffixed key.
+def clusteredSpatialdataTableKey(sourceTableKey, segmentation, suffix = "") {
+    def suffixToken = suffix == null ? "" : suffix.toString().trim()
+    def suffixFragment = suffixToken ? "_${suffixToken}" : ""
     if (segmentation == "reseg" || sourceTableKey == "table_MOSAIK_proseg") {
-        return "table_MOSAIK_proseg_clustering_squidpy"
+        return "table_MOSAIK_proseg_clustering_squidpy${suffixFragment}"
     }
     if (segmentation == "original_seg" || sourceTableKey == "table_original") {
-        return "table_original_clustering_squidpy"
+        return "table_original_clustering_squidpy${suffixFragment}"
     }
-    return "${sourceTableKey}_clustering_squidpy"
+    return "${sourceTableKey}_clustering_squidpy${suffixFragment}"
 }
 
 def gastonConfigJson(
@@ -719,7 +727,9 @@ def gastonConfigJson(
         latest_zarr_path: latestZarr.toString(),
         source_table_key: layerKeys.table_key,
         clustered_table_key: clusteredSpatialdataTableKey(
-            layerKeys.table_key, segmentation,
+            layerKeys.table_key,
+            segmentation,
+            settings.clustering_squidpy_table_key_suffix, // rca-site:H2
         ),
         shape_key: layerKeys.shape_key,
         output_dir: "gaston_out",
@@ -923,7 +933,7 @@ def corticalDepthConfigForPlatform(
             segmentation: segmentation,
             table_key: layerKeys.table_key,
             shape_key: layerKeys.shape_key,
-        ]
+        ] + AnnotationSettings.clusteredTableFields(row, params) // rca-site:H2
     }
     return [
         dataset_name: "${pairId}_${platform}",
@@ -1334,6 +1344,11 @@ def findCachedAtlasFilePath(rawCacheDir, referenceAtlas, filename) {
 }
 
 def appendClusteringSquidpyPreflightChecks(errors, settings, params) {
+    // rca-hook:H4: map_first checks (plan §3.7); the checks below are legacy-only.
+    AnnotationPreflight.append(errors, settings, params)
+    if (!AnnotationSettings.isLegacy(settings)) {
+        return
+    }
     def hierarchicalEnabled = effectiveClusteringHierarchicalEnabled(params)
     if (!(settings.run_clustering_squidpy && hierarchicalEnabled)) {
         return
@@ -1770,8 +1785,12 @@ def appendMenderPreflightChecks(errors, settings, params) {
                 publishedPairPath(
                     params.outdir,
                     settings.pair_id,
-                    "${segmentation}/clustering_squidpy/" +
-                    "clustering_squidpy_out/${platform.toLowerCase()}/" +
+                    "${segmentation}/" +
+                    AnnotationSettings.publishedClusteringDir(
+                        params.outdir, settings.pair_id, segmentation, platform, sampleId,
+                        settings.clustering_squidpy_table_key_suffix, // rca-site:H2
+                    ) +
+                    "/clustering_squidpy_out/${platform.toLowerCase()}/" +
                     "${sampleId}_clustered.h5ad",
                 )
             )
@@ -1799,6 +1818,7 @@ def appendMenderPreflightChecks(errors, settings, params) {
                 def tableKey = clusteredSpatialdataTableKey(
                     layerKeys.table_key,
                     segmentation,
+                    settings.clustering_squidpy_table_key_suffix, // rca-site:H2
                 )
                 def tablePath = latestZarr.resolve("tables").resolve(tableKey)
                 if (!tablePath.toFile().exists()) {
@@ -2046,8 +2066,12 @@ def appendGastonPreflightChecks(errors, settings, params) {
                 publishedPairPath(
                     params.outdir,
                     settings.pair_id,
-                    "${segmentation}/clustering_squidpy/" +
-                    "clustering_squidpy_out/${platform.toLowerCase()}/" +
+                    "${segmentation}/" +
+                    AnnotationSettings.publishedClusteringDir(
+                        params.outdir, settings.pair_id, segmentation, platform, sampleId,
+                        settings.clustering_squidpy_table_key_suffix, // rca-site:H2
+                    ) +
+                    "/clustering_squidpy_out/${platform.toLowerCase()}/" +
                     "${sampleId}_clustered.h5ad",
                 )
             )
@@ -2073,7 +2097,9 @@ def appendGastonPreflightChecks(errors, settings, params) {
             } else {
                 def layerKeys = analysisLayerKeys(platform, segmentation)
                 def tableKey = clusteredSpatialdataTableKey(
-                    layerKeys.table_key, segmentation,
+                    layerKeys.table_key,
+                    segmentation,
+                    settings.clustering_squidpy_table_key_suffix, // rca-site:H2
                 )
                 def tablePath = latestZarr.resolve("tables").resolve(tableKey)
                 if (!tablePath.toFile().exists()) {
@@ -2340,6 +2366,100 @@ def ateraNativeStages() {
     ]
 }
 
+// Whether a samplesheet row analyses an ATERA section (its analysis_mode, else
+// --analysis_mode). An invalid mode answers false here; rowSampleSettings then
+// reports it.
+def rowIsAtera(row, params) {
+    try {
+        def analysisMode = normalizeAnalysisMode(
+            rowFieldOrDefault(row, "analysis_mode", params.analysis_mode)
+        )
+        return activePlatformsForMode(analysisMode).contains("ATERA")
+    } catch (IllegalArgumentException ignored) {
+        return false
+    }
+}
+
+// The map_first annotation of the robust cell-type annotation effort
+// (ANNOTATE_PANEL, ANNOTATE_REFERENCE_PREP, MAP, RESOLVE, COMPUTE_CPU and
+// ANNOTATION_REPORT) is not covered for ATERA rows yet: its panel, reference
+// and gate steps are built for the targeted MERSCOPE/XENIUM panels and have
+// never run on a whole-transcriptome ATERA section (AT-11, RCA on Atera, in
+// docs/plans/atera-support-plan.md §8). An ATERA row that does not set its own clustering_squidpy_mode
+// column therefore clusters in legacy mode, whatever the species default or
+// --clustering_squidpy_mode, like the other global switches ATERA rows ignore;
+// a row that asks for map_first itself is refused by the ATERA preflight.
+// The readers of a row's annotation mode (the run's mode list and the row
+// settings) go through this function; cortical depth, whose clustered-table
+// fields also read the mode, is refused for ATERA rows.
+def annotationModeRow(row, params) {
+    if (!rowIsAtera(row, params)) {
+        return row
+    }
+    if (chooseField(row, [AnnotationDefaults.ROW_MODE_COLUMN]) != null) {
+        return row
+    }
+    return row + [(AnnotationDefaults.ROW_MODE_COLUMN): AnnotationDefaults.LEGACY]
+}
+
+// The launch-log lines of the run's annotation modes, logged once before any
+// channel runs (hook H5 site):
+// - info: the per-row mode summary, where an ATERA row held in legacy mode by
+//   annotationModeRow reads "legacy (ATERA)" rather than "(row)", and the note
+//   naming those rows;
+// - warn: the legacy deprecation warning of a flipped species. It leaves out
+//   every ATERA row: holding one in legacy mode, or a row that names legacy as
+//   the ATERA refusal advises, is not a deprecated choice.
+def annotationModeLaunchLog(samplesheetRows, params) {
+    def ateraRows = samplesheetRows.findAll { row -> rowIsAtera(row, params) }
+    def ateraLegacyRows = ateraRows.findAll { row ->
+        chooseField(row, [AnnotationDefaults.ROW_MODE_COLUMN]) == null
+    }
+    def info = []
+    def summary = AnnotationSettings.rowModeSummary(
+        params,
+        samplesheetRows.collect { row -> annotationModeRow(row, params) },
+        AnnotationDefaults.FLIPPED_SPECIES,
+        ateraLegacyRows.collect { row -> row.pair_id },
+    )
+    if (summary) {
+        info.add(summary)
+    }
+    if (ateraLegacyRows) {
+        info.add(
+            "ATERA rows ${ateraLegacyRows.collect { row -> row.pair_id }.join(', ')} " +
+            "cluster in legacy mode: map_first annotation is not covered for ATERA " +
+            "rows yet (AT-11, RCA on Atera)"
+        )
+    }
+    def warn = []
+    def deprecation = AnnotationSettings.deprecatedLegacyWarning(
+        params,
+        samplesheetRows
+            .findAll { row -> !rowIsAtera(row, params) }
+            .collect { row -> row[AnnotationDefaults.ROW_MODE_COLUMN] },
+    )
+    if (deprecation) {
+        warn.add(deprecation)
+    }
+    return [info: info.collect { line -> line.toString() }, warn: warn]
+}
+
+// Whether --annotation_prepare_only leaves a (pair_id, row, settings) entry out:
+// an ATERA row builds no reference bundle, as its rows cluster in legacy mode
+// (AT-11, RCA on Atera; annotationModeRow).
+def ateraPrepareOnlyRow(entry) {
+    def settings = entry[2]
+    if (!("ATERA" in settings.active_platforms)) {
+        return false
+    }
+    log.info(
+        "annotation_prepare_only: ATERA row ${settings.pair_id} builds no reference " +
+        "bundle: map_first annotation is not covered for ATERA rows yet (AT-11, RCA on Atera)"
+    )
+    return true
+}
+
 def appendAteraPreflightChecks(errors, row, settings, params) {
     if (!("ATERA" in settings.active_platforms)) {
         return
@@ -2357,6 +2477,13 @@ def appendAteraPreflightChecks(errors, row, settings, params) {
         errors.add(
             "standalone MapMyCells is not covered for ATERA rows; stop at " +
             "clustering_squidpy or mender"
+        )
+    }
+    if (AnnotationSettings.isMapFirst(settings)) {
+        errors.add(
+            "map_first annotation is not covered for ATERA rows yet (AT-11, RCA " +
+            "on Atera); remove clustering_squidpy_mode from " +
+            "row ${settings.pair_id} or set it to legacy"
         )
     }
     if (stageOrder.contains("gaston")) {
@@ -3386,7 +3513,13 @@ def rowSampleSettings(row, params) {
         alignmentEnabled &&
         (runAlign || runAlignQc || needAlignmentDownstream)
 
-    return [
+    // rca-hook:H3: annotation settings and the map_first MAPMYCELLS rule (plan §3.1).
+    // Legacy rows get no key, so their settings and -resume hashes are unchanged.
+    def annotationSettings = AnnotationSettings.forRow(
+        annotationModeRow(row, params), params, species
+    )
+    runMapMyCells = AnnotationSettings.runMapMyCells(runMapMyCells, annotationSettings, stopStage)
+    return annotationSettings + [
         pair_id: pairId,
         species: species,
         analysis_mode: analysisMode,
@@ -3643,6 +3776,37 @@ workflow {
         .fromPath(params.samplesheet, checkIfExists: true)
         .splitCsv(header: true, sep: ",", quote: '"', strip: true)
 
+    // rca-site:H5 (pre-registration §20 D15): each row's clustering_squidpy_mode
+    // column, read once here because the clustering wiring is chosen before
+    // any channel runs. A run takes the map_first wiring when any row
+    // resolves to map_first; a run whose rows are all legacy keeps the legacy
+    // DAG.
+    def samplesheetRows = file(params.samplesheet, checkIfExists: true)
+        .splitCsv(header: true, sep: ",", quote: '"', strip: true)
+    // ATERA rows without their own mode column cluster in legacy mode
+    // (annotationModeRow).
+    def annotationModeRows = samplesheetRows.collect { row -> annotationModeRow(row, params) }
+    AnnotationSettings.useRowModes(
+        annotationModeRows.collect { row -> row[AnnotationDefaults.ROW_MODE_COLUMN] }
+    )
+    // The mode summary and the legacy deprecation warning, which leaves out
+    // every ATERA row (annotationModeLaunchLog).
+    def annotationModeLog = annotationModeLaunchLog(samplesheetRows, params)
+    annotationModeLog.info.each { line -> log.info(line) }
+    def nearMissModeColumns = AnnotationSettings.nearMissModeColumns(
+        samplesheetRows ? samplesheetRows[0].keySet() : []
+    )
+    if (nearMissModeColumns) {
+        log.warn(
+            "Samplesheet column(s) ${nearMissModeColumns.join(', ')} are ignored: the " +
+            "per-row mode column is '${AnnotationDefaults.ROW_MODE_COLUMN}' (exact name). " +
+            "Those rows follow the run's clustering mode."
+        )
+    }
+    // Legacy rows of a flipped species (human since M8, mouse since M9); no
+    // ATERA row is a deprecated choice.
+    annotationModeLog.warn.each { line -> log.warn(line) }
+
     sample_rows_raw_ch = samplesheet_ch.map { row ->
         def settings = rowSampleSettings(row, params)
         log.info(
@@ -3674,6 +3838,14 @@ workflow {
         tuple(settings.pair_id, row, settings)
     }
 
+    // rca-hook:H10: --annotation_prepare_only builds reference bundles (plan §3.2)
+    // and runs no pipeline stage; legacy and map_first runs skip this block.
+    if (AnnotationReferences.prepareOnly(params)) {
+        sample_rows_raw_ch = sample_rows_raw_ch.filter { entry -> !ateraPrepareOnlyRow(entry) }
+        ANNOTATION_PREPARE_ONLY(sample_rows_raw_ch)
+        sample_rows_raw_ch = channel.empty()
+    }
+
     preflight_done_ch = sample_rows_raw_ch
         .map { _pairId, row, settings ->
             runPreflightChecks(row, settings, params)
@@ -3703,6 +3875,19 @@ workflow {
         .map { pairId, row, settings, _doneFlag ->
             tuple(pairId, row, settings)
         }
+
+    // rca-hook:H6: end-of-run annotation summary (plan §3.1); empty in legacy runs.
+    def annotationCompletionParams = params
+    def annotationCompletionWorkflow = workflow
+    annotationCompletionWorkflow.onComplete {
+        def annotationSummary = AnnotationSettings.completionSummary(
+            annotationCompletionParams,
+            AnnotationRunRecord.runInfo() + [success: annotationCompletionWorkflow.success],
+        )
+        if (annotationSummary) {
+            log.info(annotationSummary)
+        }
+    }
 
     build_inputs_ch = sample_rows_ch.flatMap { pairId, row, settings ->
         if (!settings.run_build) {
@@ -5485,8 +5670,180 @@ workflow {
             .mix(clustering_after_visualize_ch)
             .mix(clustering_after_spatial_gene_analysis_ch)
 
-    clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE(clustering_inputs_ch)
-    clustering_computed_ch = CLUSTERING_SQUIDPY_COMPUTE(clustering_prepared_ch)
+    // rca-hook:H5: map_first clustering (plan §2.4, §3.1). The mode is one per
+    // row (its clustering_squidpy_mode column, else the run's; §20 D15). With
+    // any map_first row, rows are prepared once (a legacy row's PREPARE hash
+    // is unchanged) and legacy rows go on to the legacy COMPUTE; a run whose
+    // rows are all legacy runs exactly the legacy PREPARE -> COMPUTE
+    // statements of the else-branch, keeping its DAG and task hashes.
+    // CLUSTERING_MAP_FIRST emits FINALIZE's input, so FINALIZE, the MENDER
+    // barrier and every downstream stage are shared by both modes.
+    if (AnnotationSettings.isMapFirstRun(params)) {
+        row_is_map_first_ch = sample_rows_ch.map { pairId, _row, settings ->
+            tuple(pairId, AnnotationSettings.isMapFirst(settings))
+        }
+        clustering_inputs_ch
+            .combine(row_is_map_first_ch, by: 0)
+            .filter { _pairId, _segmentation, _samplesJson, mapFirst -> mapFirst }
+            .subscribe { pairId, segmentation, _samplesJson, _mapFirst ->
+                AnnotationRunRecord.expect(pairId, segmentation)
+            }
+        clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE(
+            clustering_inputs_ch
+                .combine(sample_rows_ch, by: 0)
+                .map { pairId, segmentation, samplesJson, row, settings ->
+                    tuple(
+                        pairId,
+                        segmentation,
+                        AnnotationSettings.samplesJsonWithRowColumns(samplesJson, row, settings),
+                    )
+                }
+        )
+        clustering_prepared_by_mode_ch = clustering_prepared_ch
+            .combine(row_is_map_first_ch, by: 0)
+            .branch { _pairId, _segmentation, _samplesJson, _config, _preparedDir, mapFirst ->
+                map_first: mapFirst
+                legacy: true
+            }
+        // The registration checks RESOLVE reads (G1: the mouse gate's, the
+        // human real-data QC's NR9; M13 C15): per pair x segmentation, the
+        // *_registration_qc.json of each active platform. A branch whose QC
+        // stage runs in this launch (qc_inputs_ch's filter: run_qc and an
+        // analysis segmentation) takes its own QC tasks' checks, released
+        // once all of them have finished (groupKey), and never a published
+        // one, even when its QC wrote none. Every branch of a row whose QC
+        // stage does not run at all (settings.run_qc false: a start_stage
+        // after qc or an only_stage, the run's or the row's) takes the checks
+        // an earlier launch's QC published under params.outdir for the
+        // outputs this launch starts from, or none. A segmentation that is
+        // not an analysis segmentation of a row whose QC runs (a MENDER-only
+        // one) takes none and never a published one: the launch's earlier
+        // stages may have re-segmented it, so a published check could be an
+        // older launch's. Without a check, mouse RESOLVE refuses and human G1
+        // is not_evaluable. The source of each branch's checks, or why none
+        // was looked up, goes to the end-of-run summary (hook H6).
+        map_first_registration_from_qc_ch = qc_results_ch
+            .map { _key, pairId, _platform, segmentation, _latestZarr, qcOutDir, _tableKey, _shapeKey ->
+                tuple(pairId, segmentation, qcOutDir)
+            }
+            .combine(
+                sample_rows_ch.map { pairId, _row, settings ->
+                    tuple(pairId, settings.active_platforms.size())
+                },
+                by: 0,
+            )
+            .map { pairId, segmentation, qcOutDir, nPlatforms ->
+                tuple(
+                    groupKey(AnnotationReferences.branchKey(pairId, segmentation), nPlatforms),
+                    pairId,
+                    segmentation,
+                    qcOutDir,
+                    nPlatforms,
+                )
+            }
+            .groupTuple(remainder: true)
+            .map { _branchKey, pairIds, segmentations, qcOutDirs, nPlatforms ->
+                tuple(
+                    pairIds[0],
+                    segmentations[0],
+                    AnnotationReferences.registrationQcFiles(qcOutDirs),
+                    nPlatforms[0],
+                    AnnotationRunRecord.REGISTRATION_QC_STAGE,
+                )
+            }
+        map_first_registration_published_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
+            settings.analysis_input_segmentations
+                .findAll { segmentation ->
+                    !(settings.run_qc && settings.analysis_segmentations.contains(segmentation))
+                }
+                .collect { segmentation ->
+                    def nPlatforms = settings.active_platforms.size()
+                    if (settings.run_qc) {
+                        if (AnnotationSettings.isMapFirst(settings)) {
+                            log.warn(
+                                "${pairId}:${segmentation}: the row's QC stage runs in this launch " +
+                                "but not for this segmentation (not an analysis_segmentation), so " +
+                                "RESOLVE stages no registration check and published ones are not " +
+                                "used (mouse RESOLVE refuses, human registration G1 is not_evaluable)"
+                            )
+                        }
+                        tuple(
+                            pairId,
+                            segmentation,
+                            [],
+                            nPlatforms,
+                            AnnotationRunRecord.REGISTRATION_ROW_RUNS_QC,
+                        )
+                    } else {
+                        def publishedChecks = AnnotationReferences.publishedRegistrationQcFiles(
+                            params.outdir,
+                            pairId,
+                            settings.active_platforms,
+                            segmentation,
+                        )
+                        if (AnnotationSettings.isMapFirst(settings)) {
+                            def branchText = "${pairId}:${segmentation}: the QC stage does not run in this launch"
+                            if (publishedChecks) {
+                                log.info(
+                                    "${branchText}; RESOLVE stages the published registration checks " +
+                                    publishedChecks.join(", ")
+                                )
+                            } else {
+                                def searched = AnnotationReferences.publishedQcOutDirs(
+                                    params.outdir,
+                                    pairId,
+                                    settings.active_platforms,
+                                    segmentation,
+                                )
+                                log.warn(
+                                    "${branchText} and no registration check is published in " +
+                                    "${searched.join(', ')} (mouse RESOLVE refuses, human " +
+                                    "registration G1 is not_evaluable)"
+                                )
+                            }
+                        }
+                        tuple(
+                            pairId,
+                            segmentation,
+                            publishedChecks,
+                            nPlatforms,
+                            AnnotationRunRecord.REGISTRATION_PUBLISHED,
+                        )
+                    }
+                }
+        }
+        map_first_registration_sources_ch = map_first_registration_from_qc_ch
+            .mix(map_first_registration_published_ch)
+        map_first_registration_sources_ch.subscribe { pairId, segmentation, registrationFiles, nPlatforms, source ->
+            AnnotationRunRecord.registrationChecks(pairId, segmentation, source, registrationFiles, nPlatforms)
+        }
+        map_first_registration_ch = map_first_registration_sources_ch
+            .map { pairId, segmentation, registrationFiles, _nPlatforms, _source ->
+                tuple(pairId, segmentation, registrationFiles)
+            }
+        map_first_alignment_ch = alignment_results_ch
+            .map { pairId, _merscopeLatest, _xeniumLatest, _transformJson, _coordsDir, alignOut ->
+                tuple(pairId, AnnotationReferences.alignmentFiles(alignOut))
+            }
+            .mix(
+                sample_rows_ch
+                    .filter { _pairId, _row, settings -> !settings.need_alignment_results }
+                    .map { pairId, _row, _settings -> tuple(pairId, []) }
+            )
+        clustering_computed_ch = CLUSTERING_MAP_FIRST(
+            clustering_prepared_by_mode_ch.map_first.map { item -> item.take(5) },
+            map_first_alignment_ch,
+            map_first_registration_ch,
+        ).computed
+            .mix(
+                CLUSTERING_SQUIDPY_COMPUTE(
+                    clustering_prepared_by_mode_ch.legacy.map { item -> item.take(5) }
+                )
+            )
+    } else {
+        clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE(clustering_inputs_ch)
+        clustering_computed_ch = CLUSTERING_SQUIDPY_COMPUTE(clustering_prepared_ch)
+    }
     clustering_results_ch = CLUSTERING_SQUIDPY_FINALIZE(clustering_computed_ch)
 
     pciseq_reference_inputs_ch = sample_rows_ch
@@ -6017,6 +6374,10 @@ workflow {
         .mix(clustering_terminal_events_ch)
         .mix(terminal_extra_clustering_terminal_events_ch)
 
+    // Pair every terminal event with the pair's one spec: combine keeps the
+    // spec, whereas join pairs items one to one, so the pair's first terminal
+    // event (often FINALIZE's) would consume it and the events the terminal
+    // consumers wait for would be dropped. Legacy and map_first runs alike.
     pair_terminal_grouped_ch = pair_terminal_events_ch
         .combine(pair_terminal_specs_ch, by: 0)
         .filter { _pairId, eventStage, _done, expectedStage, _expectedCount ->
@@ -6099,8 +6460,12 @@ workflow {
                             publishedPairPath(
                                 params.outdir,
                                 pairId,
-                                "${segmentation}/clustering_squidpy/" +
-                                "clustering_squidpy_out/" +
+                                "${segmentation}/" +
+                                AnnotationSettings.publishedClusteringDir(
+                                    params.outdir, pairId, segmentation, platform, sampleId,
+                                    settings.clustering_squidpy_table_key_suffix, // rca-site:H2
+                                ) +
+                                "/clustering_squidpy_out/" +
                                 "${platform.toLowerCase()}/" +
                                 "${sampleId}_clustered.h5ad",
                             )
@@ -6142,12 +6507,13 @@ workflow {
             sampleId,
             clusteredH5ad,
             latestZarr,
-            _settings,
+            settings, // rca-site:H2: was _settings; binds the row suffix used below
             terminalToken ->
                 def layerKeys = analysisLayerKeys(platform, segmentation)
                 def clusteredTableKey = clusteredSpatialdataTableKey(
                     layerKeys.table_key,
                     segmentation,
+                    settings.clustering_squidpy_table_key_suffix, // rca-site:H2
                 )
                 tuple(
                     taskKey,
@@ -6243,6 +6609,12 @@ workflow {
         }
     mender_finalized_ch = MENDER_FINALIZE(mender_finalize_inputs_ch)
     MENDER_IMPORT(mender_finalized_ch)
+    // Hook H6's record of skipped MENDER runs (no assigned state; map_first only).
+    if (AnnotationSettings.isMapFirstRun(params)) { // rca-site:H6
+        MENDER_IMPORT.out.subscribe { _taskKey, pairId, segmentation, platform, importManifest ->
+            AnnotationRunRecord.menderImported(pairId, segmentation, platform, importManifest)
+        }
+    }
 
     gaston_current_clustering_gate_ch = post_pciseq_sample_rows_ch.flatMap {
         pairId, _row, settings ->
@@ -6311,8 +6683,12 @@ workflow {
                             publishedPairPath(
                                 params.outdir,
                                 pairId,
-                                "${segmentation}/clustering_squidpy/" +
-                                "clustering_squidpy_out/" +
+                                "${segmentation}/" +
+                                AnnotationSettings.publishedClusteringDir(
+                                    params.outdir, pairId, segmentation, platform, sampleId,
+                                    settings.clustering_squidpy_table_key_suffix, // rca-site:H2
+                                ) +
+                                "/clustering_squidpy_out/" +
                                 "${platform.toLowerCase()}/" +
                                 "${sampleId}_clustered.h5ad",
                             )
@@ -6535,4 +6911,23 @@ workflow {
         }
 
     GASTON_IMPORT(gaston_import_inputs_ch)
+
+    // rca-hook:H11: the annotation QC report (plan §3.6, §9; M7), map_first runs only:
+    // after FINALIZE, the pair's cortical depth and the branch's MENDER when they run.
+    if (AnnotationSettings.isMapFirstRun(params) && AnnotationReport.enabled(params)) {
+        ANNOTATION_REPORTING(
+            CLUSTERING_MAP_FIRST.out.labels,
+            CLUSTERING_MAP_FIRST.out.alignment,
+            clustering_results_ch,
+            compute_cortical_depth_results_ch.map { _key, pairId, platform, _latestZarr, corticalDepthOut ->
+                tuple(pairId, platform, corticalDepthOut)
+            },
+            mender_finalized_ch.map {
+                _taskKey, pairId, segmentation, platform, _sampleId, _spatialdataPath,
+                _sourceSpatialdataTable, _nativeShapeKey, _sourceH5adPath, _menderConfig, menderDir ->
+                    tuple(pairId, segmentation, platform, menderDir)
+            },
+            sample_rows_ch.map { pairId, _row, settings -> tuple(pairId, AnnotationReport.pairSpec(settings, params)) },
+        )
+    }
 }

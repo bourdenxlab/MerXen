@@ -72,8 +72,11 @@ LEFT_ALIGNED_COLUMN = 0
 
 # Shared render options.
 #
-# --x-spacing 90 and --font-scale 1.4 were chosen together by sweeping both and
-# checking every station label still renders as one unwrapped line. They are not
+# --x-spacing 88 and --font-scale 1.4 were chosen together by sweeping both and
+# checking every station label still renders as one unwrapped line. (The
+# spacing was 90 until the RCA annotation chain and the Atera ProSeg station
+# together pushed the map to 2013px; 88 brings it back under the 2000px limit
+# with every label still on one line.) They are not
 # independent: raising the font past 1.4 at this spacing hyphenates
 # "Cellpose-SAM cells", and *widening* the spacing makes the on-screen text
 # smaller, because the figure grows faster than the type does. Re-run the sweep
@@ -86,7 +89,7 @@ COMMON_OPTIONS = [
     "--theme",
     "light",
     "--x-spacing",
-    "90",
+    "88",
     "--font-scale",
     "1.4",
     "--embed-font",

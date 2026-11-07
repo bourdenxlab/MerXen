@@ -454,8 +454,15 @@ def test_pciseq_default_stop_extension_and_region_preflight(tmp_path: Path) -> N
         ],
     )
 
+    # Legacy clustering: human runs map_first by default since the RCA flip
+    # (M8), whose preflight would refuse PCI_OFF for its missing WHB reference
+    # sources before the pciSeq check this test is about.
     result = _run_nextflow(
-        tmp_path, "--clustering_squidpy_hierarchical_enabled", "false"
+        tmp_path,
+        "--clustering_squidpy_hierarchical_enabled",
+        "false",
+        "--clustering_squidpy_mode",
+        "legacy",
     )
 
     assert result.returncode != 0

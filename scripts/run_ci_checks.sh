@@ -54,6 +54,9 @@ fi
 
 case "${install_mode}" in
     locked)
+        # The lock is the full pinned tree (uv pip compile), so it is installed with --no-deps:
+        # re-resolving would follow cell_type_mapper's unpinned abc_atlas_access git URL to the
+        # upstream head, which conflicts with the lock's pinned commit whenever upstream moves.
         uv pip install --python "${venv_dir}/bin/python" --no-deps -r requirements/requirements.lock
         uv pip install --python "${venv_dir}/bin/python" -e . --no-deps
         # Isolated runtime for reading Zeiss CZI files (czifile cannot live in
@@ -138,6 +141,14 @@ select_changed_tests() {
     echo "changed tier: $(wc -l < "${changed_selection}") test path(s) reachable from the changes since ${base_ref}."
     pytest_args+=("@${changed_selection}")
 }
+
+# Nextflow lint, when Nextflow is installed. -project-dir makes the linter
+# load the Groovy classes in workflows/lib; without it, run from the repo
+# root, every lib class main.nf uses reads as "not defined". Warnings pass,
+# errors fail (tests/test_workflows/test_nextflow_lint.py checks the same).
+if command -v nextflow >/dev/null 2>&1; then
+    NXF_DISABLE_CHECK_LATEST=true nextflow lint -project-dir workflows -o concise workflows/
+fi
 
 case "${run_tests}" in
     true | 1 | yes)

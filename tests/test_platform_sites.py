@@ -185,6 +185,10 @@ REASONS: dict[str, dict[str, str]] = {
         "workflows/modules/segmentation.nf": (
             "produces and forwards the nuclei mask (process script text is pinned)"
         ),
+        "scripts/acceptance/segmentation_comparison.py": (
+            "RCA acceptance script: reads the cellpose_nuclei shapes of paired "
+            "MERSCOPE/XENIUM stores (never run on ATERA)"
+        ),
     },
     "platform_equality": {
         "scripts/acceptance/prepare_hitl1_fixture.py": (
@@ -227,6 +231,31 @@ REASONS: dict[str, dict[str, str]] = {
             "builders that raise for an unknown platform, MERSCOPE- or Xenium-only "
             "features, paired roles and the analysis_mode map (kept in step by "
             "test_analysis_mode_parity)"
+        ),
+        "scripts/acceptance/segmentation_comparison.py": (
+            "RCA acceptance script for paired MERSCOPE/XENIUM sections (Xenium QV "
+            "filter and panel)"
+        ),
+        "scripts/acceptance/shadow_baselines.py": (
+            "RCA acceptance script: Xenium fixed frame of a pair (pairing role)"
+        ),
+        "src/merxen/annotation/panel.py": (
+            "map_first panel modes of the MERSCOPE/XENIUM targeted panels (set c "
+            "needs both pseudobulks, Xenium symbols first); ATERA rows are kept "
+            "off map_first until AT-11 (RCA on Atera; main.nf ATERA gate)"
+        ),
+        "src/merxen/annotation/pipeline.py": (
+            "map_first pairing roles (Xenium fixed frame, MERSCOPE moving) and the "
+            "MERSCOPE+XENIUM cross-platform pair; ATERA rows are kept off "
+            "map_first until AT-11 (RCA on Atera; main.nf ATERA gate)"
+        ),
+        "src/merxen/annotation/report_scoring.py": (
+            "fixed scoring datasets of the human acceptance pairs (aliases)"
+        ),
+        "src/merxen/annotation/sim_inputs.py": (
+            "panel chemistry detection (MERSCOPE, else Xenium Prime gene lists); "
+            "ATERA rows are kept off map_first until AT-11 (RCA on Atera; main.nf "
+            "ATERA gate)"
         ),
     },
     "native_image_names": {
@@ -387,6 +416,7 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         "workflows/main.nf": (),
         "workflows/modules/enrichment.nf": (),
         "workflows/modules/segmentation.nf": (),
+        "scripts/acceptance/segmentation_comparison.py": (),
     },
     "platform_equality": {
         "scripts/acceptance/prepare_hitl1_fixture.py": (
@@ -471,6 +501,37 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
             'if (platform == "XENIUM") {',
             'settings.paired_mode && platform == "MERSCOPE"',
             'settings.paired_mode && platform == "XENIUM"',
+        ),
+        "scripts/acceptance/segmentation_comparison.py": (
+            'if platform == "MERSCOPE"',
+            'min_qv = args.xenium_min_qv if platform == "XENIUM" else None',
+            'min_qv = args.xenium_min_qv if platform == "XENIUM" else None',
+            'panel_path = xenium_panels.get(pair) if platform == "XENIUM" else None',
+            'part["xenium"] = part["platform"] == "XENIUM"',
+        ),
+        "scripts/acceptance/shadow_baselines.py": (
+            'aligned_frame=platform == "XENIUM" or "_aligned" in shape_key,',
+            'if merscope.aligned_frame and mask.fixed_platform == "XENIUM":',
+        ),
+        "src/merxen/annotation/panel.py": (
+            'for platform in ("MERSCOPE", "XENIUM"):',
+            'order = sorted(symbol_maps, key=lambda platform: platform != "XENIUM")',
+        ),
+        "src/merxen/annotation/pipeline.py": (
+            '(item.h5ad_path for item in inputs if item.platform == "MERSCOPE"),',
+            'for name in ("MERSCOPE", "XENIUM")',
+            'if platform not in {"MERSCOPE", "XENIUM"}:',
+            (
+                'return str(platform).upper() == "XENIUM" or "_aligned" in '
+                'str(shape_key or "")'
+            ),
+        ),
+        "src/merxen/annotation/report_scoring.py": (
+            'for platform in ("MERSCOPE", "XENIUM")',
+        ),
+        "src/merxen/annotation/sim_inputs.py": (
+            'and platform_name in ("", "XENIUM")',
+            'if platform_name == "MERSCOPE":',
         ),
     },
     "native_image_names": {

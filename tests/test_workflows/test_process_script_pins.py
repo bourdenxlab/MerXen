@@ -22,6 +22,14 @@ Changes made so far:
   ``qc`` golden), but the edited source text changes the hash of every QC task
   once: the published XENIUM/MERSCOPE QC results get an announced one-time
   re-run (docs/plans/atera-support-plan.md, AT-6).
+- RCA merge into the Atera line: the processes of the robust cell-type
+  annotation (``ANNOTATE_PANEL``, ``ANNOTATE_REFERENCE_PREP``,
+  ``CLUSTERING_SQUIDPY_ANNOTATE_MAP``, ``CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE``
+  and ``ANNOTATION_REPORT`` in ``modules/annotation.nf``,
+  ``CLUSTERING_SQUIDPY_COMPUTE_CPU`` in ``modules/clustering_squidpy.nf``) are
+  pinned as they are on ``feature/robust-celltype-annotation``. They are new
+  processes, so no completed task is invalidated; no existing pin changed (RCA
+  kept the legacy script texts, MENDER_PREPARE's among them, byte-identical).
 - AT-9 added the pins of ATERA_PROSEG_PLAN, ATERA_PROSEG_TILE and
   ATERA_PROSEG_STITCH (``modules/atera_proseg.nf``); no existing pin changed.
 """
@@ -147,14 +155,14 @@ def test_main_nf_defines_no_process() -> None:
 
 
 def test_pinned_inventory(pinned: dict[str, str]) -> None:
-    """Today's inventory: 47 processes, 47 ``script:`` and 7 ``stub:`` sections.
+    """Today's inventory: 53 processes, 53 ``script:`` and 12 ``stub:`` sections.
 
-    AT-9 added the three ATERA ProSeg processes (``modules/atera_proseg.nf``);
-    no existing pin changed.
+    AT-9 added the three ATERA ProSeg processes (``modules/atera_proseg.nf``) and
+    the RCA merge added the annotation processes; no existing pin changed.
     """
     labels = [key.rsplit("::", 1)[1] for key in pinned]
-    assert labels.count("script") == 47
-    assert labels.count("stub") == 7
+    assert labels.count("script") == 53
+    assert labels.count("stub") == 12
     assert {key for key in pinned if key.endswith("::stub")} == {
         f"workflows/modules/pciseq.nf::{name}::stub"
         for name in (
@@ -170,6 +178,16 @@ def test_pinned_inventory(pinned: dict[str, str]) -> None:
             "MANUAL_REGISTRATION_REGISTER",
             "MANUAL_REGISTRATION_COMPARE",
         )
+    } | {
+        f"workflows/modules/annotation.nf::{name}::stub"
+        for name in (
+            "ANNOTATE_REFERENCE_PREP",
+            "CLUSTERING_SQUIDPY_ANNOTATE_MAP",
+            "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE",
+            "ANNOTATION_REPORT",
+        )
+    } | {
+        "workflows/modules/clustering_squidpy.nf::CLUSTERING_SQUIDPY_COMPUTE_CPU::stub"
     }
 
 

@@ -1,0 +1,33 @@
+label,subclass,supertype_prefix,broad_class,broad_class_any,lineage,nt,sink,region_plausible_frontal_cortex
+CS20260630_SCLA_001,Lamp5 Lhx6,,Neurons,Neurons,Neurons,Inhibitory,false,true
+CS20260630_SCLA_002,Lamp5,,Neurons,Neurons,Neurons,Inhibitory,false,true
+CS20260630_SCLA_003,Pax6,,Neurons,Neurons,Neurons,Inhibitory,false,true
+CS20260630_SCLA_004,Sncg,,Neurons,Neurons,Neurons,Inhibitory,false,true
+CS20260630_SCLA_005,Vip,,Neurons,Neurons,Neurons,Inhibitory,false,true
+CS20260630_SCLA_006,Sst Chodl,,Neurons,Neurons,Neurons,Inhibitory,false,true
+CS20260630_SCLA_007,Sst,,Neurons,Neurons,Neurons,Inhibitory,false,true
+CS20260630_SCLA_008,Pvalb,,Neurons,Neurons,Neurons,Inhibitory,false,true
+CS20260630_SCLA_009,Chandelier,,Neurons,Neurons,Neurons,Inhibitory,false,true
+CS20260630_SCLA_010,L2/3 IT,,Neurons,Neurons,Neurons,Excitatory,false,true
+CS20260630_SCLA_011,L4 IT,,Neurons,Neurons,Neurons,Excitatory,false,true
+CS20260630_SCLA_012,L5 IT,,Neurons,Neurons,Neurons,Excitatory,false,true
+CS20260630_SCLA_013,L6 IT,,Neurons,Neurons,Neurons,Excitatory,false,true
+CS20260630_SCLA_014,L6 IT Car3,,Neurons,Neurons,Neurons,Excitatory,false,true
+CS20260630_SCLA_015,L5 ET,,Neurons,Neurons,Neurons,Excitatory,false,true
+CS20260630_SCLA_016,L6 CT,,Neurons,Neurons,Neurons,Excitatory,false,true
+CS20260630_SCLA_017,L6b,,Neurons,Neurons,Neurons,Excitatory,false,true
+CS20260630_SCLA_018,L5/6 NP,,Neurons,Neurons,Neurons,Excitatory,false,true
+CS20260630_SCLA_019,EC IT,,Neurons,Neurons,Neurons,Excitatory,false,false
+CS20260630_SCLA_020,Sub-CA1,,Neurons,Neurons,Neurons,Excitatory,false,false
+CS20260630_SCLA_021,CA2-4,,Neurons,Neurons,Neurons,Excitatory,false,false
+CS20260630_SCLA_022,DG,,Neurons,Neurons,Neurons,Excitatory,false,false
+CS20260630_SCLA_023,Astrocyte,,Astrocytes,Astrocytes,Astrocytes,,false,true
+CS20260630_SCLA_024,Ependymal,,Mixed/Unknown,,Mixed/Unknown,,true,true
+CS20260630_SCLA_025,OPC,,Oligodendrocyte precursors,Oligodendrocyte precursors,Oligodendrocyte lineage,,false,true
+CS20260630_SCLA_026,Oligodendrocyte,,Oligodendrocytes,Oligodendrocytes,Oligodendrocyte lineage,,false,true
+CS20260630_SCLA_027,Endothelial,,Vascular cells,Vascular cells,Vascular cells,,false,true
+CS20260630_SCLA_028,VLMC & Perivascular,,Mixed/Unknown,Vascular cells;Fibroblasts,Mixed/Unknown,,false,true
+CS20260630_SCLA_028,VLMC & Perivascular,VLMC,Fibroblasts,Fibroblasts,Fibroblasts,,false,true
+CS20260630_SCLA_028,VLMC & Perivascular,Pericyte,Vascular cells,Vascular cells,Vascular cells,,false,true
+CS20260630_SCLA_028,VLMC & Perivascular,SMC,Vascular cells,Vascular cells,Vascular cells,,false,true
+CS20260630_SCLA_029,Immune,,Microglia,Microglia,Microglia,,false,true

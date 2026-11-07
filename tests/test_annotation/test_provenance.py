@@ -1,0 +1,455 @@
+"""Tests for annotation provenance (merxen.annotation.provenance)."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import anndata as ad
+import numpy as np
+import pytest
+from pydantic import ValidationError
+
+from merxen.annotation.provenance import (
+    PROVENANCE_UNS_KEY,
+    AnnotationProvenance,
+    DatasetGateProvenance,
+    EngineProvenance,
+    FlagProvenance,
+    MarkerProvenance,
+    MouseGateProvenance,
+    PanelProvenance,
+    RealQcProvenance,
+    ReferenceProvenance,
+    ResolvabilityProvenance,
+    SourceIdentity,
+    ThresholdProvenance,
+    annotation_manifest_filename,
+    is_safe_key,
+    to_uns_json,
+    unsafe_structure_problems,
+)
+from merxen.annotation.schema import safe_token
+
+
+def _human_provenance() -> AnnotationProvenance:
+    whb = ReferenceProvenance(
+        reference_id="whb_frontal_supc_clus",
+        role="primary",
+        taxonomy_id="CCN202210140",
+        levels=["CCN202210140_SUPC", "CCN202210140_CLUS"],
+        n_leaves=653,
+        bundle_path="/store/whb_frontal_supc_clus/abc123",
+        build_hash="abc123",
+        sources={
+            "precompute": SourceIdentity(
+                path="/store/src/precompute.h5",
+                size=1024,
+                mtime_ns=1,
+                sha256="f" * 64,
+                sha256_scope="head_tail_64mb",
+            )
+        },
+        n_query_genes_used=296,
+        markers=MarkerProvenance(
+            lookup_sha256="e" * 64,
+            n_per_utility=30,
+            n_panel_genes=296,
+            markers_per_parent_min=12,
+            markers_per_parent_median=30.0,
+            root_markers=230,
+            root_children_separated=15,
+            n_weak_parents=1,
+            n_collapsed_parents=0,
+            n_hidden_leaves=0,
+        ),
+        panel_trust="validated",
+        trust_reasons=["family_validated"],
+        n_panel_genes_absent=0,
+    )
+    seaad = ReferenceProvenance(reference_id="seaad_mr_panel", role="secondary")
+    return AnnotationProvenance(
+        species="human",
+        anatomical_region="frontal_cortex",
+        merxen_version="0.1.0",
+        panel=PanelProvenance(
+            panel_hash="a" * 64,
+            panel_family="human_set_a",
+            family_basis="listed",
+            panel_mode="intersection",
+            panel_trust="validated",
+            trust_reasons=["family_validated"],
+            banner=False,
+            validation_basis="real_data",
+            validated_max_level="supercluster",
+            validated_panels_sha256="d" * 64,
+            validated_share={"broad": 1.0, "supercluster": 0.98},
+            real_data_qc=RealQcProvenance(
+                outcomes={"marker_consistency": "pass", "paired_broad_jsd": "warn"},
+                downgrades=[],
+                warn_only=True,
+            ),
+            n_declared_genes=296,
+            gene_id_resolution={"native": 290, "reference_gene_csv": 6},
+            n_unmapped=0,
+            controls_removed={safe_token("Blank"): 20},
+            panel_report_sha256="b" * 64,
+        ),
+        references={whb.reference_id: whb, seaad.reference_id: seaad},
+        engine=EngineProvenance(
+            ctm_version="1.7.2",
+            bootstrap_factor=0.5,
+            bootstrap_iteration=100,
+            rng_seed=0,
+            n_processors=6,
+            wall_time_s=812.5,
+        ),
+        resolvability={
+            "whb_frontal_supc_clus": ResolvabilityProvenance(
+                recipe="R1_contam_HO",
+                recipe_version=1,
+                emitted_depth_bins={
+                    "supercluster": {
+                        safe_token("Oligodendrocyte precursors"): [120, 250],
+                        safe_token("Neurons"): [10, 15, 30, 60, 120, 250],
+                    }
+                },
+                d_max={safe_token("Microglia"): 120},
+                extrapolated_share={safe_token("Microglia"): 0.12},
+                reweighted_to_composition=True,
+                resolvable_share={"supercluster": 0.64},
+            )
+        },
+        thresholds=ThresholdProvenance(
+            values={"whb_broad": 0.73, "whb_supercluster": 0.69},
+            threshold_source="validated_default",
+            floors_sha256="c" * 64,
+            floor_source="real_e2",
+        ),
+        flags=FlagProvenance(
+            thresholds={"contamination_alpha": 0.01},
+            gene_sets={"negative_neurons": ["AQP4", "GJA1"]},
+            realised_rates={
+                "flag_contaminated": {
+                    safe_token("Astrocytes/MERSCOPE"): 0.04,
+                }
+            },
+            informative={
+                "flag_contaminated": {safe_token("Astrocytes/MERSCOPE"): True}
+            },
+            null_reasons={"flag_microglial_spillover": "disabled_for_human"},
+        ),
+        gate=DatasetGateProvenance(
+            frac_ge30=0.62,
+            table_broad_coverage=0.71,
+            segmented_broad_coverage=0.4,
+            level="full",
+            warning=False,
+        ),
+        confident_fraction_table={"broad": 0.71, "supercluster": 0.55},
+        confident_fraction_segmented={"broad": 0.4, "supercluster": 0.31},
+    )
+
+
+def _mouse_provenance() -> AnnotationProvenance:
+    return AnnotationProvenance(
+        species="mouse",
+        references={
+            "wmb_panel": ReferenceProvenance(
+                reference_id="wmb_panel",
+                role="primary",
+                drop_level="CCN20230722_SUPT",
+                nodes_dropped=["05 OB-IMN GABA"],
+            )
+        },
+        mouse_gate=MouseGateProvenance(
+            signals={"g1_density_ratio": 2.9, "g4_astro_epen_points": None},
+            level="full",
+            warning=True,
+            reasons=["g4_astro_epen_outside_band"],
+            section_regions=["Isocortex", "HPF", "TH"],
+            region_source="auto",
+            n_assigned_tiles=1200,
+            drop_list_size=12,
+            n_remapped=3000,
+            rule_variant="v1",
+        ),
+    )
+
+
+def _walk_lists(value: Any) -> list[Any]:
+    found = []
+    if isinstance(value, dict):
+        for item in value.values():
+            found += _walk_lists(item)
+    elif isinstance(value, list):
+        found.append(value)
+        for item in value:
+            found += _walk_lists(item)
+    return found
+
+
+@pytest.mark.parametrize("builder", [_human_provenance, _mouse_provenance])
+def test_json_round_trip_is_lossless_and_canonical(builder: Any) -> None:
+    provenance = builder()
+    text = provenance.to_uns_json()
+    assert to_uns_json(provenance) == text
+    restored = AnnotationProvenance.from_uns_json(text)
+    assert restored == provenance
+    assert restored.to_uns_json() == text
+    assert json.loads(text) == json.loads(builder().to_uns_json())
+    assert unsafe_structure_problems(json.loads(text)) == []
+
+
+def test_serialised_provenance_has_no_list_of_mappings() -> None:
+    payload = json.loads(_human_provenance().to_uns_json())
+    for values in _walk_lists(payload):
+        assert not any(isinstance(item, dict) for item in values)
+    assert payload["schema_version"] == 3
+    assert payload["label_table_version"] == 1
+    assert payload["panel"]["validation_basis"] == "real_data"
+
+
+@pytest.mark.filterwarnings("ignore:Writing zarr v2 data:UserWarning")
+@pytest.mark.parametrize("backend", ["h5ad", "zarr"])
+def test_provenance_survives_anndata_round_trips(backend: str, tmp_path: Path) -> None:
+    provenance = _human_provenance()
+    adata = ad.AnnData(np.zeros((2, 2), dtype=np.float32))
+    adata.obs_names = ["cell_0", "cell_1"]
+    adata.var_names = ["GENE1", "GENE2"]
+    provenance.write_to_uns(adata.uns)
+    if backend == "h5ad":
+        path = tmp_path / "labels.h5ad"
+        adata.write_h5ad(path)
+        restored = ad.read_h5ad(path)
+    else:
+        path = tmp_path / "labels.zarr"
+        adata.write_zarr(path)
+        restored = ad.read_zarr(path)
+    assert isinstance(restored.uns[PROVENANCE_UNS_KEY], str)
+    assert AnnotationProvenance.read_from_uns(restored.uns) == provenance
+
+
+def test_read_from_uns_handles_absent_and_bad_values() -> None:
+    assert AnnotationProvenance.read_from_uns({}) is None
+    text = _mouse_provenance().to_uns_json()
+    assert AnnotationProvenance.read_from_uns({PROVENANCE_UNS_KEY: np.str_(text)}) == (
+        _mouse_provenance()
+    )
+    with pytest.raises(TypeError, match="JSON string"):
+        AnnotationProvenance.read_from_uns({PROVENANCE_UNS_KEY: {"species": "human"}})
+
+
+@pytest.mark.parametrize("key", ["Astrocytes/Ependymal", "has space", "", "a:b"])
+def test_unsafe_keys_are_rejected(key: str) -> None:
+    assert not is_safe_key(key)
+    with pytest.raises(ValidationError, match="unsafe key"):
+        PanelProvenance(validated_share={key: 0.5})
+
+
+def test_safe_keys() -> None:
+    for key in ("broad", "whb_frontal_supc_clus", "g1_density_ratio", "a.b-c"):
+        assert is_safe_key(key)
+    assert not is_safe_key(3)
+
+
+def test_unsafe_structures_are_listed() -> None:
+    problems = unsafe_structure_problems(
+        {"ok": [{"nested": 1}], "bad/key": 1.0, "nan": float("nan")}
+    )
+    assert "$.ok[0]: list holds a mapping" in problems
+    assert "$: unsafe key 'bad/key'" in problems
+    assert any("non-finite" in problem for problem in problems)
+
+
+def test_non_finite_floats_and_unknown_fields_are_rejected() -> None:
+    with pytest.raises(ValidationError):
+        EngineProvenance(wall_time_s=float("nan"))
+    with pytest.raises(ValidationError):
+        DatasetGateProvenance(frac_ge30=float("inf"))
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        EngineProvenance(gpu=True)  # type: ignore[call-arg]
+
+
+def test_reference_keys_must_match_reference_ids() -> None:
+    reference = ReferenceProvenance(reference_id="wmb_panel", role="primary")
+    with pytest.raises(ValidationError, match="differs from its reference_id"):
+        AnnotationProvenance(species="mouse", references={"wmb": reference})
+    with pytest.raises(ValidationError, match="safe token"):
+        ReferenceProvenance(reference_id="wmb/panel", role="primary")
+    with pytest.raises(ValidationError, match="unknown references"):
+        AnnotationProvenance(
+            species="mouse",
+            references={"wmb_panel": reference},
+            resolvability={"whb_frontal_supc_clus": ResolvabilityProvenance()},
+        )
+
+
+def test_trust_basis_and_species_rules() -> None:
+    with pytest.raises(ValidationError, match="validation_basis"):
+        PanelProvenance(panel_trust="provisional", validation_basis="simulation")
+    PanelProvenance(panel_trust="validated", validation_basis="simulation")
+    PanelProvenance(panel_trust="provisional")
+    with pytest.raises(ValidationError):
+        PanelProvenance(panel_trust="trusted")  # type: ignore[arg-type]
+    PanelProvenance(panel_trust="provisional", banner=True)
+    PanelProvenance(panel_trust="broad_only", banner=True)
+    with pytest.raises(ValidationError, match="banner"):
+        PanelProvenance(panel_trust="validated", banner=True)
+    with pytest.raises(ValidationError, match="banner"):
+        PanelProvenance(panel_trust="provisional", banner=False)
+    with pytest.raises(ValidationError):
+        PanelProvenance(family_basis="borrowed")  # type: ignore[arg-type]
+    with pytest.raises(ValidationError, match="mouse_gate"):
+        AnnotationProvenance(species="human", mouse_gate=MouseGateProvenance())
+    with pytest.raises(ValidationError):
+        DatasetGateProvenance(level="partial")  # type: ignore[arg-type]
+
+
+def test_minimal_provenance_defaults() -> None:
+    provenance = AnnotationProvenance(species="human")
+    assert provenance.mode == "map_first"
+    assert provenance.panel is None
+    assert provenance.references == {}
+    payload = json.loads(provenance.to_uns_json())
+    assert payload["species"] == "human"
+    assert payload["panel"] is None
+
+
+def test_manifest_filename() -> None:
+    assert annotation_manifest_filename("HD2_XENIUM") == (
+        "HD2_XENIUM_annotation_manifest.json"
+    )
+
+
+# --------------------------------------------------------------------------
+# validation_basis round trip of a simulation row (M13)
+
+
+@pytest.mark.filterwarnings("ignore:Writing zarr v2 data:UserWarning")
+def test_a_simulation_row_round_trips_from_the_csv_to_the_uns(tmp_path: Path) -> None:
+    """CSV -> read_validated_panels -> trust_for_panel -> panel_provenance -> uns.
+
+    A gate-P row (``validation_basis = simulation``) reaches the label
+    table's provenance with its basis, level and table digests; the same
+    row on a bundle without a self-map stays ``broad_only`` (the fail-safe)
+    and records no basis.
+    """
+    from merxen.annotation.diagnostics import (
+        VALIDATED_PANEL_LEVELS_FILE,
+        VALIDATED_PANELS_FILE,
+        panel_diagnostics,
+        panel_provenance,
+        read_validated_panels,
+        trust_for_panel,
+    )
+    from merxen.annotation.panel import panel_family
+
+    from .test_diagnostics import (
+        annotation_panel,
+        bundle_manifest,
+        ids,
+        level_row,
+        panel_row,
+        report_entry,
+        write_tables,
+    )
+
+    gene_ids = ids(100)
+    row = panel_row(
+        "sim_panel",
+        gene_ids,
+        family_id="sim_family",
+        max_level="broad",
+        basis="simulation",
+    )
+    levels = [
+        level_row("sim_family", row["panel_hash"], "broad", "Exc", min_depth=15),
+        level_row(
+            "sim_family",
+            row["panel_hash"],
+            "supercluster",
+            "Exc",
+            status="failed:NP4",
+            min_depth=None,
+            max_depth=None,
+        ),
+    ]
+    directory = write_tables(
+        tmp_path / "tables", [row], levels=levels, genes={"sim_panel": (gene_ids, ())}
+    )
+    table = read_validated_panels(directory)
+    (record,) = table.records
+    assert record.validation_basis == "simulation"
+    family = panel_family(
+        gene_ids,
+        species="human",
+        platforms=["XENIUM"],
+        known_families=table.known_families(),
+    )
+    panel = annotation_panel(gene_ids, family)
+    report = {"declared_panels": {"S_X": report_entry()}}
+    restored = {}
+    for name, self_map in (("self_map", True), ("no_self_map", False)):
+        diagnostics = panel_diagnostics(
+            panel,
+            panel_report=report,
+            bundles=[
+                bundle_manifest(
+                    panel_hash=panel.panel_hash,
+                    n_query_genes_used=100,
+                    resolvability=self_map,
+                )
+            ],
+        )
+        decision = trust_for_panel(
+            diagnostics,
+            reference_id="whb_frontal_supc_clus",
+            role="primary",
+            validated=table,
+        )
+        provenance = AnnotationProvenance(
+            species="human",
+            panel=panel_provenance(
+                decision,
+                diagnostics,
+                panel_mode="per_platform",
+                validated_share={"broad": 0.75},
+            ),
+        )
+        adata = ad.AnnData(np.zeros((2, 2), dtype=np.float32))
+        adata.obs_names = ["cell_0", "cell_1"]
+        adata.var_names = ["GENE1", "GENE2"]
+        provenance.write_to_uns(adata.uns)
+        path = tmp_path / f"{name}.h5ad"
+        adata.write_h5ad(path)
+        read_back = AnnotationProvenance.read_from_uns(ad.read_h5ad(path).uns)
+        assert read_back == provenance
+        assert (
+            AnnotationProvenance.from_uns_json(provenance.to_uns_json()) == provenance
+        )
+        assert read_back is not None and read_back.panel is not None
+        restored[name] = read_back.panel
+    promoted = restored["self_map"]
+    assert promoted.panel_trust == "validated"
+    assert promoted.validation_basis == "simulation"
+    assert promoted.validated_max_level == "broad"
+    assert (promoted.panel_family, promoted.family_basis) == ("sim_family", "listed")
+    assert promoted.trust_reasons == ["family_validated"] and promoted.banner is False
+    assert promoted.validated_panels_sha256 == table.sha256[VALIDATED_PANELS_FILE]
+    assert (
+        promoted.validated_panel_levels_sha256
+        == (table.sha256[VALIDATED_PANEL_LEVELS_FILE])
+    )
+    assert promoted.validated_share == {"broad": 0.75}
+    payload = json.loads(
+        AnnotationProvenance(species="human", panel=promoted).to_uns_json()
+    )
+    assert payload["panel"]["validation_basis"] == "simulation"
+    fail_safe = restored["no_self_map"]
+    assert fail_safe.panel_trust == "broad_only" and fail_safe.banner is True
+    assert fail_safe.validation_basis is None
+    assert fail_safe.validated_max_level is None
+    assert fail_safe.trust_reasons == ["resolvability_not_run"]
+    assert fail_safe.panel_family == "sim_family"

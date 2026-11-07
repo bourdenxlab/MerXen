@@ -234,6 +234,10 @@ _REFUSALS = {
     "atera/only_pciseq": "'pciseq' is not active for this run. ATERA rows run only",
     "atera/stop_gaston": "'gaston' is not active for this run. ATERA rows run only",
     "atera/only_mecr": "'mecr' is not active for this run. ATERA rows run only",
+    "atera/map_first_row": (
+        "map_first annotation is not covered for ATERA rows yet (AT-11, RCA on "
+        "Atera); remove clustering_squidpy_mode from row PAIR_A"
+    ),
     "mixed/xenium_native": (
         "segmentation_source=native is not available for XENIUM rows yet; "
         "XENIUM supports: cellpose_proseg"
@@ -317,6 +321,102 @@ def test_atera_rows_run_the_native_route(
         assert record["analysis_segmentations"] == ["original_seg"]
     assert preflight_cases["atera/only_segment"]["selected_stages"] == ["segment"]
     assert preflight_cases["atera/start_enrich"]["selected_stages"] == ["enrich"]
+
+
+@pytest.mark.nextflow
+def test_atera_rows_cluster_in_legacy_mode(
+    preflight_cases: dict[str, dict[str, Any]],
+) -> None:
+    """map_first annotation (RCA) is gated off for ATERA rows.
+
+    Human runs map_first by default since the RCA flip (M8), but its panel,
+    reference and gate steps are built for the MERSCOPE/XENIUM panels, so an
+    ATERA row without its own clustering_squidpy_mode clusters in legacy
+    mode, and its settings gain no annotation key (its task hashes are the
+    pre-merge ones). A row that names map_first is refused
+    (``test_atera_refusals``).
+    """
+    for case in (
+        "atera/no_stop_stage",
+        "atera/mender",
+        "atera/legacy_row",
+        "mixed/atera",
+    ):
+        record = preflight_cases[case]
+        assert record["result"] == "OK", (case, record)
+        assert record["clustering_squidpy_mode"] == "legacy", (case, record)
+    # The XENIUM row of the same samplesheet keeps the human default.
+    assert preflight_cases["mixed/xenium"]["clustering_squidpy_mode"] == "map_first"
+
+
+_ATERA_LEGACY_NOTE = (
+    "cluster in legacy mode: map_first annotation is not covered for ATERA rows "
+    "yet (AT-11, RCA on Atera)"
+)
+
+
+@pytest.mark.nextflow
+def test_atera_rows_raise_no_legacy_deprecation_warning(
+    preflight_cases: dict[str, dict[str, Any]],
+) -> None:
+    """The launch log never calls an ATERA row's legacy mode deprecated.
+
+    Neither a row held in legacy mode nor one that names legacy itself (as the
+    map_first refusal advises) is a deprecated choice. The mode summary marks a
+    held row "(ATERA)", not "(row)"; a XENIUM legacy row of the same
+    samplesheet still raises the warning.
+    """
+    summary = "Clustering mode per samplesheet row (human; run mode map_first): "
+    expected = {
+        "log/atera": [
+            summary + "PAIR_A=legacy (ATERA)",
+            f"ATERA rows PAIR_A {_ATERA_LEGACY_NOTE}",
+        ],
+        "log/atera_legacy_row": [summary + "PAIR_A=legacy (row)"],
+        "log/mixed": [
+            summary + "PAIR_B=map_first, PAIR_C=legacy (ATERA)",
+            f"ATERA rows PAIR_C {_ATERA_LEGACY_NOTE}",
+        ],
+        "log/mixed_atera_legacy_row": [
+            summary + "PAIR_B=map_first, PAIR_A=legacy (row)"
+        ],
+        "log/mixed_xenium_legacy_row": [
+            summary + "PAIR_B=map_first, PAIR_C=legacy (ATERA), PAIR_D=legacy (row)",
+            f"ATERA rows PAIR_C {_ATERA_LEGACY_NOTE}",
+        ],
+    }
+    for case, info in expected.items():
+        record = preflight_cases[case]
+        assert record["info"] == info, (case, record)
+        if case == "log/mixed_xenium_legacy_row":
+            (warning,) = record["warn"]
+            assert warning.startswith("Human legacy clustering"), warning
+        else:
+            assert record["warn"] == [], (case, record)
+
+
+@pytest.mark.nextflow
+def test_annotation_prepare_only_leaves_atera_rows_out(
+    preflight_cases: dict[str, dict[str, Any]],
+) -> None:
+    """--annotation_prepare_only builds no reference bundle for an ATERA row."""
+    assert preflight_cases["prepare_only/atera"] == {"left_out": True}
+    assert preflight_cases["prepare_only/xenium"] == {"left_out": False}
+
+
+@pytest.mark.nextflow
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
+def test_global_legacy_mode_warns_only_for_non_atera_rows(tmp_path: Path) -> None:
+    """--clustering_squidpy_mode legacy is deprecated only where it acts."""
+    cases = _preflight_cases(
+        tmp_path, "--stop_stage", "enrich", "--clustering_squidpy_mode", "legacy"
+    )
+    summary = "Clustering mode per samplesheet row (human; run mode legacy): "
+    assert cases["log/atera"]["info"][0] == summary + "PAIR_A=legacy (ATERA)"
+    assert cases["log/atera"]["warn"] == []
+    assert cases["log/atera_legacy_row"]["warn"] == []
+    (warning,) = cases["log/mixed"]["warn"]
+    assert warning.startswith("Human legacy clustering"), warning
 
 
 @pytest.mark.nextflow
@@ -450,6 +550,24 @@ def test_global_off_stage_switches_are_ignored_for_atera(tmp_path: Path) -> None
     for stage in ("pciseq", "gaston", "compute_cortical_depth", "distance_from_object"):
         assert stage in xenium["stage_order"], stage
     assert xenium["setting_notes"] == []
+
+
+@pytest.mark.nextflow
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
+def test_global_map_first_mode_is_ignored_for_atera(tmp_path: Path) -> None:
+    """An explicit --clustering_squidpy_mode map_first leaves ATERA rows legacy."""
+    cases = _preflight_cases(
+        tmp_path,
+        "--stop_stage",
+        "enrich",
+        "--clustering_squidpy_mode",
+        "map_first",
+    )
+    for case in ("atera/no_stop_stage", "mixed/atera"):
+        record = cases[case]
+        assert record["result"] == "OK", (case, record)
+        assert record["clustering_squidpy_mode"] == "legacy", (case, record)
+    assert cases["mixed/xenium_enrich"]["clustering_squidpy_mode"] == "map_first"
 
 
 # --------------------------------------------------------------------------- #

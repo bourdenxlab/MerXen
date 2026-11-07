@@ -36,6 +36,9 @@ converge at alignment; dashed stations are governed by a parameter. See
 - [Outputs](outputs.md) — directory layout and artifacts produced by each stage.
 - [Manual landmark registration](stages/manual-registration.md) — standalone
   prepare, label and register workflows for image pairs, including Zeiss CZI.
+- [Cell-type annotation overview](annotation-overview.md) — what the map-first
+  annotation does, its outputs, how panels are trusted, and the exact rule
+  behind each cell-type level.
 
 ### Pipeline stages
 - [SpatialData build](stages/spatialdata-build.md)
@@ -56,6 +59,9 @@ converge at alignment; dashed stations are governed by a parameter. See
 - [Distance from object](stages/distance-from-object.md)
 - [MapMyCells](stages/mapmycells.md)
 - [GASTON spatial domains](stages/gaston.md)
+- [Reference-based annotation](stages/annotation.md) (in development); start
+  with the [annotation overview and method](annotation-overview.md) for what
+  the annotation does and how each cell type is defined.
 
 ### Developer reference
 - [Pipeline architecture](pipeline.md) — stage graph and data flow.
