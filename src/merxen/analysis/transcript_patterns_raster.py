@@ -9,7 +9,7 @@ the same compartment and signed-distance statistics without keeping points:
 1. **Tissue support.** Hand annotations win when the sample has them (the
    polygon is rasterised on a 10 um grid; transcripts in grid bins that the
    boundary crosses get an exact point-in-polygon test). Otherwise the tissue
-   is the all-transcript density at 10 um, smoothed, thresholded (log-Otsu,
+   is the all-transcript density at 10 um, thresholded (log-Otsu,
    capped at a fraction of the dense-tissue level), morphologically closed,
    hole-filled and cleared of small fragments (:func:`density_tissue_mask`).
    The method and its parameters are recorded.
@@ -88,7 +88,6 @@ from merxen.enrichment.label_lookup import (
     BlockCache,
     PixelFrame,
     default_n_workers,
-    lookup_labels,
     natural_partition_order,
     pixel_indices,
 )
@@ -152,7 +151,9 @@ class RasterEngineSettings:
 
     Attributes:
         tissue_bin_um: Bin of the tissue grid (density and annotation masks).
-        tissue_smoothing_sigma_um: Gaussian sigma of the density.
+        tissue_smoothing_sigma_um: Gaussian sigma of the density (0: none;
+            smoothing widens the mask past sharp tissue edges, and the closing
+            already bridges sparse bins).
         tissue_closing_radius_um: Radius of the closing disk.
         tissue_min_component_area_um2: Smallest kept tissue component.
         tissue_max_threshold_fraction: Cap of the density threshold, as a
@@ -168,10 +169,10 @@ class RasterEngineSettings:
     """
 
     tissue_bin_um: float = 10.0
-    tissue_smoothing_sigma_um: float = 10.0
+    tissue_smoothing_sigma_um: float = 0.0
     tissue_closing_radius_um: float = 50.0
     tissue_min_component_area_um2: float = 50_000.0
-    tissue_max_threshold_fraction: float = 0.05
+    tissue_max_threshold_fraction: float = 0.01
     distance_tile_px: int = 4096
     median_bin_um: float = 0.05
     diagnostic_bin_um: float = 1.0
@@ -463,21 +464,23 @@ def density_tissue_mask(
     *,
     origin_um: tuple[float, float],
     bin_um: float,
-    smoothing_sigma_um: float = 10.0,
+    smoothing_sigma_um: float = 0.0,
     closing_radius_um: float = 50.0,
     min_component_area_um2: float = 50_000.0,
-    max_threshold_fraction: float = 0.05,
+    max_threshold_fraction: float = 0.01,
 ) -> TissueMask:
     """Derive the tissue support from an all-transcript density raster.
 
     Steps, all recorded in the mask's ``parameters``:
 
-    1. Gaussian smoothing (``smoothing_sigma_um``).
-    2. Threshold: Otsu on ``log10`` of the positive smoothed bins (the sparse
-       off-tissue background and the tissue form two modes), capped at
-       ``max_threshold_fraction`` of the 99th percentile of the positive bins,
-       so that a window holding no background (a crop inside the tissue) is
-       not split into dense and sparse tissue.
+    1. Threshold: Otsu on ``log10`` of the positive bins of the raw raster
+       (the sparse off-tissue background, a few transcripts per bin, and the
+       tissue, hundreds or more, form two modes), capped at
+       ``max_threshold_fraction`` of the 99th percentile of the positive
+       bins, so that a window holding no background (a crop inside the
+       tissue) is not split into dense and sparse tissue.
+    2. Bins whose density (Gaussian-smoothed when ``smoothing_sigma_um`` is
+       positive; off by default) reaches the threshold are tissue.
     3. Binary closing with a disk of ``closing_radius_um`` (on a padded grid,
        so the grid edge does not erode the mask).
     4. Hole filling.
@@ -492,7 +495,7 @@ def density_tissue_mask(
         closing_radius_um: Radius of the closing disk; 0 disables closing.
         min_component_area_um2: Smallest kept component.
         max_threshold_fraction: Cap of the threshold, as a fraction of the
-            99th percentile of the positive smoothed bins.
+            99th percentile of the positive bins.
 
     Returns:
         The density-derived mask.
@@ -509,9 +512,7 @@ def density_tissue_mask(
         if sigma_bins > 0
         else density
     )
-    positive = smooth[smooth > 0]
-    # Smoothing spreads far-off counts into tiny values; they are background.
-    positive = positive[positive >= 1e-3 * float(positive.max())]
+    positive = density[density > 0]
     otsu = float(10.0 ** _otsu_threshold(np.log10(positive)))
     p99 = float(np.percentile(positive, 99.0))
     ceiling = float(max_threshold_fraction) * p99
@@ -1781,19 +1782,13 @@ def gene_diagnostic_rasters(
         return x[inside], y[inside], slots[inside]
 
     def _tissue_pass(path: Path) -> None:
-        local = np.zeros((n_slots, n_bins), dtype=np.int64)
         for batch in _iter_batches(path, columns, batch_rows):
             selected = _selected(batch) if batch.num_rows else None
             if selected is None:
                 continue
             x, y, slots = selected
             ix, iy = tissue.bins(x, y)
-            flat = slots * n_bins + iy * n_x + ix
-            local += np.bincount(flat, minlength=n_slots * n_bins).reshape(
-                n_slots, n_bins
-            )
-        with lock:
-            tissue_counts[:] += local
+            _sparse_add(tissue_counts, slots * n_bins + iy * n_x + ix, lock)
 
     _map_files(inputs.files, _tissue_pass, n_workers)
 
@@ -1817,7 +1812,6 @@ def gene_diagnostic_rasters(
     cache = BlockCache(512 * 1024**2)
 
     def _window_pass(path: Path) -> None:
-        local = np.zeros_like(window_counts)
         for batch in _iter_batches(path, columns, batch_rows):
             selected = _selected(batch) if batch.num_rows else None
             if selected is None:
@@ -1832,21 +1826,20 @@ def gene_diagnostic_rasters(
             column, row = pixel_indices(
                 x, y, inputs.frame, convention=inputs.convention
             )
-            cell = lookup_labels(
-                column, row, inputs.cell_labels, cache=cache, cache_key="cell"
+            looked_up = lookup_many(
+                column,
+                row,
+                {"cell": inputs.cell_labels, "nucleus": inputs.nucleus_labels},
+                cache=cache,
             )
-            nucleus = lookup_labels(
-                column, row, inputs.nucleus_labels, cache=cache, cache_key="nucleus"
-            )
+            cell, nucleus = looked_up["cell"], looked_up["nucleus"]
             compartment = np.full(x.size, COMPARTMENT_CODES["extracellular"], np.int64)
             compartment[cell > 0] = COMPARTMENT_CODES["cytoplasmic"]
             compartment[nucleus > 0] = COMPARTMENT_CODES["nuclear"]
             flat = (slots * len(COMPARTMENTS) + compartment) * (n_fine * n_fine) + (
                 fy * n_fine + fx
             )
-            local += np.bincount(flat, minlength=local.size).reshape(local.shape)
-        with lock:
-            window_counts[:] += local
+            _sparse_add(window_counts, flat, lock)
 
     _map_files(window_files, _window_pass, n_workers)
 
@@ -1869,6 +1862,15 @@ def gene_diagnostic_rasters(
             edges_extent=extent,
         )
     return rasters
+
+
+def _sparse_add(target: np.ndarray, flat: np.ndarray, lock: threading.Lock) -> None:
+    """Add one count per flat index into ``target`` without a dense temporary."""
+    if flat.size == 0:
+        return
+    keys, counts = np.unique(flat, return_counts=True)
+    with lock:
+        target.reshape(-1)[keys] += counts
 
 
 def _file_meets_windows(path: Path, origins: np.ndarray, span: float) -> bool:

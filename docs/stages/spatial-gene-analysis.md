@@ -87,10 +87,12 @@ engine streams every transcript instead of keeping points:
    columns above), they win: the polygon is rasterised on a 10 µm grid and
    transcripts in grid bins its boundary crosses get an exact
    point-in-polygon test. Otherwise the tissue comes from the density of
-   every transcript (controls included) on a 10 µm grid: Gaussian smoothing
-   (σ 10 µm), a threshold (Otsu on log10 of the positive bins, capped at 5% of
-   their 99th percentile so a window inside the tissue is not split into
-   dense and sparse tissue), a closing with a 50 µm disk, hole filling, and
+   every transcript (controls included) on a 10 µm grid: a threshold (Otsu
+   on log10 of the positive bins, which separates the off-tissue background
+   of a few transcripts per bin from the tissue; capped at 1% of their 99th
+   percentile so a window inside the tissue is not split into dense and
+   sparse tissue) applied to every bin, a closing with a 50 µm disk, hole
+   filling, and
    removal of components smaller than 0.05 mm². The manifest records the
    method, the threshold and the areas; the mask itself is written as
    `<sample_id>_transcript_tissue_mask.npz` and drawn over the density in
@@ -229,8 +231,8 @@ They are not required when the row's effective
 | `transcript_diagnostic_*` | Representative gene plot count, cap, local window size, and point cap. |
 
 The label-raster engine's own parameters (tissue grid 10 µm, smoothing sigma
-10 µm, closing radius 50 µm, smallest kept component 50,000 µm², threshold cap
-0.05 of the 99th percentile, distance tile 4,096 px, median bin 0.05 µm, fine
+0 (off), closing radius 50 µm, smallest kept component 50,000 µm², threshold cap
+0.01 of the 99th percentile, distance tile 4,096 px, median bin 0.05 µm, fine
 diagnostic bin 1 µm, scratch directory, worker threads from
 `DASK_NUM_WORKERS`) are `RasterEngineSettings` in
 [analysis/transcript_patterns_raster.py](../../src/merxen/analysis/transcript_patterns_raster.py),
