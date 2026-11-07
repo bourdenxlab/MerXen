@@ -92,8 +92,11 @@ def _main_nf_analysis_layer_keys() -> dict[str, dict[str, AnalysisLayerKeys]]:
     """Evaluate ``analysisLayerKeys`` for every segmentation it names."""
     params, body = _function_body(MAIN_NF.read_text(), "analysisLayerKeys")
     assert [part.strip() for part in params.split(",")] == ["platform", "segmentation"]
+    body = re.sub(r"//[^\n]*", "", body)
     block_pattern = re.compile(
-        r"if \((?P<condition>[^)]*)\)\s*\{\s*return\s*\[(?P<value>[^\]]*)\]\s*\}",
+        r"if \((?P<condition>[^)]*)\)\s*\{\s*"
+        r'(?:def layer = AteraProsegLayers.forKind\("(?P<prior>[^\"]+)"\)\s*)?'
+        r"return\s*\[(?P<value>[^\]]*)\]\s*\}",
         re.DOTALL,
     )
     blocks = list(block_pattern.finditer(body))
@@ -115,6 +118,18 @@ def _main_nf_analysis_layer_keys() -> dict[str, dict[str, AnalysisLayerKeys]]:
             assert equals is not None, f"unparsed condition: {condition}"
             segmentations = [equals.group(1)]
         value = block.group("value")
+        if block.group("prior") is not None:
+            from merxen.segmentation.atera_proseg import proseg_layer
+
+            layer = proseg_layer(block.group("prior"))
+            assert re.fullmatch(
+                r"\s*table_key:\s*layer.table_key,\s*"
+                r"shape_key:\s*layer.shapes_key,?\s*",
+                value,
+            ), value
+            # The registry's Groovy twin is independently checked by
+            # test_platform_registry_groovy; retain the same mirror check here.
+            value = f'table_key: "{layer.table_key}", shape_key: "{layer.shapes_key}"'
         table_match = re.search(r'table_key:\s*"([^"]+)"', value)
         assert table_match is not None, value
         shape_literal = re.search(r'shape_key:\s*"([^"]+)"', value)

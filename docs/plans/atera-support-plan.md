@@ -2582,3 +2582,11 @@ AT-11 annotation results; each embedding is an independent fit.
 The seven exact-total QC refreshes also completed. Before/after file checks
 found no missing files, no changes outside QC, and no changes to per-cell or
 geometry outputs. Published clustering was not rerun for dotplots, as requested.
+
+AT-7 cache scope after the RCA integration: process script pins remain unchanged,
+but `AnnotationReferences.HIERARCHY_SOURCES` hashes all of `merxen/config.py` and
+`analysis/clustering_squidpy.py`. Their AT-7 changes invalidate the map-first
+`CLUSTERING_SQUIDPY_COMPUTE_CPU` cache on a future restart, including other
+platforms. This continuation has not launched any published clustering refresh.
+The vendor-prior layer rename intentionally refreshes the Atera stitch and its
+derived stages when that route is relaunched.

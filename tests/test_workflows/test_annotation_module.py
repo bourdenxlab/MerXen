@@ -297,6 +297,7 @@ def test_no_gpu_lock_or_gpu_queue_on_the_annotation_processes() -> None:
         r'withName: "(\w+)" \{\s*maxForks = [^\n]+\n\s*beforeScript', dwight
     )
     assert set(locked) == {
+        "ATERA_CELLPOSE_SEGMENT",
         "CELLPOSE_SEGMENT",
         "CELLPOSE_NUCLEI_SEGMENT",
         "ALIGN",
@@ -610,6 +611,10 @@ HIERARCHY_IMPORT_EXEMPTIONS = {
         "map_first hierarchy never runs it (its QC embedding has its own rule)"
     ),
     "merxen.io.spatialdata_io": "SpatialData writes (FINALIZE, PREPARE)",
+    "merxen.io.spatialdata_schema": (
+        "vendor namespace constant for PREPARE's SpatialData nucleus lookup; "
+        "COMPUTE_CPU hashes the prepared table"
+    ),
     "merxen.io.transcript_io": "column lookups (PREPARE's SpatialData reads)",
     "merxen.memory": "memory logging",
     "merxen.platforms": (
