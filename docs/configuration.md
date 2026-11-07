@@ -125,7 +125,7 @@ cases, unless the variable is set to `none` or `/dev/null` on purpose:
 | `mask_image_quantification_enabled` | `true` | Insert the Cellpose-mask image quantification stage between enrichment and QC. A non-empty samplesheet `mask_image_quantification_enabled` value overrides this per row. |
 | `mecr_enabled` | species-dependent | Insert species-matched whole-brain mutually exclusive co-expression rate analysis after QC. Defaults to `true` for human and `false` for mouse; mouse may opt in to the complete WMB reference. |
 | `spatial_gene_analysis_enabled` | `true` | Insert spatial gene analysis between visualization and clustering. A non-empty samplesheet value overrides this per row; disabled rows proceed directly from visualization to clustering. |
-| `spatial_gene_analysis_transcript_analysis_enabled` | `true` | Run the annotation-dependent transcript-pattern component inside spatial gene analysis. A non-empty samplesheet value overrides this per row; `false` retains cell-level autocorrelation without requiring tissue GeoJSON files. |
+| `spatial_gene_analysis_transcript_analysis_enabled` | `true` | Run the transcript-pattern component inside spatial gene analysis. XENIUM and MERSCOPE rows need tissue GeoJSON files for it; ATERA rows (label-raster engine) derive the tissue from the transcript density when they have none. A non-empty samplesheet value overrides this per row; `false` retains cell-level autocorrelation only. |
 | `cortical_depth_enabled` | `false` | Insert the cortical-depth stage after clustering. Requires per-sample pial/tissue-edge annotations, with optional gray/white boundaries for depth pieces. A non-empty samplesheet `cortical_depth_enabled` value overrides this per row. |
 | `distance_from_object_enabled` | `false` | Insert registered polygon-edge distance analysis after cortical depth/clustering. A non-empty samplesheet value overrides this per row. |
 | `distance_from_object_segmentations` | `proseg, original, cellpose` | Cell-table branches for object distance. Legacy `reseg`, `original_seg`, and `proseg_mask` values remain accepted aliases. A samplesheet value may override this per row. |
@@ -407,7 +407,7 @@ and no Cellpose or ProSeg task runs. See
 | `enrich` | Native enrichment: no Cellpose masks. |
 | `build_viewer_caches` | Vendor label masks on `morphology_focus`. |
 | `mask_image_quantification` | Quantifies the vendor `cell_labels`. |
-| `qc`, `visualize`, `spatial_gene_analysis`, `clustering_squidpy` | Run on the `original_seg` layer. `clustering_squidpy` runs in legacy mode: map_first annotation ([Cell-type annotation overview](annotation-overview.md)) is not covered for ATERA rows yet (AT-11, RCA on Atera; [Atera plan §8](plans/atera-support-plan.md)). |
+| `qc`, `visualize`, `spatial_gene_analysis`, `clustering_squidpy` | Run on the `original_seg` layer. Spatial gene analysis includes the transcript spatial patterns, on the label-raster engine over every transcript ([spatial gene analysis](stages/spatial-gene-analysis.md#label-raster-engine-atera)); no tissue annotations are needed. `clustering_squidpy` runs in legacy mode: map_first annotation ([Cell-type annotation overview](annotation-overview.md)) is not covered for ATERA rows yet (AT-11, RCA on Atera; [Atera plan §8](plans/atera-support-plan.md)). |
 | `mender` | Runs when `mender_enabled` (on `original_seg`). An explicit `stop_stage=mender` passes over the standalone `mapmycells` stage, which ATERA rows do not run. |
 
 Native rows have one analysis layer, `original_seg`. A global
@@ -438,7 +438,6 @@ with "remove `<setting>` from row `<pair>` or set it to false"):
 | row `gaston_enabled=true` | GASTON is not covered for ATERA rows |
 | row `pciseq_enabled=true` | pciSeq is off for ATERA rows |
 | row `mecr_enabled=true` | MECR is off for ATERA rows until it streams its reference |
-| row `spatial_gene_analysis_transcript_analysis_enabled=true` | transcript spatial patterns are off for ATERA rows |
 | row `cortical_depth_enabled=true` or `distance_from_object_enabled=true` | cortical depth and distance from object are off for non-cortical ATERA sections |
 | row `enable_alignment` or `xenium_registered_images_csv` | image registration and alignment are not covered for ATERA rows (AT-10) |
 | `segmentation_source=cellpose_only` or `cellpose_proseg` | segmentation_source=… is not available for ATERA rows yet; ATERA supports: native, native_proseg |
@@ -447,10 +446,12 @@ with "remove `<setting>` from row `<pair>` or set it to false"):
 | row `clustering_squidpy_mode=map_first` | map_first annotation is not covered for ATERA rows yet (AT-11, RCA on Atera); remove clustering_squidpy_mode from row `<pair>` or set it to legacy |
 
 The global `pciseq_enabled`, `gaston_enabled`, `mecr_enabled`,
-`cortical_depth_enabled`, `distance_from_object_enabled` and
-`spatial_gene_analysis_transcript_analysis_enabled` do not apply to ATERA rows:
+`cortical_depth_enabled` and `distance_from_object_enabled` do not apply to
+ATERA rows:
 the stages stay off there and the run log says when a global `true` is ignored,
-so a mixed samplesheet keeps them for its XENIUM and MERSCOPE rows. Only a
+so a mixed samplesheet keeps them for its XENIUM and MERSCOPE rows. The
+transcript spatial patterns (`spatial_gene_analysis_transcript_analysis_enabled`,
+default `true`) apply to ATERA rows like any other (AT-8). Only a
 value set on the ATERA row itself is refused. The clustering mode follows the
 same rule: the species default (map_first for human and mouse) and a global
 `clustering_squidpy_mode` do not apply to ATERA rows, which cluster in legacy

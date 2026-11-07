@@ -1654,6 +1654,14 @@ def appendAlignmentAnnotationPreflightChecks(errors, row, settings, params) {
     }
 }
 
+// Whether a platform's transcript spatial patterns run on the label-raster
+// engine (Python selects it when the layer has cell and nucleus label
+// elements: the vendor-label platforms, ATERA). That engine needs no tissue
+// annotations: it derives the tissue from the all-transcript density.
+def transcriptPatternsUseLabelRasters(platform) {
+    return PlatformSpec.forName(platform).defaultSegmentationSource == "native"
+}
+
 def appendSpatialGeneTranscriptPreflightChecks(errors, row, settings, _params) {
     if (
         !settings.run_spatial_gene_analysis ||
@@ -1663,6 +1671,28 @@ def appendSpatialGeneTranscriptPreflightChecks(errors, row, settings, _params) {
     }
     settings.active_platforms.each { platform ->
         def labelPrefix = "SPATIAL_GENE_ANALYSIS ${settings.pair_id}:${platform}"
+        if (transcriptPatternsUseLabelRasters(platform)) {
+            // The label-raster engine derives the tissue from the transcript
+            // density when a row has no annotations; given ones must exist.
+            [
+                annotation: "combined pia/tissue-edge annotation GeoJSON",
+                pial: "pial boundary GeoJSON",
+                side: "tissue-edge GeoJSON",
+                wm: "wm annotation GeoJSON",
+                exclusion: "exclusion annotation GeoJSON",
+                ribbon: "ribbon annotation GeoJSON",
+            ].each { role, description ->
+                def optionalPath = corticalDepthAnnotationPath(row, platform, role)
+                if (!isBlankPath(optionalPath)) {
+                    appendPreflightFileCheck(
+                        errors,
+                        optionalPath,
+                        "${labelPrefix} ${description}",
+                    )
+                }
+            }
+            return
+        }
         def annotationPath = corticalDepthAnnotationPath(row, platform, "annotation")
         if (!isBlankPath(annotationPath)) {
             appendPreflightFileCheck(
@@ -2504,13 +2534,6 @@ def appendAteraPreflightChecks(errors, row, settings, params) {
             "mecr_enabled from row ${settings.pair_id} or set it to false"
         )
     }
-    if (settings.spatial_gene_analysis_transcript_analysis_enabled) {
-        errors.add(
-            "transcript spatial patterns are off for ATERA rows; remove " +
-            "spatial_gene_analysis_transcript_analysis_enabled from row " +
-            "${settings.pair_id} or set it to false"
-        )
-    }
     if (
         stageOrder.contains("compute_cortical_depth") ||
         stageOrder.contains("distance_from_object")
@@ -3038,19 +3061,6 @@ def rowSampleSettings(row, params) {
         true,
         "spatial_gene_analysis_transcript_analysis_enabled for ${pairId}",
     )
-    if (
-        ateraRow &&
-        chooseField(row, ["spatial_gene_analysis_transcript_analysis_enabled"]) == null
-    ) {
-        // Only a samplesheet value reaches the preflight, which refuses it.
-        if (spatialGeneTranscriptAnalysisEnabled) {
-            settingNotes << (
-                "transcript spatial patterns are off for ATERA rows; the global " +
-                "spatial_gene_analysis_transcript_analysis_enabled is ignored"
-            )
-        }
-        spatialGeneTranscriptAnalysisEnabled = false
-    }
     def corticalDepthEnabled = ateraIgnoresGlobalSwitch(
         boolOrDefault(
             rowFieldOrDefault(

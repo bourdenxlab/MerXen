@@ -42,7 +42,7 @@ template lives at
 | `only_stage` | no | Row-level single-stage override. If set, it overrides that row's start/stop stage settings. |
 | `mecr_enabled` | no | Row-level MECR switch. Blank inherits its species-dependent default (`true` for human, `false` for mouse). Set `true` for mouse to use the complete WMB reference. |
 | `spatial_gene_analysis_enabled` | no | Row-level switch for the complete spatial-gene-analysis stage. Blank inherits `--spatial_gene_analysis_enabled`, which defaults to `true`. When `false`, clustering follows visualization directly. |
-| `spatial_gene_analysis_transcript_analysis_enabled` | no | Row-level switch for the annotation-dependent transcript analysis within spatial-gene analysis. Blank inherits `--spatial_gene_analysis_transcript_analysis_enabled`. Set this to `false` to retain cell-level autocorrelation without requiring tissue GeoJSON files. |
+| `spatial_gene_analysis_transcript_analysis_enabled` | no | Row-level switch for the transcript analysis within spatial-gene analysis. Blank inherits `--spatial_gene_analysis_transcript_analysis_enabled`. Set this to `false` to retain cell-level autocorrelation without requiring tissue GeoJSON files (XENIUM and MERSCOPE rows need them; ATERA rows do not). |
 | `cortical_depth_enabled` | no | Row-level cortical-depth switch. Blank inherits `--cortical_depth_enabled`. |
 | `distance_from_object_enabled` | no | Row-level polygon-distance switch. Blank inherits `--distance_from_object_enabled`. |
 | `distance_from_object_segmentations` | no | Comma-separated object-distance branches: `proseg`, `original`, and/or `cellpose`; optional `proseg_geometry_assignment` and `proseg_hybrid` are also accepted when present. Legacy names remain aliases. Blank uses the three defaults. |
