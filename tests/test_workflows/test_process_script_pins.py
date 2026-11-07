@@ -36,6 +36,9 @@ Changes made so far:
   streaming MECR reference of ATERA rows; a new process, so no completed task
   is invalidated, and no existing pin changed (MECR_REFERENCE and MECR keep
   their script texts).
+- AT-7 added the pins of ATERA_CELLPOSE_SEGMENT (``modules/atera_cellpose.nf``)
+  and ATERA_PROSEG_PLAN_CELLPOSE (``modules/atera_proseg.nf``, the script of
+  ATERA_PROSEG_PLAN with two more staged inputs); no existing pin changed.
 """
 
 from __future__ import annotations
@@ -159,13 +162,14 @@ def test_main_nf_defines_no_process() -> None:
 
 
 def test_pinned_inventory(pinned: dict[str, str]) -> None:
-    """Today's inventory: 53 processes, 53 ``script:`` and 12 ``stub:`` sections.
+    """Today's inventory: 56 processes, 56 ``script:`` and 12 ``stub:`` sections.
 
-    AT-9 added the three ATERA ProSeg processes (``modules/atera_proseg.nf``) and
-    the RCA merge added the annotation processes; no existing pin changed.
+    AT-9 added the three ATERA ProSeg processes, RCA added annotation processes,
+    AT-8 added the streaming MECR reference, and AT-7 added
+    ATERA_CELLPOSE_SEGMENT and ATERA_PROSEG_PLAN_CELLPOSE. No existing pin changed.
     """
     labels = [key.rsplit("::", 1)[1] for key in pinned]
-    assert labels.count("script") == 54
+    assert labels.count("script") == 56
     assert labels.count("stub") == 12
     assert {key for key in pinned if key.endswith("::stub")} == {
         f"workflows/modules/pciseq.nf::{name}::stub"

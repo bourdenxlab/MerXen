@@ -23,6 +23,7 @@ def check(String id, Map row) {
             selected_stages: settings.selected_stages,
             run_native_segment: settings.run_native_segment,
             run_atera_proseg: settings.run_atera_proseg,
+            run_atera_cellpose: settings.run_atera_cellpose,
             run_segment_nuclei: settings.run_segment_nuclei,
             run_mecr: settings.run_mecr,
             run_mapmycells: settings.run_mapmycells,
@@ -115,6 +116,7 @@ workflow {
     check("proseg/start_enrich", proseg + [start_stage: "enrich", stop_stage: "enrich"])
     check("proseg/alias", atera + [segmentation_source: "Vendor-ProSeg"])
     check("proseg/reseg_only", proseg + [analysis_segmentation: "reseg"])
+    check("proseg/vendor_only", proseg + [analysis_segmentation: "proseg_vendor"])
     check("proseg/hybrid", proseg + [analysis_segmentation: "proseg_hybrid"])
     check(
         "proseg/mender_hybrid",
@@ -126,6 +128,26 @@ workflow {
         [pair_id: "PAIR_D", analysis_mode: "xenium", xenium_dir: "raw/xenium",
          segmentation_source: "native_proseg"],
     )
+    // AT-7: Cellpose (DAPI + 18S) and Cellpose-prior tiled ProSeg on ATERA.
+    def cellpose = atera + [segmentation_source: "cellpose_proseg"]
+    check("cellpose/default", cellpose)
+    check(
+        "cellpose/all_mender",
+        cellpose + [analysis_segmentation: "all", mender_enabled: "true", stop_stage: "mender"],
+    )
+    check("cellpose/alias", atera + [segmentation_source: "Cellpose-ProSeg"])
+    check("cellpose/stop_segment", cellpose + [stop_stage: "segment"])
+    check("cellpose/start_enrich", cellpose + [start_stage: "enrich", stop_stage: "enrich"])
+    check("cellpose/mask_only", cellpose + [analysis_segmentation: "proseg_mask"])
+    check("cellpose/channels", cellpose + [atera_channels: "DAPI, 18S"])
+    check("cellpose/hybrid", cellpose + [analysis_segmentation: "proseg_hybrid"])
+    check("cellpose/vendor_layer", cellpose + [analysis_segmentation: "proseg_vendor"])
+    check(
+        "cellpose/mender_hybrid",
+        cellpose + [mender_enabled: "true", mender_segmentations: "proseg_hybrid"],
+    )
+    check("cellpose/segment_nuclei", cellpose + [only_stage: "segment_nuclei"])
+    check("cellpose/blank_channels", cellpose + [atera_channels: " , "])
     // Mixed samplesheet: the XENIUM row keeps its four layers and Cellpose.
     def xenium = [pair_id: "PAIR_B", analysis_mode: "xenium", xenium_dir: "raw/xenium"]
     check("mixed/xenium", xenium + [stop_stage: "build_spatialdata"])

@@ -1,4 +1,8 @@
-"""Channel wiring of the ATERA ProSeg route (``native_proseg``) in ``main.nf``.
+"""Channel wiring of the ATERA ProSeg routes in ``main.nf``.
+
+The vendor prior (``native_proseg``, AT-9) and the ATERA Cellpose prior
+(``cellpose_proseg``, AT-7: ATERA_CELLPOSE_SEGMENT, ATERA_PROSEG_PLAN_CELLPOSE,
+the same tiles and stitch, the Cellpose mask in the SEGMENT mask slot).
 
 Runs the real workflow on one ATERA row with a stand-in ``merxen`` executable
 that only creates the outputs each command declares and a stand-in ProSeg that
@@ -28,6 +32,7 @@ from merxen.config import (
     EnrichmentConfig,
     MaskImageQuantificationConfig,
     NativeLatestConfig,
+    SegmentationConfig,
     ViewerCacheConfig,
 )
 
@@ -67,6 +72,16 @@ _FAKE_MERXEN = textwrap.dedent(
             "pixel_size_um": 0.2125, "mask_shape_px": [100, 100],
             "tile_subset": config.get("tile_subset"), "tiles": tiles,
         }}
+        prior = config.get("prior")
+        if prior:
+            mask = os.path.realpath(prior["mask_path"])
+            cellprob = os.path.realpath(prior["cellprob_path"])
+            plan["prior"] = {{
+                "kind": "cellpose", "mask_path": mask, "cellprob_path": cellprob,
+                "mask_sha256": "a" * 64, "cellprob_sha256": "b" * 64,
+                "mask_stat": [1, 2], "cellprob_stat": [3, 4], "fingerprint": "c" * 64,
+            }}
+            plan["prior_weight"] = {{"rule": "whole_section_auto", "effective": 93.5}}
         if config.get("tile_subset"):
             for tile in tiles:
                 tile["run"] = tile["run"] and tile["tile_id"] in config["tile_subset"]
@@ -78,6 +93,22 @@ _FAKE_MERXEN = textwrap.dedent(
         out = Path(config["output_dir"])
         out.mkdir(exist_ok=True)
         (out / "tile_manifest.json").write_text("{{}}")
+    elif command == "cellpose-segment":
+        dataset = config["dataset"]
+        out = Path(dataset["output_dir"])
+        out.mkdir(exist_ok=True)
+        for name in (
+            "cellpose_masks_tiled.npy", "cellpose_cellprobs_tiled.npy",
+            "cellpose_transforms.json", "cellpose_stitching_stats.json",
+            "cellpose_model_identity.json",
+        ):
+            (out / name).write_text(name)
+        # As the real command: the masks live at their persistent paths.
+        persistent = Path(dataset["persistent_mask_path"])
+        persistent.parent.mkdir(parents=True, exist_ok=True)
+        persistent.write_text("mask")
+        (out / "cellpose_masks_tiled.npy").unlink()
+        os.symlink(persistent, out / "cellpose_masks_tiled.npy")
     elif command == "atera-proseg-stitch":
         out = Path(config["output_dir"])
         out.mkdir(exist_ok=True)
@@ -92,6 +123,7 @@ _FAKE_PROSEG = "#!/bin/sh\necho 'proseg 3.2.0'\n"
 
 _MODELS = {
     "native-latest": NativeLatestConfig,
+    "cellpose-segment": SegmentationConfig,
     "atera-proseg-plan": AteraProsegPlanConfig,
     "atera-proseg-tile": AteraProsegTileConfig,
     "atera-proseg-stitch": AteraProsegStitchConfig,
@@ -193,10 +225,11 @@ def test_native_proseg_route_and_its_restart_arm(tmp_path: Path) -> None:
     )
     stdout, calls = _fresh_calls(tmp_path, "full", row, "full")
     assert "segmentation_source=native_proseg" in stdout
-    assert "analysis segmentations=reseg, original_seg" in stdout
-    assert sorted(calls) == sorted(["build-spatialdata", *_MODELS])
+    assert "analysis segmentations=proseg_vendor, original_seg" in stdout
+    vendor_commands = [name for name in _MODELS if name != "cellpose-segment"]
+    assert sorted(calls) == sorted(["build-spatialdata", *vendor_commands])
     for command, model in _MODELS.items():
-        for config in calls[command]:
+        for config in calls.get(command, []):
             model.model_validate(config)
     tiles = sorted(config["tile_id"] for config in calls["atera-proseg-tile"])
     assert tiles == ["c0_r0", "c1_r0"]
@@ -206,14 +239,17 @@ def test_native_proseg_route_and_its_restart_arm(tmp_path: Path) -> None:
     assert stitch["persistent_latest_zarr_path"] == str(
         (latest / "latest_spatialdata.zarr").resolve()
     )
+    assert stitch["prior_kind"] == "vendor"
+    assert "prior" not in calls["atera-proseg-plan"][0]
+    assert all("prior" not in config for config in calls["atera-proseg-tile"])
     assert calls["enrich"][0]["segmentation_source"] == "native_proseg"
     (quant,) = calls["mask-image-quantification"]
     assert quant["mask_label_key"] == "cell_labels"
     assert quant["extra_layers"] == [
         {
-            "mask_label_key": "proseg_cell_labels",
-            "shape_key": "MOSAIK_proseg",
-            "table_key": "table_MOSAIK_proseg_image_quantification",
+            "mask_label_key": "proseg_vendor_cell_labels",
+            "shape_key": "MOSAIK_proseg_vendor",
+            "table_key": "table_MOSAIK_proseg_vendor_image_quantification",
         }
     ]
     tile_config = calls["atera-proseg-tile"][0]
@@ -303,3 +339,83 @@ def test_a_failed_tile_is_named_and_retried_unless_a_refusal(
     assert all(c["allow_untested_version"] is True for c in calls["atera-proseg-tile"])
     assert "atera-proseg-stitch" not in calls and "enrich" not in calls
     assert "PAIR_A:ATERA: 1 of 2 ATERA ProSeg tiles failed (c1_r0)" in output
+
+
+def _install_fakes(tmp_path: Path) -> None:
+    (tmp_path / "bin").mkdir()
+    fake = tmp_path / "bin" / "merxen"
+    fake.write_text(_FAKE_MERXEN.format(python=sys.executable))
+    fake.chmod(0o755)
+    proseg = tmp_path / "bin" / "proseg"
+    proseg.write_text(_FAKE_PROSEG)
+    proseg.chmod(0o755)
+    (tmp_path / "raw" / "atera").mkdir(parents=True)
+
+
+@pytest.mark.nextflow
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
+def test_atera_cellpose_route_and_its_restart_arm(tmp_path: Path) -> None:
+    """AT-7: Cellpose (no nuclei, no SEGMENT) feeds the tiled ProSeg route."""
+    _install_fakes(tmp_path)
+    row = (
+        "pair_id,analysis_mode,atera_dir,segmentation_source,stop_stage\n"
+        "PAIR_A,atera,raw/atera,cellpose_proseg,mask_image_quantification\n"
+    )
+    stdout, calls = _fresh_calls(tmp_path, "cellpose", row, "cellpose")
+    assert "segmentation_source=cellpose_proseg" in stdout
+    assert "analysis segmentations=reseg, original_seg, proseg_mask" in stdout
+    assert sorted(calls) == sorted(["build-spatialdata", *_MODELS])
+    for command, model in _MODELS.items():
+        for config in calls[command]:
+            model.model_validate(config)
+    # One Cellpose task, on DAPI + 18S of the store's morphology_focus, no CSV.
+    (segment,) = calls["cellpose-segment"]
+    assert segment["dataset"]["platform"] == "ATERA"
+    assert segment["dataset"]["channels"] == ["DAPI", "18S"]
+    assert segment["dataset"]["image_key"] == "morphology_focus"
+    assert segment["dataset"]["proseg_transcripts"] == "none"
+    assert "persistent_transcripts_path" not in segment["dataset"]
+    (plan,) = calls["atera-proseg-plan"]
+    assert plan["prior"] == {
+        "kind": "cellpose",
+        "mask_path": "prior_mask.npy",
+        "cellprob_path": "prior_cellprob.npy",
+    }
+    # The fixed effective weight of the vendor route (AT-9 follow-up).
+    assert plan["prior_weight_effective"] == 140.0
+    published = tmp_path / "results" / "PAIR_A" / "atera" / "segmentation"
+    for tile in calls["atera-proseg-tile"]:
+        assert tile["prior"]["kind"] == "cellpose"
+        assert Path(tile["prior"]["mask_path"]).name == "cellpose_masks_tiled.npy"
+        assert tile["model"]["prior_weight_effective"] == 93.5
+        assert tile["model"]["nuclear_compartment"] is False
+    (stitch,) = calls["atera-proseg-stitch"]
+    assert stitch["prior_kind"] == "cellpose"
+    (enrich,) = calls["enrich"]
+    assert enrich["segmentation_source"] == "cellpose_proseg"
+    assert enrich["mask_path"] == "enrich_input_mask.npy"
+    assert enrich["nuclei_mask_path"] is None
+    (quant,) = calls["mask-image-quantification"]
+    assert [layer["shape_key"] for layer in quant["extra_layers"]] == [
+        "MOSAIK_proseg",
+        "MOSAIK_cellpose",
+    ]
+    assert (published / "cellpose_masks_tiled.npy").exists()
+
+    # -resume: Cellpose, the plan and the tiles stay cached.
+    _, calls = _fresh_calls(
+        tmp_path, "cellpose_resume", row, "cellpose_resume", resume=True
+    )
+    for command in ("cellpose-segment", "atera-proseg-plan", "atera-proseg-tile"):
+        assert command not in calls
+
+    # Restart at enrich: the published stitch store and Cellpose mask.
+    _, calls = _fresh_calls(
+        tmp_path,
+        "cellpose_restart",
+        "pair_id,analysis_mode,atera_dir,segmentation_source,start_stage,stop_stage\n"
+        "PAIR_A,atera,raw/atera,cellpose_proseg,enrich,enrich\n",
+        "cellpose_restart",
+    )
+    assert sorted(calls) == ["enrich"]
+    assert calls["enrich"][0]["segmentation_source"] == "cellpose_proseg"

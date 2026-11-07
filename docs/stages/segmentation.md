@@ -570,7 +570,20 @@ modification time (AT-6 exit runs).
 A row with `segmentation_source=native_proseg` (aliases `vendor_proseg`,
 `instrument_proseg`; ATERA only, opt-in) keeps the vendor segmentation as the
 `original_seg` layer and adds ProSeg cells refined from the vendor cell masks as
-the `reseg` layer. No Cellpose runs: the vendor `cell_labels` are ProSeg's prior.
+the `proseg_vendor` layer. No Cellpose runs: the vendor `cell_labels` are
+ProSeg's prior.
+
+> **Renamed in AT-7.** AT-9 first wrote this layer under the XENIUM ProSeg
+> names (`reseg`: `MOSAIK_proseg`, `table_MOSAIK_proseg`,
+> `proseg_cell_labels`, registry branch `proseg`). Those names now mean the
+> Cellpose-prior ProSeg layer, as on XENIUM ([below](#atera-cellpose-route-cellpose_proseg-at-7)),
+> so the vendor-prior layer is `proseg_vendor`: shapes `MOSAIK_proseg_vendor`,
+> table `table_MOSAIK_proseg_vendor`, labels `proseg_vendor_cell_labels`,
+> registry branch `proseg_vendor` (aliases `vendor_proseg`, `native_proseg`).
+> The transcript columns stay `assignment` and `background`. The stitch config
+> gained `prior_kind`, so a `-resume` of an AT-9 row re-runs the stitch and
+> the later stages (the tiles stay cached); the stitch removes the old-named
+> elements, their derived tables and the old registry branch.
 `native` stays the ATERA default, and the bare word `proseg` still means
 `cellpose_proseg`. The segment stage runs `NATIVE_LATEST` (as above), then
 ([atera_proseg.nf](../../workflows/modules/atera_proseg.nf),
@@ -606,7 +619,10 @@ proseg tile.parquet xenium -x x_location -y y_location -z z_location
   `fov_name` and float32 coordinates and QV. Controls are not exported.
 - ProSeg scales `--prior-weight` by `max(mean transcripts per cell / 100, 1)`.
   `atera_proseg_prior_weight` (140) is the *effective* weight: each tile's
-  multiplier `m` undoes that scaling. ProSeg takes the mean after its own
+  multiplier `m` undoes that scaling. It is fixed because ProSeg's automatic
+  value follows each tile's density (about 113 to 152 over the full section's
+  tiles, falling towards 1 on sparse edge tiles), so tiles would weigh the
+  same prior differently. ProSeg takes the mean after its own
   cell-free filter, so the weight it prints is lower by the share of rows that
   filter drops (0.3% on the crop, at most 0.7% per tile on the full section).
   A run that prints a weight more than 2% off is stopped as soon as it prints
@@ -644,9 +660,9 @@ proseg tile.parquet xenium -x x_location -y y_location -z z_location
 
 | Element | Contents |
 |---|---|
-| `shapes/MOSAIK_proseg` | Every owned ProSeg consensus polygon, unclipped, in microns, with the vendor shapes' `Scale(1/ps)` transform; `instance_id`, `source_cell_id`, `proseg_internal_id`, `proseg_tile`. |
-| `labels/proseg_cell_labels` | The polygons rasterised on the morphology grid (pixel-centre rule, ascending `instance_id`, last wins), vendor pyramid, `Identity` transform. |
-| `tables/table_MOSAIK_proseg` | Cells × genes foreground counts (`var` copied from `table_original`, genes only). `obs`: `instance_id`, `source_cell_id`, ProSeg's `proseg_internal_id`, `proseg_tile`, centroid, `volume`, `surface_area`, `scale`, `proseg_cluster`, `cell_area`, `transcript_counts`, `proseg_zero_transcripts` and the control counts (`genomic_control_counts`, `unassigned_codeword_counts`, `deprecated_codeword_counts`, `control_codeword_counts`, `control_probe_counts`, `other_control_counts`), attributed geometrically through `proseg_cell_labels`. |
+| `shapes/MOSAIK_proseg_vendor` | Every owned ProSeg consensus polygon (MultiPolygon), clipped at tile seams (below), in microns, with the vendor shapes' `Scale(1/ps)` transform; `instance_id`, `source_cell_id`, `proseg_internal_id`, `proseg_tile`. |
+| `labels/proseg_vendor_cell_labels` | The polygons rasterised on the morphology grid (pixel-centre rule, ascending `instance_id`, last wins), vendor pyramid, `Identity` transform. |
+| `tables/table_MOSAIK_proseg_vendor` | Cells × genes foreground counts (`var` copied from `table_original`, genes only). `obs`: `instance_id`, `source_cell_id`, ProSeg's `proseg_internal_id`, `proseg_tile`, centroid, `volume`, `surface_area`, `scale`, `proseg_cluster`, `cell_area`, `transcript_counts`, `proseg_zero_transcripts` and the control counts (`genomic_control_counts`, `unassigned_codeword_counts`, `deprecated_codeword_counts`, `control_codeword_counts`, `control_probe_counts`, `other_control_counts`), attributed geometrically through `proseg_vendor_cell_labels`. |
 | `points/transcripts` | Every file rewritten with two more columns, `assignment` (nullable uint64: the vendor label of the ProSeg cell) and `background`. Names, row counts, row order and the other columns are kept, so the build's points index and aggregates still describe the files. Controls, vendor and ProSeg background and the rows ProSeg dropped have no assignment. |
 
 - **Ids.** A ProSeg cell keeps its vendor label as `instance_id` (namespace
@@ -656,8 +672,24 @@ proseg tile.parquet xenium -x x_location -y y_location -z z_location
 - **Seams.** A transcript claimed by two tiles for different cells goes to the
   tile whose core holds it, else to the first tile in plan order. Conflicts are
   counted per tile pair and per losing cell, not hidden.
-- **Registry.** Branch `proseg` (legacy alias `reseg`) with `assignment`,
-  `background`, `label: proseg_cell_labels`, `prior: vendor_cell_labels` and the
+- **Seam clip** (stitch format 2, `merxen.segmentation.atera_proseg.seams`).
+  Each tile draws only the cells it owns, so cells of two tiles can overlap
+  across a seam (AT-9's full section: 279 pairs, 174 above 1 µm², largest
+  91.5 µm²). The overlap is split by the same rule as the transcripts: the
+  part inside a tile's core goes to that tile's cell, the rest to the tile
+  earlier in plan order, and each cell loses the parts it does not win
+  (`shapely` difference against the neighbours' original polygons). Only
+  cells that lose area change; they stay MultiPolygons with every part of
+  positive area. A cell left with no area is not in the layer and its rows
+  become background, like an owned cell without a polygon. The stitch then
+  refuses any cross-tile pair overlapping by more than 0.01 µm². The report's
+  `seam_clip` holds the overlap stats before and after, every clipped cell
+  (area before and after, the cells it ceded to, its rows lost in conflicts)
+  and the emptied cells. Overlaps of two cells of one tile are ProSeg's own
+  and stay (`overlap_pixels_within_tile`).
+- **Registry.** Branch `proseg_vendor` (aliases `vendor_proseg`,
+  `native_proseg`) with `assignment`, `background`,
+  `label: proseg_vendor_cell_labels`, `prior: vendor_cell_labels` and the
   ProSeg model identity. `merxen_schema.segmentation_source` stays `native` (it
   describes the store's original segmentation).
 - **Provenance.** Root attr `merxen_atera_proseg`: fingerprint, source build,
@@ -695,8 +727,9 @@ proseg tile.parquet xenium -x x_location -y y_location -z z_location
   task, which then only stages its output). Tiles are cached by their config
   value, so a re-run plan does not invalidate them. A stitch from other tiles
   (another prior weight or schedule) deletes the tables computed from the
-  previous ProSeg cells (every table of region `MOSAIK_proseg` other than
-  `table_MOSAIK_proseg`, such as the image quantification and clustering), so
+  previous ProSeg cells (every table of region `MOSAIK_proseg_vendor` other
+  than `table_MOSAIK_proseg_vendor`, such as the image quantification and
+  clustering), so
   MIQ cannot skip on intensities of the old polygons; the report lists them.
   The label raster scratch file is removed whether or not the stitch
   succeeds.
@@ -721,6 +754,68 @@ full section, so a re-stitch does not depend on the work directory), and
 link and the three placeholders, linked like NATIVE_LATEST's). Runs before
 this layout published the tiles and the report as links into the work
 directory; cleaning it lost them, and the next run re-runs the tiles.
+
+## ATERA Cellpose route (`cellpose_proseg`, AT-7)
+
+A row with `segmentation_source=cellpose_proseg` on ATERA runs the XENIUM
+segmentation on the ATERA morphology image: Cellpose-SAM on **DAPI + 18S**
+only (`atera_channels`, default `DAPI,18S`; the boundary stains are never
+read), then ProSeg with the Cellpose masks as prior. ProSeg runs on the tiled
+route above (2 mm tiles, halo, label-owned stitching, Xenium-layout parquet,
+explicit prior weight, short schedule), never as one whole-section run.
+`native` stays the ATERA default.
+
+Layers (the XENIUM names and meanings, so downstream stages and
+`analysis_segmentation=all` treat the row like a XENIUM row):
+
+| Analysis layer | Elements | Ids |
+|---|---|---|
+| `reseg` | `MOSAIK_proseg`, `table_MOSAIK_proseg`, `proseg_cell_labels`; branch `proseg` (alias `reseg`), `prior: cellpose_cell_labels` | Cellpose labels (`cellpose_label_v1`) |
+| `proseg_mask` | `MOSAIK_cellpose`, `table_MOSAIK_cellpose`, `cellpose_cell_labels`; branch `cellpose` (aliases `proseg_mask`, `cellpose_mask`) | Cellpose labels (`cellpose_label_v1`) |
+| `original_seg` | the vendor layer of `NATIVE_LATEST` | vendor ids |
+
+`proseg_hybrid` is off for ATERA (`PlatformSpec.proseg_hybrid=False`): `all`
+resolves to `reseg, original_seg, proseg_mask`, and naming `proseg_hybrid` in
+the samplesheet is an error.
+
+The segment stage runs:
+
+| Process | What it does |
+|---|---|
+| `NATIVE_LATEST` | The latest store and the vendor `original_seg` layer, as for `native` rows. |
+| `ATERA_CELLPOSE_SEGMENT` ([atera_cellpose.nf](../../workflows/modules/atera_cellpose.nf), GPU lock) | `merxen cellpose-segment` on `morphology_focus` of the built store (`image_key` required, every requested channel must be present), with the global `cellpose_*` settings. It writes the masks, the logits, the transforms (`diag(ps)` from the store's spec sidecars), the stitching statistics and the model identity, but **no ProSeg transcript CSV** (`proseg_transcripts="none"`). No Cellpose nuclei run: ATERA keeps the vendor nuclei, and neither ProSeg nor the layers above use Cellpose nuclei. |
+| `ATERA_PROSEG_PLAN_CELLPOSE` | The tile plan of the Cellpose labels: label statistics streamed from the mask in row strips (centroid `(mean index + 0.5) ps`, pixel bounds), ownership and windows as above, the SHA-256, size and modification time of the mask and logits, and the effective prior weight of every tile. |
+| `ATERA_PROSEG_TILE` | As above, with the Cellpose window as `prior.npy`, the logits window as `prior_cellprob.npy` (`--cellpose-cellprobs`, as XENIUM) and `cell_id` = the Cellpose label at each row's pixel (corner rule), never the vendor assignment. A tile refuses prior files that changed since the plan. |
+| `ATERA_PROSEG_STITCH` | As above, into the `reseg` elements, plus the points column `cellpose_assignment` (nullable uint64, the Cellpose label at every row's pixel, controls included). Its SEGMENT tuple carries the Cellpose mask in the mask slot. |
+
+- **Pixel convention.** The Cellpose masks are on the vendor mask grid
+  (morphology grid), so they follow the vendor's corner rule everywhere:
+  `floor(x / ps)` lookups, ProSeg transforms `[ps, 0, col0 ps]`, polygons at
+  pixel centres + 0.5 px. XENIUM keeps its own rule.
+- **Prior weight.** `atera_cellpose_proseg_prior_weight` (140, as
+  `atera_proseg_prior_weight`) is the effective weight of every tile. A fixed
+  weight treats every tile alike: ProSeg's own value,
+  `max(mean transcripts per cell / 100, 1)` per tile, varied from about 113 to
+  152 with density over AT-9's tiles and collapses towards 1 on sparse edge
+  tiles. `null` gives every tile the automatic weight of one whole-section
+  run, `max(gene rows / Cellpose cells / 100, 1)` (38.8 on the crop). On the
+  crop's dense tile 140 and 38.8 gave the same cells (1,381 and 1,382 of
+  3,141 owned cells without transcripts). A weight of 1 is not printed by
+  ProSeg and is accepted.
+- **Nuclear compartment** off (`atera_cellpose_proseg_nuclear_compartment`):
+  no vendor segmentation feeds the Cellpose route, and the XENIUM CSV has none.
+- **ENRICH** enriches the vendor layer natively, checks the stitched `reseg`
+  layer and builds `proseg_mask` from the mask: polygons by the AT-3
+  polygoniser, `labels/cellpose_cell_labels` (the mask on the morphology grid,
+  which the viewer cache and the image quantification read), and
+  `table_MOSAIK_cellpose` counted from `cellpose_assignment` (no spatial join).
+  Table, shape and mask ids must agree. Record: `attrs.merxen_atera_cellpose_layer`.
+- **Nucleus metrics.** The vendor nuclei join cells through vendor cell ids, so
+  clustering adds no nucleus metrics to the Cellpose-label layers (`reseg`,
+  `proseg_mask`) and records why in `uns`.
+
+Restart from `enrich` or later reads `segmentation/stitch_out/proseg_latest.zarr`
+and `segmentation/cellpose_masks_tiled.npy`.
 
 ## Memory guardrails
 

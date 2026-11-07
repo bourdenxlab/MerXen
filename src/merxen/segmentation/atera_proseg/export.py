@@ -11,15 +11,19 @@ column                    content
 ``transcript_id``         uint64, the store's
 ``x_location`` ...        float32 microns (``z_location``, ``qv`` too)
 ``feature_name``          plain string
-``cell_id``               string vendor label (``original_assignment``),
-                          ``"0"`` when unassigned
+``cell_id``               string prior label, ``"0"`` when unassigned:
+                          the vendor label (``original_assignment``) for
+                          the vendor prior, the Cellpose label at the
+                          row's pixel (corner rule) for a Cellpose prior
 ``overlaps_nucleus``      uint8
 ``fov_name``              constant ``"0"`` (ProSeg keys cells by fov)
 ========================  ==========================================
 
 Beside the parquet, the transcript ids of every source file are kept
 (``exported/<file>.npy``, sorted) so the claims can be written per source
-file, and the vendor cell mask of the window is saved as the uint32 prior.
+file, and the prior mask of the window is saved as the uint32 ``prior.npy``
+(with the float32 ``prior_cellprob.npy`` window of a Cellpose prior that has
+cell probabilities).
 """
 
 from __future__ import annotations
@@ -76,7 +80,9 @@ class TileExport:
 
     Attributes:
         parquet_path: The ProSeg input.
-        prior_path: The uint32 vendor mask of the window.
+        prior_path: The uint32 prior mask of the window.
+        cellprob_path: The float32 cell probabilities of the window, or
+            ``None``.
         exported_dir: Folder of the per-source-file transcript ids.
         n_rows: Rows written.
         n_rows_assigned: Rows with a vendor cell.
@@ -90,6 +96,7 @@ class TileExport:
     parquet_path: Path
     prior_path: Path
     exported_dir: Path
+    cellprob_path: Path | None = None
     n_rows: int = 0
     n_rows_assigned: int = 0
     n_labels_in_window: int = 0
@@ -146,20 +153,32 @@ def _constant_strings(value: str, n_rows: int) -> pa.Array:
 
 
 def xenium_layout_table(
-    table: pa.Table, *, nuclear_compartment: bool = True
+    table: pa.Table,
+    *,
+    nuclear_compartment: bool = True,
+    prior_labels: np.ndarray | None = None,
 ) -> pa.Table:
     """Convert filtered store rows to ProSeg's Xenium parquet layout.
 
     Args:
         table: Rows with the store columns (:data:`SOURCE_COLUMNS`).
         nuclear_compartment: Keep ``overlaps_nucleus``; ``False`` writes 0.
+        prior_labels: The prior label of each row (0 = none), which replaces
+            the vendor ``original_assignment`` as ``cell_id`` (a Cellpose
+            prior); ``None`` keeps the vendor assignment.
 
     Returns:
         A table with :data:`XENIUM_SCHEMA`.
     """
     n_rows = table.num_rows
-    assignment = table.column("original_assignment").combine_chunks()
-    cell_id = pc.fill_null(pc.cast(assignment, pa.string()), UNASSIGNED_CELL_ID)
+    if prior_labels is None:
+        assignment = table.column("original_assignment").combine_chunks()
+        cell_id = pc.fill_null(pc.cast(assignment, pa.string()), UNASSIGNED_CELL_ID)
+    else:
+        labels = np.asarray(prior_labels, dtype=np.uint64)
+        if labels.size != n_rows:
+            raise AteraProsegError("prior_labels must give one label per row")
+        cell_id = pc.cast(pa.array(labels), pa.string())
     if nuclear_compartment:
         nucleus = pc.cast(
             pc.fill_null(table.column("overlaps_nucleus").combine_chunks(), False),
@@ -183,12 +202,39 @@ def xenium_layout_table(
     )
 
 
-def _prior(store: Path, window_px: list[int] | tuple[int, ...]) -> np.ndarray:
+def _prior(
+    store: Path,
+    window_px: list[int] | tuple[int, ...],
+    mask_path: Path | None = None,
+) -> np.ndarray:
+    """Return the uint32 prior of the window (vendor labels or a Cellpose mask)."""
+    col0, col1, row0, row1 = (int(v) for v in window_px)
+    if mask_path is not None:
+        from merxen.segmentation.atera_proseg.prior import open_mask
+
+        mask = open_mask(mask_path)
+        window = mask[row0:row1, col0:col1]
+        if window.size and int(window.max()) > np.iinfo(np.uint32).max:
+            raise AteraProsegError("A Cellpose label exceeds the uint32 range")
+        return np.ascontiguousarray(window, dtype=np.uint32)
     from merxen.segmentation.atera_proseg.plan import _level0
 
-    col0, col1, row0, row1 = (int(v) for v in window_px)
     level0 = _level0(Path(store) / "labels" / "cell_labels")
     return np.ascontiguousarray(level0[row0:row1, col0:col1], dtype=np.uint32)
+
+
+def _window_labels(
+    prior: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    window_px: list[int] | tuple[int, ...],
+    ps: float,
+) -> np.ndarray:
+    """Return the window prior's label at each row (rows lie in the window)."""
+    col0, _col1, row0, _row1 = (int(v) for v in window_px)
+    column, row = pixel_indices(x, y, PixelFrame(um_per_px=ps), convention="corner")
+    labels: np.ndarray = prior[row - row0, column - col0].astype(np.uint64)
+    return labels
 
 
 def export_tile(
@@ -199,11 +245,13 @@ def export_tile(
     *,
     min_qv: float,
     nuclear_compartment: bool = True,
+    prior_mask_path: Path | None = None,
+    prior_cellprob_path: Path | None = None,
 ) -> TileExport:
     """Write the ProSeg input, the prior and the exported-id side files.
 
     Args:
-        store: The store whose points and vendor labels are read.
+        store: The store whose points (and vendor labels) are read.
         window_px: ``[col0, col1, row0, row1]``.
         pixel_size_um: Microns per pixel.
         output_dir: Folder for ``tile.parquet``, ``prior.npy`` and
@@ -211,6 +259,11 @@ def export_tile(
         min_qv: Smallest QV exported. The build already applies it, so a
             gene row below it is logged as a warning and not exported.
         nuclear_compartment: Give ProSeg ``overlaps_nucleus``.
+        prior_mask_path: A Cellpose mask on the store's grid: the prior, and
+            the source of each row's ``cell_id``. ``None`` uses the vendor
+            ``labels/cell_labels`` and ``original_assignment``.
+        prior_cellprob_path: The Cellpose cell probabilities, saved for the
+            window as ``prior_cellprob.npy``.
 
     Returns:
         The export record.
@@ -226,6 +279,12 @@ def export_tile(
     parquet_path = output_dir / "tile.parquet"
     prior_path = output_dir / "prior.npy"
     bbox = window_bbox_um(window_px, pixel_size_um)
+    # A Cellpose prior seeds cell_id from the mask, so it is read first.
+    prior = (
+        _prior(Path(store), window_px, prior_mask_path)
+        if prior_mask_path is not None
+        else None
+    )
     files, n_total, pruned = points_files(Path(store), POINTS_KEY, bbox)
     record = TileExport(
         parquet_path=parquet_path, prior_path=prior_path, exported_dir=exported_dir
@@ -254,7 +313,14 @@ def export_tile(
             if not keep.any():
                 continue
             rows = table.filter(pa.array(keep))
-            out = xenium_layout_table(rows, nuclear_compartment=nuclear_compartment)
+            seeds = (
+                None
+                if prior is None
+                else _window_labels(prior, x[keep], y[keep], window_px, pixel_size_um)
+            )
+            out = xenium_layout_table(
+                rows, nuclear_compartment=nuclear_compartment, prior_labels=seeds
+            )
             writer.write_table(out)
             ids = np.sort(out.column("transcript_id").to_numpy())
             np.save(exported_dir / f"{path.name}.npy", ids)
@@ -270,8 +336,18 @@ def export_tile(
     if record.n_rows == 0:
         raise AteraProsegError("The tile window holds no gene transcript")
     record.n_genes = len(genes)
-    prior = _prior(Path(store), window_px)
+    if prior is None:
+        prior = _prior(Path(store), window_px)
     np.save(prior_path, prior)
+    if prior_cellprob_path is not None:
+        col0, col1, row0, row1 = (int(v) for v in window_px)
+        cellprob = np.load(Path(prior_cellprob_path), mmap_mode="r")
+        record.cellprob_path = output_dir / "prior_cellprob.npy"
+        np.save(
+            record.cellprob_path,
+            np.ascontiguousarray(cellprob[row0:row1, col0:col1], dtype=np.float32),
+        )
+        del cellprob
     labels = np.unique(prior)
     record.n_labels_in_window = int((labels != 0).sum())
     del prior

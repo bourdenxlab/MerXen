@@ -34,7 +34,7 @@ class CellposeModelMetadata(BaseModel):
 
     schema_version: Literal[1] = 1
     weights_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    platform: Literal["MERSCOPE", "XENIUM"]
+    platform: Literal["MERSCOPE", "XENIUM", "ATERA"]
     species: Literal["human", "mouse"]
     channels: list[str] = Field(min_length=1, max_length=3)
     image_key: Literal["morphology_focus", "MERSCOPE_z_projection"]

@@ -2,22 +2,38 @@
 
 Inputs are the tile plan, every tile result the plan runs and the persistent
 latest store of the row (built by NATIVE_LATEST from the same source build).
-The stitch writes, in place under the store's write lock:
+The plan's prior kind names the layer (:data:`PROSEG_LAYERS`): ``proseg_vendor``
+for the vendor prior (``native_proseg``), ``reseg`` with the XENIUM names for a
+Cellpose prior (``cellpose_proseg``). The stitch writes, in place under the
+store's write lock (names of the vendor layer, then of the Cellpose layer):
 
-- ``shapes/MOSAIK_proseg``: every owned ProSeg polygon, unclipped, in microns,
-  with the vendor shapes' ``Scale(1 / ps)`` transform to ``global``;
-- ``labels/proseg_cell_labels``: the polygons rasterised on the morphology
-  grid (pixel-centre rule, ascending ``instance_id``, last wins), with the
-  vendor labels' pyramid and ``Identity`` transform;
-- ``tables/table_MOSAIK_proseg``: cells x genes foreground counts (genes only,
-  ``var`` copied from ``table_original``), the ProSeg cell metadata and the
-  per-cell control counts in ``obs``;
-- ``points/transcripts``: every points file rewritten with two appended
-  columns, ``assignment`` (nullable uint64, the vendor label of the ProSeg
-  cell) and ``background``; file names, row counts and row order are kept, so
-  the build's points index and aggregates still describe the files;
-- the registry branch ``proseg`` (legacy alias ``reseg``) and the provenance
+- ``shapes/MOSAIK_proseg_vendor`` | ``shapes/MOSAIK_proseg``: every owned
+  ProSeg polygon in microns, with the vendor shapes' ``Scale(1 / ps)``
+  transform to ``global``; where two cells of different tiles overlap across
+  a seam, the overlap is clipped by the transcripts' core rule
+  (:mod:`merxen.segmentation.atera_proseg.seams`), a cell left with no area is
+  dropped (its rows become background) and the report lists both;
+- ``labels/proseg_vendor_cell_labels`` | ``labels/proseg_cell_labels``: the
+  polygons rasterised on the morphology grid (pixel-centre rule, ascending
+  ``instance_id``, last wins), with the vendor labels' pyramid and
+  ``Identity`` transform;
+- ``tables/table_MOSAIK_proseg_vendor`` | ``tables/table_MOSAIK_proseg``:
+  cells x genes foreground counts (genes only, ``var`` copied from
+  ``table_original``), the ProSeg cell metadata and the per-cell control
+  counts in ``obs``;
+- ``points/transcripts``: every points file rewritten with the appended
+  columns ``assignment`` (nullable uint64, the prior label of the ProSeg cell)
+  and ``background``, and for a Cellpose prior ``cellpose_assignment``
+  (nullable uint64, the Cellpose label at the row's pixel by the corner rule,
+  controls included; null off any Cellpose cell); file names, row counts and
+  row order are kept, so the build's points index and aggregates still
+  describe the files;
+- the registry branch (``proseg_vendor`` | ``proseg``) and the provenance
   ``attrs["merxen_atera_proseg"]``.
+
+A store holding the other prior's layer (a row whose source changed, or a
+store stitched before AT-7 renamed the vendor layer from ``MOSAIK_proseg``)
+has that layer, its derived tables and its registry branch removed.
 
 A transcript claimed by one tile gets that tile's assignment; claimed by two
 tiles for different cells it goes to the tile whose core holds it, else to the
@@ -59,26 +75,41 @@ from merxen.config import AteraProsegStitchConfig
 from merxen.io.points_aggregates import points_parquet_dir, read_root_attrs
 from merxen.io.spatialdata_schema import (
     MERXEN_SCHEMA_ATTR,
-    ORIGINAL_ID_NAMESPACE,
     register_segmentation_branch,
 )
 from merxen.path_utils import remove_path, stage_existing_output
 from merxen.segmentation.atera_proseg import (
     ASSIGNMENT_COLUMN,
     BACKGROUND_COLUMN,
-    PRIOR_NAME,
-    PROSEG_BRANCH,
-    PROSEG_LABEL_KEY,
-    PROSEG_SHAPES_KEY,
-    PROSEG_TABLE_KEY,
+    CELLPOSE_ASSIGNMENT_COLUMN,
+    PROSEG_LAYERS,
     PROVENANCE_ATTR,
     STITCH_FORMAT_VERSION,
     TILE_CELLS_NAME,
     TILE_CLAIMS_DIR,
     AteraProsegError,
+    ProsegLayer,
+    proseg_layer,
 )
 from merxen.segmentation.atera_proseg.plan import _core_index, read_plan
+from merxen.segmentation.atera_proseg.prior import (
+    check_prior_files,
+    lookup_labels,
+    open_mask,
+    plan_prior_kind,
+)
+from merxen.segmentation.atera_proseg.seams import (
+    SEAM_CLIP_RULE,
+    SEAM_OVERLAP_TOLERANCE_UM2,
+    clip_seam_overlaps,
+    core_box,
+)
 from merxen.segmentation.atera_proseg.tile import read_tile_manifest
+from merxen.viewer_cache.format import (
+    DERIVED_CACHE_PREFIX,
+    label_key_for_shape_key,
+    safe_cache_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -248,6 +279,7 @@ class _Tiles:
     dirs: dict[str, Path]
     order: list[str]
     grid: dict[str, tuple[int, int]]
+    layer: ProsegLayer
 
 
 def _load_tiles(cfg: AteraProsegStitchConfig) -> _Tiles:
@@ -258,6 +290,14 @@ def _load_tiles(cfg: AteraProsegStitchConfig) -> _Tiles:
             f"({', '.join(plan['tile_subset'])}); a subset is a check run and "
             "cannot be stitched"
         )
+    kind = plan_prior_kind(plan)
+    if kind != cfg.prior_kind:
+        raise AteraProsegError(
+            f"[{cfg.dataset_name}] The tile plan has a {kind} prior; the stitch was "
+            f"configured for the {cfg.prior_kind} prior"
+        )
+    if kind == "cellpose":
+        check_prior_files(plan["prior"], f"[{cfg.dataset_name}] Stitch")
     expected = [tile["tile_id"] for tile in plan["tiles"] if tile["run"]]
     manifests: dict[str, dict[str, Any]] = {}
     dirs: dict[str, Path] = {}
@@ -284,7 +324,7 @@ def _load_tiles(cfg: AteraProsegStitchConfig) -> _Tiles:
         str(tile["tile_id"]): (int(tile["grid"][0]), int(tile["grid"][1]))
         for tile in plan["tiles"]
     }
-    return _Tiles(plan, manifests, dirs, expected, grid)
+    return _Tiles(plan, manifests, dirs, expected, grid, proseg_layer(kind))
 
 
 def stitch_fingerprint(tiles: _Tiles) -> str:
@@ -321,7 +361,7 @@ def _load_cells(tiles: _Tiles) -> pd.DataFrame:
         frames.append(frame)
     cells = pd.concat(frames, ignore_index=True)
     if cells["instance_id"].duplicated().any():
-        raise AteraProsegError("Two tiles own the same vendor label")
+        raise AteraProsegError("Two tiles own the same prior label")
     return cells.sort_values("instance_id", kind="stable").reset_index(drop=True)
 
 
@@ -469,6 +509,7 @@ class _FileResult:
     n_foreground: int
     n_controls: int
     n_genes_unclaimed: int
+    n_released: int
     conflicts: Counter[str]
     losing_cells: Counter[int]
     gene_keys: np.ndarray
@@ -523,6 +564,8 @@ def _rewrite_points_file(
     gene_position: dict[str, int],
     labels: np.ndarray,
     pixel_size_um: float,
+    cellpose_mask: np.ndarray | None = None,
+    released_cells: np.ndarray | None = None,
 ) -> _FileResult:
     from merxen.enrichment.label_lookup import PixelFrame, pixel_indices
 
@@ -532,7 +575,7 @@ def _rewrite_points_file(
     parquet.close()
     drop = [
         name
-        for name in (ASSIGNMENT_COLUMN, BACKGROUND_COLUMN)
+        for name in (ASSIGNMENT_COLUMN, BACKGROUND_COLUMN, CELLPOSE_ASSIGNMENT_COLUMN)
         if name in table.column_names
     ]
     if drop:
@@ -564,6 +607,15 @@ def _rewrite_points_file(
             )
         )
     resolution = resolve_claims(n_rows, x, y, tile_um, claim_sets)
+    n_released = 0
+    if released_cells is not None and released_cells.size:
+        # Cells the seam clip emptied are not in the layer: their rows are
+        # background, as for an owned cell ProSeg gave no polygon.
+        released = resolution.claimed & np.isin(resolution.assignment, released_cells)
+        n_released = int(released.sum())
+        resolution.claimed[released] = False
+        resolution.assignment[released] = 0
+        resolution.background[released] = True
     claimed = resolution.claimed
     is_gene = table.column("is_gene").to_numpy(zero_copy_only=False).astype(bool)
 
@@ -627,10 +679,19 @@ def _rewrite_points_file(
     insert_at = columns.index(index_column) if index_column in columns else len(columns)
     table = table.add_column(insert_at, ASSIGNMENT_COLUMN, assignment)
     table = table.add_column(insert_at + 1, BACKGROUND_COLUMN, background)
-    pandas_meta = _pandas_metadata(
-        table.schema,
-        [(ASSIGNMENT_COLUMN, "uint64", "UInt64"), (BACKGROUND_COLUMN, "bool", "bool")],
-    )
+    added = [
+        (ASSIGNMENT_COLUMN, "uint64", "UInt64"),
+        (BACKGROUND_COLUMN, "bool", "bool"),
+    ]
+    if cellpose_mask is not None:
+        cellpose_label = lookup_labels(cellpose_mask, x, y, pixel_size_um)
+        table = table.add_column(
+            insert_at + 2,
+            CELLPOSE_ASSIGNMENT_COLUMN,
+            pa.array(cellpose_label, pa.uint64(), mask=cellpose_label == 0),
+        )
+        added.append((CELLPOSE_ASSIGNMENT_COLUMN, "uint64", "UInt64"))
+    pandas_meta = _pandas_metadata(table.schema, added)
     schema_meta = dict(table.schema.metadata or {})
     if pandas_meta:
         schema_meta[b"pandas"] = pandas_meta
@@ -656,6 +717,7 @@ def _rewrite_points_file(
         n_foreground=int((claimed & ~resolution.background).sum()),
         n_controls=int(control.sum()),
         n_genes_unclaimed=int((~claimed & is_gene).sum()),
+        n_released=n_released,
         conflicts=resolution.conflicts,
         losing_cells=resolution.losing_cells,
         gene_keys=gene_keys,
@@ -707,24 +769,37 @@ def _remove_leftovers(directory: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _layer_complete(latest: Path) -> bool:
+def _element_exists(latest: Path, kind: str, name: str) -> bool:
+    return (latest / kind / name / "zarr.json").is_file() or (
+        latest / kind / name / ".zgroup"
+    ).is_file()
+
+
+def _layer_complete(latest: Path, layer: ProsegLayer) -> bool:
     return all(
-        (latest / kind / name / "zarr.json").is_file()
-        or (latest / kind / name / ".zgroup").is_file()
+        _element_exists(latest, kind, name)
         for kind, name in (
-            ("shapes", PROSEG_SHAPES_KEY),
-            ("tables", PROSEG_TABLE_KEY),
-            ("labels", PROSEG_LABEL_KEY),
+            ("shapes", layer.shapes_key),
+            ("tables", layer.table_key),
+            ("labels", layer.label_key),
         )
     )
 
 
-def _points_have_assignment(latest: Path) -> bool:
+def _points_columns(layer: ProsegLayer) -> set[str]:
+    """Points columns the stitch of a layer writes."""
+    columns = {ASSIGNMENT_COLUMN, BACKGROUND_COLUMN}
+    if layer.prior_kind == "cellpose":
+        columns.add(CELLPOSE_ASSIGNMENT_COLUMN)
+    return columns
+
+
+def _points_have_assignment(latest: Path, layer: ProsegLayer) -> bool:
     directory = points_parquet_dir(latest, POINTS_KEY)
     files = sorted(directory.glob("*.parquet"))
+    wanted = _points_columns(layer)
     return bool(files) and all(
-        {ASSIGNMENT_COLUMN, BACKGROUND_COLUMN} <= set(pq.read_schema(path).names)
-        for path in files
+        wanted <= set(pq.read_schema(path).names) for path in files
     )
 
 
@@ -743,28 +818,301 @@ def _table_region(table_dir: Path) -> Any:
     return None
 
 
-def derived_proseg_tables(latest: Path) -> list[str]:
+def derived_proseg_tables(latest: Path, layer: ProsegLayer | None = None) -> list[str]:
     """Return the tables computed from the ProSeg cells (not the layer's own).
 
     Args:
         latest: The latest store.
+        layer: The ProSeg layer; ``None`` is the vendor-prior layer.
 
     Returns:
-        Sorted names of the tables of region ``MOSAIK_proseg`` other than
-        ``table_MOSAIK_proseg`` (image quantification, clustering).
+        Sorted names of the tables whose region is the layer's shapes, other
+        than the layer's table (image quantification, clustering).
+    """
+    layer = layer or PROSEG_LAYERS["vendor"]
+    return derived_tables(latest, layer.shapes_key, layer.table_key)
+
+
+def derived_tables(latest: Path, shapes_key: str, table_key: str) -> list[str]:
+    """Return the tables of region ``shapes_key`` other than ``table_key``.
+
+    Args:
+        latest: The latest store.
+        shapes_key: The layer's shapes element.
+        table_key: The layer's own table.
+
+    Returns:
+        Sorted table names (image quantification, clustering).
     """
     tables_dir = Path(latest) / "tables"
     if not tables_dir.is_dir():
         return []
     found = []
     for table_dir in sorted(tables_dir.iterdir()):
-        if not table_dir.is_dir() or table_dir.name == PROSEG_TABLE_KEY:
+        if not table_dir.is_dir() or table_dir.name == table_key:
             continue
         region = _table_region(table_dir)
         regions = region if isinstance(region, list) else [region]
-        if PROSEG_SHAPES_KEY in regions:
+        if shapes_key in regions:
             found.append(table_dir.name)
     return found
+
+
+def viewer_cache_labels(latest: Path, shape_key: str) -> list[str]:
+    """Return the viewer cache's label elements of a shape that a store holds.
+
+    VIEWER_CACHE writes the base mask ``<shape>_labels`` (for a ProSeg layer, an
+    alias of its label element) and that mask's pyramid and outline levels.
+    """
+    root = latest / "labels"
+    if not root.is_dir():
+        return []
+    base = label_key_for_shape_key(shape_key, set())
+    token = safe_cache_token(base)
+    derived = (
+        f"{DERIVED_CACHE_PREFIX}labelpyr__{token}__ds",
+        f"{DERIVED_CACHE_PREFIX}outline__{token}__w",
+    )
+    return sorted(
+        path.name
+        for path in root.iterdir()
+        if path.is_dir() and (path.name == base or path.name.startswith(derived))
+    )
+
+
+def _foreign_layers(latest: Path, layer: ProsegLayer) -> list[ProsegLayer]:
+    """Return the other prior kinds' layers present in a store."""
+    found = []
+    for other in PROSEG_LAYERS.values():
+        if other.prior_kind == layer.prior_kind:
+            continue
+        if any(
+            _element_exists(latest, kind, name)
+            for kind, name in (
+                ("shapes", other.shapes_key),
+                ("tables", other.table_key),
+                ("labels", other.label_key),
+            )
+        ) or viewer_cache_labels(latest, other.shapes_key):
+            found.append(other)
+    return found
+
+
+def _stale_cellpose_mask_elements(
+    latest: Path, layer: ProsegLayer
+) -> list[tuple[str, str]]:
+    """Return the Cellpose mask layer's elements a vendor stitch must remove.
+
+    ENRICH of a ``cellpose_proseg`` row builds ``proseg_mask`` from the
+    Cellpose mask and its ``cellpose_assignment`` column; a vendor stitch drops
+    that column, so the layer would point at a column that is gone.
+    """
+    from merxen.enrichment.atera_cellpose_layer import (
+        CELLPOSE_LABEL_KEY,
+        CELLPOSE_SHAPES_KEY,
+        CELLPOSE_TABLE_KEY,
+    )
+
+    if layer.prior_kind == "cellpose":
+        return []
+    return [
+        (kind, name)
+        for kind, name in (
+            ("tables", CELLPOSE_TABLE_KEY),
+            ("shapes", CELLPOSE_SHAPES_KEY),
+            ("labels", CELLPOSE_LABEL_KEY),
+        )
+        if _element_exists(latest, kind, name)
+    ] + [("labels", name) for name in viewer_cache_labels(latest, CELLPOSE_SHAPES_KEY)]
+
+
+def _remove_stale_cellpose_mask_layer(
+    sdata: Any, latest: Path, layer: ProsegLayer
+) -> list[str]:
+    """Delete the Cellpose mask layer, its derived tables and registry entry."""
+    from merxen.enrichment.atera_cellpose_layer import (
+        CELLPOSE_BRANCH,
+        CELLPOSE_SHAPES_KEY,
+        CELLPOSE_TABLE_KEY,
+        LAYER_ATTR,
+    )
+    from merxen.io.spatialdata_io import delete_element
+
+    elements = _stale_cellpose_mask_elements(latest, layer)
+    if not elements:
+        return []
+    deleted: list[str] = []
+    for key in derived_tables(latest, CELLPOSE_SHAPES_KEY, CELLPOSE_TABLE_KEY):
+        delete_element(sdata, key, "tables")
+        deleted.append(f"tables/{key}")
+    for kind, name in elements:
+        delete_element(sdata, name, kind)
+        deleted.append(f"{kind}/{name}")
+    schema = dict(sdata.attrs.get(MERXEN_SCHEMA_ATTR) or {})
+    registry = dict(schema.get("segmentations") or {})
+    entry = registry.get(CELLPOSE_BRANCH)
+    if isinstance(entry, dict) and entry.get("shape") == CELLPOSE_SHAPES_KEY:
+        registry.pop(CELLPOSE_BRANCH)
+        schema["segmentations"] = registry
+        sdata.attrs[MERXEN_SCHEMA_ATTR] = schema
+        deleted.append(f"registry/{CELLPOSE_BRANCH}")
+    if LAYER_ATTR in sdata.attrs:
+        sdata.attrs.pop(LAYER_ATTR)
+        deleted.append(f"attrs/{LAYER_ATTR}")
+    return deleted
+
+
+def _remove_foreign_layers(
+    sdata: Any, latest: Path, layer: ProsegLayer, dataset: str
+) -> list[str]:
+    """Delete the elements and registry branch of the other prior's layer.
+
+    A store has one ProSeg layer: the other kind's elements are left by a row
+    whose source changed or by a stitch from before the vendor layer was
+    renamed (it used the Cellpose layer's names), and would be read as the
+    current layer. A vendor stitch also removes the Cellpose mask layer
+    (``proseg_mask``) of an earlier ``cellpose_proseg`` run. The viewer cache's
+    labels of a removed shape (its ``<shape>_labels`` alias, pyramid and
+    outline) go with it.
+
+    Returns:
+        The deleted elements as ``kind/name``.
+    """
+    from merxen.io.spatialdata_io import delete_element
+
+    deleted: list[str] = []
+    for other in _foreign_layers(latest, layer):
+        for key in derived_proseg_tables(latest, other):
+            delete_element(sdata, key, "tables")
+            deleted.append(f"tables/{key}")
+        for kind, name in (
+            ("tables", other.table_key),
+            ("shapes", other.shapes_key),
+            ("labels", other.label_key),
+            *(("labels", key) for key in viewer_cache_labels(latest, other.shapes_key)),
+        ):
+            if _element_exists(latest, kind, name):
+                delete_element(sdata, name, kind)
+                deleted.append(f"{kind}/{name}")
+        schema = dict(sdata.attrs.get(MERXEN_SCHEMA_ATTR) or {})
+        registry = dict(schema.get("segmentations") or {})
+        entry = registry.get(other.branch)
+        if isinstance(entry, dict) and entry.get("shape") == other.shapes_key:
+            registry.pop(other.branch)
+            schema["segmentations"] = registry
+            sdata.attrs[MERXEN_SCHEMA_ATTR] = schema
+            deleted.append(f"registry/{other.branch}")
+    deleted.extend(_remove_stale_cellpose_mask_layer(sdata, latest, layer))
+    if deleted:
+        logger.warning(
+            "[%s] Removed the other prior's ProSeg layer from the store: %s",
+            dataset,
+            ", ".join(deleted),
+        )
+    return deleted
+
+
+def _remove_leftovers_only(latest: Path, layer: ProsegLayer, dataset: str) -> list[str]:
+    """Remove another layer's elements from a store whose layer is current."""
+    if not _foreign_layers(latest, layer) and not _stale_cellpose_mask_elements(
+        latest, layer
+    ):
+        return []
+    import spatialdata as sd
+
+    sdata = sd.read_zarr(latest, selection=("shapes", "tables", "labels"))
+    removed = _remove_foreign_layers(sdata, latest, layer, dataset)
+    sdata.write_attrs()
+    sdata.write_consolidated_metadata()
+    return removed
+
+
+def _clip_seams(
+    cells: pd.DataFrame, tiles: _Tiles, tile_um: float
+) -> tuple[pd.DataFrame, list[Any], dict[str, Any]]:
+    """Clip cross-tile polygon overlaps; drop the cells left with no area.
+
+    Returns:
+        The kept cells, their geometries and the clip record (before the
+        points pass adds the rows the clipped cells lost or released).
+    """
+    import shapely
+
+    geometries = list(shapely.from_wkb(cells["geometry_wkb"].to_numpy()))
+    groups = np.asarray(
+        pd.Categorical(cells["proseg_tile"], categories=tiles.order).codes,
+        dtype=np.int64,
+    )
+    cores = [core_box(tiles.grid[tid], tile_um) for tid in tiles.order]
+    clip = clip_seam_overlaps(geometries, groups, cores)
+    ids = cells["instance_id"].to_numpy(dtype=np.uint64)
+    tile_of = cells["proseg_tile"].to_numpy()
+    clipped = [
+        {
+            "instance_id": int(ids[record["position"]]),
+            "proseg_tile": str(tile_of[record["position"]]),
+            "area_before_um2": record["area_before_um2"],
+            "area_after_um2": record["area_after_um2"],
+            "clipped_area_um2": record["clipped_area_um2"],
+            "against": [int(ids[other]) for other in record["against"]],
+        }
+        for record in clip.clipped
+    ]
+    emptied = [int(ids[position]) for position in clip.emptied]
+    assert clip.before is not None and clip.after is not None
+    record: dict[str, Any] = {
+        "rule": SEAM_CLIP_RULE,
+        "tolerance_um2": SEAM_OVERLAP_TOLERANCE_UM2,
+        "overlaps_before": clip.before.as_dict(),
+        "overlaps_after": clip.after.as_dict(),
+        "n_cells_clipped": len(clipped),
+        "clipped_area_um2_total": float(
+            sum(entry["clipped_area_um2"] for entry in clipped)
+        ),
+        "clipped_cells": clipped,
+        "n_cells_emptied": len(emptied),
+        "emptied_instance_ids": emptied,
+    }
+    if emptied:
+        logger.warning(
+            "The seam clip left %d ProSeg cells with no area; they are not in the "
+            "layer and their transcripts are background: %s",
+            len(emptied),
+            ", ".join(str(v) for v in emptied[:20]),
+        )
+    logger.info(
+        "Seam clip: %d cross-tile overlaps before (%d above 1 um^2, largest "
+        "%.2f um^2), %d after (largest %.4f um^2); %d cells clipped, %d emptied",
+        clip.before.n_pairs,
+        clip.before.n_pairs_over_1um2,
+        clip.before.max_area_um2,
+        clip.after.n_pairs,
+        clip.after.max_area_um2,
+        len(clipped),
+        len(emptied),
+    )
+    keep = np.ones(len(cells), dtype=bool)
+    keep[clip.emptied] = False
+    kept_geometries = [g for g, ok in zip(clip.geometries, keep, strict=True) if ok]
+    return cells[keep].reset_index(drop=True), kept_geometries, record
+
+
+def _finish_clip_record(
+    record: dict[str, Any], losing: Counter[int], results: list[_FileResult]
+) -> dict[str, Any]:
+    """Add the conflict rows of each clipped cell and the released rows."""
+    finished = dict(record)
+    finished["clipped_cells"] = [
+        {**entry, "rows_lost_in_conflicts": int(losing.get(entry["instance_id"], 0))}
+        for entry in record["clipped_cells"]
+    ]
+    finished["n_clipped_cells_losing_conflicts"] = sum(
+        1 for entry in finished["clipped_cells"] if entry["rows_lost_in_conflicts"]
+    )
+    finished["n_rows_released_by_emptied_cells"] = int(
+        sum(result.n_released for result in results)
+    )
+    return finished
 
 
 def stitch(cfg: AteraProsegStitchConfig) -> dict[str, Any]:
@@ -792,8 +1140,8 @@ def stitch(cfg: AteraProsegStitchConfig) -> dict[str, Any]:
         if (
             not cfg.force
             and recorded.get("fingerprint") == fingerprint
-            and _layer_complete(latest)
-            and _points_have_assignment(latest)
+            and _layer_complete(latest, tiles.layer)
+            and _points_have_assignment(latest, tiles.layer)
         ):
             logger.info(
                 "[%s] ProSeg layer already stitched from these tiles (%s); skipping",
@@ -805,6 +1153,11 @@ def stitch(cfg: AteraProsegStitchConfig) -> dict[str, Any]:
                 "fingerprint": fingerprint,
                 **recorded.get("stitch", {}),
             }
+            # The current layer stays as it is (with the tables derived from
+            # it); only another layer's leftovers are removed.
+            removed = _remove_leftovers_only(latest, tiles.layer, cfg.dataset_name)
+            if removed:
+                report["removed_foreign_layer_without_restitch"] = removed
         else:
             try:
                 report = _stitch_into(cfg, latest, tiles, fingerprint)
@@ -837,12 +1190,16 @@ def _stitch_into(
     from merxen.io.spatialdata_io import delete_element, write_or_replace_element
 
     plan = tiles.plan
+    layer = tiles.layer
     ps = float(plan["pixel_size_um"])
     tile_um = float(plan["grid"]["tile_um"])
     n_rows_px, n_cols_px = (int(v) for v in plan["mask_shape_px"])
     cells = _load_cells(tiles)
+    cells, geometries, clip_record = _clip_seams(cells, tiles, tile_um)
+    released_cells = np.asarray(
+        sorted(int(v) for v in clip_record["emptied_instance_ids"]), dtype=np.uint64
+    )
     instance_ids = cells["instance_id"].to_numpy(dtype=np.uint64)
-    geometries = list(shapely.from_wkb(cells["geometry_wkb"].to_numpy()))
     n_workers = cfg.n_workers or int(os.environ.get("DASK_NUM_WORKERS", "4") or 4)
 
     # Table identity from table_original (genes and vendor cell ids).
@@ -850,18 +1207,30 @@ def _stitch_into(
     original = ad.read_zarr(group_path)
     var = original.var.copy()
     gene_position = {str(name): i for i, name in enumerate(original.var_names)}
-    source_ids = pd.Series(
-        original.obs["source_cell_id"].astype(str).to_numpy()
-        if "source_cell_id" in original.obs
-        else original.obs["instance_id"].astype(str).to_numpy(),
-        index=original.obs["instance_id"].to_numpy(dtype=np.uint64),
-    )
+    if layer.prior_kind == "cellpose":
+        # The Cellpose ids ENRICH gives its own Cellpose layer.
+        source_cell_ids = np.asarray(
+            [f"cellpose_{int(v)}" for v in instance_ids], dtype=object
+        )
+    else:
+        source_ids = pd.Series(
+            original.obs["source_cell_id"].astype(str).to_numpy()
+            if "source_cell_id" in original.obs
+            else original.obs["instance_id"].astype(str).to_numpy(),
+            index=original.obs["instance_id"].to_numpy(dtype=np.uint64),
+        )
+        source_cell_ids = source_ids.reindex(instance_ids).fillna("").to_numpy()
     del original
+    cellpose_mask = (
+        open_mask(Path(plan["prior"]["mask_path"]))
+        if layer.prior_kind == "cellpose"
+        else None
+    )
 
     # Labels first: the control attribution reads them.
     scratch = cfg.output_dir / "scratch"
     scratch.mkdir(parents=True, exist_ok=True)
-    raster_path = scratch / f"proseg_cell_labels_s0-{uuid.uuid4().hex}.npy"
+    raster_path = scratch / f"{layer.label_key}_s0-{uuid.uuid4().hex}.npy"
     labels = np.lib.format.open_memmap(
         raster_path, mode="w+", dtype=np.uint32, shape=(n_rows_px, n_cols_px)
     )
@@ -893,7 +1262,7 @@ def _stitch_into(
             "other cells); mask-based stages leave them out",
             cfg.dataset_name,
             len(without_pixels),
-            PROSEG_LABEL_KEY,
+            layer.label_key,
         )
 
     # Points: rewrite every file with the resolved assignment.
@@ -917,6 +1286,8 @@ def _stitch_into(
         gene_position=gene_position,
         labels=read_only,
         pixel_size_um=ps,
+        cellpose_mask=cellpose_mask,
+        released_cells=released_cells,
     )
     try:
         with ThreadPoolExecutor(max_workers=max(n_workers, 1)) as pool:
@@ -960,8 +1331,8 @@ def _stitch_into(
     obs = pd.DataFrame(
         {
             "instance_id": instance_ids,
-            "region": pd.Categorical([PROSEG_SHAPES_KEY] * n_cells),
-            "source_cell_id": source_ids.reindex(instance_ids).fillna("").to_numpy(),
+            "region": pd.Categorical([layer.shapes_key] * n_cells),
+            "source_cell_id": source_cell_ids,
             "proseg_internal_id": cells["proseg_internal_id"].to_numpy(np.uint32),
             "proseg_tile": pd.Categorical(cells["proseg_tile"].to_numpy()),
             "centroid_x": cells["centroid_x"].to_numpy(np.float32),
@@ -990,14 +1361,14 @@ def _stitch_into(
         for v in m["cells"]["owned_cells_without_polygon"]
     )
     if without_cell or without_polygon:
-        # Their transcripts are background in the layer: vendor cells lost.
+        # Their transcripts are background in the layer: prior cells lost.
         logger.warning(
-            "[%s] %d vendor labels have no ProSeg cell and %d owned ProSeg cells "
+            "[%s] %d prior labels have no ProSeg cell and %d owned ProSeg cells "
             "have no polygon; they are not in %s",
             cfg.dataset_name,
             len(without_cell),
             len(without_polygon),
-            PROSEG_TABLE_KEY,
+            layer.table_key,
         )
     conflicts: Counter[str] = Counter()
     losing: Counter[int] = Counter()
@@ -1007,6 +1378,8 @@ def _stitch_into(
     stitch_record = {
         "format_version": STITCH_FORMAT_VERSION,
         "stitched_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "prior_kind": layer.prior_kind,
+        "analysis_segmentation": layer.analysis_segmentation,
         "n_cells": int(n_cells),
         "n_zero_transcript_cells": int(zero.sum()),
         "zero_transcript_cells": [int(v) for v in instance_ids[zero]],
@@ -1028,6 +1401,7 @@ def _stitch_into(
         ],
         "n_cells_without_label_pixels": len(without_pixels),
         "cells_without_label_pixels": without_pixels,
+        "seam_clip": _finish_clip_record(clip_record, losing, results),
         "overlap_pixels_within_tile": int(overlap.within_group),
         "overlap_pixels_across_tiles": int(overlap.cross_group),
         "owned_cells_near_interior_window_edge": int(
@@ -1038,6 +1412,8 @@ def _stitch_into(
         ),
         "control_assignment": CONTROL_ASSIGNMENT_RULE,
     }
+    if layer.prior_kind == "cellpose":
+        stitch_record["cellpose_assignment_rule"] = "cellpose_mask_corner"
 
     adata = ad.AnnData(X=matrix, obs=obs, var=var)
     adata.obsm["spatial"] = np.column_stack(
@@ -1048,6 +1424,15 @@ def _stitch_into(
         "version": STITCH_FORMAT_VERSION,
         "fingerprint": fingerprint,
         "source_build_fingerprint": plan["source_build_fingerprint"],
+        "prior_kind": layer.prior_kind,
+        "prior": _provenance_prior(plan),
+        "layer": {
+            "analysis_segmentation": layer.analysis_segmentation,
+            "branch": layer.branch,
+            "shapes": layer.shapes_key,
+            "table": layer.table_key,
+            "labels": layer.label_key,
+        },
         "proseg_version": first["proseg"]["version"],
         "proseg_git_rev": first["proseg"]["git_rev"],
         "command_template": first["proseg"]["arguments"],
@@ -1058,11 +1443,18 @@ def _stitch_into(
     }
     adata.uns[PROVENANCE_ATTR] = {
         key: provenance[key]
-        for key in ("version", "fingerprint", "proseg_version", "model_params", "grid")
+        for key in (
+            "version",
+            "fingerprint",
+            "prior_kind",
+            "proseg_version",
+            "model_params",
+            "grid",
+        )
     }
     adata.uns[PROVENANCE_ATTR]["control_assignment"] = CONTROL_ASSIGNMENT_RULE
     table = TableModel.parse(
-        adata, region=PROSEG_SHAPES_KEY, region_key="region", instance_key="instance_id"
+        adata, region=layer.shapes_key, region_key="region", instance_key="instance_id"
     )
 
     gdf = gpd.GeoDataFrame(
@@ -1087,10 +1479,13 @@ def _stitch_into(
     )
 
     sdata = sd.read_zarr(latest, selection=("shapes", "tables", "labels"))
-    write_or_replace_element(sdata, PROSEG_SHAPES_KEY, "shapes", shapes)
-    write_or_replace_element(sdata, PROSEG_LABEL_KEY, "labels", label_element)
-    write_or_replace_element(sdata, PROSEG_TABLE_KEY, "tables", table)
-    stale = derived_proseg_tables(latest)
+    stitch_record["removed_foreign_layer"] = _remove_foreign_layers(
+        sdata, latest, layer, cfg.dataset_name
+    )
+    write_or_replace_element(sdata, layer.shapes_key, "shapes", shapes)
+    write_or_replace_element(sdata, layer.label_key, "labels", label_element)
+    write_or_replace_element(sdata, layer.table_key, "tables", table)
+    stale = derived_proseg_tables(latest, layer)
     for key in stale:
         delete_element(sdata, key, "tables")
     if stale:
@@ -1103,21 +1498,21 @@ def _stitch_into(
     stitch_record["deleted_derived_tables"] = stale
     register_segmentation_branch(
         sdata,
-        PROSEG_BRANCH,
+        layer.branch,
         points_key=POINTS_KEY,
         assignment_column=ASSIGNMENT_COLUMN,
         background_column=BACKGROUND_COLUMN,
-        shape_key=PROSEG_SHAPES_KEY,
-        table_key=PROSEG_TABLE_KEY,
-        id_namespace=ORIGINAL_ID_NAMESPACE,
-        legacy_aliases=("reseg",),
-        label_key=PROSEG_LABEL_KEY,
-        prior=PRIOR_NAME,
+        shape_key=layer.shapes_key,
+        table_key=layer.table_key,
+        id_namespace=layer.id_namespace,
+        legacy_aliases=layer.legacy_aliases,
+        label_key=layer.label_key,
+        prior=layer.prior_name,
     )
     schema = dict(sdata.attrs[MERXEN_SCHEMA_ATTR])
     registry = dict(schema["segmentations"])
-    registry[PROSEG_BRANCH] = {
-        **registry[PROSEG_BRANCH],
+    registry[layer.branch] = {
+        **registry[layer.branch],
         "model_identity": {
             "tool": "proseg",
             "version": provenance["proseg_version"],
@@ -1129,7 +1524,7 @@ def _stitch_into(
     sdata.attrs[PROVENANCE_ATTR] = provenance
     sdata.write_attrs()
     sdata.write_consolidated_metadata()
-    del sdata, read_only, labels
+    del sdata, read_only, labels, cellpose_mask
     remove_path(scratch)
     logger.info(
         "[%s] Stitched %d ProSeg cells from %d tiles: %d assigned rows, %d "
@@ -1142,6 +1537,26 @@ def _stitch_into(
         stitch_record["n_zero_transcript_cells"],
     )
     return {"skipped": False, "fingerprint": fingerprint, **stitch_record}
+
+
+def _provenance_prior(plan: dict[str, Any]) -> dict[str, Any]:
+    """Return the prior record of the provenance (no host paths)."""
+    prior = plan.get("prior")
+    if not prior:
+        return {"kind": "vendor", "source": "labels/cell_labels"}
+    record = {
+        key: prior.get(key)
+        for key in ("kind", "fingerprint", "mask_sha256", "cellprob_sha256")
+    }
+    record["mask_file"] = Path(str(prior["mask_path"])).name
+    record["mask_stat"] = prior.get("mask_stat")
+    record["cellprob_file"] = (
+        None
+        if prior.get("cellprob_path") is None
+        else Path(prior["cellprob_path"]).name
+    )
+    record["prior_weight"] = plan.get("prior_weight")
+    return record
 
 
 def _compact_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -1187,7 +1602,7 @@ def _check_points_file(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 def check_proseg_layer(
-    latest_path: Path, n_workers: int | None = None
+    latest_path: Path, n_workers: int | None = None, prior_kind: str | None = None
 ) -> dict[str, Any]:
     """Check the stitched ProSeg layer of a latest store in one streaming pass.
 
@@ -1199,6 +1614,8 @@ def check_proseg_layer(
     Args:
         latest_path: The latest store.
         n_workers: Threads over the points files.
+        prior_kind: The row's prior kind; ``None`` reads it from the stitch
+            provenance.
 
     Returns:
         ``{"passed": bool, "failures": [...], ...}`` with the counts checked.
@@ -1211,20 +1628,28 @@ def check_proseg_layer(
     import zarr
 
     latest = Path(latest_path)
-    if not _layer_complete(latest) or not _points_have_assignment(latest):
+    provenance = dict(read_root_attrs(latest).get(PROVENANCE_ATTR) or {})
+    layer = proseg_layer(prior_kind or provenance.get("prior_kind") or "vendor")
+    if not _layer_complete(latest, layer) or not _points_have_assignment(latest, layer):
         raise AteraProsegError(
-            "native_proseg row without a stitched ProSeg layer: the latest store "
-            f"lacks {PROSEG_SHAPES_KEY}, {PROSEG_TABLE_KEY}, {PROSEG_LABEL_KEY} or "
-            "the points assignment; run the segment stage (ATERA_PROSEG_STITCH)"
+            "Row without a stitched ProSeg layer: the latest store lacks "
+            f"{layer.shapes_key}, {layer.table_key}, {layer.label_key} or the "
+            f"points columns {', '.join(sorted(_points_columns(layer)))}; run the "
+            "segment stage (ATERA_PROSEG_STITCH)"
         )
     failures: list[str] = []
-    group = zarr.open_group(str(latest / "tables" / PROSEG_TABLE_KEY), mode="r")
+    if provenance.get("prior_kind", "vendor") != layer.prior_kind:
+        failures.append(
+            f"the stitch provenance records a {provenance.get('prior_kind')} prior, "
+            f"not {layer.prior_kind}"
+        )
+    group = zarr.open_group(str(latest / "tables" / layer.table_key), mode="r")
     obs = ad.io.read_elem(group["obs"])
     x_matrix = ad.io.read_elem(group["X"])
     table_ids = obs["instance_id"].to_numpy(dtype=np.uint64)
     row_sums = np.asarray(sparse.csr_matrix(x_matrix).sum(axis=1)).ravel()
     row_sums = np.rint(row_sums).astype(np.int64)
-    shapes = gpd.read_parquet(latest / "shapes" / PROSEG_SHAPES_KEY / "shapes.parquet")
+    shapes = gpd.read_parquet(latest / "shapes" / layer.shapes_key / "shapes.parquet")
     shape_ids = shapes["instance_id"].to_numpy(dtype=np.uint64)
     if set(table_ids.tolist()) != set(shape_ids.tolist()):
         failures.append("table and shape ids differ")
@@ -1255,23 +1680,30 @@ def check_proseg_layer(
     entry = (
         dict(read_root_attrs(latest).get(MERXEN_SCHEMA_ATTR, {}) or {})
         .get("segmentations", {})
-        .get(PROSEG_BRANCH, {})
+        .get(layer.branch, {})
     )
     expected = {
-        "shape": PROSEG_SHAPES_KEY,
-        "table": PROSEG_TABLE_KEY,
+        "shape": layer.shapes_key,
+        "table": layer.table_key,
         "assignment_column": ASSIGNMENT_COLUMN,
         "background_column": BACKGROUND_COLUMN,
-        "id_namespace": ORIGINAL_ID_NAMESPACE,
-        "label": PROSEG_LABEL_KEY,
-        "prior": PRIOR_NAME,
+        "id_namespace": layer.id_namespace,
+        "label": layer.label_key,
+        "prior": layer.prior_name,
     }
     wrong = sorted(key for key, value in expected.items() if entry.get(key) != value)
     if wrong:
-        failures.append(f"registry entry {PROSEG_BRANCH} differs in {', '.join(wrong)}")
-    provenance = dict(read_root_attrs(latest).get(PROVENANCE_ATTR) or {})
+        failures.append(f"registry entry {layer.branch} differs in {', '.join(wrong)}")
+    foreign = _foreign_layers(latest, layer)
+    if foreign:
+        failures.append(
+            "the store also holds the "
+            f"{', '.join(other.prior_kind for other in foreign)} prior's ProSeg layer"
+        )
     return {
         "passed": not failures,
+        "prior_kind": layer.prior_kind,
+        "analysis_segmentation": layer.analysis_segmentation,
         "failures": failures,
         "fingerprint": provenance.get("fingerprint"),
         "n_cells": int(table_ids.size),

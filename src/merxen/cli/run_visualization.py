@@ -270,7 +270,8 @@ def _sanity_assignment_column(
     rather than testing which ProSeg polygon each transcript falls inside.
     The original layer of a native-segmentation platform (ATERA) reads the
     vendor assignment the registry records for its shape
-    (``original_assignment``). The other branches keep their shape-based or
+    (``original_assignment``), and every other ATERA layer the column its
+    registry entry records. The other branches keep their shape-based or
     hybrid assignment sources.
     """
     segmentation = (
@@ -288,4 +289,14 @@ def _sanity_assignment_column(
         return registered_assignment_column(
             sdata_obj, sample.shape_key or spec.original_cell_shape_key
         )
+    # Every other ATERA layer reads the assignment its registry entry records
+    # (AT-7: proseg_mask reads cellpose_assignment, not ProSeg's assignment;
+    # proseg_vendor reads assignment).
+    if (
+        sdata_obj is not None
+        and spec is not None
+        and spec.native_latest_base
+        and sample.shape_key is not None
+    ):
+        return registered_assignment_column(sdata_obj, sample.shape_key)
     return None

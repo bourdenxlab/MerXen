@@ -1,37 +1,134 @@
-"""Tiled ProSeg for ATERA rows (``segmentation_source=native_proseg``, plan AT-9).
+"""Tiled ProSeg for ATERA rows (plans AT-9 and AT-7).
 
-The vendor cell masks are ProSeg's prior; no Cellpose runs. A section is cut
-into square tiles (:mod:`.plan`); each tile is one ProSeg run on the
-transcripts of its window (:mod:`.export`, :mod:`.runner`) reduced to the cells
-it owns and their transcript claims (:mod:`.tile`). The stitch
-(:mod:`.stitch`) writes the stitched cells into the latest store as the
-analysis layer ``reseg``: registry branch ``proseg`` with the shapes
-``MOSAIK_proseg``, the table ``table_MOSAIK_proseg``, the label element
-``proseg_cell_labels`` and the transcript columns ``assignment`` and
-``background``, as on XENIUM and MERSCOPE.
+ProSeg refines a prior segmentation of the morphology grid. Two priors exist,
+one per segmentation source, and each writes its own analysis layer
+(:data:`PROSEG_LAYERS`):
 
-Ownership: a vendor label belongs to the tile whose half-open core holds its
-vendor centroid; every label has exactly one owner. A tile's window is its core
-plus the halo plus the bounding box of every cell it owns (with a margin), so
-an owned cell is never cut by the window. A ProSeg cell keeps the vendor label
-as its ``instance_id`` (the original id namespace); a transcript assigned by
-two tiles to different cells goes to the tile whose core holds it.
+- ``native_proseg`` (AT-9): the vendor cell masks are the prior; the layer is
+  ``proseg_vendor`` (shapes ``MOSAIK_proseg_vendor``, table
+  ``table_MOSAIK_proseg_vendor``, labels ``proseg_vendor_cell_labels``) and
+  keeps the vendor ids (namespace ``source_segmentation_v1``).
+- ``cellpose_proseg`` (AT-7): MerXen's Cellpose masks (DAPI + 18S) are the
+  prior; the layer is ``reseg`` with the XENIUM names (shapes
+  ``MOSAIK_proseg``, table ``table_MOSAIK_proseg``, labels
+  ``proseg_cell_labels``) and the Cellpose label namespace
+  ``cellpose_label_v1``.
+
+Both write the transcript columns ``assignment`` and ``background``; a row has
+one source, so one store never holds both layers.
+
+A section is cut into square tiles (:mod:`.plan`); each tile is one ProSeg run
+on the transcripts of its window (:mod:`.export`, :mod:`.runner`) reduced to
+the cells it owns and their transcript claims (:mod:`.tile`). The stitch
+(:mod:`.stitch`) writes the stitched cells into the latest store.
+
+Ownership: a prior label belongs to the tile whose half-open core holds its
+centroid; every label has exactly one owner. A tile's window is its core plus
+the halo plus the bounding box of every cell it owns (with a margin), so an
+owned cell is never cut by the window. A ProSeg cell keeps the prior label as
+its ``instance_id``; a transcript assigned by two tiles to different cells goes
+to the tile whose core holds it.
 """
 
 from __future__ import annotations
 
-from typing import Final
+from collections.abc import Mapping
+from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Final, Literal
 
-PROSEG_BRANCH: Final = "proseg"
-"""Registry branch of the ProSeg layer (``analysis_segmentation=reseg``)."""
+from merxen.io.spatialdata_schema import ORIGINAL_ID_NAMESPACE, PROSEG_ID_NAMESPACE
 
-PROSEG_SHAPES_KEY: Final = "MOSAIK_proseg"
-PROSEG_TABLE_KEY: Final = "table_MOSAIK_proseg"
-PROSEG_LABEL_KEY: Final = "proseg_cell_labels"
 ASSIGNMENT_COLUMN: Final = "assignment"
 BACKGROUND_COLUMN: Final = "background"
-PRIOR_NAME: Final = "vendor_cell_labels"
-"""Registry ``prior`` field: what the ProSeg cells were refined from."""
+CELLPOSE_ASSIGNMENT_COLUMN: Final = "cellpose_assignment"
+"""Points column of a Cellpose-prior store: the Cellpose label at each row."""
+
+PriorKind = Literal["vendor", "cellpose"]
+"""What a tiled ProSeg run takes as its prior."""
+
+
+@dataclass(frozen=True)
+class ProsegLayer:
+    """Element names and registry fields of one ProSeg layer.
+
+    Attributes:
+        prior_kind: The prior the layer is refined from.
+        analysis_segmentation: Its ``analysis_segmentation`` value.
+        branch: Registry branch name.
+        shapes_key: Shapes element.
+        table_key: Table element.
+        label_key: Label element (cells rasterised on the morphology grid).
+        id_namespace: Namespace of the cell ids (the prior's labels).
+        prior_name: Registry ``prior`` field.
+        legacy_aliases: Registry aliases.
+    """
+
+    prior_kind: PriorKind
+    analysis_segmentation: str
+    branch: str
+    shapes_key: str
+    table_key: str
+    label_key: str
+    id_namespace: str
+    prior_name: str
+    legacy_aliases: tuple[str, ...]
+
+
+PROSEG_LAYERS: Final[Mapping[str, ProsegLayer]] = MappingProxyType(
+    {
+        "vendor": ProsegLayer(
+            prior_kind="vendor",
+            analysis_segmentation="proseg_vendor",
+            branch="proseg_vendor",
+            shapes_key="MOSAIK_proseg_vendor",
+            table_key="table_MOSAIK_proseg_vendor",
+            label_key="proseg_vendor_cell_labels",
+            id_namespace=ORIGINAL_ID_NAMESPACE,
+            prior_name="vendor_cell_labels",
+            legacy_aliases=("vendor_proseg", "native_proseg"),
+        ),
+        "cellpose": ProsegLayer(
+            prior_kind="cellpose",
+            analysis_segmentation="reseg",
+            branch="proseg",
+            shapes_key="MOSAIK_proseg",
+            table_key="table_MOSAIK_proseg",
+            label_key="proseg_cell_labels",
+            id_namespace=PROSEG_ID_NAMESPACE,
+            prior_name="cellpose_cell_labels",
+            legacy_aliases=("reseg",),
+        ),
+    }
+)
+"""The ProSeg layer of each prior kind (twin: ``AteraProsegLayers.groovy``)."""
+
+SOURCE_PRIOR_KIND: Final[Mapping[str, PriorKind]] = MappingProxyType(
+    {"native_proseg": "vendor", "cellpose_proseg": "cellpose"}
+)
+"""Prior kind of each segmentation source that runs the tiled ProSeg route."""
+
+
+def proseg_layer(prior_kind: str) -> ProsegLayer:
+    """Return the ProSeg layer of a prior kind.
+
+    Args:
+        prior_kind: ``"vendor"`` or ``"cellpose"``.
+
+    Returns:
+        The layer's names.
+
+    Raises:
+        AteraProsegError: For an unknown prior kind.
+    """
+    layer = PROSEG_LAYERS.get(str(prior_kind))
+    if layer is None:
+        raise AteraProsegError(
+            f"Unknown ProSeg prior kind {prior_kind!r}; known: "
+            f"{', '.join(PROSEG_LAYERS)}"
+        )
+    return layer
+
 
 PROVENANCE_ATTR: Final = "merxen_atera_proseg"
 """Root attribute holding the provenance of the stitched ProSeg layer."""
@@ -45,7 +142,8 @@ REQUIRED_PROSEG_VERSION: Final = "3.2.0"
 
 PLAN_FORMAT_VERSION: Final = 1
 TILE_FORMAT_VERSION: Final = 1
-STITCH_FORMAT_VERSION: Final = 1
+STITCH_FORMAT_VERSION: Final = 2
+"""2 (AT-7): cross-tile polygon overlaps are clipped by the core rule."""
 
 
 def tile_id(column: int, row: int) -> str:

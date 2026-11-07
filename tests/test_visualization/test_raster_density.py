@@ -565,3 +565,51 @@ def test_visualize_cli_on_native_atera_store(
         "assignment_rate_bar",
     ):
         assert (out_dir / f"ATERA_SYNTH_ATERA_{suffix}.png").exists(), suffix
+
+
+def test_sanity_assignment_column_of_atera_cellpose_layers() -> None:
+    """AT-7: every ATERA layer reads the column its registry entry records."""
+    from types import SimpleNamespace
+
+    registry = {
+        "proseg": {
+            "points": "transcripts",
+            "shape": "MOSAIK_proseg",
+            "table": "table_MOSAIK_proseg",
+            "assignment_column": "assignment",
+            "id_namespace": "cellpose_label_v1",
+        },
+        "cellpose": {
+            "points": "transcripts",
+            "shape": "MOSAIK_cellpose",
+            "table": "table_MOSAIK_cellpose",
+            "assignment_column": "cellpose_assignment",
+            "id_namespace": "cellpose_label_v1",
+        },
+    }
+    sdata = SimpleNamespace(
+        attrs={"merxen_schema": {"segmentations": registry}},
+        shapes={"MOSAIK_proseg": None, "MOSAIK_cellpose": None},
+        tables={},
+        labels={},
+        points={"transcripts": None},
+    )
+    mask = VisualizationSampleConfig(
+        sample_id="A",
+        platform="ATERA",
+        zarr_path=Path("a.zarr"),
+        segmentation="proseg_mask",
+        table_key="table_MOSAIK_cellpose",
+        shape_key="MOSAIK_cellpose",
+    )
+    assert _sanity_assignment_column(mask, sdata) == "cellpose_assignment"
+    reseg = mask.model_copy(
+        update={
+            "segmentation": "reseg",
+            "table_key": "table_MOSAIK_proseg",
+            "shape_key": "MOSAIK_proseg",
+        }
+    )
+    assert _sanity_assignment_column(reseg, sdata) == "assignment"
+    xenium_mask = mask.model_copy(update={"platform": "XENIUM"})
+    assert _sanity_assignment_column(xenium_mask, sdata) is None

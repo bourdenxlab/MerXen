@@ -21,6 +21,7 @@ from merxen.io.bead_removal.provenance import (
     check_store_segmentation_sidecar,
     read_image_preprocessing_attr,
     remove_segmentation_sidecar,
+    segmentation_sidecar_path,
     write_segmentation_sidecar,
     write_store_segmentation_sidecar,
 )
@@ -224,6 +225,26 @@ def _load_xenium_transform_matrix(config: SegmentationConfig) -> np.ndarray:
     )
 
 
+def _load_atera_transform_matrix(config: SegmentationConfig) -> np.ndarray:
+    """Return the micron-to-pixel matrix of an ATERA store's morphology image.
+
+    The pixel size comes from the store's spec sidecars (the override first),
+    as the build used it; the morphology grid has its origin at (0, 0) and is
+    the vendor mask grid (corner convention).
+    """
+    from merxen.platforms import find_um_per_px
+
+    um_per_px = float(find_um_per_px(Path(config.dataset.data_path), "ATERA"))
+    return np.array(
+        [
+            [1.0 / um_per_px, 0.0, 0.0],
+            [0.0, 1.0 / um_per_px, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
+
+
 def _derive_cellpose_transforms(
     config: SegmentationConfig,
 ) -> tuple[AffineComponent, AffineComponent]:
@@ -233,6 +254,8 @@ def _derive_cellpose_transforms(
         matrix = _load_merscope_transform_matrix(config)
     elif platform == "XENIUM":
         matrix = _load_xenium_transform_matrix(config)
+    elif platform == "ATERA":
+        matrix = _load_atera_transform_matrix(config)
     else:
         raise ValueError(f"Unsupported platform: {config.dataset.platform}")
 
@@ -520,7 +543,66 @@ def _load_dataset_sdata(
         points_key = _require_transcript_points(sdata, dataset.name)
         return sdata, fetch_tile_fn, height, width, matrix, sdata.points[points_key]
 
+    if platform == "ATERA":
+        return _load_atera_sdata(config)
+
     raise ValueError(f"Unsupported platform: {dataset.platform}")
+
+
+def _load_atera_sdata(
+    config: SegmentationConfig,
+) -> tuple[Any, Any, int, int, np.ndarray, Any]:
+    """Return the tile-fetch context of an ATERA store (plan AT-7).
+
+    Only a built store is read (never the raw bundle), the image must be the
+    platform's native morphology image, and every requested channel must be
+    present: a partial channel set would silently segment on other stains.
+    No transcripts are read (``proseg_transcripts="none"``).
+
+    Raises:
+        ValueError: If the source is not a zarr store, the image key is not
+            the native one, or a requested channel is missing.
+    """
+    dataset = config.dataset
+    if Path(dataset.data_path).suffix != ".zarr":
+        raise ValueError(
+            f"[{dataset.name}] ATERA Cellpose reads the built store "
+            "(BUILD_SPATIALDATA), not the raw bundle"
+        )
+    spec = platform_spec("ATERA")
+    if dataset.image_key != spec.native_image_key:
+        raise ValueError(
+            f"[{dataset.name}] ATERA Cellpose segments {spec.native_image_key}; "
+            f"image_key={dataset.image_key!r}"
+        )
+    sdata = sd.read_zarr(dataset.data_path, selection=("images",))
+    if dataset.image_key not in sdata.images:
+        raise ValueError(
+            f"[{dataset.name}] The store has no image {dataset.image_key!r}; "
+            f"available: {sorted(map(str, sdata.images))}"
+        )
+    source = build_image_source(
+        sdata.images[dataset.image_key],
+        requested_channels=dataset.channels,
+        as_float32=True,
+    )
+    if list(source["channels"]) != list(dataset.channels):
+        raise ValueError(
+            f"[{dataset.name}] ATERA Cellpose needs the channels "
+            f"{list(dataset.channels)}; {dataset.image_key} gives "
+            f"{list(source['channels'])}"
+        )
+    matrix = _load_atera_transform_matrix(config)
+    height, width, _ = source["shape"]
+    log_status(
+        f"[{dataset.name}] ATERA image='{dataset.image_key}' shape={height}x{width}, "
+        f"channels={source['channels']}"
+    )
+
+    def fetch_tile_fn(y0: int, y1: int, x0: int, x1: int) -> np.ndarray:
+        return fetch_tile(source, y0, y1, x0, x1)
+
+    return sdata, fetch_tile_fn, height, width, matrix, None
 
 
 def _require_transcript_points(sdata: Any, dataset_name: str) -> str:
@@ -584,12 +666,15 @@ def _preflight_model_selection(
     )
     require_matching_cached_model(mask_path, config, identity)
     if mask_path.exists():
-        required = (
+        required: tuple[Path, ...] = (
             config.dataset.persistent_cellpose_cellprob_path
             or mask_path.with_name("cellpose_cellprobs_tiled.npy"),
-            config.dataset.persistent_transcripts_path
-            or mask_path.with_name("transcripts_for_proseg.csv"),
         )
+        if config.dataset.proseg_transcripts == "csv":
+            required += (
+                config.dataset.persistent_transcripts_path
+                or mask_path.with_name("transcripts_for_proseg.csv"),
+            )
         if not all(path.exists() for path in required):
             raise ValueError("Custom-model cache is incomplete; use a fresh outdir")
     del sdata
@@ -606,6 +691,9 @@ def run_cellpose_segmentation(
     dataset = config.dataset
     out_dir = Path(dataset.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    # ATERA (AT-7): no ProSeg transcript CSV; the tiled ProSeg route reads the
+    # store's parquet.
+    writes_csv = dataset.proseg_transcripts == "csv"
 
     staged_transcripts_csv = out_dir / "transcripts_for_proseg.csv"
     staged_mask_path = out_dir / "cellpose_masks_tiled.npy"
@@ -649,7 +737,7 @@ def run_cellpose_segmentation(
         staged_identity_path = model_identity_path(staged_mask_path)
         if identity_path != staged_identity_path:
             stage_existing_output(identity_path, staged_identity_path)
-        if transcripts_csv != staged_transcripts_csv:
+        if writes_csv and transcripts_csv != staged_transcripts_csv:
             stage_existing_output(transcripts_csv, staged_transcripts_csv)
         if mask_path != staged_mask_path:
             stage_existing_output(mask_path, staged_mask_path)
@@ -682,8 +770,17 @@ def run_cellpose_segmentation(
             },
         )
 
+    # The masks and probabilities are written in place, tile by tile, so their
+    # existence does not mean a finished run. With a CSV, the CSV (written
+    # after Cellpose) marks completion; without one (ATERA), the segmentation
+    # sidecar does: _finish_cellpose_without_csv writes it last and
+    # run_tiled_cellpose removes it (before_overwrite) before it opens them.
     reusable_outputs_exist = (
-        transcripts_csv.exists()
+        (
+            transcripts_csv.exists()
+            if writes_csv
+            else segmentation_sidecar_path(mask_path).exists()
+        )
         and mask_path.exists()
         and cellprob_path.exists()
         and not force_rerun
@@ -707,13 +804,14 @@ def run_cellpose_segmentation(
             current_x_transform, current_y_transform = _derive_cellpose_transforms(
                 config
             )
-            _require_seeding_matches_transforms(
-                dataset.name,
-                transcripts_csv,
-                mask_path,
-                current_x_transform,
-                current_y_transform,
-            )
+            if writes_csv:
+                _require_seeding_matches_transforms(
+                    dataset.name,
+                    transcripts_csv,
+                    mask_path,
+                    current_x_transform,
+                    current_y_transform,
+                )
             if not transforms_path.exists():
                 _write_transforms_json(
                     transforms_path, current_x_transform, current_y_transform
@@ -731,13 +829,13 @@ def run_cellpose_segmentation(
                 staged_stats,
                 staged_transforms,
             ) = _stage_outputs()
-            return {
-                "transcripts_csv": staged_transcripts,
-                "cellpose_mask_path": staged_mask,
-                "cellpose_cellprob_path": staged_cellprob,
-                "stitching_stats_path": staged_stats,
-                "transforms_path": staged_transforms,
-            }
+            return _cellpose_outputs(
+                staged_transcripts if writes_csv else None,
+                staged_mask,
+                staged_cellprob,
+                staged_stats,
+                staged_transforms,
+            )
         logger.warning(
             "[%s] Existing Cellpose mask has no positive labels; regenerating "
             "it instead of reusing an incomplete artifact",
@@ -844,6 +942,20 @@ def run_cellpose_segmentation(
 
     synchronize_cellpose_probability_logits(mask_path, cellprob_path)
 
+    if not writes_csv:
+        return _finish_cellpose_without_csv(
+            config,
+            mask_path=mask_path,
+            stitching_stats_path=stitching_stats_path,
+            transforms_path=transforms_path,
+            x_transform=x_transform,
+            y_transform=y_transform,
+            source_preprocessing=source_preprocessing,
+            bead_veto=bead_veto,
+            stage_outputs=_stage_outputs,
+            progress=_progress,
+        )
+
     x_col = resolve_col(points_obj, ["x", "global_x", "x_location"])
     y_col = resolve_col(points_obj, ["y", "global_y", "y_location"])
     z_col = resolve_col(points_obj, ["z", "global_z", "z_location"], required=False)
@@ -935,13 +1047,71 @@ def run_cellpose_segmentation(
         staged_stats,
         staged_transforms,
     ) = _stage_outputs()
-    return {
-        "transcripts_csv": Path(staged_transcripts),
-        "cellpose_mask_path": Path(staged_mask),
-        "cellpose_cellprob_path": Path(staged_cellprob),
-        "stitching_stats_path": Path(staged_stats),
-        "transforms_path": Path(staged_transforms),
-    }
+    return _cellpose_outputs(
+        staged_transcripts,
+        staged_mask,
+        staged_cellprob,
+        staged_stats,
+        staged_transforms,
+    )
+
+
+def _cellpose_outputs(
+    transcripts_csv: Path | None,
+    mask_path: Path,
+    cellprob_path: Path,
+    stitching_stats_path: Path,
+    transforms_path: Path,
+) -> dict[str, Path]:
+    """Return the staged Cellpose outputs (no ``transcripts_csv`` without a CSV)."""
+    outputs: dict[str, Path] = {}
+    if transcripts_csv is not None:
+        outputs["transcripts_csv"] = Path(transcripts_csv)
+    outputs.update(
+        cellpose_mask_path=Path(mask_path),
+        cellpose_cellprob_path=Path(cellprob_path),
+        stitching_stats_path=Path(stitching_stats_path),
+        transforms_path=Path(transforms_path),
+    )
+    return outputs
+
+
+def _finish_cellpose_without_csv(
+    config: SegmentationConfig,
+    *,
+    mask_path: Path,
+    stitching_stats_path: Path,
+    transforms_path: Path,
+    x_transform: AffineComponent,
+    y_transform: AffineComponent,
+    source_preprocessing: dict[str, Any] | None,
+    bead_veto: Any,
+    stage_outputs: Any,
+    progress: Any,
+) -> dict[str, Path]:
+    """Finish a Cellpose run that writes no ProSeg transcript CSV (ATERA, AT-7).
+
+    The transforms and the stitching statistics are written, then (last, so
+    masks without it are never complete outputs) the segmentation sidecar.
+    """
+    _write_transforms_json(transforms_path, x_transform, y_transform)
+    if not stitching_stats_path.exists():
+        stitching_stats_path.write_text(
+            json.dumps({"write_stitching_stats": False}, indent=2) + "\n"
+        )
+    write_segmentation_sidecar(
+        mask_path,
+        source_preprocessing,
+        bead_mask_veto=None if bead_veto is None else bead_veto.identity,
+    )
+    force_release(note=f"after {config.dataset.name} Cellpose segmentation")
+    progress("done")
+    _transcripts, staged_mask, staged_cellprob, staged_stats, staged_transforms = (
+        stage_outputs()
+    )
+    return _cellpose_outputs(
+        None, staged_mask, staged_cellprob, staged_stats, staged_transforms
+    )
 
 
 def run_cellpose_nuclei_segmentation(

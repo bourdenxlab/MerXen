@@ -116,10 +116,15 @@ def test_hitl0_preserves_legacy_cellpose_config_json(
     """The Python model default must not add new keys to legacy Nextflow JSON."""
     repo_root = Path(__file__).resolve().parents[2]
     main_text = (repo_root / "workflows" / "main.nf").read_text()
+    # AT-7 moved the builder from the workflow block (16 spaces) into
+    # segmentationConfigMap (8 spaces); the pinned text is the block as it was.
     match = re.search(
-        rf"^                {field}: \[(.*?)^                \],",
+        rf"^        {field}: \[(.*?)^        \],",
         main_text,
         re.MULTILINE | re.DOTALL,
     )
     assert match is not None
-    assert hashlib.sha256(match.group(1).encode()).hexdigest() == expected_hash
+    body = "\n".join(
+        f"        {line}" if line else line for line in match.group(1).split("\n")
+    )
+    assert hashlib.sha256(body.encode()).hexdigest() == expected_hash

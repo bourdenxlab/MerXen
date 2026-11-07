@@ -19,7 +19,8 @@ class PlatformSpec {
     final List<String> transformPathFields
     final List<String> segmentationSources
     final String defaultSegmentationSource
-    final String prosegLabelKey
+    final boolean nativeLatestBase
+    final boolean prosegHybrid
 
     static final Map<String, PlatformSpec> REGISTRY = Collections.unmodifiableMap([
         MERSCOPE: new PlatformSpec(
@@ -34,7 +35,8 @@ class PlatformSpec {
             ['merscope_transform_path'],
             ['cellpose_proseg'],
             'cellpose_proseg',
-            null,
+            false,
+            true,
         ),
         XENIUM: new PlatformSpec(
             'XENIUM',
@@ -48,7 +50,8 @@ class PlatformSpec {
             ['xenium_spec_path'],
             ['cellpose_proseg'],
             'cellpose_proseg',
-            null,
+            false,
+            true,
         ),
         ATERA: new PlatformSpec(
             'ATERA',
@@ -60,9 +63,10 @@ class PlatformSpec {
             ['atera_dir'],
             ['atera_spatialdata_path'],
             ['atera_spec_path'],
-            ['native', 'native_proseg'],
+            ['native', 'native_proseg', 'cellpose_proseg'],
             'native',
-            'proseg_cell_labels',
+            true,
+            false,
         ),
     ] as LinkedHashMap<String, PlatformSpec>)
 
@@ -78,7 +82,8 @@ class PlatformSpec {
         List<String> transformPathFields,
         List<String> segmentationSources,
         String defaultSegmentationSource,
-        String prosegLabelKey
+        boolean nativeLatestBase,
+        boolean prosegHybrid
     ) {
         this.name = name
         this.family = family
@@ -94,7 +99,8 @@ class PlatformSpec {
         this.segmentationSources = Collections.unmodifiableList(
             new ArrayList<String>(segmentationSources))
         this.defaultSegmentationSource = defaultSegmentationSource
-        this.prosegLabelKey = prosegLabelKey
+        this.nativeLatestBase = nativeLatestBase
+        this.prosegHybrid = prosegHybrid
     }
 
     /**
@@ -134,7 +140,8 @@ class PlatformSpec {
             transform_path_fields: new ArrayList<String>(transformPathFields),
             segmentation_sources: new ArrayList<String>(segmentationSources),
             default_segmentation_source: defaultSegmentationSource,
-            proseg_label_key: prosegLabelKey,
+            native_latest_base: nativeLatestBase,
+            proseg_hybrid: prosegHybrid,
         ]
     }
 }
