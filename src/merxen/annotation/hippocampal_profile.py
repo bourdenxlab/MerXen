@@ -164,6 +164,74 @@ class HippocampalPolicy(_FrozenModel):
         return hashlib.sha256(payload.encode()).hexdigest()
 
 
+class RuleDiagnostic(_FrozenModel):
+    """Distinct-cell diagnostic support for one frozen rule and atlas fold."""
+
+    diagnostic_id: str = Field(min_length=1)
+    level: str
+    assignment: str
+    min_counts: int = Field(ge=1)
+    n_accepted: int = Field(ge=0)
+    n_correct: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _check_counts(self) -> RuleDiagnostic:
+        if self.n_correct > self.n_accepted:
+            raise ValueError("Diagnostic correct count exceeds accepted count")
+        return self
+
+
+class PolicyQualification(_FrozenModel):
+    """Downgrade-only audit of an unchanged policy on reused atlas evidence."""
+
+    policy_sha256: Sha256
+    evidence_basis: Literal["existing_atlas_diagnostics_reused"]
+    diagnostic_sources: dict[str, Sha256]
+    checks: tuple[RuleDiagnostic, ...]
+
+    def allowed_rules(
+        self, policy: HippocampalPolicy
+    ) -> frozenset[tuple[str, str, int]]:
+        """Validate complete evidence and return rules meeting every diagnostic."""
+        if self.policy_sha256 != policy.digest():
+            raise ValueError("Qualification belongs to a different policy")
+        if len(self.diagnostic_sources) < 2:
+            raise ValueError(
+                "Qualification requires at least two existing diagnostic folds"
+            )
+        candidates = {
+            (r.level, r.assignment, r.min_counts)
+            for r in policy.rules
+            if r.min_bootstrap is not None
+        }
+        expected = {(d, *key) for d in self.diagnostic_sources for key in candidates}
+        actual = {
+            (c.diagnostic_id, c.level, c.assignment, c.min_counts) for c in self.checks
+        }
+        if actual != expected or len(actual) != len(self.checks):
+            raise ValueError(
+                "Qualification requires exactly one check per emitting rule/fold"
+            )
+        failed = set()
+        for check in self.checks:
+            n, correct = check.n_accepted, check.n_correct
+            if (
+                not n
+                or correct / n < policy.objective.min_precision
+                or wilson_lower(correct, n, policy.objective.wilson_z)
+                < policy.objective.min_wilson_lower
+            ):
+                failed.add((check.level, check.assignment, check.min_counts))
+        return frozenset(candidates - failed)
+
+    def digest(self) -> str:
+        """Hash the qualification and its source identities."""
+        payload = json.dumps(
+            self.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+        )
+        return hashlib.sha256(payload.encode()).hexdigest()
+
+
 def ordered_genes_sha256(genes: Sequence[str]) -> str:
     """Hash all query columns in their declared order."""
     return hashlib.sha256("\n".join(genes).encode()).hexdigest()
@@ -289,6 +357,7 @@ def resolve_reference_calls(
     policy: HippocampalPolicy,
     binding: ReferenceBinding,
     parent_of: Mapping[tuple[str, str], str],
+    qualification: PolicyQualification | None = None,
 ) -> pd.DataFrame:
     """Apply a bound policy, retaining all objects, raw calls and abstention causes.
 
@@ -313,6 +382,7 @@ def resolve_reference_calls(
     positive_ids = set(objects.loc[counts > 0, "cell_id"])
     if not set(predictions.level) <= set(binding.levels):
         raise ValueError("Predictions contain an unexpected taxonomy level")
+    allowed = qualification.allowed_rules(policy) if qualification is not None else None
     out = []
     previous: pd.DataFrame | None = None
     rule_of = {(r.level, r.assignment, r.min_counts): r for r in policy.rules}
@@ -358,6 +428,12 @@ def resolve_reference_calls(
             )
             if rule is None or rule.min_bootstrap is None:
                 continue
+            if (
+                allowed is not None
+                and (level, str(row.assignment), rule.min_counts) not in allowed
+            ):
+                status[i] = "diagnostic_not_reproduced"
+                continue
             if pd.isna(row.bp) or row.bp < rule.min_bootstrap - 1e-6:
                 status[i] = "low_support"
                 continue
@@ -375,6 +451,8 @@ def resolve_reference_calls(
         part["assignment"] = part.assignment.where(accepted)
         part["name"] = part["name"].where(accepted)
         part["policy_sha256"] = policy.digest()
+        if qualification is not None:
+            part["qualification_sha256"] = qualification.digest()
         part["evidence_basis"] = policy.evidence_basis
         out.append(part)
         previous = part

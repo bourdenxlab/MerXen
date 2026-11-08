@@ -9,6 +9,7 @@ from merxen.annotation.hippocampal_profile import (
     ConfidenceObjective,
     DepthRule,
     HippocampalPolicy,
+    PolicyQualification,
     ReferenceBinding,
     calibrate_rules,
     ordered_genes_sha256,
@@ -284,3 +285,78 @@ def test_policy_roundtrip_hash_and_forged_evidence_refusal() -> None:
     forged["rules"][0]["wilson_lower"] = 1.0
     with pytest.raises(ValidationError, match="Wilson bound differs"):
         HippocampalPolicy.model_validate(forged)
+
+
+def qualification(*, failed_level: str | None = None) -> PolicyQualification:
+    from merxen.annotation.hippocampal_profile import (
+        PolicyQualification,
+        RuleDiagnostic,
+    )
+
+    p = policy()
+    return PolicyQualification(
+        policy_sha256=p.digest(),
+        evidence_basis=p.evidence_basis,
+        diagnostic_sources={"check_1": "a" * 64, "check_2": "b" * 64},
+        checks=tuple(
+            RuleDiagnostic(
+                diagnostic_id=diagnostic,
+                level=r.level,
+                assignment=r.assignment,
+                min_counts=r.min_counts,
+                n_accepted=100,
+                n_correct=80
+                if r.level == failed_level and diagnostic == "check_2"
+                else 100,
+            )
+            for diagnostic in ("check_1", "check_2")
+            for r in p.rules
+        ),
+    )
+
+
+def test_failed_parent_diagnostic_withholds_child_without_changing_raw_calls() -> None:
+    result = resolve_reference_calls(
+        objects(),
+        predictions(),
+        policy=policy(),
+        binding=binding(),
+        parent_of={("child", "A"): "P"},
+        qualification=qualification(failed_level="parent"),
+    ).set_index(["cell_id", "level"])
+    assert (
+        result.loc[("a", "parent"), "resolution_status"] == "diagnostic_not_reproduced"
+    )
+    assert result.loc[("a", "child"), "resolution_status"] == "parent_unresolved"
+    assert result.loc[("a", "child"), "raw_name"] == "Child A"
+    assert pd.isna(result.loc[("a", "child"), "name"])
+    assert result.loc[("empty", "child"), "resolution_status"] == "no_expression"
+
+
+@pytest.mark.parametrize(
+    "change", ["policy", "missing", "duplicate", "unknown", "one_fold"]
+)
+def test_qualification_refuses_incomplete_or_mismatched_evidence(change: str) -> None:
+    q = qualification()
+    data = q.model_dump()
+    if change == "policy":
+        data["policy_sha256"] = "0" * 64
+    elif change == "missing":
+        data["checks"] = data["checks"][:-1]
+    elif change == "duplicate":
+        data["checks"] = (*data["checks"], data["checks"][0])
+    elif change == "unknown":
+        data["checks"][0]["assignment"] = "unknown"
+    else:
+        data["diagnostic_sources"] = {"check_1": "a" * 64}
+    with pytest.raises(ValueError):
+        type(q).model_validate(data).allowed_rules(policy())
+
+
+def test_no_accepted_diagnostic_evidence_is_withheld() -> None:
+    q = qualification()
+    data = q.model_dump()
+    data["checks"][0].update(n_accepted=0, n_correct=0)
+    q = type(q).model_validate(data)
+    assert ("parent", "P", 100) not in q.allowed_rules(policy())
+    assert ("child", "A", 100) in q.allowed_rules(policy())
