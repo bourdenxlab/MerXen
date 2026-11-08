@@ -2160,7 +2160,15 @@ def write_clustered_spatialdata_table(
         log_status(
             f"Writing clustered SpatialData table '{output_table_key}' to {zarr_path}"
         )
-        sdata_obj = sd.read_zarr(zarr_path)
+        if (
+            adata.uns.get(HIERARCHICAL_UNS_KEY, {}).get("profile")
+            == "human_hippocampus_whole_panel_v1"
+        ):
+            from merxen.annotation.hippocampal_io import read_annotation_store
+
+            sdata_obj = read_annotation_store(zarr_path, output_table_key)
+        else:
+            sdata_obj = sd.read_zarr(zarr_path)
         try:
             write_or_replace_element(
                 sdata_obj,

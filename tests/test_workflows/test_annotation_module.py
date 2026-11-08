@@ -516,7 +516,10 @@ def test_resolve_rule_sources_exist_and_cover_their_imports() -> None:
         "merxen/clustering/cellset.py",
         "merxen/cli/run_annotation.py",
     ]
-    assert _rule_excludes() == ["merxen/annotation/report"]
+    assert _rule_excludes() == [
+        "merxen/annotation/report",
+        "merxen/annotation/hippocampal",
+    ]
     assert _sources_outside(sources, _rule_excludes()) == set(RULE_IMPORT_EXEMPTIONS)
     # The excluded report modules exist and no rule source imports them, so
     # leaving them out of the fingerprint cannot hide a rule change.

@@ -63,6 +63,7 @@ PLANNED_ANNOTATION_PARAMS = frozenset(
         "annotation_auto_download",
         "annotation_panel_genes_path",
         "annotation_prepare_only",
+        "annotation_hippocampal_resources",
         "annotation_max_forks",
         "annotation_ctm_version",
         "annotation_keep_extended_json",

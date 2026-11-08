@@ -100,6 +100,14 @@ class AnnotationRunRecord {
         EXPECTED << branch(pairId, segmentation)
     }
 
+    /** Record the separate whole-panel profile without frontal trust or gates. */
+    static void labelledHippocampal(Object pairId, Object segmentation) {
+        def key = branch(pairId, segmentation)
+        LABELLED << key
+        TRUST.computeIfAbsent("provisional") { ignored -> new ConcurrentSkipListSet<String>() } <<
+            "${key} whole-panel hippocampus (reused atlas diagnostics)".toString()
+    }
+
     /**
      * Record that a pair x segmentation got its label tables (RESOLVE done).
      *

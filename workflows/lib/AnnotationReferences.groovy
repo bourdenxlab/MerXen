@@ -110,6 +110,8 @@ class AnnotationReferences {
     // fingerprint of a checkout is then the one it had before the report.
     static final List<String> RESOLVE_RULE_EXCLUDES = [
         "merxen/annotation/report",
+        // The whole-panel domain has its own workflow fingerprints.
+        "merxen/annotation/hippocampal",
     ].asImmutable()
 
     // What the map_first hierarchy fingerprint covers (COMPUTE_CPU, plan
@@ -130,6 +132,7 @@ class AnnotationReferences {
         "merxen/annotation/vocab.py",
         "merxen/annotation/provenance.py",
         "merxen/annotation/config.py",
+        "merxen/annotation/hippocampal_io.py",
         "merxen/assets/annotation/whb_supercluster_vocab.csv",
         "merxen/assets/annotation/seaad_mr_subclass_vocab.csv",
         "merxen/assets/annotation/wmb_class_vocab.csv",

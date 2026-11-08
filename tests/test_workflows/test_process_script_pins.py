@@ -169,8 +169,8 @@ def test_pinned_inventory(pinned: dict[str, str]) -> None:
     ATERA_CELLPOSE_SEGMENT and ATERA_PROSEG_PLAN_CELLPOSE. No existing pin changed.
     """
     labels = [key.rsplit("::", 1)[1] for key in pinned]
-    assert labels.count("script") == 56
-    assert labels.count("stub") == 12
+    assert labels.count("script") == 61
+    assert labels.count("stub") == 17
     assert {key for key in pinned if key.endswith("::stub")} == {
         f"workflows/modules/pciseq.nf::{name}::stub"
         for name in (
@@ -196,6 +196,15 @@ def test_pinned_inventory(pinned: dict[str, str]) -> None:
         )
     } | {
         "workflows/modules/clustering_squidpy.nf::CLUSTERING_SQUIDPY_COMPUTE_CPU::stub"
+    } | {
+        f"workflows/subworkflows/hippocampal_annotation.nf::{name}::stub"
+        for name in (
+            "HIPPOCAMPAL_REFERENCE",
+            "HIPPOCAMPAL_MAP",
+            "HIPPOCAMPAL_RESOLVE",
+            "HIPPOCAMPAL_COMPUTE",
+            "HIPPOCAMPAL_REPORT",
+        )
     }
 
 

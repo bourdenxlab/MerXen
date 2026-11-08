@@ -58,6 +58,23 @@ def checkPrepareOnly(String id, Map row) {
     println "\nCASE\t${id}\t" + groovy.json.JsonOutput.toJson([left_out: leftOut])
 }
 
+def checkHippocampal(String id, Map row, Map overrides) {
+    def resource = new File("hippocampal_resources.json")
+    resource.text = "{}"
+    def runParams = params + [annotation_hippocampal_resources: resource.absolutePath] + overrides
+    def value
+    try {
+        def settings = rowSampleSettings(row, runParams)
+        runPreflightChecks(row, settings, runParams)
+        value = [result: "OK", mode: AnnotationSettings.mode(settings),
+            suffix: AnnotationSettings.tableKeySuffix(settings),
+            region: settings.annotation_anatomical_region]
+    } catch (Throwable error) {
+        value = [message: error.getMessage()]
+    }
+    println "CASE\t${id}\t" + groovy.json.JsonOutput.toJson(value)
+}
+
 workflow {
     def atera = [pair_id: "PAIR_A", analysis_mode: "atera", atera_dir: "raw/atera"]
     // Passing rows: the native route through clustering (and MENDER).
@@ -186,5 +203,10 @@ workflow {
     // --annotation_prepare_only builds no reference bundle for ATERA rows.
     checkPrepareOnly("prepare_only/atera", atera)
     checkPrepareOnly("prepare_only/xenium", xenium + [stop_stage: "build_spatialdata"])
+    checkHippocampal("hippocampal/explicit", atera + [anatomical_region: "hippocampus", clustering_squidpy_mode: "map_first"], [:])
+    checkHippocampal("hippocampal/default", atera + [anatomical_region: "hippocampus"], [:])
+    checkHippocampal("hippocampal/missing_region", atera + [clustering_squidpy_mode: "map_first"], [:])
+    checkHippocampal("hippocampal/mouse", atera + [anatomical_region: "hippocampus", clustering_squidpy_mode: "map_first"], [species: "mouse"])
+    checkHippocampal("hippocampal/xenium_unchanged", xenium + [stop_stage: "build_spatialdata"], [:])
     println "DONE"
 }

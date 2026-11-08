@@ -458,7 +458,7 @@ with "remove `<setting>` from row `<pair>` or set it to false"):
 | `segmentation_source=cellpose_only` | segmentation_source=cellpose_only is not available for ATERA rows yet; ATERA supports: native, native_proseg, cellpose_proseg |
 | `native_proseg` or ATERA `cellpose_proseg` with `atera_proseg_halo_um` below 100, a tile no wider than twice the halo, an invalid schedule or prior weight (`atera_proseg_prior_weight`, `atera_cellpose_proseg_prior_weight`), `proseg_version` other than 3.2.0, `atera_proseg_tile_subset` with a stage after `segment`, or a blank `atera_channels` | one message each, naming the param |
 | `start_stage`, `stop_stage` or `only_stage` naming a stage ATERA rows do not run (such as `pciseq`, `gaston`) | … is not active for this run. ATERA rows run only build_spatialdata, segment, … |
-| row `clustering_squidpy_mode=map_first` | map_first annotation is not covered for ATERA rows yet (AT-11, RCA on Atera); remove clustering_squidpy_mode from row `<pair>` or set it to legacy |
+| row `clustering_squidpy_mode=map_first` without a hippocampal resource manifest | requires `annotation_hippocampal_resources`, human species and explicit `anatomical_region=hippocampus` |
 
 The global `pciseq_enabled`, `gaston_enabled`,
 `cortical_depth_enabled` and `distance_from_object_enabled` do not apply to
@@ -468,8 +468,9 @@ so a mixed samplesheet keeps them for its XENIUM and MERSCOPE rows. The
 transcript spatial patterns (`spatial_gene_analysis_transcript_analysis_enabled`,
 default `true`) apply to ATERA rows like any other (AT-8). Only a
 value set on the ATERA row itself is refused. The clustering mode follows the
-same rule: the species default (map_first for human and mouse) and a global
-`clustering_squidpy_mode` do not apply to ATERA rows, which cluster in legacy
+same rule without a bound hippocampal resource manifest: the species default
+(map_first for human and mouse) and a global `clustering_squidpy_mode` do not
+apply to ATERA rows, which cluster in legacy
 mode (the run log names them), while the XENIUM and MERSCOPE rows of a mixed
 samplesheet keep map_first.
 
@@ -842,6 +843,7 @@ the dwight values in `workflows/conf/dwight.annotation.config`.
 | `clustering_squidpy_mode` | `null` | Explicit mode for both species; overrides the species params (a row's `clustering_squidpy_mode` column overrides it in turn). |
 | `clustering_squidpy_table_key_suffix` | `null` | Clustered table-key suffix of a `map_first` run: `null` means `mapfirst` while the species has not flipped (`""` after), so the legacy clustered table is never overwritten; an empty suffix before the flip is refused. Legacy runs always write the unsuffixed key. |
 | `mender_unassigned_state_policy` | `exclude_from_features` | MENDER policy of `map_first` tables (plan §4.9): unassigned cells (`Mixed/Unknown`, `*/unresolved`) stay spatial nodes but add no neighbourhood state. Recorded in the clustered table, which MENDER applies; legacy tables keep `state`. |
+| `annotation_hippocampal_resources` | `null` | Local resource manifest for the full 18,049-gene human hippocampal ATERA profile. Requires explicit `anatomical_region=hippocampus`; validates frozen SEA-AD/WHB artifacts, policies and reused-diagnostic qualifications. Writes separate `rcahippocampal` tables; see the [AT-11 plan](plans/atera-celltype-annotation-plan.md#explicit-whole-panel-workflow). |
 | `annotation_prepare_only` | `false` | Build the reference bundles of `annotation_panel_genes_path` for every row and segmentation, and run no pipeline stage. |
 | `annotation_panel_genes_path` | `null` | Declared panel of a prepare-only run (any gene list `merxen annotation-panel --panel-genes-path` reads). A human gene list of the seeded set-a family also gets its curated set c. |
 | `annotation_human_references`, `annotation_mouse_references` | `whb_frontal_supc_clus,seaad_mr_panel`; `wmb_panel,wmb_region_share` | Reference ids per species. |

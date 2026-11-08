@@ -236,8 +236,8 @@ _REFUSALS = {
     "atera/only_pciseq": "'pciseq' is not active for this run. ATERA rows run only",
     "atera/stop_gaston": "'gaston' is not active for this run. ATERA rows run only",
     "atera/map_first_row": (
-        "map_first annotation is not covered for ATERA rows yet (AT-11, RCA on "
-        "Atera); remove clustering_squidpy_mode from row PAIR_A"
+        "map_first annotation requires --annotation_hippocampal_resources "
+        "for ATERA rows"
     ),
     "mixed/xenium_native": (
         "segmentation_source=native is not available for XENIUM rows yet; "
@@ -896,3 +896,25 @@ def test_atera_cellpose_param_refusals(
     assert record.get("error_class") == "java.lang.IllegalArgumentException", record
     assert message in record["message"], record["message"]
     assert cases["atera/no_stop_stage"]["result"] == "OK"
+
+
+@pytest.mark.nextflow
+def test_hippocampal_resources_enable_only_the_explicit_human_domain(
+    preflight_cases: dict[str, dict[str, Any]],
+) -> None:
+    for case in ("hippocampal/explicit", "hippocampal/default"):
+        record = preflight_cases[case]
+        assert record == {
+            "result": "OK",
+            "mode": "map_first",
+            "suffix": "rcahippocampal",
+            "region": "hippocampus",
+        }
+    assert "hippocampus" in preflight_cases["hippocampal/missing_region"]["message"]
+    assert "human" in preflight_cases["hippocampal/mouse"]["message"]
+    assert preflight_cases["hippocampal/xenium_unchanged"] == {
+        "result": "OK",
+        "mode": "map_first",
+        "suffix": "",
+        "region": "frontal_cortex",
+    }

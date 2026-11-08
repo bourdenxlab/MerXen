@@ -89,3 +89,47 @@ This module does not lift the Atera workflow gate. Configuration dispatch,
 pipeline/report integration and mixed-samplesheet plus crop/full-section exit
 checks must pass before activation. Existing viewer review exports remain
 immutable snapshots of the experimental calls.
+
+## Explicit whole-panel workflow
+
+The whole-panel path is separate from the frontal `AnnotationConfig` and label
+schema. `--annotation_hippocampal_resources` selects a local resource manifest;
+ATERA rows must declare human `anatomical_region=hippocampus`. Without this
+manifest ATERA keeps legacy mode, including its existing task hashes. Xenium
+and MERSCOPE continue through the existing annotation workflow.
+
+The resource stage verifies the measured panel, statistics, lookup, taxonomy,
+frozen policy and qualification identities. Gene-release replacements replay
+the panel's recorded resolver and must reproduce its feature-resolution digest.
+All 18,049 query columns and every raw count survive; empty objects are explicit.
+The measured mapping settings are 100 bootstraps, factor 0.5, seed 0, eight
+workers, chunks of 1,000 and `max_gb=40`. These are independent of frontal caps.
+
+`PolicyQualification` checks each emitting class/depth rule against at least two
+existing diagnostic folds. A failed or unsupported check withholds the rule;
+it does not retune its bootstrap cut. Qualified children still require qualified,
+accepted parents. SEA-AD Class → Subclass → Supertype provides final labels,
+falling back to an accepted ancestor. Allen WHB Supercluster → Cluster remains
+a separate comparison, never a fabricated cross-taxonomy consensus.
+
+The workflow separates resource verification, MAP, RESOLVE, COMPUTE and REPORT.
+MAP hashes the actual prepared H5AD files and mapping identities. A changed
+policy or qualification identity invalidates RESOLVE without invalidating MAP.
+COMPUTE writes the hierarchy, a CPU QC embedding, the raw-count layer and profile
+provenance. Its table suffix is `rcahippocampal`, preserving legacy outputs.
+Unassigned objects remain spatial nodes but add no MENDER cell-state feature.
+Finalization and MENDER read only the selected table and native shapes for this
+profile; their existing Xenium/MERSCOPE reads remain unchanged.
+
+Reports retain all resolution reasons, full-denominator coverage by depth,
+class/depth diagnostic support and uncertainty, separate atlas calls, subclass
+UMAP/spatial figures and the MENDER completion record when requested. Atlas
+agreement is not spatial accuracy. MENDER cross-platform comparability is not
+inherited from the frontal profile. The report fails if requested MENDER outputs
+are absent. Registration, spatial ground truth and newly independent donor
+confirmation are not implied by successful workflow execution.
+
+Acceptance evidence must cover the mixed-profile report/restart harness, the
+existing ATERA and frontal regressions, and real crop/full-section annotation
+through MENDER on isolated stores. Completed review exports are immutable;
+updated annotations require a new export version.
