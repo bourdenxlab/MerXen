@@ -2108,13 +2108,23 @@ routes stay. ProSeg runs on AT-9's tiled route only, never as one whole-section 
   built for the targeted MERSCOPE and XENIUM panels and have never run on a whole-transcriptome ATERA
   section. ATERA rows are gated off until this milestone (`main.nf` `annotationModeRow`, the ATERA
   preflight, `ateraPrepareOnlyRow`; `docs/configuration.md#atera-rows`).
-- **Scope (to be planned with RCA):** an ATERA panel mode for the 18,049-gene panel (§1.3 fact 6; gene
-  set shared with AT-8's "analysis gene set"); reference prep, MAP and RESOLVE resources at that panel
-  size; pairing rules for ATERA rows; then lift the gate and the deprecation exception for ATERA
-  rows.
+- **Scope:** an explicit human hippocampal profile using all 18,049 genes (§1.3 fact 6; gene set
+  shared with AT-8's "analysis gene set"). A local resource manifest binds the measured references,
+  marker lookup, taxonomy, frozen confidence policy and diagnostic qualification. SEA-AD
+  Class/Subclass/Supertype is primary; Allen WHB Supercluster/Cluster remains a separate comparison.
+  MAP, RESOLVE, COMPUTE and REPORT are separate tasks, followed by the existing finalization and
+  MENDER path. See [the annotation plan](atera-celltype-annotation-plan.md#explicit-whole-panel-workflow).
+- **Activation:** ATERA `map_first` rows require `annotation_hippocampal_resources`, human species and
+  `anatomical_region=hippocampus`. Without the manifest, ATERA retains legacy behavior. This profile
+  does not enable pairing or registration. Xenium/MERSCOPE retain their existing reference gates.
 - **Depends on:** AT-8 (analysis gene set, lean MapMyCells query).
 - **Exit:** a mixed samplesheet stub run (XENIUM `map_first` + ATERA) reaches ANNOTATION_REPORT for both
   rows, then the crop and the full section run `map_first` through MENDER within their resources.
+- **Evidence interpretation:** confidence qualification uses the existing, previously inspected
+  atlas diagnostics; it is not new independent donor confirmation or spatial ground truth. No new
+  donor is required for this dataset. Unsupported fine calls and empty objects remain explicit.
+  Acceptance records include per-rule uncertainty, parent-conditioned checks, raw-count identity,
+  all three segmentation branches, workflow traces and versioned viewer-export verification.
 - **Notes from AT-8 for AT-11 (2026-11-07):**
   - **Gene set.** AT-8 built the analysis gene set: `merxen analysis-gene-set`
     (`merxen.analysis_gene_set`, `docs/cli.md`). ATERA defaults to the recipe `all_panel_genes`,
