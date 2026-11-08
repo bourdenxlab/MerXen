@@ -118,8 +118,9 @@ policy or qualification identity invalidates RESOLVE without invalidating MAP.
 COMPUTE writes the hierarchy, a CPU QC embedding, the raw-count layer and profile
 provenance. Its table suffix is `rcahippocampal`, preserving legacy outputs.
 Unassigned objects remain spatial nodes but add no MENDER cell-state feature.
-Finalization and MENDER read only the selected table and native shapes for this
-profile; their existing Xenium/MERSCOPE reads remain unchanged.
+Preparation, finalization and MENDER read only the selected table and native
+shapes for this profile, so a sibling branch writing a derived table cannot
+interrupt preparation. Existing legacy and Xenium/MERSCOPE reads remain unchanged.
 
 Reports retain all resolution reasons, full-denominator coverage by depth,
 class/depth diagnostic support and uncertainty, separate atlas calls, subclass

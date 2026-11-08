@@ -366,3 +366,55 @@ def test_selective_store_read_and_write_preserve_unrelated_tables(
     np.testing.assert_array_equal(checked.tables["unrelated"].X.toarray(), [[7, 8]])
     assert checked.tables["chosen"].obs.new_annotation.tolist() == ["A", "B"]
     assert not read_annotation_store(root, "missing").tables
+
+
+def test_preparation_ignores_an_unrelated_table_being_written(tmp_path: Path) -> None:
+    import spatialdata as sd
+    import zarr
+    from spatialdata.models import TableModel
+
+    from merxen.analysis.clustering_squidpy import prepare_clustering_squidpy
+    from merxen.config import ClusteringSquidpyConfig
+
+    root = tmp_path / "store.zarr"
+    data = ad.AnnData(
+        sparse.csr_matrix([[3, 4], [5, 6]]),
+        var=pd.DataFrame(
+            {"gene_ids": ["ENSG00000000001", "ENSG00000000002"]},
+            index=["GENEA", "GENEB"],
+        ),
+    )
+    data.obsm["spatial"] = np.asarray([[1.0, 2.0], [3.0, 4.0]])
+    sd.SpatialData(
+        tables={
+            "chosen": TableModel.parse(data),
+            "unrelated": TableModel.parse(data.copy()),
+        }
+    ).write(root)
+    # An incomplete sibling PCA group reproduces an in-flight table write.
+    other = zarr.open_group(root / "tables/unrelated", mode="a")
+    other["varm"].create_group("PCs").create_array("partial", data=np.ones((2, 1)))
+    with pytest.raises(AttributeError, match="shape"):
+        ad.read_zarr(root / "tables/unrelated")
+    config = ClusteringSquidpyConfig.model_validate(
+        {
+            "pair_id": "TEST",
+            "output_dir": tmp_path / "out",
+            "samples": [
+                {
+                    "sample_id": "TEST",
+                    "platform": "ATERA",
+                    "zarr_path": root,
+                    "table_key": "chosen",
+                    "anatomical_region": "hippocampus",
+                }
+            ],
+        }
+    )
+    destination = tmp_path / "prepared"
+    prepare_clustering_squidpy(config, destination)
+    actual = ad.read_h5ad(destination / "atera/TEST_prepared.h5ad")
+    np.testing.assert_array_equal(actual.X.toarray(), data.X.toarray())
+    np.testing.assert_array_equal(actual.obsm["spatial"], data.obsm["spatial"])
+    assert actual.var.gene_ids.tolist() == data.var.gene_ids.tolist()
+    assert actual.uns["merxen_clustering_squidpy"]["table_key"] == "chosen"

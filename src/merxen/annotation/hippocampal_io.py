@@ -15,7 +15,7 @@ def read_annotation_store(path: Path | str, table_key: str) -> SpatialData:
     """Read shapes and just the requested table, retaining the backing store.
 
     A whole-panel store can contain many multi-gigabyte expression tables.
-    FINALIZE and MENDER need one table and native shapes; loading unrelated
+    PREPARE, FINALIZE and MENDER need one table and native shapes; loading unrelated
     tables, images or transcript partitions adds neither validation nor data.
     All writes still use the normal store lock and single-element writer.
     A missing table remains absent, so the caller's existing check applies.
