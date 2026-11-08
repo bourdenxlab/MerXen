@@ -62,3 +62,30 @@ targeted frontal panel. Low support, missing reference classes, unavailable
 reference genes, empty objects and disagreement must be reported explicitly.
 Final fine labels require held-out evidence at relevant depths; broad labels
 and unassigned outcomes are valid when finer distinctions lack that evidence.
+
+## Hippocampal policy implementation
+
+`annotation.hippocampal_profile` provides reference-bound policy fitting and
+resolution independently of the frontal annotation defaults. A binding records
+species, domain, regional scope, ordered taxonomy, the full-panel identity and
+hashes of reference statistics, marker lookup and tree. A runtime query must
+preserve all 18,049 ordered columns. Artifact changes invalidate the binding.
+
+The operating objective is explicit in each policy, rather than inherited from
+an existing panel family. Class/depth rules maximize observed accepted-cell
+coverage subject to that objective; repeated thinnings count as one cell per
+class/depth interval, choosing the lowest-depth realization before examining
+correctness. Unsupported classes and depths remain unresolved. Raw predictions
+survive abstention, and a child cannot be emitted without its matching parent.
+
+The current evidence basis is `existing_atlas_diagnostics_reused`. Additional
+donor collection is not an acceptance prerequisite for this dataset. Policies
+fitted or inspected using the existing atlas folds must not be described as a
+new independently confirmed policy, or as spatial ground-truth validation.
+Per-class precision, coverage, uncertainty and all unresolved outcomes remain
+part of the acceptance report.
+
+This module does not lift the Atera workflow gate. Configuration dispatch,
+pipeline/report integration and mixed-samplesheet plus crop/full-section exit
+checks must pass before activation. Existing viewer review exports remain
+immutable snapshots of the experimental calls.
