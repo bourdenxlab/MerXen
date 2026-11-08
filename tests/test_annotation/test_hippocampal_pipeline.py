@@ -86,9 +86,86 @@ def test_requested_mender_without_completion_is_a_report_failure(
     assert (tmp_path / "report/annotation_report.html").exists()
 
 
-def test_unknown_hippocampal_state_is_excluded_by_existing_mender_policy() -> None:
-    assert is_unassigned_state("Mixed/Unknown:unresolved")
-    assert not is_unassigned_state("Glutamatergic:unresolved")
+def test_resolved_unknown_branch_is_excluded_by_existing_mender_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from merxen.annotation import hippocampal_pipeline as pipeline
+    from merxen.annotation import hippocampal_profile as profile
+
+    source = tmp_path / "mapped" / "sample"
+    source.mkdir(parents=True)
+    write_json(source.parent / "manifest.json", {"samples": {"sample": {}}})
+    pd.DataFrame({"cell_id": ["empty", "broad"], "n_counts": [0, 100]}).to_parquet(
+        source / "objects.parquet", index=False
+    )
+    levels = {
+        "seaad": ("Class", "Subclass", "Supertype"),
+        "whb": ("Supercluster", "Cluster"),
+    }
+    for atlas in levels:
+        pd.DataFrame({"level": [levels[atlas][0]], "assignment": ["node"]}).to_parquet(
+            source / f"{atlas}_assignments.parquet", index=False
+        )
+
+    def bound(
+        reference: str, _panel: object
+    ) -> tuple[
+        SimpleNamespace, SimpleNamespace, SimpleNamespace, dict[str, str], set[str]
+    ]:
+        binding = SimpleNamespace(levels=levels[reference])
+        policy = SimpleNamespace(binding=binding, model_dump=lambda **_: {})
+        qualification = SimpleNamespace(model_dump=lambda **_: {})
+        return binding, policy, qualification, {}, set()
+
+    def calls(
+        objects: pd.DataFrame,
+        _predictions: pd.DataFrame,
+        *,
+        binding: SimpleNamespace,
+        **_: object,
+    ) -> pd.DataFrame:
+        rows = []
+        for obj in objects.itertuples():
+            for level in binding.levels:
+                accepted = obj.cell_id == "broad" and level == binding.levels[0]
+                rows.append(
+                    dict(
+                        cell_id=obj.cell_id,
+                        level=level,
+                        assignment="node" if accepted else None,
+                        name="Glutamatergic" if accepted else None,
+                        raw_assignment="node",
+                        raw_name="Glutamatergic",
+                        bp=1.0,
+                        resolution_status="accepted" if accepted else "unresolved",
+                        accepted=accepted,
+                    )
+                )
+        return pd.DataFrame(rows)
+
+    monkeypatch.setattr(pipeline, "load_annotation_panel", lambda _: None)
+    monkeypatch.setattr(pipeline, "bound_reference", bound)
+    monkeypatch.setattr(profile, "resolve_reference_calls", calls)
+    output = tmp_path / "resolved"
+    pipeline.resolve_prepared(
+        SimpleNamespace(
+            panel=None,
+            seaad="seaad",
+            whb="whb",
+            profile="human_hippocampus_whole_panel_v1",
+        ),
+        source.parent,
+        output,
+    )
+    labels = pd.read_parquet(output / "sample/celltype_labels.parquet").set_index(
+        "cell_id"
+    )
+    for state in ["ct_branch", "ct_mender_state"]:
+        assert is_unassigned_state(labels.loc["empty", state])
+        assert not is_unassigned_state(labels.loc["broad", state])
+    hierarchy = labels.ct_branch + ":" + labels.ct_leaf
+    assert is_unassigned_state(hierarchy.loc["empty"])
+    assert not is_unassigned_state(hierarchy.loc["broad"])
 
 
 def test_declared_gene_release_resolution_must_reproduce_its_digest(

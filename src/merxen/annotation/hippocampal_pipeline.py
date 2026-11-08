@@ -405,7 +405,7 @@ def resolve_prepared(
             wide.loc[accepted, "ct_final_level"] = token
             wide.loc[accepted, "ct_final_reference"] = "seaad_hippocampal"
         wide["ct_branch"] = wide.ct_seaad_class_name.astype("string").fillna(
-            "Unassigned"
+            "Mixed/Unknown"
         )
         wide["ct_leaf"] = wide.ct_seaad_subclass_name.astype("string").fillna(
             "unresolved"
