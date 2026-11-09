@@ -50,7 +50,11 @@ style and save/review procedure.
 See [the testing guide](testing-guide.md#5-atera-correction-pilot) for the config
 and commands. Runtime configs, reports and crop data belong outside git under
 the site's configured evidence/output locations. Existing experimental and
-published outputs are preserved; default stock segmentation is unchanged.
+published outputs are preserved. Atera Cellpose now defaults to the
+[transcript-density third input](../stages/atera-transcript-density.md),
+with native-pixel bins and Gaussian σ = 0.15 µm; the two-stain compatibility
+switch retains historical inputs. This changes the Atera input recipe and
+requires a fresh three-channel run rather than silent mask reuse.
 
 ## Validation
 

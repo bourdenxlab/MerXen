@@ -65,9 +65,12 @@ from merxen.segmentation.hitl.registry import (
 )
 from merxen.segmentation.mask_filter import filter_labeled_mask_by_area
 from merxen.segmentation.model_identity import (
+    CPSAM_V2_SHA256,
+    CellposeInferenceContext,
     CellposeModelIdentity,
     ensure_model_identity,
     model_identity_path,
+    require_cellpose_runtime,
 )
 from merxen.segmentation.proseg import run_proseg_refinement
 from merxen.segmentation.proseg_hybrid import (
@@ -581,8 +584,13 @@ def _load_atera_sdata(
             f"[{dataset.name}] The store has no image {dataset.image_key!r}; "
             f"available: {sorted(map(str, sdata.images))}"
         )
+    from merxen.segmentation.transcript_density import image_with_density
+
+    combined = image_with_density(
+        sdata, Path(dataset.data_path), dataset.transcript_density_path
+    )
     source = build_image_source(
-        sdata.images[dataset.image_key],
+        combined,
         requested_channels=dataset.channels,
         as_float32=True,
     )
@@ -640,6 +648,35 @@ def _preflight_model_selection(
     """Validate custom arms before any entry point creates or replaces output."""
     require_safe_custom_outputs(config)
     if not is_experimental_arm(config):
+        if config.dataset.transcript_density_path is not None:
+            from merxen.segmentation.transcript_density import density_input_identity
+
+            _sdata, _fetch, _h, _w, matrix, _points = _load_dataset_sdata(config)
+            cellpose_version, torch_version = require_cellpose_runtime()
+            inverse = np.linalg.inv(matrix)
+            return CellposeModelIdentity(
+                status="verified",
+                model_name="cpsam_v2",
+                weights_sha256=CPSAM_V2_SHA256,
+                cellpose_version=cellpose_version,
+                torch_version=torch_version,
+                cellpose_config=config.cellpose,
+                inference_context=CellposeInferenceContext(
+                    platform=config.dataset.platform,
+                    species=config.cellpose_model_policy.species,
+                    channels=config.dataset.channels,
+                    image_key=platform_spec(config.dataset.platform).native_image_key,
+                    pixel_size_um=(
+                        float(np.linalg.norm(inverse[:2, 0])),
+                        float(np.linalg.norm(inverse[:2, 1])),
+                    ),
+                    mask_filter=config.mask_filter,
+                    tiling=config.tiling,
+                    transcript_density=density_input_identity(
+                        config.dataset.transcript_density_path
+                    ),
+                ),
+            )
         return None
     native_key = platform_spec(config.dataset.platform).native_image_key
     if config.dataset.image_key not in (None, native_key):

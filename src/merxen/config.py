@@ -46,6 +46,7 @@ class CellposeConfig(BaseModel):
     bsize: int = 256
     factor_rescale: float = 1.0
     use_bfloat16: bool = False
+    input_normalization: Literal["joint", "per_channel"] = "joint"
 
     @field_validator("model_type")
     @classmethod
@@ -492,6 +493,24 @@ class SpatialDataBuildConfig(BaseModel):
     atera: AteraBuildConfig = AteraBuildConfig()
 
 
+class AteraTranscriptDensityConfig(BaseModel):
+    """Rasterize gene transcripts on the native Atera morphology grid.
+
+    Gaussian width is in physical microns. Counts include unassigned genes
+    across all z planes, independently of any existing segmentation.
+    """
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    source_zarr_path: Path
+    output_dir: Path
+    min_qv: float = Field(default=20, ge=0)
+    bin_size_px: int = Field(default=1, ge=1, le=8)
+    sigma_um: float = Field(default=0.15, gt=0)
+    batch_rows: int = Field(default=524_288, ge=1)
+    chunk_size_px: int = Field(default=1024, ge=64)
+
+
 class DatasetConfig(BaseModel):
     """Configuration for a single dataset (one half of a pair).
 
@@ -529,9 +548,22 @@ class DatasetConfig(BaseModel):
     # "csv" seeds the ProSeg transcript CSV from the masks (XENIUM, MERSCOPE);
     # "none" writes no CSV (ATERA: tiled ProSeg reads the store's parquet).
     proseg_transcripts: Literal["csv", "none"] = "csv"
+    transcript_density_path: Path | None = None
 
     @model_validator(mode="after")
     def _validate_atera(self: DatasetConfig) -> DatasetConfig:
+        if self.transcript_density_path is not None and (
+            self.platform != "ATERA"
+            or self.channels != ["DAPI", "18S", "transcript_density"]
+        ):
+            raise ValueError(
+                "Atera density requires DAPI, 18S, transcript_density in that order"
+            )
+        if (
+            "transcript_density" in self.channels
+            and self.transcript_density_path is None
+        ):
+            raise ValueError("The transcript_density channel requires its raster path")
         if self.platform == "ATERA":
             if self.proseg_transcripts != "none":
                 raise ValueError(
@@ -900,6 +932,17 @@ class SegmentationConfig(BaseModel):
     proseg: ProsegConfig = ProsegConfig()
     proseg_hybrid: ProsegHybridConfig = ProsegHybridConfig()
     memory: MemoryConfig = MemoryConfig()
+
+    @model_validator(mode="after")
+    def _density_normalization(self) -> SegmentationConfig:
+        if (
+            self.dataset.transcript_density_path is not None
+            and self.cellpose.input_normalization != "per_channel"
+        ):
+            raise ValueError(
+                "Atera density inputs require input_normalization='per_channel'"
+            )
+        return self
 
 
 class EnrichmentConfig(BaseModel):

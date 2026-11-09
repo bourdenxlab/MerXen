@@ -1,4 +1,4 @@
-# Cellpose annotation pilot — guide pilot-v1
+# Cellpose annotation pilot — guide pilot-v2
 
 These crops are for developing a consistent correction style. They are marked
 `pilot_train`; they must never be used as a held-out test set. Automatic crops
@@ -13,6 +13,13 @@ contains the current Cellpose masks. Use the images in filename order.
 `context/overview.png` shows the crop locations in the native section.
 The TIFF channels and their order are listed in `manifest.json` under
 `view_channels`; the model channels can differ from this display choice.
+
+Atera density-enabled packages use DAPI, 18S RNA and transcript density.
+Cellpose RGB displays these as red, green and blue respectively; the previews
+show DAPI blue, 18S green and density red. Older packages can show the boundary
+stain instead; check the manifest. Edit the supplied masks directly rather than
+running a new GUI prediction. The exported server inputs define the training
+recipe, independently of GUI display contrast.
 
 The raw and normalized arrays in subfolders are for future server-side
 training. Leave them unchanged. Image normalization in the GUI affects the

@@ -38,12 +38,21 @@ been processed, reuse its completed latest/review store and stitching statistics
 instead of recomputing it. Atera's default `native` route provides vendor masks,
 not Cellpose pre-fills.
 
+Atera Cellpose runs now generate transcript density before segmentation and
+use **DAPI → 18S → density** by default, with native-pixel bins and Gaussian
+σ = **0.15 µm**. See [the density stage](../stages/atera-transcript-density.md)
+for settings, provenance and the explicit two-stain compatibility option.
+
 Create a private `pilot.json` with the config shown in
 [the Atera pilot instructions](testing-guide.md#5-atera-correction-pilot).
 Point `source_zarr` at the completed latest/review store, `mask_key` at
 `cellpose_cell_labels`, and `baseline_stats_path` at the original Cellpose
 `cellpose_stitching_stats.json`. Keep the source and published output in
 `protected_roots`. Use a fresh `output_dir` for every export.
+
+New stitching statistics locate the density raster automatically. For older
+two-stain prefills, add `transcript_density_path` to a newly generated raster
+and omit `channels` to export DAPI, 18S and density for future training.
 
 The initial crop exporter supports native Atera and Xenium images. Neither
 path loads transcript partitions or whole-transcriptome expression tables.
@@ -167,12 +176,12 @@ Keep the pipeline and viewer in their existing environments. The drawing GUI
 works locally on CPU; no GPU, server connection or model inference is needed
 to correct the exported masks.
 
-With the default pilot config, **model inputs are DAPI followed by 18S RNA**,
-with Cellpose's third slot filled with zeros. The display TIFF additionally
-includes ATP1A1/CD45/E-Cadherin when available to help identify boundaries.
-Cellpose's RGB view shows DAPI in red, 18S in green and this boundary stain in
-blue; the package previews show DAPI in blue and the boundary stain in red.
-`model_channels` and `view_channels` in the manifest record the two choices.
+For density-enabled Atera packages, model and display channels are **DAPI,
+18S RNA and transcript density**. Cellpose RGB shows them in red, green and
+blue respectively; package previews show DAPI blue, 18S green and density red.
+Older two-stain packages keep an empty third model slot and can display the
+boundary stain instead. `model_channels` and `view_channels` in each manifest
+record the actual choices; earlier archives and annotations are preserved.
 
 For either selection method:
 

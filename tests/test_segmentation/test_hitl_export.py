@@ -283,3 +283,71 @@ def test_roi_context_cannot_be_written_into_a_source_store(
         prepare_viewer_roi_context(
             pilot_config, pilot_config.source_zarr / "context.json"
         )
+
+
+def test_density_halo_inputs_match_inference_before_cropping(
+    pilot_config: HitlExportConfig,
+) -> None:
+    import pandas as pd
+    from spatialdata.models import PointsModel
+
+    from merxen.config import AteraTranscriptDensityConfig
+    from merxen.segmentation.transcript_density import (
+        create_transcript_density,
+        image_with_density,
+    )
+
+    source = sd.read_zarr(pilot_config.source_zarr)
+    ps = 0.21249222
+    rng = np.random.default_rng(4)
+    points = pd.DataFrame(
+        {
+            "x": rng.uniform(0, 1024 * ps, 50000).astype(np.float32),
+            "y": rng.uniform(0, 1024 * ps, 50000).astype(np.float32),
+            "qv": np.full(50000, 40, np.float32),
+            "is_gene": np.ones(50000, bool),
+        }
+    )
+    source.points["transcripts"] = PointsModel.parse(
+        points,
+        coordinates={"x": "x", "y": "y"},
+        transformations={"global": Scale([1 / ps, 1 / ps], axes=("x", "y"))},
+    )
+    source.write_element("transcripts")
+    density = create_transcript_density(
+        AteraTranscriptDensityConfig(
+            source_zarr_path=pilot_config.source_zarr,
+            output_dir=pilot_config.output_dir.parent / "density",
+        )
+    )
+    pilot_config.transcript_density_path = density
+    result = export_annotation_pilot(pilot_config)
+    manifest = json.loads((result.output_dir / "manifest.json").read_text())
+    assert manifest["model_channels"] == ["DAPI", "18S", "transcript_density"]
+    assert manifest["view_channels"] == manifest["model_channels"]
+    assert manifest["transcript_density"]["profile"]["sigma_um"] == 0.15
+    native = image_with_density(
+        source, pilot_config.source_zarr, density
+    ).data.compute()
+    _, prepared, _ = prepare_cellpose_input(
+        np.moveaxis(native[:, :736, :736], 0, -1), normalization="per_channel"
+    )
+    normalized, _ = normalize_training_tile(prepared)
+    row = manifest["crops"][0]
+    saved = np.load(result.output_dir / "model_input" / f"{row['crop_id']}.npy")
+    np.testing.assert_array_equal(saved, np.moveaxis(normalized[64:320, 64:320], -1, 0))
+    assert saved[2].any()
+
+
+def test_multiple_tile_crops_keep_the_normalization_mode(
+    pilot_config: HitlExportConfig,
+) -> None:
+    pilot_config.boxes = [
+        CropBox(y0=64, x0=64, size=256),
+        CropBox(y0=64, x0=736, size=256),
+    ]
+    result = export_annotation_pilot(pilot_config)
+    manifest = json.loads((result.output_dir / "manifest.json").read_text())
+    assert result.crop_count == 2
+    assert manifest["input_normalization"] == "joint"
+    assert len({row["tile_index"] for row in manifest["crops"]}) == 2

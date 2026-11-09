@@ -134,6 +134,15 @@ Details: [Stage 2 — Segmentation](stages/segmentation.md).
 
 ---
 
+## `merxen atera-transcript-density`
+
+For Atera density generation before segmentation, use
+`merxen atera-transcript-density --config density.json`. Its
+`AteraTranscriptDensityConfig` selects the source, a fresh output directory,
+minimum QV, native-pixel bin size and Gaussian σ in µm. The pipeline invokes
+this Atera-only step automatically for Cellpose runs. See
+[the stage guide](stages/atera-transcript-density.md).
+
 ## `merxen cellpose-hitl-export`
 
 Export an initial native-image correction pilot for the Cellpose GUI:

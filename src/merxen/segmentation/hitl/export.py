@@ -42,7 +42,7 @@ from merxen.segmentation.model_identity import (
     require_cellpose_runtime,
 )
 
-GUIDE_VERSION = "pilot-v1"
+GUIDE_VERSION = "pilot-v2"
 
 
 class ChannelNormalization(TypedDict):
@@ -99,6 +99,8 @@ class HitlExportConfig(BaseModel):
     seed: int = 0
     boxes: list[CropBox] | None = None
     roi_geojson_path: Path | None = None
+    transcript_density_path: Path | None = None
+    input_normalization: Literal["joint", "per_channel"] | None = None
 
     @model_validator(mode="after")
     def _validate_channels(self) -> HitlExportConfig:
@@ -479,6 +481,45 @@ def export_annotation_pilot(config: HitlExportConfig) -> HitlExportResult:
         raise ValueError("Source lacks its platform's native image")
     image = sdata.images[spec.native_image_key]
     native = image_to_cyx(image)
+    stats = json.loads(config.baseline_stats_path.read_text())
+    context = (stats.get("model_identity") or {}).get("inference_context") or {}
+    density_identity = context.get("transcript_density")
+    density_path = config.transcript_density_path
+    if density_path is None and density_identity:
+        density_path = Path(density_identity["raster_path"])
+    if density_path is not None:
+        if config.platform != "ATERA":
+            raise ValueError("Transcript-density HITL input is Atera-only")
+        from merxen.segmentation.transcript_density import (
+            density_input_identity,
+            image_with_density,
+        )
+
+        native = image_with_density(sdata, config.source_zarr, density_path)
+        actual = density_input_identity(density_path)
+        assert actual is not None
+        if (
+            config.transcript_density_path is None
+            and density_identity is not None
+            and actual.fingerprint != density_identity["fingerprint"]
+        ):
+            raise ValueError(
+                "The inferred density raster differs from the saved mask input"
+            )
+        density_identity = actual.model_dump(mode="json")
+        if "channels" not in config.model_fields_set:
+            config = config.model_copy(
+                update={"channels": ["DAPI", "18S", "transcript_density"]}
+            )
+    normalization = config.input_normalization or (
+        "per_channel"
+        if "transcript_density" in config.channels
+        else ((stats.get("model_identity") or {}).get("cellpose_config") or {}).get(
+            "input_normalization", "joint"
+        )
+    )
+    if "transcript_density" in config.channels and normalization != "per_channel":
+        raise ValueError("Density training inputs require per-channel normalization")
     available = [str(value) for value in native.coords["c"].values]
     view_channels = config.view_channels or list(config.channels)
     boundary = "ATP1A1/CD45/E-Cadherin"
@@ -492,7 +533,6 @@ def export_annotation_pilot(config: HitlExportConfig) -> HitlExportResult:
     if any(channel not in available for channel in config.channels + view_channels):
         raise ValueError("Native image is missing requested model/view channels")
     height, width = int(native.sizes["y"]), int(native.sizes["x"])
-    stats = json.loads(config.baseline_stats_path.read_text())
     if (int(stats["height"]), int(stats["width"])) != (height, width):
         raise ValueError("Baseline tile grid dimensions differ from the native image")
     tile_size, overlap = int(stats["tile_size"]), int(stats["stitch_overlap_px"])
@@ -544,7 +584,7 @@ def export_annotation_pilot(config: HitlExportConfig) -> HitlExportResult:
     thumbnail = _thumbnail(image, "DAPI" if "DAPI" in available else config.channels[0])
     selected = _choose_boxes(selection_config, tiles, thumbnail, (height, width))
     source = build_image_source(
-        image, requested_channels=config.channels, as_float32=True
+        native, requested_channels=config.channels, as_float32=True
     )
     output = config.output_dir
     output.mkdir(parents=True, exist_ok=True)
@@ -569,9 +609,11 @@ def export_annotation_pilot(config: HitlExportConfig) -> HitlExportResult:
         halo = fetch_tile(
             source, tile["tile_y0"], tile["tile_y1"], tile["tile_x0"], tile["tile_x1"]
         )
-        p2, p98 = np.percentile(halo, (2, 98))
-        _, model_input, _ = prepare_cellpose_input(halo)
-        normalized, normalization = normalize_training_tile(model_input)
+        p2, p98 = np.percentile(
+            halo, (2, 98), axis=(0, 1) if normalization == "per_channel" else None
+        )
+        _, model_input, _ = prepare_cellpose_input(halo, normalization=normalization)
+        normalized, normalization_record = normalize_training_tile(model_input)
         del halo, model_input
         for crop_index, (box, owner) in enumerate(selected, 1):
             if owner != tile_index:
@@ -641,8 +683,13 @@ def export_annotation_pilot(config: HitlExportConfig) -> HitlExportResult:
                     "tile": tile,
                     "normalization": {
                         "route": "A",
-                        "joint_p2_p98": [float(p2), float(p98)],
-                        **normalization,
+                        "input_normalization": normalization,
+                        (
+                            "per_channel_p2_p98"
+                            if normalization == "per_channel"
+                            else "joint_p2_p98"
+                        ): [np.asarray(p2).tolist(), np.asarray(p98).tolist()],
+                        **normalization_record,
                     },
                     "prefill_cells": int(labels.max()),
                 }
@@ -668,6 +715,8 @@ def export_annotation_pilot(config: HitlExportConfig) -> HitlExportResult:
         "pixel_size_um": pixel_size,
         "raw_channels": available,
         "model_channels": config.channels,
+        "input_normalization": normalization,
+        "transcript_density": density_identity,
         "view_channels": view_channels,
         "cellpose_version": runtime[0],
         "torch_version": runtime[1],

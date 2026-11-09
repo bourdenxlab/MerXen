@@ -14,7 +14,7 @@ process ATERA_CELLPOSE_SEGMENT {
     publishDir { "${params.outdir}/${pair_id}/${platform.toLowerCase()}/segmentation" }, mode: "symlink", overwrite: true
 
     input:
-    tuple val(key), val(pair_id), val(platform), val(seg_config_json)
+    tuple val(key), val(pair_id), val(platform), val(seg_config_json), path(density_input)
 
     output:
     tuple val(key), val(pair_id), val(platform), path("segment_out/cellpose_masks_tiled.npy"), path("segment_out/cellpose_cellprobs_tiled.npy"), path("segment_out/cellpose_transforms.json"), path("segment_out/cellpose_stitching_stats.json"), emit: segmentation

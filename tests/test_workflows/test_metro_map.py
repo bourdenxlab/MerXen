@@ -68,8 +68,12 @@ STATION_ALIASES = {
     },
     # The XENIUM/MERSCOPE reference and the ATERA streaming reference (AT-8).
     "mecr_reference": {"MECR_REFERENCE", "MECR_REFERENCE_ATERA"},
-    # The ATERA Cellpose task (AT-7) is the same Cellpose-SAM segmentation.
-    "cellpose_segment": {"CELLPOSE_SEGMENT", "ATERA_CELLPOSE_SEGMENT"},
+    # Atera's native-grid density preparation belongs to its Cellpose route.
+    "cellpose_segment": {
+        "CELLPOSE_SEGMENT",
+        "ATERA_CELLPOSE_SEGMENT",
+        "ATERA_TRANSCRIPT_DENSITY",
+    },
     "mender": {
         "MENDER_PREPARE",
         "MENDER_COMPUTE",

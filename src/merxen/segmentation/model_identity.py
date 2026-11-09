@@ -19,6 +19,14 @@ TORCH_MINOR = "2.14"
 CPSAM_V2_SHA256 = "0f1cc3f7ecdd8a037a57c6c48d9d8921391be4cbce3fa9f13c3e3a2e1253c667"
 
 
+class TranscriptDensityInputIdentity(BaseModel):
+    """The exact auxiliary raster and portable density recipe used in inference."""
+
+    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    profile: dict[str, Any]
+    raster_path: Path
+
+
 class CellposeInferenceContext(BaseModel):
     """Image and filtering contract required for verified custom-model reuse."""
 
@@ -29,6 +37,7 @@ class CellposeInferenceContext(BaseModel):
     pixel_size_um: tuple[float, float]
     mask_filter: MaskFilterConfig
     tiling: TilingConfig
+    transcript_density: TranscriptDensityInputIdentity | None = None
 
 
 class CellposeModelIdentity(BaseModel):

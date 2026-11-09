@@ -196,6 +196,16 @@ never the correction code, and the package imports no GPU code. Configured by `M
 
 ## `merxen.segmentation`
 
+### `segmentation.transcript_density`
+
+`create_transcript_density(AteraTranscriptDensityConfig)` writes a separate
+native-grid Atera raster and its manifest. `accumulate_density_counts` streams
+Q20 genes into exact integer bins; `smooth_density_counts` uses physical area
+and Gaussian width; `reconstruct_density_window` preserves native pixel-centre
+phase. `image_with_density` verifies and appends the auxiliary channel lazily;
+`density_input_identity` binds the raster/recipe to model provenance.
+See [the density stage](stages/atera-transcript-density.md).
+
 ### `segmentation.hitl.export`
 
 `HitlExportConfig` describes a read-only annotation pilot, selected label layer

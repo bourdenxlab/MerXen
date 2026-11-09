@@ -279,7 +279,9 @@ def choose_working_tile_size(
         tile = img_seg = masks = flows = styles = None
         try:
             tile = fetch_tile_fn(y0, y1, x0, x1)
-            _, img_seg, _ = prepare_cellpose_input(tile, factor_rescale=1.0)
+            _, img_seg, _ = prepare_cellpose_input(
+                tile, factor_rescale=1.0, normalization=config.input_normalization
+            )
             masks, flows, styles = run_cellpose_model_eval(model, img_seg, config)
             log_status(
                 f"[{dataset_name}] Tile size {ts} succeeded "
@@ -535,7 +537,9 @@ def run_cellpose_tile(
     source = fetch_tile_fn(
         tile["tile_y0"], tile["tile_y1"], tile["tile_x0"], tile["tile_x1"]
     )
-    _, model_input, _ = prepare_cellpose_input(source, factor_rescale=1.0)
+    _, model_input, _ = prepare_cellpose_input(
+        source, factor_rescale=1.0, normalization=cellpose_config.input_normalization
+    )
     masks, flows, _styles = run_cellpose_model_eval(model, model_input, cellpose_config)
     logits = (
         extract_cellpose_probability_logits(flows, masks.shape)

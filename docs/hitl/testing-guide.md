@@ -269,13 +269,17 @@ with existing local files and a fresh destination. Do not commit it:
   "baseline_stats_path": "<original-segmentation>/cellpose_stitching_stats.json",
   "output_dir": "<fresh-output>/annotation-pilot",
   "protected_roots": ["<published-results>", "<exported-stores>"],
-  "channels": ["DAPI", "18S"],
   "n_crops": 6,
   "crop_size_px": 768,
   "margin_px": 656,
   "seed": 0
 }
 ```
+
+For new Atera density runs, omitting `channels` discovers DAPI, 18S and
+transcript density from the stitching statistics. For older two-stain prefills,
+provide `transcript_density_path` to a separately generated raster to export the
+new three-channel training inputs. See [the density stage](../stages/atera-transcript-density.md).
 
 Run with the existing pinned segmentation environment and this checkout's
 source on `PYTHONPATH`:

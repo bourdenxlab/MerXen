@@ -6,7 +6,10 @@ import java.nio.file.Files
 class CellposeSettings {
     static final String STOCK_SHA256 = '0f1cc3f7ecdd8a037a57c6c48d9d8921391be4cbce3fa9f13c3e3a2e1253c667'
 
-    static List channelsForRow(row, platform) {
+    static List channelsForRow(row, platform, params = null) {
+        if (platform == 'ATERA' && params != null) {
+            return AteraDensitySettings.channels(row, params)
+        }
         def spec = PlatformSpec.forName(platform)
         def raw = row["${platform.toLowerCase()}_channels"]
         return raw != null && raw.toString().trim()
@@ -94,7 +97,10 @@ class CellposeSettings {
             cellprob_threshold: params.cellpose_cellprob, tile_overlap: params.cellpose_tile_overlap,
             bsize: params.cellpose_bsize, factor_rescale: 1.0,
             use_bfloat16: params.cellpose_use_bfloat16,
+            input_normalization: platform == 'ATERA' && AteraDensitySettings.enabled(params)
+                ? 'per_channel' : 'joint',
         ] + selected.cellpose
+        def recordedCellpose = [input_normalization: 'joint'] + (identity.cellpose_config ?: [:])
         def expectedFilter = [
             max_eccentricity: 0.99, min_area_percentile: 1.0, min_area_px: null,
             final_min_area_um2: params.cellpose_final_min_area_um2,
@@ -125,9 +131,11 @@ class CellposeSettings {
             identity.cellpose_version != metadata.cellpose_version ||
             identity.torch_version != metadata.torch_version ||
             (isStock && !(identity.torch_version instanceof String && identity.torch_version.startsWith('2.14.'))) ||
-            !matchesFields(identity.cellpose_config, expectedCellpose) ||
+            !matchesFields(recordedCellpose, expectedCellpose) ||
             context == null || context.platform != platform || context.species != rowSettings.species ||
             context.channels != metadata.channels || context.image_key != metadata.image_key ||
+            (platform == 'ATERA' && context.transcript_density?.profile !=
+                (AteraDensitySettings.enabled(params) ? AteraDensitySettings.profile(params) : null)) ||
             !validPixels ||
             !matchesFields(context.mask_filter, expectedFilter) ||
             !matchesFields(context.tiling, expectedTiling) || identity != statsIdentity) {
@@ -252,7 +260,7 @@ class CellposeSettings {
                 }
                 if (needsPublishedMasks) {
                     requirePublishedIdentity(rowSettings, platform, params, selected, null,
-                        channelsForRow(row, platform))
+                        channelsForRow(row, platform, params))
                 }
                 return
             }
@@ -266,9 +274,18 @@ class CellposeSettings {
             if (metadata.platform != platform || metadata.species != rowSettings.species) {
                 throw new IllegalArgumentException('Model platform/species does not match the row')
             }
-            def channels = channelsForRow(row, platform)
+            def channels = channelsForRow(row, platform, params)
             if (metadata.channels != channels) {
                 throw new IllegalArgumentException('Model channel names/order do not match the row')
+            }
+            if (platform == 'ATERA') {
+                def density = AteraDensitySettings.enabled(params)
+                def profile = density ? AteraDensitySettings.profile(params) : null
+                def normalization = density ? 'per_channel' : 'joint'
+                if (metadata.transcript_density_profile != profile ||
+                    (metadata.evaluated_cellpose?.input_normalization ?: 'joint') != normalization) {
+                    throw new IllegalArgumentException('Model density recipe/input normalization does not match the requested Atera input')
+                }
             }
             if (!(metadata.status == 'accepted' ||
                 (metadata.status == 'candidate' && policy.allow_candidate_model))) {
