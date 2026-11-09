@@ -149,6 +149,33 @@ def test_pilot_refuses_protected_alias_before_source_read(
     assert not (protected / "pilot").exists()
 
 
+def test_boundary_stain_is_display_only_when_model_channels_are_dapi_and_18s(
+    pilot_config: HitlExportConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = sd.read_zarr(pilot_config.source_zarr, selection=("images", "labels"))
+    native = source.images["morphology_focus"].data.compute()
+    boundary = np.full((1, *native.shape[1:]), 60000, dtype=native.dtype)
+    source.images["morphology_focus"] = Image2DModel.parse(
+        np.concatenate([native, boundary]),
+        dims=("c", "y", "x"),
+        c_coords=["DAPI", "18S", "ATP1A1/CD45/E-Cadherin"],
+        transformations={"global": Identity()},
+    )
+    monkeypatch.setattr(export.sd, "read_zarr", lambda *a, **k: source)
+    result = export_annotation_pilot(pilot_config)
+    manifest = json.loads((result.output_dir / "manifest.json").read_text())
+    assert manifest["model_channels"] == ["DAPI", "18S"]
+    assert manifest["view_channels"] == ["DAPI", "18S", "ATP1A1/CD45/E-Cadherin"]
+    crop_id = manifest["crops"][0]["crop_id"]
+    display = tifffile.imread(result.output_dir / f"{crop_id}.tif")
+    assert np.all(display[2] == 60000)
+    _, prepared, _ = prepare_cellpose_input(np.moveaxis(native[:, :736, :736], 0, -1))
+    normalized, _ = normalize_training_tile(prepared)
+    model = np.load(result.output_dir / "model_input" / f"{crop_id}.npy")
+    np.testing.assert_array_equal(model, np.moveaxis(normalized[64:320, 64:320], -1, 0))
+    assert not model[2].any()
+
+
 def test_pilot_refuses_changed_grid_before_writing(
     pilot_config: HitlExportConfig,
 ) -> None:

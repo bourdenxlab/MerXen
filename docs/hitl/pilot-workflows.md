@@ -167,6 +167,13 @@ Keep the pipeline and viewer in their existing environments. The drawing GUI
 works locally on CPU; no GPU, server connection or model inference is needed
 to correct the exported masks.
 
+With the default pilot config, **model inputs are DAPI followed by 18S RNA**,
+with Cellpose's third slot filled with zeros. The display TIFF additionally
+includes ATP1A1/CD45/E-Cadherin when available to help identify boundaries.
+Cellpose's RGB view shows DAPI in red, 18S in green and this boundary stain in
+blue; the package previews show DAPI in blue and the boundary stain in red.
+`model_channels` and `view_channels` in the manifest record the two choices.
+
 For either selection method:
 
 1. Copy `annotation-pilot.tar.gz` to the annotation laptop and extract it into a
