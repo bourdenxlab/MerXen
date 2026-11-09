@@ -64,6 +64,11 @@ legacy-alignment = [
 ]
 
 [dependency-groups]
+hitl-gui-runtime = [
+    # Separate local drawing GUI; never installed into the pipeline environment.
+    "cellpose[gui]==4.2.1.1",
+    "torch>=2.14,<2.15",
+]
 pciseq-runtime = [
     "pciSeq_3d @ git+https://github.com/acycliq/pciSeq_3d.git@5e2c0fd1841f8a4022a2fa341ece965687e343dd",
     # Upstream uses groupby.apply(include_groups=True), removed in pandas 3.
@@ -119,6 +124,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 merxen = [
     "assets/fonts/*.ttf",
+    "assets/hitl/*.md",
     "assets/annotation/*.csv",
     "assets/annotation/*.yaml",
     "assets/annotation/NOTICE",

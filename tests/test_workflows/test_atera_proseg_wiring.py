@@ -29,6 +29,7 @@ from merxen.config import (
     AteraProsegPlanConfig,
     AteraProsegStitchConfig,
     AteraProsegTileConfig,
+    AteraTranscriptDensityConfig,
     EnrichmentConfig,
     MaskImageQuantificationConfig,
     NativeLatestConfig,
@@ -93,6 +94,11 @@ _FAKE_MERXEN = textwrap.dedent(
         out = Path(config["output_dir"])
         out.mkdir(exist_ok=True)
         (out / "tile_manifest.json").write_text("{{}}")
+    elif command == "atera-transcript-density":
+        out = Path(config["output_dir"])
+        out.mkdir(exist_ok=True)
+        (out / "transcript_density.zarr").mkdir()
+        (out / "transcript_density.json").write_text("{{}}")
     elif command == "cellpose-segment":
         dataset = config["dataset"]
         out = Path(dataset["output_dir"])
@@ -354,6 +360,31 @@ def _install_fakes(tmp_path: Path) -> None:
 
 @pytest.mark.nextflow
 @pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
+def test_atera_density_opt_out_keeps_two_stain_inputs(tmp_path: Path) -> None:
+    """The compatibility switch skips raster generation and retains old inputs."""
+    _install_fakes(tmp_path)
+    row = (
+        "pair_id,analysis_mode,atera_dir,segmentation_source,stop_stage\n"
+        "PAIR_A,atera,raw/atera,cellpose_proseg,segment\n"
+    )
+    _, calls = _fresh_calls(
+        tmp_path,
+        "two_stains",
+        row,
+        "two_stains",
+        "--atera_transcript_density_enabled",
+        "false",
+    )
+    assert "atera-transcript-density" not in calls
+    (segment,) = calls["cellpose-segment"]
+    config = SegmentationConfig.model_validate(segment)
+    assert config.dataset.channels == ["DAPI", "18S"]
+    assert config.dataset.transcript_density_path is None
+    assert config.cellpose.input_normalization == "joint"
+
+
+@pytest.mark.nextflow
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow is unavailable")
 def test_atera_cellpose_route_and_its_restart_arm(tmp_path: Path) -> None:
     """AT-7: Cellpose (no nuclei, no SEGMENT) feeds the tiled ProSeg route."""
     _install_fakes(tmp_path)
@@ -364,14 +395,23 @@ def test_atera_cellpose_route_and_its_restart_arm(tmp_path: Path) -> None:
     stdout, calls = _fresh_calls(tmp_path, "cellpose", row, "cellpose")
     assert "segmentation_source=cellpose_proseg" in stdout
     assert "analysis segmentations=reseg, original_seg, proseg_mask" in stdout
-    assert sorted(calls) == sorted(["build-spatialdata", *_MODELS])
+    assert sorted(calls) == sorted(
+        ["build-spatialdata", "atera-transcript-density", *_MODELS]
+    )
+    (density,) = calls["atera-transcript-density"]
+    AteraTranscriptDensityConfig.model_validate(density)
+    assert density["sigma_um"] == 0.15 and density["bin_size_px"] == 1
     for command, model in _MODELS.items():
         for config in calls[command]:
             model.model_validate(config)
     # One Cellpose task, on DAPI + 18S of the store's morphology_focus, no CSV.
     (segment,) = calls["cellpose-segment"]
     assert segment["dataset"]["platform"] == "ATERA"
-    assert segment["dataset"]["channels"] == ["DAPI", "18S"]
+    assert segment["dataset"]["channels"] == ["DAPI", "18S", "transcript_density"]
+    assert segment["dataset"]["transcript_density_path"].endswith(
+        "transcript_density.zarr"
+    )
+    assert segment["cellpose"]["input_normalization"] == "per_channel"
     assert segment["dataset"]["image_key"] == "morphology_focus"
     assert segment["dataset"]["proseg_transcripts"] == "none"
     assert "persistent_transcripts_path" not in segment["dataset"]

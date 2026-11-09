@@ -191,8 +191,9 @@ REASONS: dict[str, dict[str, str]] = {
         ),
     },
     "platform_equality": {
-        "scripts/acceptance/prepare_hitl1_fixture.py": (
-            "acceptance fixture for a Xenium-only gate"
+        "src/merxen/segmentation/hitl/regions.py": (
+            "initial native-pixel ROI exchange supports ATERA and XENIUM only; "
+            "MERSCOPE affine ROI support is a later extension"
         ),
         "scripts/cleanup_assignment_tables_and_outputs.py": (
             "analysis_mode map, kept in step by test_analysis_mode_parity"
@@ -258,8 +259,6 @@ REASONS: dict[str, dict[str, str]] = {
         ),
     },
     "native_image_names": {
-        "scripts/acceptance/hitl0_tile_check.py": "acceptance check of a Xenium arm",
-        "scripts/acceptance/prepare_hitl1_fixture.py": "acceptance fixture",
         "scripts/manual_registration/export_reference_image.py": (
             "standalone export script; --image-key is a user-overridable default"
         ),
@@ -271,9 +270,6 @@ REASONS: dict[str, dict[str, str]] = {
         "src/merxen/image_registration.py": "docstring",
         "src/merxen/io/builders/xenium.py": "Xenium reader option",
         "src/merxen/io/image_source.py": "the MERSCOPE image name constant",
-        "src/merxen/segmentation/hitl/registry.py": (
-            "model metadata Literal (Literals are not widened in AT-1)"
-        ),
         "src/merxen/segmentation/pipeline.py": (
             "dispatch that raises for an unknown platform, error messages, and the "
             "Xenium nuclei arm"
@@ -418,8 +414,8 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         "scripts/acceptance/segmentation_comparison.py": (),
     },
     "platform_equality": {
-        "scripts/acceptance/prepare_hitl1_fixture.py": (
-            'if config.dataset.platform != "XENIUM":',
+        "src/merxen/segmentation/hitl/regions.py": (
+            'if self.schema_version != 1 or self.platform not in ("ATERA", "XENIUM"):',
         ),
         "scripts/cleanup_assignment_tables_and_outputs.py": (
             'if mode == "xenium":',
@@ -531,12 +527,6 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         ),
     },
     "native_image_names": {
-        "scripts/acceptance/hitl0_tile_check.py": (
-            '"morphology_focus" if is_experimental_arm(config) else list(sdata.images)[0]',  # noqa: E501
-        ),
-        "scripts/acceptance/prepare_hitl1_fixture.py": (
-            'image_key="morphology_focus",',
-        ),
         "scripts/manual_registration/export_reference_image.py": (
             "``morphology_focus`` image lives inside a SpatialData store, so a ground-truth",  # noqa: E501
             "Xenium stores keep ``morphology_focus`` in pixel units (an identity ``global``",  # noqa: E501
@@ -563,9 +553,6 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         ),
         "src/merxen/io/image_source.py": (
             'MERSCOPE_ZPROJ_IMAGE_NAME = "MERSCOPE_z_projection"',
-        ),
-        "src/merxen/segmentation/hitl/registry.py": (
-            'image_key: Literal["morphology_focus", "MERSCOPE_z_projection"]',
         ),
         "src/merxen/segmentation/pipeline.py": (
             '"Custom MERSCOPE models require native MERSCOPE_z_projection"',

@@ -1,5 +1,10 @@
 # Testing the Cellpose HITL changes
 
+For current Atera runs on `feature/atera-support`, start with
+[the compatibility audit](atera-compatibility.md) and
+[the automatic and viewer-selected workflows](pilot-workflows.md). The sections below retain
+the original runtime acceptance procedure; HITL-0 and HITL-1 have merged.
+
 Start with HITL-0's runtime and provenance checks. HITL-1 follows after HITL-0's
 acceptance and merge. The published baseline is `$MERXEN_RESULTS_ROOT/`;
 all acceptance predictions and reports must go outside that directory.
@@ -156,7 +161,10 @@ candidate opt-in, model/image/runtime mismatches, cache reuse and refusal, and
 protected paths through symlinks, including forced reruns. Synthetic output hashes
 were captured before the shared tile function was extracted.
 
-Prepare a candidate fixture using the already verified stock weights:
+Prepare a candidate fixture using the already verified stock weights. Set
+`MERXEN_HITL_BASELINE_STATS` to the original run's
+`cellpose_stitching_stats.json`; it pins the tile size actually selected during
+that run, including a memory-driven reduction from the initial candidate.
 
 ```bash
 export MERXEN_TEST_PYTHON=$MERXEN_STORAGE_ROOT/work/conda/env-0e319c40ef50b2834c65ae2f7f53bbcd/bin/python
@@ -165,6 +173,7 @@ export MERXEN_HITL1_FIXTURE=$(mktemp -d $MERXEN_TASK_TMP_DIR/hitl1-fixture.XXXXX
   --config $MERXEN_STORAGE_ROOT/work/d2/2bb63695bfa15cdb697b604cb6f624/segment_config.json \
   --source-zarr $MERXEN_STORAGE_ROOT/work/c9/800bf12cfc879ab1368ba767fff599/spatialdata_out/source_spatialdata.zarr \
   --weights "$HOME/.cellpose/models/cpsam_v2" \
+  --baseline-stats "$MERXEN_HITL_BASELINE_STATS" \
   --protected-root $MERXEN_RESULTS_ROOT \
   --output-dir "$MERXEN_HITL1_FIXTURE"
 ```
@@ -237,3 +246,73 @@ Cache-reuse checks use synthetic complete artifacts in the fast tests; a tile
 report is not a reusable full-section segmentation. Full-section custom arms,
 annotation and adoption decisions follow later milestones. Preserve failed
 reports and task logs rather than relaxing the agreement threshold.
+
+## 5. Atera correction pilot
+
+For the complete mask/cache preparation, automatic selection, viewer ROI
+selection and separate Cellpose drawing procedure, follow
+[Choose and correct HITL pilot crops](pilot-workflows.md).
+
+Use the Atera integration branch, which contains its segmentation and downstream
+routes. The initial HITL command exports a CPU-only annotation package; no model
+is trained and no full-section rerun is scheduled.
+
+Create a private JSON configuration, replacing the angle-bracket placeholders
+with existing local files and a fresh destination. Do not commit it:
+
+```json
+{
+  "platform": "ATERA",
+  "dataset_alias": "ATERA_PILOT",
+  "source_zarr": "<review-store.zarr>",
+  "mask_key": "cellpose_cell_labels",
+  "baseline_stats_path": "<original-segmentation>/cellpose_stitching_stats.json",
+  "output_dir": "<fresh-output>/annotation-pilot",
+  "protected_roots": ["<published-results>", "<exported-stores>"],
+  "n_crops": 6,
+  "crop_size_px": 768,
+  "margin_px": 656,
+  "seed": 0
+}
+```
+
+For new Atera density runs, omitting `channels` discovers DAPI, 18S and
+transcript density from the stitching statistics. For older two-stain prefills,
+provide `transcript_density_path` to a separately generated raster to export the
+new three-channel training inputs. See [the density stage](../stages/atera-transcript-density.md).
+
+Run with the existing pinned segmentation environment and this checkout's
+source on `PYTHONPATH`:
+
+```bash
+merxen cellpose-hitl-export --config pilot.json
+```
+
+The source may be a built store or a review export retaining its native
+`morphology_focus`, Cellpose labels and native pixel-size metadata. The original
+stitching statistics must describe the same full-image grid. `baseline_mask_path`
+can select an original `.npy` prefill instead of `mask_key`; its model identity is
+then copied into the manifest. Label-layer prefills retain unknown checkpoint
+provenance explicitly. Every mask/image shape and coordinate grid must agree.
+
+Open `context/overview.png` and the per-crop previews before annotation. The
+default selection requires 90% coverage by a smoothed linear-DAPI tissue mask,
+then spreads windows spatially, without using mask errors to rank them. This is
+an unstratified training pilot, not a claim of anatomical balance. To choose
+specific native-pixel windows, supply `boxes`, for example
+`[{"y0": 8000, "x0": 10000, "size": 768}]`; these still require the tile margin
+and cannot overlap.
+
+Copy `annotation-pilot.tar.gz` to the annotation laptop, extract it in a fresh
+folder, and follow its `annotation-guide.md` in the Cellpose 4.2.1.1 GUI. The
+TIFFs include the boundary stain for viewing when present; `model_input/` always
+uses the declared model channels and full-halo normalization. The arrays are
+ready for future training with `normalize=False`. Keep all raw/model-input files
+unchanged. Save every corrected crop, then mark it `reviewed` in `review.tsv`;
+return the edited `_seg.npy` files, review sheet and original manifest.
+
+Expected: six image/mask pairs, manifest, checksums, review sheet, previews,
+guide and archive. A second export into that directory must refuse to overwrite
+edits. Original source/published output is read only. Import, training and
+adoption remain later milestones. The whole-transcriptome annotation profile
+is independent of this segmentation-correction pilot.

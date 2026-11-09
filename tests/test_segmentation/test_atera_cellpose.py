@@ -6,6 +6,7 @@ synthetic mini-Atera bundle built into a source store.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -94,6 +95,78 @@ def test_atera_dataset_config_rules(source: Path, tmp_path: Path) -> None:
         == "csv"
     )
     assert CellposeInferenceContext.model_fields["platform"].annotation is not None
+
+
+def test_custom_atera_model_reuses_complete_masks_without_a_transcript_csv(
+    source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from merxen.segmentation import model_identity
+    from merxen.segmentation.hitl.registry import CellposeModelMetadata
+    from merxen.segmentation.model_identity import write_model_identity
+
+    config = _config(source, tmp_path)
+    config.tiling.tile_size_candidates = [6144]
+    weights = tmp_path / "model"
+    weights.write_bytes(b"custom synthetic checkpoint")
+    digest = hashlib.sha256(weights.read_bytes()).hexdigest()
+    metadata_path = tmp_path / "model.json"
+    metadata_path.write_text(
+        CellposeModelMetadata(
+            weights_sha256=digest,
+            platform="ATERA",
+            species="human",
+            channels=config.dataset.channels,
+            image_key="morphology_focus",
+            pixel_size_um=PIXEL_SIZE_UM,
+            tile_size=6144,
+            normalization_route="A",
+            annotation_style="fixture",
+            annotation_guide_version="fixture",
+            license_note="Synthetic only",
+            status="accepted",
+            cellpose_version="4.2.1.1",
+            torch_version="2.14.1+cu130",
+            evaluated_cellpose=config.cellpose,
+            evaluated_mask_filter=config.mask_filter,
+        ).model_dump_json()
+    )
+    config.cellpose.pretrained_model = str(weights)
+    config.cellpose.model_sha256 = digest
+    config.cellpose.model_metadata_path = metadata_path
+    config.cellpose_model_policy.protected_output_roots = [tmp_path / "published"]
+    monkeypatch.setattr(
+        model_identity, "require_cellpose_runtime", lambda: ("4.2.1.1", "2.14.1+cu130")
+    )
+    monkeypatch.setattr(
+        "merxen.segmentation.hitl.registry.require_cellpose_runtime",
+        lambda: ("4.2.1.1", "2.14.1+cu130"),
+    )
+    calls = []
+
+    def run(**kwargs: Any) -> Path:
+        calls.append(True)
+        mask_path = kwargs["output_mask_path"]
+        masks = np.zeros((kwargs["height"], kwargs["width"]), np.uint32)
+        masks[2:8, 2:8] = 1
+        np.save(mask_path, masks)
+        np.save(kwargs["output_cellprob_path"], np.ones_like(masks, dtype=np.float32))
+        identity = kwargs["expected_model_identity"]
+        write_model_identity(mask_path, identity)
+        kwargs["output_stitching_stats_path"].write_text(
+            json.dumps({"model_identity": identity.model_dump(mode="json")})
+        )
+        return mask_path
+
+    monkeypatch.setattr(pipeline, "run_tiled_cellpose", run)
+    outputs = run_cellpose_segmentation(config)
+    run_cellpose_segmentation(config)
+    assert len(calls) == 1
+    assert not list(tmp_path.rglob("transcripts_for_proseg.csv"))
+    before = outputs["cellpose_mask_path"].read_bytes()
+    config.cellpose.cellprob_threshold = 0
+    with pytest.raises(ValueError, match="identity mismatch"):
+        run_cellpose_segmentation(config)
+    assert outputs["cellpose_mask_path"].read_bytes() == before
 
 
 def test_loads_the_morphology_image_of_the_store(source: Path, tmp_path: Path) -> None:

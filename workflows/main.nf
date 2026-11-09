@@ -6,6 +6,7 @@ include { CELLPOSE_NUCLEI_SEGMENT; SEGMENT } from "./modules/segmentation"
 include { NATIVE_LATEST } from "./modules/native_segmentation"
 include { ATERA_PROSEG_PLAN; ATERA_PROSEG_PLAN_CELLPOSE; ATERA_PROSEG_TILE; ATERA_PROSEG_STITCH } from "./modules/atera_proseg"
 include { ATERA_CELLPOSE_SEGMENT } from "./modules/atera_cellpose"
+include { ATERA_TRANSCRIPT_DENSITY } from "./modules/atera_transcript_density"
 include { ENRICH } from "./modules/enrichment"
 include { VIEWER_CACHE } from "./modules/viewer_cache"
 include { MASK_IMAGE_QUANTIFICATION } from "./modules/mask_image_quantification"
@@ -752,7 +753,7 @@ def segmentMetaForPlatform(row, platform, params) {
     if (platform == "ATERA") {
         def spec = PlatformSpec.forName(platform)
         return extra + [
-            channels: parseChannels(row.atera_channels, spec.defaultChannels),
+            channels: AteraDensitySettings.channels(row, params),
             image_key: spec.nativeImageKey,
             voxel_layers: intOrDefault(
                 row.atera_voxel_layers,
@@ -4195,6 +4196,11 @@ def segmentationConfigMap(pairId, platform, sourceSpatialdata, meta, params) {
         }
         dataset.image_key = meta.image_key
         dataset.proseg_transcripts = "none"
+        if (AteraDensitySettings.enabled(params)) {
+            segmentConfig.cellpose.input_normalization = "per_channel"
+            dataset.transcript_density_path = meta.transcript_density_path ?: publishedDatasetPath(
+                params.outdir, pairId, platform, "transcript_density/transcript_density.zarr")
+        }
         segmentConfig.remove("nuclei_cellpose")
         segmentConfig.remove("nuclei_mask_filter")
         segmentConfig.remove("proseg_hybrid")
@@ -4474,9 +4480,30 @@ workflow {
         }
     }
 
-    atera_cellpose_inputs_ch = build_results_ch
+    atera_cellpose_sources_ch = build_results_ch
         .join(atera_cellpose_meta_ch)
+    atera_density_inputs_ch = atera_cellpose_sources_ch
+        .filter { _key, _pairId, _platform, _source, _meta -> AteraDensitySettings.enabled(params) }
+        .map { key, pairId, platform, sourceSpatialdata, _meta ->
+            tuple(key, pairId, platform,
+                groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(
+                    AteraDensitySettings.config(sourceSpatialdata, params))),
+                sourceSpatialdata)
+        }
+    atera_density_results_ch = ATERA_TRANSCRIPT_DENSITY(atera_density_inputs_ch).density
+    atera_density_ready_ch = atera_cellpose_sources_ch
+        .join(atera_density_results_ch)
+        .map { key, pairId, platform, sourceSpatialdata, meta, _densityPair, _densityPlatform, densityPath, _densityManifest ->
+            tuple(key, pairId, platform, sourceSpatialdata,
+                meta + [transcript_density_path: densityPath.toRealPath().toString()], densityPath)
+        }
+    atera_density_disabled_ch = atera_cellpose_sources_ch
+        .filter { _key, _pairId, _platform, _source, _meta -> !AteraDensitySettings.enabled(params) }
         .map { key, pairId, platform, sourceSpatialdata, meta ->
+            tuple(key, pairId, platform, sourceSpatialdata, meta, [])
+        }
+    atera_cellpose_inputs_ch = atera_density_ready_ch.mix(atera_density_disabled_ch)
+        .map { key, pairId, platform, sourceSpatialdata, meta, densityPath ->
             tuple(
                 key,
                 pairId,
@@ -4488,6 +4515,7 @@ workflow {
                         )
                     )
                 ),
+                densityPath,
             )
         }
 

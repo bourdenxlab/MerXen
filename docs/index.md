@@ -43,7 +43,10 @@ converge at alignment; dashed stations are governed by a parameter. See
 ### Pipeline stages
 - [SpatialData build](stages/spatialdata-build.md)
 - [Segmentation](stages/segmentation.md) (Cellpose-SAM + ProSeg)
+- [Atera transcript-density input](stages/atera-transcript-density.md) (native-grid third channel before Cellpose)
 - [Cellpose HITL model selection](stages/cellpose-hitl.md) (optional model plumbing)
+- [Cellpose annotation pilot](hitl/annotation-guide.md) (initial crop correction workflow)
+- [Choose and correct HITL crops](hitl/pilot-workflows.md) (automatic or viewer-selected regions)
 - [Enrichment](stages/enrichment.md)
 - [Image registration](stages/register-images.md) (post-Xenium IF onto the mask grid)
 - [Manual landmark registration](stages/manual-registration.md) (standalone workflows, not a stage of `main.nf`)
