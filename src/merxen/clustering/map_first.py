@@ -354,6 +354,20 @@ def downstream_annotation_summary(uns: Mapping[str, Any]) -> dict[str, Any] | No
     """
     summary = downstream_summary_from_uns(uns)
     if summary is None:
+        record = map_first_record(uns)
+        if (
+            record is not None
+            and record.get("profile") == "human_hippocampus_whole_panel_v1"
+        ):
+            return {
+                "profile": record["profile"],
+                "anatomical_region": "hippocampus",
+                "panel_trust": "provisional",
+                "evidence_basis": "existing_atlas_diagnostics_reused",
+                "branch_level": "seaad_class",
+                "leaf_level": "seaad_subclass",
+                "spatial_ground_truth_validated": False,
+            }
         return None
     scope = recorded_cross_platform(uns)
     if scope is not None:

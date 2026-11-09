@@ -372,7 +372,17 @@ def prepare_mender(config: MenderConfig, output_dir: Path | str) -> Path:
 
     import spatialdata as sd
 
-    sdata_obj = sd.read_zarr(config.spatialdata_path)
+    if (
+        annotation is not None
+        and annotation.get("profile") == "human_hippocampus_whole_panel_v1"
+    ):
+        from merxen.annotation.hippocampal_io import read_annotation_store
+
+        sdata_obj = read_annotation_store(
+            config.spatialdata_path, config.source_spatialdata_table
+        )
+    else:
+        sdata_obj = sd.read_zarr(config.spatialdata_path)
     try:
         if config.source_spatialdata_table not in sdata_obj.tables:
             raise KeyError(
@@ -913,7 +923,17 @@ def import_mender_spatialdata(
 
         with spatialdata_write_lock(config.spatialdata_path) as acquired_lock:
             lock_path = acquired_lock
-            sdata_obj = sd.read_zarr(config.spatialdata_path)
+            if (
+                annotated.uns.get("merxen_hierarchical_clustering", {}).get("profile")
+                == "human_hippocampus_whole_panel_v1"
+            ):
+                from merxen.annotation.hippocampal_io import read_annotation_store
+
+                sdata_obj = read_annotation_store(
+                    config.spatialdata_path, config.source_spatialdata_table
+                )
+            else:
+                sdata_obj = sd.read_zarr(config.spatialdata_path)
             try:
                 if config.source_spatialdata_table not in sdata_obj.tables:
                     table_key = config.source_spatialdata_table

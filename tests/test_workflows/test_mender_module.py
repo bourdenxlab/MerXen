@@ -685,7 +685,7 @@ def test_map_first_alignment_gives_one_tuple_per_pair(tmp_path: Path) -> None:
     block = _main_nf_block(
         main_text,
         "        map_first_alignment_ch = alignment_results_ch",
-        "        clustering_computed_ch = CLUSTERING_MAP_FIRST(",
+        "        hippocampal_prepared_ch = clustering_prepared_by_mode_ch",
     )
     align_out = tmp_path / "align_out"
     align_out.mkdir()

@@ -49,6 +49,7 @@ include {
 // rca-hook:H1: reference-based annotation (plan §2.4); nothing runs in legacy mode.
 include { ANNOTATION_PREPARE_ONLY } from "./subworkflows/annotation_references"
 include { CLUSTERING_MAP_FIRST } from "./subworkflows/clustering_map_first"
+include { HIPPOCAMPAL_ANNOTATION; HIPPOCAMPAL_REPORT; HIPPOCAMPAL_REFERENCE as HIPPOCAMPAL_PREPARE_ONLY } from "./subworkflows/hippocampal_annotation"
 include { ANNOTATION_REPORTING } from "./subworkflows/annotation_report"
 
 def parseChannels(rawValue, defaults) {
@@ -2565,23 +2566,14 @@ def rowIsAtera(row, params) {
     }
 }
 
-// The map_first annotation of the robust cell-type annotation effort
-// (ANNOTATE_PANEL, ANNOTATE_REFERENCE_PREP, MAP, RESOLVE, COMPUTE_CPU and
-// ANNOTATION_REPORT) is not covered for ATERA rows yet: its panel, reference
-// and gate steps are built for the targeted MERSCOPE/XENIUM panels and have
-// never run on a whole-transcriptome ATERA section (AT-11, RCA on Atera, in
-// docs/plans/atera-support-plan.md §8). An ATERA row that does not set its own clustering_squidpy_mode
-// column therefore clusters in legacy mode, whatever the species default or
-// --clustering_squidpy_mode, like the other global switches ATERA rows ignore;
-// a row that asks for map_first itself is refused by the ATERA preflight.
-// The readers of a row's annotation mode (the run's mode list and the row
-// settings) go through this function; cortical depth, whose clustered-table
-// fields also read the mode, is refused for ATERA rows.
+// ATERA keeps its legacy task hashes unless a bound hippocampal resource
+// manifest opts it into RCA. That profile has its own taxonomy and confidence
+// evidence; it never inherits the targeted frontal-panel rules.
 def annotationModeRow(row, params) {
     if (!rowIsAtera(row, params)) {
         return row
     }
-    if (chooseField(row, [AnnotationDefaults.ROW_MODE_COLUMN]) != null) {
+    if (params.annotation_hippocampal_resources || chooseField(row, [AnnotationDefaults.ROW_MODE_COLUMN]) != null) {
         return row
     }
     return row + [(AnnotationDefaults.ROW_MODE_COLUMN): AnnotationDefaults.LEGACY]
@@ -2598,7 +2590,7 @@ def annotationModeRow(row, params) {
 def annotationModeLaunchLog(samplesheetRows, params) {
     def ateraRows = samplesheetRows.findAll { row -> rowIsAtera(row, params) }
     def ateraLegacyRows = ateraRows.findAll { row ->
-        chooseField(row, [AnnotationDefaults.ROW_MODE_COLUMN]) == null
+        !params.annotation_hippocampal_resources && chooseField(row, [AnnotationDefaults.ROW_MODE_COLUMN]) == null
     }
     def info = []
     def summary = AnnotationSettings.rowModeSummary(
@@ -2638,6 +2630,10 @@ def ateraPrepareOnlyRow(entry) {
     if (!("ATERA" in settings.active_platforms)) {
         return false
     }
+    if (params.annotation_hippocampal_resources) {
+        log.info("annotation_prepare_only: ATERA row ${settings.pair_id} validates the bound hippocampal references separately")
+        return true
+    }
     log.info(
         "annotation_prepare_only: ATERA row ${settings.pair_id} builds no reference " +
         "bundle: map_first annotation is not covered for ATERA rows yet (AT-11, RCA on Atera)"
@@ -2665,12 +2661,14 @@ def appendAteraPreflightChecks(errors, row, settings, params) {
         )
     }
     if (AnnotationSettings.isMapFirst(settings)) {
-        errors.add(
-            "map_first annotation is not covered for ATERA rows yet (AT-11, RCA " +
-            "on Atera); remove clustering_squidpy_mode from " +
-            "row ${settings.pair_id} or set it to legacy"
-        )
+        if (!params.annotation_hippocampal_resources) {
+            errors.add("map_first annotation requires --annotation_hippocampal_resources for ATERA rows (AT-11)")
+        }
+        if (settings.species != "human" || settings.annotation_anatomical_region != "hippocampus") {
+            errors.add("ATERA map_first requires human species and explicit anatomical_region=hippocampus")
+        }
     }
+
     if (stageOrder.contains("gaston")) {
         errors.add(
             "GASTON is not covered for ATERA rows; remove gaston_enabled from " +
@@ -3767,6 +3765,10 @@ def rowSampleSettings(row, params) {
     def annotationSettings = AnnotationSettings.forRow(
         annotationModeRow(row, params), params, species
     )
+    if (activePlatforms.contains("ATERA") && AnnotationSettings.isMapFirst(annotationSettings)) {
+        annotationSettings.clustering_squidpy_table_key_suffix = "rcahippocampal"
+        annotationSettings.mender_unassigned_state_policy = "exclude_from_features"
+    }
     runMapMyCells = AnnotationSettings.runMapMyCells(runMapMyCells, annotationSettings, stopStage)
     return annotationSettings + [
         pair_id: pairId,
@@ -4287,6 +4289,12 @@ workflow {
     // and runs no pipeline stage; legacy and map_first runs skip this block.
     if (AnnotationReferences.prepareOnly(params)) {
         sample_rows_raw_ch = sample_rows_raw_ch.filter { entry -> !ateraPrepareOnlyRow(entry) }
+        if (params.annotation_hippocampal_resources) {
+            HIPPOCAMPAL_PREPARE_ONLY(
+                channel.value(file(params.annotation_hippocampal_resources)),
+                channel.value(AnnotationReferences.sourcesFingerprint("${projectDir}/../src", ["merxen/annotation/hippocampal_pipeline.py", "merxen/annotation/hippocampal_profile.py"])),
+            )
+        }
         ANNOTATION_PREPARE_ONLY(sample_rows_raw_ch)
         sample_rows_raw_ch = channel.empty()
     }
@@ -6242,11 +6250,24 @@ workflow {
                     .filter { _pairId, _row, settings -> !settings.need_alignment_results }
                     .map { pairId, _row, _settings -> tuple(pairId, []) }
             )
+        hippocampal_prepared_ch = clustering_prepared_by_mode_ch.map_first.branch {
+            _pairId, _segmentation, samplesJson, _config, _prepared, _mapFirst ->
+            hippocampal: new groovy.json.JsonSlurperClassic().parseText(samplesJson).every { sample -> sample.platform == "ATERA" }
+            frontal: true
+        }
+        hippocampal_computed_ch = channel.empty()
+        hippocampal_labels_ch = channel.empty()
+        if (params.annotation_hippocampal_resources) {
+            hippocampal = HIPPOCAMPAL_ANNOTATION(hippocampal_prepared_ch.hippocampal.map { item -> item.take(5) })
+            hippocampal_computed_ch = hippocampal.computed
+            hippocampal_labels_ch = hippocampal.labels
+        }
         clustering_computed_ch = CLUSTERING_MAP_FIRST(
-            clustering_prepared_by_mode_ch.map_first.map { item -> item.take(5) },
+            hippocampal_prepared_ch.frontal.map { item -> item.take(5) },
             map_first_alignment_ch,
             map_first_registration_ch,
         ).computed
+            .mix(hippocampal_computed_ch)
             .mix(
                 CLUSTERING_SQUIDPY_COMPUTE(
                     clustering_prepared_by_mode_ch.legacy.map { item -> item.take(5) }
@@ -7324,6 +7345,31 @@ workflow {
 
     GASTON_IMPORT(gaston_import_inputs_ch)
 
+    if (AnnotationSettings.isMapFirstRun(params) && params.annotation_hippocampal_resources && AnnotationReport.enabled(params)) {
+        hippocampal_labels_ch.subscribe { pairId, segmentation, _resolved ->
+            AnnotationRunRecord.reportExpected(pairId, segmentation)
+        }
+        hippocampal_report_rows = hippocampal_labels_ch
+            .map { pairId, segmentation, resolved -> tuple(AnnotationReferences.branchKey(pairId, segmentation), pairId, segmentation, resolved) }
+            .join(clustering_results_ch.map { pairId, segmentation, _samples, clustered -> tuple(AnnotationReferences.branchKey(pairId, segmentation), clustered) })
+            .map { key, pairId, segmentation, resolved, clustered -> tuple(pairId, key, segmentation, resolved, clustered) }
+            .combine(sample_rows_ch.map { pairId, _row, settings -> tuple(pairId, settings.run_mender ? settings.mender_segmentations : []) }, by: 0)
+            .map { pairId, key, segmentation, resolved, clustered, menderSegmentations -> tuple(key, pairId, segmentation, resolved, clustered, menderSegmentations) }
+        hippocampal_mender = mender_finalized_ch
+            .filter { _taskKey, _pairId, _segmentation, platform, _sampleId, _spatialdataPath, _sourceTable, _shape, _sourceH5ad, _config, _menderDir -> platform == "ATERA" }
+            .map { _taskKey, pairId, segmentation, _platform, _sampleId, _spatialdataPath, _sourceTable, _shape, _sourceH5ad, _config, menderDir -> tuple(AnnotationReferences.branchKey(pairId, segmentation), menderDir) }
+        hippocampal_reports_ch = HIPPOCAMPAL_REPORT(hippocampal_report_rows.join(hippocampal_mender, remainder: true)
+            .filter { _key, pairId, _segmentation, _resolved, _clustered, _menderSegmentations, _menderDir -> pairId != null }
+            .map { _key, pairId, segmentation, resolved, clustered, menderSegmentations, menderDir ->
+                tuple(pairId, segmentation, resolved, clustered, menderDir ? [menderDir] : [],
+                    segmentation in menderSegmentations,
+                    AnnotationReferences.sourcesFingerprint("${projectDir}/../src", ["merxen/annotation/hippocampal_pipeline.py", "merxen/annotation/hippocampal_report.py"]))
+            })
+        hippocampal_reports_ch.subscribe { pairId, segmentation, reportDir ->
+            AnnotationRunRecord.reported(pairId, segmentation, reportDir)
+        }
+    }
+
     // rca-hook:H11: the annotation QC report (plan §3.6, §9; M7), map_first runs only:
     // after FINALIZE, the pair's cortical depth and the branch's MENDER when they run.
     if (AnnotationSettings.isMapFirstRun(params) && AnnotationReport.enabled(params)) {
@@ -7342,4 +7388,5 @@ workflow {
             sample_rows_ch.map { pairId, _row, settings -> tuple(pairId, AnnotationReport.pairSpec(settings, params)) },
         )
     }
+
 }

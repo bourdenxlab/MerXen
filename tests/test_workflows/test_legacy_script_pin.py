@@ -57,8 +57,11 @@ EXPECTED_SHA256: dict[str, str] = {
     # else-branch, the process texts and the legacy inputs are unchanged.
     # 2026-10-13: that fallback is narrowed to rows whose QC stage does not
     # run at all; again only the map_first branch changed.
+    # AT-11: only the map_first branch routes the explicit whole-panel
+    # hippocampal profile separately. The legacy else branch, the three
+    # legacy process scripts and their defaults remain byte-identical.
     "main.nf wiring": (
-        "65ea609bc42e7f079a6a805ddb61d6b9140ef4ad39842dc88593178af6696d4a"
+        "33f1dd3be75eb6e0a9cc2f1c4d2c3e13f7d2fd7622e9706dd316278e42d9cbeb"
     ),
     # 2026-10-15 (privacy clean-up): four host-location params the legacy
     # clustering reads (the broad reference cache directory and three WHB

@@ -66,5 +66,15 @@
   "workflows/modules/spatial_gene_analysis.nf::SPATIAL_GENE_ANALYSIS::script": "8ea4a99b5a541ff558d44bf5f21d1b17bb564a66d59ed43d505a2b770df0919b",
   "workflows/modules/spatialdata_build.nf::BUILD_SPATIALDATA::script": "ad87aae07e5e6dc55dde91eede1e8e42d373f0a50b92fa74ccac50399a6f5935",
   "workflows/modules/viewer_cache.nf::VIEWER_CACHE::script": "b73804d72318eb607b6965501fbaeae989fccae02854a0d73f5b2accf8223aff",
-  "workflows/modules/visualization.nf::VISUALIZE::script": "fe9580e307429e89f0745833afd786dd86df070d8aee339bdcb9de5180890f80"
+  "workflows/modules/visualization.nf::VISUALIZE::script": "fe9580e307429e89f0745833afd786dd86df070d8aee339bdcb9de5180890f80",
+  "workflows/subworkflows/hippocampal_annotation.nf::HIPPOCAMPAL_COMPUTE::script": "0d2d950eb1e363f17e935b63bb740be2882c99a07b6d9ef0bb26352968b063b6",
+  "workflows/subworkflows/hippocampal_annotation.nf::HIPPOCAMPAL_COMPUTE::stub": "42b11cc3117ec1c7f9a99e5aceaa21a17aa5ad62fda6287f5fd680e2435cf58e",
+  "workflows/subworkflows/hippocampal_annotation.nf::HIPPOCAMPAL_MAP::script": "6c6dc68f919d09af6b98f712436bb2531d6c5a32ee7247b563dba5eaa9f8770e",
+  "workflows/subworkflows/hippocampal_annotation.nf::HIPPOCAMPAL_MAP::stub": "347cfc52e9aa71d433c662d691f57bf30a43bfd80b25b30ff1a05df56ee5d350",
+  "workflows/subworkflows/hippocampal_annotation.nf::HIPPOCAMPAL_REFERENCE::script": "ffb2f7c884dbcdcf71e9026138fd56461318a7d76566104227c70e85d3477c0a",
+  "workflows/subworkflows/hippocampal_annotation.nf::HIPPOCAMPAL_REFERENCE::stub": "875b041b006c8957d5ddf9e2b033de93724a41532731743a56a3d06bf13ae2bb",
+  "workflows/subworkflows/hippocampal_annotation.nf::HIPPOCAMPAL_REPORT::script": "ddf6feb5965a481d722e2da867a80b02321ada6f9b4180606f9a11a1966403e0",
+  "workflows/subworkflows/hippocampal_annotation.nf::HIPPOCAMPAL_REPORT::stub": "fcb646e66bd71beeebecc8a5e481cceb4ded733770e3688305430101a0782764",
+  "workflows/subworkflows/hippocampal_annotation.nf::HIPPOCAMPAL_RESOLVE::script": "85cbbceff7df21fc98b971e35210737b288189e854a5ca2de65ebce768cbec8b",
+  "workflows/subworkflows/hippocampal_annotation.nf::HIPPOCAMPAL_RESOLVE::stub": "e7d1746c55304f7a6f6157214fafb772b56d3e21b084c5a643b0f2ad379cb4f6"
 }

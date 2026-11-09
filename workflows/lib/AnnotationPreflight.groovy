@@ -72,6 +72,18 @@ class AnnotationPreflight {
         if (!suffix && !(species in flippedSpecies)) {
             errors << "${label}: ${AnnotationDefaults.emptySuffixMessage(species)}".toString()
         }
+        if (settings.get("active_platforms")?.contains("ATERA")) {
+            def resourcePath = params?.get("annotation_hippocampal_resources")
+            if (!resourcePath || !new File(resourcePath.toString()).isFile()) {
+                errors << "${label}: annotation_hippocampal_resources must name an existing resource manifest".toString()
+            }
+            if (species != "human" || settings.get("annotation_anatomical_region") != "hippocampus") {
+                errors << "${label}: whole-panel ATERA annotation requires human hippocampus".toString()
+            }
+            // The measured hippocampal profile validates its own references,
+            // full panel and confidence evidence in HIPPOCAMPAL_REFERENCE.
+            return
+        }
         appendChoiceChecks(errors, params, label)
         appendCtmVersionCheck(errors, params, label)
         appendReferenceChecks(errors, species, params, label)

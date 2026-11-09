@@ -2160,7 +2160,15 @@ def write_clustered_spatialdata_table(
         log_status(
             f"Writing clustered SpatialData table '{output_table_key}' to {zarr_path}"
         )
-        sdata_obj = sd.read_zarr(zarr_path)
+        if (
+            adata.uns.get(HIERARCHICAL_UNS_KEY, {}).get("profile")
+            == "human_hippocampus_whole_panel_v1"
+        ):
+            from merxen.annotation.hippocampal_io import read_annotation_store
+
+            sdata_obj = read_annotation_store(zarr_path, output_table_key)
+        else:
+            sdata_obj = sd.read_zarr(zarr_path)
         try:
             write_or_replace_element(
                 sdata_obj,
@@ -3656,13 +3664,35 @@ def prepare_clustering_squidpy(
     gene_id_lookup = collect_gene_id_lookup_for_samples(config)
     manifest: dict[str, str] = {}
     for sample in config.samples:
-        adata = load_spatialdata_adata(
-            sample.zarr_path,
-            platform=sample.platform,
-            table_key=sample.table_key,
-            shape_key=sample.shape_key,
-            gene_id_lookup=gene_id_lookup,
-        )
+        if sample.platform == "ATERA" and sample.anatomical_region == "hippocampus":
+            from merxen.annotation.hippocampal_io import read_annotation_store
+
+            if sample.table_key is None:
+                raise ValueError(
+                    "Hippocampal preparation requires an explicit raw table"
+                )
+            store = read_annotation_store(sample.zarr_path, sample.table_key)
+            try:
+                adata = adata_from_spatialdata(
+                    store,
+                    platform=sample.platform,
+                    table_key=sample.table_key,
+                    shape_key=sample.shape_key,
+                    gene_id_lookup=gene_id_lookup,
+                )
+            finally:
+                del store
+                force_release(
+                    note=f"after preparing hippocampal input {sample.sample_id}"
+                )
+        else:
+            adata = load_spatialdata_adata(
+                sample.zarr_path,
+                platform=sample.platform,
+                table_key=sample.table_key,
+                shape_key=sample.shape_key,
+                gene_id_lookup=gene_id_lookup,
+            )
         relative_path = Path(sample.platform.lower()) / (
             f"{sample.sample_id}_prepared.h5ad"
         )
@@ -3823,7 +3853,16 @@ def collect_gene_id_lookup_for_samples(
                 zarr_path,
             )
             continue
-        sdata_obj = sd.read_zarr(zarr_path)
+        if sample.platform == "ATERA" and sample.anatomical_region == "hippocampus":
+            from merxen.annotation.hippocampal_io import read_annotation_store
+
+            if sample.table_key is None:
+                raise ValueError(
+                    "Hippocampal preparation requires an explicit raw table"
+                )
+            sdata_obj = read_annotation_store(zarr_path, sample.table_key)
+        else:
+            sdata_obj = sd.read_zarr(zarr_path)
         try:
             sample_lookup = _extract_gene_id_lookup_from_spatialdata(sdata_obj)
         finally:
