@@ -13,7 +13,7 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from merxen.config import CellposeConfig, MaskFilterConfig, SegmentationConfig
-from merxen.platforms import platform_spec
+from merxen.platforms import PlatformName, platform_spec
 from merxen.segmentation.model_identity import (
     CPSAM_V2_SHA256,
     CellposeInferenceContext,
@@ -34,10 +34,10 @@ class CellposeModelMetadata(BaseModel):
 
     schema_version: Literal[1] = 1
     weights_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    platform: Literal["MERSCOPE", "XENIUM", "ATERA"]
+    platform: PlatformName
     species: Literal["human", "mouse"]
     channels: list[str] = Field(min_length=1, max_length=3)
-    image_key: Literal["morphology_focus", "MERSCOPE_z_projection"]
+    image_key: str = Field(min_length=1)
     pixel_size_um: float = Field(gt=0)
     tile_size: int = Field(gt=0)
     normalization_route: Literal["A"]

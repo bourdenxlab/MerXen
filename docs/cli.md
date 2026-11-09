@@ -134,6 +134,40 @@ Details: [Stage 2 — Segmentation](stages/segmentation.md).
 
 ---
 
+## `merxen cellpose-hitl-export`
+
+Export an initial native-image correction pilot for the Cellpose GUI:
+
+```bash
+merxen cellpose-hitl-export --config pilot.json
+```
+
+The JSON follows `HitlExportConfig` in `merxen.segmentation.hitl.export`.
+The command reads images/labels only and creates a fresh archive with crop
+TIFFs, editable mask pre-fills, normalized training arrays, previews, a manifest
+and review sheet. Existing exports are refused to protect human edits. It runs
+on CPU and starts no model training or full-section segmentation.
+
+Selection can be automatic, explicit native boxes, or a HITL viewer GeoJSON
+through `roi_geojson_path`. See [both workflows](hitl/pilot-workflows.md),
+[the pilot config](hitl/testing-guide.md#5-atera-correction-pilot) and
+[versioned annotation guide](hitl/annotation-guide.md).
+
+## `merxen cellpose-hitl-prepare-rois`
+
+Prepare portable image/grid context before selecting crops in the viewer:
+
+```bash
+merxen cellpose-hitl-prepare-rois --config pilot.json --output roi_context.json
+```
+
+This uses the same config as crop export, reads image metadata only, and writes
+a new context file outside protected data. It runs no segmentation or training.
+Use `add_roi_picker` in the existing viewer's Python console to select regions,
+then pass its saved GeoJSON to the exporter. See [the viewer workflow](hitl/pilot-workflows.md#2b-regions-selected-in-the-viewer).
+
+---
+
 ## `merxen enrich`
 
 Enrich a segmented zarr with explicit shape layers and per-shape gene

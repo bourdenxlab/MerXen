@@ -12,15 +12,23 @@ import hashlib
 import json
 import logging
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import numpy as np
 
-from merxen.config import SegmentationConfig
+from merxen.config import BeadMaskVetoConfig, SegmentationConfig
 from merxen.io.bead_removal.provenance import (
     check_segmentation_sidecar,
     read_image_preprocessing_attr,
+    write_segmentation_sidecar,
+)
+from merxen.platforms import platform_spec
+from merxen.segmentation.bead_mask_veto import (
+    PreparedBeadMaskVeto,
+    apply_bead_mask_veto,
+    bead_mask_veto_identity,
+    prepare_bead_mask_veto,
 )
 from merxen.segmentation.cellpose import (
     build_cellpose_affine_to_microns,
@@ -143,6 +151,25 @@ def _require_fresh_output(output: Path, protected_root: Path) -> None:
         raise ValueError("Acceptance output directory must be new or empty")
 
 
+def _tile_bead_veto(
+    veto: PreparedBeadMaskVeto, tile: dict[str, int]
+) -> PreparedBeadMaskVeto:
+    """Translate slide-global bead/DAPI coordinates into the halo mask's grid."""
+    origin_y, origin_x = tile["tile_y0"], tile["tile_x0"]
+
+    def read_dapi(y0: int, y1: int, x0: int, x1: int) -> np.ndarray:
+        return veto.read_dapi(
+            y0 + origin_y, y1 + origin_y, x0 + origin_x, x1 + origin_x
+        )
+
+    return replace(
+        veto,
+        bead_y=veto.bead_y - origin_y,
+        bead_x=veto.bead_x - origin_x,
+        read_dapi=read_dapi,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the read-only tile drift check and write its report.
 
@@ -183,10 +210,18 @@ def main(argv: list[str] | None = None) -> int:
     # mask: both must come from the same image (a bead-corrected tile against an
     # uncorrected mask would give meaningless agreement). Read-only; the sidecar
     # next to the real mask file is found through a symlink.
+    source_preprocessing = read_image_preprocessing_attr(args.source_zarr)
+    veto_config = BeadMaskVetoConfig.model_validate(
+        json.loads(args.config.read_text()).get("bead_mask_veto", {})
+    )
+    veto_identity = bead_mask_veto_identity(
+        veto_config, args.source_zarr, source_preprocessing
+    )
     check_segmentation_sidecar(
         args.baseline_mask.resolve(),
-        read_image_preprocessing_attr(args.source_zarr),
+        source_preprocessing,
         dataset_name="tile check",
+        bead_mask_veto=veto_identity,
     )
     if args.margin_px < 0:
         raise ValueError("margin-px must be non-negative")
@@ -200,12 +235,19 @@ def main(argv: list[str] | None = None) -> int:
     stats = json.loads(args.baseline_stats.read_text())
     tile_size = int(stats["tile_size"])
     overlap = int(stats["stitch_overlap_px"])
+    if is_experimental_arm(config) and (
+        config.tiling.tile_size_candidates != [tile_size]
+        or config.tiling.stitch_overlap_px != overlap
+    ):
+        raise ValueError("Experimental tile check must use the pinned baseline grid")
     logger.info("Hashing the read-only published mask before inference")
     before = _sha256(args.baseline_mask)
     stats_sha = _sha256(args.baseline_stats)
     sdata, fetch, height, width, matrix, _points = _load_dataset_sdata(config)
     selected_key = config.dataset.image_key or (
-        "morphology_focus" if is_experimental_arm(config) else list(sdata.images)[0]
+        platform_spec(config.dataset.platform).native_image_key
+        if is_experimental_arm(config)
+        else list(sdata.images)[0]
     )
     if selected_key != args.image_key:
         raise ValueError("Production loader selected a different native image element")
@@ -213,6 +255,13 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("Acceptance must use the native image element")
     if (height, width) != (int(stats["height"]), int(stats["width"])):
         raise ValueError("Native image dimensions differ from the published tile grid")
+    prepared_veto = prepare_bead_mask_veto(
+        config.bead_mask_veto,
+        source=args.source_zarr,
+        recorded=source_preprocessing,
+        sdata=sdata,
+        shape=(height, width),
+    )
     tiles = iter_core_tiles(height, width, tile_size, overlap)
     if not 0 <= args.tile_index < len(tiles):
         raise ValueError("tile-index is outside the published tile grid")
@@ -277,6 +326,14 @@ def main(argv: list[str] | None = None) -> int:
         max_area_um2=config.mask_filter.final_max_area_um2,
         show_progress=False,
     )
+    veto_counts = None
+    if prepared_veto is not None:
+        veto_result = apply_bead_mask_veto(
+            prediction_path,
+            _tile_bead_veto(prepared_veto, tile),
+            dataset_name="tile check",
+        )
+        veto_counts = veto_result.counts()
     prediction = np.load(prediction_path, mmap_mode="r")
     reference = np.load(args.baseline_mask, mmap_mode="r")
     local_y0, local_y1 = y0 - tile["tile_y0"], y1 - tile["tile_y0"]
@@ -293,6 +350,9 @@ def main(argv: list[str] | None = None) -> int:
         agreement.passed,
     )
     write_model_identity(prediction_path, identity)
+    write_segmentation_sidecar(
+        prediction_path, source_preprocessing, bead_mask_veto=veto_identity
+    )
     logger.info("Hashing the published mask again to check baseline preservation")
     after = _sha256(args.baseline_mask)
     baseline_unchanged = before == after and stats_sha == _sha256(args.baseline_stats)
@@ -311,6 +371,8 @@ def main(argv: list[str] | None = None) -> int:
         "border_rule": "Exclude labels touching the scoring-window border in each mask",
         "model_identity": identity.model_dump(mode="json"),
         "area_filter": area_stats,
+        "bead_mask_veto": veto_identity,
+        "bead_mask_veto_counts": veto_counts,
         "agreement": asdict(agreement),
         "baseline_mask_sha256_before": before,
         "baseline_mask_sha256_after": after,

@@ -220,6 +220,12 @@ class CellposeSettings {
             if (!selected.cellpose_model_policy) {
                 return
             }
+            if (platform == 'ATERA' && rowSettings.segmentation_source != null &&
+                rowSettings.segmentation_source != 'cellpose_proseg') {
+                throw new IllegalArgumentException(
+                    'ATERA Cellpose model/overrides require segmentation_source=cellpose_proseg; ' +
+                    'native and native_proseg use vendor masks and do not run Cellpose')
+            }
             def policy = selected.cellpose_model_policy
             if (!policy.protected_output_roots) {
                 throw new IllegalArgumentException('Custom models require --cellpose_protected_output_roots')

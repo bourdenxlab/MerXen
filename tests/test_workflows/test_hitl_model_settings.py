@@ -71,7 +71,9 @@ workflow {
                          ? entry.run_segment : true,
                      stage_order: ['build_spatialdata', 'segment_nuclei',
                          'segment', 'enrich', 'qc'],
-                     start_stage: entry.start_stage ?: 'enrich'],
+                     start_stage: entry.start_stage ?: 'enrich',
+                     segmentation_source: entry.segmentation_source
+                         ?: 'cellpose_proseg'],
                     opts)
             }
             return [before: before, after: groovy.json.JsonOutput.prettyPrint(
@@ -112,6 +114,44 @@ def test_required_hitl_hooks_occur_once() -> None:
     assert CPSAM_V2_SHA256 in library
     assert CELLPOSE_VERSION in library
     assert f"startsWith('{TORCH_MINOR}.')" in library
+
+
+@pytest.mark.nextflow
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow unavailable")
+def test_atera_controls_refuse_routes_that_do_not_use_cellpose(tmp_path: Path) -> None:
+    options = {
+        **_defaults(),
+        "atera_cellpose_cellprob": 0,
+        "cellpose_protected_output_roots": [str(tmp_path / "published")],
+        "cellpose_tile_size_candidates": [6144],
+        "outdir": str(tmp_path / "arm"),
+    }
+    cases = [
+        {
+            "platform": "ATERA",
+            "options": options,
+            "row": {},
+            "check_preflight": True,
+            "segmentation_source": source,
+        }
+        for source in ("native", "native_proseg", "cellpose_proseg")
+    ]
+    cases.append(
+        {
+            "platform": "ATERA",
+            "options": {**options, "atera_cellpose_cellprob": None},
+            "row": {},
+            "check_preflight": True,
+            "segmentation_source": "native",
+        }
+    )
+    results = _run_cases(tmp_path, cases)
+    for result in results[:2]:
+        assert "require segmentation_source=cellpose_proseg" in result["error"]
+    assert "error" not in results[2]
+    assert results[2]["selected"]["cellpose"]["cellprob_threshold"] == 0
+    assert "error" not in results[3]
+    assert results[3]["selected"] == {}
 
 
 @pytest.mark.nextflow

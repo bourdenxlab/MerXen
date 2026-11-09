@@ -196,6 +196,31 @@ never the correction code, and the package imports no GPU code. Configured by `M
 
 ## `merxen.segmentation`
 
+### `segmentation.hitl.export`
+
+`HitlExportConfig` describes a read-only annotation pilot, selected label layer
+or mask, original tile grid and fresh output directory.
+`export_annotation_pilot(config)` returns `HitlExportResult` with the folder,
+portable archive and crop count. `normalize_training_tile` applies route-A
+normalization to the whole prepared halo; `split_crop_labels` makes each
+eight-connected prefill component a separate object. This API begins crop
+export, not import/training. `prepare_viewer_roi_context(config, output_path)`
+writes a portable `RoiContext` for manual crop selection without exporting images.
+See [both workflows](hitl/pilot-workflows.md).
+
+### `segmentation.hitl.regions` and `segmentation.hitl.viewer`
+
+`RoiContext`, `ViewerRegion`, `write_viewer_regions` and `read_viewer_regions`
+exchange native-pixel squares as GeoJSON with explicit source/grid identity,
+XY/YX conversion, overlap and tile-margin validation. The exchange module uses
+only NumPy and the standard library.
+
+`add_roi_picker(viewer, context_path, regions_path=None)` adds a location-selection
+dock and independent Shapes layers to an existing napari viewer. It imports Qt
+and napari only when called. `validate_native_viewer_image` refuses incompatible
+display frames before placing or saving regions. Cell outlines are corrected
+later in the separate Cellpose GUI; the helper never writes the source store.
+
 ### `segmentation.pipeline` — [pipeline.py](../src/merxen/segmentation/pipeline.py)
 - `run_segmentation_pipeline(config, *, force_rerun)` — full stage entry point.
 - `run_cellpose_nuclei_segmentation(config, *, force_rerun)` — reusable

@@ -2,7 +2,8 @@
 
 HITL-1 adds optional cell-model selection and safe reuse checks. It also shares
 the production halo-tile input, inference and filtering operation with acceptance
-checks. Crop annotation, training and model evaluation arrive in later milestones.
+checks. An initial crop exporter now prepares correction pilots; annotation
+import, training and model evaluation remain later milestones.
 Dwight acceptance uses Conda; Apptainer validation remains deferred.
 
 With no optional model/override parameters, Nextflow emits the same segmentation
@@ -11,7 +12,7 @@ default. Legacy stock masks retain `unverified` provenance and remain reusable.
 
 ## Select a model
 
-Set `xenium_cellpose_model` or `merscope_cellpose_model` to a bundle directory,
+Set `xenium_cellpose_model`, `merscope_cellpose_model` or `atera_cellpose_model` to a bundle directory,
 its weights file, or a 64-character registry hash. A directory contains `model`
 and `model.json`. Hashes resolve under `cellpose_model_store`, which may also be
 set with the exported `MERXEN_CELLPOSE_MODEL_STORE` variable. Dwight supplies
@@ -20,6 +21,12 @@ set with the exported `MERXEN_CELLPOSE_MODEL_STORE` variable. Dwight supplies
 The same-named samplesheet columns override the run parameter for that platform;
 blank cells inherit it. Cell-model selection and the overrides below leave the
 independent stock DAPI nuclei model and its settings unchanged.
+
+For Atera, select `segmentation_source=cellpose_proseg` explicitly. Its default
+`native` route and `native_proseg` use vendor masks, so model/threshold options
+are refused there rather than silently ignored. Atera keeps the vendor nuclei;
+it does not run the independent Cellpose nuclei process. Its Cellpose stage
+writes no transcript CSV; tiled ProSeg reads the store's parquet.
 
 | Parameter | Default | Effect |
 |---|---|---|
@@ -32,7 +39,7 @@ independent stock DAPI nuclei model and its settings unchanged.
 | `allow_candidate_model` | false | Explicitly permit a candidate bundle |
 | `cellpose_protected_output_roots` | Dwight: published results root | Roots protected from experimental arms; required on other hosts |
 
-Here `<platform>` is `xenium` or `merscope`. Numeric overrides also accept
+Here `<platform>` is `xenium`, `merscope` or `atera`. Numeric overrides also accept
 same-named samplesheet columns. Explicit zero is preserved. Values from a model's
 evaluation are **not** applied automatically; differences produce warnings.
 
@@ -54,7 +61,7 @@ provenance so the requested change cannot silently reuse an older mask.
 |---|---|
 | `schema_version` | 1 |
 | `weights_sha256` | Full lowercase SHA-256 of `model` |
-| `platform`, `species` | `XENIUM`/`MERSCOPE`, `human`/`mouse`; match the run |
+| `platform`, `species` | `XENIUM`/`MERSCOPE`/`ATERA`, `human`/`mouse`; match the run |
 | `channels` | One to three unique channel names in exact input order |
 | `image_key` | `morphology_focus` or `MERSCOPE_z_projection`, matching the platform |
 | `pixel_size_um` | Positive native pixel size; both axes of the full affine must agree within 1% |
@@ -97,6 +104,35 @@ tile's uint8 model input, raw labels, filtered labels and optional probability
 logits. Production keeps the original stitching, final area filtering and
 transcript assignment. Regression hashes captured before extraction pin the
 synthetic masks, logits and stitching statistics.
+
+## Start an annotation pilot
+
+`merxen cellpose-hitl-export --config pilot.json` exports a CPU-only correction
+package from a native image and existing Cellpose labels. It reads images and
+labels only, avoiding whole-transcriptome tables and transcript partitions.
+The baseline stitching statistics pin the actual global tile grid. Training
+inputs are normalized on each complete enclosing halo tile before cropping;
+the manifest records percentile bounds, their numeric dtype and sampling stride.
+The guide is bundled with the installed package, so export also works outside a
+source checkout.
+
+The default is six 768 px crops spread across an image-derived tissue mask,
+with at least 90% tissue coverage and the plan's 656 px tile-core margin.
+Explicit native pixel boxes are also supported. These are unstratified pilot
+training crops, never a held-out evaluation split. The portable archive contains
+TIFFs, editable `_seg.npy` pre-fills, raw/normalized arrays, previews, a manifest,
+checksums, `review.tsv` and the [annotation guide](../hitl/annotation-guide.md).
+Existing export directories containing edits are refused without replacement.
+Import, training and automatic adoption are not launched by this command.
+
+For user-selected regions, `cellpose-hitl-prepare-rois` creates portable native
+context. The lightweight `add_roi_picker` helper adds a crop-selection dock to
+the existing napari viewer. Its GeoJSON is passed as `roi_geojson_path`; source,
+frame and tile-grid identity are verified before any crops are written. See the
+[automatic and viewer-selected workflows](../hitl/pilot-workflows.md).
+
+See [the Atera pilot instructions](../hitl/testing-guide.md#5-atera-correction-pilot)
+and [compatibility audit](../hitl/atera-compatibility.md).
 
 See the [testing guide](../hitl/testing-guide.md) for a stock-checkpoint fixture,
 fast validation tests and the locked HD1 tile check. A passing fixture confirms

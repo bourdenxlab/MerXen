@@ -1,5 +1,15 @@
 # Cellpose HITL implementation status
 
+Update 2026-11-09: HITL-1 merged in PR #75 (`43cf265d`). The current Atera
+implementation is on `feature/atera-support`. The
+[compatibility audit](../hitl/atera-compatibility.md) records the subsequent
+platform, segmentation-route and image-preprocessing changes. Initial HITL-2
+work now includes a tissue-spanning correction-pilot exporter, viewer-selected
+ROI exchange and a versioned annotation guide. The [pilot workflows](../hitl/pilot-workflows.md)
+cover both paths into the separate Cellpose drawing GUI.
+Full anatomical sampling, import, training and adoption are
+still future milestones; the historical acceptance results below cover HITL-0/1.
+
 Implementation started on 2026-10-19 from `main` at `a9625a9`, on
 `codex/hitl-segmentation`. The design remains the
 [Cellpose HITL plan](cellpose-hitl-segmentation-plan.md). This first change is
