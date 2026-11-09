@@ -386,8 +386,23 @@ def resolve_prepared(
                     "bp",
                     "resolution_status",
                     "accepted",
+                    "aggregate_probability",
+                    "avg_correlation",
+                    "directly_assigned",
+                    "n_runners_up",
+                    *(
+                        f"runner_up_{rank}_{field}"
+                        for rank in range(1, 6)
+                        for field in (
+                            "assignment",
+                            "name",
+                            "probability",
+                            "correlation",
+                        )
+                    ),
                 ):
-                    wide[f"ct_{atlas}_{token}_{field}"] = part[field]
+                    if field in part:
+                        wide[f"ct_{atlas}_{token}_{field}"] = part[field]
             provenance[atlas] = {
                 "policy": policy.model_dump(mode="json"),
                 "qualification": qualification.model_dump(mode="json"),
@@ -480,7 +495,7 @@ def compute_prepared(
                 pd.Categorical(values.astype("string").fillna("Mixed/Unknown"))
                 if column != "n_counts"
                 and (pd.api.types.is_string_dtype(values) or values.dtype == object)
-                else values.to_numpy()
+                else values.array
             )
         for column, values in {
             "broad_class": aligned.ct_branch,
