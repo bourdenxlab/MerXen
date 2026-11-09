@@ -46,7 +46,7 @@ def validate_native_viewer_image(image: Any, context: RoiContext) -> None:
         or "aligned" in name.lower()
     ):
         raise ValueError(
-            "Choose the native morphology_focus image, not an aligned image"
+            f"Choose the native {context.image_key} image, not an aligned image"
         )
     if image.ndim != 2:
         raise ValueError("Use a two-dimensional native image layer")

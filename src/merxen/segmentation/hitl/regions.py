@@ -16,6 +16,8 @@ from typing import Any
 
 import numpy as np
 
+from merxen.platforms import platform_spec
+
 
 @dataclass(frozen=True)
 class RoiContext:
@@ -38,7 +40,7 @@ class RoiContext:
     def __post_init__(self) -> None:
         if self.schema_version != 1 or self.platform not in ("ATERA", "XENIUM"):
             raise ValueError("Unsupported HITL ROI context")
-        if self.image_key != "morphology_focus":
+        if self.image_key != platform_spec(self.platform).native_image_key:
             raise ValueError("ROI selection requires the native morphology image")
         if not math.isfinite(self.pixel_size_um) or self.pixel_size_um <= 0:
             raise ValueError("ROI context requires a positive native pixel size")
