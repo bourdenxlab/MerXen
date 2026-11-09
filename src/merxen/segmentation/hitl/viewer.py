@@ -122,7 +122,17 @@ def add_roi_picker(
     rectangles = []
     if regions_path is not None:
         for box in read_viewer_regions(Path(regions_path), context):
-            rectangles.append(_rectangle(box.y0, box.x0, box.size))
+            rectangles.append(
+                np.array(
+                    [
+                        [box.y0, box.x0],
+                        [box.y0, box.x0 + box.width_px],
+                        [box.y0 + box.height_px, box.x0 + box.width_px],
+                        [box.y0 + box.height_px, box.x0],
+                    ],
+                    float,
+                )
+            )
     roi_layer = viewer.add_shapes(
         rectangles,
         name=roi_name,

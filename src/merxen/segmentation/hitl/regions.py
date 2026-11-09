@@ -94,6 +94,18 @@ class ViewerRegion:
     y0: int
     x0: int
     size: int
+    height: int | None = None
+    width: int | None = None
+
+    @property
+    def height_px(self) -> int:
+        """Return the crop height, retaining legacy square selections."""
+        return self.height if self.height is not None else self.size
+
+    @property
+    def width_px(self) -> int:
+        """Return the crop width, retaining legacy square selections."""
+        return self.width if self.width is not None else self.size
 
 
 def _parse_regions(payload: dict[str, Any], expected: RoiContext) -> list[ViewerRegion]:
@@ -106,6 +118,9 @@ def _parse_regions(payload: dict[str, Any], expected: RoiContext) -> list[Viewer
         raise ValueError(
             "Viewer ROIs refer to a different source, tile grid or crop context"
         )
+    regions_version = payload.get("merxen_hitl_regions_version", 1)
+    if regions_version not in (1, 2):
+        raise ValueError("Unsupported HITL region geometry version")
     regions: list[ViewerRegion] = []
     seen = set()
     for feature in payload.get("features", []):
@@ -127,8 +142,15 @@ def _parse_regions(payload: dict[str, Any], expected: RoiContext) -> list[Viewer
             raise ValueError("ROI coordinates must lie on native integer pixel edges")
         x0, y0 = rounded.min(axis=0)
         x1, y1 = rounded.max(axis=0)
-        if not 256 <= x1 - x0 <= 1024 or x1 - x0 != y1 - y0:
-            raise ValueError("Use square HITL crops of 256–1024 native pixels")
+        height, width = int(y1 - y0), int(x1 - x0)
+        if min(height, width) < 256:
+            raise ValueError(
+                "HITL crops must be at least 256 native pixels on each axis"
+            )
+        if regions_version == 1 and (width != height or width > 1024):
+            raise ValueError(
+                "Legacy HITL files require square crops of 256–1024 pixels"
+            )
         if x0 < 0 or y0 < 0 or x1 > expected.width or y1 > expected.height:
             raise ValueError("HITL regions must lie inside the native image")
         corners = {(x0, y0), (x1, y0), (x1, y1), (x0, y1)}
@@ -155,14 +177,23 @@ def _parse_regions(payload: dict[str, Any], expected: RoiContext) -> list[Viewer
         ):
             raise ValueError("Move the crop completely inside a valid tile-core guide")
         if any(
-            y0 < other.y0 + other.size
+            y0 < other.y0 + other.height_px
             and y1 > other.y0
-            and x0 < other.x0 + other.size
+            and x0 < other.x0 + other.width_px
             and x1 > other.x0
             for other in regions
         ):
             raise ValueError("Viewer-selected HITL crops cannot overlap")
-        regions.append(ViewerRegion(roi_id, int(y0), int(x0), int(x1 - x0)))
+        regions.append(
+            ViewerRegion(
+                roi_id,
+                int(y0),
+                int(x0),
+                width if width == height else expected.crop_size_px,
+                height=height,
+                width=width,
+            )
+        )
     if not regions:
         raise ValueError("Select at least one HITL crop")
     return regions
@@ -208,6 +239,7 @@ def write_viewer_regions(
     payload = {
         "type": "FeatureCollection",
         "coordinate_system": "native_pixels",
+        "merxen_hitl_regions_version": 2,
         "merxen_hitl_context": asdict(context),
         "features": features,
     }

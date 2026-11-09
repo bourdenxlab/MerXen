@@ -90,12 +90,10 @@ the source data need not be accessible to the ROI helper itself.
 
 ### Select locations
 
-Start the existing viewer in its usual environment, making the current MerXen
-checkout available to its Python console:
+Start the current viewer in its usual environment:
 
 ```bash
-PYTHONPATH="<current-MerXen-checkout>/src" \
-  napari-compare-xenium-merscope --atera-zarr "<completed-store.zarr>" \
+napari-compare-xenium-merscope --atera-zarr "<completed-store.zarr>" \
   --skip-transcripts
 ```
 
@@ -104,36 +102,37 @@ stains and display the Cellpose segmentation (`MOSAIK_cellpose` /
 `cellpose_cell_labels`); the viewer initially shows vendor masks for Atera.
 Transcript loading is unnecessary for crop selection.
 
-Open napari's Python console and run, replacing the context path:
+Choose **HITL seg crops** in the viewer's right-hand controls. No Python console
+or MerXen installation in the viewer environment is needed.
+
+1. Click **Load crop setup…** and select `roi_context.json`. The viewer checks
+   the source identity and remembers matching setups. It also discovers a
+   `merxen_hitl_roi_context.json` inside the store or `roi_context.json` beside it.
+2. With the native `morphology_focus` image visible, click **Add rectangular crop**,
+   then click and drag to draw one crop. Press the button again for each new crop.
+3. Select a crop in the list to move or resize it. Width and height are free,
+   with a minimum of 256 native pixels on each axis. Keep each rectangle entirely
+   inside one cyan guide and keep crops separate. The guides preserve the
+   full-tile normalization context; crossing them is refused on export.
+4. The list shows each crop's estimated Cellpose cell count. The total counts
+   unique nonzero Cellpose labels touching the crops and turns green between
+   800 and 1,200. Counts read selected mask windows in the background; no
+   transcript scan is required. Missing masks are reported rather than replaced
+   with vendor counts. This is a prefill estimate, not the final corrected count.
+5. Choose representative tissue as well as difficult areas, then click **Save
+   crop regions…** to save a new `.geojson` outside the source store. Existing
+   files are preserved. Save before closing the viewer.
+
+The general cortical-depth/object annotation buttons are not used here; those
+tools serve other analyses and are disabled for Atera. The crop tab does not
+modify the SpatialData store.
+Aligned, reflected, shifted and native-pixel-unit image views are refused.
+
+The older console helper remains available for programmatic square selection:
 
 ```python
 from merxen.segmentation.hitl.viewer import add_roi_picker
 
-picker = add_roi_picker(viewer, "roi_context.json")
-```
-
-The **HITL crop selection** dock adds independent crop and guide layers:
-
-1. Choose the native `morphology_focus` image in the dock's image selector.
-2. Pan/zoom to a location you want to correct and click **Add crop at view centre**.
-   It places a fixed-size square at the nearest valid tile position.
-3. Drag the square to refine its position. Keep each crop completely inside
-   one cyan guide and keep crops separate. The guides preserve the full-tile
-   normalization context; crossing their boundaries is refused on export.
-4. Repeat for other regions. Choose representative tissue as well as difficult
-   areas; selected crops remain pilot training material.
-5. Click **Save crop regions…** and save a new `.geojson` file. The helper checks
-   the native micron frame, square geometry, overlap and tile margins. Existing
-   ROI files are preserved; choose a new filename for a revised selection.
-
-The general cortical-depth/object annotation buttons are not used here; those
-tools serve other analyses and are disabled for Atera. This dedicated helper
-requires no viewer-repository changes and does not modify the SpatialData store.
-Aligned, reflected, shifted and native-pixel-unit image views are refused.
-
-To reopen a previous set in a fresh viewer session:
-
-```python
 picker = add_roi_picker(viewer, "roi_context.json", regions_path="hitl-regions.geojson")
 ```
 
@@ -152,6 +151,10 @@ baseline-grid settings the same as when the context was prepared. Then run:
 ```bash
 merxen cellpose-hitl-export --config selected-pilot.json
 ```
+
+Use the rectangle-enabled exporter for the native viewer's version-two region
+files; older square-only exporters refuse free rectangles. Existing square
+region files and automatic square crops remain supported.
 
 The file binds selections to the source and tile-grid checksums. Coordinates
 are saved as GeoJSON `(x, y)` in native level-zero pixels; the helper/exporter

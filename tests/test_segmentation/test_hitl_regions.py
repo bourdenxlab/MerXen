@@ -152,3 +152,24 @@ def test_another_platforms_morphology_image_is_refused(context: RoiContext) -> N
     image.name = "XENIUM morphology_focus DAPI"
     with pytest.raises(ValueError, match="native morphology_focus"):
         validate_native_viewer_image(image, context)
+
+
+def test_version_two_rectangles_preserve_both_dimensions(
+    context: RoiContext, tmp_path: Path
+) -> None:
+    path = tmp_path / "rectangles.geojson"
+    rectangle = np.array([[100, 100], [100, 600], [400, 600], [400, 100]], float)
+    write_viewer_regions(path, context, [rectangle])
+    payload = json.loads(path.read_text())
+    assert payload["merxen_hitl_regions_version"] == 2
+    region = read_viewer_regions(path, context)[0]
+    assert (region.y0, region.x0, region.height_px, region.width_px) == (
+        100,
+        100,
+        300,
+        500,
+    )
+    payload.pop("merxen_hitl_regions_version")
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="Legacy HITL"):
+        read_viewer_regions(path, context)

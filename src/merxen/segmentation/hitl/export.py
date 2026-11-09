@@ -64,12 +64,24 @@ class TileNormalization(TypedDict):
 
 
 class CropBox(BaseModel):
-    """A square annotation crop in native level-zero image pixels."""
+    """A native-pixel crop, with legacy size-only squares still supported."""
 
     y0: int = Field(ge=0)
     x0: int = Field(ge=0)
-    size: int = Field(ge=256, le=1024)
+    size: int = Field(default=768, ge=256, le=1024)
+    height: int | None = Field(default=None, ge=256)
+    width: int | None = Field(default=None, ge=256)
     roi_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
+
+    @property
+    def height_px(self) -> int:
+        """Return height in pixels, falling back to the legacy square size."""
+        return self.height if self.height is not None else self.size
+
+    @property
+    def width_px(self) -> int:
+        """Return width in pixels, falling back to the legacy square size."""
+        return self.width if self.width is not None else self.size
 
 
 class HitlExportConfig(BaseModel):
@@ -358,16 +370,18 @@ def _choose_boxes(
                 for i, tile in enumerate(tiles)
                 if box.y0 >= tile["core_y0"] + config.margin_px
                 and box.x0 >= tile["core_x0"] + config.margin_px
-                and box.y0 + box.size <= tile["core_y1"] - config.margin_px
-                and box.x0 + box.size <= tile["core_x1"] - config.margin_px
+                and box.y0 + box.height_px <= tile["core_y1"] - config.margin_px
+                and box.x0 + box.width_px <= tile["core_x1"] - config.margin_px
             ]
             if len(owners) != 1:
                 raise ValueError(
                     "Each crop must lie inside one tile core with the requested margin"
                 )
             if any(
-                abs(box.y0 - other.y0) < max(box.size, other.size)
-                and abs(box.x0 - other.x0) < max(box.size, other.size)
+                box.y0 < other.y0 + other.height_px
+                and box.y0 + box.height_px > other.y0
+                and box.x0 < other.x0 + other.width_px
+                and box.x0 + box.width_px > other.x0
                 for other, _ in result
             ):
                 raise ValueError("Explicit annotation crops overlap")
@@ -427,7 +441,11 @@ def _save_overview(
     for index, (box, _) in enumerate(boxes, 1):
         axes.add_patch(
             Rectangle(
-                (box.x0, box.y0), box.size, box.size, fill=False, edgecolor="cyan"
+                (box.x0, box.y0),
+                box.width_px,
+                box.height_px,
+                fill=False,
+                edgecolor="cyan",
             )
         )
         axes.text(box.x0, box.y0, str(index), color="cyan")
@@ -577,7 +595,13 @@ def export_annotation_pilot(config: HitlExportConfig) -> HitlExportResult:
     selection_config = config
     if config.roi_geojson_path is not None:
         boxes = [
-            CropBox(y0=box.y0, x0=box.x0, size=box.size, roi_id=box.roi_id)
+            CropBox(
+                y0=box.y0,
+                x0=box.x0,
+                height=box.height_px,
+                width=box.width_px,
+                roi_id=box.roi_id,
+            )
             for box in read_viewer_regions(config.roi_geojson_path, roi_context)
         ]
         selection_config = config.model_copy(update={"boxes": boxes})
@@ -619,7 +643,12 @@ def export_annotation_pilot(config: HitlExportConfig) -> HitlExportResult:
             if owner != tile_index:
                 continue
             crop_id = f"{config.dataset_alias}_pilot_{crop_index:03d}"
-            y0, y1, x0, x1 = box.y0, box.y0 + box.size, box.x0, box.x0 + box.size
+            y0, y1, x0, x1 = (
+                box.y0,
+                box.y0 + box.height_px,
+                box.x0,
+                box.x0 + box.width_px,
+            )
             local_y, local_x = y0 - tile["tile_y0"], x0 - tile["tile_x0"]
             raw = np.asarray(
                 native.data[:, y0:y1, x0:x1].compute()
@@ -663,7 +692,8 @@ def export_annotation_pilot(config: HitlExportConfig) -> HitlExportResult:
                 output / "model_input" / f"{crop_id}.npy",
                 np.moveaxis(
                     normalized[
-                        local_y : local_y + box.size, local_x : local_x + box.size
+                        local_y : local_y + box.height_px,
+                        local_x : local_x + box.width_px,
                     ],
                     -1,
                     0,

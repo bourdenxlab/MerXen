@@ -276,6 +276,36 @@ def test_viewer_selections_export_exact_prefilled_crops_and_keep_roi_ids(
     assert not config.output_dir.exists()
 
 
+def test_viewer_rectangle_exports_exact_halo_crop_and_prefill(
+    pilot_config: HitlExportConfig, tmp_path: Path
+) -> None:
+    from merxen.segmentation.hitl.regions import write_viewer_regions
+
+    context = prepare_viewer_roi_context(pilot_config, tmp_path / "context.json")
+    rois = tmp_path / "rectangles.geojson"
+    write_viewer_regions(
+        rois,
+        context,
+        [np.array([[64, 64], [64, 576], [384, 576], [384, 64]], float)],
+    )
+    config = pilot_config.model_copy(update={"boxes": None, "roi_geojson_path": rois})
+    result = export_annotation_pilot(config)
+    row = json.loads((result.output_dir / "manifest.json").read_text())["crops"][0]
+    crop_id = row["crop_id"]
+    assert row["bbox_y0_y1_x0_x1"] == [64, 384, 64, 576]
+    assert tifffile.imread(result.output_dir / f"{crop_id}.tif").shape == (2, 320, 512)
+    saved = np.load(result.output_dir / f"{crop_id}_seg.npy", allow_pickle=True).item()
+    assert saved["masks"].shape == (320, 512)
+    source = sd.read_zarr(config.source_zarr, selection=("images",))
+    native = source.images["morphology_focus"].data.compute()
+    _, prepared, _ = prepare_cellpose_input(np.moveaxis(native[:, :736, :736], 0, -1))
+    normalized, _ = normalize_training_tile(prepared)
+    np.testing.assert_array_equal(
+        np.load(result.output_dir / "model_input" / f"{crop_id}.npy"),
+        np.moveaxis(normalized[64:384, 64:576], -1, 0),
+    )
+
+
 def test_roi_context_cannot_be_written_into_a_source_store(
     pilot_config: HitlExportConfig,
 ) -> None:
