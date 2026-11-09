@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 import zarr
 
-from merxen.annotation.prediction_metadata import (
+from merxen.io.annotation_predictions import (
     PREDICTION_FIELDS,
     enrich_observations,
     enrich_store,
@@ -112,7 +112,7 @@ def test_store_enrichment_changes_only_observations_and_is_repeatable(
 def test_failed_replacement_rolls_back_previously_changed_tables(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from merxen.annotation import prediction_metadata as module
+    from merxen.io import annotation_predictions as module
 
     seaad, whb = _inputs(tmp_path)
     store = _store(tmp_path)

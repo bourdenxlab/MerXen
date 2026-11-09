@@ -37,7 +37,7 @@ downstream table publication. Earlier runs already retain the alternatives in
 To enrich an existing store's explicitly chosen tables, close readers and run:
 
 ```bash
-python -m merxen.annotation.prediction_metadata \
+python -m merxen.io.annotation_predictions \
   --store "$MERXEN_VIEWER_STORE" \
   --table "$MERXEN_VIEWER_TABLE" \
   --seaad-resolved "$MERXEN_SEAAD_RESOLVED" \
