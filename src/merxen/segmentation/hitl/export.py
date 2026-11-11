@@ -346,7 +346,12 @@ def viewer_export_settings(config: HitlExportConfig) -> ViewerExportSettings:
     path = config.transcript_density_path
     from merxen.segmentation.density_storage import has_embedded_density
 
-    if path is None and has_embedded_density(config.source_zarr):
+    if (
+        "channels" in config.model_fields_set
+        and "transcript_density" not in config.channels
+    ):
+        path, density = None, None
+    elif path is None and has_embedded_density(config.source_zarr):
         path = config.source_zarr
     if path is None and density:
         path = Path(density["raster_path"])
@@ -570,7 +575,12 @@ def export_annotation_pilot(config: HitlExportConfig) -> HitlExportResult:
     density_path = config.transcript_density_path
     from merxen.segmentation.density_storage import has_embedded_density
 
-    if density_path is None and has_embedded_density(config.source_zarr):
+    if (
+        "channels" in config.model_fields_set
+        and "transcript_density" not in config.channels
+    ):
+        density_path, density_identity = None, None
+    elif density_path is None and has_embedded_density(config.source_zarr):
         density_path = config.source_zarr
     if density_path is None and density_identity:
         density_path = Path(density_identity["raster_path"])

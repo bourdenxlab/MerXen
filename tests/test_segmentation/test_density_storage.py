@@ -50,6 +50,24 @@ def test_embedded_density_is_independent_and_reusable_without_regeneration(
     assert DENSITY_IMAGE_KEY in sd.read_zarr(source, selection=("images",)).images
     assert _files(source / "images/morphology_focus") == image_before
     assert _files(source / "points") == points_before
+    from merxen.segmentation.hitl.export import HitlExportConfig, viewer_export_settings
+
+    stats = density_config.output_dir / "baseline.json"
+    stats.write_text("{}")
+    pilot = HitlExportConfig(
+        source_zarr=source,
+        baseline_stats_path=stats,
+        output_dir=density_config.output_dir.with_name("pilot"),
+        protected_roots=[source],
+    )
+    settings = viewer_export_settings(pilot)
+    assert settings["model_channels"] == ["DAPI", "18S", "transcript_density"]
+    assert settings["transcript_density"]["fingerprint"] == record["fingerprint"]
+    legacy = viewer_export_settings(
+        pilot.model_copy(update={"channels": ["DAPI", "18S"]})
+    )
+    assert legacy["model_channels"] == ["DAPI", "18S"]
+    assert legacy["transcript_density"] is None
     before = _files(source)
 
     def refuse_regeneration(*args: object, **kwargs: object) -> None:
