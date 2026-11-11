@@ -1,4 +1,12 @@
 {
+  "L0/ATERA": "{\"dataset_name\":\"PAIR_A_ATERA\",\"platform\":\"ATERA\",\"latest_zarr_path\":\"latest_input.zarr\",\"mask_path\":null,\"nuclei_mask_path\":null,\"original_data_path\":\"source_spatialdata.zarr\",\"output_dir\":\"enrich_out\",\"persistent_output_path\":\"<WORK>/results/PAIR_A/atera/latest/latest_spatialdata.zarr\",\"transform_path\":null,\"segmentation_source\":\"native\",\"transcript_density_source_path\":\"source_spatialdata.zarr\"}",
+  "L0/ATERA/blank_fields/restart_latest_zarr": "null",
+  "L0/ATERA/blank_inputs/restart_latest_zarr": "null",
+  "L0/ATERA/dir_only/restart_latest_zarr": "null",
+  "L0/ATERA/dir_spatialdata_spec/restart_latest_zarr": "null",
+  "L0/ATERA/missing_inputs/restart_latest_zarr": "null",
+  "L0/ATERA/other_platform_fields/restart_latest_zarr": "null",
+  "L0/ATERA/spatialdata_only/restart_latest_zarr": "null",
   "L0/MERSCOPE": "{\"dataset_name\":\"PAIR_A_MERSCOPE\",\"platform\":\"MERSCOPE\",\"latest_zarr_path\":\"latest_input.zarr\",\"mask_path\":\"enrich_input_mask.npy\",\"nuclei_mask_path\":\"enrich_input_nuclei_mask.npy\",\"original_data_path\":\"source_spatialdata.zarr\",\"output_dir\":\"enrich_out\",\"persistent_output_path\":\"<WORK>/results/PAIR_A/merscope/latest/latest_spatialdata.zarr\",\"transform_path\":null}",
   "L0/MERSCOPE/bead_removal/restart_latest_zarr": "null",
   "L0/MERSCOPE/bead_removal_off/restart_latest_zarr": "null",

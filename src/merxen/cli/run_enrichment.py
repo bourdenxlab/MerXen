@@ -36,6 +36,8 @@ def enrich_command(config_path: Path, force_rerun: bool) -> None:
         dataset_name=cfg.dataset_name,
         latest_path=enriched_path,
         force_rerun=force_rerun,
+        platform=cfg.platform,
+        segmentation_source=cfg.segmentation_source,
     )
 
     cfg.output_dir.mkdir(parents=True, exist_ok=True)

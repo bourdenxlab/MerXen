@@ -21,6 +21,12 @@ dependencies:
       - python-igraph==0.10.4
       - leidenalg==0.9.1
       - umap-learn==0.5.3
+      # Transitive pins: pynndescent 0.7 (via umap-learn) fails to compile its
+      # parallel subtree builder under numba 0.55 once a dataset is large
+      # enough for deferred subtrees (about 90k cells), so a fresh env broke.
+      - pynndescent==0.5.13
+      - numba==0.55.2
+      - llvmlite==0.38.1
       - multianndata==0.0.4
       - urllib3==1.26.12
       - MENDER @ git+https://github.com/yuanzhiyuan/MENDER.git@b29dc5ea352a2762cb7bf49d44ee661f0009f694

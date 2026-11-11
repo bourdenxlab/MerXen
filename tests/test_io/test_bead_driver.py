@@ -128,7 +128,9 @@ def test_worker_count_rules(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert count(8, memory_available_gb=float("inf"), rss_per_worker_gb=11, cpus=3) == 3
     # CPUs: the affinity mask (not the host), the cgroup quota, DASK_NUM_WORKERS.
-    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(4)))
+    monkeypatch.setattr(
+        os, "sched_getaffinity", lambda pid: set(range(4)), raising=False
+    )
     monkeypatch.setattr(driver, "cgroup_cpu_limit", lambda *a, **k: None)
     monkeypatch.delenv("DASK_NUM_WORKERS", raising=False)
     assert driver.available_cpu_count() == 4
@@ -139,6 +141,9 @@ def test_worker_count_rules(monkeypatch: pytest.MonkeyPatch) -> None:
     assert driver.available_cpu_count() == 4
     monkeypatch.setattr(driver, "cgroup_cpu_limit", lambda *a, **k: 3)
     assert driver.available_cpu_count() == 3
+    monkeypatch.delattr(os, "sched_getaffinity")
+    monkeypatch.setattr(os, "cpu_count", lambda: 2)
+    assert driver.available_cpu_count() == 2
 
 
 def test_worker_count_warns_when_memory_fits_no_worker(

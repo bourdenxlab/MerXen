@@ -3,6 +3,11 @@ nextflow.enable.dsl = 2
 include { BUILD_SPATIALDATA } from "./modules/spatialdata_build"
 include { ENSURE_PROSEG } from "./modules/proseg_bootstrap"
 include { CELLPOSE_NUCLEI_SEGMENT; SEGMENT } from "./modules/segmentation"
+include { NATIVE_LATEST } from "./modules/native_segmentation"
+include { ATERA_PROSEG_PLAN; ATERA_PROSEG_PLAN_CELLPOSE; ATERA_PROSEG_TILE; ATERA_PROSEG_STITCH } from "./modules/atera_proseg"
+include { ATERA_CELLPOSE_SEGMENT } from "./modules/atera_cellpose"
+include { ATERA_TRANSCRIPT_DENSITY } from "./modules/atera_transcript_density"
+include { CELLPOSE_HITL_TRAIN; CELLPOSE_HITL_SEED } from "./modules/cellpose_hitl"
 include { ENRICH } from "./modules/enrichment"
 include { VIEWER_CACHE } from "./modules/viewer_cache"
 include { MASK_IMAGE_QUANTIFICATION } from "./modules/mask_image_quantification"
@@ -17,7 +22,7 @@ include { ALIGN; MATERIALIZE_ALIGNMENT; ALIGN_QC } from "./modules/alignment"
 include { COMPARE } from "./modules/comparison"
 include { VISUALIZE } from "./modules/visualization"
 include { SPATIAL_GENE_ANALYSIS } from "./modules/spatial_gene_analysis"
-include { MECR_REFERENCE; MECR } from "./modules/mecr"
+include { MECR_REFERENCE; MECR_REFERENCE_ATERA; MECR } from "./modules/mecr"
 include {
     CLUSTERING_SQUIDPY_PREPARE;
     CLUSTERING_SQUIDPY_COMPUTE;
@@ -43,6 +48,11 @@ include {
     GASTON_POSTPROCESS;
     GASTON_IMPORT
 } from "./modules/gaston"
+// rca-hook:H1: reference-based annotation (plan §2.4); nothing runs in legacy mode.
+include { ANNOTATION_PREPARE_ONLY } from "./subworkflows/annotation_references"
+include { CLUSTERING_MAP_FIRST } from "./subworkflows/clustering_map_first"
+include { HIPPOCAMPAL_ANNOTATION; HIPPOCAMPAL_REPORT; HIPPOCAMPAL_REFERENCE as HIPPOCAMPAL_PREPARE_ONLY } from "./subworkflows/hippocampal_annotation"
+include { ANNOTATION_REPORTING } from "./subworkflows/annotation_report"
 
 def parseChannels(rawValue, defaults) {
     if (rawValue == null) {
@@ -171,18 +181,204 @@ def activePlatformsForMode(analysisMode) {
     throw new IllegalArgumentException("Unknown analysis mode: ${analysisMode}")
 }
 
+// Where the cells of a row come from (plan AT-6): "native" keeps the vendor
+// segmentation (ATERA), "native_proseg" also adds ProSeg cells refined from
+// the vendor masks (ATERA, AT-9; no Cellpose; layer proseg_vendor),
+// "cellpose_only" runs Cellpose without ProSeg (reserved; no platform allows
+// it), "cellpose_proseg" refines Cellpose masks with ProSeg: the
+// XENIUM/MERSCOPE route and, tiled on DAPI + 18S Cellpose masks, the ATERA
+// route of AT-7 (layers reseg and proseg_mask beside the vendor original_seg).
+// null or blank means the platform default of the registry. The bare word
+// "proseg" keeps meaning cellpose_proseg.
+def normalizeSegmentationSource(rawValue) {
+    if (rawValue == null || !rawValue.toString().trim()) {
+        return null
+    }
+    def key = rawValue
+        .toString()
+        .trim()
+        .toLowerCase()
+        .replaceAll(/[^a-z0-9]+/, "_")
+        .replaceAll(/^_+|_+$/, "")
+    def aliases = [
+        "native": "native",
+        "vendor": "native",
+        "instrument": "native",
+        "native_proseg": "native_proseg",
+        "vendor_proseg": "native_proseg",
+        "instrument_proseg": "native_proseg",
+        "cellpose": "cellpose_only",
+        "cellpose_only": "cellpose_only",
+        "proseg": "cellpose_proseg",
+        "cellpose_proseg": "cellpose_proseg",
+    ]
+    if (!aliases.containsKey(key)) {
+        throw new IllegalArgumentException(
+            "Unknown segmentation_source '${rawValue}'. Valid values: " +
+            "native, native_proseg, cellpose_only, cellpose_proseg"
+        )
+    }
+    return aliases[key]
+}
+
+// The segmentation source of a row: its samplesheet value, else
+// --segmentation_source, else the registry default of its platforms. It must
+// be one the registry allows for every active platform.
+def segmentationSourceForRow(row, activePlatforms, params) {
+    def requested = normalizeSegmentationSource(
+        rowFieldOrDefault(row, "segmentation_source", params.segmentation_source)
+    )
+    def specs = activePlatforms.collect { platform -> PlatformSpec.forName(platform) }
+    def source = requested
+    if (source == null) {
+        def defaults = specs.collect { spec -> spec.defaultSegmentationSource }.unique()
+        if (defaults.size() != 1) {
+            throw new IllegalArgumentException(
+                "Samplesheet row ${row.pair_id} needs a segmentation_source: its " +
+                "platforms ${activePlatforms.join(', ')} have different defaults " +
+                "(${defaults.join(', ')})"
+            )
+        }
+        source = defaults[0]
+    }
+    specs.each { spec ->
+        if (!spec.segmentationSources.contains(source)) {
+            throw new IllegalArgumentException(
+                "segmentation_source=${source} is not available for ${spec.name} " +
+                "rows yet; ${spec.name} supports: ${spec.segmentationSources.join(', ')}"
+            )
+        }
+    }
+    return source
+}
+
+// Analysis layers a segmentation source produces
+// (merxen.platforms.segmentation_layers). With platforms, a platform without
+// the hybrid layer (ATERA) drops proseg_hybrid; null gives the
+// platform-independent list.
+def availableSegmentationLayers(segmentationSource, platforms = null) {
+    def layers = [
+        "native": ["original_seg"],
+        "native_proseg": ["proseg_vendor", "original_seg"],
+        "cellpose_proseg": ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"],
+        "cellpose_only": ["proseg_mask", "original_seg"],
+    ]
+    if (!layers.containsKey(segmentationSource)) {
+        throw new IllegalArgumentException(
+            "Unknown segmentation source: ${segmentationSource}"
+        )
+    }
+    def available = layers[segmentationSource]
+    def withoutHybrid = (platforms ?: []).any { platform ->
+        !PlatformSpec.forName(platform).prosegHybrid
+    }
+    if (withoutHybrid) {
+        available = available.findAll { layer -> layer != "proseg_hybrid" }
+    }
+    return available
+}
+
+// Sources whose original layer is the vendor segmentation: their segment stage
+// is NATIVE_LATEST and no Cellpose nuclei stage runs
+// (merxen.platforms.uses_vendor_segmentation).
+def usesVendorSegmentation(segmentationSource) {
+    return segmentationSource in ["native", "native_proseg"]
+}
+
+// Whether a row builds its latest store with NATIVE_LATEST: vendor sources,
+// and every ATERA route (registry nativeLatestBase), so the vendor
+// original_seg layer of an ATERA cellpose_proseg row comes from it too
+// (merxen.platforms.uses_native_latest).
+def usesNativeLatest(segmentationSource, platforms) {
+    return usesVendorSegmentation(segmentationSource) || (platforms ?: []).any { platform ->
+        PlatformSpec.forName(platform).nativeLatestBase
+    }
+}
+
+// Whether a row runs the tiled ATERA ProSeg route (plan, tiles, stitch): the
+// vendor prior (native_proseg, AT-9) or ATERA Cellpose masks (cellpose_proseg,
+// AT-7).
+def runsAteraProseg(segmentationSource, platforms) {
+    if (segmentationSource == "native_proseg") {
+        return true
+    }
+    return segmentationSource == "cellpose_proseg" && (platforms ?: []).contains("ATERA")
+}
+
+// Whether a row runs Cellpose on the ATERA morphology image (DAPI + 18S, AT-7).
+def runsAteraCellpose(segmentationSource, platforms) {
+    return segmentationSource == "cellpose_proseg" && (platforms ?: []).contains("ATERA")
+}
+
+// Keep the layers a source has (AT-6 rule): a default or group value ("all",
+// a global param) falls back to the layers the source has, adding a note on
+// what was dropped (the workflow logs the notes of each row); a samplesheet
+// value naming a layer the source lacks is an error. A default that keeps no
+// layer at all (the MENDER default proseg_hybrid) resolves to every layer the
+// source has (AT-9; native has one). The layers are those of the row's
+// platforms (ATERA has no proseg_hybrid, AT-7). A group value drops
+// proseg_vendor, the layer of the native_proseg route only, without a note
+// (XENIUM and MERSCOPE rows keep their notes as they were). `strict` is a
+// boolean (every missing layer is an error) or the list of layers the row
+// named explicitly: only those are errors, so a group word mixed with names
+// ("all,original_seg") still falls back for the members the source lacks.
+// Kept layers stay in the order asked. null returns `selected` as is.
+def filterSegmentationsForSource(
+    selected,
+    segmentationSource,
+    strict,
+    label,
+    pairId,
+    notes,
+    platforms = null
+) {
+    if (segmentationSource == null) {
+        return selected
+    }
+    def available = availableSegmentationLayers(segmentationSource, platforms)
+    def missing = selected.findAll { segmentation -> !available.contains(segmentation) }
+    if (!missing) {
+        return selected
+    }
+    def missingNamed = strict instanceof Collection
+        ? missing.findAll { segmentation -> strict.contains(segmentation) }
+        : (strict ? missing : [])
+    if (missingNamed) {
+        throw new IllegalArgumentException(
+            "${label}=${missingNamed.join(',')} for ${pairId} is not available with " +
+            "segmentation_source=${segmentationSource}; available: " +
+            "${available.join(', ')}"
+        )
+    }
+    def kept = selected.findAll { segmentation -> available.contains(segmentation) }
+    if (!kept) {
+        kept = available
+    }
+    def asked = selected.findAll { segmentation -> segmentation != "proseg_vendor" }
+    if (asked != kept) {
+        notes << (
+            "${label} ${asked.join(', ')} resolves to ${kept.join(', ')} " +
+            "(segmentation_source=${segmentationSource} has ${available.join(', ')})"
+        )
+    }
+    return kept
+}
+
 def normalizeAnalysisSegmentation(rawValue) {
     def raw = rawValue == null ? "all" : rawValue.toString().trim()
     if (!raw) {
         raw = "all"
     }
     def aliases = [
-        "both": ["reseg", "original_seg"],
-        "all": ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"],
+        "both": ["reseg", "proseg_vendor", "original_seg"],
+        "all": ["reseg", "proseg_vendor", "original_seg", "proseg_mask", "proseg_hybrid"],
         "reseg": ["reseg"],
         "resegmented": ["reseg"],
         "proseg": ["reseg"],
         "mosaik": ["reseg"],
+        "proseg_vendor": ["proseg_vendor"],
+        "vendor_proseg": ["proseg_vendor"],
+        "native_proseg": ["proseg_vendor"],
         "proseg_mask": ["proseg_mask"],
         "cellpose": ["proseg_mask"],
         "cellpose_mask": ["proseg_mask"],
@@ -211,7 +407,7 @@ def normalizeAnalysisSegmentation(rawValue) {
                 throw new IllegalArgumentException(
                     "Unknown analysis_segmentation '${value}'. Valid values: " +
                     "both, all, reseg, original_seg, proseg_mask, " +
-                    "cellpose, proseg_hybrid"
+                    "cellpose, proseg_hybrid, proseg_vendor"
                 )
             }
             aliases[key].each { segmentation ->
@@ -233,10 +429,12 @@ def normalizeMenderSegmentations(rawValue) {
         ? rawValue
         : rawValue.toString().split(",")
     def aliases = [
-        "all": ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"],
+        "all": ["reseg", "proseg_vendor", "original_seg", "proseg_mask", "proseg_hybrid"],
         "reseg": ["reseg"],
         "resegmented": ["reseg"],
         "proseg": ["reseg"],
+        "proseg_vendor": ["proseg_vendor"],
+        "vendor_proseg": ["proseg_vendor"],
         "original": ["original_seg"],
         "original_seg": ["original_seg"],
         "instrument": ["original_seg"],
@@ -260,7 +458,7 @@ def normalizeMenderSegmentations(rawValue) {
         if (!aliases.containsKey(key)) {
             throw new IllegalArgumentException(
                 "Unknown mender segmentation '${value}'. Valid values: " +
-                "all, reseg, original_seg, proseg_mask, proseg_hybrid"
+                "all, reseg, original_seg, proseg_mask, proseg_hybrid, proseg_vendor"
             )
         }
         aliases[key].each { segmentation ->
@@ -273,6 +471,51 @@ def normalizeMenderSegmentations(rawValue) {
         throw new IllegalArgumentException("mender_segmentations must not be empty")
     }
     return selected
+}
+
+// The layers a samplesheet value names explicitly: every token but the group
+// words "all" and "both", normalised by `normalizer` (null: none named).
+def explicitlyNamedSegmentations(rawValue, normalizer) {
+    if (rawValue == null) {
+        return []
+    }
+    def named = []
+    rawValue.toString().split(",").each { token ->
+        def key = token.trim().toLowerCase()
+        if (!key || key in ["all", "both"]) {
+            return
+        }
+        normalizer.call(key).each { segmentation ->
+            if (!named.contains(segmentation)) {
+                named << segmentation
+            }
+        }
+    }
+    return named
+}
+
+// The layers of a row setting (analysis_segmentation, mender_segmentations):
+// `value` (the row's value, else the global param) normalised and filtered for
+// the row's source; only the layers the samplesheet value names are strict.
+def resolveRowSegmentations(
+    rowValue,
+    value,
+    normalizer,
+    segmentationSource,
+    label,
+    pairId,
+    notes,
+    platforms
+) {
+    return filterSegmentationsForSource(
+        normalizer.call(value),
+        segmentationSource,
+        explicitlyNamedSegmentations(rowValue, normalizer),
+        label,
+        pairId,
+        notes,
+        platforms,
+    )
 }
 
 def normalizeGastonSegmentations(rawValue) {
@@ -505,6 +748,21 @@ def segmentMetaForPlatform(row, platform, params) {
         ]
     }
 
+    // ATERA cellpose_proseg rows (AT-7): Cellpose on the native morphology image
+    // of the built store, DAPI + 18S as on XENIUM. No transform or spec path:
+    // the pixel size comes from the store's spec sidecars.
+    if (platform == "ATERA") {
+        def spec = PlatformSpec.forName(platform)
+        return extra + [
+            channels: AteraDensitySettings.channels(row, params),
+            image_key: spec.nativeImageKey,
+            voxel_layers: intOrDefault(
+                row.atera_voxel_layers,
+                params.default_atera_voxel_layers
+            ),
+        ]
+    }
+
     throw new IllegalArgumentException("Unknown platform: ${platform}")
 }
 
@@ -524,6 +782,14 @@ def samplesJsonForPlatforms(pairId, platforms, platformPaths = [:]) {
 
 def analysisLayerKeys(platform, segmentation) {
     def spec = PlatformSpec.forName(platform)
+    // The vendor-prior ProSeg layer of native_proseg rows (AT-9, renamed in AT-7).
+    if (segmentation in ["proseg_vendor", "vendor_proseg"]) {
+        def layer = AteraProsegLayers.forKind("vendor")
+        return [
+            table_key: layer.table_key,
+            shape_key: layer.shapes_key,
+        ]
+    }
     if (segmentation in ["proseg", "reseg"]) {
         return [
             table_key: "table_MOSAIK_proseg",
@@ -557,14 +823,18 @@ def analysisLayerKeys(platform, segmentation) {
     throw new IllegalArgumentException("Unknown analysis segmentation: ${segmentation}")
 }
 
-def clusteredSpatialdataTableKey(sourceTableKey, segmentation) {
+// rca-hook:H2: a map_first suffix (plan §4.8) is appended on every path; a null or
+// blank suffix (legacy rows) keeps the unsuffixed key.
+def clusteredSpatialdataTableKey(sourceTableKey, segmentation, suffix = "") {
+    def suffixToken = suffix == null ? "" : suffix.toString().trim()
+    def suffixFragment = suffixToken ? "_${suffixToken}" : ""
     if (segmentation == "reseg" || sourceTableKey == "table_MOSAIK_proseg") {
-        return "table_MOSAIK_proseg_clustering_squidpy"
+        return "table_MOSAIK_proseg_clustering_squidpy${suffixFragment}"
     }
     if (segmentation == "original_seg" || sourceTableKey == "table_original") {
-        return "table_original_clustering_squidpy"
+        return "table_original_clustering_squidpy${suffixFragment}"
     }
-    return "${sourceTableKey}_clustering_squidpy"
+    return "${sourceTableKey}_clustering_squidpy${suffixFragment}"
 }
 
 def gastonConfigJson(
@@ -585,7 +855,9 @@ def gastonConfigJson(
         latest_zarr_path: latestZarr.toString(),
         source_table_key: layerKeys.table_key,
         clustered_table_key: clusteredSpatialdataTableKey(
-            layerKeys.table_key, segmentation,
+            layerKeys.table_key,
+            segmentation,
+            settings.clustering_squidpy_table_key_suffix, // rca-site:H2
         ),
         shape_key: layerKeys.shape_key,
         output_dir: "gaston_out",
@@ -708,6 +980,15 @@ def samplesJsonForSegmentation(pairId, platforms, platformPaths, segmentation) {
             table_key: layerKeys.table_key,
             shape_key: layerKeys.shape_key,
         ]
+        // Whole-transcriptome ATERA panels: no 300-gene panel check, and the
+        // PCA runs on highly variable genes. XENIUM/MERSCOPE samples keep
+        // their JSON (and task hashes).
+        if (platform == "ATERA") {
+            sample.expected_panel_gene_count = null
+            sample.hvg_n_top_genes = params.atera_clustering_hvg_n_top_genes == null
+                ? null
+                : params.atera_clustering_hvg_n_top_genes as int
+        }
         if (platformPaths.containsKey(platform)) {
             sample.zarr_path = platformPaths[platform].toString()
         }
@@ -733,11 +1014,39 @@ def mergeMecrSamplesJson(samplesJsonValues) {
     )
 }
 
+// Whether a MECR sample list belongs to an ATERA row, whose reference streams
+// (MECR_REFERENCE_ATERA). ATERA rows analyse one platform, so no list mixes
+// ATERA with XENIUM or MERSCOPE samples.
+def mecrSamplesUseAteraReference(samplesJson) {
+    def samples = new groovy.json.JsonSlurper().parseText(samplesJson.toString())
+    return samples.any { sample -> sample.platform?.toString() == "ATERA" }
+}
+
+// One reference task over every MECR sample list of a channel (none when it is
+// empty): the atlas for the run's species and the merged sample JSON.
+def mecrReferenceInputs(samplesChannel) {
+    return samplesChannel
+        .map { _pairId, _segmentation, samplesJson -> samplesJson }
+        .collect()
+        .filter { samplesJsonValues -> !samplesJsonValues.isEmpty() }
+        .map { samplesJsonValues ->
+            def referenceAtlas = normalizeSpecies(params.species) == "mouse"
+                ? "wmb"
+                : "whb"
+            tuple(referenceAtlas, mergeMecrSamplesJson(samplesJsonValues))
+        }
+}
+
 def spatialGeneSamplesJson(samplesJson, row) {
     def samples = new groovy.json.JsonSlurper().parseText(samplesJson.toString())
     samples.each { sample ->
         def platform = sample.platform.toString()
-        sample.nuclei_shape_key = "cellpose_nuclei"
+        def sampleSpec = PlatformSpec.forName(platform)
+        // Native rows have no Cellpose nuclei; their vendor nuclei are the
+        // registry's original nucleus shapes.
+        sample.nuclei_shape_key = sampleSpec.defaultSegmentationSource == "native"
+            ? sampleSpec.originalNucleusShapeKey
+            : "cellpose_nuclei"
         sample.pial_boundary_path = optionalNormalizedPathString(
             corticalDepthAnnotationPath(row, platform, "pial")
         )
@@ -775,7 +1084,7 @@ def corticalDepthConfigForPlatform(
             segmentation: segmentation,
             table_key: layerKeys.table_key,
             shape_key: layerKeys.shape_key,
-        ]
+        ] + AnnotationSettings.clusteredTableFields(row, params) // rca-site:H2
     }
     return [
         dataset_name: "${pairId}_${platform}",
@@ -882,6 +1191,8 @@ def normalizeStage(rawValue, paramName) {
         "spatialdata_build": "build_spatialdata",
         "segment": "segment",
         "segmentation": "segment",
+        "train_cellpose": "train_cellpose",
+        "cellpose_hitl_train": "train_cellpose",
         "segment_nuclei": "segment_nuclei",
         "nuclei_segment": "segment_nuclei",
         "cellpose_nuclei": "segment_nuclei",
@@ -966,9 +1277,21 @@ def activeStageOrder(
     menderEnabled,
     registerImagesEnabled,
     gastonEnabled = false,
-    pciseqEnabled = false
+    pciseqEnabled = false,
+    segmentationSource = "cellpose_proseg",
+    platforms = null,
+    cellposeHitlTrainingEnabled = false
 ) {
     def stages = ["build_spatialdata", "segment_nuclei", "segment", "enrich"]
+    // Native rows and every ATERA row keep the vendor nuclei: "segment" is
+    // NATIVE_LATEST (and, for native_proseg and ATERA cellpose_proseg, the
+    // ATERA Cellpose and tiled ProSeg tasks) and no Cellpose nuclei stage runs.
+    if (usesNativeLatest(segmentationSource, platforms)) {
+        stages = ["build_spatialdata", "segment", "enrich"]
+    }
+    if (cellposeHitlTrainingEnabled) {
+        stages.add(stages.indexOf('segment'), 'train_cellpose')
+    }
     // Registered images join the zarr before the viewer cache and quantification
     // so both see the new channels.
     if (registerImagesEnabled) {
@@ -1023,10 +1346,23 @@ def validateStage(
     paramName,
     alignmentEnabled,
     spatialGeneAnalysisEnabled,
-    menderEnabled
+    menderEnabled,
+    segmentationSource = "cellpose_proseg",
+    ateraRow = false
 ) {
     if (!stages.contains(stage)) {
         def hint = ""
+        if (stage == "segment_nuclei" && usesVendorSegmentation(segmentationSource)) {
+            hint = (
+                " Rows with segmentation_source=${segmentationSource} keep the vendor " +
+                "nuclei and run no Cellpose nuclei stage; use segment (NATIVE_LATEST)."
+            )
+        } else if (stage == "segment_nuclei" && ateraRow) {
+            hint = (
+                " ATERA rows keep the vendor nuclei and run no Cellpose nuclei stage; " +
+                "use segment."
+            )
+        }
         if (stage in ["align", "align_qc"] && !alignmentEnabled) {
             hint = " Pass --enable_alignment true to use alignment stages."
         }
@@ -1053,6 +1389,11 @@ def validateStage(
         }
         if (stage == "pciseq") {
             hint = " Pass --pciseq_enabled true to use pciSeq."
+        }
+        // The enable hints above lead into the ATERA refusal; ATERA rows are
+        // told which stages they run instead (the native nuclei hint stays).
+        if (ateraRow && !(stage in ateraNativeStages()) && stage != "segment_nuclei") {
+            hint = " ATERA rows run only ${ateraNativeStages().join(', ')}."
         }
         throw new IllegalArgumentException(
             "${paramName} '${stage}' is not active for this run.${hint} " +
@@ -1166,6 +1507,11 @@ def findCachedAtlasFilePath(rawCacheDir, referenceAtlas, filename) {
 }
 
 def appendClusteringSquidpyPreflightChecks(errors, settings, params) {
+    // rca-hook:H4: map_first checks (plan §3.7); the checks below are legacy-only.
+    AnnotationPreflight.append(errors, settings, params)
+    if (!AnnotationSettings.isLegacy(settings)) {
+        return
+    }
     def hierarchicalEnabled = effectiveClusteringHierarchicalEnabled(params)
     if (!(settings.run_clustering_squidpy && hierarchicalEnabled)) {
         return
@@ -1471,6 +1817,14 @@ def appendAlignmentAnnotationPreflightChecks(errors, row, settings, params) {
     }
 }
 
+// Whether a platform's transcript spatial patterns run on the label-raster
+// engine (Python selects it when the layer has cell and nucleus label
+// elements: the vendor-label platforms, ATERA). That engine needs no tissue
+// annotations: it derives the tissue from the all-transcript density.
+def transcriptPatternsUseLabelRasters(platform) {
+    return PlatformSpec.forName(platform).defaultSegmentationSource == "native"
+}
+
 def appendSpatialGeneTranscriptPreflightChecks(errors, row, settings, _params) {
     if (
         !settings.run_spatial_gene_analysis ||
@@ -1480,6 +1834,28 @@ def appendSpatialGeneTranscriptPreflightChecks(errors, row, settings, _params) {
     }
     settings.active_platforms.each { platform ->
         def labelPrefix = "SPATIAL_GENE_ANALYSIS ${settings.pair_id}:${platform}"
+        if (transcriptPatternsUseLabelRasters(platform)) {
+            // The label-raster engine derives the tissue from the transcript
+            // density when a row has no annotations; given ones must exist.
+            [
+                annotation: "combined pia/tissue-edge annotation GeoJSON",
+                pial: "pial boundary GeoJSON",
+                side: "tissue-edge GeoJSON",
+                wm: "wm annotation GeoJSON",
+                exclusion: "exclusion annotation GeoJSON",
+                ribbon: "ribbon annotation GeoJSON",
+            ].each { role, description ->
+                def optionalPath = corticalDepthAnnotationPath(row, platform, role)
+                if (!isBlankPath(optionalPath)) {
+                    appendPreflightFileCheck(
+                        errors,
+                        optionalPath,
+                        "${labelPrefix} ${description}",
+                    )
+                }
+            }
+            return
+        }
         def annotationPath = corticalDepthAnnotationPath(row, platform, "annotation")
         if (!isBlankPath(annotationPath)) {
             appendPreflightFileCheck(
@@ -1602,8 +1978,12 @@ def appendMenderPreflightChecks(errors, settings, params) {
                 publishedPairPath(
                     params.outdir,
                     settings.pair_id,
-                    "${segmentation}/clustering_squidpy/" +
-                    "clustering_squidpy_out/${platform.toLowerCase()}/" +
+                    "${segmentation}/" +
+                    AnnotationSettings.publishedClusteringDir(
+                        params.outdir, settings.pair_id, segmentation, platform, sampleId,
+                        settings.clustering_squidpy_table_key_suffix, // rca-site:H2
+                    ) +
+                    "/clustering_squidpy_out/${platform.toLowerCase()}/" +
                     "${sampleId}_clustered.h5ad",
                 )
             )
@@ -1631,6 +2011,7 @@ def appendMenderPreflightChecks(errors, settings, params) {
                 def tableKey = clusteredSpatialdataTableKey(
                     layerKeys.table_key,
                     segmentation,
+                    settings.clustering_squidpy_table_key_suffix, // rca-site:H2
                 )
                 def tablePath = latestZarr.resolve("tables").resolve(tableKey)
                 if (!tablePath.toFile().exists()) {
@@ -1878,8 +2259,12 @@ def appendGastonPreflightChecks(errors, settings, params) {
                 publishedPairPath(
                     params.outdir,
                     settings.pair_id,
-                    "${segmentation}/clustering_squidpy/" +
-                    "clustering_squidpy_out/${platform.toLowerCase()}/" +
+                    "${segmentation}/" +
+                    AnnotationSettings.publishedClusteringDir(
+                        params.outdir, settings.pair_id, segmentation, platform, sampleId,
+                        settings.clustering_squidpy_table_key_suffix, // rca-site:H2
+                    ) +
+                    "/clustering_squidpy_out/${platform.toLowerCase()}/" +
                     "${sampleId}_clustered.h5ad",
                 )
             )
@@ -1905,7 +2290,9 @@ def appendGastonPreflightChecks(errors, settings, params) {
             } else {
                 def layerKeys = analysisLayerKeys(platform, segmentation)
                 def tableKey = clusteredSpatialdataTableKey(
-                    layerKeys.table_key, segmentation,
+                    layerKeys.table_key,
+                    segmentation,
+                    settings.clustering_squidpy_table_key_suffix, // rca-site:H2
                 )
                 def tablePath = latestZarr.resolve("tables").resolve(tableKey)
                 if (!tablePath.toFile().exists()) {
@@ -2155,33 +2542,556 @@ def pciseqConfigJson(pairId, segmentation, platform, sampleId, spatialdataPath, 
     ]))
 }
 
-// Stages implemented for ATERA rows; later stages land with the native
-// segmentation route (plan AT-6).
-def ateraImplementedStages() {
-    return ["build_spatialdata"]
+// Stages an ATERA row may select with the native segmentation route (plan
+// AT-6). The others are refused with one message each below.
+def ateraNativeStages() {
+    return [
+        "build_spatialdata",
+        "train_cellpose",
+        "segment",
+        "enrich",
+        "build_viewer_caches",
+        "mask_image_quantification",
+        "qc",
+        "visualize",
+        "spatial_gene_analysis",
+        "mecr",
+        "clustering_squidpy",
+        "mender",
+    ]
 }
 
-def appendAteraStagePreflightChecks(errors, settings) {
+// Whether a samplesheet row analyses an ATERA section (its analysis_mode, else
+// --analysis_mode). An invalid mode answers false here; rowSampleSettings then
+// reports it.
+def rowIsAtera(row, params) {
+    try {
+        def analysisMode = normalizeAnalysisMode(
+            rowFieldOrDefault(row, "analysis_mode", params.analysis_mode)
+        )
+        return activePlatformsForMode(analysisMode).contains("ATERA")
+    } catch (IllegalArgumentException ignored) {
+        return false
+    }
+}
+
+// ATERA keeps its legacy task hashes unless a bound hippocampal resource
+// manifest opts it into RCA. That profile has its own taxonomy and confidence
+// evidence; it never inherits the targeted frontal-panel rules.
+def annotationModeRow(row, params) {
+    if (!rowIsAtera(row, params)) {
+        return row
+    }
+    if (params.annotation_hippocampal_resources || chooseField(row, [AnnotationDefaults.ROW_MODE_COLUMN]) != null) {
+        return row
+    }
+    return row + [(AnnotationDefaults.ROW_MODE_COLUMN): AnnotationDefaults.LEGACY]
+}
+
+// The launch-log lines of the run's annotation modes, logged once before any
+// channel runs (hook H5 site):
+// - info: the per-row mode summary, where an ATERA row held in legacy mode by
+//   annotationModeRow reads "legacy (ATERA)" rather than "(row)", and the note
+//   naming those rows;
+// - warn: the legacy deprecation warning of a flipped species. It leaves out
+//   every ATERA row: holding one in legacy mode, or a row that names legacy as
+//   the ATERA refusal advises, is not a deprecated choice.
+def annotationModeLaunchLog(samplesheetRows, params) {
+    def ateraRows = samplesheetRows.findAll { row -> rowIsAtera(row, params) }
+    def ateraLegacyRows = ateraRows.findAll { row ->
+        !params.annotation_hippocampal_resources && chooseField(row, [AnnotationDefaults.ROW_MODE_COLUMN]) == null
+    }
+    def info = []
+    def summary = AnnotationSettings.rowModeSummary(
+        params,
+        samplesheetRows.collect { row -> annotationModeRow(row, params) },
+        AnnotationDefaults.FLIPPED_SPECIES,
+        ateraLegacyRows.collect { row -> row.pair_id },
+    )
+    if (summary) {
+        info.add(summary)
+    }
+    if (ateraLegacyRows) {
+        info.add(
+            "ATERA rows ${ateraLegacyRows.collect { row -> row.pair_id }.join(', ')} " +
+            "cluster in legacy mode: map_first annotation is not covered for ATERA " +
+            "rows yet (AT-11, RCA on Atera)"
+        )
+    }
+    def warn = []
+    def deprecation = AnnotationSettings.deprecatedLegacyWarning(
+        params,
+        samplesheetRows
+            .findAll { row -> !rowIsAtera(row, params) }
+            .collect { row -> row[AnnotationDefaults.ROW_MODE_COLUMN] },
+    )
+    if (deprecation) {
+        warn.add(deprecation)
+    }
+    return [info: info.collect { line -> line.toString() }, warn: warn]
+}
+
+// Whether --annotation_prepare_only leaves a (pair_id, row, settings) entry out:
+// an ATERA row builds no reference bundle, as its rows cluster in legacy mode
+// (AT-11, RCA on Atera; annotationModeRow).
+def ateraPrepareOnlyRow(entry) {
+    def settings = entry[2]
+    if (!("ATERA" in settings.active_platforms)) {
+        return false
+    }
+    if (params.annotation_hippocampal_resources) {
+        log.info("annotation_prepare_only: ATERA row ${settings.pair_id} validates the bound hippocampal references separately")
+        return true
+    }
+    log.info(
+        "annotation_prepare_only: ATERA row ${settings.pair_id} builds no reference " +
+        "bundle: map_first annotation is not covered for ATERA rows yet (AT-11, RCA on Atera)"
+    )
+    return true
+}
+
+def appendAteraPreflightChecks(errors, row, settings, params) {
     if (!("ATERA" in settings.active_platforms)) {
         return
     }
-    def unsupported = settings.selected_stages.findAll { stage ->
-        !(stage in ateraImplementedStages())
-    }
-    if (!settings.selected_stages || unsupported) {
+    if (!settings.selected_stages) {
         errors.add(
-            "ATERA rows run only ${ateraImplementedStages().join(', ')} for now; " +
-            "this row selects ${settings.selected_stages.join(' -> ') ?: 'no stage'}. " +
-            "Set stop_stage=build_spatialdata in the samplesheet row of " +
-            "${settings.pair_id} (a start_stage or only_stage there must select " +
-            "build_spatialdata too)."
+            "ATERA row ${settings.pair_id} selects no stage; ATERA rows run " +
+            "${ateraNativeStages().join(', ')}"
+        )
+        return
+    }
+    def stageOrder = settings.stage_order
+    appendAteraProsegPreflightChecks(errors, row, settings, params)
+    if (settings.run_mapmycells) {
+        errors.add(
+            "standalone MapMyCells is not covered for ATERA rows; stop at " +
+            "clustering_squidpy or mender"
+        )
+    }
+    if (AnnotationSettings.isMapFirst(settings)) {
+        if (!params.annotation_hippocampal_resources) {
+            errors.add("map_first annotation requires --annotation_hippocampal_resources for ATERA rows (AT-11)")
+        }
+        if (settings.species != "human" || settings.annotation_anatomical_region != "hippocampus") {
+            errors.add("ATERA map_first requires human species and explicit anatomical_region=hippocampus")
+        }
+    }
+
+    if (stageOrder.contains("gaston")) {
+        errors.add(
+            "GASTON is not covered for ATERA rows; remove gaston_enabled from " +
+            "row ${settings.pair_id} or set it to false"
+        )
+    }
+    if (stageOrder.contains("pciseq")) {
+        errors.add(
+            "pciSeq is off for ATERA rows; remove pciseq_enabled from row " +
+            "${settings.pair_id} or set it to false"
+        )
+    }
+    if (
+        stageOrder.contains("compute_cortical_depth") ||
+        stageOrder.contains("distance_from_object")
+    ) {
+        errors.add(
+            "cortical depth and distance from object are off for non-cortical " +
+            "ATERA sections; remove cortical_depth_enabled and " +
+            "distance_from_object_enabled from row ${settings.pair_id} or set " +
+            "them to false"
+        )
+    }
+    def alignmentRequested = boolOrDefault(
+        chooseField(row, ["enable_alignment"]),
+        false,
+        "enable_alignment for ${settings.pair_id}",
+    )
+    if (
+        alignmentRequested ||
+        chooseField(row, ["xenium_registered_images_csv"]) != null
+    ) {
+        errors.add(
+            "image registration and alignment are not covered for ATERA rows (AT-10)"
+        )
+    }
+    def unsupported = settings.selected_stages.findAll { stage ->
+        !(stage in ateraNativeStages()) && stage != "mapmycells"
+    }
+    if (unsupported) {
+        errors.add(
+            "ATERA rows run only ${ateraNativeStages().join(', ')}; " +
+            "${settings.pair_id} also selects ${unsupported.join(', ')}"
         )
     }
 }
 
+// NATIVE_LATEST config of a native row: the latest store is built at the
+// persistent latest path from the staged source store.
+def nativeLatestConfigForPlatform(pairId, platform, params) {
+    return [
+        dataset_name: "${pairId}_${platform}",
+        platform: platform,
+        source_zarr_path: "native_source.zarr",
+        output_dir: "native_out",
+        persistent_latest_zarr_path: file(
+            publishedDatasetPath(
+                params.outdir,
+                pairId,
+                platform,
+                "latest/latest_spatialdata.zarr",
+            )
+        ).toAbsolutePath().toString(),
+        link_mode: params.native_latest_link_mode.toString().trim().toLowerCase(),
+    ]
+}
+
+// A published NATIVE_LATEST output (restart from a later stage).
+def publishedNativeOutput(params, pairId, platform, name) {
+    return requireExistingPath(
+        publishedDatasetPath(
+            params.outdir,
+            pairId,
+            platform,
+            "segmentation/native_out/${name}",
+        ),
+        "NATIVE_LATEST ${name} for ${pairId}:${platform}",
+    )
+}
+
+// ---------------------------------------------------------------------------
+// ATERA ProSeg route (segmentation_source=native_proseg, plan AT-9)
+// ---------------------------------------------------------------------------
+
+// A numeric ATERA ProSeg param; command-line values arrive as strings.
+def ateraProsegNumber(params, name, integer) {
+    def raw = params[name]
+    if (raw == null || raw instanceof Boolean || !raw.toString().trim()) {
+        throw new IllegalArgumentException(
+            "${name} must be set for segmentation_source=native_proseg rows"
+        )
+    }
+    def value
+    try {
+        value = new BigDecimal(raw.toString().trim())
+    } catch (NumberFormatException error) {
+        throw new IllegalArgumentException("${name}=${raw} is not a number")
+    }
+    if (integer) {
+        try {
+            return value.intValueExact()
+        } catch (ArithmeticException error) {
+            throw new IllegalArgumentException("${name}=${raw} is not an integer")
+        }
+    }
+    return value.doubleValue()
+}
+
+// Tile ids of atera_proseg_tile_subset (a check run), or null for every tile.
+def ateraProsegTileSubset(params) {
+    def raw = params.atera_proseg_tile_subset
+    if (raw == null || raw instanceof Boolean || !raw.toString().trim()) {
+        return null
+    }
+    def ids = raw.toString().split(",").collect { value -> value.trim() }.findAll { value ->
+        value.length() > 0
+    }
+    return ids ? ids : null
+}
+
+// ProSeg model and schedule of every tile (AteraProsegModelParams). The
+// Cellpose prior (AT-7) takes its effective prior weight from the plan (the
+// vendor one stays atera_proseg_prior_weight) and its own nuclear-compartment
+// switch (off by default: no vendor segmentation feeds the Cellpose route, as
+// the XENIUM CSV route has no compartment).
+def ateraProsegModelParams(params, priorKind = "vendor") {
+    def model = ateraProsegVendorModelParams(params)
+    if (priorKind == "cellpose") {
+        model.prior_weight_effective = null
+        model.nuclear_compartment = boolOrDefault(
+            params.atera_cellpose_proseg_nuclear_compartment,
+            false,
+            "atera_cellpose_proseg_nuclear_compartment",
+        )
+    }
+    return model
+}
+
+def ateraProsegVendorModelParams(params) {
+    return [
+        voxel_size: ateraProsegNumber(params, "proseg_voxel_size", false),
+        burnin_voxel_size: ateraProsegNumber(params, "proseg_burnin_voxel_size", false),
+        voxel_layers: ateraProsegNumber(params, "default_atera_voxel_layers", true),
+        nuclear_reassignment_prob: ateraProsegNumber(
+            params, "proseg_nuclear_reassignment_prob", false
+        ),
+        diffusion_probability: ateraProsegNumber(
+            params, "proseg_diffusion_probability", false
+        ),
+        cell_compactness: ateraProsegNumber(params, "proseg_cell_compactness", false),
+        burnin_samples: ateraProsegNumber(params, "atera_proseg_burnin_samples", true),
+        samples: ateraProsegNumber(params, "atera_proseg_samples", true),
+        hillclimb: ateraProsegNumber(params, "atera_proseg_hillclimb", true),
+        recorded_samples: ateraProsegNumber(params, "atera_proseg_recorded_samples", true),
+        prior_weight_effective: ateraProsegNumber(params, "atera_proseg_prior_weight", false),
+        min_qv: params.atera_min_qv == null ? 0.0d : ateraProsegNumber(params, "atera_min_qv", false),
+        nuclear_compartment: boolOrDefault(
+            params.atera_proseg_nuclear_compartment,
+            true,
+            "atera_proseg_nuclear_compartment",
+        ),
+    ]
+}
+
+// Refusals of a tiled ATERA ProSeg row (native_proseg, AT-9; ATERA
+// cellpose_proseg, AT-7) that the Pydantic models would only raise inside a
+// task (plan AT-9 §2.2).
+def appendAteraProsegPreflightChecks(errors, row, settings, params) {
+    if (!runsAteraProseg(settings.segmentation_source, settings.active_platforms)) {
+        return
+    }
+    def cellposePrior = settings.segmentation_source == "cellpose_proseg"
+    def checks = []
+    if (cellposePrior) {
+        def channels = parseChannels(row.atera_channels, [])
+        if (row.atera_channels != null && !channels) {
+            checks << "atera_channels of ${settings.pair_id} names no channel"
+        }
+        def weight = params.atera_cellpose_proseg_prior_weight
+        if (weight != null && !(weight instanceof Boolean) && weight.toString().trim()) {
+            try {
+                if (ateraProsegNumber(params, "atera_cellpose_proseg_prior_weight", false) <= 0) {
+                    checks << "atera_cellpose_proseg_prior_weight must be positive"
+                }
+            } catch (IllegalArgumentException error) {
+                checks << error.getMessage()
+            }
+        }
+        ["atera_cellpose_proseg_nuclear_compartment", "atera_cellpose_proseg_cellprobs"].each {
+            name ->
+                try {
+                    boolOrDefault(params[name], true, name)
+                } catch (IllegalArgumentException error) {
+                    checks << error.getMessage()
+                }
+        }
+    }
+    try {
+        def halo = ateraProsegNumber(params, "atera_proseg_halo_um", false)
+        def tile = ateraProsegNumber(params, "atera_proseg_tile_um", false)
+        if (halo < 100) {
+            checks << "atera_proseg_halo_um=${halo} is below the minimum of 100 microns"
+        }
+        if (tile <= 2 * halo) {
+            checks << "atera_proseg_tile_um=${tile} must exceed twice the halo (${halo})"
+        }
+        if (ateraProsegNumber(params, "atera_proseg_owned_margin_um", false) < 0) {
+            checks << "atera_proseg_owned_margin_um must be at least 0"
+        }
+        def model = ateraProsegModelParams(params)
+        ["burnin_samples", "hillclimb", "recorded_samples"].each { name ->
+            if (model[name] < 0) {
+                checks << "atera_proseg_${name} must be at least 0"
+            }
+        }
+        if (model.samples < 1) {
+            checks << "atera_proseg_samples must be at least 1"
+        }
+        if (model.recorded_samples > model.samples) {
+            checks << (
+                "atera_proseg_recorded_samples=${model.recorded_samples} exceeds " +
+                "atera_proseg_samples=${model.samples}"
+            )
+        }
+        if (!cellposePrior && model.prior_weight_effective <= 0) {
+            checks << "atera_proseg_prior_weight must be positive"
+        }
+        if (ateraProsegNumber(params, "atera_proseg_tile_cpus", true) < 1) {
+            checks << "atera_proseg_tile_cpus must be at least 1"
+        }
+    } catch (IllegalArgumentException error) {
+        checks << error.getMessage()
+    }
+    def allowUntested = boolOrDefault(
+        params.atera_proseg_allow_untested_version,
+        false,
+        "atera_proseg_allow_untested_version",
+    )
+    if (params.proseg_version?.toString()?.trim() != "3.2.0" && !allowUntested) {
+        checks << (
+            "the ATERA ProSeg route is verified with ProSeg 3.2.0 only (Xenium-layout " +
+            "parquet reader and flags); proseg_version=${params.proseg_version}. Set " +
+            "atera_proseg_allow_untested_version=true to run it anyway"
+        )
+    }
+    def subset = ateraProsegTileSubset(params)
+    if (subset != null) {
+        def order = settings.stage_order
+        def later = settings.selected_stages.findAll { stage ->
+            order.indexOf(stage) > order.indexOf("segment")
+        }
+        if (later) {
+            checks << (
+                "atera_proseg_tile_subset (${subset.join(',')}) is a check run of " +
+                "single tiles and cannot be stitched; ${settings.pair_id} also " +
+                "selects ${later.join(', ')}. Use stop_stage=segment"
+            )
+        }
+    }
+    errors.addAll(checks)
+}
+
+// ATERA_PROSEG_PLAN config: the plan reads the staged source store. A
+// Cellpose plan (AT-7) also reads the staged Cellpose mask and logits and fixes
+// the effective prior weight of every tile (null: the whole-section automatic
+// weight).
+def ateraProsegPlanConfig(pairId, platform, params, priorKind = "vendor") {
+    def config = [
+        dataset_name: "${pairId}_${platform}",
+        platform: platform,
+        source_zarr_path: "proseg_source.zarr",
+        output_dir: "plan_out",
+        tile_um: ateraProsegNumber(params, "atera_proseg_tile_um", false),
+        halo_um: ateraProsegNumber(params, "atera_proseg_halo_um", false),
+        owned_margin_um: ateraProsegNumber(params, "atera_proseg_owned_margin_um", false),
+    ]
+    def subset = ateraProsegTileSubset(params)
+    if (subset != null) {
+        config.tile_subset = subset
+    }
+    // Only for a Cellpose plan, so the vendor plan config (and its task hash)
+    // is unchanged.
+    if (priorKind == "cellpose") {
+        def cellprobs = boolOrDefault(
+            params.atera_cellpose_proseg_cellprobs,
+            true,
+            "atera_cellpose_proseg_cellprobs",
+        )
+        config.prior = [
+            kind: "cellpose",
+            mask_path: "prior_mask.npy",
+            cellprob_path: cellprobs ? "prior_cellprob.npy" : null,
+        ]
+        def weight = params.atera_cellpose_proseg_prior_weight
+        config.prior_weight_effective = (
+            weight == null || weight instanceof Boolean || !weight.toString().trim()
+        ) ? null : ateraProsegNumber(params, "atera_cellpose_proseg_prior_weight", false)
+    }
+    return config
+}
+
+// The tiles a plan runs: one [tile_id, AteraProsegTileConfig map] per tile.
+// The config is a value (not the plan file), so a re-run plan with the same
+// content does not invalidate finished tiles.
+def ateraProsegTileSpecs(planText, pairId, platform, sourceZarrPath, params) {
+    def plan = new groovy.json.JsonSlurper().parseText(planText)
+    def priorKind = plan.prior ? plan.prior.kind.toString() : "vendor"
+    def model = ateraProsegModelParams(params, priorKind)
+    if (priorKind == "cellpose") {
+        model.prior_weight_effective = plan.prior_weight.effective as double
+    }
+    def gitRev = params.proseg_git_rev?.toString()?.trim()
+    return plan.tiles.findAll { tile -> tile.run }.collect { tile ->
+        def config = [
+            dataset_name: "${pairId}_${platform}",
+            platform: platform,
+            tile_id: tile.tile_id,
+            source_zarr_path: sourceZarrPath,
+            source_build_fingerprint: plan.source_build_fingerprint,
+            pixel_size_um: plan.pixel_size_um,
+            core_um: tile.core_um,
+            window_px: tile.window_px,
+            mask_shape_px: plan.mask_shape_px,
+            owned_labels: tile.owned_labels,
+            output_dir: "tile_${tile.tile_id}",
+            num_threads: ateraProsegNumber(params, "atera_proseg_tile_cpus", true),
+            max_rss_gb: ateraProsegNumber(params, "atera_proseg_tile_max_rss_gb", false),
+            model: model,
+            proseg_git_rev: gitRev ? gitRev : null,
+            keep_inputs: boolOrDefault(
+                params.atera_proseg_keep_tile_inputs,
+                false,
+                "atera_proseg_keep_tile_inputs",
+            ),
+        ]
+        // Only when set, so the default config (and the task hash of
+        // finished tiles) is unchanged.
+        if (boolOrDefault(
+            params.atera_proseg_allow_untested_version,
+            false,
+            "atera_proseg_allow_untested_version",
+        )) {
+            config.allow_untested_version = true
+        }
+        // The Cellpose prior (AT-7): the files the plan fingerprinted, by real
+        // path; a vendor tile config has no entry (its task hash is unchanged).
+        if (priorKind == "cellpose") {
+            config.prior = [
+                kind: "cellpose",
+                mask_path: plan.prior.mask_path,
+                cellprob_path: plan.prior.cellprob_path,
+                mask_stat: plan.prior.mask_stat,
+                cellprob_stat: plan.prior.cellprob_stat,
+                fingerprint: plan.prior.fingerprint,
+            ]
+        }
+        [tile.tile_id.toString(), config]
+    }
+}
+
+// ATERA_PROSEG_STITCH config: the stitch writes the ProSeg layer of the prior
+// kind (proseg_vendor or, for a Cellpose prior, reseg) into the persistent
+// latest store of the row. prior_kind is always set: it entered the config with
+// the AT-7 rename of the vendor layer, so stitches made before it re-run.
+def ateraProsegStitchConfig(pairId, platform, tileIds, params, priorKind = "vendor") {
+    return [
+        dataset_name: "${pairId}_${platform}",
+        platform: platform,
+        latest_zarr_path: "native_latest.zarr",
+        persistent_latest_zarr_path: file(
+            publishedDatasetPath(
+                params.outdir,
+                pairId,
+                platform,
+                "latest/latest_spatialdata.zarr",
+            )
+        ).toAbsolutePath().toString(),
+        plan_path: "tile_plan.json",
+        tile_dirs: tileIds.collect { tileId -> "tile_${tileId}".toString() }.sort(),
+        output_dir: "stitch_out",
+        prior_kind: priorKind,
+    ]
+}
+
+// The published ATERA Cellpose mask of a cellpose_proseg row (restart from a
+// later stage).
+def publishedAteraCellposeMask(params, pairId, platform) {
+    return requireExistingPath(
+        publishedDatasetPath(
+            params.outdir,
+            pairId,
+            platform,
+            "segmentation/cellpose_masks_tiled.npy",
+        ),
+        "ATERA_CELLPOSE_SEGMENT Cellpose mask for ${pairId}:${platform}",
+    )
+}
+
+// A published ATERA_PROSEG_STITCH output (restart from a later stage).
+def publishedAteraProsegOutput(params, pairId, platform, name) {
+    return requireExistingPath(
+        publishedDatasetPath(
+            params.outdir,
+            pairId,
+            platform,
+            "segmentation/stitch_out/${name}",
+        ),
+        "ATERA_PROSEG_STITCH ${name} for ${pairId}:${platform}",
+    )
+}
+
 def runPreflightChecks(row, settings, params) {
     def ateraErrors = []
-    appendAteraStagePreflightChecks(ateraErrors, settings)
+    appendAteraPreflightChecks(ateraErrors, row, settings, params)
     if (ateraErrors) {
         throw new IllegalArgumentException(
             "Preflight checks failed for sample ${settings.pair_id}:\n" +
@@ -2288,6 +3198,21 @@ def merscopeBeadRemovalFillMode(params) {
     return rawMode.toString().trim().toLowerCase()
 }
 
+// A global switch of a stage that is off for ATERA rows is ignored on them with
+// a setting note, so a mixed samplesheet keeps it for its other rows. A value
+// set on the ATERA row itself is kept, and the ATERA preflight refuses it.
+def ateraIgnoresGlobalSwitch(enabled, ateraRow, row, fieldName, stageLabel, settingNotes) {
+    if (!ateraRow || chooseField(row, [fieldName]) != null) {
+        return enabled
+    }
+    if (enabled) {
+        settingNotes << (
+            "${stageLabel} is off for ATERA rows; the global ${fieldName} is ignored"
+        ).toString()
+    }
+    return false
+}
+
 def rowSampleSettings(row, params) {
     def pairId = row.pair_id?.toString()?.trim()
     if (!pairId) {
@@ -2300,13 +3225,36 @@ def rowSampleSettings(row, params) {
     )
     def pairedMode = analysisMode == "paired"
     def activePlatforms = activePlatformsForMode(analysisMode)
-    def analysisSegmentations = normalizeAnalysisSegmentation(
-        rowFieldOrDefault(row, "analysis_segmentation", params.analysis_segmentation)
+    def segmentationSource = segmentationSourceForRow(row, activePlatforms, params)
+    // Every ATERA route builds its latest store with NATIVE_LATEST (AT-7).
+    def nativeSegmentation = usesNativeLatest(segmentationSource, activePlatforms)
+    // Whole-transcriptome ATERA rows use the label-raster transcript patterns
+    // and their own streaming MECR reference (MECR_REFERENCE_ATERA).
+    def ateraRow = activePlatforms.contains("ATERA")
+    // Settings resolved differently from what was asked, logged per row.
+    def settingNotes = []
+    def rowAnalysisSegmentation = chooseField(row, ["analysis_segmentation"])
+    def analysisSegmentations = resolveRowSegmentations(
+        rowAnalysisSegmentation,
+        rowFieldOrDefault(row, "analysis_segmentation", params.analysis_segmentation),
+        { value -> normalizeAnalysisSegmentation(value) },
+        segmentationSource,
+        "analysis_segmentation",
+        pairId,
+        settingNotes,
+        activePlatforms,
     )
-    def pciseqEnabled = boolOrDefault(
-        rowFieldOrDefault(row, "pciseq_enabled", params.pciseq_enabled),
-        false,
-        "pciseq_enabled for ${pairId}",
+    def pciseqEnabled = ateraIgnoresGlobalSwitch(
+        boolOrDefault(
+            rowFieldOrDefault(row, "pciseq_enabled", params.pciseq_enabled),
+            false,
+            "pciseq_enabled for ${pairId}",
+        ),
+        ateraRow,
+        row,
+        "pciseq_enabled",
+        "pciSeq",
+        settingNotes,
     )
     def pciseqReference = pciseqReferenceSettings(row, species, params)
     def requestedAlignmentEnabled = boolOrDefault(
@@ -2366,23 +3314,37 @@ def rowSampleSettings(row, params) {
         true,
         "spatial_gene_analysis_transcript_analysis_enabled for ${pairId}",
     )
-    def corticalDepthEnabled = boolOrDefault(
-        rowFieldOrDefault(
-            row,
-            "cortical_depth_enabled",
-            params.cortical_depth_enabled,
+    def corticalDepthEnabled = ateraIgnoresGlobalSwitch(
+        boolOrDefault(
+            rowFieldOrDefault(
+                row,
+                "cortical_depth_enabled",
+                params.cortical_depth_enabled,
+            ),
+            false,
+            "cortical_depth_enabled for ${pairId}",
         ),
-        false,
-        "cortical_depth_enabled for ${pairId}",
+        ateraRow,
+        row,
+        "cortical_depth_enabled",
+        "cortical depth",
+        settingNotes,
     )
-    def distanceFromObjectEnabled = boolOrDefault(
-        rowFieldOrDefault(
-            row,
-            "distance_from_object_enabled",
-            params.distance_from_object_enabled,
+    def distanceFromObjectEnabled = ateraIgnoresGlobalSwitch(
+        boolOrDefault(
+            rowFieldOrDefault(
+                row,
+                "distance_from_object_enabled",
+                params.distance_from_object_enabled,
+            ),
+            false,
+            "distance_from_object_enabled for ${pairId}",
         ),
-        false,
-        "distance_from_object_enabled for ${pairId}",
+        ateraRow,
+        row,
+        "distance_from_object_enabled",
+        "distance from object",
+        settingNotes,
     )
     def mecrEnabled = boolOrDefault(
         rowFieldOrDefault(row, "mecr_enabled", params.mecr_enabled),
@@ -2394,13 +3356,28 @@ def rowSampleSettings(row, params) {
         false,
         "mender_enabled for ${pairId}",
     )
-    def menderSegmentations = normalizeMenderSegmentations(
-        rowFieldOrDefault(row, "mender_segmentations", params.mender_segmentations)
+    def rowMenderSegmentations = chooseField(row, ["mender_segmentations"])
+    def menderSegmentations = resolveRowSegmentations(
+        rowMenderSegmentations,
+        rowFieldOrDefault(row, "mender_segmentations", params.mender_segmentations),
+        { value -> normalizeMenderSegmentations(value) },
+        segmentationSource,
+        "mender_segmentations",
+        pairId,
+        settingNotes,
+        activePlatforms,
     )
-    def gastonEnabled = boolOrDefault(
-        rowFieldOrDefault(row, "gaston_enabled", params.gaston_enabled),
-        false,
-        "gaston_enabled for ${pairId}",
+    def gastonEnabled = ateraIgnoresGlobalSwitch(
+        boolOrDefault(
+            rowFieldOrDefault(row, "gaston_enabled", params.gaston_enabled),
+            false,
+            "gaston_enabled for ${pairId}",
+        ),
+        ateraRow,
+        row,
+        "gaston_enabled",
+        "GASTON",
+        settingNotes,
     )
     def gastonSegmentations = normalizeGastonSegmentations(
         rowFieldOrDefault(
@@ -2622,6 +3599,9 @@ def rowSampleSettings(row, params) {
         registerImagesEnabled,
         gastonEnabled,
         pciseqEnabled,
+        segmentationSource,
+        activePlatforms,
+        CellposeHitlSettings.enabled(params),
     )
     def startStage = normalizeStage(startStageRaw, startParamName)
     def stopStage = normalizeStage(stopStageRaw, stopParamName)
@@ -2632,6 +3612,8 @@ def rowSampleSettings(row, params) {
         alignmentEnabled,
         spatialGeneAnalysisEnabled,
         menderEnabled,
+        segmentationSource,
+        ateraRow,
     )
     validateStage(
         stopStage,
@@ -2640,6 +3622,8 @@ def rowSampleSettings(row, params) {
         alignmentEnabled,
         spatialGeneAnalysisEnabled,
         menderEnabled,
+        segmentationSource,
+        ateraRow,
     )
     // Opt-in terminal analyses extend the historical clustering stop default.
     // Explicit only_stage selections and non-default stop stages remain exact.
@@ -2731,6 +3715,16 @@ def rowSampleSettings(row, params) {
     if (autoExtendedToMender || autoExtendedToGaston) {
         runMapMyCells = false
     }
+    // ATERA rows have no standalone MapMyCells; an explicit stop at MENDER
+    // passes over it like the extended clustering stop above. A row that names
+    // mapmycells itself as its start or stop stage still selects it, and the
+    // ATERA preflight refuses it.
+    def ateraSkipsMapMyCells = (
+        ateraRow && startStage != "mapmycells" && stopStage != "mapmycells"
+    )
+    if (ateraSkipsMapMyCells) {
+        runMapMyCells = false
+    }
     def runGaston = stageInRange("gaston", startStage, stopStage, stageOrder)
     def runMender = stageInRange("mender", startStage, stopStage, stageOrder)
     def requiredClusteringSegmentations = (
@@ -2776,12 +3770,24 @@ def rowSampleSettings(row, params) {
         alignmentEnabled &&
         (runAlign || runAlignQc || needAlignmentDownstream)
 
-    return [
+    // rca-hook:H3: annotation settings and the map_first MAPMYCELLS rule (plan §3.1).
+    // Legacy rows get no key, so their settings and -resume hashes are unchanged.
+    def annotationSettings = AnnotationSettings.forRow(
+        annotationModeRow(row, params), params, species
+    )
+    if (activePlatforms.contains("ATERA") && AnnotationSettings.isMapFirst(annotationSettings)) {
+        annotationSettings.clustering_squidpy_table_key_suffix = "rcahippocampal"
+        annotationSettings.mender_unassigned_state_policy = "exclude_from_features"
+    }
+    runMapMyCells = AnnotationSettings.runMapMyCells(runMapMyCells, annotationSettings, stopStage)
+    return annotationSettings + [
         pair_id: pairId,
         species: species,
         analysis_mode: analysisMode,
         enable_alignment: alignmentEnabled,
         active_platforms: activePlatforms,
+        segmentation_source: segmentationSource,
+        setting_notes: settingNotes,
         paired_mode: pairedMode,
         analysis_segmentations: analysisSegmentations,
         analysis_input_segmentations: analysisInputSegmentations,
@@ -2807,11 +3813,17 @@ def rowSampleSettings(row, params) {
         stop_stage: stopStage,
         selected_stages: stageOrder.findAll { stage ->
             stageInRange(stage, startStage, stopStage, stageOrder) &&
-                !((autoExtendedToMender || autoExtendedToGaston) && stage == "mapmycells")
+                !(
+                    (autoExtendedToMender || autoExtendedToGaston || ateraSkipsMapMyCells) &&
+                    stage == "mapmycells"
+                )
         },
         run_build: runBuild,
         run_segment_nuclei: runSegmentNuclei,
         run_segment: runSegment,
+        run_native_segment: runSegment && nativeSegmentation,
+        run_atera_cellpose: runSegment && runsAteraCellpose(segmentationSource, activePlatforms),
+        run_atera_proseg: runSegment && runsAteraProseg(segmentationSource, activePlatforms),
         run_enrich: runEnrich,
         run_register_images: runRegisterImages,
         registered_images_csv: registeredImagesCsv,
@@ -3005,6 +4017,209 @@ def validateMenderParams(params) {
     }
 }
 
+// The SegmentationConfig of one row and platform (CELLPOSE_SEGMENT,
+// CELLPOSE_NUCLEI_SEGMENT, PROSEG_SEGMENT and, for ATERA, ATERA_CELLPOSE_SEGMENT).
+// ATERA (AT-7) segments the native morphology image of its built store on its
+// Cellpose channels (DAPI + 18S): no transform or spec path (the pixel size
+// comes from the store's spec sidecars), no ProSeg transcript CSV (the tiled
+// ProSeg route reads the store's parquet) and no Cellpose nuclei. The XENIUM
+// and MERSCOPE maps are built as before, key for key.
+def segmentationConfigMap(pairId, platform, sourceSpatialdata, meta, params) {
+    def persistentLatestZarrPath = file(
+        publishedDatasetPath(
+            params.outdir,
+            pairId,
+            platform,
+            "latest/latest_spatialdata.zarr",
+        )
+    ).toAbsolutePath().toString()
+    def persistentMaskPath = file(
+        publishedDatasetPath(
+            params.outdir,
+            pairId,
+            platform,
+            "segmentation/cellpose_masks_tiled.npy",
+        )
+    ).toAbsolutePath().toString()
+    def persistentCellprobPath = file(
+        publishedDatasetPath(
+            params.outdir,
+            pairId,
+            platform,
+            "segmentation/cellpose_cellprobs_tiled.npy",
+        )
+    ).toAbsolutePath().toString()
+    def persistentTranscriptsPath = file(
+        publishedDatasetPath(
+            params.outdir,
+            pairId,
+            platform,
+            "segmentation/transcripts_for_proseg.csv",
+        )
+    ).toAbsolutePath().toString()
+    def persistentStitchingStatsPath = file(
+        publishedDatasetPath(
+            params.outdir,
+            pairId,
+            platform,
+            "segmentation/cellpose_stitching_stats.json",
+        )
+    ).toAbsolutePath().toString()
+    def persistentNucleiMaskPath = file(
+        publishedDatasetPath(
+            params.outdir,
+            pairId,
+            platform,
+            "segmentation/cellpose_nuclei_masks_tiled.npy",
+        )
+    ).toAbsolutePath().toString()
+    def persistentNucleiStitchingStatsPath = file(
+        publishedDatasetPath(
+            params.outdir,
+            pairId,
+            platform,
+            "segmentation/cellpose_nuclei_stitching_stats.json",
+        )
+    ).toAbsolutePath().toString()
+    def baseConfig = [
+        cellpose: [
+            model_type: params.cellpose_model_type,
+            gpu: params.cellpose_gpu,
+            diameter: params.cellpose_diameter,
+            flow_threshold: params.cellpose_flow_threshold,
+            cellprob_threshold: params.cellpose_cellprob,
+            tile_overlap: params.cellpose_tile_overlap,
+            bsize: params.cellpose_bsize,
+            factor_rescale: 1.0,
+            use_bfloat16: params.cellpose_use_bfloat16,
+        ],
+        nuclei_cellpose: [
+            model_type: "nuclei",
+            gpu: params.cellpose_gpu,
+            diameter: params.cellpose_diameter,
+            flow_threshold: params.cellpose_flow_threshold,
+            cellprob_threshold: params.cellpose_cellprob,
+            tile_overlap: params.cellpose_tile_overlap,
+            bsize: params.cellpose_bsize,
+            factor_rescale: 1.0,
+            use_bfloat16: params.cellpose_use_bfloat16,
+        ],
+        tiling: [
+            tile_size_candidates: params.cellpose_tile_size_candidates,
+            stitch_overlap_px: params.cellpose_stitch_overlap_px,
+            min_tile_size: params.cellpose_min_tile_size,
+            status_every_tiles: params.cellpose_stitch_status_every_tiles,
+            filter_per_tile: params.cellpose_filter_per_tile,
+            duplicate_iou_threshold: params.cellpose_duplicate_iou_threshold,
+            duplicate_overlap_fraction: params.cellpose_duplicate_overlap_fraction,
+            min_remaining_fraction: params.cellpose_min_remaining_fraction,
+            edge_touch_policy: params.cellpose_edge_touch_policy,
+            write_stitching_stats: params.cellpose_write_stitching_stats,
+        ],
+        mask_filter: [
+            final_min_area_um2: params.cellpose_final_min_area_um2,
+            final_max_area_um2: params.cellpose_final_max_area_um2,
+            final_filter_chunk_mb: params.cellpose_final_filter_chunk_mb,
+        ],
+        nuclei_mask_filter: [
+            final_min_area_um2: params.cellpose_final_min_area_um2,
+            final_max_area_um2: params.cellpose_final_max_area_um2,
+            final_filter_chunk_mb: params.cellpose_final_filter_chunk_mb,
+        ],
+        proseg: [
+            binary_path: params.proseg_binary,
+            samples: params.proseg_samples,
+            voxel_size: params.proseg_voxel_size,
+            burnin_voxel_size: params.proseg_burnin_voxel_size,
+            nuclear_reassignment_prob: params.proseg_nuclear_reassignment_prob,
+            diffusion_probability: params.proseg_diffusion_probability,
+            cell_compactness: params.proseg_cell_compactness,
+            num_threads: params.proseg_num_threads,
+            voxel_layers: 2,
+        ],
+        proseg_hybrid: [
+            enabled: params.proseg_hybrid_enabled,
+            min_transcripts: params.proseg_hybrid_min_transcripts,
+            outlier_neighbors: params.proseg_hybrid_outlier_neighbors,
+            outlier_mad_multiplier: params.proseg_hybrid_outlier_mad_multiplier,
+            minimum_external_group: params.proseg_hybrid_minimum_external_group,
+            chain_radius_scale: params.proseg_hybrid_chain_radius_scale,
+            near_surface_radius_fraction: params.proseg_hybrid_near_surface_radius_fraction,
+            maximum_expansion_radius_fraction: params.proseg_hybrid_maximum_expansion_radius_fraction,
+            attachment_arc_width_scale: params.proseg_hybrid_attachment_arc_width_scale,
+            rounding_radius_fraction: params.proseg_hybrid_rounding_radius_fraction,
+            smoothing_radius_um: params.proseg_hybrid_smoothing_radius_um,
+            outward_rounding_um: params.proseg_hybrid_outward_rounding_um,
+            smoothing_quad_segs: params.proseg_hybrid_smoothing_quad_segs,
+            containment_tolerance_um: params.proseg_hybrid_containment_tolerance_um,
+        ],
+        memory: [
+            max_system_ram_gb: params.max_ram_gb,
+            memory_warn_gb: params.warn_ram_gb,
+            transcript_chunk_rows: params.transcript_chunk_rows,
+        ],
+    ]
+
+    // hitl-hook:C4
+    if (meta.cellpose_settings) {
+        baseConfig.cellpose.putAll(meta.cellpose_settings.cellpose)
+        baseConfig.mask_filter.putAll(meta.cellpose_settings.mask_filter)
+        if (meta.cellpose_settings.tiling) {
+            baseConfig.tiling.putAll(meta.cellpose_settings.tiling)
+        }
+        if (meta.cellpose_settings.cellpose_model_policy) {
+            baseConfig.cellpose_model_policy = meta.cellpose_settings.cellpose_model_policy
+        }
+    }
+
+    // Only present for rows with bead removal on (see segmentMetaForPlatform).
+    if (meta.bead_mask_veto) {
+        baseConfig.bead_mask_veto = meta.bead_mask_veto
+    }
+
+    def segmentConfig = baseConfig + [
+        dataset: [
+            name: "${pairId}_${platform}",
+            platform: platform,
+            data_path: sourceSpatialdata.toString(),
+            channels: meta.channels,
+            output_dir: "segment_out",
+            persistent_latest_zarr_path: persistentLatestZarrPath,
+            persistent_mask_path: persistentMaskPath,
+            persistent_cellpose_cellprob_path: persistentCellprobPath,
+            persistent_transcripts_path: persistentTranscriptsPath,
+            persistent_cellpose_stitching_stats_path: persistentStitchingStatsPath,
+            persistent_nuclei_mask_path: persistentNucleiMaskPath,
+            persistent_nuclei_stitching_stats_path: persistentNucleiStitchingStatsPath,
+            image_prefix: meta.image_prefix,
+            z_range: meta.z_range,
+            transform_path: meta.transform_path,
+            xenium_spec_path: meta.xenium_spec_path,
+            min_qv: meta.min_qv,
+            proseg_overrides: [voxel_layers: meta.voxel_layers],
+        ],
+    ]
+    if (platform == "ATERA") {
+        def dataset = segmentConfig.dataset
+        ["persistent_transcripts_path", "persistent_nuclei_mask_path",
+            "persistent_nuclei_stitching_stats_path", "image_prefix", "z_range",
+            "transform_path", "xenium_spec_path", "min_qv"].each { name ->
+            dataset.remove(name)
+        }
+        dataset.image_key = meta.image_key
+        dataset.proseg_transcripts = "none"
+        if (AteraDensitySettings.enabledForMeta(meta, params)) {
+            segmentConfig.cellpose.input_normalization = "per_channel"
+            dataset.transcript_density_path = meta.transcript_density_path ?: publishedDatasetPath(
+                params.outdir, pairId, platform, "transcript_density/transcript_density.zarr")
+        }
+        segmentConfig.remove("nuclei_cellpose")
+        segmentConfig.remove("nuclei_mask_filter")
+        segmentConfig.remove("proseg_hybrid")
+    }
+    return segmentConfig
+}
+
 workflow {
     // Private site configs (docs/local-configuration.md): stop a launch whose
     // site locations are missing instead of letting null params fall back.
@@ -3026,10 +4241,42 @@ workflow {
         .fromPath(params.samplesheet, checkIfExists: true)
         .splitCsv(header: true, sep: ",", quote: '"', strip: true)
 
+    // rca-site:H5 (pre-registration §20 D15): each row's clustering_squidpy_mode
+    // column, read once here because the clustering wiring is chosen before
+    // any channel runs. A run takes the map_first wiring when any row
+    // resolves to map_first; a run whose rows are all legacy keeps the legacy
+    // DAG.
+    def samplesheetRows = file(params.samplesheet, checkIfExists: true)
+        .splitCsv(header: true, sep: ",", quote: '"', strip: true)
+    // ATERA rows without their own mode column cluster in legacy mode
+    // (annotationModeRow).
+    def annotationModeRows = samplesheetRows.collect { row -> annotationModeRow(row, params) }
+    AnnotationSettings.useRowModes(
+        annotationModeRows.collect { row -> row[AnnotationDefaults.ROW_MODE_COLUMN] }
+    )
+    // The mode summary and the legacy deprecation warning, which leaves out
+    // every ATERA row (annotationModeLaunchLog).
+    def annotationModeLog = annotationModeLaunchLog(samplesheetRows, params)
+    annotationModeLog.info.each { line -> log.info(line) }
+    def nearMissModeColumns = AnnotationSettings.nearMissModeColumns(
+        samplesheetRows ? samplesheetRows[0].keySet() : []
+    )
+    if (nearMissModeColumns) {
+        log.warn(
+            "Samplesheet column(s) ${nearMissModeColumns.join(', ')} are ignored: the " +
+            "per-row mode column is '${AnnotationDefaults.ROW_MODE_COLUMN}' (exact name). " +
+            "Those rows follow the run's clustering mode."
+        )
+    }
+    // Legacy rows of a flipped species (human since M8, mouse since M9); no
+    // ATERA row is a deprecated choice.
+    annotationModeLog.warn.each { line -> log.warn(line) }
+
     sample_rows_raw_ch = samplesheet_ch.map { row ->
         def settings = rowSampleSettings(row, params)
         log.info(
             "Sample ${settings.pair_id}: analysis_mode=${settings.analysis_mode}; " +
+            "segmentation_source=${settings.segmentation_source}; " +
             "enable_alignment=${settings.enable_alignment}; " +
             "spatial_gene_analysis=${settings.run_spatial_gene_analysis}; " +
             "spatial_gene_transcripts=" +
@@ -3050,7 +4297,24 @@ workflow {
             "GASTON segmentations=${settings.gaston_segmentations.join(', ')}; " +
             "selected stages=${settings.selected_stages.join(' -> ')}"
         )
+        settings.setting_notes.each { note ->
+            log.info("Sample ${settings.pair_id}: ${note}")
+        }
         tuple(settings.pair_id, row, settings)
+    }
+
+    // rca-hook:H10: --annotation_prepare_only builds reference bundles (plan §3.2)
+    // and runs no pipeline stage; legacy and map_first runs skip this block.
+    if (AnnotationReferences.prepareOnly(params)) {
+        sample_rows_raw_ch = sample_rows_raw_ch.filter { entry -> !ateraPrepareOnlyRow(entry) }
+        if (params.annotation_hippocampal_resources) {
+            HIPPOCAMPAL_PREPARE_ONLY(
+                channel.value(file(params.annotation_hippocampal_resources)),
+                channel.value(AnnotationReferences.sourcesFingerprint("${projectDir}/../src", ["merxen/annotation/hippocampal_pipeline.py", "merxen/annotation/hippocampal_profile.py"])),
+            )
+        }
+        ANNOTATION_PREPARE_ONLY(sample_rows_raw_ch)
+        sample_rows_raw_ch = channel.empty()
     }
 
     preflight_done_ch = sample_rows_raw_ch
@@ -3082,6 +4346,61 @@ workflow {
         .map { pairId, row, settings, _doneFlag ->
             tuple(pairId, row, settings)
         }
+
+    // Optional model training completes before any segmentation input is emitted.
+    // Normal runs retain the existing row channel and task configuration text.
+    if (CellposeHitlSettings.enabled(params)) {
+        def hitlSpec = CellposeHitlSettings.specification(params)
+        hitl_training_inputs_ch = sample_rows_raw_ch.collect(flat: false)
+            .map { entries ->
+                CellposeHitlSettings.validateRows(entries, hitlSpec, params)
+                tuple(CellposeHitlSettings.configJson(hitlSpec),
+                    hitlSpec.package_paths.collect { path -> file(path) })
+            }
+            .combine(preflight_done_ch)
+            .map { configJson, packages, _done -> tuple(configJson, packages) }
+        hitl_model_ready_ch = CELLPOSE_HITL_TRAIN(hitl_training_inputs_ch).model_selector
+            .map { selectorFile -> new groovy.json.JsonSlurper().parse(selectorFile.toFile()) }
+            .first()
+        sample_rows_ch = sample_rows_ch.combine(hitl_model_ready_ch)
+            .map { pairId, row, settings, selector ->
+                tuple(pairId,
+                    CellposeHitlSettings.applyTrainedModel(row, settings, selector, params),
+                    settings)
+            }
+    }
+
+    def hitlSeedRequested = params.cellpose_hitl_source_outdir || params.cellpose_hitl_source_zarr ||
+        samplesheetRows.any { row -> row.any { key, value -> key.toString().endsWith('_hitl_source_zarr') && value?.toString()?.trim() } }
+    if (hitlSeedRequested) {
+        hitl_seed_inputs_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+            settings.active_platforms.collect { platform ->
+                def seed = CellposeHitlSettings.seedConfig(pairId, platform, row, settings, params)
+                seed ? tuple(groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(seed)),
+                    file(seed.source_zarr), seed.nuclei_source_dir
+                        ? new File(seed.nuclei_source_dir.toString()).listFiles()
+                            .findAll { it.isFile() && it.name.startsWith('cellpose_nuclei') }
+                            .collect { file(it.toString()) }
+                        : []) : null
+            }.findAll { it != null }
+        }
+        hitl_seed_complete_ch = CELLPOSE_HITL_SEED(hitl_seed_inputs_ch).complete.collect().map { true }
+        sample_rows_ch = sample_rows_ch.combine(hitl_seed_complete_ch)
+            .map { pairId, row, settings, _seeded -> tuple(pairId, row, settings) }
+    }
+
+    // rca-hook:H6: end-of-run annotation summary (plan §3.1); empty in legacy runs.
+    def annotationCompletionParams = params
+    def annotationCompletionWorkflow = workflow
+    annotationCompletionWorkflow.onComplete {
+        def annotationSummary = AnnotationSettings.completionSummary(
+            annotationCompletionParams,
+            AnnotationRunRecord.runInfo() + [success: annotationCompletionWorkflow.success],
+        )
+        if (annotationSummary) {
+            log.info(annotationSummary)
+        }
+    }
 
     build_inputs_ch = sample_rows_ch.flatMap { pairId, row, settings ->
         if (!settings.run_build) {
@@ -3125,7 +4444,13 @@ workflow {
     build_results_ch = build_task_results_ch.mix(build_published_results_ch)
 
     segment_meta_ch = sample_rows_ch.flatMap { pairId, row, settings ->
-        if (!(settings.run_segment_nuclei || settings.run_segment)) {
+        // Native rows and every ATERA row run NATIVE_LATEST instead (an ATERA
+        // cellpose_proseg row runs ATERA_CELLPOSE_SEGMENT and the tiled ProSeg
+        // route below, never SEGMENT).
+        if (
+            !(settings.run_segment_nuclei || settings.run_segment) ||
+            usesNativeLatest(settings.segmentation_source, settings.active_platforms)
+        ) {
             []
         } else {
             settings.active_platforms.collect { platform ->
@@ -3139,182 +4464,223 @@ workflow {
         }
     }
 
+    // Native rows (plan AT-6): NATIVE_LATEST turns the vendor segmentation of
+    // the source store into the latest store and emits the SEGMENT tuple shape
+    // with empty placeholders in the Cellpose mask, transcript CSV and nuclei
+    // mask slots. The gate carries the row's source: a native_proseg row's
+    // latest store goes on to the ATERA ProSeg stitch (AT-9) instead.
+    native_latest_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
+        if (!settings.run_native_segment) {
+            []
+        } else {
+            settings.active_platforms.collect { platform ->
+                tuple("${pairId}|${platform}", settings.segmentation_source)
+            }
+        }
+    }
+
+    native_latest_inputs_ch = build_results_ch
+        .join(native_latest_gate_ch)
+        .map { key, pairId, platform, sourceSpatialdata, _rowSource ->
+            tuple(
+                key,
+                pairId,
+                platform,
+                groovy.json.JsonOutput.prettyPrint(
+                    groovy.json.JsonOutput.toJson(
+                        nativeLatestConfigForPlatform(pairId, platform, params)
+                    )
+                ),
+                sourceSpatialdata,
+            )
+        }
+
+    native_task_results_ch = NATIVE_LATEST(native_latest_inputs_ch).segmentation
+
+    native_routed_ch = native_task_results_ch
+        .join(native_latest_gate_ch)
+        .branch {
+            key, pairId, platform, latestZarr, maskPath, transcriptsCsv,
+            nucleiMaskPath, rowSource ->
+                proseg: runsAteraProseg(rowSource, [platform])
+                    return tuple(
+                        key, pairId, platform, latestZarr, maskPath, transcriptsCsv,
+                        nucleiMaskPath, rowSource,
+                    )
+                plain: true
+                    return tuple(
+                        key, pairId, platform, latestZarr, maskPath, transcriptsCsv,
+                        nucleiMaskPath,
+                    )
+        }
+    native_plain_ch = native_routed_ch.plain
+
+    // ATERA Cellpose (segmentation_source=cellpose_proseg, plan AT-7): Cellpose
+    // segments the native morphology image of the built store on DAPI + 18S, as
+    // on XENIUM, under the GPU lock. It writes no ProSeg transcript CSV (the
+    // tiled ProSeg route reads the store's parquet) and no Cellpose nuclei
+    // (ATERA keeps the vendor nuclei).
+    atera_cellpose_meta_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+        if (!settings.run_atera_cellpose) {
+            []
+        } else {
+            settings.active_platforms.findAll { platform -> platform == "ATERA" }
+                .collect { platform ->
+                    tuple(
+                        "${pairId}|${platform}",
+                        segmentMetaForPlatform(row, platform, params),
+                    )
+                }
+        }
+    }
+
+    atera_cellpose_sources_ch = build_results_ch
+        .join(atera_cellpose_meta_ch)
+    atera_density_inputs_ch = atera_cellpose_sources_ch
+        .filter { _key, _pairId, _platform, _source, meta -> AteraDensitySettings.enabledForMeta(meta, params) }
+        .map { key, pairId, platform, sourceSpatialdata, meta ->
+            tuple(key, pairId, platform,
+                groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(
+                    AteraDensitySettings.config(sourceSpatialdata, params,
+                        AteraDensitySettings.selectedProfile(meta.cellpose_settings ?: [:], params)))),
+                sourceSpatialdata)
+        }
+    atera_density_results_ch = ATERA_TRANSCRIPT_DENSITY(atera_density_inputs_ch).density
+    atera_density_ready_ch = atera_cellpose_sources_ch
+        .join(atera_density_results_ch)
+        .map { key, pairId, platform, sourceSpatialdata, meta, _densityPair, _densityPlatform, densityPath, _densityManifest ->
+            tuple(key, pairId, platform, sourceSpatialdata,
+                meta + [transcript_density_path: densityPath.toRealPath().toString()], densityPath)
+        }
+    atera_density_disabled_ch = atera_cellpose_sources_ch
+        .filter { _key, _pairId, _platform, _source, meta -> !AteraDensitySettings.enabledForMeta(meta, params) }
+        .map { key, pairId, platform, sourceSpatialdata, meta ->
+            tuple(key, pairId, platform, sourceSpatialdata, meta, [])
+        }
+    atera_cellpose_inputs_ch = atera_density_ready_ch.mix(atera_density_disabled_ch)
+        .map { key, pairId, platform, sourceSpatialdata, meta, densityPath ->
+            tuple(
+                key,
+                pairId,
+                platform,
+                groovy.json.JsonOutput.prettyPrint(
+                    groovy.json.JsonOutput.toJson(
+                        segmentationConfigMap(
+                            pairId, platform, sourceSpatialdata, meta, params,
+                        )
+                    )
+                ),
+                densityPath,
+            )
+        }
+
+    atera_cellpose_ch = ATERA_CELLPOSE_SEGMENT(atera_cellpose_inputs_ch).segmentation
+
+    // ATERA ProSeg route (plan AT-9; tiled, 2 mm tiles): the plan reads the
+    // source store and the prior: the vendor cell mask (native_proseg, layer
+    // proseg_vendor) or the ATERA Cellpose mask and logits (cellpose_proseg,
+    // AT-7, layer reseg). One ATERA_PROSEG_TILE task per tile runs ProSeg on
+    // its window (bounded by atera_proseg_tile_max_forks); ATERA_PROSEG_STITCH
+    // writes the stitched cells into the latest store NATIVE_LATEST built and
+    // emits the SEGMENT tuple, so ENRICH and the later stages take it as they
+    // take NATIVE_LATEST's output. The gate carries the prior kind.
+    atera_proseg_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
+        if (!settings.run_atera_proseg) {
+            []
+        } else {
+            settings.active_platforms.collect { platform ->
+                tuple(
+                    "${pairId}|${platform}",
+                    AteraProsegLayers.priorKindForSource(settings.segmentation_source),
+                )
+            }
+        }
+    }
+
+    atera_proseg_plan_inputs_ch = build_results_ch
+        .join(atera_proseg_gate_ch.filter { _key, priorKind -> priorKind == "vendor" })
+        .map { key, pairId, platform, sourceSpatialdata, _priorKind ->
+            tuple(
+                key,
+                pairId,
+                platform,
+                groovy.json.JsonOutput.prettyPrint(
+                    groovy.json.JsonOutput.toJson(
+                        ateraProsegPlanConfig(pairId, platform, params)
+                    )
+                ),
+                sourceSpatialdata,
+            )
+        }
+
+    // A Cellpose plan stages the Cellpose mask and logits as path inputs, so
+    // a re-run Cellpose invalidates the plan (and, through the files' identity
+    // in the tile configs, every tile).
+    atera_proseg_cellpose_plan_inputs_ch = build_results_ch
+        .join(atera_proseg_gate_ch.filter { _key, priorKind -> priorKind == "cellpose" })
+        .join(atera_cellpose_ch)
+        .map {
+            key, pairId, platform, sourceSpatialdata, _priorKind, _segPairId,
+            _segPlatform, cellposeMask, cellposeCellprob, _transforms, _stats ->
+                tuple(
+                    key,
+                    pairId,
+                    platform,
+                    groovy.json.JsonOutput.prettyPrint(
+                        groovy.json.JsonOutput.toJson(
+                            ateraProsegPlanConfig(pairId, platform, params, "cellpose")
+                        )
+                    ),
+                    sourceSpatialdata,
+                    cellposeMask,
+                    cellposeCellprob,
+                )
+        }
+
+    atera_proseg_plan_ch = ATERA_PROSEG_PLAN(atera_proseg_plan_inputs_ch).plan
+        .mix(ATERA_PROSEG_PLAN_CELLPOSE(atera_proseg_cellpose_plan_inputs_ch).plan)
+
+    // One tile task per tile the plan runs. The tile config is a value holding
+    // the real path of the source store, so a re-run plan with the same
+    // content leaves finished tiles cached.
+    atera_proseg_tile_specs_ch = atera_proseg_plan_ch
+        .join(build_results_ch)
+        .flatMap { key, pairId, platform, planFile, _buildPairId, _buildPlatform, sourceSpatialdata ->
+            def sourcePath = java.nio.file.Paths
+                .get(sourceSpatialdata.toString())
+                .toRealPath()
+                .toString()
+            def specs = ateraProsegTileSpecs(
+                planFile.text, pairId, platform, sourcePath, params,
+            )
+            if (!specs) {
+                log.warn(
+                    "${pairId}:${platform}: the ATERA ProSeg plan runs no tile; " +
+                    "the ProSeg layer is not built"
+                )
+            }
+            specs.collect { tileId, tileConfig ->
+                tuple(
+                    key,
+                    pairId,
+                    platform,
+                    specs.size(),
+                    tileId,
+                    groovy.json.JsonOutput.prettyPrint(
+                        groovy.json.JsonOutput.toJson(tileConfig)
+                    ),
+                )
+            }
+        }
+
     segmentation_config_inputs_ch = build_results_ch
         .join(segment_meta_ch)
         .map {
             key, pairId, platform, sourceSpatialdata, meta,
             runSegmentNuclei, runSegment ->
-            def persistentLatestZarrPath = file(
-                publishedDatasetPath(
-                    params.outdir,
-                    pairId,
-                    platform,
-                    "latest/latest_spatialdata.zarr",
-                )
-            ).toAbsolutePath().toString()
-            def persistentMaskPath = file(
-                publishedDatasetPath(
-                    params.outdir,
-                    pairId,
-                    platform,
-                    "segmentation/cellpose_masks_tiled.npy",
-                )
-            ).toAbsolutePath().toString()
-            def persistentCellprobPath = file(
-                publishedDatasetPath(
-                    params.outdir,
-                    pairId,
-                    platform,
-                    "segmentation/cellpose_cellprobs_tiled.npy",
-                )
-            ).toAbsolutePath().toString()
-            def persistentTranscriptsPath = file(
-                publishedDatasetPath(
-                    params.outdir,
-                    pairId,
-                    platform,
-                    "segmentation/transcripts_for_proseg.csv",
-                )
-            ).toAbsolutePath().toString()
-            def persistentStitchingStatsPath = file(
-                publishedDatasetPath(
-                    params.outdir,
-                    pairId,
-                    platform,
-                    "segmentation/cellpose_stitching_stats.json",
-                )
-            ).toAbsolutePath().toString()
-            def persistentNucleiMaskPath = file(
-                publishedDatasetPath(
-                    params.outdir,
-                    pairId,
-                    platform,
-                    "segmentation/cellpose_nuclei_masks_tiled.npy",
-                )
-            ).toAbsolutePath().toString()
-            def persistentNucleiStitchingStatsPath = file(
-                publishedDatasetPath(
-                    params.outdir,
-                    pairId,
-                    platform,
-                    "segmentation/cellpose_nuclei_stitching_stats.json",
-                )
-            ).toAbsolutePath().toString()
-            def baseConfig = [
-                cellpose: [
-                    model_type: params.cellpose_model_type,
-                    gpu: params.cellpose_gpu,
-                    diameter: params.cellpose_diameter,
-                    flow_threshold: params.cellpose_flow_threshold,
-                    cellprob_threshold: params.cellpose_cellprob,
-                    tile_overlap: params.cellpose_tile_overlap,
-                    bsize: params.cellpose_bsize,
-                    factor_rescale: 1.0,
-                    use_bfloat16: params.cellpose_use_bfloat16,
-                ],
-                nuclei_cellpose: [
-                    model_type: "nuclei",
-                    gpu: params.cellpose_gpu,
-                    diameter: params.cellpose_diameter,
-                    flow_threshold: params.cellpose_flow_threshold,
-                    cellprob_threshold: params.cellpose_cellprob,
-                    tile_overlap: params.cellpose_tile_overlap,
-                    bsize: params.cellpose_bsize,
-                    factor_rescale: 1.0,
-                    use_bfloat16: params.cellpose_use_bfloat16,
-                ],
-                tiling: [
-                    tile_size_candidates: params.cellpose_tile_size_candidates,
-                    stitch_overlap_px: params.cellpose_stitch_overlap_px,
-                    min_tile_size: params.cellpose_min_tile_size,
-                    status_every_tiles: params.cellpose_stitch_status_every_tiles,
-                    filter_per_tile: params.cellpose_filter_per_tile,
-                    duplicate_iou_threshold: params.cellpose_duplicate_iou_threshold,
-                    duplicate_overlap_fraction: params.cellpose_duplicate_overlap_fraction,
-                    min_remaining_fraction: params.cellpose_min_remaining_fraction,
-                    edge_touch_policy: params.cellpose_edge_touch_policy,
-                    write_stitching_stats: params.cellpose_write_stitching_stats,
-                ],
-                mask_filter: [
-                    final_min_area_um2: params.cellpose_final_min_area_um2,
-                    final_max_area_um2: params.cellpose_final_max_area_um2,
-                    final_filter_chunk_mb: params.cellpose_final_filter_chunk_mb,
-                ],
-                nuclei_mask_filter: [
-                    final_min_area_um2: params.cellpose_final_min_area_um2,
-                    final_max_area_um2: params.cellpose_final_max_area_um2,
-                    final_filter_chunk_mb: params.cellpose_final_filter_chunk_mb,
-                ],
-                proseg: [
-                    binary_path: params.proseg_binary,
-                    samples: params.proseg_samples,
-                    voxel_size: params.proseg_voxel_size,
-                    burnin_voxel_size: params.proseg_burnin_voxel_size,
-                    nuclear_reassignment_prob: params.proseg_nuclear_reassignment_prob,
-                    diffusion_probability: params.proseg_diffusion_probability,
-                    cell_compactness: params.proseg_cell_compactness,
-                    num_threads: params.proseg_num_threads,
-                    voxel_layers: 2,
-                ],
-                proseg_hybrid: [
-                    enabled: params.proseg_hybrid_enabled,
-                    min_transcripts: params.proseg_hybrid_min_transcripts,
-                    outlier_neighbors: params.proseg_hybrid_outlier_neighbors,
-                    outlier_mad_multiplier: params.proseg_hybrid_outlier_mad_multiplier,
-                    minimum_external_group: params.proseg_hybrid_minimum_external_group,
-                    chain_radius_scale: params.proseg_hybrid_chain_radius_scale,
-                    near_surface_radius_fraction: params.proseg_hybrid_near_surface_radius_fraction,
-                    maximum_expansion_radius_fraction: params.proseg_hybrid_maximum_expansion_radius_fraction,
-                    attachment_arc_width_scale: params.proseg_hybrid_attachment_arc_width_scale,
-                    rounding_radius_fraction: params.proseg_hybrid_rounding_radius_fraction,
-                    smoothing_radius_um: params.proseg_hybrid_smoothing_radius_um,
-                    outward_rounding_um: params.proseg_hybrid_outward_rounding_um,
-                    smoothing_quad_segs: params.proseg_hybrid_smoothing_quad_segs,
-                    containment_tolerance_um: params.proseg_hybrid_containment_tolerance_um,
-                ],
-                memory: [
-                    max_system_ram_gb: params.max_ram_gb,
-                    memory_warn_gb: params.warn_ram_gb,
-                    transcript_chunk_rows: params.transcript_chunk_rows,
-                ],
-            ]
-
-            // hitl-hook:C4
-            if (meta.cellpose_settings) {
-                baseConfig.cellpose.putAll(meta.cellpose_settings.cellpose)
-                baseConfig.mask_filter.putAll(meta.cellpose_settings.mask_filter)
-                if (meta.cellpose_settings.cellpose_model_policy) {
-                    baseConfig.cellpose_model_policy = meta.cellpose_settings.cellpose_model_policy
-                }
-            }
-
-            // Only present for rows with bead removal on (see segmentMetaForPlatform).
-            if (meta.bead_mask_veto) {
-                baseConfig.bead_mask_veto = meta.bead_mask_veto
-            }
-
-            def segmentConfig = baseConfig + [
-                dataset: [
-                    name: "${pairId}_${platform}",
-                    platform: platform,
-                    data_path: sourceSpatialdata.toString(),
-                    channels: meta.channels,
-                    output_dir: "segment_out",
-                    persistent_latest_zarr_path: persistentLatestZarrPath,
-                    persistent_mask_path: persistentMaskPath,
-                    persistent_cellpose_cellprob_path: persistentCellprobPath,
-                    persistent_transcripts_path: persistentTranscriptsPath,
-                    persistent_cellpose_stitching_stats_path: persistentStitchingStatsPath,
-                    persistent_nuclei_mask_path: persistentNucleiMaskPath,
-                    persistent_nuclei_stitching_stats_path: persistentNucleiStitchingStatsPath,
-                    image_prefix: meta.image_prefix,
-                    z_range: meta.z_range,
-                    transform_path: meta.transform_path,
-                    xenium_spec_path: meta.xenium_spec_path,
-                    min_qv: meta.min_qv,
-                    proseg_overrides: [voxel_layers: meta.voxel_layers],
-                ],
-            ]
+            def segmentConfig = segmentationConfigMap(
+                pairId, platform, sourceSpatialdata, meta, params,
+            )
 
             tuple(
                 key,
@@ -3390,7 +4756,11 @@ workflow {
         }
 
     nuclei_results_ch = nuclei_task_results_ch.mix(nuclei_published_results_ch)
-    proseg_trigger_ch = cellpose_segment_inputs_ch.map { true }.take(1)
+    proseg_trigger_ch = cellpose_segment_inputs_ch
+        .map { true }
+        .mix(atera_proseg_plan_inputs_ch.map { true })
+        .mix(atera_proseg_cellpose_plan_inputs_ch.map { true })
+        .take(1)
     proseg_path_ch = ENSURE_PROSEG(proseg_trigger_ch)
     segment_task_results_ch = SEGMENT(
         cellpose_segment_inputs_ch,
@@ -3398,9 +4768,149 @@ workflow {
         proseg_path_ch,
     )
 
+    // A failed tile leaves its group incomplete: groupTuple drops it, so the
+    // row's stitch (and its later stages) does not run; the failed tiles are
+    // named below.
+    atera_proseg_tile_results_ch = ATERA_PROSEG_TILE(
+        atera_proseg_tile_specs_ch.combine(proseg_path_ch)
+    ).tile
+
+    atera_proseg_tile_specs_ch
+        .map { key, pairId, platform, _nTiles, tileId, _tileConfig ->
+            tuple(key, "${pairId}:${platform}".toString(), tileId)
+        }
+        .groupTuple(by: [0, 1])
+        .join(
+            atera_proseg_tile_results_ch
+                .map { key, _nTiles, tileId, _tileDir -> tuple(key, tileId) }
+                .groupTuple(),
+            remainder: true,
+        )
+        .subscribe { key, label, expectedIds, finishedIds ->
+            if (key == null || label == null) {
+                return
+            }
+            def missing = (expectedIds - (finishedIds ?: [])).sort()
+            if (missing) {
+                log.error(
+                    "${label}: ${missing.size()} of ${expectedIds.size()} ATERA " +
+                    "ProSeg tiles failed (${missing.join(', ')}); the ProSeg stitch " +
+                    "and every later stage of this row (original_seg and proseg " +
+                    "layers) do not run. Fix the cause and re-run with -resume; " +
+                    "the finished tiles are cached."
+                )
+            }
+        }
+
+    atera_proseg_tiles_ch = atera_proseg_tile_results_ch
+        .map { key, nTiles, tileId, tileDir ->
+            tuple(groupKey(key, nTiles), tileId, tileDir)
+        }
+        .groupTuple()
+        .map { groupedKey, tileIds, tileDirs ->
+            // Tiles finish in any order; sorting keeps the stitch inputs (and
+            // its task hash) stable across runs.
+            def pairs = [tileIds, tileDirs].transpose().sort { pair -> pair[0].toString() }
+            tuple(
+                groupedKey.getGroupTarget(),
+                pairs.collect { pair -> pair[0] },
+                pairs.collect { pair -> pair[1] },
+            )
+        }
+
+    // A tile subset is a check run of single tiles: it is never stitched.
+    if (ateraProsegTileSubset(params) != null) {
+        log.info(
+            "atera_proseg_tile_subset=${ateraProsegTileSubset(params).join(',')}: " +
+            "the ATERA ProSeg tiles run as a check and are not stitched"
+        )
+    }
+    atera_proseg_stitch_inputs_ch = native_routed_ch.proseg
+        .join(atera_proseg_plan_ch)
+        .join(atera_proseg_tiles_ch)
+        .filter { ateraProsegTileSubset(params) == null }
+        .map {
+            key, pairId, platform, latestZarr, _maskPath, _transcriptsCsv,
+            _nucleiMaskPath, rowSource, _planPairId, _planPlatform, planFile, tileIds,
+            tileDirs ->
+                tuple(
+                    key,
+                    pairId,
+                    platform,
+                    groovy.json.JsonOutput.prettyPrint(
+                        groovy.json.JsonOutput.toJson(
+                            ateraProsegStitchConfig(
+                                pairId,
+                                platform,
+                                tileIds,
+                                params,
+                                AteraProsegLayers.priorKindForSource(rowSource),
+                            )
+                        )
+                    ),
+                    latestZarr,
+                    planFile,
+                    tileDirs,
+                )
+        }
+
+    // An ATERA cellpose_proseg row's SEGMENT tuple carries its Cellpose mask in
+    // the mask slot (as a XENIUM row's does), for ENRICH's proseg_mask layer
+    // and the image quantification; a native_proseg row keeps the placeholder.
+    atera_proseg_stitch_ch = ATERA_PROSEG_STITCH(atera_proseg_stitch_inputs_ch).segmentation
+        .join(
+            atera_cellpose_ch.map {
+                key, _pairId, _platform, cellposeMask, _cellprob, _transforms, _stats ->
+                    tuple(key, cellposeMask)
+            },
+            remainder: true,
+        )
+        .filter { values -> values.size() == 8 && values[1] != null }
+        .map {
+            key, pairId, platform, latestZarr, placeholderMask, transcriptsCsv,
+            nucleiMaskPath, cellposeMask ->
+                tuple(
+                    key,
+                    pairId,
+                    platform,
+                    latestZarr,
+                    cellposeMask ?: placeholderMask,
+                    transcriptsCsv,
+                    nucleiMaskPath,
+                )
+        }
+
     segment_published_results_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
         if (!(settings.run_enrich && !settings.run_segment)) {
             []
+        } else if (runsAteraProseg(settings.segmentation_source, settings.active_platforms)) {
+            settings.active_platforms.collect { platform ->
+                def key = "${pairId}|${platform}"
+                tuple(
+                    key,
+                    pairId,
+                    platform,
+                    publishedAteraProsegOutput(params, pairId, platform, "proseg_latest.zarr"),
+                    settings.segmentation_source == "cellpose_proseg"
+                        ? publishedAteraCellposeMask(params, pairId, platform)
+                        : publishedAteraProsegOutput(params, pairId, platform, "NO_CELLPOSE_MASK"),
+                    publishedAteraProsegOutput(params, pairId, platform, "NO_TRANSCRIPTS_CSV"),
+                    publishedAteraProsegOutput(params, pairId, platform, "NO_NUCLEI_MASK"),
+                )
+            }
+        } else if (settings.segmentation_source == "native") {
+            settings.active_platforms.collect { platform ->
+                def key = "${pairId}|${platform}"
+                tuple(
+                    key,
+                    pairId,
+                    platform,
+                    publishedNativeOutput(params, pairId, platform, "native_latest.zarr"),
+                    publishedNativeOutput(params, pairId, platform, "NO_CELLPOSE_MASK"),
+                    publishedNativeOutput(params, pairId, platform, "NO_TRANSCRIPTS_CSV"),
+                    publishedNativeOutput(params, pairId, platform, "NO_NUCLEI_MASK"),
+                )
+            }
         } else {
             settings.active_platforms.collect { platform ->
                 def key = "${pairId}|${platform}"
@@ -3453,7 +4963,10 @@ workflow {
         }
     }
 
-    segment_results_ch = segment_task_results_ch.mix(segment_published_results_ch)
+    segment_results_ch = segment_task_results_ch
+        .mix(native_plain_ch)
+        .mix(atera_proseg_stitch_ch)
+        .mix(segment_published_results_ch)
 
     metadata_ch = build_results_ch.map { key, pairId, platform, sourceSpatialdata ->
         tuple(key, pairId, platform, sourceSpatialdata.toString())
@@ -3464,7 +4977,7 @@ workflow {
             []
         } else {
             settings.active_platforms.collect { platform ->
-                tuple("${pairId}|${platform}", true)
+                tuple("${pairId}|${platform}", settings.segmentation_source)
             }
         }
     }
@@ -3475,7 +4988,7 @@ workflow {
         .map {
             key, pairId, platform, latestZarr, maskPath, _transcriptsCsv,
             nucleiMaskPath,
-            pairMeta, platformMeta, originalDataPath, _runFlag ->
+            pairMeta, platformMeta, originalDataPath, rowSource ->
             if (pairId != pairMeta || platform != platformMeta) {
                 error(
                     "Internal channel mismatch for key=${key}: " +
@@ -3503,6 +5016,28 @@ workflow {
                 persistent_output_path: persistentLatestZarrPath,
                 transform_path: null,
             ]
+            // Native rows enrich the vendor segmentation; no Cellpose mask is
+            // read (the mask slots hold NATIVE_LATEST placeholders). Every
+            // ATERA row has a NATIVE_LATEST store, so the vendor enrichment
+            // runs for each; the row's source (carried by the gate) adds the
+            // rest.
+            if (PlatformSpec.forName(platform).nativeLatestBase) {
+                enrichConfig.segmentation_source = "native"
+                enrichConfig.transcript_density_source_path = originalDataPath
+                enrichConfig.mask_path = null
+                enrichConfig.nuclei_mask_path = null
+            }
+            // A native_proseg row also checks its stitched ProSeg layer (AT-9).
+            if (rowSource == "native_proseg") {
+                enrichConfig.segmentation_source = "native_proseg"
+            }
+            // An ATERA cellpose_proseg row (AT-7) checks its stitched ProSeg
+            // layer (reseg) and builds its Cellpose layer (proseg_mask) from
+            // the Cellpose mask in the mask slot; it has no Cellpose nuclei.
+            if (rowSource == "cellpose_proseg" && PlatformSpec.forName(platform).nativeLatestBase) {
+                enrichConfig.segmentation_source = "cellpose_proseg"
+                enrichConfig.mask_path = "enrich_input_mask.npy"
+            }
 
             tuple(
                 key,
@@ -3523,10 +5058,16 @@ workflow {
         } else {
             settings.active_platforms.collect { platform ->
                 def key = "${pairId}|${platform}"
-                def explicitLatestZarr = chooseField(
-                    row,
-                    PlatformSpec.forName(platform).spatialdataPathFields
+                // On native rows that field names the source store, not a latest
+                // store, so the published latest store is always used.
+                def explicitLatestZarr = (
+                    PlatformSpec.forName(platform).defaultSegmentationSource == "native"
                 )
+                    ? null
+                    : chooseField(
+                        row,
+                        PlatformSpec.forName(platform).spatialdataPathFields
+                    )
                 // Cross-pair restarts may intentionally combine durable latest
                 // zarrs that live under different source pair IDs.
                 def latestZarrPath = isBlankPath(explicitLatestZarr)
@@ -3700,6 +5241,10 @@ workflow {
                 min_size: params.viewer_cache_min_size,
                 build_image_pyramid: params.viewer_cache_build_image_pyramid,
             ]
+            // Native rows draw the vendor label masks on the native image.
+            if (PlatformSpec.forName(platform).defaultSegmentationSource == "native") {
+                viewerCacheConfig.base_image_key = PlatformSpec.forName(platform).nativeImageKey
+            }
 
             tuple(
                 key,
@@ -3746,16 +5291,19 @@ workflow {
                 []
             } else {
                 settings.active_platforms.collect { platform ->
-                    tuple("${pairId}|${platform}", true)
+                    tuple("${pairId}|${platform}", settings.segmentation_source)
                 }
             }
     }
 
-    mask_image_quantification_task_masks_ch = segment_task_results_ch.map {
-        key, _pairId, _platform, _latestZarr, maskPath, _transcriptsCsv,
-        _nucleiMaskPath ->
-            tuple(key, maskPath)
-    }
+    mask_image_quantification_task_masks_ch = segment_task_results_ch
+        .mix(native_plain_ch)
+        .mix(atera_proseg_stitch_ch)
+        .map {
+            key, _pairId, _platform, _latestZarr, maskPath, _transcriptsCsv,
+            _nucleiMaskPath ->
+                tuple(key, maskPath)
+        }
 
     mask_image_quantification_published_masks_ch = sample_rows_ch.flatMap {
         pairId, _row, settings ->
@@ -3767,15 +5315,21 @@ workflow {
             } else {
                 settings.active_platforms.collect { platform ->
                     def key = "${pairId}|${platform}"
-                    def maskPath = requireExistingPath(
-                        publishedDatasetPath(
-                            params.outdir,
-                            pairId,
-                            platform,
-                            "segmentation/cellpose_masks_tiled.npy",
-                        ),
-                        "SEGMENT Cellpose mask for ${pairId}:${platform}",
-                    )
+                    // Native rows quantify the vendor label element; the slot
+                    // holds the NATIVE_LATEST placeholder.
+                    def maskPath = settings.segmentation_source == "native_proseg"
+                        ? publishedAteraProsegOutput(params, pairId, platform, "NO_CELLPOSE_MASK")
+                        : settings.segmentation_source == "native"
+                        ? publishedNativeOutput(params, pairId, platform, "NO_CELLPOSE_MASK")
+                        : requireExistingPath(
+                            publishedDatasetPath(
+                                params.outdir,
+                                pairId,
+                                platform,
+                                "segmentation/cellpose_masks_tiled.npy",
+                            ),
+                            "SEGMENT Cellpose mask for ${pairId}:${platform}",
+                        )
                     tuple(key, maskPath)
                 }
             }
@@ -3789,7 +5343,7 @@ workflow {
     mask_image_quantification_inputs_ch = post_enrich_zarrs_ch
         .join(mask_image_quantification_masks_ch)
         .join(mask_image_quantification_gate_ch)
-        .map { key, pairId, platform, enrichedLatestZarr, maskPath, _runFlag ->
+        .map { key, pairId, platform, enrichedLatestZarr, maskPath, rowSource ->
             def quantConfig = [
                 dataset_name: "${pairId}_${platform}",
                 platform: platform,
@@ -3797,6 +5351,41 @@ workflow {
                 mask_path: "mask_image_quantification_input_mask.npy",
                 output_dir: "mask_image_quantification_out",
             ]
+            // Native rows quantify the vendor cell labels of the store; the
+            // linked mask slot is an empty placeholder.
+            def quantSpec = PlatformSpec.forName(platform)
+            if (quantSpec.nativeLatestBase) {
+                quantConfig.mask_path = null
+                quantConfig.mask_label_key = "cell_labels"
+                quantConfig.shape_key = quantSpec.originalCellShapeKey
+                quantConfig.table_key =
+                    "table_${quantSpec.originalCellShapeKey}_image_quantification"
+            }
+            // A tiled ProSeg row also quantifies its stitched ProSeg cells in
+            // the same task (one writer per store), by their label element; an
+            // ATERA cellpose_proseg row also its Cellpose cells (the label
+            // element ENRICH writes: the global frame of an ATERA store is in
+            // pixels, so every ATERA layer is quantified from labels).
+            def prosegPriorKind = quantSpec.nativeLatestBase
+                ? AteraProsegLayers.priorKindForSource(rowSource)
+                : null
+            if (prosegPriorKind != null) {
+                def prosegLayer = AteraProsegLayers.forKind(prosegPriorKind)
+                quantConfig.extra_layers = [
+                    [
+                        mask_label_key: prosegLayer.label_key,
+                        shape_key: prosegLayer.shapes_key,
+                        table_key: "${prosegLayer.table_key}_image_quantification",
+                    ],
+                ]
+                if (prosegPriorKind == "cellpose") {
+                    quantConfig.extra_layers << [
+                        mask_label_key: "cellpose_cell_labels",
+                        shape_key: "MOSAIK_cellpose",
+                        table_key: "table_MOSAIK_cellpose_image_quantification",
+                    ]
+                }
+            }
 
             tuple(
                 key,
@@ -4010,22 +5599,35 @@ workflow {
                 )
         }
 
-    mecr_reference_inputs_ch = mecr_samples_ch
-        .map { _pairId, _segmentation, samplesJson -> samplesJson }
-        .collect()
-        .filter { samplesJsonValues -> !samplesJsonValues.isEmpty() }
-        .map { samplesJsonValues ->
-            def referenceAtlas = normalizeSpecies(params.species) == "mouse"
-                ? "wmb"
-                : "whb"
-            tuple(referenceAtlas, mergeMecrSamplesJson(samplesJsonValues))
+    // XENIUM and MERSCOPE rows share one reference over their merged panels
+    // (MECR_REFERENCE, its JSON unchanged by ATERA rows). ATERA rows get their
+    // own streaming reference over the whole-transcriptome panel (Atera plan
+    // AT-8).
+    mecr_samples_by_reference_ch = mecr_samples_ch
+        .branch { _pairId, _segmentation, samplesJson ->
+            atera: mecrSamplesUseAteraReference(samplesJson)
+            standard: true
         }
+    mecr_reference_inputs_ch = mecrReferenceInputs(mecr_samples_by_reference_ch.standard)
     mecr_reference_results_ch = MECR_REFERENCE(mecr_reference_inputs_ch)
-    mecr_inputs_ch = mecr_samples_ch
+    mecr_atera_reference_inputs_ch = mecrReferenceInputs(
+        mecr_samples_by_reference_ch.atera
+    )
+    mecr_atera_reference_results_ch = MECR_REFERENCE_ATERA(
+        mecr_atera_reference_inputs_ch
+    )
+    mecr_inputs_ch = mecr_samples_by_reference_ch.standard
         .combine(mecr_reference_results_ch)
         .map { pairId, segmentation, samplesJson, referenceOut ->
             tuple(pairId, segmentation, samplesJson, referenceOut)
         }
+        .mix(
+            mecr_samples_by_reference_ch.atera
+                .combine(mecr_atera_reference_results_ch)
+                .map { pairId, segmentation, samplesJson, referenceOut ->
+                    tuple(pairId, segmentation, samplesJson, referenceOut)
+                }
+        )
     mecr_results_ch = MECR(mecr_inputs_ch)
 
     merscope_zarr_ch = analysis_ready_zarrs_ch
@@ -4572,8 +6174,193 @@ workflow {
             .mix(clustering_after_visualize_ch)
             .mix(clustering_after_spatial_gene_analysis_ch)
 
-    clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE(clustering_inputs_ch)
-    clustering_computed_ch = CLUSTERING_SQUIDPY_COMPUTE(clustering_prepared_ch)
+    // rca-hook:H5: map_first clustering (plan §2.4, §3.1). The mode is one per
+    // row (its clustering_squidpy_mode column, else the run's; §20 D15). With
+    // any map_first row, rows are prepared once (a legacy row's PREPARE hash
+    // is unchanged) and legacy rows go on to the legacy COMPUTE; a run whose
+    // rows are all legacy runs exactly the legacy PREPARE -> COMPUTE
+    // statements of the else-branch, keeping its DAG and task hashes.
+    // CLUSTERING_MAP_FIRST emits FINALIZE's input, so FINALIZE, the MENDER
+    // barrier and every downstream stage are shared by both modes.
+    if (AnnotationSettings.isMapFirstRun(params)) {
+        row_is_map_first_ch = sample_rows_ch.map { pairId, _row, settings ->
+            tuple(pairId, AnnotationSettings.isMapFirst(settings))
+        }
+        clustering_inputs_ch
+            .combine(row_is_map_first_ch, by: 0)
+            .filter { _pairId, _segmentation, _samplesJson, mapFirst -> mapFirst }
+            .subscribe { pairId, segmentation, _samplesJson, _mapFirst ->
+                AnnotationRunRecord.expect(pairId, segmentation)
+            }
+        clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE(
+            clustering_inputs_ch
+                .combine(sample_rows_ch, by: 0)
+                .map { pairId, segmentation, samplesJson, row, settings ->
+                    tuple(
+                        pairId,
+                        segmentation,
+                        AnnotationSettings.samplesJsonWithRowColumns(samplesJson, row, settings),
+                    )
+                }
+        )
+        clustering_prepared_by_mode_ch = clustering_prepared_ch
+            .combine(row_is_map_first_ch, by: 0)
+            .branch { _pairId, _segmentation, _samplesJson, _config, _preparedDir, mapFirst ->
+                map_first: mapFirst
+                legacy: true
+            }
+        // The registration checks RESOLVE reads (G1: the mouse gate's, the
+        // human real-data QC's NR9; M13 C15): per pair x segmentation, the
+        // *_registration_qc.json of each active platform. A branch whose QC
+        // stage runs in this launch (qc_inputs_ch's filter: run_qc and an
+        // analysis segmentation) takes its own QC tasks' checks, released
+        // once all of them have finished (groupKey), and never a published
+        // one, even when its QC wrote none. Every branch of a row whose QC
+        // stage does not run at all (settings.run_qc false: a start_stage
+        // after qc or an only_stage, the run's or the row's) takes the checks
+        // an earlier launch's QC published under params.outdir for the
+        // outputs this launch starts from, or none. A segmentation that is
+        // not an analysis segmentation of a row whose QC runs (a MENDER-only
+        // one) takes none and never a published one: the launch's earlier
+        // stages may have re-segmented it, so a published check could be an
+        // older launch's. Without a check, mouse RESOLVE refuses and human G1
+        // is not_evaluable. The source of each branch's checks, or why none
+        // was looked up, goes to the end-of-run summary (hook H6).
+        map_first_registration_from_qc_ch = qc_results_ch
+            .map { _key, pairId, _platform, segmentation, _latestZarr, qcOutDir, _tableKey, _shapeKey ->
+                tuple(pairId, segmentation, qcOutDir)
+            }
+            .combine(
+                sample_rows_ch.map { pairId, _row, settings ->
+                    tuple(pairId, settings.active_platforms.size())
+                },
+                by: 0,
+            )
+            .map { pairId, segmentation, qcOutDir, nPlatforms ->
+                tuple(
+                    groupKey(AnnotationReferences.branchKey(pairId, segmentation), nPlatforms),
+                    pairId,
+                    segmentation,
+                    qcOutDir,
+                    nPlatforms,
+                )
+            }
+            .groupTuple(remainder: true)
+            .map { _branchKey, pairIds, segmentations, qcOutDirs, nPlatforms ->
+                tuple(
+                    pairIds[0],
+                    segmentations[0],
+                    AnnotationReferences.registrationQcFiles(qcOutDirs),
+                    nPlatforms[0],
+                    AnnotationRunRecord.REGISTRATION_QC_STAGE,
+                )
+            }
+        map_first_registration_published_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
+            settings.analysis_input_segmentations
+                .findAll { segmentation ->
+                    !(settings.run_qc && settings.analysis_segmentations.contains(segmentation))
+                }
+                .collect { segmentation ->
+                    def nPlatforms = settings.active_platforms.size()
+                    if (settings.run_qc) {
+                        if (AnnotationSettings.isMapFirst(settings)) {
+                            log.warn(
+                                "${pairId}:${segmentation}: the row's QC stage runs in this launch " +
+                                "but not for this segmentation (not an analysis_segmentation), so " +
+                                "RESOLVE stages no registration check and published ones are not " +
+                                "used (mouse RESOLVE refuses, human registration G1 is not_evaluable)"
+                            )
+                        }
+                        tuple(
+                            pairId,
+                            segmentation,
+                            [],
+                            nPlatforms,
+                            AnnotationRunRecord.REGISTRATION_ROW_RUNS_QC,
+                        )
+                    } else {
+                        def publishedChecks = AnnotationReferences.publishedRegistrationQcFiles(
+                            params.outdir,
+                            pairId,
+                            settings.active_platforms,
+                            segmentation,
+                        )
+                        if (AnnotationSettings.isMapFirst(settings)) {
+                            def branchText = "${pairId}:${segmentation}: the QC stage does not run in this launch"
+                            if (publishedChecks) {
+                                log.info(
+                                    "${branchText}; RESOLVE stages the published registration checks " +
+                                    publishedChecks.join(", ")
+                                )
+                            } else {
+                                def searched = AnnotationReferences.publishedQcOutDirs(
+                                    params.outdir,
+                                    pairId,
+                                    settings.active_platforms,
+                                    segmentation,
+                                )
+                                log.warn(
+                                    "${branchText} and no registration check is published in " +
+                                    "${searched.join(', ')} (mouse RESOLVE refuses, human " +
+                                    "registration G1 is not_evaluable)"
+                                )
+                            }
+                        }
+                        tuple(
+                            pairId,
+                            segmentation,
+                            publishedChecks,
+                            nPlatforms,
+                            AnnotationRunRecord.REGISTRATION_PUBLISHED,
+                        )
+                    }
+                }
+        }
+        map_first_registration_sources_ch = map_first_registration_from_qc_ch
+            .mix(map_first_registration_published_ch)
+        map_first_registration_sources_ch.subscribe { pairId, segmentation, registrationFiles, nPlatforms, source ->
+            AnnotationRunRecord.registrationChecks(pairId, segmentation, source, registrationFiles, nPlatforms)
+        }
+        map_first_registration_ch = map_first_registration_sources_ch
+            .map { pairId, segmentation, registrationFiles, _nPlatforms, _source ->
+                tuple(pairId, segmentation, registrationFiles)
+            }
+        map_first_alignment_ch = alignment_results_ch
+            .map { pairId, _merscopeLatest, _xeniumLatest, _transformJson, _coordsDir, alignOut ->
+                tuple(pairId, AnnotationReferences.alignmentFiles(alignOut))
+            }
+            .mix(
+                sample_rows_ch
+                    .filter { _pairId, _row, settings -> !settings.need_alignment_results }
+                    .map { pairId, _row, _settings -> tuple(pairId, []) }
+            )
+        hippocampal_prepared_ch = clustering_prepared_by_mode_ch.map_first.branch {
+            _pairId, _segmentation, samplesJson, _config, _prepared, _mapFirst ->
+            hippocampal: new groovy.json.JsonSlurperClassic().parseText(samplesJson).every { sample -> sample.platform == "ATERA" }
+            frontal: true
+        }
+        hippocampal_computed_ch = channel.empty()
+        hippocampal_labels_ch = channel.empty()
+        if (params.annotation_hippocampal_resources) {
+            hippocampal = HIPPOCAMPAL_ANNOTATION(hippocampal_prepared_ch.hippocampal.map { item -> item.take(5) })
+            hippocampal_computed_ch = hippocampal.computed
+            hippocampal_labels_ch = hippocampal.labels
+        }
+        clustering_computed_ch = CLUSTERING_MAP_FIRST(
+            hippocampal_prepared_ch.frontal.map { item -> item.take(5) },
+            map_first_alignment_ch,
+            map_first_registration_ch,
+        ).computed
+            .mix(hippocampal_computed_ch)
+            .mix(
+                CLUSTERING_SQUIDPY_COMPUTE(
+                    clustering_prepared_by_mode_ch.legacy.map { item -> item.take(5) }
+                )
+            )
+    } else {
+        clustering_prepared_ch = CLUSTERING_SQUIDPY_PREPARE(clustering_inputs_ch)
+        clustering_computed_ch = CLUSTERING_SQUIDPY_COMPUTE(clustering_prepared_ch)
+    }
     clustering_results_ch = CLUSTERING_SQUIDPY_FINALIZE(clustering_computed_ch)
 
     pciseq_reference_inputs_ch = sample_rows_ch
@@ -5104,6 +6891,10 @@ workflow {
         .mix(clustering_terminal_events_ch)
         .mix(terminal_extra_clustering_terminal_events_ch)
 
+    // Pair every terminal event with the pair's one spec: combine keeps the
+    // spec, whereas join pairs items one to one, so the pair's first terminal
+    // event (often FINALIZE's) would consume it and the events the terminal
+    // consumers wait for would be dropped. Legacy and map_first runs alike.
     pair_terminal_grouped_ch = pair_terminal_events_ch
         .combine(pair_terminal_specs_ch, by: 0)
         .filter { _pairId, eventStage, _done, expectedStage, _expectedCount ->
@@ -5186,8 +6977,12 @@ workflow {
                             publishedPairPath(
                                 params.outdir,
                                 pairId,
-                                "${segmentation}/clustering_squidpy/" +
-                                "clustering_squidpy_out/" +
+                                "${segmentation}/" +
+                                AnnotationSettings.publishedClusteringDir(
+                                    params.outdir, pairId, segmentation, platform, sampleId,
+                                    settings.clustering_squidpy_table_key_suffix, // rca-site:H2
+                                ) +
+                                "/clustering_squidpy_out/" +
                                 "${platform.toLowerCase()}/" +
                                 "${sampleId}_clustered.h5ad",
                             )
@@ -5229,12 +7024,13 @@ workflow {
             sampleId,
             clusteredH5ad,
             latestZarr,
-            _settings,
+            settings, // rca-site:H2: was _settings; binds the row suffix used below
             terminalToken ->
                 def layerKeys = analysisLayerKeys(platform, segmentation)
                 def clusteredTableKey = clusteredSpatialdataTableKey(
                     layerKeys.table_key,
                     segmentation,
+                    settings.clustering_squidpy_table_key_suffix, // rca-site:H2
                 )
                 tuple(
                     taskKey,
@@ -5330,6 +7126,12 @@ workflow {
         }
     mender_finalized_ch = MENDER_FINALIZE(mender_finalize_inputs_ch)
     MENDER_IMPORT(mender_finalized_ch)
+    // Hook H6's record of skipped MENDER runs (no assigned state; map_first only).
+    if (AnnotationSettings.isMapFirstRun(params)) { // rca-site:H6
+        MENDER_IMPORT.out.subscribe { _taskKey, pairId, segmentation, platform, importManifest ->
+            AnnotationRunRecord.menderImported(pairId, segmentation, platform, importManifest)
+        }
+    }
 
     gaston_current_clustering_gate_ch = post_pciseq_sample_rows_ch.flatMap {
         pairId, _row, settings ->
@@ -5398,8 +7200,12 @@ workflow {
                             publishedPairPath(
                                 params.outdir,
                                 pairId,
-                                "${segmentation}/clustering_squidpy/" +
-                                "clustering_squidpy_out/" +
+                                "${segmentation}/" +
+                                AnnotationSettings.publishedClusteringDir(
+                                    params.outdir, pairId, segmentation, platform, sampleId,
+                                    settings.clustering_squidpy_table_key_suffix, // rca-site:H2
+                                ) +
+                                "/clustering_squidpy_out/" +
                                 "${platform.toLowerCase()}/" +
                                 "${sampleId}_clustered.h5ad",
                             )
@@ -5622,4 +7428,49 @@ workflow {
         }
 
     GASTON_IMPORT(gaston_import_inputs_ch)
+
+    if (AnnotationSettings.isMapFirstRun(params) && params.annotation_hippocampal_resources && AnnotationReport.enabled(params)) {
+        hippocampal_labels_ch.subscribe { pairId, segmentation, _resolved ->
+            AnnotationRunRecord.reportExpected(pairId, segmentation)
+        }
+        hippocampal_report_rows = hippocampal_labels_ch
+            .map { pairId, segmentation, resolved -> tuple(AnnotationReferences.branchKey(pairId, segmentation), pairId, segmentation, resolved) }
+            .join(clustering_results_ch.map { pairId, segmentation, _samples, clustered -> tuple(AnnotationReferences.branchKey(pairId, segmentation), clustered) })
+            .map { key, pairId, segmentation, resolved, clustered -> tuple(pairId, key, segmentation, resolved, clustered) }
+            .combine(sample_rows_ch.map { pairId, _row, settings -> tuple(pairId, settings.run_mender ? settings.mender_segmentations : []) }, by: 0)
+            .map { pairId, key, segmentation, resolved, clustered, menderSegmentations -> tuple(key, pairId, segmentation, resolved, clustered, menderSegmentations) }
+        hippocampal_mender = mender_finalized_ch
+            .filter { _taskKey, _pairId, _segmentation, platform, _sampleId, _spatialdataPath, _sourceTable, _shape, _sourceH5ad, _config, _menderDir -> platform == "ATERA" }
+            .map { _taskKey, pairId, segmentation, _platform, _sampleId, _spatialdataPath, _sourceTable, _shape, _sourceH5ad, _config, menderDir -> tuple(AnnotationReferences.branchKey(pairId, segmentation), menderDir) }
+        hippocampal_reports_ch = HIPPOCAMPAL_REPORT(hippocampal_report_rows.join(hippocampal_mender, remainder: true)
+            .filter { _key, pairId, _segmentation, _resolved, _clustered, _menderSegmentations, _menderDir -> pairId != null }
+            .map { _key, pairId, segmentation, resolved, clustered, menderSegmentations, menderDir ->
+                tuple(pairId, segmentation, resolved, clustered, menderDir ? [menderDir] : [],
+                    segmentation in menderSegmentations,
+                    AnnotationReferences.sourcesFingerprint("${projectDir}/../src", ["merxen/annotation/hippocampal_pipeline.py", "merxen/annotation/hippocampal_report.py"]))
+            })
+        hippocampal_reports_ch.subscribe { pairId, segmentation, reportDir ->
+            AnnotationRunRecord.reported(pairId, segmentation, reportDir)
+        }
+    }
+
+    // rca-hook:H11: the annotation QC report (plan §3.6, §9; M7), map_first runs only:
+    // after FINALIZE, the pair's cortical depth and the branch's MENDER when they run.
+    if (AnnotationSettings.isMapFirstRun(params) && AnnotationReport.enabled(params)) {
+        ANNOTATION_REPORTING(
+            CLUSTERING_MAP_FIRST.out.labels,
+            CLUSTERING_MAP_FIRST.out.alignment,
+            clustering_results_ch,
+            compute_cortical_depth_results_ch.map { _key, pairId, platform, _latestZarr, corticalDepthOut ->
+                tuple(pairId, platform, corticalDepthOut)
+            },
+            mender_finalized_ch.map {
+                _taskKey, pairId, segmentation, platform, _sampleId, _spatialdataPath,
+                _sourceSpatialdataTable, _nativeShapeKey, _sourceH5adPath, _menderConfig, menderDir ->
+                    tuple(pairId, segmentation, platform, menderDir)
+            },
+            sample_rows_ch.map { pairId, _row, settings -> tuple(pairId, AnnotationReport.pairSpec(settings, params)) },
+        )
+    }
+
 }

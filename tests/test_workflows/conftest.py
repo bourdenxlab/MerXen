@@ -25,7 +25,8 @@ def example_site_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     """Point both site-config variables at the tracked templates.
 
     The variables are set in ``os.environ`` for the test, so the subprocesses it
-    starts (``nextflow config``, ``nextflow run``) inherit them.
+    starts (``nextflow config``, ``nextflow run``, the launch guard) inherit
+    them.
 
     Returns:
         Variable name to template path.
@@ -58,6 +59,8 @@ def combined_config_text(dwight_config_text: str) -> str:
 PARAM_CONFIG_FILES: tuple[str, ...] = (
     "nextflow.config",
     "conf/dwight.config",
+    "conf/annotation.config",
+    "conf/dwight.annotation.config",
     "conf/site.config.example",
     "conf/dwight.site.config.example",
 )

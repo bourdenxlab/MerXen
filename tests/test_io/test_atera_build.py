@@ -235,6 +235,9 @@ def test_resolve_worker_count(monkeypatch: pytest.MonkeyPatch) -> None:
     assert atera_builder.resolve_worker_count() >= 1
     with pytest.raises(ValueError, match="positive"):
         atera_builder.resolve_worker_count(0)
+    monkeypatch.delattr(os, "sched_getaffinity", raising=False)
+    monkeypatch.setattr(os, "cpu_count", lambda: 3)
+    assert atera_builder.resolve_worker_count() == 3
 
 
 def test_watchdog_records_the_peak_and_acts_on_the_cap() -> None:

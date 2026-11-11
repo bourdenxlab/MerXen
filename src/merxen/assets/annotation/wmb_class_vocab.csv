@@ -1,0 +1,35 @@
+label,class,broad_class,nt,never_drop
+CS20230722_CLAS_01,01 IT-ET Glut,Neurons,Excitatory,false
+CS20230722_CLAS_02,02 NP-CT-L6b Glut,Neurons,Excitatory,false
+CS20230722_CLAS_03,03 OB-CR Glut,Neurons,Excitatory,false
+CS20230722_CLAS_04,04 DG-IMN Glut,Neurons,Excitatory,false
+CS20230722_CLAS_05,05 OB-IMN GABA,Neurons,Inhibitory,false
+CS20230722_CLAS_06,06 CTX-CGE GABA,Neurons,Inhibitory,false
+CS20230722_CLAS_07,07 CTX-MGE GABA,Neurons,Inhibitory,false
+CS20230722_CLAS_08,08 CNU-MGE GABA,Neurons,Inhibitory,false
+CS20230722_CLAS_09,09 CNU-LGE GABA,Neurons,Inhibitory,false
+CS20230722_CLAS_10,10 LSX GABA,Neurons,Inhibitory,false
+CS20230722_CLAS_11,11 CNU-HYa GABA,Neurons,Inhibitory,false
+CS20230722_CLAS_12,12 HY GABA,Neurons,Inhibitory,false
+CS20230722_CLAS_13,13 CNU-HYa Glut,Neurons,Excitatory,false
+CS20230722_CLAS_14,14 HY Glut,Neurons,Excitatory,false
+CS20230722_CLAS_15,15 HY Gnrh1 Glut,Neurons,Excitatory,false
+CS20230722_CLAS_16,16 HY MM Glut,Neurons,Excitatory,false
+CS20230722_CLAS_17,17 MH-LH Glut,Neurons,Excitatory,false
+CS20230722_CLAS_18,18 TH Glut,Neurons,Excitatory,false
+CS20230722_CLAS_19,19 MB Glut,Neurons,Excitatory,false
+CS20230722_CLAS_20,20 MB GABA,Neurons,Inhibitory,false
+CS20230722_CLAS_21,21 MB Dopa,Neurons,Other,false
+CS20230722_CLAS_22,22 MB-HB Sero,Neurons,Other,false
+CS20230722_CLAS_23,23 P Glut,Neurons,Excitatory,false
+CS20230722_CLAS_24,24 MY Glut,Neurons,Excitatory,false
+CS20230722_CLAS_25,25 Pineal Glut,Neurons,Excitatory,true
+CS20230722_CLAS_26,26 P GABA,Neurons,Inhibitory,false
+CS20230722_CLAS_27,27 MY GABA,Neurons,Inhibitory,false
+CS20230722_CLAS_28,28 CB GABA,Neurons,Inhibitory,false
+CS20230722_CLAS_29,29 CB Glut,Neurons,Excitatory,false
+CS20230722_CLAS_30,30 Astro-Epen,Astrocytes/Ependymal,,true
+CS20230722_CLAS_31,31 OPC-Oligo,Oligodendrocyte lineage,,true
+CS20230722_CLAS_32,32 OEC,OEC,,false
+CS20230722_CLAS_33,33 Vascular,Vascular cells,,true
+CS20230722_CLAS_34,34 Immune,Microglia,,true

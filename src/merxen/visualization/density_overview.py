@@ -12,10 +12,19 @@ from matplotlib import colors as mcolors
 from tqdm.auto import tqdm
 
 from merxen.io.spatialdata_schema import choose_primary_points_key
+from merxen.platforms import find_platform_spec
 from merxen.plotting import prepare_plot_output, save_figure
+from merxen.visualization.raster_density import (
+    DensityRaster,
+    percentile_vmax,
+    points_bounds,
+    single_colour_cmap,
+    stream_hist2d,
+)
 
 MERSCOPE_TRANSCRIPT_COLOR = "#1f77b4"
 XENIUM_TRANSCRIPT_COLOR = "#d62728"
+ATERA_TRANSCRIPT_COLOR = "#2ca02c"
 TRANSCRIPT_OVERVIEW_SAMPLE_N = 250_000
 TRANSCRIPT_OVERVIEW_CROP_SAMPLE_N = 200_000
 TRANSCRIPT_OVERVIEW_RANDOM_STATE = 42
@@ -26,6 +35,9 @@ TRANSCRIPT_OVERVIEW_HEATMAP_CMAP = "magma"
 TRANSCRIPT_OVERVIEW_HEATMAP_LOG = False
 TRANSCRIPT_OVERVIEW_HEATMAP_VMIN = None
 TRANSCRIPT_OVERVIEW_HEATMAP_VMAX = 1700.0
+RASTER_OVERVIEW_VMAX_PERCENTILE = 99.5
+RASTER_OVERVIEW_FULL_BIN_UM = 10.0
+RASTER_OVERVIEW_CROP_BIN_UM = 1.0
 
 
 def density_hist2d(
@@ -279,8 +291,35 @@ def plot_single_transcript_overview(
     heatmap_log: bool = TRANSCRIPT_OVERVIEW_HEATMAP_LOG,
     heatmap_vmin: float | None = TRANSCRIPT_OVERVIEW_HEATMAP_VMIN,
     heatmap_vmax: float | None = TRANSCRIPT_OVERVIEW_HEATMAP_VMAX,
+    zarr_path: Path | str | None = None,
 ) -> Path:
-    """Render a one-dataset transcript density, full scatter, and crop overview."""
+    """Render a one-dataset transcript density, full scatter, and crop overview.
+
+    Platforms with ``rasterised_transcript_plots`` (whole-transcriptome panels)
+    draw all three panels as density rasters over every transcript instead
+    (:func:`plot_rasterised_transcript_overview`); ``sample_n``,
+    ``crop_sample_n``, ``random_state``, ``point_size``, ``heatmap_log`` and
+    ``heatmap_vmax`` do not apply to them.
+    """
+    spec = find_platform_spec(dataset_name)
+    if spec is not None and spec.rasterised_transcript_plots:
+        store = zarr_path if zarr_path is not None else getattr(sdata_obj, "path", None)
+        if store is None:
+            raise ValueError(
+                f"{spec.name} transcript overviews stream the points from the "
+                "store; pass zarr_path or a store-backed SpatialData object."
+            )
+        return plot_rasterised_transcript_overview(
+            store,
+            dataset_name,
+            output_path,
+            points_key=_reference_points_key(sdata_obj),
+            crop_bbox_um=crop_bbox_um,
+            crop_size_um=crop_size_um,
+            heatmap_bins=heatmap_bins,
+            heatmap_cmap=heatmap_cmap,
+            heatmap_vmin=heatmap_vmin,
+        )
     output_path = prepare_plot_output(output_path)
     dataset_label = str(dataset_name).upper()
     point_color = (
@@ -380,6 +419,158 @@ def plot_single_transcript_overview(
     save_figure(fig, output_path, dpi=220)
     plt.close(fig)
     return output_path
+
+
+def plot_rasterised_transcript_overview(
+    zarr_path: Path | str,
+    dataset_name: str,
+    output_path: Path | str,
+    *,
+    points_key: str = "transcripts",
+    crop_bbox_um: tuple[float, float, float, float] | None = None,
+    crop_size_um: float = 2_000.0,
+    heatmap_bins: int = TRANSCRIPT_OVERVIEW_HEATMAP_BINS,
+    heatmap_cmap: str = TRANSCRIPT_OVERVIEW_HEATMAP_CMAP,
+    heatmap_vmin: float | None = TRANSCRIPT_OVERVIEW_HEATMAP_VMIN,
+    full_bin_um: float = RASTER_OVERVIEW_FULL_BIN_UM,
+    crop_bin_um: float = RASTER_OVERVIEW_CROP_BIN_UM,
+    vmax_percentile: float = RASTER_OVERVIEW_VMAX_PERCENTILE,
+) -> Path:
+    """Render the three overview panels as density over every transcript.
+
+    Nothing is sampled: the points element of the store is streamed one
+    parquet file at a time (:func:`raster_density.stream_hist2d`) in two
+    passes: one over the section at ``full_bin_um``, and one over the crop
+    that reads only the files the points index places in the crop.
+
+    - Panel 0: about ``heatmap_bins`` square bins per axis over the section,
+      summed from the section pass (the bin edge is the multiple of
+      ``full_bin_um`` closest to ``span / heatmap_bins``); the colour limit is
+      the ``vmax_percentile`` of the non-empty bins.
+    - Panel 1: ``full_bin_um`` bins over the section, log colour scale.
+    - Panel 2: ``crop_bin_um`` bins over the crop, log colour scale.
+
+    Args:
+        zarr_path: Store whose points are binned.
+        dataset_name: Platform label used in titles.
+        output_path: PNG path (a PDF is written beside it).
+        points_key: Points element.
+        crop_bbox_um: Crop ``(x0, y0, x1, y1)``; centred on the section when
+            ``None``.
+        crop_size_um: Crop edge when ``crop_bbox_um`` is ``None``.
+        heatmap_bins: Target bins per axis of panel 0.
+        heatmap_cmap: Colormap of panel 0.
+        heatmap_vmin: Lower colour limit of panel 0 (default 0).
+        full_bin_um: Bin edge of panel 1.
+        crop_bin_um: Bin edge of panel 2.
+        vmax_percentile: Percentile of non-empty bins used as colour maximum.
+
+    Returns:
+        ``output_path``.
+    """
+    output_path = prepare_plot_output(output_path)
+    zarr_path = Path(zarr_path)
+    dataset_label = str(dataset_name).upper()
+    bounds = points_bounds(zarr_path, points_key)
+    cx, cy, span = _center_and_span(bounds)
+    span = max(float(span), 1.0)
+    half = 0.5 * span
+    x_range = (cx - half, cx + half)
+    y_range = (cy - half, cy + half)
+    square = (x_range[0], y_range[0], x_range[1], y_range[1])
+    if crop_bbox_um is None:
+        crop_bbox_um = _centered_bbox(bounds, crop_size_um)
+
+    full = stream_hist2d(zarr_path, points_key, square, full_bin_um)
+    heat = full.coarsen(
+        max(1, round(span / max(int(heatmap_bins), 1) / float(full_bin_um)))
+    )
+    crop = stream_hist2d(zarr_path, points_key, crop_bbox_um, crop_bin_um)
+
+    colour = ATERA_TRANSCRIPT_COLOR
+    cmap = single_colour_cmap(colour, name=f"{dataset_label.lower()}_density")
+    fig, axes = plt.subplots(3, 1, figsize=(8, 18), constrained_layout=True)
+
+    heat_values = heat.combined().astype(np.float64)
+    vmin = 0.0 if heatmap_vmin is None else float(heatmap_vmin)
+    vmax = max(percentile_vmax(heat_values, vmax_percentile), vmin + 1.0)
+    im = axes[0].imshow(
+        heat_values,
+        origin="lower",
+        extent=heat.extent,
+        cmap=heatmap_cmap,
+        norm=mcolors.Normalize(vmin=vmin, vmax=vmax),
+        aspect="equal",
+        interpolation="nearest",
+    )
+    axes[0].set_xlim(x_range)
+    axes[0].set_ylim(y_range)
+    axes[0].set_title(
+        f"{dataset_label} transcript density (all transcripts, {heat.total():,})"
+    )
+    fig.colorbar(im, ax=axes[0], shrink=0.85).set_label(
+        f"Transcript count per {heat.bin_um:.3g} um bin "
+        f"(max = {vmax_percentile:g}th percentile)"
+    )
+
+    _draw_log_density(
+        fig,
+        axes[1],
+        full,
+        cmap=cmap,
+        vmax_percentile=vmax_percentile,
+        title=f"{dataset_label} transcripts (all transcripts, "
+        f"{full.bin_um:g} um bins, {full.total():,})",
+    )
+    axes[1].set_xlim(x_range)
+    axes[1].set_ylim(y_range)
+
+    x0, y0, x1, y1 = crop_bbox_um
+    _draw_log_density(
+        fig,
+        axes[2],
+        crop,
+        cmap=cmap,
+        vmax_percentile=vmax_percentile,
+        title=f"{dataset_label} crop x=[{x0:.0f},{x1:.0f}], y=[{y0:.0f},{y1:.0f}] "
+        f"(all transcripts, {crop.bin_um:g} um bins, {crop.total():,})",
+    )
+    axes[2].set_xlim(x0, x1)
+    axes[2].set_ylim(y0, y1)
+    for ax in axes:
+        ax.set_xlabel("x (microns)")
+        ax.set_ylabel("y (microns)")
+
+    save_figure(fig, output_path, dpi=220)
+    plt.close(fig)
+    return output_path
+
+
+def _draw_log_density(
+    fig: Any,
+    ax: Any,
+    raster: DensityRaster,
+    *,
+    cmap: Any,
+    vmax_percentile: float,
+    title: str,
+) -> None:
+    values = raster.combined().astype(np.float64)
+    vmax = percentile_vmax(values, vmax_percentile)
+    shown = np.ma.masked_less_equal(values, 0.0)
+    im = ax.imshow(
+        shown,
+        origin="lower",
+        extent=raster.extent,
+        cmap=cmap,
+        norm=mcolors.LogNorm(vmin=1.0, vmax=max(vmax, 1.0 + 1e-9)),
+        aspect="equal",
+        interpolation="nearest",
+    )
+    ax.set_title(title)
+    fig.colorbar(im, ax=ax, shrink=0.85).set_label(
+        f"Transcripts per {raster.bin_um:g} um bin (log scale)"
+    )
 
 
 def _resolve_points_xy_cols(

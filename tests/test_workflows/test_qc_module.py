@@ -15,8 +15,11 @@ def test_qc_process_passes_registration_settings() -> None:
         qc_text
     )
     assert '"registration_strict": ${registrationStrict}' in qc_text
-    assert '"merscope_cell_boundaries"' in qc_text
-    assert '"xenium_cell_boundaries"' in qc_text
+    # The platform's cells come from the registry (AT-6), not a platform branch.
+    assert (
+        "def registrationReferenceShapeKey = "
+        "PlatformSpec.forName(platform).originalCellShapeKey"
+    ) in qc_text
     assert "params.qc_registration_strict" in qc_text
 
 

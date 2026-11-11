@@ -18,7 +18,8 @@ This guide takes you from a fresh clone to a running pipeline.
 - Ample RAM. With no `-profile` argument, Nextflow selects the `standard`
   profile, which loads the Dwight workstation settings: a local executor
   capacity of **72 CPUs / 640 GB**, conservative stage concurrency, one shared
-  GPU lock, and Dwight's local reference paths. Individual segmentation
+  GPU lock, and Dwight's local reference paths (read from the private
+  `workflows/conf/dwight.site.config`, see step 3). Individual segmentation
   processes request up to 220 GB. Other execution profiles must provide their
   own host capacity, concurrency, GPU/device, and reference-path settings. See
   [Configuration](configuration.md#resource-limits) to dial requests down.
@@ -65,6 +66,15 @@ Typically fill in:
 
 `.env` is git-ignored. See [Configuration](configuration.md) for the full list
 and how these are consumed.
+
+The host locations the pipeline reads (reference sources and stores, the task
+temporary directory, container images) are not in `.env` but in two private
+Nextflow files, `workflows/conf/dwight.site.config` and
+`workflows/conf/site.config`. Copy their `*.example` templates and fill in the
+values; without the Dwight one, a default (`standard`) run stops at start-up
+with an error that says so. See
+[Configuration](configuration.md#site-configs-private-host-locations) and
+[Local configuration](local-configuration.md).
 
 ## 4. Sanity check: run the tests
 

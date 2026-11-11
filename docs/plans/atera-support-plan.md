@@ -1,8 +1,16 @@
 # 10x Atera support: build stage and downstream plan
 
-> **Status:** revision 4, 2026-11-04. This is a plan only; no code has changed. Decisions marked
-> *Recommended* in §3 and §10 are the defaults the plan adopts until the user overrides them. Milestone 1
-> (§1) covers the build stage. Everything after it in §8 is sequenced but has not started. Revision 4
+> **Main promotion, 2026-11-11:** the user authorized promoting the complete
+> Atera integration and all dependent HITL work through acceptance-gate PR #127.
+> That head includes the integrated robust cell-type annotation history and
+> its human/mouse `map_first` defaults. The former integration branches close
+> on merge; further work branches from `main`. The milestone evidence,
+> biological limitations and future work recorded below retain their scope.
+
+> **Status:** implementation in progress; milestone 1 is met. The design baseline is revision 4,
+> 2026-11-04; §8 records implementation progress and Appendix A records later decisions. Decisions marked
+> *Recommended* in §3 and §10 apply unless superseded by those decisions. Milestone 1 (§1) covers the
+> build stage; downstream work is underway. Revision 4
 > applies the fidelity, scale, docs-conformance and completeness reviews. Each accepted or rejected point
 > is listed in the Review log (Appendix A). **User decision 2026-11-05 (metadata retention):** the store
 > keeps all vendor metadata verbatim; privacy rules apply only to what is committed to git and to
@@ -13,7 +21,18 @@
 > criterion (status after §1.1 item 7; measured numbers in §6.1; decisions in Appendix A, "AT-5 pilot").
 > Milestone 1 is met. **AT-5b (2026-11-05):** the ProSeg benchmark ran on the crop and on the densest
 > 2 mm tile; AT-9 goes ahead as an opt-in tiled route, and a single whole-section run is ruled out
-> (§8 AT-5 and AT-9, Appendix A "AT-5b ProSeg benchmark").
+> (§8 AT-5 and AT-9, Appendix A "AT-5b ProSeg benchmark"). **AT-6 (2026-11-06):** the native
+> (vendor-segmentation) route runs end to end through Nextflow on the crop and on the full public section,
+> from the AT-5 source stores to clustering and MENDER, and passes every exit check (§1.4, §6.2, §8 AT-6,
+> Appendix A "AT-6 exit runs"). **AT-9 (2026-11-06):** the opt-in ProSeg route
+> (`segmentation_source=native_proseg`: vendor masks as the prior, 2 mm label-owned tiles, a stitched
+> `proseg_vendor` layer (formerly `reseg`)) runs end to end on the crop and on the full public section through MENDER on both
+> layers (full section: 30 tiles, 91,431 cells, 8 h 41 min on a busy host, every check passed), and
+> the short ProSeg schedule is confirmed on the densest tile (§6.2, §8 AT-9, Appendix A "AT-9
+> implementation and crop run", "AT-9 full-section run" and "AT-9 final review").
+> **AT-7 (2026-11-07, in review):** Cellpose-SAM on DAPI + 18S, followed by tiled ProSeg with
+> Cellpose masks as prior, completed the full section through MENDER on all three layers.
+> Independent verification passed all 48 checks; integration review is in progress.
 
 *Names and paths (2026-11-04).* The only dataset used here is the public 10x Atera whole-transcriptome
 dataset of a human hippocampus section (atera-1.1.1, fresh frozen); its name is not written here, and the
@@ -145,7 +164,7 @@ the reviewed revision with the new resource defaults (`atera_at5/full_r2/`).
 Each item is sequenced in §8:
 
 - Running SEGMENT, ENRICH, QC, VISUALIZE or the analysis stages on Atera. The "native segmentation"
-  route that lets them run is AT-6, the next milestone. §5 lists every downstream change.
+  route that lets them run is AT-6, the next milestone (done; §1.4). §5 lists every downstream change.
 - ProSeg on Atera. The AT-5b benchmark has run; ProSeg comes in AT-9 as an opt-in tiled route.
 - H&E registration.
 - Pairing Atera with XENIUM or MERSCOPE.
@@ -163,6 +182,32 @@ Each item is sequenced in §8:
 | 5 | **The masks are the true segmentation; the polygons are display simplifications** (official docs).<br>• Cell mask label = cell index + 1 (official docs; exhaustively verified).<br>• Nucleus mask label = nucleus-polygon row + 1 (empirical, exhaustively verified on 90,238 nuclei). The docs state the label rule for cell masks only.<br>• Nucleus pixels are 100% inside their owning cell. | [H] |
 | 6 | **Near-whole-transcriptome panel.**<br>• 18,049 genes and 6,628 control features.<br>• Several downstream stages densify or loop per gene and break or run for many hours at this size (§5). | [H]/[M] |
 | 7 | **Sample-identifying metadata.** `experiment.spatial`, the `metrics_summary_*.csv` header and file name, `analysis_summary_*.html` and `panel_config.customer` all carry run, slide, ROI or serial identifiers, or customer PII. The store keeps them verbatim; committed text and human-facing output never show them (D13). | [H] |
+
+### 1.4 AT-6 status: the native route end to end
+
+**Status (2026-11-06): the AT-6 exit runs pass on the crop and on the full public section.** Each ran
+as one Nextflow row (`analysis_mode=atera`, `segmentation_source=native`, `mender_enabled=true`,
+`stop_stage=mender`) from the AT-5 source store through `NATIVE_LATEST`, ENRICH, VIEWER_CACHE, MIQ, QC,
+VISUALIZE, spatial gene analysis, clustering and MENDER. pciSeq, GASTON, standalone MapMyCells, MECR,
+transcript spatial patterns, cortical depth and distance from object are off or refused for ATERA rows
+(user decision). The runs found three bugs, each fixed with a test (Appendix A, "AT-6 exit runs").
+Evidence: `$MERXEN_EVIDENCE_ROOT/atera_at6/` (run scripts, samplesheets, traces, reports, timelines,
+`verify_{crop,full}.json`, `stage_resources.json`, `disk_{crop,full}.json`, the check scripts). Stage
+times, memory and disk are in §6.2.
+
+| Check | Crop (3,013 cells, 40.6 M transcripts) | Full section (91,431 cells, 1.41 B transcripts) |
+|---|---|---|
+| Source store unchanged (inode, size, mtime of every file; SHA-256 of every metadata file and 200 random payloads) | 927 files, 1.48 GB unchanged; 143 payloads made read-only (0664 → 0444) | 3,352 files, 38.8 GB unchanged; 1,543 payloads made read-only |
+| Latest store shares no metadata inode with the source | 185 payload files hardlinked, 0 metadata | 1,905 payload files (38.2 GB) hardlinked, 0 metadata |
+| Viewer reads every transcript (`points/transcripts` rows of the latest store) | 40,642,374 = source = `n_points_written` | 1,409,601,228 = source = `n_points_written` |
+| Native label check (corner convention, float32) | passed, 0 mismatches | passed, 0 mismatches; 638,849,843 assigned rows; `overlaps_nucleus` agreement 1.0 |
+| ENRICH gene counts per cell = vendor matrix row sums (int64) and vendor `transcript_counts` | 0 cells differ; 18,894,687 | 0 cells differ; 638,693,512 |
+| ENRICH all-feature counts = vendor genes + controls | short by 3 counts in 3 cells, all `DeprecatedCodeword` | short by 84 counts in 84 cells, all `DeprecatedCodeword` (the AT-5 vendor quirk) |
+| QC: transcript total, assigned total, registration | 40,642,374; 18,894,687 (after the float32 fix); pass, density ratio 7.2 | 1,409,601,228; 638,693,512; pass, density ratio 4.8 |
+| Density figures bin every transcript | section pass bins 40,642,374 of 40,642,374 | section pass bins 1,409,601,228 of 1,409,601,228 (409 of 409 files) |
+| Clustering | 3,012 cells × 15,479 genes, 2,000 HVGs (`cell_ranger`), PCA `mask_var` | 91,381 cells × 18,049 genes, 2,000 HVGs, GPU |
+| Nucleus metrics via `cell_instance_id` | 2 two-nucleus cells; `nucleus_count` equals the join for every cell | 332 multi-nucleus cells (up to 5 nuclei); `nucleus_count` equals the join for every cell; 10 spot-checked cells (2–4 nuclei): count equal, largest and summed nucleus area within 0.5% of the nucleus polygons |
+| MENDER | 15 outputs | 15 outputs (after the env pin) |
 
 ---
 
@@ -788,6 +833,12 @@ grow a third arm in every ternary.
   1/ps within `rtol=1e-6`.
 - **Pixel convention (ATERA vendor masks): corner/floor.** Any µm → mask-pixel lookup against vendor masks
   uses `floor(µm/ps)` (100.00% vendor agreement) [H].
+  - The vendor computes it in float32 as `floor(float32(µm) * float32(1/ps))`. Float64 `µm/ps` puts
+    about 1.4e-5 of transcripts, all within 0.0012 px of a pixel edge, on the neighbouring pixel; the
+    float32 rule has 0 mismatches over the whole public section (AT-6). The AT-6 native check uses
+    `merxen.enrichment.label_lookup.PixelFrame` (default `precision="float32"`); the later vendor-mask
+    lookups (AT-7 `assign_labels_from_masks(pixel_convention="corner")`, the AT-9 ProSeg prior) must use
+    the same `PixelFrame`, or they will disagree with the vendor at pixel edges.
   - `assign_labels_from_masks` uses `np.rint` (`segmentation/cellpose.py:896-897`), which disagrees on
     about 1.35% of transcripts.
   - Add a `pixel_convention: Literal["center", "corner"] = "center"` argument. The default keeps Xenium
@@ -1187,7 +1238,7 @@ The prefix helpers that already build names from `platform.toLowerCase()` (`main
 | Stage | REQUIRED to run | RECOMMENDED Atera-specific path | Why | Effort |
 |---|---|---|---|---|
 | **Segmentation, native (new `NATIVE_LATEST` process)** | • New CPU process. It builds `latest_spatialdata.zarr` by **hardlinking only data payloads** (chunk files, `points.parquet/*`) and **copying every `zarr.json`, `.zattrs`, `.zgroup`, `.zmetadata`**. ENRICH's `_prune_zarr_consolidated_metadata` writes those in place (`enrich.py:669, 682-692`), which would otherwise corrupt the source through the shared inode.<br>• Registers `original` (shape `atera_cell_boundaries`, table `table_original`, assignment `original_assignment`) and `original_nucleus` (`atera_nucleus`).<br>• Never calls `convert_to_latest` or `upgrade_spatialdata_contract`.<br>• Explicit `NO_FILE` placeholders in the SEGMENT output tuple (`segmentation.nf:70`).<br>• Test: source inodes and bytes unchanged after ENRICH and its partial cleanup | Export vendor `masks/1` once to `.npy` (+10.4 GB; +10.4 GB if a cell-keyed nucleus mask is also exported) for MIQ and as a future ProSeg prior | ENRICH today requires Cellpose masks and turns the first shape into `MOSAIK_proseg` (`enrich.py:930-994`) | 4.5 |
-| **Segmentation, Cellpose** (`cellpose_only`) | • ATERA in `DatasetConfig` and `hitl/registry.py:36`.<br>• Transform via the spec (`pipeline.py:225-236`).<br>• Zarr-only loader, never `xenium_reader` (`:474-522`).<br>• Explicit `image_key=morphology_focus` (`main.nf:3246-3267`); native key via the spec (`:561-582, 1047-1048`).<br>• Channels `["DAPI","18S"]`.<br>• Partial channel mismatch is an error (`image_source.py:388-394`) | • Evaluate `["DAPI","ATP1A1/CD45/E-Cadherin","18S"]` (vendor used 18S for 91% of cells).<br>• Per-channel normalisation behind a flag | Image 2.61 Gpx, about 1.5 h per Cellpose task [M] | 2 |
+| **Segmentation, Cellpose** (`cellpose_proseg`, AT-7; `cellpose_only` stays refused) | • ATERA in `DatasetConfig` and `hitl/registry.py:36`.<br>• Transform via the spec (`pipeline.py:225-236`).<br>• Zarr-only loader, never `xenium_reader` (`:474-522`).<br>• Explicit `image_key=morphology_focus` (`main.nf:3246-3267`); native key via the spec (`:561-582, 1047-1048`).<br>• Channels `["DAPI","18S"]`.<br>• Partial channel mismatch is an error (`image_source.py:388-394`) | • Evaluate `["DAPI","ATP1A1/CD45/E-Cadherin","18S"]` (vendor used 18S for 91% of cells).<br>• Per-channel normalisation behind a flag | Image 2.61 Gpx, about 1.5 h per Cellpose task [M] | 2 |
 | **ProSeg** | • QV branch takes ATERA → `qv`, `min_qv` 20 (`pipeline.py:863-886`).<br>• ATERA-specific `PROSEG_SEGMENT` memory and time.<br>• `convert_to_latest` fast paths (§3.3) | • Benchmarked in AT-5b (§8).<br>• Parquet input in Xenium layout (`proseg_src/src/sampler/transcripts.rs:459-573`).<br>• Controls excluded.<br>• Vendor masks as prior (floor lookups).<br>• 2 mm tiles with a ≥ 60 µm halo and label-owned stitching; explicit `--prior-weight`.<br>• Optional gene subset plus back-assignment.<br>• CSV export out of the GPU lock; delete the CSV after success | • Measured in AT-5b [H]: one whole-section run would need about 300 GB and 32–37 h at the default schedule (no-go); a 2 mm tile peaks at 21.7 GB.<br>• proseg#162: OOM at 256 GB with 1.04e9 transcripts.<br>• CSV about 73 GB (52 B/row) against about 12 GB of parquet.<br>• Neuropil: 47% of QV ≥ 20 gene transcripts are outside vendor cells on the dense tile; ProSeg takes in 15–18% of them under the vendor prior | 8–12 |
 | **ProSeg hybrid** | Off for ATERA | Vectorise (`proseg_hybrid.py:983-1031`), `n_jobs > 1` (`:798`), COO (`:1246-1256`) | 10–26 h single-threaded [M] | 3 |
 | **Enrichment** | • Native mode with optional masks; no `MOSAIK_proseg` alias; no fake Cellpose provenance (`enrich.py:816-836`).<br>• ATERA arm in the copy step (`:999-1102`), `_is_already_enriched` (`:536-571`) and partial artifacts (`:608-635`).<br>• Original shape → `table_original` clone (`assignment.py:369-375, 407-419`).<br>• Nucleus shapes excluded from per-shape assignment (`:510-516`).<br>• Image copy by hardlink or allow-list (`:520-533`) | • Label-mask lookup (corner convention) instead of `gpd.sjoin` (`assignment.py:205-367`), with COO accumulation and parallel partitions.<br>• Nucleus attribution via remapped `masks/0`.<br>• `max_ram_gb` from task memory (`assignment.py:450-455`) | • sjoin about 1.3–1.5 h per shape × 3 [M benchmark, 25-vertex polygons].<br>• Mask-derived polygons have more vertices, so simplification (§3.5) or the mask lookup is needed | 4 |
@@ -1280,6 +1331,75 @@ times larger scales the table and the masks; raise both values together if the w
 | Clustering | About 20 GB dense transient today; < 100 MB with sparse means | [M] |
 | Transcript spatial patterns | About 70–80 GB, about 15–20 h; about 1–1.5 h with the cap | [M/L] |
 | VISUALIZE | About 12 x/y passes per branch, 15–40 min per branch; one pass less with attrs | [L] |
+
+**Measured on the public section (AT-6 exit runs, 2026-11-06).** Nextflow, `-profile dwight,conda`, host
+load 8–30, about 280–510 GB free. Time and peak RSS are the trace's `realtime` and `peak_rss` of the run
+that did the work (a `-resume` re-runs ENRICH and the stages that read the latest store, as skips; their
+numbers are in `stage_resources.json`). The native route uses no `.npy` export: MIQ reads the vendor
+`cell_labels`.
+
+| Process | Reserved | Crop: time / peak RSS | Full: time / peak RSS |
+|---|---|---|---|
+| BUILD_SPATIALDATA (reuse check only) | 16 CPU, 64 GB | 8 s / 1.1 GB | 9 s / 1.1 GB |
+| NATIVE_LATEST | 8 CPU, 32 GB | 28 s / 1.3 GB | 35 s / 3.8 GB |
+| ENRICH (native label check and counts) | 8 CPU, 64 GB | 38 s / 5.5 GB | 5 min 4 s / 11.7 GB |
+| VIEWER_CACHE | 8 CPU, 60 GB | 26 s / 2.5 GB | 2 min 22 s / 9.6 GB |
+| MASK_IMAGE_QUANTIFICATION | 4 CPU, 160 GB | 23 s / 2.0 GB | 3 min 9 s / 9.6 GB |
+| QC | 4 CPU, 48 GB | 28 s / 2.4 GB | 1 min 15 s / 4.9 GB |
+| VISUALIZE | 4 CPU, 64 GB | 40 s / 2.1 GB | 3 min 21 s / 4.5 GB |
+| SPATIAL_GENE_ANALYSIS | 12 CPU, 120 GB | 1 min 1 s / 2.1 GB | 13 min 52 s / 22.8 GB |
+| CLUSTERING_SQUIDPY (prepare + compute + finalize) | 64 / 96 / 64 GB | 2 min / 3.2 GB | 6 min 32 s / 19.4 GB |
+| MENDER (prepare + compute + finalize + import) | 64 / 192 / 64 / 48 GB | 1 min 43 s / 1.0 GB | 6 min 30 s / 17.7 GB |
+
+**ATERA ProSeg route (AT-9, `native_proseg`), measured 2026-11-06.** Both rows ran both layers
+through MENDER. The crop ran at host load 10–55. The full section ran in one Nextflow run from
+11:11 to 19:52 (8 h 41 min wall, 60 tasks, no failure, no retry), at host load 30–345 (other
+sessions' test suites and, for the first 3 h 49 min, the 200 + 600 schedule check of `c2_r1` at
+16 threads beside the 4 tiles); the lowest available host memory was 404 GB.
+
+| Process | Reserved | Crop: time / peak RSS | Full section: time / peak RSS |
+|---|---|---|---|
+| ATERA_PROSEG_PLAN | 2 CPU, 16 GB | 11 s / 1.1 GB | 12 s / 1.5 GB (30 of 35 tiles run) |
+| ATERA_PROSEG_TILE | 16 CPU, 32 GB (×2 on retry), 40 GB cap | 10 min 40 s / 5.5 GB (13.9 M rows); 17 min 50 s / 7.2 GB (29.2 M rows) | 30 tiles, 4 at once: 3 min 15 s (0.1 M rows) to 2 h 1 min (`c2_r1`, 102.6 M rows); peak 24.1 GB (trace; 22.7 GB anonymous). 1.69 B exported rows, 26.2 h of task time, tile phase 7 h 26 min wall. Earlier single-tile checks of `c2_r1` at a quieter time: 53 min 51 s / 24.2 GB at 16 CPUs, 40 min 15 s / 25.0 GB at 32 |
+| ATERA_PROSEG_STITCH | 16 CPU, 64 GB | 30 s / 7.8 GB; a re-run on `-resume` is a 10 s skip | 6 min 29 s / 46.7 GB (a 42,548 × 61,369 raster, 409 points files, 1.41 B rows rewritten) |
+| ENRICH (with the layer check) | 8 CPU, 64 GB | 46 s | 6 min 33 s / 13.6 GB |
+| VIEWER_CACHE (both layers' pyramids) | 8 CPU, 60 GB | — | 3 min 17 s / 11.4 GB |
+| MASK_IMAGE_QUANTIFICATION (both layers) | 4 CPU, 160 GB | 41 s | 6 min 40 s / 11.5 GB |
+| VALIDATE_ANALYSIS_LAYER, per layer | 1 CPU | — | 21 s / 4.9 GB |
+| QC, per layer | 4 CPU, 48 GB | as native | 2 min 14 s / 7.1 GB |
+| VISUALIZE, per layer | 4 CPU, 64 GB | as native | 4 min 49 s – 5 min 22 s / 6.5 GB |
+| SPATIAL_GENE_ANALYSIS, per layer | 12 CPU, 120 GB | as native | 14 min 18 s – 14 min 56 s / 22.8 GB |
+| CLUSTERING_SQUIDPY (prepare + compute + finalize), per layer | 64 / 96 / 64 GB | as native | about 9.5–10 min / 19.4 GB |
+| MENDER (prepare + compute + finalize + import), per layer | 64 / 192 / 64 / 48 GB | as native | about 10 min / 24.0 GB |
+
+Stitch to MENDER on the full section takes 1 h 15 min wall for both layers. Per-tile numbers
+(time, RSS, rows, owned and empty cells, prior weight, disk) are in
+`$MERXEN_EVIDENCE_ROOT/atera_at9/tiles_full.tsv`; the stage table in `stage_table_full.md`.
+Nextflow does not start the tiles in plan or size order: the largest tile still pending at
+17:18 (`c2_r2`, 102.8 M rows) set the end of the tile phase. Starting the largest tiles first
+would shorten it, but the order in which Nextflow releases tasks held by `maxForks` is not
+controlled by the emission order; left as a possible improvement.
+
+| Disk (full section, ProSeg route) | Measured |
+|---|---|
+| Latest store, bytes not shared with the source | **29.5 GB**: rewritten points 25.4 GB, clustering tables 1.07 GB (vendor) and 0.93 GB (ProSeg), image pyramid 0.74 GB, `table_original` 0.49 GB, `table_MOSAIK_proseg` 0.41 GB, ProSeg labels and their viewer pyramids 0.14 GB, shapes 0.10 GB, MIQ tables 15 MB |
+| Tile results (30 tiles, inputs dropped) | 2.9 GB |
+| Work directories | Clustering about 12 GB per layer (h5ad outputs), MENDER about 5 GB per layer, the rest under 1 GB |
+
+The crop's rewritten points take 0.68 GB (no longer hardlinked to the source); the ProSeg labels,
+table and shapes add 19 MB; each tile result keeps 40–181 MB (cells, claims, polygons, ProSeg's
+cell metadata and table).
+
+| Disk (full section) | Measured |
+|---|---|
+| Latest store, bytes not shared with the source | **2.56 GB**: clustering table 1.07 GB, `table_original` 0.49 GB, image pyramid 0.74 GB, label pyramids and outlines 0.08 GB, shapes 0.10 GB, metadata and sidecar copies 0.07 GB, MIQ table 7 MB. The 38.2 GB of payloads are hardlinks |
+| Work directories | Clustering about 13 GB (h5ad outputs), MENDER about 6 GB, the rest under 0.3 GB |
+| Total for the native route on top of the 38.8 GB source store | About 22 GB; source plus route about 61 GB (the 130–160 GB estimate above included the raw download and staging) |
+
+The whole full-section route takes about 45 min of task time (40 min wall for the first run up to the
+MENDER failure, then 14 min for the resumed run). MIQ, ENRICH, VIEWER_CACHE and QC use under 15 GB, far
+under their reservations; the reservations are left as they are (directives are not hashed, so they can
+be lowered for ATERA later without a re-run).
 
 ---
 
@@ -1480,6 +1600,13 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
   `feature/atera-<wp>-<slug>`. `main` is merged in regularly; the branch is never rebased.
 - This needs a CLAUDE.md exception line like the RCA one (Q13).
 - Acceptance-gate PRs merge into `main` after AT-5 and AT-6.
+- **RCA merged in (2026-11-06, user decision):** `feature/robust-celltype-annotation` was merged into
+  `feature/atera-support` (never the other way) and is frozen; it never merges into `main` by itself.
+  RCA work continues on this branch (branches `feature/rca-m<N>-<slug>`, CLAUDE.md exception line). The
+  next Atera acceptance-gate PR into `main` therefore also carries RCA: the human and mouse `map_first`
+  default for XENIUM and MERSCOPE rows (RCA gates H and M) and version 0.2.0. It needs RCA's gate H/M
+  sign-off as well as the Atera exit checks; RCA plan §2.2 left that flip to merge into `main` "only
+  when you say so" (U10).
 
 **Conventions:** commit prefixes follow Agents.md; PR text goes through
 `scripts/privacy/check_private_text.py --stdin`.
@@ -1487,7 +1614,10 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
 **Coordination:**
 - `feature/manual-registration` and `feature/robust-celltype-annotation` both edit the `config.py`
   Literals and `main.nf`. Land AT-1 after manual-registration.
-- Do AT-8 clustering on top of RCA.
+- Do AT-8 clustering on top of RCA (RCA is on this branch since the merge above).
+- ATERA rows are held off RCA's `map_first` annotation until AT-11 (below): a row without its own
+  `clustering_squidpy_mode` clusters in `legacy` mode, `map_first` on the row is refused, and
+  `--annotation_prepare_only` builds no reference bundle for ATERA rows.
 
 **Cache invariant (every milestone):**
 - Existing XENIUM and MERSCOPE configs and process `script:` text stay byte-identical.
@@ -1610,12 +1740,194 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
 - **Tests:** registry contents; source-inode test; `-preview` with `start_stage=enrich`; harness runs;
   script pins.
 - **Exit:** the crop, then the full section, run in native mode through VISUALIZE and clustering.
+- **Status (2026-11-06): exit met.** Both runs pass through clustering and MENDER (§1.4, §6.2). User
+  decisions applied in AT-6: pciSeq off and untested for ATERA; GASTON and standalone MapMyCells refused;
+  MECR off until it streams (with RCA); transcript spatial patterns off; cortical depth and distance from
+  object off for non-cortical sections; no transcript caps or subsampling (figures are density rasters
+  over every transcript the build kept, i.e. every QV >= 20 row, and the viewer reads every one of them).
+  One figure bounds genes rather than transcripts: a branch dotplot of a panel wider than 400 genes draws
+  each group's top 5 genes (the CSV tables keep every gene; approved 2026-11-06, together with extending
+  the top-5 selection to every panel size). The `qc.nf`
+  reference-shape edit changes the QC task hash of existing XENIUM and MERSCOPE rows once (Q17); the
+  MENDER env pin changes the MENDER_COMPUTE hash of every platform once (Appendix A, "AT-6 exit runs";
+  awaiting the user's OK). The broad atlas labels of ATERA rows are provisional (Appendix A, "AT-6
+  reviews").
 
-### AT-7 `[feature]`: `cellpose_only` for Atera (5 d)
+### AT-7 `[feature]`: Cellpose (DAPI + 18S) and Cellpose-prior tiled ProSeg for Atera (6–8 d)
 
-- **Scope:** segmentation REQ items; CSV export out of the GPU lock or skipped; enrichment mask lookup;
-  `convert_to_latest` fast paths verified on ATERA.
-- **Exit:** a `reseg` layer on the crop and on the full section.
+Brought forward ahead of RCA and MECR at the user's request: the vendor segmentation looked poor.
+The user's decisions: Cellpose-SAM on **DAPI + 18S only**, as on XENIUM (no boundary stain); the
+XENIUM pipeline (Cellpose masks → Cellpose layer, ProSeg with the Cellpose prior → ProSeg layer),
+so ATERA gets the XENIUM layer set; `proseg_hybrid` stays off; the native and `native_proseg`
+routes stay. ProSeg runs on AT-9's tiled route only, never as one whole-section run.
+
+- **Source scheme:** `native` (default) | `native_proseg` (vendor prior, layer `proseg_vendor`) |
+  `cellpose_proseg` (layers `reseg` = ProSeg cells, `proseg_mask` = Cellpose cells, plus the vendor
+  `original_seg`). `cellpose_only` stays reserved and refused. `all` and the MENDER default
+  resolve to the layers the route makes; `proseg_hybrid` is an error on ATERA
+  (`PlatformSpec.proseg_hybrid=False`). Every ATERA route builds its latest store with
+  NATIVE_LATEST (`native_latest_base`), and no ATERA route runs Cellpose nuclei (ProSeg and the
+  layers do not use them; ATERA keeps the vendor nuclei).
+- **Rename (flagged to the user):** AT-9 had written its vendor-prior layer under the XENIUM
+  ProSeg names. It is now `proseg_vendor` (`MOSAIK_proseg_vendor`, `table_MOSAIK_proseg_vendor`,
+  `proseg_vendor_cell_labels`, branch `proseg_vendor`), so `reseg`/`MOSAIK_proseg` mean the
+  Cellpose-prior ProSeg layer as on XENIUM. The stitch config gained `prior_kind`: an AT-9 store
+  re-stitches once on `-resume` (tiles cached) and the stitch removes the old-named elements
+  (and VIEWER_CACHE's labels of them); the later stages re-run under the new layer name (F4 run,
+  below).
+- **Cellpose:** `ATERA_CELLPOSE_SEGMENT` (GPU lock) runs the XENIUM tiled Cellpose on
+  `morphology_focus` of the built store; zarr only, `image_key` required, every requested channel
+  must be present; transforms from the spec sidecars; **no transcript CSV**
+  (`proseg_transcripts="none"`), so nothing transcript-related runs under the GPU lock.
+- **Prior:** `ATERA_PROSEG_PLAN_CELLPOSE` streams label statistics from the mask (row strips),
+  records the SHA-256, size and mtime of the mask and logits, and fixes the effective prior weight:
+  `atera_cellpose_proseg_prior_weight` (140 since the AT-9 follow-ups; `null` gives ProSeg's
+  automatic weight of one whole-section run, `max(gene rows / labels / 100, 1)`). Tiles slice the
+  prior from the mask, seed `cell_id` from the Cellpose label at each row's pixel (corner rule),
+  pass `--cellpose-cellprobs`, write `overlaps_nucleus=0`
+  (`atera_cellpose_proseg_nuclear_compartment=false`; ProSeg ignores it with a mask prior, review
+  F3) and refuse changed prior files. The stitch writes `reseg` (namespace `cellpose_label_v1`, `source_cell_id
+  cellpose_<label>`) and the points column `cellpose_assignment`. Vendor tile configs and commands
+  are byte-identical to AT-9's.
+- **ENRICH:** native vendor enrichment, the ProSeg layer check, and the `proseg_mask` layer:
+  `MOSAIK_cellpose` (AT-3 polygoniser), `cellpose_cell_labels` (for the viewer cache and MIQ, which
+  read ATERA layers from labels) and `table_MOSAIK_cellpose` counted from `cellpose_assignment`
+  (no spatial join).
+- **Guards:** clustering joins vendor nuclei only to tables in the vendor id namespace; VISUALIZE
+  reads the registered assignment column of every ATERA layer.
+- **Exit:** the three layers on the crop through MENDER, then the full section; a comparison of
+  Cellpose vs vendor and ProSeg(Cellpose prior) vs ProSeg(vendor prior) for the user.
+- **Crop run (ATERA_PUB_CROP, 18,824 × 9,412 px; evidence `$MERXEN_EVIDENCE_ROOT/atera_at7/`):**
+  all three layers ran through VIEWER_CACHE, MIQ, QC, VISUALIZE, spatial gene analysis,
+  clustering and MENDER; the source store is unchanged.
+
+  | Step | Result |
+  |---|---|
+  | Cellpose (GPU, 8 tiles of 6,144 px) | 7 min 56 s, 14.3 GB peak; 10,930 masks, 10,476 after the 5–400 µm² area filter (vendor: 3,013 cells); median area 31 µm² (vendor 67) |
+  | Alignment | 95.7% of the vendor nucleus centroids fall in a Cellpose cell; 33% after a 25 px shift, 19% after 50 px |
+  | Plan | 17 s; 2 tiles; whole-section automatic weight 38.8 (40.6 M gene rows / 10,476 labels / 100) |
+  | Tiles | 24 min and 33 min (16 threads, loaded host), 5.7 and 8.1 GB; reported weight 38.77 and 38.79, no restart; `--cellpose-cellprobs` passed |
+  | Stitch | 47 s, 10 GB; 811 seam conflicts (23 cells), 124 cross-tile overlap pixels; `cellpose_assignment` equals an independent corner lookup on all 40.6 M rows |
+  | ENRICH | Cellpose layer: table, shape and mask ids equal (10,476), 21.2 M gene rows on cells, counts equal the lookup |
+  | `-resume` | Cellpose, the plan and both tiles cached; the stitch only stages (12 s) |
+
+  | Layer | Cells | Median transcripts per cell | Cells with none | Gene rows assigned |
+  |---|---|---|---|---|
+  | `original_seg` (vendor) | 3,013 | 5,223 | 0 | 46.5% |
+  | `proseg_mask` (Cellpose) | 10,476 | 270 | 993 | 52.2% |
+  | `reseg` (ProSeg, Cellpose prior) | 10,476 (5,461 with transcripts) | 2,281 among those | 5,015 | 52.3% |
+
+  ProSeg empties the small, transcript-poor Cellpose objects (median 21 µm² and 29 transcripts)
+  and keeps the rest (median 51 µm², 2,294 Cellpose transcripts). Clustering kept 5,177 `reseg`,
+  8,372 `proseg_mask` and 3,012 vendor cells. The crop ran at the automatic weight 38.8; the
+  default is now 140 (AT-9 follow-ups), which the review's A/B shows changes nothing here (below).
+  The run found one bug (a float32 table total past 2^24, fixed) and one environment slip (a
+  `-resume` launched from a shell with the base env first on `PATH` could not import MENDER;
+  relaunched from a clean shell).
+
+- **AT-9 follow-ups (decided 2026-11-06, done 2026-11-07).** The shared stitcher serves both
+  priors, so both layers get them:
+  1. *Seam clip.* Each tile draws only the cells it owns, so two tiles' polygons can overlap
+     across a seam. The stitch (`atera_proseg/seams.py`, stitch format 2) splits each cross-tile
+     overlap by the transcripts' own conflict rule: the part inside a tile's core goes to that
+     tile's cell, the rest to the tile earlier in plan order. In the usual case (the overlap in
+     one core) that is the winner's polygon subtracted from the loser's. Only cells that lose area
+     change; clipped cells stay MultiPolygons (ProSeg's type). A cell left with no area is dropped
+     from the layer, its rows become background (as for an owned cell without a polygon) and the
+     report lists it. The stitch refuses any cross-tile pair still overlapping by more than
+     0.01 µm² and reports `seam_clip`: overlap stats before and after, and per clipped cell its
+     area before and after, the neighbours it ceded to and its rows lost in conflicts. Overlaps of
+     two cells of one tile are ProSeg's own and stay. Stores stitched before re-stitch from their
+     tiles on `-resume` (format version in the fingerprint).
+  2. *Prior weight:* fixed effective 140 for both priors (`atera_proseg_prior_weight`,
+     `atera_cellpose_proseg_prior_weight`); ProSeg's automatic per-tile value follows density
+     (about 113–152 over AT-9's tiles) and collapses towards 1 on sparse edge tiles.
+  3. AT-9's message-only golden change: accepted.
+
+  **AT-9 full section re-stitched with the clip** (its 30 published tiles, no ProSeg re-run; into a
+  copy of the AT-9 store, `$MERXEN_RESULTS_ROOT/atera_pilot/at7/ATERA_PUB_vendor_restitch/`;
+  evidence `$MERXEN_EVIDENCE_ROOT/atera_at7/seam_clip/`):
+
+  | | AT-9 stitch | AT-7 re-stitch |
+  |---|---|---|
+  | Cross-tile polygon pairs overlapping (> 1 µm²) | 279 (174) | 0 (0) |
+  | Largest / total cross-tile overlap | 91.5 / 1,656 µm² | 0 / 0 µm² |
+  | Cells clipped (lost transcript conflicts too) / emptied | — | 304 (299) / 0 |
+  | Clipped area per cell, median / p90 / max | — | 1.6 / 15.2 / 96.3 µm² (median 1.9% of the cell) |
+  | Cross-tile overlap pixels in the label raster | 35,423 | 0 |
+  | Cells, assigned rows, conflicts, cells without transcripts | 91,431; 572,765,066; 160,659; 806 | identical |
+  | Stitch wall time, peak RSS | 6 min 29 s, 46.7 GB | 12 min 27 s, 55 GB (host load 12–20) |
+
+  The clip itself takes about 5 s. The layer check passes; the old-named layer (`MOSAIK_proseg`
+  and its two derived tables) was removed and the layer written as `proseg_vendor`. The peak RSS
+  of 55 GB is within the 64 GB the stitch reserves but closer to it than AT-9's run; it is noted
+  for the full `cellpose_proseg` run.
+
+- **AT-7 reviews (2026-11-07).** A code and data review and a scale and mutation review of
+  `7faea54..0a768cc`. Both confirmed the channels (DAPI + 18S only), the pixel convention of the
+  Cellpose masks (ProSeg cell = Cellpose cell, median centroid offset 0.44 µm, no half-pixel
+  shift), label ownership, the XENIUM layer names and that XENIUM/MERSCOPE goldens and pins are
+  unchanged apart from F1. Mutation testing killed 24 of 26 mutants; the two survivors (P4, P12)
+  are killed now. Findings and changes:
+
+  | Finding | Change or decision |
+  |---|---|
+  | F1 (medium): XENIUM/MERSCOPE rows with a mixed value (`analysis_segmentation=all,original_seg`, `both,proseg_mask`, `mender_segmentations=all,reseg`) failed: the whole value was strict and `all`/`both` now hold `proseg_vendor` | Only the layers a samplesheet value names are strict; group members a source lacks fall back. Kept layers stay in the order asked, as at the AT-9 tip. Golden cases for mixed values on XENIUM, MERSCOPE and the three ATERA routes; existing goldens unchanged |
+  | R2-1 (high): a killed ATERA Cellpose run left a partial mask that the next `-resume` reused as finished (no CSV marks completion) | Without a CSV, reuse also needs the segmentation sidecar, written last and removed before the arrays are opened; regression test kills a run after one tile |
+  | F2 / R2-6: half the Cellpose-prior ProSeg cells end with no transcripts; Q4 proposed raising the prior weight | Not a weight effect: on crop tile `c0_r0` weight 140 vs 38.8 left 1,381 vs 1,382 of 3,141 owned cells empty, cell probabilities off 1,449. The emptied cells are low-confidence, small Cellpose objects (mean logit median −0.46 vs 0.69 kept; median 460 vs 1,126 px) that `cellpose_cellprob=−5` and the 5 µm² minimum area let through (settings shared with XENIUM); 90% of their gene rows go to ProSeg background (2.2% of the rows on Cellpose cells). Q4 dropped; if fewer empty cells are wanted, the Cellpose threshold or minimum area is the knob (compare a XENIUM run's empty fraction first) |
+  | F3: the nuclear compartment switch (Q3) and the plan's statement that the Xenium layout turns the compartment model on | ProSeg 3.2.0 ignores both with a mask prior (above, AT-9 requirements, corrected); Q3 dropped, the switch is documented as having no effect |
+  | F4: the `proseg_vendor` rename had not run end to end | Crop `native_proseg` row resumed on the AT-7 code into a copy of the AT-9 crop outdir (below) |
+  | F5: docs with the old names (status header, AT-9 status, §5.2 row, `docs/samplesheet.md` on `all`/`both`) | Updated |
+  | F6: full-section Cellpose memory (crop 14.3 GB on 177 M px; full 2.61 G px) | Not measured yet; the masks and probabilities are memmaps and the filters work in row chunks; the 212 GB request is XENIUM's. Recorded for the full run |
+  | F7 / R2-4: the Cellpose table build indexed labels before the unknown-label check (IndexError) and held one key per gene row of the section (about 0.7 G keys, 30–50 GB estimated) | Each worker reduces its file to (cell, gene) counts after checking its labels; unit test |
+  | R2-2, R2-3 (surviving mutants P12, P4): `table_MOSAIK_cellpose` was not told apart from ProSeg's table (identity fake ProSeg); the tile window of the cell probabilities was not checked | The route fixture's fake ProSeg moves rows (`greedy_halo`) and the test asserts the Cellpose table differs from ProSeg's; the probabilities of a tile off the origin equal the source slice. Both mutants killed |
+  | R2-5: a `native_proseg` re-stitch of a store a `cellpose_proseg` run had enriched kept `MOSAIK_cellpose`, its table, labels, registry entry and attrs, but dropped the `cellpose_assignment` column they read | A vendor stitch removes them (and counts them as foreign for its skip); test |
+
+  **F4 run: the AT-9 crop row on the AT-7 code** (`segmentation_source=native_proseg`, `-resume`
+  in a copy of the AT-9 launch folder and crop outdir; evidence `verify_f4_vendor_crop.json`,
+  `trace_f4_vendor_crop*.tsv`): 27 tasks ran and 5 were cached (the build, the plan, ENSURE_PROSEG
+  and both tiles: no ProSeg re-run). The stitch removed the old-named layer (`MOSAIK_proseg`, its
+  table, labels, two derived tables and registry branch) and wrote `proseg_vendor`; the seam clip
+  removed the crop's one cross-tile overlap (0.71 µm²); 3,013 cells and 18,138,163 assigned rows as
+  in AT-9; the layer check passes. `proseg_vendor` then ran through VIEWER_CACHE, MIQ, layer
+  validation, QC, VISUALIZE, spatial gene analysis, clustering and MENDER. The run found two
+  defects, both fixed: VIEWER_CACHE's alias of the removed layer (`MOSAIK_proseg_labels` and its
+  pyramid and outline) stayed in the store; and the first fix made a store holding such leftovers
+  re-stitch its current layer on the next `-resume`, which deleted the layer's derived tables while
+  the cached clustering task did not write its table back. Leftovers of another layer are now
+  removed without a re-stitch. The outdir keeps AT-9's published `reseg/` result folders beside
+  the new `proseg_vendor/` ones; the workflow does not delete published folders, so they are to be
+  removed by hand in an AT-9 outdir that is resumed.
+
+  **Cellpose crop re-run with the follow-ups** (`-resume`, evidence
+  `nextflow_crop_w140_clip.log`): the plan changed (weight 140), so both tiles re-ran (reported
+  139.91 and 139.99, no restart; Cellpose cached). 10,476 cells, 4,973 without transcripts
+  (38.8: 5,015), 20.9 M assigned rows, 739 seam conflicts. The clip removed 9 cross-tile overlaps
+  (4 above 1 µm², largest 1.54 µm²) from 10 cells and none emptied; cross-tile overlap pixels
+  124 → 0.
+
+  **`-resume` after a re-stitch leaves later stages stale (found here, not fixed).** The
+  re-stitch rewrote `reseg` and deleted its derived tables, ENRICH, VIEWER_CACHE, MIQ, layer
+  validation and QC re-ran, but VISUALIZE, spatial gene analysis, clustering and MENDER were
+  cached: their inputs are values (`samples_json`) that do not change when the cells do, so their
+  published outputs describe the previous cells and `table_MOSAIK_proseg_clustering_squidpy` is
+  missing from the store. The same holds for XENIUM/MERSCOPE rows whose segmentation re-runs in
+  place (the persistent latest store), so a fix (a segmentation token in the downstream inputs)
+  would change their task hashes; it is left for the user to decide. Workaround: re-run the row
+  without `-resume` from `--start_stage visualize` (done for the crop: 30 tasks, VISUALIZE to
+  MENDER on all three layers, no failure; `nextflow_crop_w140_downstream.log`). It affects a
+  re-stitch that keeps the layer's name: an AT-7 `cellpose_proseg` outdir, or a `native_proseg`
+  outdir already stitched under `proseg_vendor`; an AT-9 outdir re-runs its later stages anyway
+  because the layer is renamed (F4 run).
+
+  **Open decisions for the user:** Q1 accept the `proseg_vendor` rename; Q2 keep `native` as the
+  ATERA default until the full-section comparison; Q5 pass the Cellpose cell probabilities to
+  ProSeg as XENIUM does (default on); Q6 the Cellpose-numbered layers carry no nucleus metrics
+  (a geometric match to the vendor nuclei would add them); Q7 whether downstream stages should be
+  invalidated by a segmentation change under `-resume` (above; changes XENIUM/MERSCOPE task
+  hashes). Q3 and Q4 are withdrawn (above).
+  **Not done:** the full-section `cellpose_proseg` run and the Cellpose-vs-vendor and
+  Cellpose-prior-vs-vendor-prior comparison figures.
 
 ### AT-8 `[feature]`: whole-transcriptome analysis paths (8 d)
 
@@ -1623,6 +1935,41 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
   guardrails; capped transcript patterns; MECR streaming reference; shared "analysis gene set". Guards key
   on gene count, not only the platform (Q22).
 - **Exit:** the default analysis stages run on the full section within their resources.
+- **Status (2026-11-07): in progress, in five work packages** (gene-count guards; analysis gene set; MECR
+  streaming reference; raster transcript patterns; exit run). User decisions of 2026-11-07 in Appendix A
+  ("AT-8 user decisions"). **WP1 (gene-count guards) done:** `merxen.gene_sets` holds the shared rule
+  (more than 5,000 non-control genes is whole-transcriptome, so Xenium Prime 5K counts). Legacy clustering
+  runs the PCA on 2,000 `cell_ranger` highly variable genes for such a panel when the sample sets no
+  `hvg_n_top_genes`, and records why in `uns`; GASTON raises instead of keeping the first
+  `gaston_max_genes` genes; pciSeq refuses an atlas reference without an explicit `gene_names` list on such
+  a panel. The rules live in Python: no sample JSON or process script changes, so the clustering, GASTON
+  and pciSeq task hashes of every row are unchanged and the 300-gene XENIUM/MERSCOPE outputs are unchanged.
+  A cached 5K clustering task is not re-run by `-resume`. As with any edit of
+  `analysis/clustering_squidpy.py` or `config.py`, the map_first hierarchy fingerprint
+  (`HIERARCHY_SOURCES`) changes, so the annotation `COMPUTE_CPU` task of every row re-runs once (same
+  labels expected: the hierarchy does not run the legacy HVG rule). The map_first QC embedding's own HVG rule (`seurat`, above 1,000 genes) is
+  unchanged.
+
+- **WP2 (analysis gene set) merged:** PR #119 provides the panel-stable gene-set model, CLI and
+  annotation-panel CSV hand-off. The ATERA identity recipe retains all 18,049 genes; the same gene IDs
+  produce the same hash across layers and crop/full-section stores. Independent continuation checks
+  passed all 30 gene-set tests, and the PR's CI passed before merging.
+- **WP3 (streaming MECR), continuation verification (2026-11-07):** the recovered implementation
+  splits ATERA reference preparation from the existing XENIUM/MERSCOPE reference task. Automatic
+  streaming applies above 5,000 non-control genes on every platform. ATERA barnyard figures use all
+  cells in density plots. The saved full-panel WHB run retained 3,030,703 reference cells and matched
+  17,777 of 18,049 panel genes, yielding 190 unique markers and 11,754 reference marker pairs. It took
+  31 min 26 s, with a sampled process-tree peak RSS of 11.01 GB. Scoring completed on both full-section
+  AT-9 layers. On the real 354-gene comparison panel, streaming and in-memory modes produced identical
+  detection statistics, markers and MECR pairs. Wilcoxon scores and unadjusted p-values also matched;
+  adjusted p-values intentionally cover only candidate genes in streaming mode. Evidence is under
+  `$MERXEN_EVIDENCE_ROOT/atera_at8/wp3/`; the comparison is in
+  `$MERXEN_STORAGE_ROOT/results/atera_pilot/at8_wp3/equivalence_hd_union/comparison.json`.
+  The continuation's full local CI passed: 6,592 tests passed and 56 skipped, with lint, formatting,
+  mypy and Nextflow lint also passing. Existing process-script and configuration guards pass.
+- **Published dotplots (2026-11-07):** the user declined a clustering rerun solely to regenerate
+  dotplots. The exact-total refresh runs validation and QC only; existing clustering and its figures
+  are retained.
 
 ### AT-9 `[feature]`: ProSeg for Atera, conditional on AT-5b (8–12 d)
 
@@ -1634,13 +1981,184 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
   - Input as parquet in **Xenium layout** (plain-string `feature_name` and `cell_id`, uint64
     `transcript_id`, uint8 `overlaps_nucleus`, string `fov_name`, float32 x/y/z/qv). A plain parquet
     makes ProSeg 3.2.0 stop with "No parquet file format specified"; CSV is 52 B/row (about 73 GB and
-    about 2 h to write for the section) against 8.8 B/row. The Xenium layout also turns on ProSeg's
-    nucleus-compartment model, which the CSV route does not use.
+    about 2 h to write for the section) against 8.8 B/row. *(Corrected in AT-7, review F3.)* The
+    layout's `overlaps_nucleus` column was taken to turn on ProSeg's nucleus-compartment model. In
+    ProSeg 3.2.0 `cell_id` and `overlaps_nucleus` only feed its prior segmentation (`priorseg`),
+    which only `from_prior_transcript_assignments` reads; with `--cellpose-masks` ProSeg starts
+    from the masks (`from_seg_masks`), so the compartment switch and the `cell_id` seeding change
+    nothing on either tiled route (`atera_proseg_nuclear_compartment`,
+    `atera_cellpose_proseg_nuclear_compartment`).
   - An explicit `--prior-weight`, not the automatic value.
   - Mask transforms `[ps, 0, col0·ps]` and `[0, ps, row0·ps]`: ProSeg samples pixel centres, which
     matches the floor convention of the vendor masks.
   - The short schedule (100 burn-in + 200 samples) by default, after checking it on one dense tile.
   - Report the number of cells left with no transcripts.
+- **Status (2026-11-06): implemented; the crop and the full section run end to end.** Opt-in
+  `segmentation_source=native_proseg` (aliases `vendor_proseg`, `instrument_proseg`); `native` stays
+  the default. The segment stage is `NATIVE_LATEST`, `ATERA_PROSEG_PLAN`, one `ATERA_PROSEG_TILE`
+  task per 2 mm tile (100 µm halo, label-owned: a vendor label belongs to the tile whose core holds
+  its vendor centroid) and `ATERA_PROSEG_STITCH`, which writes the layer `reseg` into the latest
+  store (shapes `MOSAIK_proseg`, table `table_MOSAIK_proseg`, labels `proseg_cell_labels`, points
+  columns `assignment` and `background`; registry branch `proseg`, alias `reseg`, with `label` and
+  `prior`). *AT-7 renamed this layer `proseg_vendor` (`MOSAIK_proseg_vendor`,
+  `table_MOSAIK_proseg_vendor`, `proseg_vendor_cell_labels`, branch `proseg_vendor`) so that the
+  XENIUM names mean the Cellpose-prior layer; the names below are AT-9's.* ProSeg instance ids are the vendor labels. The effective prior weight is fixed at 140
+  per tile (the multiplier undoes ProSeg's own scaling). ENRICH checks the layer; MIQ, the viewer
+  cache, QC, VISUALIZE, spatial gene analysis, clustering and MENDER run on both layers with
+  `analysis_segmentation=all`. Docs: `docs/stages/segmentation.md` (ATERA ProSeg route). Evidence:
+  `$MERXEN_EVIDENCE_ROOT/atera_at9/`.
+  - **Crop (`ATERA_PUB_CROP`, 2 tiles, one Nextflow row through MENDER):** 32 tasks, no failure.
+    Tiles: 13.9 M and 29.2 M rows, 10 min 40 s and 17 min 50 s at 16 threads (sampling 1.9 and
+    3.0 s per iteration on a host at load 20–55), 5.5 and 7.2 GB peak RSS; reported prior weight
+    139.57 and 139.59. Stitch 30 s, 7.8 GB: 3,013 cells (every vendor label), 4 with no
+    transcripts, 18,138,163 assigned rows, 292 seam conflicts (0.0016%). The verification passes:
+    source store unchanged (927 files), points files and row counts unchanged and the build's points
+    index still matching, table and shape ids equal, every assignment a table id, int64 row sums
+    equal to the foreground counts, ENRICH check recorded, both layers through MIQ, the viewer cache,
+    QC, VISUALIZE, spatial gene analysis, clustering and MENDER. A `-resume` re-runs no tile; the
+    stitch task re-runs as a 10 s skip (fingerprint), ENRICH and its check skip.
+  - **ProSeg against the vendor layer (crop):** ProSeg assigns 44.6% of gene transcripts (vendor
+    46.5%), absorbs 15.4% of the vendor-unassigned ones and releases 21.7% of the vendor-assigned
+    ones (70.2% stay in the same cell, 8.1% move); median area ratio 0.83 (p05–p95 0.49–1.83),
+    total area −2.2%. These match the CSV benchmark (`run_s200`: 45.4%, 16.6%, 21.5%, 0.85), so the
+    nuclear compartment model the Xenium parquet layout turns on does not change the result on the
+    crop (Q3 of the AT-9 design: compartment model kept on). *(AT-7 review F3: with a mask prior
+    ProSeg 3.2.0 does not read the compartment flag at all, which is why.)*
+  - **Dense-tile check (`ATERA_PUB` tile `c2_r1`, the benchmark's [2,1]; `stop_stage=segment`,
+    `atera_proseg_tile_subset=c2_r1`, 16 threads):** 102.6 M rows exported, 102.4 M kept, 7,008
+    labels in the window, 5,716 owned. 53 min 51 s task time (ProSeg 48.8 min: burn-in 2.5 s and
+    sampling 8.8 s per iteration, against 1.76 and 5.83 s at 32 threads in the benchmark), 22.7 GB
+    peak anonymous RSS (trace 24.2 GB) against the 32 GB reservation and the 40 GB cap. Reported
+    prior weight 139.77 (benchmark auto weight 146.17). The recount equals ProSeg's count matrix;
+    39 owned cells (0.7%) end with no transcripts; no owned cell reaches an interior window edge.
+    Against the CSV benchmark run on the same owned cells: median area ratio 0.841 (benchmark
+    0.844), 41.7 M against 41.1 M assigned rows, and 57.7% of the rows either run assigns to these
+    cells are assigned to the same cell by both (two CSV runs on the crop: 62.1%; ProSeg's chain
+    noise, AT-5(b)). The compartment model therefore stays on. Re-run at 32 threads
+    (`atera_proseg_tile_cpus=32`): 40 min 15 s task time, burn-in 1.68 s and sampling 5.82 s per
+    iteration (benchmark 1.76 and 5.83 s; total 1.07× the benchmark's 37 min 42 s), 23.5 GB peak
+    anonymous RSS (trace 25.0 GB), 73 owned cells with no transcripts (benchmark: 74). Halving the
+    threads costs 1.34× the time, so the default stays 16 threads with 4 tiles at once.
+  - **Schedule check on the dense tile (2026-11-06): the short default stays.** The same tile
+    `c2_r1` at 200 burn-in + 600 samples (+ 20 hillclimb, 100 recorded; one run, 16 threads, at
+    nice 15 beside the full-section run, host load 30–175) against three short-schedule runs (the
+    16- and 32-thread checks and the full-section tile), on the 5,716 owned cells
+    (`dense_schedule_compare.json`):
+
+    | | Short runs (3) | Long 200 + 600 |
+    |---|---|---|
+    | Foreground rows on owned cells | 41.7–43.3 M | 42.2 M |
+    | Owned cells with no transcripts | 39–73 | 50 |
+    | Median area ratio to vendor (p05–p95) | 0.841–0.852 (0.47–0.49 to 1.56–1.64) | 0.811 (0.45–1.78) |
+    | Total area change | −1.6% to −0.9% | −0.6% |
+    | Same cell among rows either run assigns, short vs short / short vs long | 58.5–59.2% | 57.1–57.8% |
+    | Same cell when both assign | 84.7–85.0% | 83.7–84.0% |
+    | Per-cell count Pearson, short vs short / short vs long | 0.991 | 0.984–0.985 |
+    | Per-cell area Pearson | 0.977–0.978 | 0.961–0.964 |
+
+    The long chain differs from the short ones a little more than the short ones differ from each
+    other (about 1.3 points of agreement), and it widens the area distribution (the same direction
+    as the crop's 1,200-sample run in AT-5(b): median 0.80 against 0.85, p95 2.11 against 1.94).
+    Totals, assigned rows and empty cells stay inside the short runs' spread. The long run took
+    3 h 49 min wall (ProSeg sampling 16.8 s per iteration under contention), 3.4 times the short
+    schedule's ProSeg time, for a shift smaller than the chain noise between two short runs, so the
+    default stays 100 + 200 + 20. Longer schedules remain available through the
+    `atera_proseg_*` schedule params.
+  - **Full section (`ATERA_PUB`, one Nextflow row through MENDER on both layers, 2026-11-06):** 60
+    tasks, no failure, no retry, no prior-weight restart; 8 h 41 min wall on a host at load 30–345
+    (§6.2). 30 tiles, 1.69 B exported rows (halos included), reported prior weights 138.76–139.99.
+    The stitch keeps **91,431 ProSeg cells, every vendor cell once** (no vendor label without a
+    ProSeg cell, no owned cell without a polygon), **806 (0.88%) with no transcripts**, 572.8 M
+    assigned rows, 160,659 seam conflicts (0.028% of the assigned rows; 1,592 cells lose some),
+    no owned cell near an interior window edge. The verification
+    (`verify_full.json`) passes: source store unchanged (3,352 files: inode, size, mtime), points
+    files and rows unchanged (409 files, 1,409,601,228 rows, every transcript, with
+    `original_assignment`, `assignment` and `background` for the viewer), points index fingerprint
+    still matching, table and shape ids equal and unique, all 91,431 polygons valid and non-empty,
+    every assignment a table id, table row sums equal to the per-cell foreground counts of the
+    points (572,765,066), registry entry `proseg` (label `proseg_cell_labels`, prior
+    `vendor_cell_labels`, ProSeg 3.2.0 identity), ENRICH layer check recorded, viewer pyramids of
+    both layers, MIQ and clustering tables of both layers, and VISUALIZE, spatial gene analysis,
+    clustering, MENDER and QC outputs for both layers (QC as `atera/<layer>/qc/qc_out`, 5 files each; the
+    first version of the check looked in a folder that does not exist and is replaced by the
+    final review's re-run).
+  - **ProSeg against the vendor layer (full section, `layer_compare_full.json`):** ProSeg assigns
+    **40.6% of gene transcripts (vendor 45.3%)**; it absorbs 12.9% of the vendor-unassigned ones and
+    releases 25.9% of the vendor-assigned ones (66.0% stay in the same cell, 8.1% move to another);
+    **median area ratio 0.81** (p05–p95 0.48–1.71), total cell area −3.2%. Denser than the crop
+    (44.6% / 46.5%, area ratio 0.83), as the AT-5(b) dense tile predicted (46.5% / 53.1%, 0.83).
+  - **Clustering of the two layers (`cluster_compare_full.json`):** clustering QC keeps 88,960
+    ProSeg cells against 91,381 vendor cells (median 4,323 against 4,812 counts and 2,291 against
+    2,687 genes per cell); both give 12 Leiden clusters and 19 MENDER domains. On the 88,958 shared
+    cells (ProSeg ids are the vendor labels) Leiden ARI 0.88 (NMI 0.85), broad class ARI 0.87 with
+    93.5% the same label, neuron split 96.7% the same, MENDER domains ARI 0.65. Both layers agree as
+    well with the vendor Azimuth broad labels (ARI 0.659 ProSeg, 0.664 vendor). The class that
+    moves is the vendor layer's mixed "Fibroblasts" cluster (7,244 cells, against 4,748 on ProSeg):
+    in ProSeg 752 of its cells go to Vascular cells and 611 to Microglia; and 1,730 vendor
+    "Oligodendrocyte precursors" (mature oligodendrocytes, AT-6 note on the broad labels) become
+    Neurons on ProSeg (not checked; a likely cause is neuronal transcripts entering small glial
+    cells next to neurons). The broad labels stay provisional for ATERA (AT-6).
+  - **Cells without label pixels:** 9 ProSeg cells (0.25–4 µm² polygons, covered by later cells
+    or smaller than a pixel centre) have no pixel in `proseg_cell_labels`, so the ProSeg MIQ table
+    has 91,422 rows; the crop has 1. Found by this run and now reported by the stitch
+    (`cells_without_label_pixels`, with a warning); the full-section store was stitched before
+    the change and skips a re-stitch (same fingerprint), so its count comes from
+    `label_pixels_full.json`. After the final review, MIQ also lists the shapes without a row
+    in its table's `uns` and summary (`shapes_without_label_pixels`, with a warning) and adds
+    the list to an older table without quantifying again; the full-section store got it that
+    way (the 9 ids, checked by `verify_full.json`).
+
+### AT-11 `[feature]`: RCA on Atera (map_first annotation for ATERA rows)
+
+- **Why:** since the RCA merge, `map_first` is the human and mouse default, but its panel, reference and
+  gate steps (ANNOTATE_PANEL, ANNOTATE_REFERENCE_PREP, MAP, RESOLVE, COMPUTE_CPU, ANNOTATION_REPORT) are
+  built for the targeted MERSCOPE and XENIUM panels and have never run on a whole-transcriptome ATERA
+  section. ATERA rows are gated off until this milestone (`main.nf` `annotationModeRow`, the ATERA
+  preflight, `ateraPrepareOnlyRow`; `docs/configuration.md#atera-rows`).
+- **Scope:** an explicit human hippocampal profile using all 18,049 genes (§1.3 fact 6; gene set
+  shared with AT-8's "analysis gene set"). A local resource manifest binds the measured references,
+  marker lookup, taxonomy, frozen confidence policy and diagnostic qualification. SEA-AD
+  Class/Subclass/Supertype is primary; Allen WHB Supercluster/Cluster remains a separate comparison.
+  MAP, RESOLVE, COMPUTE and REPORT are separate tasks, followed by the existing finalization and
+  MENDER path. See [the annotation plan](atera-celltype-annotation-plan.md#explicit-whole-panel-workflow).
+- **Activation:** ATERA `map_first` rows require `annotation_hippocampal_resources`, human species and
+  `anatomical_region=hippocampus`. Without the manifest, ATERA retains legacy behavior. This profile
+  does not enable pairing or registration. Xenium/MERSCOPE retain their existing reference gates.
+- **Depends on:** AT-8 (analysis gene set, lean MapMyCells query).
+- **Exit:** a mixed samplesheet stub run (XENIUM `map_first` + ATERA) reaches ANNOTATION_REPORT for both
+  rows, then the crop and the full section run `map_first` through MENDER within their resources.
+- **Evidence interpretation:** confidence qualification uses the existing, previously inspected
+  atlas diagnostics; it is not new independent donor confirmation or spatial ground truth. No new
+  donor is required for this dataset. Unsupported fine calls and empty objects remain explicit.
+  Acceptance records include per-rule uncertainty, parent-conditioned checks, raw-count identity,
+  all three segmentation branches, workflow traces and versioned viewer-export verification.
+- **Notes from AT-8 for AT-11 (2026-11-07):**
+  - **Gene set.** AT-8 built the analysis gene set: `merxen analysis-gene-set`
+    (`merxen.analysis_gene_set`, `docs/cli.md`). ATERA defaults to the recipe `all_panel_genes`,
+    every one of the 18,049 panel genes (user decision of 2026-11-07: maximum accuracy, compute
+    cost accepted); `intersect_public_panel:<key>` and `explicit:<path>` exist but are not the
+    default. The set depends only on the panel (both layers of a store, and the crop, give the same
+    `gene_set_hash`), so one reference preparation serves every ATERA section of the panel. Its
+    `analysis_gene_set.csv` is the `annotation-panel --panel-genes-path` layout, and
+    `gene_set_hash` equals the `panel_hash` that command gives it. Wire the command beside
+    ANNOTATE_PANEL for ATERA rows. The Atera ∩ Xenium Prime 5K human overlap (4,874 of 5,001) is
+    recorded for information only. The user's rule of 2026-11-07 (RCA on Atera is a new rule set:
+    no existing RCA rule, such as family trust inheritance, the large-panel marker prefilter,
+    marker caps, gates or thresholds, is kept where it would cost accuracy, and each departure is
+    shown by a comparison) applies to everything built on this set.
+  - **Query rule 1: the MapMyCells query is the full gene set, never trimmed to marker genes.**
+    `cell_type_mapper` 1.7.2 turns a raw query into log2 CPM using the row sums of the genes in
+    the query file (`cell_by_gene/cell_by_gene.py`), so trimming the query to the bundle's marker
+    genes changes every cell's CPM and therefore the mapping. The query columns must equal the
+    bundle panel, which is the analysis gene set; RCA's `build_sample_query` and
+    `write_query_h5ad` already do this, and AT-8 tests it on an ATERA-shaped fixture
+    (`tests/test_analysis_gene_set.py`).
+  - **Query rule 2: decide which depth RESOLVE uses.** `SampleQuery.total_counts` counts every
+    non-control feature of the sample (`annotation/pipeline.py`, `load_samples`), not the panel's
+    genes. On the 300-gene panels the two are the same; on ATERA with `all_panel_genes` they are
+    also the same, but with any smaller gene set they differ (the whole transcriptome against the
+    set). AT-11 must decide which depth the RESOLVE depth bins use, so that it matches the depth the
+    bundle's simulations assume, and record the choice.
 
 ### AT-10 optional, on request
 
@@ -1952,3 +2470,178 @@ findings and what was done:
 **AT-5b ProSeg benchmark (2026-11-05).** Experiment only; no code change. The numbers and the AT-9
 decision are in §8 (AT-5, AT-9); R9 and R15 are updated. The crop is a sparse corner, so the densest
 2 mm tile of the full section was run as well and the extrapolation is calibrated on it.
+
+**AT-6 exit runs (2026-11-06).** Crop, then full public section, in native mode from the AT-5 source
+stores through MENDER (§1.4, §6.2). Findings and changes:
+
+| Finding | Change or decision |
+|---|---|
+| An explicit `stop_stage=mender` on an ATERA row selected the standalone `mapmycells` stage between clustering and MENDER, so preflight refused the very stop its own message suggests | ATERA rows pass over `mapmycells` unless the row names it as its start, stop or only stage (which preflight still refuses). Harness cases for `stop_stage=mender`, `only_stage=mapmycells` and `start_stage=mapmycells` |
+| QC summed the float32 cell table in float32: the crop's assigned total was 18,894,688, one above the vendor matrix | Stores with build aggregates (ATERA) sum per cell in float64 and total in int64; XENIUM and MERSCOPE keep their historical sums. Full section: 638,693,512, exact. Since the user decision of 2026-11-06 every platform takes the exact sum |
+| `MENDER_COMPUTE` failed on the full section in `sc.pp.neighbors`: the MENDER env, created fresh during the run, resolved `pynndescent` 0.7.0, whose parallel subtree builder numba 0.55.2 cannot compile. Under 4,096 cells (the crop) Scanpy computes exact neighbours and never reaches that path; MENDER runs of 100–164k cells completed in September, before this env was re-created | `envs/environment.mender.yml` pins `pynndescent==0.5.13`, `numba==0.55.2`, `llvmlite==0.38.1` (tested). This changes the MENDER_COMPUTE env and so its task hash for every platform, once |
+| ENRICH's all-feature counts fall short of the vendor gene + control obs columns by 3 (crop) and 84 (full) counts | Not a MerXen difference: every short count is in a `DeprecatedCodeword` column with no transcript, the vendor matrix quirk recorded in AT-5 |
+| A `-resume` re-runs ENRICH and every stage that takes the latest store as input: ENRICH rewrites the store's root `zarr.json`, which changes the directory's modification time that Nextflow hashes | Not changed in AT-6: the reruns are skips (ENRICH 1.5 min on the full section) and the analysis stages downstream of VISUALIZE stay cached. Recorded for the AT-7 restart work |
+| The first hardlink run made the source stores' linked payloads read-only (143 crop files, 1,543 full-section files) | By design (`readonly_payloads`); bytes, inodes and modification times are unchanged. Writing to those files now fails instead of corrupting the source |
+| MIQ on the full section was unmeasured (WP-X) | 3 min 9 s, 9.6 GB peak, against a 160 GB reservation |
+
+**AT-9 implementation and crop run (2026-11-06).** The ProSeg route for ATERA
+(`segmentation_source=native_proseg`; §8 AT-9). Findings and changes:
+
+| Finding | Change or decision |
+|---|---|
+| ProSeg 3.2.0 refuses an `--output-path` that does not exist (found on the first real crop tile) | The tile task creates it; the fake ProSeg of the tests now refuses a missing one too |
+| With two ATERA sources, ENRICH's native-store fallback (`segmentation_sources == ("native",)`) turned false, and per-shape assignment ran its Cellpose path (spatial joins of every shape, including the 1.4 B-row points against `MOSAIK_proseg`) for any source other than `native` | The fallback keys on the default source; per-shape assignment treats `native_proseg` as native. Tests for both |
+| A failed ENRICH's partial cleanup would delete `table_MOSAIK_proseg`, which ENRICH cannot rebuild | Tables of registry branches with a `prior` are never derived tables |
+| ATERA refused to draw any mask that is not a vendor label element | A registry branch with a `label` element is backed by it (`MOSAIK_proseg` -> `proseg_cell_labels`) |
+| `sanity_plots._crop_points` and `qc.gene_comparison` use a points `background` column whenever one exists, whatever the assignment column | Not reached on ATERA (overlays use the rasterised path with the registry column; `assigned_only` has no caller); a grep test lists every generic `assignment` pick with its reason |
+| Changed test text | The `native` golden changes the error text of two cases (the list of sources): the ATERA-only `atera_cellpose_only_error` and the platform-independent `unknown_error`, so an unknown `segmentation_source` on a XENIUM or MERSCOPE row now also lists `native_proseg` (message only; no task input or hash changes; corrected by the final review, which found the second case is not ATERA-only; for the user's OK). The ENSURE_PROSEG trigger pin of `test_analysis_segmentation_branches.py` follows the new trigger (same value). No process script or pin changed |
+| The Xenium parquet layout turns on ProSeg's nuclear compartment model, untested at the full schedule | Crop and dense tile agree with the CSV benchmark (above); kept on, `atera_proseg_nuclear_compartment=false` is the fallback. *AT-7 review F3: ProSeg 3.2.0 ignores the flag with a mask prior* |
+| `-resume` | No tile re-runs (their inputs are values); the stitch task re-runs and skips by fingerprint; ENRICH and its layer check skip |
+
+**AT-9 reviews (2026-11-06).** A code and data review and a scale and mutation review of the AT-9
+branch. Both rebuilt the crop stitch independently and found no defect in the stitching, the pixel
+convention, the parquet layout, the filtering or the layer registration. Findings and changes:
+
+| Finding | Change or decision |
+|---|---|
+| A re-stitch (another prior weight or schedule) rewrote the ProSeg layer in place but kept the tables computed from the old cells; MIQ's skip check (table, sidecars, image keys, bead removal) would keep intensities of the old polygons under the same vendor ids | A stitch that writes deletes every table of region `MOSAIK_proseg` other than `table_MOSAIK_proseg` (image quantification, clustering) and reports them; test with a changed tile manifest (also covers the stitch skip ignoring the fingerprint) |
+| One failed tile dropped the row after `segment` on both layers, with no message naming the tile (`failOnIgnore` exits non-zero) | The log names the failed tiles of each row and says `-resume` re-runs only those. A tile task is retried once unless it exits 99 (watchdog) or 3 (new: a refusal a retry would repeat); a failed ProSeg process exits 1 and is retried. Routing the row's native layer on alone was rejected: the row asks for both layers, and finishing it with one would be a quieter partial result than a named failure that `-resume` repairs cheaply. Wiring test with a failing tile (exit 3: one attempt; exit 1: two) |
+| The printed prior weight is lower than requested by the share of rows ProSeg's cell-free filter drops (crop 0.31%; at most 0.68% per tile on the full section from a 2% sample); a section with large cell-free areas could pass 2% and fail its tiles | A tile whose printed weight is off restarts once with the multiplier rescaled by requested / printed (ProSeg's factor is fixed by the data), and fails only if it is still off; restarts are in the manifest |
+| `atera_proseg_allow_untested_version=true` passed the preflight, but every tile refused any version but 3.2.0 | The flag reaches the tile config (only when true, so default task hashes are unchanged) and the tile runs that version with a warning |
+| The stitch report summed only the vendor labels without a ProSeg cell; owned cells without a polygon reached only the tile manifests | Both are listed and counted in the report, with a warning when either is non-zero (their transcripts become background) |
+| `seam_overlap_pixels` mostly counted overlaps of two cells of one tile (crop: 567 of 568 pairs) | Split into `overlap_pixels_within_tile` and `overlap_pixels_across_tiles` |
+| A tile trusted the plan's source build fingerprint | The tile compares it with the source store's build marker before exporting |
+| ProSeg writes `membership_debug.txt` and `rebalanced_membership_debug.txt` to its working directory (the repo root when tests ran from there) | ProSeg runs in its output folder (`work/proseg`); the command's paths are absolute |
+| The stitch's label raster (10.4 GB on the full section) was removed only on success | Removed whether or not the stitch succeeds |
+| The `export_tile` docstring said a row below `min_qv` raises; the code warns and drops it | Docstring fixed; a test now covers the QV filter |
+| Surviving mutants: claims naming points files the store lacks, two tiles owning one label, two ProSeg cells of one label, the export QV filter, the float-rounding correction of the core index, the prior-weight multiplier (killed only by the real-ProSeg test) | One test each (the multiplier on a synthetic store with more than 100 transcripts per cell); all seven mutants are now killed |
+| The `nextflow.config` comment gave the dense tile's peak as 21.7 GB | 24.2 GB (16 threads) and 25 GB (32 threads) against the 32 GB reservation; the watchdog cap (40 GB) sits above the reservation, so an executor that enforces memory kills first and the retry gets 64 GB |
+| A failed tile keeps its inputs in the work folder (1–2 GB of parquet, up to 430 MB of prior) | Kept: they are what a failure is diagnosed from; finished tiles drop them unless `atera_proseg_keep_tile_inputs` |
+| A halo tile's claim on a transcript beats the core tile's background; the core rule settles only two claims | As designed: in effect the tile that owns the cell decides, which is the requirement "transcripts assigned in halos resolved by the owning tile". For the user to confirm, together with the seam polygons of cells that lose a conflict (AT-9 final review) |
+| Polygons of two tiles' cells overlap across seams (full section: 279 pairs, 174 above 1 µm², largest 91.5 µm²) | **Decided 2026-11-06: clip** (done in AT-7, §8 AT-7 "AT-9 follow-ups") |
+| The effective prior weight is 140 on every tile; ProSeg's automatic weight follows local density (about 113 and 152 on the two crop tiles) | **Decided 2026-11-06: keep the fixed 140** (a param), for both priors since AT-7: the automatic value varies about 113–152 with density and collapses towards 1 on sparse edge tiles |
+| A `-resume` re-runs 8 tasks (the stitch, ENRICH, VIEWER_CACHE, MIQ, both layer validations, both QC); QC recomputes in full | Recorded with AT-6's ENRICH `-resume` finding for the AT-7 restart work; the full-section stitch (30 tiles, a 42,548 x 61,369 raster) has not run yet |
+| Changed test text missing from the implementation entry above | The golden harness span signatures gained `rowSource = null`; the process-pin count went from 44 to 47 (three new pins, none changed); the rule that a default keeping no layer resolves to every layer also applies to `cellpose_only`, which no platform allows today. All need the user's OK |
+
+**AT-9 full-section run (2026-11-06).** `ATERA_PUB` through the ProSeg route and both layers to
+MENDER (§6.2, §8 AT-9; evidence `$MERXEN_EVIDENCE_ROOT/atera_at9/`: `run_full.sh`, trace, report,
+timeline, `verify_full.json`, `tiles_full.tsv`, `layer_compare_full.json`,
+`cluster_compare_full.json`, `dense_schedule_compare.json`, `disk_full.json`). Findings and
+changes:
+
+| Finding | Change or decision |
+|---|---|
+| The run passes every check on the first attempt: 30 tiles, no retry, no prior-weight restart, every vendor cell once, 806 empty cells reported, table counts equal to the points assignment, source store unchanged | None |
+| 9 ProSeg cells (0.01%) have no pixel in `proseg_cell_labels` (tiny or covered polygons) and are silently absent from the ProSeg MIQ table; their control counts are zero | The rasteriser counts each cell's final pixels; the stitch report lists them (`cells_without_label_pixels`) and warns. Tests on covered, sub-pixel and off-grid polygons. Mask-based stages still leave them out (they have no mask) |
+| Short schedule against 200 + 600 on the densest tile | Short default kept (§8 AT-9: the long chain differs by about 1.3 points of agreement, less than the chain noise between short runs, at 3.4× the ProSeg time). The longer chain widens the area distribution (median ratio 0.81 against 0.84–0.85), as on the crop in AT-5(b) |
+| Tile phase 7 h 26 min on a host at load up to 345, with 4 tiles at once and the schedule check beside them; the largest pending tile started last | Concurrency default kept (4). Largest-first ordering is a possible improvement; Nextflow's release order under `maxForks` is not the emission order |
+| The ProSeg route adds 29.5 GB to the latest store (25.4 GB of rewritten points) against 2.6 GB for the native route | As designed (the points carry the second assignment column); recorded in §6.2 |
+| ProSeg cells carry fewer counts (median 4,323 against 4,812); clustering QC drops 2,471 ProSeg cells against 50 vendor cells | Recorded; follows from the 25.9% release and the 806 empty cells. No threshold change |
+
+**AT-9 final review (2026-11-06).** An independent check of the full-section outputs against
+the report (source store, trace, tiles, table, shapes, points, labels, downstream, clustering
+numbers, AT-1 guards) found no blocking problem. Findings and changes:
+
+| Finding | Change or decision |
+|---|---|
+| The label-pixel fix does not reach the existing store (the stitch format version and fingerprint are unchanged), and MIQ of the ProSeg layer left out the 9 cells without a label pixel without saying so | MIQ of an extra layer lists the shapes it has no row for in its table's `uns` and summary (`shapes_without_label_pixels`, `n_shapes_without_label_pixels`) and warns; a table without the field gets it on the next run without quantifying again. Tests with a blanked label and an older table. The full-section store was updated that way; the docs say stores stitched before the report field lack it there |
+| A cell that loses a seam conflict keeps its full polygon: 174 cross-tile polygon pairs overlap by more than 1 µm² (48 by more than 10 µm², at most 91.5 µm²); the label raster settles their pixels by ascending id, not by the transcripts' core rule, so MIQ and control counts can give a pixel to another cell than its transcripts | Added to the pending "halo tile claim vs owning tile" decision (AT-9 reviews). Options: clip the losing polygon, or rasterise cross-tile overlap pixels by the core rule. Scale: the 160,659 conflicts are 0.028% of the assigned rows (1,592 cells). Documented in the segmentation stage doc |
+| `verify_full.json` never checked QC (it looked in `atera/qc`), but §8 cites it for QC outputs of both layers | The check looks in `atera/<layer>/qc/qc_out` (5 files per layer) and also checks the MIQ field above; re-run (`verify_full.json`, previous result kept as `verify_full_v2.json`) |
+| The evidence `manifests/full_tile_plan.json` was the dense-tile check's plan (`tile_subset: ["c2_r1"]`) | Renamed `dense_tile_plan.json`; `full_tile_plan.json` is now the full run's published plan |
+| The `native` golden's `unknown_error` case is not ATERA-only, so XENIUM/MERSCOPE rows see the new error text | Docstring and the AT-9 entry above corrected; listed for the user (message only, no hash change) |
+| The tiles (2.7 GB) and the stitch report were published as links into the work directory; cleaning it would lose what a re-stitch needs | Tiles and the report are published by copy (publishDir only: no script pin or task hash changes); the store link and placeholders stay links. The full run's published tiles and report were materialised the same way |
+| Tiles do not start largest-first (`c2_r2` started last and set the end of the tile phase) | Already recorded (AT-9 full-section run); not a defect |
+
+**AT-6 reviews (2026-11-06).** An end-to-end data review and a code review of the AT-6 branch.
+Findings and changes:
+
+| Finding | Change or decision |
+|---|---|
+| A `[docs]` commit reworded a comment in `envs/environment.mender.yml` after the exit runs; Nextflow names a conda env after the file's full text, so HEAD would build an untested env and recompute MENDER_COMPUTE once more | The file is back to the exact text the exit runs used (their env). A new guard pins the SHA-256 of every `envs/*.yml` (`test_env_file_pins.py`), so an env edit is a reviewed decision; env edits stay out of `[docs]` commits |
+| The MENDER env pin changes the MENDER_COMPUTE hash of every platform | Needs the user's OK as a second announced re-run. Without it any freshly built MENDER env fails above 4,096 cells on every platform |
+| The broad atlas labels misname the human hippocampus: 27,805 mature oligodendrocytes (MOBP, PLP1, MOG high, PDGFRA 0.2 per 10k) are "Oligodendrocyte precursor", 8,345 PROX1/CALB1/SLC17A7-positive excitatory neurons are "Upper rhombic lip", 3,512 SLC17A7-high cells are "Cerebellar inhibitory"; the names carry into `broad_class`, the subcluster names and the MENDER cell states | Documented as provisional for ATERA (clustering doc). Follow-up for the robust annotation work: restrict the WHB superclusters by region (no cerebellar classes for hippocampus), add a marker sanity gate (an OPC label needs PDGFRA), and check whether human XENIUM rows show the same pattern |
+| An ATERA row whose `only_stage`/`stop_stage` names `pciseq`, `gaston` or `mecr` was told to pass `--<stage>_enabled true`, which leads into the ATERA refusal | ATERA rows are told which stages they run instead |
+| Global switches of off stages were handled two ways: a global `pciseq_enabled`, `gaston_enabled`, `cortical_depth_enabled` or `distance_from_object_enabled` aborted every run with an ATERA row (mixed samplesheets too), while a global `mecr_enabled` or transcript-pattern switch was ignored with a note | One policy: a global switch is ignored on ATERA rows with a setting note (so mixed samplesheets keep it for XENIUM/MERSCOPE rows); a value set on the ATERA row is refused, and the message names the row setting to remove |
+| QC without a table key raised on every platform when the dask aggregation failed, where XENIUM/MERSCOPE used to warn and retry in pandas | Only stores with build aggregates (ATERA) raise; the others keep the warning and the fallback |
+| The float32 regression test did not show that its fixture drifts on the legacy sum | It now asserts the drift (240,333,536 against 240,333,534) |
+| XENIUM and MERSCOPE keep the float32 QC assigned total, which is inexact past 2^24 counts (a real Xenium section exceeds it) | Unchanged (byte-identity). Candidate accepted change for the user to decide with the QC re-run. Accepted 2026-11-06: every platform now takes the exact sum; the QC re-run of the published datasets follows |
+| The all-transcript figures pruned parquet files by the boxes stored in the points index, which the fingerprint (names, row counts) does not validate | Files are chosen by their own footer statistics, as QC's registration windows are; section bounds come from the footers too, so the overview crop no longer centres on the build's recorded `bounds_um` (0.7 um wider than the rows on the full section) |
+| The wide-panel paths (sparse means above 1,000 genes, dotplot gene selection above 400) depend on panel width, not platform | Documented as panel-width rules: the 300-gene XENIUM/MERSCOPE panels never reach them; a XENIUM 5K panel would (its dotplot exceeded the render limit before). Since the user decision of 2026-11-06 the dotplot selection (top 5 genes per group) applies to every panel size |
+| "All transcripts" means all QV >= 20 transcripts (1,409,601,228 of 1,640,508,930 vendor rows on the full section; D3, `atera_min_qv`) | Stated in the visualization doc and in AT-6's status |
+| The resumed viewer-cache summary records the mask, label and image pyramids as skipped (built in the first attempt) | Noted; the pyramids were built at 03:26–03:29 in the first attempt. Part of the AT-7 restart work with the `-resume` rerun of ENRICH |
+| The source stores' hardlinked payloads are now read-only (143 crop, 1,543 full-section files) | Announced to whoever shares the AT-5 stores (exit report) |
+
+**AT-8 user decisions (2026-11-07).** Taken on the AT-8 design report (remaining scope after AT-6 and AT-9):
+
+| Question | Decision |
+|---|---|
+| Transcript pair correlation on ATERA | Off on the ATERA (label-raster) transcript-pattern engine in AT-8, and recorded in its summary. An all-transcript method (raster FFT plus an analytic null) is a follow-up; it may later replace the 5,000-transcripts-per-gene cap of the XENIUM/MERSCOPE engine |
+| Q22, panels above 5,000 genes | The whole-transcriptome rules apply automatically to any panel with more than 5,000 genes, whatever the platform: HVG-only PCA in legacy clustering, the streaming MECR reference (`reference_mode` auto), the pciSeq refusal without an explicit gene list, and GASTON raising instead of truncating. Not warn-only. Outputs of 5K-panel Xenium rows change (accepted); task hashes of the ~300-gene XENIUM/MERSCOPE rows stay unchanged |
+| Analysis gene set | RCA on ATERA uses all 18,049 panel genes (recipe `all_panel_genes`, the identity), not a subset, for the best achievable accuracy even at a much higher compute cost. AT-8 builds the analysis-gene-set machinery with ATERA defaulting to `all_panel_genes`. The overlap with the Xenium Prime 5K human panel (4,874 of 5,001 genes) is information only. (This supersedes an earlier decision the same day to leave the choice to AT-11.) |
+| Tissue support for non-cortical sections | A mask from the all-transcript density (10 µm raster, threshold, morphological close, hole fill), with the method recorded; hand-drawn tissue annotations take precedence when present |
+
+**AT-7 full-section continuation (2026-11-07).** The completed Cellpose-prior run
+passed all 48 checks of an independent verification. The source store stayed
+unchanged and all 1,409,601,228 QV-filtered transcript rows were retained. The
+three layers contain 91,431 vendor cells and 235,917 Cellpose seed objects in
+each of the Cellpose and Cellpose-prior ProSeg layers. Their assigned gene-row
+totals are 638,693,512, 683,130,477 and 594,250,915 respectively. Per-cell counts
+match the transcript stream; geometry is valid and cross-tile polygons do not
+overlap above the stitch tolerance. All downstream stages completed.
+
+ProSeg retains 102,157 zero-count objects (43.3%); Cellpose has 7,388. The user
+accepted that this may be reasonable: this observation alone does not justify
+changing the segmentation parameters. Matched cell/transcript crops and UMAP
+comparisons were exported from the completed outputs without recomputing
+clustering. UMAP colors use the existing provisional broad-class labels, not
+AT-11 annotation results; each embedding is an independent fit.
+
+The seven exact-total QC refreshes also completed. Before/after file checks
+found no missing files, no changes outside QC, and no changes to per-cell or
+geometry outputs. Published clustering was not rerun for dotplots, as requested.
+
+AT-7 cache scope after the RCA integration: process script pins remain unchanged,
+but `AnnotationReferences.HIERARCHY_SOURCES` hashes all of `merxen/config.py` and
+`analysis/clustering_squidpy.py`. Their AT-7 changes invalidate the map-first
+`CLUSTERING_SQUIDPY_COMPUTE_CPU` cache on a future restart, including other
+platforms. This continuation has not launched any published clustering refresh.
+The vendor-prior layer rename intentionally refreshes the Atera stitch and its
+derived stages when that route is relaunched.
+
+**AT-8 WP4 continuation (2026-11-07).** The label-raster transcript-pattern
+engine is integrated with the Cellpose route. Cell-label elements resolve from
+the store registry for original, Cellpose, Cellpose-prior ProSeg and vendor-prior
+ProSeg layers, including historical vendor-prior stores with the old `reseg`
+name. Missing registered masks do not silently select another route's mask.
+The recovered vendor/native-prior crop and full-section runs all completed with
+reconciled transcript accounting. The three analysis modules' function/class
+bodies match their measured source snapshot except for the layer resolver.
+
+The combined branch passes 157 focused engine, statistics and workflow checks,
+plus 154 annotation-contract and table-key checks after the AT-7 synchronization.
+The legacy polygon statistics retain their parity checks. Real full-section
+Cellpose and Cellpose-prior MECR scoring both completed: 235,917 objects, all
+190 reference markers and all 11,754 eligible pairs scored on each layer. Store
+file comparisons after both stages found no changes. Transcript-pattern exit
+runs for those two layers completed, sequentially and at low priority, with
+fresh output directories and an immutable code snapshot. Independent checks
+reconciled all 1,409,601,228 input rows on each layer and all 18,049 gene
+summaries. Both use the same tissue-support mask. Each layer's 72 PNG outputs
+passed image-file verification; the source store remained unchanged. Geometric
+mask counts are distinct from ProSeg's probabilistic transcript assignments and
+are not expected to equal those assignments. The legacy signed-distance plot
+formula can show large log odds in bins with no observations; these bins have
+non-significant p-values and must not be interpreted as enrichment evidence.
+PR #122 is merged into `feature/atera-support` after its CI passed. Status and
+source/store manifests are under the continuation evidence directory in
+`MERXEN_EVIDENCE_ROOT`. No clustering or dotplot regeneration is scheduled.
+
+**AT-11 continuation (2026-11-07).** Cell-type annotation is the next priority.
+The [annotation execution plan](atera-celltype-annotation-plan.md) separates
+donor-held-out reference selection, independent donor confirmation, a spatial
+pilot and production integration. The recovered all-donor hippocampal probe
+establishes feasibility, not held-out accuracy. New validation helpers enforce
+donor exclusion before reference statistics, retain unseen truth classes in
+accuracy denominators and refuse lost or duplicated prediction IDs. The
+experimental queries keep all 18,049 panel columns. Existing broad-class labels
+remain provisional while the new hippocampal evidence is collected.

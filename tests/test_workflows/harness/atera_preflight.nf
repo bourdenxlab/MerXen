@@ -16,7 +16,20 @@ def check(String id, Map row) {
         value = [
             result: "OK",
             active_platforms: settings.active_platforms,
+            segmentation_source: settings.segmentation_source,
+            analysis_segmentations: settings.analysis_segmentations,
+            mender_segmentations: settings.mender_segmentations,
+            stage_order: settings.stage_order,
             selected_stages: settings.selected_stages,
+            run_native_segment: settings.run_native_segment,
+            run_atera_proseg: settings.run_atera_proseg,
+            run_atera_cellpose: settings.run_atera_cellpose,
+            run_segment_nuclei: settings.run_segment_nuclei,
+            run_mecr: settings.run_mecr,
+            run_mapmycells: settings.run_mapmycells,
+            transcript_analysis: settings.spatial_gene_analysis_transcript_analysis_enabled,
+            setting_notes: settings.setting_notes,
+            clustering_squidpy_mode: AnnotationSettings.mode(settings),
         ]
     } catch (Throwable error) {
         value = [error_class: error.getClass().getName(), message: error.getMessage()]
@@ -24,34 +37,176 @@ def check(String id, Map row) {
     println "CASE\t${id}\t" + groovy.json.JsonOutput.toJson(value)
 }
 
-def checkStages(String id, Map settings) {
+def checkStages(String id, Map row, Map settings) {
     def errors = []
-    appendAteraStagePreflightChecks(errors, settings)
+    appendAteraPreflightChecks(errors, row, settings, params)
     println "CASE\t${id}\t" + groovy.json.JsonOutput.toJson([errors: errors])
+}
+
+// The launch-log lines of a samplesheet's annotation modes (main.nf
+// annotationModeLaunchLog).
+def checkLaunchLog(String id, List rows) {
+    println "CASE\t${id}\t" + groovy.json.JsonOutput.toJson(annotationModeLaunchLog(rows, params))
+}
+
+// Whether --annotation_prepare_only leaves the row out (main.nf
+// ateraPrepareOnlyRow).
+def checkPrepareOnly(String id, Map row) {
+    def settings = rowSampleSettings(row, params)
+    def leftOut = ateraPrepareOnlyRow([settings.pair_id, row, settings])
+    // A line of its own: the log line above may end without a newline.
+    println "\nCASE\t${id}\t" + groovy.json.JsonOutput.toJson([left_out: leftOut])
+}
+
+def checkHippocampal(String id, Map row, Map overrides) {
+    def resource = new File("hippocampal_resources.json")
+    resource.text = "{}"
+    def runParams = params + [annotation_hippocampal_resources: resource.absolutePath] + overrides
+    def value
+    try {
+        def settings = rowSampleSettings(row, runParams)
+        runPreflightChecks(row, settings, runParams)
+        value = [result: "OK", mode: AnnotationSettings.mode(settings),
+            suffix: AnnotationSettings.tableKeySuffix(settings),
+            region: settings.annotation_anatomical_region]
+    } catch (Throwable error) {
+        value = [message: error.getMessage()]
+    }
+    println "CASE\t${id}\t" + groovy.json.JsonOutput.toJson(value)
 }
 
 workflow {
     def atera = [pair_id: "PAIR_A", analysis_mode: "atera", atera_dir: "raw/atera"]
-    check("atera/stop_build", atera + [stop_stage: "build_spatialdata"])
+    // Passing rows: the native route through clustering (and MENDER).
     check("atera/no_stop_stage", atera)
-    check("atera/only_build", atera + [only_stage: "build_spatialdata"])
+    check("atera/mender", atera + [mender_enabled: "true"])
+    // An explicit stop at MENDER passes over the standalone MapMyCells stage.
+    check("atera/stop_mender", atera + [mender_enabled: "true", stop_stage: "mender"])
+    check("atera/stop_build", atera + [stop_stage: "build_spatialdata"])
     check("atera/only_segment", atera + [only_stage: "segment"])
-    check("atera/stop_segment", atera + [stop_stage: "segment"])
+    check("atera/start_enrich", atera + [start_stage: "enrich", stop_stage: "enrich"])
+    check("atera/segmentation_source_native", atera + [segmentation_source: "vendor"])
+    check("atera/analysis_original", atera + [analysis_segmentation: "original"])
+    check("atera/analysis_all", atera + [analysis_segmentation: "all"])
+    check("atera/mecr_off", atera + [mecr_enabled: "false"])
+    // MECR runs on ATERA rows with its streaming reference (AT-8).
+    check("atera/mecr", atera + [mecr_enabled: "true"])
+    check("atera/only_mecr", atera + [only_stage: "mecr"])
+    // map_first annotation is gated off for ATERA rows (AT-11, RCA on Atera):
+    // a row without its own mode clusters in legacy mode, a row that names
+    // legacy keeps it, and a row that names map_first is refused.
+    check("atera/legacy_row", atera + [clustering_squidpy_mode: "legacy"])
+    check("atera/map_first_row", atera + [clustering_squidpy_mode: "map_first"])
+    // Refused rows, one message each.
+    check("atera/stop_mapmycells", atera + [stop_stage: "mapmycells"])
+    check("atera/only_mapmycells", atera + [only_stage: "mapmycells"])
     check(
-        "mixed/xenium",
-        [
-            pair_id: "PAIR_B",
-            analysis_mode: "xenium",
-            xenium_dir: "raw/xenium",
-            stop_stage: "build_spatialdata",
+        "atera/start_mapmycells",
+        atera + [mender_enabled: "true", start_stage: "mapmycells", stop_stage: "mender"],
+    )
+    check("atera/pciseq", atera + [pciseq_enabled: "true"])
+    check("atera/gaston", atera + [gaston_enabled: "true"])
+    // Transcript patterns run on ATERA rows (label-raster engine, AT-8);
+    // annotations are optional, but a named one must exist.
+    check(
+        "atera/transcript_analysis",
+        atera + [spatial_gene_analysis_transcript_analysis_enabled: "true"],
+    )
+    check(
+        "atera/transcript_analysis_off",
+        atera + [spatial_gene_analysis_transcript_analysis_enabled: "false"],
+    )
+    check(
+        "atera/transcript_missing_annotation",
+        atera + [
+            spatial_gene_analysis_transcript_analysis_enabled: "true",
+            atera_cortical_depth_annotation_geojson: "missing/annotation.geojson",
         ],
     )
+    check("atera/cortical_depth", atera + [cortical_depth_enabled: "true"])
+    check("atera/distance_from_object", atera + [distance_from_object_enabled: "true"])
+    check("atera/alignment", atera + [enable_alignment: "true"])
+    check("atera/cellpose_only", atera + [segmentation_source: "cellpose_only"])
+    check("atera/unknown_source", atera + [segmentation_source: "magic"])
+    check("atera/analysis_reseg", atera + [analysis_segmentation: "reseg"])
+    check("atera/mender_hybrid", atera + [mender_enabled: "true", mender_segmentations: "proseg_hybrid"])
+    check("atera/segment_nuclei", atera + [only_stage: "segment_nuclei"])
+    // A stage that is off for ATERA rows names the ATERA stages, not the switch
+    // that would only lead into the refusal above.
+    check("atera/only_pciseq", atera + [only_stage: "pciseq"])
+    check("atera/stop_gaston", atera + [stop_stage: "gaston"])
+    // AT-9: the ATERA ProSeg route (segmentation_source=native_proseg).
+    def proseg = atera + [segmentation_source: "native_proseg"]
+    check("proseg/default", proseg)
+    check(
+        "proseg/all_mender",
+        proseg + [analysis_segmentation: "all", mender_enabled: "true", stop_stage: "mender"],
+    )
+    check("proseg/stop_segment", proseg + [stop_stage: "segment"])
+    check("proseg/start_enrich", proseg + [start_stage: "enrich", stop_stage: "enrich"])
+    check("proseg/alias", atera + [segmentation_source: "Vendor-ProSeg"])
+    check("proseg/reseg_only", proseg + [analysis_segmentation: "reseg"])
+    check("proseg/vendor_only", proseg + [analysis_segmentation: "proseg_vendor"])
+    check("proseg/hybrid", proseg + [analysis_segmentation: "proseg_hybrid"])
+    check(
+        "proseg/mender_hybrid",
+        proseg + [mender_enabled: "true", mender_segmentations: "proseg_hybrid"],
+    )
+    check("proseg/segment_nuclei", proseg + [only_stage: "segment_nuclei"])
+    check(
+        "proseg/xenium",
+        [pair_id: "PAIR_D", analysis_mode: "xenium", xenium_dir: "raw/xenium",
+         segmentation_source: "native_proseg"],
+    )
+    // AT-7: Cellpose (DAPI + 18S) and Cellpose-prior tiled ProSeg on ATERA.
+    def cellpose = atera + [segmentation_source: "cellpose_proseg"]
+    check("cellpose/default", cellpose)
+    check(
+        "cellpose/all_mender",
+        cellpose + [analysis_segmentation: "all", mender_enabled: "true", stop_stage: "mender"],
+    )
+    check("cellpose/alias", atera + [segmentation_source: "Cellpose-ProSeg"])
+    check("cellpose/stop_segment", cellpose + [stop_stage: "segment"])
+    check("cellpose/start_enrich", cellpose + [start_stage: "enrich", stop_stage: "enrich"])
+    check("cellpose/mask_only", cellpose + [analysis_segmentation: "proseg_mask"])
+    check("cellpose/channels", cellpose + [atera_channels: "DAPI, 18S"])
+    check("cellpose/hybrid", cellpose + [analysis_segmentation: "proseg_hybrid"])
+    check("cellpose/vendor_layer", cellpose + [analysis_segmentation: "proseg_vendor"])
+    check(
+        "cellpose/mender_hybrid",
+        cellpose + [mender_enabled: "true", mender_segmentations: "proseg_hybrid"],
+    )
+    check("cellpose/segment_nuclei", cellpose + [only_stage: "segment_nuclei"])
+    check("cellpose/blank_channels", cellpose + [atera_channels: " , "])
+    // Mixed samplesheet: the XENIUM row keeps its four layers and Cellpose.
+    def xenium = [pair_id: "PAIR_B", analysis_mode: "xenium", xenium_dir: "raw/xenium"]
+    check("mixed/xenium", xenium + [stop_stage: "build_spatialdata"])
+    check("mixed/xenium_enrich", xenium + [stop_stage: "enrich"])
+    check("mixed/xenium_native", xenium + [segmentation_source: "native"])
     check("mixed/atera", atera + [pair_id: "PAIR_C"])
-    check("mixed/atera_stop_build", atera + [pair_id: "PAIR_D", stop_stage: "build_spatialdata"])
     // A row whose stage selection is empty (no stage at all) is refused too.
     checkStages(
         "atera/no_stage",
-        [pair_id: "PAIR_E", active_platforms: ["ATERA"], selected_stages: []],
+        atera + [pair_id: "PAIR_E"],
+        [pair_id: "PAIR_E", active_platforms: ["ATERA"], selected_stages: [], stage_order: []],
     )
+    // Launch log: the mode summary labels ATERA rows held in legacy mode, and
+    // no ATERA row (held in legacy mode or naming legacy itself) raises the
+    // legacy deprecation warning.
+    def ateraLegacy = atera + [clustering_squidpy_mode: "legacy"]
+    def xeniumLegacy = xenium + [pair_id: "PAIR_D", clustering_squidpy_mode: "legacy"]
+    checkLaunchLog("log/atera", [atera])
+    checkLaunchLog("log/atera_legacy_row", [ateraLegacy])
+    checkLaunchLog("log/mixed", [xenium, atera + [pair_id: "PAIR_C"]])
+    checkLaunchLog("log/mixed_atera_legacy_row", [xenium, ateraLegacy])
+    checkLaunchLog("log/mixed_xenium_legacy_row", [xenium, atera + [pair_id: "PAIR_C"], xeniumLegacy])
+    // --annotation_prepare_only builds no reference bundle for ATERA rows.
+    checkPrepareOnly("prepare_only/atera", atera)
+    checkPrepareOnly("prepare_only/xenium", xenium + [stop_stage: "build_spatialdata"])
+    checkHippocampal("hippocampal/explicit", atera + [anatomical_region: "hippocampus", clustering_squidpy_mode: "map_first"], [:])
+    checkHippocampal("hippocampal/default", atera + [anatomical_region: "hippocampus"], [:])
+    checkHippocampal("hippocampal/missing_region", atera + [clustering_squidpy_mode: "map_first"], [:])
+    checkHippocampal("hippocampal/mouse", atera + [anatomical_region: "hippocampus", clustering_squidpy_mode: "map_first"], [species: "mouse"])
+    checkHippocampal("hippocampal/xenium_unchanged", xenium + [stop_stage: "build_spatialdata"], [:])
     println "DONE"
 }

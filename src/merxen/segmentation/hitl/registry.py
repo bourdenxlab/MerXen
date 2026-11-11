@@ -7,13 +7,18 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from merxen.config import CellposeConfig, MaskFilterConfig, SegmentationConfig
-from merxen.platforms import platform_spec
+from merxen.config import (
+    CellposeConfig,
+    MaskFilterConfig,
+    SegmentationConfig,
+    TilingConfig,
+)
+from merxen.platforms import PlatformName, platform_spec
 from merxen.segmentation.model_identity import (
     CPSAM_V2_SHA256,
     CellposeInferenceContext,
@@ -34,10 +39,10 @@ class CellposeModelMetadata(BaseModel):
 
     schema_version: Literal[1] = 1
     weights_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    platform: Literal["MERSCOPE", "XENIUM"]
+    platform: PlatformName
     species: Literal["human", "mouse"]
     channels: list[str] = Field(min_length=1, max_length=3)
-    image_key: Literal["morphology_focus", "MERSCOPE_z_projection"]
+    image_key: str = Field(min_length=1)
     pixel_size_um: float = Field(gt=0)
     tile_size: int = Field(gt=0)
     normalization_route: Literal["A"]
@@ -49,7 +54,11 @@ class CellposeModelMetadata(BaseModel):
     torch_version: str
     evaluated_cellpose: CellposeConfig
     evaluated_mask_filter: MaskFilterConfig
+    transcript_density_profile: dict[str, Any] | None = None
     evaluation_summary: str | None = None
+    model_name: str | None = None
+    build_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    training_tiling: TilingConfig | None = None
 
     @model_validator(mode="after")
     def _require_native_image_and_unique_channels(self) -> CellposeModelMetadata:
@@ -204,6 +213,15 @@ def preflight_custom_model(
         raise ValueError(
             "Model channels/order or native image does not match this dataset"
         )
+    from merxen.segmentation.transcript_density import density_input_identity
+
+    density = density_input_identity(config.dataset.transcript_density_path)
+    if metadata.transcript_density_profile != (density.profile if density else None):
+        raise ValueError("Model transcript-density recipe does not match this input")
+    if metadata.evaluated_cellpose.input_normalization != cellpose.input_normalization:
+        raise ValueError(
+            "Model input normalization differs from its evaluated settings"
+        )
     pixel_to_um = np.linalg.inv(transform_matrix)
     pixel_sizes = tuple(float(np.linalg.norm(pixel_to_um[:2, axis])) for axis in (0, 1))
     if not all(
@@ -247,6 +265,7 @@ def preflight_custom_model(
         pixel_size_um=(pixel_sizes[0], pixel_sizes[1]),
         mask_filter=config.mask_filter,
         tiling=config.tiling,
+        transcript_density=density,
     )
     return CellposeModelIdentity(
         status="verified",
@@ -295,6 +314,8 @@ def preflight_stock_arm(
     if not all(np.isfinite(size) and size > 0 for size in sizes):
         raise ValueError("Native image affine has invalid pixel sizes")
     cellpose_version, torch_version = require_cellpose_runtime()
+    from merxen.segmentation.transcript_density import density_input_identity
+
     return CellposeModelIdentity(
         status="verified",
         model_name="cpsam_v2",
@@ -310,6 +331,9 @@ def preflight_stock_arm(
             pixel_size_um=(sizes[0], sizes[1]),
             mask_filter=config.mask_filter,
             tiling=config.tiling,
+            transcript_density=density_input_identity(
+                config.dataset.transcript_density_path
+            ),
         ),
     )
 
@@ -345,8 +369,16 @@ def require_matching_cached_model(
                 raise ValueError("Experimental cache is incomplete; use a fresh arm")
         return
     recorded = read_model_identity(mask_path)
-    if is_experimental_arm(config):
-        if expected is None or recorded != expected:
+    if (
+        is_experimental_arm(config)
+        or config.dataset.transcript_density_path is not None
+    ):
+        location_only = {"inference_context": {"transcript_density": {"raster_path"}}}
+        # Moving the same verified raster into SpatialData changes its storage
+        # path, not the model input identity. All other fields must still agree.
+        if expected is None or recorded.model_dump(
+            exclude=location_only
+        ) != expected.model_dump(exclude=location_only):
             raise ValueError(
                 "Cached custom-model identity mismatch; use a separate outdir"
             )
@@ -355,12 +387,22 @@ def require_matching_cached_model(
         stats_path = config.dataset.persistent_cellpose_stitching_stats_path or (
             sidecar_path.with_name("cellpose_stitching_stats.json")
         )
-        if not stats_path.exists() or json.loads(stats_path.read_text()).get(
-            "model_identity"
-        ) != expected.model_dump(mode="json"):
+        if not stats_path.exists() or CellposeModelIdentity.model_validate(
+            json.loads(stats_path.read_text()).get("model_identity", {})
+        ).model_dump(exclude=location_only) != expected.model_dump(
+            exclude=location_only
+        ):
             raise ValueError("Cached custom-model statistics identity mismatch")
         return
     # The agreed compatibility policy preserves unknown historical stock output.
+    if (
+        recorded.inference_context is not None
+        and recorded.inference_context.transcript_density is not None
+    ):
+        raise ValueError(
+            "Cached masks use transcript density; "
+            "a two-stain run needs a separate outdir"
+        )
     if recorded.status == "unverified":
         return
     if recorded.weights_sha256 != CPSAM_V2_SHA256 or (

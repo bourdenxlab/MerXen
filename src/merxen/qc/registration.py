@@ -23,23 +23,25 @@ that the points do not).
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import shapely
 from scipy.ndimage import gaussian_filter
 from scipy.signal import fftconvolve
 from scipy.spatial import cKDTree
 
+from merxen.control_features import control_transcript_mask
+from merxen.io.points_aggregates import read_points_aggregates
 from merxen.io.transcript_io import first_existing_col
 
 logger = logging.getLogger(__name__)
-
-# Blank and negative-control probes are not tied to cell bodies.
-CONTROL_FEATURE_PATTERN = r"^(Blank|NegControl|Unassigned|Deprecated|Intergenic)"
 
 Window = tuple[float, float, float, float]
 
@@ -70,7 +72,8 @@ class RegistrationCheckParams:
         min_peak_z: Minimum z-score of a cross-correlation peak for its window
             to contribute to the offset estimate.
         min_centroids: Minimum number of centroids inside the windows.
-        exclude_control_features: Drop blank / negative-control probes before
+        exclude_control_features: Drop blank / negative-control probes (the
+            platform rules of :mod:`merxen.control_features`) before
             counting. Off by default: they are under 1% of transcripts and
             spread evenly, so they do not move the ratio (MS2: identical to
             two decimals), while reading every feature name slows the points
@@ -169,20 +172,32 @@ def transcripts_in_windows(
     x_col: str,
     y_col: str,
     gene_col: str | None = None,
-    excluded_gene_pattern: str | None = CONTROL_FEATURE_PATTERN,
+    excluded_gene_pattern: str | None = None,
+    platform: str | None = None,
+    parquet_files: Sequence[Path] | None = None,
 ) -> np.ndarray:
     """Collect transcript coordinates that fall inside any window.
 
     Dask-backed points are filtered partition by partition, so only the
-    transcripts inside the windows are materialised.
+    transcripts inside the windows are materialised. When ``parquet_files``
+    is given (the files of an indexed store that overlap the windows, see
+    :func:`window_parquet_files`), only those files are read, one at a time
+    and only the needed columns.
 
     Args:
-        points_obj: SpatialData points (Dask or pandas DataFrame).
+        points_obj: SpatialData points (Dask or pandas DataFrame). Not read
+            when ``parquet_files`` is given.
         windows: Windows from :func:`sample_registration_windows`.
         x_col: Column holding x in microns.
         y_col: Column holding y in microns.
-        gene_col: Optional feature column used to drop control probes.
+        gene_col: Optional feature column; when given, control probes are
+            dropped.
         excluded_gene_pattern: Regular expression of feature names to drop.
+            When omitted, the platform control rules of
+            :func:`merxen.control_features.control_transcript_mask` decide.
+        platform: Platform whose control-name rules apply; ``None`` checks
+            the rules of every platform.
+        parquet_files: Parquet files to read instead of ``points_obj``.
 
     Returns:
         ``(m, 2)`` float64 array of transcript coordinates.
@@ -190,10 +205,8 @@ def transcripts_in_windows(
     if not windows:
         return np.empty((0, 2), dtype=np.float64)
     columns = [x_col, y_col]
-    if gene_col is not None and excluded_gene_pattern is not None:
+    if gene_col is not None:
         columns.append(gene_col)
-    else:
-        excluded_gene_pattern = None
     bounds = np.asarray(windows, dtype=np.float64)
 
     def _filter(frame: pd.DataFrame) -> pd.DataFrame:
@@ -202,24 +215,133 @@ def transcripts_in_windows(
         keep = np.zeros(len(frame), dtype=bool)
         for x_min, x_max, y_min, y_max in bounds:
             keep |= (x >= x_min) & (x < x_max) & (y >= y_min) & (y < y_max)
-        if excluded_gene_pattern is not None and gene_col is not None:
+        if gene_col is not None:
             # Match names only for the few rows inside the windows; converting
             # every feature name of a 200M-transcript partition is costly.
             rows = np.flatnonzero(keep)
             genes = frame[gene_col].iloc[rows].astype(str)
-            is_control = genes.str.match(excluded_gene_pattern, na=False)
-            keep[rows[is_control.to_numpy(dtype=bool)]] = False
+            if excluded_gene_pattern is not None:
+                is_control = genes.str.match(excluded_gene_pattern, na=False)
+                control = is_control.to_numpy(dtype=bool)
+            else:
+                control = control_transcript_mask(
+                    genes.to_numpy(dtype=object), platform=platform
+                )
+            keep[rows[control]] = False
         return pd.DataFrame({"x": x[keep], "y": y[keep]})
+
+    if parquet_files is not None:
+        parts = [
+            _filter(pq.read_table(path, columns=columns).to_pandas())
+            for path in parquet_files
+        ]
+        if not parts:
+            return np.empty((0, 2), dtype=np.float64)
+        frame = pd.concat(parts, ignore_index=True)
+        return np.asarray(frame[["x", "y"]].to_numpy(dtype=np.float64))
 
     subset = points_obj[columns]
     if hasattr(subset, "map_partitions"):
         meta = pd.DataFrame(
             {"x": pd.Series(dtype="float64"), "y": pd.Series(dtype="float64")}
         )
-        frame: pd.DataFrame = subset.map_partitions(_filter, meta=meta).compute()
+        frame = subset.map_partitions(_filter, meta=meta).compute()
     else:
         frame = _filter(pd.DataFrame(subset))
     return np.asarray(frame[["x", "y"]].to_numpy(dtype=np.float64))
+
+
+def window_parquet_files(
+    zarr_path: Path | str | None,
+    points_key: str,
+    windows: list[Window],
+    *,
+    x_col: str = "x",
+    y_col: str = "y",
+) -> list[Path] | None:
+    """Return the indexed parquet files that may hold rows in any window.
+
+    Only stores whose build recorded a points index (ATERA) are pruned, and
+    only while the index still matches the parquet files (names and row
+    counts). Each file's box is then read afresh from the ``x_col`` /
+    ``y_col`` statistics of its footer rather than taken from the index, so a
+    rewrite that moved rows between files while keeping every file's row
+    count cannot hide transcripts from a window. A file whose footer has no
+    such statistics is always read.
+
+    Args:
+        zarr_path: Store the points element lives in, or ``None``.
+        points_key: Points element.
+        windows: Windows as ``(x_min, x_max, y_min, y_max)``.
+        x_col: Points column holding x in microns.
+        y_col: Points column holding y in microns.
+
+    Returns:
+        The overlapping files in index order, or ``None`` when the store
+        cannot be pruned (no index, a stale index, or no path); the caller
+        then scans every partition.
+    """
+    if zarr_path is None:
+        return None
+    aggregates = read_points_aggregates(Path(zarr_path), points_key)
+    if aggregates is None:
+        return None
+    if not aggregates.fingerprint_matches():
+        logger.info(
+            "Registration check: the points index of %s is stale; scanning every "
+            "partition.",
+            points_key,
+        )
+        return None
+    selected = []
+    for entry in aggregates.files:
+        path = aggregates.points_dir / entry.name
+        box = _footer_box(path, x_col, y_col)
+        # The footer box is inclusive and the windows half-open, so this keeps
+        # every file that can hold a row inside a window.
+        if box is None or any(
+            box[0] <= x_max and box[1] >= x_min and box[2] <= y_max and box[3] >= y_min
+            for x_min, x_max, y_min, y_max in windows
+        ):
+            selected.append(path)
+    logger.info(
+        "Registration check: the windows read %d of %d indexed parquet files of %s.",
+        len(selected),
+        len(aggregates.files),
+        points_key,
+    )
+    return selected
+
+
+def _footer_box(path: Path, x_col: str, y_col: str) -> Window | None:
+    """Return ``(x_min, x_max, y_min, y_max)`` of a parquet file's rows.
+
+    Taken from the row-group statistics of its footer; ``None`` when a
+    column or a row group's statistics are missing.
+    """
+    metadata = pq.read_metadata(path)
+    names = [metadata.schema.column(i).name for i in range(metadata.num_columns)]
+    if x_col not in names or y_col not in names:
+        return None
+    ranges: list[tuple[float, float]] = []
+    for position in (names.index(x_col), names.index(y_col)):
+        lows: list[float] = []
+        highs: list[float] = []
+        for group in range(metadata.num_row_groups):
+            chunk = metadata.row_group(group)
+            if chunk.num_rows == 0:
+                continue
+            stats = chunk.column(position).statistics
+            if stats is None or not stats.has_min_max:
+                return None
+            lows.append(float(stats.min))
+            highs.append(float(stats.max))
+        if not lows:
+            # No rows: nothing can fall inside a window.
+            return (np.inf, -np.inf, np.inf, -np.inf)
+        ranges.append((min(lows), max(highs)))
+    (x_min, x_max), (y_min, y_max) = ranges
+    return (x_min, x_max, y_min, y_max)
 
 
 def segmentation_registration_check(
@@ -385,6 +507,8 @@ def compute_segmentation_registration_qc(
     points_key: str,
     reference_shape_key: str | None = None,
     params: RegistrationCheckParams | None = None,
+    zarr_path: Path | str | None = None,
+    platform: str | None = None,
 ) -> RegistrationCheckResult:
     """Run :func:`segmentation_registration_check` on one SpatialData layer.
 
@@ -395,6 +519,12 @@ def compute_segmentation_registration_qc(
         reference_shape_key: Shapes of the platform's own segmentation. It is
             ignored when missing or equal to ``shape_key``.
         params: Check settings; defaults are used when omitted.
+        zarr_path: Store ``sdata_obj`` was read from. When its build recorded
+            a points index (ATERA), only the parquet files overlapping the
+            windows are read; other stores scan every partition as before.
+        platform: Platform whose control-name rules apply when
+            ``params.exclude_control_features`` is set; ``None`` checks the
+            rules of every platform.
 
     Returns:
         The check result.
@@ -429,6 +559,10 @@ def compute_segmentation_registration_qc(
             x_col=x_col,
             y_col=y_col,
             gene_col=gene_col,
+            platform=platform,
+            parquet_files=window_parquet_files(
+                zarr_path, points_key, windows, x_col=x_col, y_col=y_col
+            ),
         )
     return segmentation_registration_check(
         centroids,

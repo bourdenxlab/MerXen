@@ -16,6 +16,7 @@ import logging
 import re
 import sys
 import textwrap
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -38,17 +39,60 @@ from matplotlib.lines import Line2D
 from scipy import sparse
 from scipy.cluster.hierarchy import leaves_list, linkage
 
+from merxen.clustering.cellset import restrict_to_table_cells, select_table_cells
 from merxen.config import ClusteringSquidpyConfig
 from merxen.control_features import CONTROL_TOKENS, control_token_mask
 from merxen.gene_ids import is_ensembl_gene_id
+from merxen.gene_sets import WHOLE_TRANSCRIPTOME_MIN_GENES, is_whole_transcriptome
+from merxen.io.spatialdata_schema import ORIGINAL_ID_NAMESPACE
 from merxen.io.transcript_io import first_existing_col
 from merxen.memory import force_release, log_status
+from merxen.platforms import platform_spec
 from merxen.plotting import prepare_plot_output, save_figure
+from merxen.table_keys import clustered_table_key
 
 logger = logging.getLogger(__name__)
 
 GPU_SPARSE_PCA_CHUNK_SIZE = 2048
 EXPECTED_PANEL_GENE_COUNT = 300
+# Panels wider than this (whole-transcriptome ATERA) take the sparse
+# indicator-matrix path for per-group means. This is a panel-width rule, not a
+# platform rule: the 300-gene XENIUM/MERSCOPE panels never reach it and keep
+# the dense path byte for byte, while a wider panel of any platform takes it.
+DENSE_SUMMARY_MAX_GENES = 1000
+# Every branch dotplot (legacy and map_first) shows the union of each group's top
+# DOTPLOT_TOP_GENES_PER_GROUP genes (cluster-mean z-score), whatever the panel
+# width, and never more than DOTPLOT_MAX_GENES of them (a render-size cap that
+# only bites with over 80 groups); the CSV tables keep every gene.
+DOTPLOT_MAX_GENES = 400
+DOTPLOT_TOP_GENES_PER_GROUP = 5
+# Tables of panels up to this width are written in hierarchically clustered
+# gene order; wider panels (whole-transcriptome ATERA) keep var order, as
+# clustering every gene of such a panel is too costly.
+DOTPLOT_CLUSTERED_TABLE_MAX_GENES = 400
+# A gene is a candidate for a group's top genes only when at least this
+# fraction of the group's cells express it. The z-score ignores expression
+# level, so without the floor a gene with a handful of transcripts in one
+# group outranks that group's real markers.
+DOTPLOT_MIN_GROUP_FRACTION = 0.1
+# Agg cannot render a figure side longer than 2**16 pixels.
+DOTPLOT_MAX_RENDER_PX = 65_000
+DOTPLOT_GENE_SELECTION_UNS_KEY = "merxen_dotplot_gene_selection"
+# Highly variable genes used for PCA when a sample sets ``hvg_n_top_genes``.
+# ``cell_ranger`` needs no optional dependency (``seurat_v3`` needs
+# scikit-misc, which MerXen does not declare) and works on the sparse
+# log-normalised matrix.
+HVG_FLAVOR = "cell_ranger"
+HVG_VAR_KEY = "merxen_highly_variable"
+# Highly variable genes the PCA uses when a sample sets no ``hvg_n_top_genes``
+# but its panel is whole-transcriptome (more than WHOLE_TRANSCRIPTOME_MIN_GENES
+# non-control genes, e.g. Xenium Prime 5K). Equal to the workflow default
+# ``params.atera_clustering_hvg_n_top_genes`` (a test keeps them in step).
+WHOLE_TRANSCRIPTOME_HVG_N_TOP_GENES = 2000
+# Owning-cell column of a nucleus layer whose ids are not cell ids (ATERA: one
+# row per nucleus). A registry entry's ``cell_key`` takes precedence.
+NUCLEUS_CELL_KEY_DEFAULT = "cell_instance_id"
+NUCLEUS_METRIC_COLUMNS = ("nucleus_area", "nucleus_area_total", "nucleus_count")
 ENSEMBL_ID_COLUMN = "ensembl_id"
 GENE_ID_COLUMN_CANDIDATES = (
     ENSEMBL_ID_COLUMN,
@@ -291,6 +335,44 @@ class RoundParams:
     umap_spread: float
 
 
+@dataclass(frozen=True)
+class SampleClusteringOptions:
+    """Per-sample clustering settings carried by the sample JSON.
+
+    Attributes:
+        expected_panel_gene_count: Gene count the panel check expects after
+            control and min-cell filtering; ``None`` skips the check (whole-
+            transcriptome panels).
+        hvg_n_top_genes: Highly variable genes the PCA runs on; ``None`` runs
+            it on every gene for panels of up to 5,000 genes (the 300-gene
+            XENIUM and MERSCOPE rows) and on
+            :data:`WHOLE_TRANSCRIPTOME_HVG_N_TOP_GENES` genes for wider ones.
+    """
+
+    expected_panel_gene_count: int | None = EXPECTED_PANEL_GENE_COUNT
+    hvg_n_top_genes: int | None = None
+
+    @classmethod
+    def from_sample(cls, sample: Any) -> SampleClusteringOptions:
+        """Read the options of a ``ClusteringSquidpySampleConfig``.
+
+        Args:
+            sample: A sample config (or any object with the two attributes).
+
+        Returns:
+            The sample's options; missing attributes keep the defaults.
+        """
+        return cls(
+            expected_panel_gene_count=getattr(
+                sample, "expected_panel_gene_count", EXPECTED_PANEL_GENE_COUNT
+            ),
+            hvg_n_top_genes=getattr(sample, "hvg_n_top_genes", None),
+        )
+
+
+DEFAULT_SAMPLE_OPTIONS = SampleClusteringOptions()
+
+
 def load_spatialdata_adata(
     zarr_path: Path | str,
     *,
@@ -370,8 +452,30 @@ def adata_from_spatialdata(
         shape_metrics = _shape_metrics(sdata_obj.shapes[resolved_shape_key])
         _apply_shape_metrics(adata, shape_metrics, shape_key=resolved_shape_key)
 
-    nucleus_shape_key = _choose_nucleus_shape_key(sdata_obj)
-    if nucleus_shape_key is not None:
+    nucleus_shape_key, nucleus_join = _choose_nucleus_shape_key(
+        sdata_obj, platform=platform
+    )
+    nucleus_skip_reason = None
+    if nucleus_join is not None:
+        # The owning-cell column of a cell-keyed nucleus layer (ATERA) holds
+        # vendor cell ids: joining it to a table of another id namespace (the
+        # Cellpose labels of an ATERA cellpose_proseg row, AT-7) would give
+        # Cellpose cell k the nuclei of vendor cell k.
+        namespace = _table_id_namespace(sdata_obj, resolved_table_key)
+        if namespace is not None and namespace != ORIGINAL_ID_NAMESPACE:
+            nucleus_skip_reason = (
+                f"{nucleus_shape_key} joins vendor cell ids through {nucleus_join}; "
+                f"{resolved_table_key} has ids of namespace {namespace}"
+            )
+            nucleus_shape_key, nucleus_join = None, None
+    if nucleus_shape_key is not None and nucleus_join is not None:
+        _apply_nucleus_metrics_by_cell(
+            adata,
+            sdata_obj.shapes[nucleus_shape_key],
+            cell_key=nucleus_join,
+            shape_key=nucleus_shape_key,
+        )
+    elif nucleus_shape_key is not None:
         nucleus_metrics = _shape_metrics(sdata_obj.shapes[nucleus_shape_key])
         _apply_area_metric(adata, nucleus_metrics, column="nucleus_area")
 
@@ -389,7 +493,28 @@ def adata_from_spatialdata(
         "shape_key": resolved_shape_key,
         "nucleus_shape_key": nucleus_shape_key,
     }
+    if nucleus_join is not None:
+        adata.uns["merxen_clustering_squidpy"]["nucleus_join"] = nucleus_join
+    if nucleus_skip_reason is not None:
+        adata.uns["merxen_clustering_squidpy"]["nucleus_metrics_skipped"] = (
+            nucleus_skip_reason
+        )
     return adata
+
+
+def _table_id_namespace(sdata_obj: Any, table_key: str | None) -> str | None:
+    """Return the registered id namespace of a table, or ``None`` if unregistered."""
+    if table_key is None:
+        return None
+    schema = dict(getattr(sdata_obj, "attrs", {}).get("merxen_schema", {}) or {})
+    registry = schema.get("segmentations") or {}
+    if not isinstance(registry, dict):
+        return None
+    for entry in registry.values():
+        if isinstance(entry, dict) and entry.get("table") == table_key:
+            namespace = entry.get("id_namespace")
+            return None if namespace is None else str(namespace)
+    return None
 
 
 def add_qc_metrics(adata: ad.AnnData) -> ad.AnnData:
@@ -483,6 +608,8 @@ def run_scanpy_clustering(
     use_gpu: bool = True,
     key_added: str = "leiden",
     input_layer: str | None = None,
+    expected_panel_gene_count: int | None = EXPECTED_PANEL_GENE_COUNT,
+    hvg_n_top_genes: int | None = None,
 ) -> ad.AnnData:
     """Run the Scanpy preprocessing and clustering workflow.
 
@@ -508,6 +635,18 @@ def run_scanpy_clustering(
         key_added: ``obs`` column for Leiden labels.
         input_layer: Optional layer copied into ``X`` before filtering and
             normalization, used when reclustering subsets from raw counts.
+        expected_panel_gene_count: Gene count expected after filtering; a
+            mismatch is logged and flagged in the control-filter summary.
+            ``None`` skips the check and the flag.
+        hvg_n_top_genes: When set, select this many highly variable genes
+            (:data:`HVG_FLAVOR` on the log-normalised matrix) into
+            ``.var["merxen_highly_variable"]`` and run the PCA on them only.
+            ``None`` runs the PCA on every gene, unless the panel is
+            whole-transcriptome (more than
+            :data:`~merxen.gene_sets.WHOLE_TRANSCRIPTOME_MIN_GENES` non-control
+            genes before the min-cell filter): then
+            :data:`WHOLE_TRANSCRIPTOME_HVG_N_TOP_GENES` genes are selected and
+            the reason is recorded in the round's ``uns`` parameters.
 
     Returns:
         Clustered AnnData with Leiden labels in ``.obs[key_added]``. The
@@ -525,28 +664,38 @@ def run_scanpy_clustering(
             )
         clustered.X = _copy_matrix(clustered.layers[input_layer])
 
+    hvg_selection = _resolve_hvg_selection(clustered, hvg_n_top_genes)
+
     if drop_control_features:
-        clustered = remove_control_features(clustered)
+        clustered = remove_control_features(
+            clustered, expected_panel_gene_count=expected_panel_gene_count
+        )
     else:
         _record_control_feature_filter(
             clustered,
             removed_features=[],
             n_features_before=clustered.n_vars,
             enabled=False,
+            expected_panel_gene_count=expected_panel_gene_count,
         )
 
-    sc.pp.filter_cells(clustered, min_counts=int(min_counts))
+    # The shared helper keeps the clustered cells equal to the annotation's
+    # table cells (plan §4.4); it records obs["n_counts"] as filter_cells did.
+    restrict_to_table_cells(clustered, select_table_cells(clustered, min_counts))
     sc.pp.filter_genes(clustered, min_cells=int(min_cells))
     if clustered.n_obs < 3 or clustered.n_vars < 2:
         raise ValueError(
             "Too few cells/genes remain after filtering: "
             f"n_obs={clustered.n_obs}, n_vars={clustered.n_vars}"
         )
-    if clustered.n_vars != EXPECTED_PANEL_GENE_COUNT:
+    if (
+        expected_panel_gene_count is not None
+        and clustered.n_vars != expected_panel_gene_count
+    ):
         logger.warning(
             "Expected %d genes after control-feature and min-cell filtering; "
             "observed %d.",
-            EXPECTED_PANEL_GENE_COUNT,
+            expected_panel_gene_count,
             clustered.n_vars,
         )
     filter_summary = dict(
@@ -556,9 +705,10 @@ def run_scanpy_clustering(
     )
     if filter_summary:
         filter_summary["n_features_after_min_cell_filter"] = int(clustered.n_vars)
-        filter_summary["has_expected_panel_gene_count_after_min_cell_filter"] = (
-            int(clustered.n_vars) == EXPECTED_PANEL_GENE_COUNT
-        )
+        if expected_panel_gene_count is not None:
+            filter_summary["has_expected_panel_gene_count_after_min_cell_filter"] = (
+                int(clustered.n_vars) == expected_panel_gene_count
+            )
         clustered.uns["merxen_clustering_squidpy"] = {
             **dict(clustered.uns.get("merxen_clustering_squidpy", {})),
             "control_feature_filter": filter_summary,
@@ -574,7 +724,19 @@ def run_scanpy_clustering(
     )
     sc.pp.log1p(clustered)
 
-    max_pcs = min(int(n_pcs), clustered.n_obs - 1, clustered.n_vars - 1)
+    hvg_summary: dict[str, Any] | None = None
+    pca_mask_var: str | None = None
+    n_pca_vars = int(clustered.n_vars)
+    if hvg_selection is not None:
+        n_top_genes, selection_record = hvg_selection
+        hvg_summary = {
+            **_select_highly_variable_genes(clustered, n_top_genes=n_top_genes),
+            **selection_record,
+        }
+        pca_mask_var = HVG_VAR_KEY
+        n_pca_vars = int(hvg_summary["n_highly_variable_genes"])
+
+    max_pcs = min(int(n_pcs), clustered.n_obs - 1, n_pca_vars - 1)
     n_pcs_for_neighbors: int | None = max_pcs if max_pcs > 0 else None
     effective_neighbors = max(2, min(int(n_neighbors), clustered.n_obs - 1))
 
@@ -590,10 +752,18 @@ def run_scanpy_clustering(
             leiden_resolution=float(leiden_resolution),
             random_seed=int(random_seed),
             key_added=key_added,
+            mask_var=pca_mask_var,
         )
 
     if not gpu_used:
-        if max_pcs > 0:
+        if max_pcs > 0 and pca_mask_var is not None:
+            sc.pp.pca(
+                clustered,
+                n_comps=max_pcs,
+                random_state=int(random_seed),
+                mask_var=pca_mask_var,
+            )
+        elif max_pcs > 0:
             sc.pp.pca(clustered, n_comps=max_pcs, random_state=int(random_seed))
         sc.pp.neighbors(
             clustered,
@@ -659,6 +829,8 @@ def run_scanpy_clustering(
         "gpu_used": gpu_used,
         **provenance.as_uns_params(),
     }
+    if hvg_summary is not None:
+        params.update(hvg_summary)
     params_key = f"merxen_clustering_params_{key_added}"
     clustered.uns[params_key] = params
     if key_added == "leiden":
@@ -668,6 +840,117 @@ def run_scanpy_clustering(
         key_added: provenance.to_json(key_added=key_added),
     }
     return clustered
+
+
+def _resolve_hvg_selection(
+    adata: ad.AnnData,
+    hvg_n_top_genes: int | None,
+) -> tuple[int, dict[str, Any]] | None:
+    """Decide how many highly variable genes the PCA uses, and why.
+
+    The panel width is counted before the min-cell filter and without control
+    features, so a 5,001-gene panel stays whole-transcriptome even when a few
+    of its genes are detected in too few cells. Branch and neuron rounds get
+    a matrix the broad round already filtered; they inherit the panel width
+    the broad round recorded, so every round of a sample follows one rule.
+
+    Args:
+        adata: Clustering input (raw counts; controls may still be present).
+        hvg_n_top_genes: The sample's explicit request, or ``None``.
+
+    Returns:
+        ``None`` when the PCA runs on every gene; otherwise the number of
+        genes to select and scalar ``uns`` provenance for the reason.
+    """
+    if hvg_n_top_genes is not None:
+        return int(hvg_n_top_genes), {"hvg_selection_reason": "requested"}
+    n_panel_genes = max(
+        int(np.count_nonzero(~_control_feature_mask(adata))),
+        _recorded_panel_gene_count(adata),
+    )
+    if not is_whole_transcriptome(n_panel_genes):
+        return None
+    logger.info(
+        "Panel has %d non-control genes (more than %d): the PCA runs on %d "
+        "highly variable genes.",
+        n_panel_genes,
+        WHOLE_TRANSCRIPTOME_MIN_GENES,
+        WHOLE_TRANSCRIPTOME_HVG_N_TOP_GENES,
+    )
+    return WHOLE_TRANSCRIPTOME_HVG_N_TOP_GENES, {
+        "hvg_selection_reason": "whole_transcriptome_panel",
+        "n_panel_genes": n_panel_genes,
+        "whole_transcriptome_min_genes": WHOLE_TRANSCRIPTOME_MIN_GENES,
+    }
+
+
+def _recorded_panel_gene_count(adata: ad.AnnData) -> int:
+    """Return the widest panel an earlier round of this matrix recorded.
+
+    Only rounds that took the whole-transcriptome rule record
+    ``n_panel_genes``; anything else gives 0.
+    """
+    widths = [
+        int(params["n_panel_genes"])
+        for key, params in adata.uns.items()
+        if str(key).startswith("merxen_clustering_params")
+        and isinstance(params, Mapping)
+        and "n_panel_genes" in params
+    ]
+    return max(widths, default=0)
+
+
+def _select_highly_variable_genes(
+    adata: ad.AnnData,
+    *,
+    n_top_genes: int,
+) -> dict[str, Any]:
+    """Mark the highly variable genes the PCA runs on.
+
+    The selection is written to ``.var["merxen_highly_variable"]`` (never to
+    Scanpy's implicit ``highly_variable`` column, and never read from the
+    vendor's ``vendor_highly_variable``). ``X`` must be log-normalised.
+
+    Args:
+        adata: Normalised, log-transformed AnnData; annotated in place.
+        n_top_genes: Number of genes to select. When the matrix has no more
+            genes than this, every gene is selected.
+
+    Returns:
+        Scalar provenance for the round's ``uns`` parameters: the method, the
+        requested and selected gene counts and the PCA ``mask_var``.
+    """
+    if int(adata.n_vars) <= int(n_top_genes):
+        mask = np.ones(adata.n_vars, dtype=bool)
+        method = "all_genes"
+    else:
+        result = sc.pp.highly_variable_genes(
+            adata,
+            n_top_genes=int(n_top_genes),
+            flavor=HVG_FLAVOR,
+            inplace=False,
+        )
+        if result is None:
+            raise RuntimeError(
+                "scanpy.pp.highly_variable_genes(inplace=False) returned no table."
+            )
+        mask = result["highly_variable"].to_numpy(dtype=bool)
+        method = HVG_FLAVOR
+    adata.var[HVG_VAR_KEY] = mask
+    n_selected = int(mask.sum())
+    logger.info(
+        "Highly variable genes for PCA: %d of %d (method=%s, requested=%d)",
+        n_selected,
+        adata.n_vars,
+        method,
+        n_top_genes,
+    )
+    return {
+        "hvg_method": method,
+        "hvg_n_top_genes": int(n_top_genes),
+        "n_highly_variable_genes": n_selected,
+        "pca_mask_var": HVG_VAR_KEY,
+    }
 
 
 def _leiden_provenance(
@@ -781,8 +1064,21 @@ def _import_name_distributions() -> dict[str, tuple[str, ...]]:
     }
 
 
-def remove_control_features(adata: ad.AnnData) -> ad.AnnData:
-    """Return a copy with blank/negative/control variables removed."""
+def remove_control_features(
+    adata: ad.AnnData,
+    *,
+    expected_panel_gene_count: int | None = EXPECTED_PANEL_GENE_COUNT,
+) -> ad.AnnData:
+    """Return a copy with blank/negative/control variables removed.
+
+    Args:
+        adata: Input AnnData.
+        expected_panel_gene_count: Gene count recorded as expected in the
+            control-filter summary; ``None`` leaves the expectation out.
+
+    Returns:
+        A filtered copy with the filter summary in ``uns``.
+    """
     control_mask = _control_feature_mask(adata)
     removed_features = [str(x) for x in adata.var_names[control_mask]]
     n_features_before = int(adata.n_vars)
@@ -792,6 +1088,7 @@ def remove_control_features(adata: ad.AnnData) -> ad.AnnData:
         removed_features=removed_features,
         n_features_before=n_features_before,
         enabled=True,
+        expected_panel_gene_count=expected_panel_gene_count,
     )
     return filtered
 
@@ -802,22 +1099,25 @@ def _record_control_feature_filter(
     removed_features: list[str],
     n_features_before: int,
     enabled: bool,
+    expected_panel_gene_count: int | None = EXPECTED_PANEL_GENE_COUNT,
 ) -> None:
     retained_features = [str(x) for x in adata.var_names]
+    summary: dict[str, Any] = {
+        "enabled": bool(enabled),
+        "n_features_before": int(n_features_before),
+        "n_control_features_removed": len(removed_features),
+        "n_features_after_control_filter": int(adata.n_vars),
+    }
+    if expected_panel_gene_count is not None:
+        summary["expected_panel_gene_count"] = int(expected_panel_gene_count)
+        summary["has_expected_panel_gene_count"] = (
+            int(adata.n_vars) == expected_panel_gene_count
+        )
+    summary["removed_control_features"] = removed_features
+    summary["retained_features"] = retained_features
     adata.uns["merxen_clustering_squidpy"] = {
         **dict(adata.uns.get("merxen_clustering_squidpy", {})),
-        "control_feature_filter": {
-            "enabled": bool(enabled),
-            "n_features_before": int(n_features_before),
-            "n_control_features_removed": len(removed_features),
-            "n_features_after_control_filter": int(adata.n_vars),
-            "expected_panel_gene_count": EXPECTED_PANEL_GENE_COUNT,
-            "has_expected_panel_gene_count": (
-                int(adata.n_vars) == EXPECTED_PANEL_GENE_COUNT
-            ),
-            "removed_control_features": removed_features,
-            "retained_features": retained_features,
-        },
+        "control_feature_filter": summary,
     }
 
 
@@ -832,8 +1132,12 @@ def _run_gpu_clustering(
     leiden_resolution: float,
     random_seed: int,
     key_added: str = "leiden",
+    mask_var: str | None = None,
 ) -> bool:
     """Run PCA, neighbors, UMAP, and Leiden on GPU via rapids-singlecell.
+
+    ``mask_var`` names a boolean ``var`` column restricting the PCA to those
+    genes (highly variable genes); ``None`` keeps every gene.
 
     Returns True when GPU steps completed successfully, False when
     rapids-singlecell is unavailable and the caller should use CPU instead.
@@ -857,7 +1161,7 @@ def _run_gpu_clustering(
     rsc.get.anndata_to_GPU(adata)
     try:
         if max_pcs > 0:
-            pca_kwargs = _gpu_pca_kwargs(adata, max_pcs=max_pcs)
+            pca_kwargs = _gpu_pca_kwargs(adata, max_pcs=max_pcs, mask_var=mask_var)
             rsc.pp.pca(
                 adata,
                 n_comps=max_pcs,
@@ -889,16 +1193,24 @@ def _run_gpu_clustering(
     return True
 
 
-def _gpu_pca_kwargs(adata: ad.AnnData, *, max_pcs: int) -> dict[str, int | bool]:
+def _gpu_pca_kwargs(
+    adata: ad.AnnData,
+    *,
+    max_pcs: int,
+    mask_var: str | None = None,
+) -> dict[str, int | bool | str]:
     """Return rapids-singlecell PCA kwargs for the current matrix layout."""
+    kwargs: dict[str, int | bool | str] = {}
+    if mask_var is not None:
+        kwargs["mask_var"] = mask_var
     if not _is_sparse_matrix(adata.X):
-        return {}
+        return kwargs
 
     chunk_size = min(
         adata.n_obs,
         max(GPU_SPARSE_PCA_CHUNK_SIZE, int(max_pcs) * 4, int(max_pcs) + 1),
     )
-    return {"chunked": True, "chunk_size": int(chunk_size)}
+    return {**kwargs, "chunked": True, "chunk_size": int(chunk_size)}
 
 
 def _is_sparse_matrix(matrix: Any) -> bool:
@@ -1304,13 +1616,34 @@ def compute_group_gene_summary(
         raise ValueError("No requested genes were present in the AnnData object.")
 
     matrix = adata.layers[layer] if layer is not None else adata.X
+    labels = adata.obs[groupby].astype(str).to_numpy()
+    if sparse.issparse(matrix) and adata.n_vars > DENSE_SUMMARY_MAX_GENES:
+        # Requesting every gene in var order needs no column slice, which
+        # would copy the whole matrix.
+        if gene_indices == list(range(adata.n_vars)):
+            wide_expression = matrix
+        else:
+            wide_expression = matrix[:, gene_indices]
+        sparse_means, sparse_fractions = _sparse_group_mean_and_fraction(
+            wide_expression, labels, group_order
+        )
+        return (
+            pd.DataFrame(
+                sparse_means,
+                index=pd.Index(group_order, name=groupby),
+                columns=pd.Index(resolved_genes, name="gene"),
+            ),
+            pd.DataFrame(
+                sparse_fractions,
+                index=pd.Index(group_order, name=groupby),
+                columns=pd.Index(resolved_genes, name="gene"),
+            ),
+        )
     expression = matrix[:, gene_indices]
     if sparse.issparse(expression):
         expression = expression.tocsr()
     else:
         expression = np.asarray(expression)
-
-    labels = adata.obs[groupby].astype(str).to_numpy()
     means: list[np.ndarray] = []
     fractions: list[np.ndarray] = []
     for group in group_order:
@@ -1407,10 +1740,7 @@ def plot_group_gene_dotplot(
         colorbar_label = "Mean expression"
 
     if figsize is None:
-        figsize = (
-            max(8.0, len(group_order) * 0.95 + 2.5),
-            max(10.0, len(gene_order) * 0.09 + 2.0),
-        )
+        figsize = _default_dotplot_figsize(len(group_order), len(gene_order))
 
     fig, ax = plt.subplots(figsize=figsize)
     x_positions, y_positions = np.meshgrid(
@@ -1484,6 +1814,104 @@ def plot_group_gene_dotplot(
     return output_path
 
 
+def _default_dotplot_figsize(n_groups: int, n_genes: int) -> tuple[float, float]:
+    """Return the dotplot figure size in inches for a groups-by-genes grid.
+
+    Args:
+        n_groups: Number of groups (x axis).
+        n_genes: Number of genes (y axis).
+
+    Returns:
+        ``(width, height)`` in inches.
+    """
+    return (
+        max(8.0, n_groups * 0.95 + 2.5),
+        max(10.0, n_genes * 0.09 + 2.0),
+    )
+
+
+def select_dotplot_genes(
+    mean_expression: pd.DataFrame,
+    fraction_expression: pd.DataFrame,
+    *,
+    top_k: int = DOTPLOT_TOP_GENES_PER_GROUP,
+    max_genes: int = DOTPLOT_MAX_GENES,
+    min_fraction: float = DOTPLOT_MIN_GROUP_FRACTION,
+) -> list[str]:
+    """Pick each group's top genes for a dotplot, in group order.
+
+    Within each group, only genes expressed in at least ``min_fraction`` of
+    the group's cells are candidates; they are ranked by their cluster-mean
+    z-score (z over groups, per gene), then by the group's fraction
+    expressing, then var order. A group with fewer than ``top_k`` candidates
+    adds only those it has. Groups take turns adding their next best gene
+    until every group has added ``top_k`` genes or ``max_genes`` are chosen,
+    so a cap that bites still leaves every group its best genes. A gene that
+    ranks in several groups is kept once.
+
+    The result is ordered by group (the row order of ``mean_expression``),
+    each group's genes best first, a shared gene sitting with the first group
+    that ranks it, so a dotplot drawn in this order runs along the diagonal.
+
+    Args:
+        mean_expression: Groups-by-genes mean expression.
+        fraction_expression: Groups-by-genes fraction of cells expressing,
+            with the same index and columns as ``mean_expression``.
+        top_k: Genes per group.
+        max_genes: Maximum number of genes returned.
+        min_fraction: Minimum fraction of a group's cells expressing a gene
+            for that gene to be one of the group's candidates.
+
+    Returns:
+        The selected genes in group order, without duplicates.
+
+    Raises:
+        ValueError: If the two tables do not share index and columns.
+    """
+    if not (
+        mean_expression.index.equals(fraction_expression.index)
+        and mean_expression.columns.equals(fraction_expression.columns)
+    ):
+        raise ValueError(
+            "mean_expression and fraction_expression must share index and columns."
+        )
+    z_scores = _gene_zscore(mean_expression).to_numpy(dtype=float)
+    fractions = np.nan_to_num(fraction_expression.to_numpy(dtype=float), nan=0.0)
+    genes = [str(gene) for gene in mean_expression.columns]
+    var_order = np.arange(len(genes))
+    rankings: list[np.ndarray] = []
+    for z_row, fraction_row in zip(z_scores, fractions, strict=True):
+        candidates = np.flatnonzero(fraction_row >= float(min_fraction))
+        order = np.lexsort(
+            (var_order[candidates], -fraction_row[candidates], -z_row[candidates])
+        )
+        rankings.append(candidates[order][: int(top_k)])
+    chosen = _take_group_turns(rankings, top_k=int(top_k), max_genes=int(max_genes))
+    ordered: list[str] = []
+    placed: set[int] = set()
+    for ranking in rankings:
+        for index in map(int, ranking):
+            if index in chosen and index not in placed:
+                placed.add(index)
+                ordered.append(genes[index])
+    return ordered
+
+
+def _take_group_turns(
+    rankings: list[np.ndarray], *, top_k: int, max_genes: int
+) -> set[int]:
+    """Return the genes chosen when groups take turns adding their next best."""
+    chosen: set[int] = set()
+    for rank in range(top_k):
+        for ranking in rankings:
+            if rank >= len(ranking):
+                continue
+            chosen.add(int(ranking[rank]))
+            if len(chosen) >= max_genes:
+                return chosen
+    return chosen
+
+
 def _cluster_gene_order(
     mean_expression: pd.DataFrame,
     *,
@@ -1541,15 +1969,73 @@ def save_clustered_adata(adata: ad.AnnData, output_path: Path | str) -> Path:
 def _clustered_spatialdata_table_key(
     source_table_key: str,
     segmentation: str | None,
+    table_key_suffix: str = "",
 ) -> str:
-    """Return the derived SpatialData table key for a clustered AnnData table."""
-    segmentation_key = "" if segmentation is None else str(segmentation).strip().lower()
-    source_key = str(source_table_key)
-    if segmentation_key == "reseg" or source_key == "table_MOSAIK_proseg":
-        return "table_MOSAIK_proseg_clustering_squidpy"
-    if segmentation_key == "original_seg" or source_key == "table_original":
-        return "table_original_clustering_squidpy"
-    return f"{source_key}_clustering_squidpy"
+    """Return the derived SpatialData table key for a clustered AnnData table.
+
+    Delegates to ``merxen.table_keys.clustered_table_key``, which mirrors
+    ``clusteredSpatialdataTableKey`` in ``workflows/main.nf``; the suffix
+    (``""`` in legacy runs) gives map_first runs of a species that has not
+    flipped their own ``*_mapfirst`` table (plan §4.8).
+    """
+    return clustered_table_key(source_table_key, segmentation, table_key_suffix)
+
+
+def _check_recorded_table_key_suffix(adata: ad.AnnData, table_key_suffix: str) -> None:
+    """Refuse to write a map_first table under another table-key suffix.
+
+    A map_first clustered H5AD records the suffix it was clustered for in
+    ``uns["merxen_hierarchical_clustering"]["table_key_suffix"]``; writing it
+    with a different suffix (above all ``""``) would overwrite the legacy
+    clustered table (R3, plan §4.8). Legacy H5ADs record none.
+
+    Raises:
+        ValueError: If the recorded and the requested suffix differ.
+    """
+    record = adata.uns.get(HIERARCHICAL_UNS_KEY)
+    if not isinstance(record, dict) or record.get("mode") != "map_first":
+        return
+    recorded = record.get("table_key_suffix")
+    if recorded is None:
+        return
+    if str(recorded) != str(table_key_suffix):
+        raise ValueError(
+            "this map_first clustered table was built for table-key suffix "
+            f"{str(recorded)!r} but is being written with {table_key_suffix!r}; "
+            "refusing to overwrite another clustered table (plan §4.8)"
+        )
+
+
+def finalize_table_key_suffix(
+    adata: ad.AnnData, config: ClusteringSquidpyConfig
+) -> str:
+    """Return the table-key suffix FINALIZE writes a clustered table under.
+
+    CLUSTERING_SQUIDPY_FINALIZE's Nextflow script is the legacy one (its text
+    is pinned so legacy -resume keeps working), so its config names no mode
+    and no suffix. A map_first clustered H5AD records the suffix it was
+    clustered for (``"mapfirst"`` before its species flips): FINALIZE writes
+    it under that suffix. A config that sets a map_first mode or an explicit
+    suffix wins, and ``write_clustered_spatialdata_table`` still refuses a
+    suffix that differs from the recorded one (plan §4.8).
+
+    Args:
+        adata: The clustered AnnData.
+        config: FINALIZE's config.
+
+    Returns:
+        The suffix (``""`` for legacy tables).
+    """
+    if config.mode == "map_first" or "table_key_suffix" in config.model_fields_set:
+        return str(config.table_key_suffix)
+    record = adata.uns.get(HIERARCHICAL_UNS_KEY)
+    if (
+        isinstance(record, dict)
+        and record.get("mode") == "map_first"
+        and record.get("table_key_suffix") is not None
+    ):
+        return str(record["table_key_suffix"])
+    return str(config.table_key_suffix)
 
 
 def build_clustered_spatialdata_table(
@@ -1619,9 +2105,26 @@ def write_clustered_spatialdata_table(
     adata: ad.AnnData,
     *,
     segmentation: str | None,
+    table_key_suffix: str = "",
 ) -> tuple[Path, str]:
-    """Attach the final clustered AnnData object as a SpatialData table."""
+    """Attach the final clustered AnnData object as a SpatialData table.
+
+    Args:
+        zarr_path: The SpatialData zarr.
+        adata: The clustered AnnData.
+        segmentation: Segmentation branch (decides the source-table family).
+        table_key_suffix: Clustered table-key suffix (``""`` in legacy runs;
+            ``"mapfirst"`` for map_first runs before the species flips).
+
+    Returns:
+        ``(zarr_path, written table key)``.
+
+    Raises:
+        ValueError: If a map_first table is written with another suffix
+            than it was clustered for.
+    """
     zarr_path = Path(zarr_path)
+    _check_recorded_table_key_suffix(adata, table_key_suffix)
     clustering_meta = dict(adata.uns.get("merxen_clustering_squidpy", {}))
     source_table_key = str(clustering_meta.get("table_key") or "table")
     spatial_attrs = dict(adata.uns.get("spatialdata_attrs", {}))
@@ -1636,6 +2139,7 @@ def write_clustered_spatialdata_table(
     output_table_key = _clustered_spatialdata_table_key(
         source_table_key,
         segmentation,
+        table_key_suffix,
     )
     parsed_table = build_clustered_spatialdata_table(
         adata,
@@ -1656,7 +2160,15 @@ def write_clustered_spatialdata_table(
         log_status(
             f"Writing clustered SpatialData table '{output_table_key}' to {zarr_path}"
         )
-        sdata_obj = sd.read_zarr(zarr_path)
+        if (
+            adata.uns.get(HIERARCHICAL_UNS_KEY, {}).get("profile")
+            == "human_hippocampus_whole_panel_v1"
+        ):
+            from merxen.annotation.hippocampal_io import read_annotation_store
+
+            sdata_obj = read_annotation_store(zarr_path, output_table_key)
+        else:
+            sdata_obj = sd.read_zarr(zarr_path)
         try:
             write_or_replace_element(
                 sdata_obj,
@@ -1687,8 +2199,21 @@ def run_hierarchical_scanpy_clustering(
     *,
     output_dir: Path | str,
     sample_id: str,
+    options: SampleClusteringOptions = DEFAULT_SAMPLE_OPTIONS,
 ) -> tuple[ad.AnnData, dict[str, Path]]:
-    """Run broad annotation and branch-level subclustering."""
+    """Run broad annotation and branch-level subclustering.
+
+    Args:
+        adata: Prepared AnnData of one sample.
+        config: Clustering configuration.
+        output_dir: Directory for the hierarchical artifacts.
+        sample_id: Sample identifier used in file names.
+        options: Per-sample settings (panel-size check, highly variable
+            genes) applied to every round.
+
+    Returns:
+        The clustered AnnData and the artifact paths.
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     artifacts: dict[str, Path] = {}
@@ -1701,6 +2226,7 @@ def run_hierarchical_scanpy_clustering(
         key_added=BROAD_CLUSTER_KEY,
         input_layer=None,
         drop_control_features=config.drop_control_features,
+        options=options,
     )
     clustered.obs["leiden"] = clustered.obs[BROAD_CLUSTER_KEY].astype(str)
 
@@ -1785,6 +2311,7 @@ def run_hierarchical_scanpy_clustering(
                 sample_id=sample_id,
                 artifacts=artifacts,
                 leiden_provenance=branch_leiden_provenance,
+                options=options,
             )
         else:
             branch_manifest[broad_class] = _run_leaf_branch_subclustering(
@@ -1796,6 +2323,7 @@ def run_hierarchical_scanpy_clustering(
                 sample_id=sample_id,
                 artifacts=artifacts,
                 leiden_provenance=branch_leiden_provenance,
+                options=options,
             )
 
     clustered.obs[SUBCLUSTER_LABEL_KEY] = clustered.obs[SUBCLUSTER_LABEL_KEY].astype(
@@ -2113,6 +2641,7 @@ def _run_configured_round(
     key_added: str,
     input_layer: str | None,
     drop_control_features: bool,
+    options: SampleClusteringOptions = DEFAULT_SAMPLE_OPTIONS,
 ) -> ad.AnnData:
     return run_scanpy_clustering(
         adata,
@@ -2131,6 +2660,8 @@ def _run_configured_round(
         use_gpu=config.use_gpu,
         key_added=key_added,
         input_layer=input_layer,
+        expected_panel_gene_count=options.expected_panel_gene_count,
+        hvg_n_top_genes=options.hvg_n_top_genes,
     )
 
 
@@ -2245,30 +2776,150 @@ def _save_branch_gene_dotplot(
         genes,
         groupby=group_key,
     )
-    gene_order = _cluster_gene_order(mean_expression)
     table_dir = _table_output_dir(output_dir, "dotplot")
     plot_dir = _plot_output_dir(output_dir, "dotplot")
     mean_path = table_dir / f"{prefix}_gene_mean_expression.csv"
     fraction_path = table_dir / f"{prefix}_gene_fraction_expressing.csv"
     dotplot_path = plot_dir / f"{prefix}_gene_dotplot.png"
-    mean_expression.loc[:, gene_order].to_csv(mean_path)
-    fraction_expression.loc[:, gene_order].to_csv(fraction_path)
-    plot_group_gene_dotplot(
+    plot_dpi = max(int(dpi), 220)
+    n_panel_genes = int(mean_expression.shape[1])
+    # The tables keep every gene; the figure shows each group's top genes.
+    if n_panel_genes <= DOTPLOT_CLUSTERED_TABLE_MAX_GENES:
+        table_gene_order = "clustered"
+        clustered_order = _cluster_gene_order(mean_expression)
+        mean_expression.loc[:, clustered_order].to_csv(mean_path)
+        fraction_expression.loc[:, clustered_order].to_csv(fraction_path)
+    else:
+        table_gene_order = "var"
+        mean_expression.to_csv(mean_path)
+        fraction_expression.to_csv(fraction_path)
+    plot_top_gene_dotplot(
+        adata,
         mean_expression,
         fraction_expression,
         dotplot_path,
-        gene_order=gene_order,
-        cluster_genes=False,
+        selection_name=prefix,
         x_axis_label=group_key,
-        y_axis_label="Panel genes",
-        title=f"{prefix} panel gene expression by subcluster",
-        dpi=max(int(dpi), 220),
+        title=f"{prefix} top gene expression by subcluster",
+        dpi=plot_dpi,
+        table_gene_order=table_gene_order,
     )
     return {
         f"{prefix}_gene_dotplot": dotplot_path,
         f"{prefix}_gene_mean_expression": mean_path,
         f"{prefix}_gene_fraction_expressing": fraction_path,
     }
+
+
+def plot_top_gene_dotplot(
+    adata: ad.AnnData,
+    mean_expression: pd.DataFrame,
+    fraction_expression: pd.DataFrame,
+    output_path: Path,
+    *,
+    selection_name: str,
+    x_axis_label: str,
+    title: str,
+    dpi: int,
+    table_gene_order: str,
+) -> list[str]:
+    """Draw a dotplot of each group's top genes and record the selection.
+
+    The genes are :func:`select_dotplot_genes` with the
+    :data:`DOTPLOT_MIN_GROUP_FRACTION` floor; when no gene reaches the floor
+    in any group, the floor is dropped (recorded as 0) rather than drawing an
+    empty figure. The figure keeps the groups in the row order of
+    ``mean_expression`` and the genes in selection order. The selection is
+    recorded in ``adata.uns[DOTPLOT_GENE_SELECTION_UNS_KEY][selection_name]``.
+    Shared by the legacy branch dotplots and the map_first branch dotplots.
+
+    Args:
+        adata: The object that records the selection in ``uns``.
+        mean_expression: Groups-by-genes mean expression of every panel gene.
+        fraction_expression: Groups-by-genes fraction of cells expressing,
+            with the same index and columns as ``mean_expression``.
+        output_path: The figure path.
+        selection_name: Key of the record in the ``uns`` selection mapping.
+        x_axis_label: Label of the group axis.
+        title: Figure title.
+        dpi: Output resolution.
+        table_gene_order: Gene order of the caller's CSV tables, recorded as
+            given (``"clustered"`` or ``"var"``).
+
+    Returns:
+        The plotted genes in plot order.
+
+    Raises:
+        ValueError: If the figure would exceed the render limit.
+    """
+    n_panel_genes = int(mean_expression.shape[1])
+    min_group_fraction = DOTPLOT_MIN_GROUP_FRACTION
+    gene_order = select_dotplot_genes(
+        mean_expression, fraction_expression, min_fraction=min_group_fraction
+    )
+    if not gene_order:
+        min_group_fraction = 0.0
+        gene_order = select_dotplot_genes(
+            mean_expression, fraction_expression, min_fraction=min_group_fraction
+        )
+    _check_dotplot_render_size(
+        n_groups=mean_expression.shape[0],
+        n_genes=len(gene_order),
+        dpi=int(dpi),
+    )
+    plot_group_gene_dotplot(
+        mean_expression.loc[:, gene_order],
+        fraction_expression.loc[:, gene_order],
+        output_path,
+        gene_order=gene_order,
+        cluster_genes=False,
+        x_axis_label=x_axis_label,
+        y_axis_label=(
+            f"Top {DOTPLOT_TOP_GENES_PER_GROUP} genes per group "
+            f"({len(gene_order)} of {n_panel_genes})"
+        ),
+        title=title,
+        dpi=int(dpi),
+    )
+    selections = dict(adata.uns.get(DOTPLOT_GENE_SELECTION_UNS_KEY, {}))
+    selections[selection_name] = {
+        "rule": (
+            "union of the top genes per group by cluster-mean z-score "
+            "(ties: fraction expressing), among genes expressed in at "
+            "least min_group_fraction of the group's cells; groups taking "
+            "turns under max_genes; ordered by group, best first"
+        ),
+        "top_genes_per_group": int(DOTPLOT_TOP_GENES_PER_GROUP),
+        "max_genes": int(DOTPLOT_MAX_GENES),
+        "min_group_fraction": float(min_group_fraction),
+        "n_panel_genes": n_panel_genes,
+        "n_plotted_genes": len(gene_order),
+        "plotted_genes": [str(gene) for gene in gene_order],
+        "table_gene_order": str(table_gene_order),
+    }
+    adata.uns[DOTPLOT_GENE_SELECTION_UNS_KEY] = selections
+    return gene_order
+
+
+def _check_dotplot_render_size(*, n_groups: int, n_genes: int, dpi: int) -> None:
+    """Raise when a dotplot would exceed the renderer's pixel limit.
+
+    Args:
+        n_groups: Number of groups (x axis).
+        n_genes: Number of genes (y axis).
+        dpi: Output resolution.
+
+    Raises:
+        ValueError: If the longest side reaches :data:`DOTPLOT_MAX_RENDER_PX`.
+    """
+    width, height = _default_dotplot_figsize(n_groups, n_genes)
+    largest_px = max(width, height) * int(dpi)
+    if largest_px >= DOTPLOT_MAX_RENDER_PX:
+        raise ValueError(
+            f"Dotplot of {n_groups} groups x {n_genes} genes would be "
+            f"{largest_px:.0f} px on its longest side at {dpi} dpi; the render "
+            f"limit is {DOTPLOT_MAX_RENDER_PX} px."
+        )
 
 
 def _panel_genes_for_dotplot(adata: ad.AnnData) -> list[str]:
@@ -2355,6 +3006,7 @@ def _run_leaf_branch_subclustering(
     sample_id: str,
     artifacts: dict[str, Path],
     leiden_provenance: dict[str, str],
+    options: SampleClusteringOptions = DEFAULT_SAMPLE_OPTIONS,
 ) -> dict[str, Any]:
     branch = clustered[cell_ids, :].copy()
     resolution = config.subcluster_resolution_overrides.get(
@@ -2374,6 +3026,7 @@ def _run_leaf_branch_subclustering(
             key_added="leiden_subcluster",
             input_layer="counts",
             drop_control_features=False,
+            options=options,
         )
     except ValueError as exc:
         logger.warning(
@@ -2480,6 +3133,7 @@ def _run_neuron_hierarchy(
     sample_id: str,
     artifacts: dict[str, Path],
     leiden_provenance: dict[str, str],
+    options: SampleClusteringOptions = DEFAULT_SAMPLE_OPTIONS,
 ) -> dict[str, Any]:
     neuron_branch = clustered[cell_ids, :].copy()
     split_params = _effective_round_params(config, config.neuron_split_round)
@@ -2491,6 +3145,7 @@ def _run_neuron_hierarchy(
             key_added="leiden_neuron_split",
             input_layer="counts",
             drop_control_features=False,
+            options=options,
         )
     except ValueError as exc:
         logger.warning("Skipping neuron hierarchy after filtering failed: %s", exc)
@@ -2602,6 +3257,7 @@ def _run_neuron_hierarchy(
             sample_id=sample_id,
             artifacts=artifacts,
             leiden_provenance=leiden_provenance,
+            options=options,
         )
     return {
         "n_cells": len(cell_ids),
@@ -2674,6 +3330,7 @@ def _run_neuron_split_subclustering(
     sample_id: str,
     artifacts: dict[str, Path],
     leiden_provenance: dict[str, str],
+    options: SampleClusteringOptions = DEFAULT_SAMPLE_OPTIONS,
 ) -> dict[str, Any]:
     branch = neuron_branch[cell_ids, :].copy()
     resolution = config.subcluster_resolution_overrides.get(
@@ -2696,6 +3353,7 @@ def _run_neuron_split_subclustering(
             key_added="leiden_neuron_subcluster",
             input_layer="counts",
             drop_control_features=False,
+            options=options,
         )
     except ValueError as exc:
         logger.warning(
@@ -2794,14 +3452,120 @@ def _safe_token(value: str) -> str:
     return token or "value"
 
 
+@dataclass(frozen=True)
+class MapFirstComputeOptions:
+    """Run settings of a map_first compute that ``ClusteringSquidpyConfig`` lacks.
+
+    Attributes:
+        mender_unassigned_state_policy: The run's MENDER unassigned-state
+            policy, recorded in each clustered table so MENDER applies it
+            (plan §4.9); ``None`` records none.
+    """
+
+    mender_unassigned_state_policy: str | None = None
+
+
+def _cluster_map_first(
+    adata: ad.AnnData,
+    config: ClusteringSquidpyConfig,
+    *,
+    sample: Any,
+    sample_dir: Path,
+    options: MapFirstComputeOptions,
+    cross_platform: Any,
+) -> tuple[ad.AnnData, dict[str, Path | str]]:
+    """Build the map_first hierarchy of one prepared section (plan §3.5, §6.2).
+
+    The label table and its provenance come from RESOLVE's output
+    (``config.labels_dir``); control features are removed as legacy
+    ``run_scanpy_clustering`` removes them, so the table cells are the same
+    objects (plan §4.4). The QC histograms and the clustered H5AD keep the
+    legacy file names, so FINALIZE, MENDER and cortical depth read them as
+    they read legacy outputs.
+    """
+    from merxen.annotation.config import resolve_table_key_suffix
+    from merxen.clustering.map_first import (
+        label_table_species,
+        load_label_inputs,
+        run_map_first_hierarchy,
+    )
+
+    if config.labels_dir is None:
+        raise ValueError(
+            "map_first clustering needs labels_dir (RESOLVE's annotation_resolve_out)"
+        )
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    qc_plot = plot_qc_histograms(
+        adata,
+        _plot_output_dir(sample_dir, "qc") / f"{sample.sample_id}_qc_histograms.png",
+        sample_label=sample.sample_id,
+        platform=sample.platform,
+        dpi=config.figure_dpi,
+    )
+    qc_csv = save_qc_metrics(adata, sample_dir / f"{sample.sample_id}_qc_metrics.csv")
+    inputs = load_label_inputs(config.labels_dir, sample.sample_id, sample.platform)
+    # Before the species' flip an empty suffix would overwrite the legacy
+    # clustered table (OD-A3); the preflight refuses it too.
+    resolve_table_key_suffix(
+        label_table_species(inputs.labels), "map_first", config.table_key_suffix
+    )
+    if config.drop_control_features:
+        prepared = remove_control_features(adata)
+    else:
+        prepared = adata.copy()
+        _record_control_feature_filter(
+            prepared,
+            removed_features=[],
+            n_features_before=prepared.n_vars,
+            enabled=False,
+        )
+    clustered, result = run_map_first_hierarchy(
+        prepared,
+        inputs.labels,
+        config,
+        sample_dir / f"{sample.sample_id}_hierarchical",
+        sample.sample_id,
+        provenance=inputs.provenance,
+        mender_unassigned_state_policy=options.mender_unassigned_state_policy,
+        cross_platform=cross_platform,
+    )
+    del prepared
+    h5ad = save_clustered_adata(
+        clustered,
+        sample_dir / f"{sample.sample_id}_clustered.h5ad",
+    )
+    return clustered, {
+        "qc_plot": qc_plot,
+        "qc_csv": qc_csv,
+        "labels": inputs.labels_path,
+        "h5ad": h5ad,
+        **result.artifacts,
+    }
+
+
 def _cluster_loaded_adata(
     adata: ad.AnnData,
     config: ClusteringSquidpyConfig,
     *,
     sample: Any,
     sample_dir: Path,
+    map_first_options: MapFirstComputeOptions | None = None,
+    cross_platform: Any = None,
 ) -> tuple[ad.AnnData, dict[str, Path | str]]:
-    """Cluster one prepared AnnData object and write non-SpatialData artifacts."""
+    """Cluster one prepared AnnData object and write non-SpatialData artifacts.
+
+    ``config.mode == "map_first"`` builds the map-first hierarchy from
+    RESOLVE's label table (``_cluster_map_first``); legacy mode is unchanged.
+    """
+    if config.mode == "map_first":
+        return _cluster_map_first(
+            adata,
+            config,
+            sample=sample,
+            sample_dir=sample_dir,
+            options=map_first_options or MapFirstComputeOptions(),
+            cross_platform=cross_platform,
+        )
     sample_dir.mkdir(parents=True, exist_ok=True)
     qc_plot = plot_qc_histograms(
         adata,
@@ -2813,12 +3577,14 @@ def _cluster_loaded_adata(
     qc_csv = save_qc_metrics(adata, sample_dir / f"{sample.sample_id}_qc_metrics.csv")
 
     hierarchical_artifacts: dict[str, Path] = {}
+    options = SampleClusteringOptions.from_sample(sample)
     if config.hierarchical_enabled:
         clustered, hierarchical_artifacts = run_hierarchical_scanpy_clustering(
             adata,
             config,
             output_dir=sample_dir / f"{sample.sample_id}_hierarchical",
             sample_id=sample.sample_id,
+            options=options,
         )
         umap_colors = [
             "total_counts",
@@ -2845,6 +3611,8 @@ def _cluster_loaded_adata(
             umap_spread=config.umap_spread,
             random_seed=config.random_seed,
             use_gpu=config.use_gpu,
+            expected_panel_gene_count=options.expected_panel_gene_count,
+            hvg_n_top_genes=options.hvg_n_top_genes,
         )
         umap_colors = ["total_counts", "n_genes_by_counts", "leiden"]
         spatial_color = "leiden"
@@ -2896,13 +3664,35 @@ def prepare_clustering_squidpy(
     gene_id_lookup = collect_gene_id_lookup_for_samples(config)
     manifest: dict[str, str] = {}
     for sample in config.samples:
-        adata = load_spatialdata_adata(
-            sample.zarr_path,
-            platform=sample.platform,
-            table_key=sample.table_key,
-            shape_key=sample.shape_key,
-            gene_id_lookup=gene_id_lookup,
-        )
+        if sample.platform == "ATERA" and sample.anatomical_region == "hippocampus":
+            from merxen.annotation.hippocampal_io import read_annotation_store
+
+            if sample.table_key is None:
+                raise ValueError(
+                    "Hippocampal preparation requires an explicit raw table"
+                )
+            store = read_annotation_store(sample.zarr_path, sample.table_key)
+            try:
+                adata = adata_from_spatialdata(
+                    store,
+                    platform=sample.platform,
+                    table_key=sample.table_key,
+                    shape_key=sample.shape_key,
+                    gene_id_lookup=gene_id_lookup,
+                )
+            finally:
+                del store
+                force_release(
+                    note=f"after preparing hippocampal input {sample.sample_id}"
+                )
+        else:
+            adata = load_spatialdata_adata(
+                sample.zarr_path,
+                platform=sample.platform,
+                table_key=sample.table_key,
+                shape_key=sample.shape_key,
+                gene_id_lookup=gene_id_lookup,
+            )
         relative_path = Path(sample.platform.lower()) / (
             f"{sample.sample_id}_prepared.h5ad"
         )
@@ -2919,12 +3709,37 @@ def compute_clustering_squidpy(
     config: ClusteringSquidpyConfig,
     prepared_dir: Path | str,
     output_dir: Path | str,
+    *,
+    map_first_options: MapFirstComputeOptions | None = None,
 ) -> dict[str, dict[str, Path | str]]:
-    """Run clustering from H5AD inputs without importing SpatialData."""
+    """Run clustering from H5AD inputs without importing SpatialData.
+
+    Args:
+        config: The run's clustering config (``mode`` selects legacy or
+            map_first clustering).
+        prepared_dir: CLUSTERING_SQUIDPY_PREPARE's output.
+        output_dir: Where the clustered H5ADs and artifacts go.
+        map_first_options: map_first run settings (ignored in legacy mode).
+
+    Returns:
+        The artifacts per sample id.
+    """
     prepared_dir = Path(prepared_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest = json.loads((prepared_dir / "manifest.json").read_text())["samples"]
+    # Legacy calls keep their exact arguments; map_first adds its options and
+    # the pair's cross-platform scope (one RESOLVE pair summary per pair).
+    map_first_arguments: dict[str, Any] = {}
+    if config.mode == "map_first" and config.labels_dir is not None:
+        from merxen.clustering.cross_platform import load_cross_platform_scope
+
+        map_first_arguments = {
+            "map_first_options": map_first_options or MapFirstComputeOptions(),
+            "cross_platform": load_cross_platform_scope(
+                config.labels_dir, config.pair_id
+            ),
+        }
     results: dict[str, dict[str, Path | str]] = {}
     for sample in config.samples:
         log_status(f"[{sample.sample_id}] Starting isolated clustering compute")
@@ -2934,6 +3749,7 @@ def compute_clustering_squidpy(
             config,
             sample=sample,
             sample_dir=output_dir / sample.platform.lower(),
+            **map_first_arguments,
         )
         results[sample.sample_id] = artifacts
         del adata, clustered
@@ -2965,6 +3781,7 @@ def finalize_clustering_squidpy(
                 sample.zarr_path,
                 clustered,
                 segmentation=sample.segmentation,
+                table_key_suffix=finalize_table_key_suffix(clustered, config),
             )
             sample_results.update(
                 spatialdata_zarr=zarr_path,
@@ -3002,6 +3819,7 @@ def run_clustering_squidpy(
                 sample.zarr_path,
                 clustered,
                 segmentation=sample.segmentation,
+                table_key_suffix=config.table_key_suffix,
             )
             artifacts.update(
                 spatialdata_zarr=zarr_path,
@@ -3035,7 +3853,16 @@ def collect_gene_id_lookup_for_samples(
                 zarr_path,
             )
             continue
-        sdata_obj = sd.read_zarr(zarr_path)
+        if sample.platform == "ATERA" and sample.anatomical_region == "hippocampus":
+            from merxen.annotation.hippocampal_io import read_annotation_store
+
+            if sample.table_key is None:
+                raise ValueError(
+                    "Hippocampal preparation requires an explicit raw table"
+                )
+            sdata_obj = read_annotation_store(zarr_path, sample.table_key)
+        else:
+            sdata_obj = sd.read_zarr(zarr_path)
         try:
             sample_lookup = _extract_gene_id_lookup_from_spatialdata(sdata_obj)
         finally:
@@ -3547,6 +4374,18 @@ def _mean_expression_by_cluster(
     labels = pd.Series(adata.obs[cluster_key], index=adata.obs_names)
     labels = labels.astype("string").fillna("unassigned")
     categories = [str(label) for label in pd.unique(labels)]
+    if sparse.issparse(adata.X) and adata.n_vars > DENSE_SUMMARY_MAX_GENES:
+        sparse_means, _ = _sparse_group_mean_and_fraction(
+            adata.X,
+            labels.astype(str).to_numpy(),
+            categories,
+            with_fractions=False,
+        )
+        return pd.DataFrame(
+            sparse_means,
+            index=pd.Index(categories, name=cluster_key),
+            columns=pd.Index(adata.var_names.astype(str), name="gene"),
+        )
     matrix = _matrix_to_dense(adata.X).astype(float, copy=False)
     means: list[np.ndarray] = []
     label_values = labels.astype(str).to_numpy()
@@ -3561,6 +4400,63 @@ def _mean_expression_by_cluster(
         index=pd.Index(categories, name=cluster_key),
         columns=pd.Index(adata.var_names.astype(str), name="gene"),
     )
+
+
+def _sparse_group_mean_and_fraction(
+    matrix: Any,
+    labels: np.ndarray,
+    groups: list[str],
+    *,
+    with_fractions: bool = True,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Return per-group means (and fractions expressing) of a sparse matrix.
+
+    One sparse product of a group-indicator matrix with the cell-by-gene
+    matrix, accumulated in float64, replaces densifying the matrix: memory
+    stays at the matrix's non-zeros plus a groups-by-genes result. Groups
+    without cells get zeros, as on the dense path.
+
+    Args:
+        matrix: Sparse cells-by-genes matrix.
+        labels: Group label of every cell (strings).
+        groups: Output group order; cells whose label is not listed are
+            ignored.
+        with_fractions: Also return the fraction of cells with a non-zero
+            value per group and gene.
+
+    Returns:
+        ``(means, fractions)`` as dense float64 groups-by-genes arrays;
+        ``fractions`` is ``None`` when not requested.
+    """
+    csr = sparse.csr_matrix(matrix)
+    codes = pd.Categorical(np.asarray(labels).astype(str), categories=groups).codes
+    member = codes >= 0
+    n_groups = len(groups)
+    indicator = sparse.csr_matrix(
+        (
+            np.ones(int(member.sum()), dtype=np.float64),
+            (codes[member].astype(np.int64), np.flatnonzero(member)),
+        ),
+        shape=(n_groups, csr.shape[0]),
+    )
+    sizes = np.bincount(codes[member], minlength=n_groups).astype(np.float64)
+    scale = np.divide(
+        1.0, sizes, out=np.zeros(n_groups, dtype=np.float64), where=sizes > 0
+    )[:, None]
+    # The float64 indicator makes the product accumulate in float64 without
+    # a float64 copy of the whole matrix.
+    sums = indicator @ csr
+    means = np.asarray(sparse.csr_matrix(sums).toarray()) * scale
+    if not with_fractions:
+        return means, None
+    # Shares the matrix's index arrays; only the data array is new.
+    expressed = sparse.csr_matrix(
+        ((csr.data > 0).astype(np.float64), csr.indices, csr.indptr),
+        shape=csr.shape,
+    )
+    expressed_counts = indicator @ expressed
+    fractions = np.asarray(sparse.csr_matrix(expressed_counts).toarray()) * scale
+    return means, fractions
 
 
 def _gene_zscore(mean_expression: pd.DataFrame) -> pd.DataFrame:
@@ -3742,9 +4638,41 @@ def _choose_shape_key(
     return str(list(sdata_obj.shapes.keys())[0])
 
 
-def _choose_nucleus_shape_key(sdata_obj: Any) -> str | None:
+def _choose_nucleus_shape_key(
+    sdata_obj: Any,
+    platform: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Return the nucleus shapes element and how its rows join to cells.
+
+    For a platform whose nucleus ids are cell ids (XENIUM; MERSCOPE ships no
+    nucleus layer) the fixed candidate list is searched as before and the join
+    is ``None``: nucleus ``instance_id`` k belongs to cell k. For a platform
+    whose nucleus ids are not cell ids (ATERA: one row per nucleus, nucleus row
+    + 1) only a registered nucleus layer is used, joined to its owning cell
+    through ``cell_instance_id`` (or the registry entry's ``cell_key``). The
+    source nucleus layer of the candidate list is never used there: keying it by
+    ``instance_id`` would write nucleus k's area onto cell k.
+
+    Args:
+        sdata_obj: Open SpatialData object.
+        platform: Platform name; ``None`` keeps the fixed candidate list.
+
+    Returns:
+        ``(shape_key, join)``: the nucleus shapes element (``None`` when the
+        store has none) and the owning-cell column to join through (``None``
+        for a join by id).
+
+    Raises:
+        UnknownPlatformError: If ``platform`` is not a registered platform, so
+            a misspelt name never falls back to the join by id.
+    """
     if len(sdata_obj.shapes) == 0:
-        return None
+        return None, None
+    spec = platform_spec(platform) if platform is not None else None
+    if spec is not None and not spec.nucleus_ids_are_cell_ids:
+        return _choose_cell_keyed_nucleus_shape(
+            sdata_obj, spec.original_nucleus_shape_key
+        )
     candidates = [
         "xenium_nucleus_aligned_nonrigid",
         "nucleus_boundaries_aligned_nonrigid",
@@ -3753,8 +4681,37 @@ def _choose_nucleus_shape_key(sdata_obj: Any) -> str | None:
     ]
     for candidate in candidates:
         if candidate in sdata_obj.shapes:
-            return candidate
-    return None
+            return candidate, None
+    return None, None
+
+
+def _choose_cell_keyed_nucleus_shape(
+    sdata_obj: Any,
+    spec_nucleus_key: str | None,
+) -> tuple[str | None, str | None]:
+    """Return a nucleus layer whose rows name their owning cell.
+
+    Registered segmentation branches with a ``cell_key`` come first (registry
+    order), then the platform's original nucleus shapes key joined through
+    :data:`NUCLEUS_CELL_KEY_DEFAULT`.
+    """
+    schema = dict(getattr(sdata_obj, "attrs", {}).get("merxen_schema", {}) or {})
+    registry = schema.get("segmentations") or {}
+    candidates: list[tuple[str, str]] = []
+    if isinstance(registry, dict):
+        for entry in registry.values():
+            if not isinstance(entry, dict):
+                continue
+            shape_key = entry.get("shape")
+            cell_key = entry.get("cell_key")
+            if isinstance(shape_key, str) and isinstance(cell_key, str):
+                candidates.append((shape_key, cell_key))
+    if spec_nucleus_key is not None:
+        candidates.append((spec_nucleus_key, NUCLEUS_CELL_KEY_DEFAULT))
+    for shape_key, cell_key in candidates:
+        if shape_key in sdata_obj.shapes:
+            return shape_key, cell_key
+    return None, None
 
 
 def _table_region(table: ad.AnnData) -> str | None:
@@ -4018,6 +4975,81 @@ def _apply_area_metric(
     values[pos.to_numpy()] = metrics.loc[common, "cell_area"].to_numpy(float)
     if column not in adata.obs or adata.obs[column].isna().all():
         adata.obs[column] = values
+
+
+def _apply_nucleus_metrics_by_cell(
+    adata: ad.AnnData,
+    nuclei: Any,
+    *,
+    cell_key: str,
+    shape_key: str,
+) -> None:
+    """Fill per-cell nucleus metrics from a one-row-per-nucleus layer.
+
+    Nuclei are grouped by their owning cell (``cell_key``), never by their own
+    ``instance_id``: ``nucleus_area`` is the largest nucleus of the cell,
+    ``nucleus_area_total`` the summed area and ``nucleus_count`` the number of
+    nuclei (0 for a cell without one; the areas are then NaN). Only columns
+    that are missing or all NaN are filled, so the vendor values the ATERA
+    build writes into the table are kept.
+
+    Args:
+        adata: Cell table being prepared for clustering.
+        nuclei: Nucleus shapes, one row per nucleus.
+        cell_key: Column of ``nuclei`` holding the owning cell's instance id.
+        shape_key: Name of the nucleus shapes element, for messages.
+
+    Raises:
+        KeyError: If ``nuclei`` lacks ``cell_key``.
+    """
+    missing = [
+        column
+        for column in NUCLEUS_METRIC_COLUMNS
+        if column not in adata.obs or adata.obs[column].isna().all()
+    ]
+    if not missing:
+        return
+    if cell_key not in nuclei.columns:
+        raise KeyError(
+            f"Nucleus shapes {shape_key!r} have no {cell_key!r} column; their ids "
+            "are not cell ids, so nucleus metrics cannot be joined to cells."
+        )
+    owners = pd.to_numeric(pd.Series(nuclei[cell_key]), errors="coerce").to_numpy()
+    geometry = nuclei.geometry
+    valid_geometry = (geometry.notna() & ~geometry.is_empty).to_numpy()
+    areas = np.where(valid_geometry, geometry.area.to_numpy(float), np.nan)
+    has_owner = np.isfinite(owners)
+    frame = pd.DataFrame(
+        {
+            "cell": owners[has_owner].astype(np.int64).astype(str),
+            "area": areas[has_owner],
+        }
+    )
+    grouped = frame.groupby("cell", sort=False)["area"]
+    per_cell = pd.DataFrame(
+        {
+            "nucleus_area": grouped.max(),
+            "nucleus_area_total": grouped.sum(min_count=1),
+            "nucleus_count": grouped.size().astype(float),
+        }
+    )
+    table_ids = _table_cell_ids(adata)
+    matched = per_cell.reindex(pd.Index(table_ids))
+    matched["nucleus_count"] = matched["nucleus_count"].fillna(0.0)
+    if not bool(pd.Index(table_ids).isin(per_cell.index).any()) and len(per_cell):
+        logger.warning(
+            "No nucleus of %r names a table cell through %r; nucleus metrics "
+            "are left missing.",
+            shape_key,
+            cell_key,
+        )
+        return
+    for column in missing:
+        values = matched[column].to_numpy(dtype=float)
+        if column == "nucleus_count":
+            adata.obs[column] = values.astype(np.int64)
+        else:
+            adata.obs[column] = values
 
 
 def _table_cell_ids(adata: ad.AnnData) -> pd.Index:

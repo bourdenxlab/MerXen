@@ -10,9 +10,39 @@ Regenerate the pins after an intended, announced change with::
 
     MERXEN_UPDATE_GOLDEN=1 pytest tests/test_workflows/test_process_script_pins.py
 
-and say in the pull request which caches it invalidates and why. The only
-change planned is the QC registration-reference edit of ``modules/qc.nf`` in
-AT-6 (docs/plans/atera-support-plan.md).
+and say in the pull request which caches it invalidates and why.
+
+Changes made so far:
+
+- Embedded density adds ``--embed`` to ATERA_TRANSCRIPT_DENSITY so cached
+  independent-raster tasks are upgraded. Only that existing process script pin
+  changes; matching embedded rasters are reused without scanning transcripts.
+
+- AT-6 (WP-C): the ``QC`` script of ``modules/qc.nf`` looks its registration
+  reference shape up in the platform registry
+  (``PlatformSpec.forName(platform).originalCellShapeKey``) instead of a
+  MERSCOPE/XENIUM branch, so ATERA rows get ``atera_cell_boundaries``. The
+  rendered ``qc_config.json`` of XENIUM and MERSCOPE rows is unchanged (the
+  ``qc`` golden), but the edited source text changes the hash of every QC task
+  once: the published XENIUM/MERSCOPE QC results get an announced one-time
+  re-run (docs/plans/atera-support-plan.md, AT-6).
+- RCA merge into the Atera line: the processes of the robust cell-type
+  annotation (``ANNOTATE_PANEL``, ``ANNOTATE_REFERENCE_PREP``,
+  ``CLUSTERING_SQUIDPY_ANNOTATE_MAP``, ``CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE``
+  and ``ANNOTATION_REPORT`` in ``modules/annotation.nf``,
+  ``CLUSTERING_SQUIDPY_COMPUTE_CPU`` in ``modules/clustering_squidpy.nf``) are
+  pinned as they are on ``feature/robust-celltype-annotation``. They are new
+  processes, so no completed task is invalidated; no existing pin changed (RCA
+  kept the legacy script texts, MENDER_PREPARE's among them, byte-identical).
+- AT-9 added the pins of ATERA_PROSEG_PLAN, ATERA_PROSEG_TILE and
+  ATERA_PROSEG_STITCH (``modules/atera_proseg.nf``); no existing pin changed.
+- AT-8 (WP3) added the pin of MECR_REFERENCE_ATERA (``modules/mecr.nf``), the
+  streaming MECR reference of ATERA rows; a new process, so no completed task
+  is invalidated, and no existing pin changed (MECR_REFERENCE and MECR keep
+  their script texts).
+- AT-7 added the pins of ATERA_CELLPOSE_SEGMENT (``modules/atera_cellpose.nf``)
+  and ATERA_PROSEG_PLAN_CELLPOSE (``modules/atera_proseg.nf``, the script of
+  ATERA_PROSEG_PLAN with two more staged inputs); no existing pin changed.
 """
 
 from __future__ import annotations
@@ -103,9 +133,10 @@ def test_process_script_text_is_unchanged(
     assert not changed, (
         f"process source text changed: {changed}. Nextflow hashes this text, so "
         "the change invalidates the cache of every completed task of these "
-        "processes. Only change it for an announced reason (the one planned is the "
-        "modules/qc.nf QC edit of AT-6), then regenerate the pins with "
-        "MERXEN_UPDATE_GOLDEN=1."
+        "processes. Only change it for an announced reason (as the AT-6 QC "
+        "registry lookup in modules/qc.nf was, with a one-time QC re-run), then "
+        "regenerate the pins with MERXEN_UPDATE_GOLDEN=1 and record the reason in "
+        "this module's docstring."
     )
 
 
@@ -135,10 +166,15 @@ def test_main_nf_defines_no_process() -> None:
 
 
 def test_pinned_inventory(pinned: dict[str, str]) -> None:
-    """Today's inventory: 43 processes, 43 ``script:`` and 7 ``stub:`` sections."""
+    """Today's inventory: 64 ``script:`` and 17 ``stub:`` sections.
+
+    AT-9 added the three ATERA ProSeg processes, RCA added annotation processes,
+    AT-8 added the streaming MECR reference, and AT-7 added
+    ATERA_CELLPOSE_SEGMENT and ATERA_PROSEG_PLAN_CELLPOSE. No existing pin changed.
+    """
     labels = [key.rsplit("::", 1)[1] for key in pinned]
-    assert labels.count("script") == 43
-    assert labels.count("stub") == 7
+    assert labels.count("script") == 64
+    assert labels.count("stub") == 17
     assert {key for key in pinned if key.endswith("::stub")} == {
         f"workflows/modules/pciseq.nf::{name}::stub"
         for name in (
@@ -153,6 +189,25 @@ def test_pinned_inventory(pinned: dict[str, str]) -> None:
             "MANUAL_REGISTRATION_PREPARE",
             "MANUAL_REGISTRATION_REGISTER",
             "MANUAL_REGISTRATION_COMPARE",
+        )
+    } | {
+        f"workflows/modules/annotation.nf::{name}::stub"
+        for name in (
+            "ANNOTATE_REFERENCE_PREP",
+            "CLUSTERING_SQUIDPY_ANNOTATE_MAP",
+            "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE",
+            "ANNOTATION_REPORT",
+        )
+    } | {
+        "workflows/modules/clustering_squidpy.nf::CLUSTERING_SQUIDPY_COMPUTE_CPU::stub"
+    } | {
+        f"workflows/subworkflows/hippocampal_annotation.nf::{name}::stub"
+        for name in (
+            "HIPPOCAMPAL_REFERENCE",
+            "HIPPOCAMPAL_MAP",
+            "HIPPOCAMPAL_RESOLVE",
+            "HIPPOCAMPAL_COMPUTE",
+            "HIPPOCAMPAL_REPORT",
         )
     }
 

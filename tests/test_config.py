@@ -1,17 +1,269 @@
-"""Tests for the pipeline configuration models."""
+"""Tests for the pipeline configuration models.
+
+Covers the hook-H8 annotation fields of merxen.config (plan §3.7, §4.9) and
+the MERSCOPE bead-removal build config.
+"""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
+from merxen.annotation.config import (
+    DEFAULT_CLUSTERING_MODE,
+    LEGACY_UNASSIGNED_STATE_POLICY,
+    MAP_FIRST_TABLE_KEY_SUFFIX,
+    AdaptiveSplitConfig,
+    AnnotationConfig,
+    AnnotationThresholds,
+    resolve_clustering_mode,
+    resolve_table_key_suffix,
+)
 from merxen.config import (
+    ClusteringSquidpyConfig,
+    ClusteringSquidpySampleConfig,
+    EnrichmentConfig,
+    MaskImageQuantificationConfig,
+    MenderConfig,
     MerscopeBeadRemovalConfig,
     MerscopeBuildConfig,
+    NativeLatestConfig,
     SpatialDataBuildConfig,
+    SpatialGeneAnalysisSampleConfig,
+    ViewerCacheConfig,
+    VisualizationSampleConfig,
 )
+
+H8_CLUSTERING_FIELDS = [
+    "mode",
+    "labels_dir",
+    "leaf_source",
+    "adaptive_split",
+    "qc_leiden_resolution",
+    "table_key_suffix",
+]
+
+
+def _clustering(**overrides: Any) -> ClusteringSquidpyConfig:
+    data: dict[str, Any] = {"pair_id": "P1", "output_dir": "out", "samples": []}
+    data.update(overrides)
+    return ClusteringSquidpyConfig.model_validate(data)
+
+
+def _legacy_stage_json(tmp_path: Path) -> dict[str, Any]:
+    """A config in the shape the legacy PREPARE heredoc writes (no H8 keys)."""
+    return {
+        "pair_id": "P1",
+        "output_dir": str(tmp_path),
+        "samples": [
+            {
+                "sample_id": "P1_XENIUM",
+                "platform": "XENIUM",
+                "zarr_path": str(tmp_path / "x.zarr"),
+                "segmentation": "reseg",
+                "table_key": "table_MOSAIK_proseg",
+                "shape_key": "MOSAIK_proseg",
+            }
+        ],
+        "min_counts": 10,
+        "use_gpu": True,
+        "hierarchical_enabled": True,
+        "broad_round": {"leiden_resolution": 0.2},
+    }
+
+
+def _mender(**overrides: Any) -> MenderConfig:
+    data: dict[str, Any] = {
+        "pair_id": "P1",
+        "sample_id": "P1_XENIUM",
+        "platform": "XENIUM",
+        "segmentation": "reseg",
+        "source_h5ad": "clustered.h5ad",
+        "spatialdata_path": "x.zarr",
+        "source_spatialdata_table": "table_MOSAIK_proseg_clustering_squidpy",
+        "native_shape_key": "MOSAIK_proseg",
+        "output_dir": "mender_out",
+    }
+    data.update(overrides)
+    return MenderConfig.model_validate(data)
+
+
+def test_clustering_config_h8_defaults_are_legacy() -> None:
+    config = _clustering()
+
+    assert list(ClusteringSquidpyConfig.model_fields)[-6:] == H8_CLUSTERING_FIELDS
+    assert config.mode == "legacy"
+    assert config.labels_dir is None
+    assert config.leaf_source == "mapped"
+    assert config.adaptive_split == AdaptiveSplitConfig()
+    assert config.adaptive_split.rule == "none"
+    assert config.qc_leiden_resolution == 0.5
+    assert config.table_key_suffix == ""
+    # The stage config defaults to legacy (the legacy heredoc writes no mode);
+    # map_first rows set it. Both species default to map_first since their
+    # flips (human M8, mouse M9), so a row's mode always comes from the row
+    # settings, never from this field's default.
+    assert set(DEFAULT_CLUSTERING_MODE.values()) == {"map_first"}
+
+
+def test_legacy_stage_json_loads_unchanged(tmp_path: Path) -> None:
+    """The JSON the legacy heredoc writes parses to the legacy defaults."""
+    path = tmp_path / "clustering_squidpy_config.json"
+    path.write_text(json.dumps(_legacy_stage_json(tmp_path)))
+
+    config = ClusteringSquidpyConfig.model_validate_json(path.read_text())
+
+    assert config.mode == "legacy"
+    assert config.table_key_suffix == ""
+    sample = config.samples[0]
+    assert sample.anatomical_region is None
+    assert sample.mouse_section_regions is None
+    assert config.min_counts == 10
+
+
+@pytest.mark.parametrize("species", ["human", "mouse"])
+def test_resolved_defaults_give_a_valid_config(species: str) -> None:
+    """Nextflow's default mode and suffix for either species validate.
+
+    Both species run map_first, unsuffixed, since their flips (human §20,
+    mouse §25).
+    """
+    mode = resolve_clustering_mode(species)  # type: ignore[arg-type]
+    suffix = resolve_table_key_suffix(species, mode)  # type: ignore[arg-type]
+
+    config = _clustering(mode=mode, table_key_suffix=suffix)
+
+    assert (config.mode, config.table_key_suffix) == ("map_first", "")
+
+
+def test_map_first_fields_round_trip_through_json() -> None:
+    config = _clustering(
+        mode="map_first",
+        labels_dir="annotation_out",
+        qc_leiden_resolution=0.8,
+        table_key_suffix=MAP_FIRST_TABLE_KEY_SUFFIX,
+    )
+
+    restored = ClusteringSquidpyConfig.model_validate_json(config.model_dump_json())
+
+    assert restored == config
+    assert restored.labels_dir == Path("annotation_out")
+    assert restored.table_key_suffix == "mapfirst"
+
+
+def test_table_key_suffix_is_stripped_and_checked() -> None:
+    config = _clustering(mode="map_first", table_key_suffix=" trial_2 ")
+    assert config.table_key_suffix == "trial_2"
+    with pytest.raises(ValidationError, match="lower-case token"):
+        _clustering(mode="map_first", table_key_suffix="Map/First")
+
+
+def test_legacy_mode_rejects_a_table_key_suffix() -> None:
+    """Legacy runs always write the unsuffixed clustered table (plan §4.8)."""
+    with pytest.raises(ValidationError, match="map_first runs only"):
+        _clustering(table_key_suffix="mapfirst")
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"mode": "denovo"}, "mode"),
+        ({"leaf_source": "clusters"}, "leaf_source"),
+        ({"mode": "map_first", "leaf_source": "denovo"}, "adaptive_split rule"),
+        ({"adaptive_split": {"rule": "count_split_merge"}}, "adaptive_split"),
+        ({"adaptive_split": {"rule": "none", "tau": 0.9}}, "Extra inputs"),
+        ({"qc_leiden_resolution": 0.0}, "qc_leiden_resolution"),
+    ],
+)
+def test_clustering_mode_fields_reject_invalid_values(
+    overrides: dict[str, Any], message: str
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        _clustering(**overrides)
+
+
+def test_sample_config_annotation_columns() -> None:
+    base = {"sample_id": "S", "platform": "MERSCOPE", "zarr_path": "s.zarr"}
+    fields = list(ClusteringSquidpySampleConfig.model_fields)
+
+    assert fields[-2:] == ["anatomical_region", "mouse_section_regions"]
+    blank = ClusteringSquidpySampleConfig.model_validate(
+        {**base, "anatomical_region": " ", "mouse_section_regions": ""}
+    )
+    assert (blank.anatomical_region, blank.mouse_section_regions) == (None, None)
+    parsed = ClusteringSquidpySampleConfig.model_validate(
+        {
+            **base,
+            "anatomical_region": "Frontal cortex",
+            "mouse_section_regions": "isocortex; hpf",
+        }
+    )
+    assert parsed.anatomical_region == "frontal_cortex"
+    assert parsed.mouse_section_regions == "Isocortex;HPF"
+    assert (
+        ClusteringSquidpySampleConfig.model_validate(
+            {**base, "mouse_section_regions": "AUTO"}
+        ).mouse_section_regions
+        == "auto"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("anatomical_region", "frontal/cortex", "invalid anatomical_region"),
+        ("mouse_section_regions", "Isocortex;Striatum", "unknown mouse section"),
+    ],
+)
+def test_sample_config_rejects_invalid_annotation_columns(
+    field: str, value: str, message: str
+) -> None:
+    base = {"sample_id": "S", "platform": "MERSCOPE", "zarr_path": "s.zarr"}
+    with pytest.raises(ValidationError, match=message):
+        ClusteringSquidpySampleConfig.model_validate({**base, field: value})
+
+
+def test_mender_unassigned_state_policy() -> None:
+    assert list(MenderConfig.model_fields)[-1] == "unassigned_state_policy"
+    assert _mender().unassigned_state_policy == LEGACY_UNASSIGNED_STATE_POLICY
+    assert _mender().unassigned_state_policy == "state"
+    policy = "exclude_from_features"
+    assert _mender(unassigned_state_policy=policy).unassigned_state_policy == policy
+    with pytest.raises(ValidationError, match="unassigned_state_policy"):
+        _mender(unassigned_state_policy="drop")
+
+
+def test_hard_min_counts_follows_the_clustering_min_counts() -> None:
+    clustering = _clustering(min_counts=15)
+
+    uncoupled = AnnotationConfig()
+    coupled = clustering.coupled_annotation_config(uncoupled)
+
+    assert coupled.min_counts == coupled.thresholds.hard_min_counts == 15
+    assert coupled.require_min_counts() == 15
+    with pytest.raises(ValueError, match="not coupled to the clustering run"):
+        uncoupled.require_min_counts()
+    default_run = _clustering().coupled_annotation_config(AnnotationConfig())
+    assert default_run.min_counts == default_run.thresholds.hard_min_counts == 10
+    explicit_equal = AnnotationConfig(
+        min_counts=15, thresholds=AnnotationThresholds(hard_min_counts=15)
+    )
+    assert clustering.coupled_annotation_config(explicit_equal).min_counts == 15
+
+
+def test_hard_min_counts_coupling_rejects_a_different_threshold() -> None:
+    """An annotation config naming another min_counts cannot be coupled."""
+    with pytest.raises(ValueError, match="must equal the clustering min_counts"):
+        _clustering(min_counts=15).coupled_annotation_config(
+            AnnotationConfig(min_counts=10)
+        )
+
+
+# MERSCOPE bead-removal build config
 
 
 def test_merscope_build_config_has_no_bead_removal_by_default() -> None:
@@ -238,3 +490,193 @@ def test_spatialdata_build_config_refuses_a_fill_mode_without_the_fill(
 
     with pytest.raises(ValidationError, match="requires fill=True"):
         SpatialDataBuildConfig.model_validate(raw)
+
+
+# --------------------------------------------------------------------------- #
+# AT-6: native (vendor-mask) segmentation route
+# --------------------------------------------------------------------------- #
+
+
+def _enrich(**overrides: object) -> EnrichmentConfig:
+    values: dict[str, object] = {
+        "dataset_name": "PAIR_A_XENIUM",
+        "platform": "XENIUM",
+        "latest_zarr_path": "latest_input.zarr",
+        "mask_path": "enrich_input_mask.npy",
+        "nuclei_mask_path": "enrich_input_nuclei_mask.npy",
+        "original_data_path": "source.zarr",
+        "output_dir": "enrich_out",
+    }
+    values.update(overrides)
+    return EnrichmentConfig.model_validate(values)
+
+
+def test_enrichment_defaults_keep_the_cellpose_route() -> None:
+    """A XENIUM/MERSCOPE enrich JSON without the new keys validates as before."""
+    config = _enrich()
+    assert config.segmentation_source == "cellpose_proseg"
+    assert config.native_label_check is True
+    assert config.mask_path == Path("enrich_input_mask.npy")
+
+
+def test_native_enrichment_takes_no_masks() -> None:
+    config = _enrich(
+        dataset_name="PAIR_A_ATERA",
+        platform="ATERA",
+        segmentation_source="native",
+        mask_path=None,
+        nuclei_mask_path=None,
+    )
+    assert config.mask_path is None and config.nuclei_mask_path is None
+
+
+@pytest.mark.parametrize("missing", ["mask_path", "nuclei_mask_path"])
+def test_cellpose_enrichment_needs_both_masks(missing: str) -> None:
+    with pytest.raises(ValidationError, match=f"{missing} required"):
+        _enrich(**{missing: None})
+
+
+def test_native_enrichment_is_atera_only() -> None:
+    with pytest.raises(ValidationError, match="ATERA rows only"):
+        _enrich(segmentation_source="native", mask_path=None, nuclei_mask_path=None)
+
+
+def test_enrichment_refuses_an_unknown_segmentation_source() -> None:
+    with pytest.raises(ValidationError):
+        _enrich(segmentation_source="vendor")
+
+
+def test_viewer_cache_base_image_key_defaults_to_none() -> None:
+    values = {
+        "dataset_name": "PAIR_A_ATERA",
+        "platform": "ATERA",
+        "latest_zarr_path": "latest_input.zarr",
+        "original_data_path": "latest_input.zarr",
+        "output_dir": "viewer_cache_out",
+    }
+    assert ViewerCacheConfig.model_validate(values).base_image_key is None
+    config = ViewerCacheConfig.model_validate(
+        {**values, "base_image_key": "morphology_focus"}
+    )
+    assert config.base_image_key == "morphology_focus"
+
+
+def _quant(**overrides: object) -> MaskImageQuantificationConfig:
+    values: dict[str, object] = {
+        "dataset_name": "PAIR_A_XENIUM",
+        "platform": "XENIUM",
+        "latest_zarr_path": "latest_input.zarr",
+        "mask_path": "mask_image_quantification_input_mask.npy",
+        "output_dir": "mask_image_quantification_out",
+    }
+    values.update(overrides)
+    return MaskImageQuantificationConfig.model_validate(values)
+
+
+def test_mask_quantification_defaults_are_unchanged() -> None:
+    config = _quant()
+    assert config.mask_label_key is None
+    assert config.shape_key == "MOSAIK_cellpose"
+    assert config.table_key == "table_MOSAIK_cellpose_image_quantification"
+
+
+def test_mask_quantification_reads_a_label_element() -> None:
+    config = _quant(
+        platform="ATERA",
+        mask_path=None,
+        mask_label_key="cell_labels",
+        shape_key="atera_cell_boundaries",
+        table_key="table_atera_cell_boundaries_image_quantification",
+    )
+    assert config.mask_label_key == "cell_labels"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"mask_path": None}, {"mask_label_key": "cell_labels"}],
+    ids=["neither", "both"],
+)
+def test_mask_quantification_needs_exactly_one_mask(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError, match="exactly one"):
+        _quant(**overrides)
+
+
+def test_clustering_sample_defaults_keep_the_panel_check() -> None:
+    sample = ClusteringSquidpySampleConfig.model_validate(
+        {"sample_id": "PAIR_A_XENIUM", "platform": "XENIUM", "zarr_path": "x.zarr"}
+    )
+    assert sample.expected_panel_gene_count == 300
+    assert sample.hvg_n_top_genes is None
+    atera = ClusteringSquidpySampleConfig.model_validate(
+        {
+            "sample_id": "PAIR_A_ATERA",
+            "platform": "ATERA",
+            "zarr_path": "x.zarr",
+            "expected_panel_gene_count": None,
+            "hvg_n_top_genes": 2000,
+        }
+    )
+    assert atera.expected_panel_gene_count is None
+    assert atera.hvg_n_top_genes == 2000
+
+
+@pytest.mark.parametrize(
+    "model",
+    [VisualizationSampleConfig, SpatialGeneAnalysisSampleConfig],
+)
+def test_native_route_sample_models_take_atera(model: type) -> None:
+    sample = model.model_validate(
+        {"sample_id": "PAIR_A_ATERA", "platform": "ATERA", "zarr_path": "x.zarr"}
+    )
+    assert sample.platform == "ATERA"
+
+
+def test_mender_takes_atera() -> None:
+    config = MenderConfig.model_validate(
+        {
+            "pair_id": "PAIR_A",
+            "sample_id": "PAIR_A_ATERA",
+            "platform": "ATERA",
+            "segmentation": "original_seg",
+            "source_h5ad": "clustered.h5ad",
+            "spatialdata_path": "latest.zarr",
+            "source_spatialdata_table": "table_original_clustering_squidpy",
+            "native_shape_key": "atera_cell_boundaries",
+            "output_dir": "mender_out",
+        }
+    )
+    assert config.platform == "ATERA"
+
+
+def test_native_latest_config_defaults() -> None:
+    config = NativeLatestConfig.model_validate(
+        {
+            "dataset_name": "PAIR_A_ATERA",
+            "platform": "ATERA",
+            "source_zarr_path": "native_source.zarr",
+            "output_dir": "native_out",
+            "persistent_latest_zarr_path": "results/latest_spatialdata.zarr",
+        }
+    )
+    assert config.link_mode == "hardlink"
+    assert config.readonly_payloads is True
+    assert config.force is False
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"platform": "XENIUM"}, {"link_mode": "symlink"}],
+    ids=["xenium", "symlink"],
+)
+def test_native_latest_config_refuses(overrides: dict[str, object]) -> None:
+    values: dict[str, object] = {
+        "dataset_name": "PAIR_A_ATERA",
+        "platform": "ATERA",
+        "source_zarr_path": "native_source.zarr",
+        "output_dir": "native_out",
+        "persistent_latest_zarr_path": "results/latest_spatialdata.zarr",
+    }
+    with pytest.raises(ValidationError):
+        NativeLatestConfig.model_validate({**values, **overrides})

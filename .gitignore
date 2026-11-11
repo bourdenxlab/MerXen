@@ -260,3 +260,6 @@ __marimo__/
 
 # Exact LGPL source distributed with the optional GASTON runtime.
 !licenses/sources/glmpca-0.1.0.tar.gz
+
+# Separate local Cellpose drawing environment.
+.hitl-gui-venv/
