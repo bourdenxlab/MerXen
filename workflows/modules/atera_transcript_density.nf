@@ -17,6 +17,6 @@ process ATERA_TRANSCRIPT_DENSITY {
     cat > density_config.json <<'JSON'
 ${config_json}
 JSON
-    merxen atera-transcript-density --config density_config.json
+    merxen atera-transcript-density --config density_config.json --embed
     """
 }

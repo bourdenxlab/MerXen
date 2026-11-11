@@ -344,6 +344,10 @@ def viewer_export_settings(config: HitlExportConfig) -> ViewerExportSettings:
     identity = stats.get("model_identity") or {}
     density = (identity.get("inference_context") or {}).get("transcript_density")
     path = config.transcript_density_path
+    from merxen.segmentation.density_storage import has_embedded_density
+
+    if path is None and has_embedded_density(config.source_zarr):
+        path = config.source_zarr
     if path is None and density:
         path = Path(density["raster_path"])
     if path is not None:
@@ -564,6 +568,10 @@ def export_annotation_pilot(config: HitlExportConfig) -> HitlExportResult:
     context = (stats.get("model_identity") or {}).get("inference_context") or {}
     density_identity = context.get("transcript_density")
     density_path = config.transcript_density_path
+    from merxen.segmentation.density_storage import has_embedded_density
+
+    if density_path is None and has_embedded_density(config.source_zarr):
+        density_path = config.source_zarr
     if density_path is None and density_identity:
         density_path = Path(density_identity["raster_path"])
     if density_path is not None:

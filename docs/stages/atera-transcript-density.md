@@ -3,7 +3,10 @@
 For Atera `cellpose_proseg` runs, the pipeline now prepares a density raster
 between `BUILD_SPATIALDATA` and `ATERA_CELLPOSE_SEGMENT`. The ordered model inputs
 are **DAPI, 18S RNA, transcript density**. The native stains are retained intact;
-the density is a separate SpatialData image on exactly the same pixel grid.
+the density is a permanent image element inside SpatialData on exactly the same
+pixel grid: `images/atera_transcript_density`. Its provenance and viewer pyramids
+travel with the Zarr, and enrichment propagates it to the final output. The
+viewer discovers it automatically; HITL exports need no separate raster picker.
 Vendor-only Atera routes do not run this step.
 
 ```mermaid
@@ -76,7 +79,7 @@ process reads four parquet columns in bounded batches; it never materializes
 the transcript dataframe or loads an expression table. The native histogram
 and smoothing arrays determine memory use (64 GB process reservation).
 
-For a standalone raster, create a private JSON file:
+For an explicitly standalone raster, create a private JSON file:
 
 ```json
 {
@@ -89,11 +92,31 @@ For a standalone raster, create a private JSON file:
 ```
 
 ```bash
-merxen atera-transcript-density --config density.json
+merxen atera-transcript-density --config density.json --no-embed
 ```
 
 The original source is read only. A nonempty output directory is refused.
 An unfinished store has no completed manifest and cannot be used for inference.
+
+Without `--no-embed`, the command installs density and its viewer pyramids in
+the source SpatialData. A matching embedded image is reused on resume, without
+another transcript scan. The task's `transcript_density.zarr` is an alias to
+that self-contained store; the permanent image does not depend on the task folder.
+An existing different density recipe is refused instead of replacing it.
+
+For a processed store whose density was generated earlier:
+
+```bash
+merxen embed-transcript-density --spatialdata "<processed.zarr>" \
+  --density "<verified-generated-density.zarr>"
+```
+
+The original morphology, masks and transcripts stay intact. Regenerate crop
+setup metadata after upgrading an older store. New pipeline runs embed density
+before Cellpose and propagate it into the enriched SpatialData. Native latest
+copying and density installation share the source writer lock so an incomplete
+image cannot be copied. Existing masks retain their saved provenance; relocating
+an identical verified density raster alone does not invalidate those masks.
 
 ## HITL and model provenance
 

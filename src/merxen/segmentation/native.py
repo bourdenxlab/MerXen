@@ -463,12 +463,17 @@ def _build_into(
     """Build the native latest store in ``partial`` and return its report."""
     import spatialdata as sd
 
-    tree = _copy_tree(
-        source,
-        partial,
-        link_mode=cfg.link_mode,
-        readonly_payloads=cfg.readonly_payloads,
-    )
+    from merxen.io.spatialdata_io import spatialdata_write_lock
+
+    # Density installation is additive, but its image and root provenance must
+    # be copied together. Do not snapshot a source during that installation.
+    with spatialdata_write_lock(source):
+        tree = _copy_tree(
+            source,
+            partial,
+            link_mode=cfg.link_mode,
+            readonly_payloads=cfg.readonly_payloads,
+        )
     # The copied root zarr.json carries the source's consolidated metadata,
     # which names the source elements; drop it until the new one is written.
     _drop_consolidated_metadata(partial)

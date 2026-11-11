@@ -17,7 +17,7 @@
   "workflows/modules/atera_proseg.nf::ATERA_PROSEG_PLAN_CELLPOSE::script": "a72516474bbdc273c6d6d9b76ca718f6e12ef4f425585c562c816ab18775d6f9",
   "workflows/modules/atera_proseg.nf::ATERA_PROSEG_STITCH::script": "3e1ae890073dbe5132400973d9c47158da258b9eb9f7123c6f17e9edf096d109",
   "workflows/modules/atera_proseg.nf::ATERA_PROSEG_TILE::script": "ed16e5dd643f8edac23f49b0d2c39393c56a1e83bfcbb81517b181abf1296a45",
-  "workflows/modules/atera_transcript_density.nf::ATERA_TRANSCRIPT_DENSITY::script": "f5a81393e08d58a290eadc33b0e2f3398e672909c28a6ab1f1574fe69a457333",
+  "workflows/modules/atera_transcript_density.nf::ATERA_TRANSCRIPT_DENSITY::script": "049cd500c8ca945e70b0a54a5cc1b60df7e2cbcdaeff753b7ab356452923672d",
   "workflows/modules/cellpose_hitl.nf::CELLPOSE_HITL_SEED::script": "62e1356b3470c4cae2bd5e97a281cb26096c04e4d88f0aec51d9b2692e9ac4fc",
   "workflows/modules/cellpose_hitl.nf::CELLPOSE_HITL_TRAIN::script": "87147ae64fb17475fb4332546c8106a9218c4a470991e9e9bdcae1679166ddd2",
   "workflows/modules/clustering_squidpy.nf::CLUSTERING_SQUIDPY_COMPUTE::script": "b772824832d62186cf3cf3b9488904469f5c7a0c6631f9fe5f203125ffe4a14d",

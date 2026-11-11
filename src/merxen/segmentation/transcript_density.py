@@ -72,7 +72,14 @@ def _json_hash(value: Any) -> str:
 def _file_tree_identity(root: Path) -> str:
     entries = []
     for path in sorted(root.rglob("*")):
-        if path.is_file() and path.name != DENSITY_MANIFEST:
+        if (
+            path.is_file()
+            and path.name != DENSITY_MANIFEST
+            and not any(
+                part.startswith("_napari_compare_")
+                for part in path.relative_to(root).parts
+            )
+        ):
             stat = path.stat()
             entries.append(
                 (str(path.relative_to(root)), stat.st_size, stat.st_mtime_ns)
@@ -391,6 +398,13 @@ def read_density_record(path: Path) -> dict[str, Any]:
     Returns:
         Manifest, rejecting incomplete or modified metadata.
     """
+    from merxen.segmentation.density_storage import (
+        embedded_density_record,
+        has_embedded_density,
+    )
+
+    if has_embedded_density(path):
+        return embedded_density_record(path)
     record: dict[str, Any] = json.loads((path / DENSITY_MANIFEST).read_text())
     if record.get("fingerprint") != _json_hash(
         {key: value for key, value in record.items() if key != "fingerprint"}

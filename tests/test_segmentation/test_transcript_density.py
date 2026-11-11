@@ -195,11 +195,11 @@ def test_density_cli_runs_the_registered_stage(
         main, ["atera-transcript-density", "--config", str(path)]
     )
     assert result.exit_code == 0, result.output
-    assert (
-        density_config.output_dir
-        / "transcript_density.zarr"
-        / "transcript_density.json"
-    ).is_file()
+    assert (density_config.output_dir / "transcript_density.json").is_file()
+    from merxen.segmentation.density_storage import has_embedded_density
+
+    assert has_embedded_density(density_config.source_zarr_path)
+    assert (density_config.output_dir / "transcript_density.zarr").is_symlink()
 
 
 def test_stock_density_masks_require_exact_input_identity(tmp_path: Path) -> None:
@@ -263,6 +263,16 @@ def test_stock_density_masks_require_exact_input_identity(tmp_path: Path) -> Non
         json.dumps({"model_identity": expected.model_dump(mode="json")})
     )
     require_matching_cached_model(mask, config, expected)
+    relocated = expected.model_copy(deep=True)
+    assert relocated.inference_context is not None
+    assert relocated.inference_context.transcript_density is not None
+    relocated.inference_context.transcript_density.raster_path = (
+        tmp_path / "embedded.zarr"
+    )
+    require_matching_cached_model(mask, config, relocated)
+    relocated.inference_context.transcript_density.fingerprint = "2" * 64
+    with pytest.raises(ValueError, match="identity mismatch"):
+        require_matching_cached_model(mask, config, relocated)
     two = config.model_copy(deep=True)
     two.dataset.channels = ["DAPI", "18S"]
     two.dataset.transcript_density_path = None

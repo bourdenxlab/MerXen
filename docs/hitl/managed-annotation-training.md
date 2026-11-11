@@ -14,8 +14,9 @@ viewer-selected crops, copy these items to the annotation computer:
 - The unchanged native SpatialData store containing morphology and Cellpose labels.
 - `roi_context.json` **and** its companion `hitl_export_settings.json`, generated
   by the current `merxen cellpose-hitl-prepare-rois` command. Keep them together.
-- For three-channel Atera annotation, the matching existing
-  `transcript_density.zarr`, including its `transcript_density.json` manifest.
+- Current Atera outputs already contain `images/atera_transcript_density`, its
+  provenance and viewer pyramids. Copy the complete SpatialData Zarr; no second
+  density store is needed. Older outputs can still use a matching separate raster.
 
 The viewer accepts an existing pilot package's `manifest.json` as the export
 settings when it sits beside `roi_context.json`. Copying a completed store does
@@ -36,10 +37,18 @@ background and locks the exported selection. Use **Start new crop selection**
 for another package. **Save regions only…** remains available for remote export.
 
 Atera uses **DAPI → 18S RNA → transcript density**, at native resolution. The
-viewer finds the copied density raster beside the store/setup or asks you to
-select it. Its manifest, generation recipe and grid must match the setup. It
-does not regenerate transcript density locally. The standard density recipe
+viewer automatically loads the embedded density image and HITL reads that same
+image without a file picker. Its provenance, generation recipe and grid must
+match the setup. For an older store without embedded density, the separate-raster
+discovery/file-picker fallback remains available. Neither path regenerates
+transcript density locally. The standard density recipe
 uses Gaussian σ **0.15 µm**. Two-stain packages retain an empty third model slot.
+
+To upgrade an existing server store without recounting transcripts, run
+`merxen embed-transcript-density --spatialdata <review.zarr> --density
+<verified-generated-density.zarr>`. This adds the image and pyramids, preserving
+the morphology, masks and transcript data. Prepare fresh crop context/settings
+after this metadata change, then sync the updated Zarr to the annotation computer.
 
 Automatic or previously exported crops can enter the same managed workflow:
 extract the archive and click **Open annotation package…**. The viewer copies

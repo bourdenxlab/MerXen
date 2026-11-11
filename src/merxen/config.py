@@ -969,6 +969,7 @@ class EnrichmentConfig(BaseModel):
     transform_path: Path | None = None
     segmentation_source: SegmentationSource = "cellpose_proseg"
     native_label_check: bool = True
+    transcript_density_source_path: Path | None = None
 
     @model_validator(mode="after")
     def _validate_segmentation_source(self: EnrichmentConfig) -> EnrichmentConfig:

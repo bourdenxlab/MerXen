@@ -968,6 +968,14 @@ def enrich_single_latest(
         )
 
     write_path = _resolve_enrichment_write_path(latest_path, target_path)
+    if config.transcript_density_source_path is not None:
+        from merxen.segmentation.density_storage import (
+            embed_transcript_density,
+            has_embedded_density,
+        )
+
+        if has_embedded_density(config.transcript_density_source_path):
+            embed_transcript_density(write_path, config.transcript_density_source_path)
     # Enrichment adds and replaces elements and rewrites the store's attrs, so
     # the store lock is held from the read until the metadata is persisted.
     with spatialdata_write_lock(write_path):

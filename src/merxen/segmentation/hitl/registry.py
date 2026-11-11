@@ -373,7 +373,12 @@ def require_matching_cached_model(
         is_experimental_arm(config)
         or config.dataset.transcript_density_path is not None
     ):
-        if expected is None or recorded != expected:
+        location_only = {"inference_context": {"transcript_density": {"raster_path"}}}
+        # Moving the same verified raster into SpatialData changes its storage
+        # path, not the model input identity. All other fields must still agree.
+        if expected is None or recorded.model_dump(
+            exclude=location_only
+        ) != expected.model_dump(exclude=location_only):
             raise ValueError(
                 "Cached custom-model identity mismatch; use a separate outdir"
             )
@@ -382,12 +387,10 @@ def require_matching_cached_model(
         stats_path = config.dataset.persistent_cellpose_stitching_stats_path or (
             sidecar_path.with_name("cellpose_stitching_stats.json")
         )
-        if (
-            not stats_path.exists()
-            or CellposeModelIdentity.model_validate(
-                json.loads(stats_path.read_text()).get("model_identity", {})
-            )
-            != expected
+        if not stats_path.exists() or CellposeModelIdentity.model_validate(
+            json.loads(stats_path.read_text()).get("model_identity", {})
+        ).model_dump(exclude=location_only) != expected.model_dump(
+            exclude=location_only
         ):
             raise ValueError("Cached custom-model statistics identity mismatch")
         return

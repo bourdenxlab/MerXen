@@ -195,6 +195,20 @@ run training before segmentation and perform this copy with
 [the complete managed workflow](hitl/managed-annotation-training.md) for templates,
 relative transfer destinations, candidate opt-in and named reuse.
 
+## `merxen embed-transcript-density`
+
+Add an existing verified density raster and its viewer pyramids permanently to
+a processed SpatialData store, without counting transcripts again:
+
+```bash
+merxen embed-transcript-density --spatialdata "<processed.zarr>" \
+  --density "<generated-density.zarr>"
+```
+
+`atera-transcript-density` performs this installation automatically after
+generation; use `--no-embed` only for an independent raster. The viewer and HITL
+automatically discover the embedded image. See [the density stage](stages/atera-transcript-density.md).
+
 ---
 
 ## `merxen enrich`

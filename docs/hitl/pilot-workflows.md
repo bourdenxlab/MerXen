@@ -88,8 +88,9 @@ merxen cellpose-hitl-prepare-rois --config pilot.json --output roi_context.json
 This reads image metadata and the original tile grid, and writes a small JSON
 file and its companion `hitl_export_settings.json`. It creates no crops or
 masks. Copy both files together to the machine running the viewer. Local package
-creation also needs the native image/Cellpose-label store and, for three-channel
-Atera, the existing matching `transcript_density.zarr`.
+creation also needs the native image/Cellpose-label store. Current Atera outputs
+include density and its pyramids in that same Zarr; older outputs may still need
+the matching separate raster.
 
 ### Select locations
 

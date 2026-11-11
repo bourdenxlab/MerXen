@@ -5023,6 +5023,7 @@ workflow {
             // rest.
             if (PlatformSpec.forName(platform).nativeLatestBase) {
                 enrichConfig.segmentation_source = "native"
+                enrichConfig.transcript_density_source_path = originalDataPath
                 enrichConfig.mask_path = null
                 enrichConfig.nuclei_mask_path = null
             }

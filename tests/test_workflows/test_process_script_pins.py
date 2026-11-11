@@ -14,6 +14,10 @@ and say in the pull request which caches it invalidates and why.
 
 Changes made so far:
 
+- Embedded density adds ``--embed`` to ATERA_TRANSCRIPT_DENSITY so cached
+  independent-raster tasks are upgraded. Only that existing process script pin
+  changes; matching embedded rasters are reused without scanning transcripts.
+
 - AT-6 (WP-C): the ``QC`` script of ``modules/qc.nf`` looks its registration
   reference shape up in the platform registry
   (``PlatformSpec.forName(platform).originalCellShapeKey``) instead of a
