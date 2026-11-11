@@ -52,6 +52,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -81,9 +82,8 @@ MAP = "CLUSTERING_SQUIDPY_ANNOTATE_MAP"
 RESOLVE = "CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE"
 PREP = "ANNOTATE_REFERENCE_PREP"
 PANEL = "ANNOTATE_PANEL"
-# Long enough that every other fixture branch is mapped and resolved before the
-# slow PREP ends, also on a small CI runner busy with other test workers.
-SLOW_PREP_SECONDS = 40
+# Bound the dependency test without assuming how fast a CI runner schedules work.
+BUNDLE_BARRIER_TIMEOUT_SECONDS = 180
 
 
 def _hash(tag: str) -> str:
@@ -594,13 +594,37 @@ def _write_config(
     RESOLVE reads.
     """
     fail = '"exit 3"' if failing else '"true"'
-    wait = f'"sleep {SLOW_PREP_SECONDS}"' if slow else '"true"'
+    marker_dir = root / "resolved_branches"
+    marker_dir.mkdir(exist_ok=True)
+    expected_markers = [
+        str(marker_dir / f"{pair_id}_{segmentation}")
+        for pair_id, segmentation in FIXTURE_BRANCHES
+        if pair_id not in {"F3", "F7"}
+    ]
+    wait_script = root / "wait_for_other_branches.py"
+    wait_script.write_text(
+        "import time\nfrom pathlib import Path\n"
+        f"markers = [Path(value) for value in {expected_markers!r}]\n"
+        f"deadline = time.monotonic() + {BUNDLE_BARRIER_TIMEOUT_SECONDS}\n"
+        "while not all(path.is_file() for path in markers):\n"
+        "    if time.monotonic() >= deadline:\n"
+        "        raise RuntimeError('Other branches did not resolve while F3 waited')\n"
+        "    time.sleep(0.1)\n"
+    )
+    wait = (
+        json.dumps(f"{shlex.quote(sys.executable)} {shlex.quote(str(wait_script))}")
+        if slow
+        else '"true"'
+    )
     before = f"""
     withName: ".*:{PREP}" {{
         beforeScript = {{
             bundle.reference_id == "failing_reference" ? {fail} :
                 (bundle.panel_tag == "{_hash(SLOW_TAG)}" ? {wait} : "true")
         }}
+    }}
+    withName: ".*:{RESOLVE}" {{
+        afterScript = {{ 'touch "{marker_dir}/' + pair_id + '_' + segmentation + '"' }}
     }}"""
     config = root / "nextflow.config"
     config.write_text(

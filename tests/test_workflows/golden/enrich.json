@@ -1,5 +1,5 @@
 {
-  "L0/ATERA": "{\"dataset_name\":\"PAIR_A_ATERA\",\"platform\":\"ATERA\",\"latest_zarr_path\":\"latest_input.zarr\",\"mask_path\":null,\"nuclei_mask_path\":null,\"original_data_path\":\"source_spatialdata.zarr\",\"output_dir\":\"enrich_out\",\"persistent_output_path\":\"<WORK>/results/PAIR_A/atera/latest/latest_spatialdata.zarr\",\"transform_path\":null,\"segmentation_source\":\"native\"}",
+  "L0/ATERA": "{\"dataset_name\":\"PAIR_A_ATERA\",\"platform\":\"ATERA\",\"latest_zarr_path\":\"latest_input.zarr\",\"mask_path\":null,\"nuclei_mask_path\":null,\"original_data_path\":\"source_spatialdata.zarr\",\"output_dir\":\"enrich_out\",\"persistent_output_path\":\"<WORK>/results/PAIR_A/atera/latest/latest_spatialdata.zarr\",\"transform_path\":null,\"segmentation_source\":\"native\",\"transcript_density_source_path\":\"source_spatialdata.zarr\"}",
   "L0/ATERA/blank_fields/restart_latest_zarr": "null",
   "L0/ATERA/blank_inputs/restart_latest_zarr": "null",
   "L0/ATERA/dir_only/restart_latest_zarr": "null",

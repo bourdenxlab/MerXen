@@ -55,6 +55,8 @@ published outputs are preserved. Atera Cellpose now defaults to the
 with native-pixel bins and Gaussian σ = 0.15 µm; the two-stain compatibility
 switch retains historical inputs. This changes the Atera input recipe and
 requires a fresh three-channel run rather than silent mask reuse.
+Embedding the density image also adds its source path to Atera enrichment
+configs, changing those task hashes. Xenium and MERSCOPE configs are unchanged.
 
 ## Validation
 

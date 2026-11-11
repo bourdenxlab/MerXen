@@ -206,7 +206,8 @@ def resolve_worker_count(n_workers: int | None = None) -> int:
                     f"DASK_NUM_WORKERS must be a positive integer, got {raw!r}"
                 ) from None
         else:
-            n_workers = len(os.sched_getaffinity(0))
+            cpu_affinity = getattr(os, "sched_getaffinity", None)
+            n_workers = len(cpu_affinity(0)) if cpu_affinity else os.cpu_count() or 1
     if n_workers < 1:
         raise ValueError(f"the worker count must be positive, got {n_workers}")
     return n_workers
