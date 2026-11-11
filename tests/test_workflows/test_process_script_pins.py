@@ -169,7 +169,7 @@ def test_pinned_inventory(pinned: dict[str, str]) -> None:
     ATERA_CELLPOSE_SEGMENT and ATERA_PROSEG_PLAN_CELLPOSE. No existing pin changed.
     """
     labels = [key.rsplit("::", 1)[1] for key in pinned]
-    assert labels.count("script") == 61
+    assert labels.count("script") == 62
     assert labels.count("stub") == 17
     assert {key for key in pinned if key.endswith("::stub")} == {
         f"workflows/modules/pciseq.nf::{name}::stub"
