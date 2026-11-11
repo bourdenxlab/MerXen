@@ -1,5 +1,13 @@
 # Cellpose HITL implementation status
 
+Update 2026-11-11: acceptance-gate PR #127 promotes the complete Atera and HITL
+histories together to `main`, as requested by the user. Earlier HITL milestone
+branches are already ancestors of that head. The first completed managed
+annotation package passes import validation with eight reviewed crops and
+860 saved cells. Training and resegmentation are separate user-launched runs;
+this validation does not establish improved segmentation accuracy or model
+acceptance. Further HITL work branches from `main` after promotion.
+
 Update 2026-11-09: HITL-1 merged in PR #75 (`43cf265d`). The current Atera
 implementation is on `feature/atera-support`. The
 [compatibility audit](../hitl/atera-compatibility.md) records the subsequent

@@ -1,5 +1,12 @@
 # 10x Atera support: build stage and downstream plan
 
+> **Main promotion, 2026-11-11:** the user authorized promoting the complete
+> Atera integration and all dependent HITL work through acceptance-gate PR #127.
+> That head includes the integrated robust cell-type annotation history and
+> its human/mouse `map_first` defaults. The former integration branches close
+> on merge; further work branches from `main`. The milestone evidence,
+> biological limitations and future work recorded below retain their scope.
+
 > **Status:** implementation in progress; milestone 1 is met. The design baseline is revision 4,
 > 2026-11-04; §8 records implementation progress and Appendix A records later decisions. Decisions marked
 > *Recommended* in §3 and §10 apply unless superseded by those decisions. Milestone 1 (§1) covers the
