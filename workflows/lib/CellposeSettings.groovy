@@ -6,7 +6,59 @@ import java.nio.file.Files
 class CellposeSettings {
     static final String STOCK_SHA256 = '0f1cc3f7ecdd8a037a57c6c48d9d8921391be4cbce3fa9f13c3e3a2e1253c667'
 
+    static Map selectedBundle(row, String platform, params) {
+        def selected = value(row, params, "${platform.toLowerCase()}_cellpose_model")
+        if (selected == null || !selected.toString().trim()) return [:]
+        def requested = selected.toString().trim()
+        def named = false
+        File weights
+        if (requested ==~ /[0-9a-f]{64}/) {
+            if (!params.cellpose_model_store) {
+                throw new IllegalArgumentException('Registry hashes require --cellpose_model_store')
+            }
+            weights = new File(params.cellpose_model_store.toString(), "${requested}/model")
+        } else if (requested ==~ /[a-z][a-z0-9_-]{2,63}/) {
+            def stores = []
+            def rowStore = row["${platform.toLowerCase()}_cellpose_model_store"]
+            if (rowStore) {
+                stores << new File(rowStore.toString())
+            } else {
+                if (params.cellpose_model_store) stores << new File(params.cellpose_model_store.toString())
+                if (params.cellpose_hitl_root) stores << new File(params.cellpose_hitl_root.toString(), 'models')
+            }
+            def matches = stores.collect { new File(it, "${requested}/model").canonicalFile }
+                .findAll { it.isFile() }.unique { it.path }
+            if (matches.size() > 1) throw new IllegalArgumentException('Model name is ambiguous across configured stores; select its full bundle path')
+            if (matches) {
+                weights = matches[0]
+                named = true
+            } else {
+                weights = new File(requested)
+            }
+        } else {
+            weights = new File(requested)
+        }
+        if (weights.isDirectory() || weights.name == 'model.json') {
+            weights = new File(weights.isDirectory() ? weights : weights.parentFile, 'model')
+        }
+        weights = new File(weights.absoluteFile.parentFile.canonicalFile, weights.name)
+        def metadata = new File(weights.parentFile, 'model.json').canonicalFile
+        if (!weights.isFile() || !metadata.isFile()) {
+            throw new IllegalArgumentException("Custom model requires weights and model.json: ${requested}")
+        }
+        return [weights: weights, metadata: metadata, named: named,
+                model: new JsonSlurper().parse(metadata)]
+    }
+
     static List channelsForRow(row, platform, params = null) {
+        def explicit = row["${platform.toLowerCase()}_channels"]
+        if (explicit != null && explicit.toString().trim()) {
+            return explicit.toString().split(',').collect { it.trim() }.findAll { it }
+        }
+        if (params != null) {
+            def bundle = selectedBundle(row, platform, params)
+            if (bundle.named && bundle.model.channels) return bundle.model.channels
+        }
         if (platform == 'ATERA' && params != null) {
             return AteraDensitySettings.channels(row, params)
         }
@@ -120,6 +172,7 @@ class CellposeSettings {
             edge_touch_policy: params.cellpose_edge_touch_policy,
             write_stitching_stats: params.cellpose_write_stitching_stats,
         ]
+        expectedTiling.putAll(selected.tiling ?: [:])
         def context = identity.inference_context
         def validPixels = context?.pixel_size_um?.size() == 2 && context.pixel_size_um.every {
             it instanceof Number && Double.isFinite(it as double) && it > 0 &&
@@ -135,7 +188,7 @@ class CellposeSettings {
             context == null || context.platform != platform || context.species != rowSettings.species ||
             context.channels != metadata.channels || context.image_key != metadata.image_key ||
             (platform == 'ATERA' && context.transcript_density?.profile !=
-                (AteraDensitySettings.enabled(params) ? AteraDensitySettings.profile(params) : null)) ||
+                AteraDensitySettings.selectedProfile(selected, params)) ||
             !validPixels ||
             !matchesFields(context.mask_filter, expectedFilter) ||
             !matchesFields(context.tiling, expectedTiling) || identity != statsIdentity) {
@@ -165,27 +218,25 @@ class CellposeSettings {
         }
         if (selected != null && selected.toString().trim()) {
             def requested = selected.toString().trim()
-            File weights
-            if (requested ==~ /[0-9a-f]{64}/) {
-                if (!params.cellpose_model_store) {
-                    throw new IllegalArgumentException('Registry hashes require --cellpose_model_store')
-                }
-                weights = new File(params.cellpose_model_store.toString(), "${requested}/model")
-            } else {
-                weights = new File(requested)
-                if (weights.isDirectory() || weights.name == 'model.json') {
-                    weights = new File(weights.isDirectory() ? weights : weights.parentFile, 'model')
-                }
-            }
+            def bundle = selectedBundle(row, platform, params)
+            File weights = bundle.weights
             // Preserve a model-file symlink inside the bundle so model.json
             // remains adjacent to the requested file, rather than its cache target.
             weights = weights.absoluteFile
             weights = new File(weights.parentFile.canonicalFile, weights.name)
-            def metadata = new File(weights.parentFile, 'model.json').canonicalFile
-            if (!weights.isFile() || !metadata.isFile()) {
-                throw new IllegalArgumentException("Custom model requires weights and model.json: ${requested}")
+            def metadata = bundle.metadata
+            def model = bundle.model
+            if (bundle.named) {
+                def inherited = (model.evaluated_cellpose ?: [:]).findAll { key, _value ->
+                    key in ['diameter', 'flow_threshold', 'cellprob_threshold',
+                            'input_normalization', 'use_bfloat16', 'bsize', 'factor_rescale', 'tile_overlap']
+                }
+                result.cellpose = inherited + result.cellpose
+                result.mask_filter = (model.evaluated_mask_filter ?: [:]) + result.mask_filter
+                result.tiling = model.training_tiling ?: [tile_size_candidates: [model.tile_size],
+                    min_tile_size: Math.min(params.cellpose_min_tile_size as int, model.tile_size as int)]
+                result.transcript_density_profile = model.transcript_density_profile
             }
-            def model = new JsonSlurper().parse(metadata)
             if (!(model.weights_sha256 ==~ /[0-9a-f]{64}/)) {
                 throw new IllegalArgumentException("Invalid weights_sha256 in ${metadata}")
             }
@@ -196,7 +247,8 @@ class CellposeSettings {
             ])
             def roots = params.cellpose_protected_output_roots
             roots = roots instanceof Collection ? roots : (roots ? [roots] : [])
-            def candidate = params.allow_candidate_model
+            def candidateKey = "${prefix}_allow_candidate_model"
+            def candidate = row.containsKey(candidateKey) ? row[candidateKey] : params.allow_candidate_model
             if (!(candidate.toString().toLowerCase() in ['true', 'false'])) {
                 throw new IllegalArgumentException('--allow_candidate_model must be true or false')
             }
@@ -245,6 +297,11 @@ class CellposeSettings {
                 'spatialdata/spatialdata_out/source_spatialdata.zarr').canonicalFile.toPath()
             def sourceValue = row["${platform.toLowerCase()}_spatialdata_path"] ?:
                 row["${platform.toLowerCase()}_zarr_path"]
+            // A late-start seed reads the baseline but writes an independent
+            // sourceOutput copy, whose destination is checked below.
+            if (!rowSettings.run_build && rowSettings.need_build_results &&
+                (params.cellpose_hitl_source_outdir || params.cellpose_hitl_source_zarr ||
+                 row["${platform.toLowerCase()}_hitl_source_zarr"])) sourceValue = null
             def sourceInput = sourceValue?.toString()?.trim()
                 ? new File(sourceValue.toString()).canonicalFile.toPath() : null
             def protectedTargets = protectedPaths(policy.protected_output_roots)
@@ -279,9 +336,8 @@ class CellposeSettings {
                 throw new IllegalArgumentException('Model channel names/order do not match the row')
             }
             if (platform == 'ATERA') {
-                def density = AteraDensitySettings.enabled(params)
-                def profile = density ? AteraDensitySettings.profile(params) : null
-                def normalization = density ? 'per_channel' : 'joint'
+                def profile = AteraDensitySettings.selectedProfile(selected, params)
+                def normalization = selected.cellpose.input_normalization ?: (profile != null ? 'per_channel' : 'joint')
                 if (metadata.transcript_density_profile != profile ||
                     (metadata.evaluated_cellpose?.input_normalization ?: 'joint') != normalization) {
                     throw new IllegalArgumentException('Model density recipe/input normalization does not match the requested Atera input')
@@ -291,9 +347,9 @@ class CellposeSettings {
                 (metadata.status == 'candidate' && policy.allow_candidate_model))) {
                 throw new IllegalArgumentException('Model requires accepted status or candidate opt-in')
             }
-            def candidates = params.cellpose_tile_size_candidates.collect { it as int }
+            def candidates = (selected.tiling?.tile_size_candidates ?: params.cellpose_tile_size_candidates).collect { it as int }
             if (candidates != [metadata.tile_size as int] ||
-                (metadata.tile_size as int) < (params.cellpose_min_tile_size as int)) {
+                (metadata.tile_size as int) < ((selected.tiling?.min_tile_size ?: params.cellpose_min_tile_size) as int)) {
                 throw new IllegalArgumentException('Custom models require a single evaluated tile size')
             }
             def digest = MessageDigest.getInstance('SHA-256')

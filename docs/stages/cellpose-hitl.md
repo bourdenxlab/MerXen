@@ -2,8 +2,9 @@
 
 HITL-1 adds optional cell-model selection and safe reuse checks. It also shares
 the production halo-tile input, inference and filtering operation with acceptance
-checks. An initial crop exporter now prepares correction pilots; annotation
-import, training and model evaluation remain later milestones.
+checks. Managed local annotation, numeric-mask import and named-model training
+are described in [the annotation/training workflow](../hitl/managed-annotation-training.md).
+Held-out model evaluation remains separate work.
 Dwight acceptance uses Conda; Apptainer validation remains deferred.
 
 With no optional model/override parameters, Nextflow emits the same segmentation
@@ -13,7 +14,7 @@ default. Legacy stock masks retain `unverified` provenance and remain reusable.
 ## Select a model
 
 Set `xenium_cellpose_model`, `merscope_cellpose_model` or `atera_cellpose_model` to a bundle directory,
-its weights file, or a 64-character registry hash. A directory contains `model`
+its weights file, a unique trained model name, or a 64-character registry hash. A directory contains `model`
 and `model.json`. Hashes resolve under `cellpose_model_store`, which may also be
 set with the exported `MERXEN_CELLPOSE_MODEL_STORE` variable. Dwight supplies
 `$MERXEN_STORAGE_ROOT/cellpose_models` as its site default.
@@ -40,8 +41,10 @@ writes no transcript CSV; tiled ProSeg reads the store's parquet.
 | `cellpose_protected_output_roots` | Dwight: published results root | Roots protected from experimental arms; required on other hosts |
 
 Here `<platform>` is `xenium`, `merscope` or `atera`. Numeric overrides also accept
-same-named samplesheet columns. Explicit zero is preserved. Values from a model's
-evaluation are **not** applied automatically; differences produce warnings.
+same-named samplesheet columns. Explicit zero is preserved. Named models restore
+their saved inference/filter defaults, tile grid, channels and density recipe;
+explicit platform overrides take precedence. Existing full-path/hash selectors
+retain their prior behavior: evaluation settings are not applied automatically.
 
 Use a Nextflow JSON/YAML params file to supply a singleton tile-size list, for
 example `"cellpose_tile_size_candidates": [6144]`. A custom model must use its

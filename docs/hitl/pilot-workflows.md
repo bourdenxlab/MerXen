@@ -4,7 +4,8 @@ There are two ways to choose crops: let MerXen spread a small set across tissue,
 or choose locations yourself while inspecting the processed sample in the
 viewer. Both produce the same pre-filled correction package for the **separate
 Cellpose GUI**. The MerXen viewer selects crop locations; Cellpose edits cell
-outlines. Import, training and adoption follow in subsequent milestones.
+outlines. The [managed annotation and training workflow](managed-annotation-training.md)
+adds viewer-launched editing, saved-crop tracking and reusable named models.
 
 ```mermaid
 flowchart LR
@@ -85,8 +86,10 @@ merxen cellpose-hitl-prepare-rois --config pilot.json --output roi_context.json
 ```
 
 This reads image metadata and the original tile grid, and writes a small JSON
-file. It creates no crops or masks. Copy it to the machine running the viewer;
-the source data need not be accessible to the ROI helper itself.
+file and its companion `hitl_export_settings.json`. It creates no crops or
+masks. Copy both files together to the machine running the viewer. Local package
+creation also needs the native image/Cellpose-label store and, for three-channel
+Atera, the existing matching `transcript_density.zarr`.
 
 ### Select locations
 
@@ -120,8 +123,14 @@ or MerXen installation in the viewer environment is needed.
    transcript scan is required. Missing masks are reported rather than replaced
    with vendor counts. This is a prefill estimate, not the final corrected count.
 5. Choose representative tissue as well as difficult areas, then click **Save
-   crop regions…** to save a new `.geojson` outside the source store. Existing
-   files are preserved. Save before closing the viewer.
+   areas and prepare annotation**. The viewer creates all Cellpose files in a
+   fresh folder beside the Zarr. Select a crop and press **Annotate cell masks**;
+   save and close Cellpose to mark it green and proceed to the next crop.
+   [Continue with the managed workflow](managed-annotation-training.md).
+
+For remote export, **Save regions only…** writes a new `.geojson` outside the
+source store. Existing files are preserved. The instructions below describe
+that alternative; it is unnecessary for local package creation.
 
 The general cortical-depth/object annotation buttons are not used here; those
 tools serve other analyses and are disabled for Atera. The crop tab does not
@@ -186,7 +195,12 @@ Older two-stain packages keep an empty third model slot and can display the
 boundary stain instead. `model_channels` and `view_channels` in each manifest
 record the actual choices; earlier archives and annotations are preserved.
 
-For either selection method:
+The recommended route for either selection method is **Open annotation
+package…** in the viewer, then **Annotate cell masks**. This preserves older
+prefills/edits in a fresh managed copy and tracks actual saves. See
+[annotation, transfer and training](managed-annotation-training.md).
+
+For the older standalone correction workflow:
 
 1. Copy `annotation-pilot.tar.gz` to the annotation laptop and extract it into a
    fresh folder. Keep an untouched archive as the audit copy.
@@ -199,6 +213,8 @@ For either selection method:
    `excluded` with a reason for unusable tissue.
 5. Return corrected `_seg.npy` files, `review.tsv` and the original manifest.
    Keep image, raw and model-input files unchanged. Do not train in the GUI.
+   To train with the managed importer, open the package in the current viewer
+   and save each crop once through its launched Cellpose window.
 
 The exported model inputs were normalized on the complete original halo tile
 before cropping; future server training must use `normalize=False`. Changing

@@ -12,7 +12,12 @@ from typing import Any, Literal
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from merxen.config import CellposeConfig, MaskFilterConfig, SegmentationConfig
+from merxen.config import (
+    CellposeConfig,
+    MaskFilterConfig,
+    SegmentationConfig,
+    TilingConfig,
+)
 from merxen.platforms import PlatformName, platform_spec
 from merxen.segmentation.model_identity import (
     CPSAM_V2_SHA256,
@@ -51,6 +56,9 @@ class CellposeModelMetadata(BaseModel):
     evaluated_mask_filter: MaskFilterConfig
     transcript_density_profile: dict[str, Any] | None = None
     evaluation_summary: str | None = None
+    model_name: str | None = None
+    build_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    training_tiling: TilingConfig | None = None
 
     @model_validator(mode="after")
     def _require_native_image_and_unique_channels(self) -> CellposeModelMetadata:

@@ -7,6 +7,7 @@ include { NATIVE_LATEST } from "./modules/native_segmentation"
 include { ATERA_PROSEG_PLAN; ATERA_PROSEG_PLAN_CELLPOSE; ATERA_PROSEG_TILE; ATERA_PROSEG_STITCH } from "./modules/atera_proseg"
 include { ATERA_CELLPOSE_SEGMENT } from "./modules/atera_cellpose"
 include { ATERA_TRANSCRIPT_DENSITY } from "./modules/atera_transcript_density"
+include { CELLPOSE_HITL_TRAIN; CELLPOSE_HITL_SEED } from "./modules/cellpose_hitl"
 include { ENRICH } from "./modules/enrichment"
 include { VIEWER_CACHE } from "./modules/viewer_cache"
 include { MASK_IMAGE_QUANTIFICATION } from "./modules/mask_image_quantification"
@@ -1190,6 +1191,8 @@ def normalizeStage(rawValue, paramName) {
         "spatialdata_build": "build_spatialdata",
         "segment": "segment",
         "segmentation": "segment",
+        "train_cellpose": "train_cellpose",
+        "cellpose_hitl_train": "train_cellpose",
         "segment_nuclei": "segment_nuclei",
         "nuclei_segment": "segment_nuclei",
         "cellpose_nuclei": "segment_nuclei",
@@ -1276,7 +1279,8 @@ def activeStageOrder(
     gastonEnabled = false,
     pciseqEnabled = false,
     segmentationSource = "cellpose_proseg",
-    platforms = null
+    platforms = null,
+    cellposeHitlTrainingEnabled = false
 ) {
     def stages = ["build_spatialdata", "segment_nuclei", "segment", "enrich"]
     // Native rows and every ATERA row keep the vendor nuclei: "segment" is
@@ -1284,6 +1288,9 @@ def activeStageOrder(
     // ATERA Cellpose and tiled ProSeg tasks) and no Cellpose nuclei stage runs.
     if (usesNativeLatest(segmentationSource, platforms)) {
         stages = ["build_spatialdata", "segment", "enrich"]
+    }
+    if (cellposeHitlTrainingEnabled) {
+        stages.add(stages.indexOf('segment'), 'train_cellpose')
     }
     // Registered images join the zarr before the viewer cache and quantification
     // so both see the new channels.
@@ -2540,6 +2547,7 @@ def pciseqConfigJson(pairId, segmentation, platform, sampleId, spatialdataPath, 
 def ateraNativeStages() {
     return [
         "build_spatialdata",
+        "train_cellpose",
         "segment",
         "enrich",
         "build_viewer_caches",
@@ -3593,6 +3601,7 @@ def rowSampleSettings(row, params) {
         pciseqEnabled,
         segmentationSource,
         activePlatforms,
+        CellposeHitlSettings.enabled(params),
     )
     def startStage = normalizeStage(startStageRaw, startParamName)
     def stopStage = normalizeStage(stopStageRaw, stopParamName)
@@ -4155,6 +4164,9 @@ def segmentationConfigMap(pairId, platform, sourceSpatialdata, meta, params) {
     if (meta.cellpose_settings) {
         baseConfig.cellpose.putAll(meta.cellpose_settings.cellpose)
         baseConfig.mask_filter.putAll(meta.cellpose_settings.mask_filter)
+        if (meta.cellpose_settings.tiling) {
+            baseConfig.tiling.putAll(meta.cellpose_settings.tiling)
+        }
         if (meta.cellpose_settings.cellpose_model_policy) {
             baseConfig.cellpose_model_policy = meta.cellpose_settings.cellpose_model_policy
         }
@@ -4196,7 +4208,7 @@ def segmentationConfigMap(pairId, platform, sourceSpatialdata, meta, params) {
         }
         dataset.image_key = meta.image_key
         dataset.proseg_transcripts = "none"
-        if (AteraDensitySettings.enabled(params)) {
+        if (AteraDensitySettings.enabledForMeta(meta, params)) {
             segmentConfig.cellpose.input_normalization = "per_channel"
             dataset.transcript_density_path = meta.transcript_density_path ?: publishedDatasetPath(
                 params.outdir, pairId, platform, "transcript_density/transcript_density.zarr")
@@ -4334,6 +4346,48 @@ workflow {
         .map { pairId, row, settings, _doneFlag ->
             tuple(pairId, row, settings)
         }
+
+    // Optional model training completes before any segmentation input is emitted.
+    // Normal runs retain the existing row channel and task configuration text.
+    if (CellposeHitlSettings.enabled(params)) {
+        def hitlSpec = CellposeHitlSettings.specification(params)
+        hitl_training_inputs_ch = sample_rows_raw_ch.collect(flat: false)
+            .map { entries ->
+                CellposeHitlSettings.validateRows(entries, hitlSpec, params)
+                tuple(CellposeHitlSettings.configJson(hitlSpec),
+                    hitlSpec.package_paths.collect { path -> file(path) })
+            }
+            .combine(preflight_done_ch)
+            .map { configJson, packages, _done -> tuple(configJson, packages) }
+        hitl_model_ready_ch = CELLPOSE_HITL_TRAIN(hitl_training_inputs_ch).model_selector
+            .map { selectorFile -> new groovy.json.JsonSlurper().parse(selectorFile.toFile()) }
+            .first()
+        sample_rows_ch = sample_rows_ch.combine(hitl_model_ready_ch)
+            .map { pairId, row, settings, selector ->
+                tuple(pairId,
+                    CellposeHitlSettings.applyTrainedModel(row, settings, selector, params),
+                    settings)
+            }
+    }
+
+    def hitlSeedRequested = params.cellpose_hitl_source_outdir || params.cellpose_hitl_source_zarr ||
+        samplesheetRows.any { row -> row.any { key, value -> key.toString().endsWith('_hitl_source_zarr') && value?.toString()?.trim() } }
+    if (hitlSeedRequested) {
+        hitl_seed_inputs_ch = sample_rows_ch.flatMap { pairId, row, settings ->
+            settings.active_platforms.collect { platform ->
+                def seed = CellposeHitlSettings.seedConfig(pairId, platform, row, settings, params)
+                seed ? tuple(groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(seed)),
+                    file(seed.source_zarr), seed.nuclei_source_dir
+                        ? new File(seed.nuclei_source_dir.toString()).listFiles()
+                            .findAll { it.isFile() && it.name.startsWith('cellpose_nuclei') }
+                            .collect { file(it.toString()) }
+                        : []) : null
+            }.findAll { it != null }
+        }
+        hitl_seed_complete_ch = CELLPOSE_HITL_SEED(hitl_seed_inputs_ch).complete.collect().map { true }
+        sample_rows_ch = sample_rows_ch.combine(hitl_seed_complete_ch)
+            .map { pairId, row, settings, _seeded -> tuple(pairId, row, settings) }
+    }
 
     // rca-hook:H6: end-of-run annotation summary (plan §3.1); empty in legacy runs.
     def annotationCompletionParams = params
@@ -4483,11 +4537,12 @@ workflow {
     atera_cellpose_sources_ch = build_results_ch
         .join(atera_cellpose_meta_ch)
     atera_density_inputs_ch = atera_cellpose_sources_ch
-        .filter { _key, _pairId, _platform, _source, _meta -> AteraDensitySettings.enabled(params) }
-        .map { key, pairId, platform, sourceSpatialdata, _meta ->
+        .filter { _key, _pairId, _platform, _source, meta -> AteraDensitySettings.enabledForMeta(meta, params) }
+        .map { key, pairId, platform, sourceSpatialdata, meta ->
             tuple(key, pairId, platform,
                 groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(
-                    AteraDensitySettings.config(sourceSpatialdata, params))),
+                    AteraDensitySettings.config(sourceSpatialdata, params,
+                        AteraDensitySettings.selectedProfile(meta.cellpose_settings ?: [:], params)))),
                 sourceSpatialdata)
         }
     atera_density_results_ch = ATERA_TRANSCRIPT_DENSITY(atera_density_inputs_ch).density
@@ -4498,7 +4553,7 @@ workflow {
                 meta + [transcript_density_path: densityPath.toRealPath().toString()], densityPath)
         }
     atera_density_disabled_ch = atera_cellpose_sources_ch
-        .filter { _key, _pairId, _platform, _source, _meta -> !AteraDensitySettings.enabled(params) }
+        .filter { _key, _pairId, _platform, _source, meta -> !AteraDensitySettings.enabledForMeta(meta, params) }
         .map { key, pairId, platform, sourceSpatialdata, meta ->
             tuple(key, pairId, platform, sourceSpatialdata, meta, [])
         }

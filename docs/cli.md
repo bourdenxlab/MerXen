@@ -172,8 +172,28 @@ merxen cellpose-hitl-prepare-rois --config pilot.json --output roi_context.json
 
 This uses the same config as crop export, reads image metadata only, and writes
 a new context file outside protected data. It runs no segmentation or training.
-Use `add_roi_picker` in the existing viewer's Python console to select regions,
-then pass its saved GeoJSON to the exporter. See [the viewer workflow](hitl/pilot-workflows.md#2b-regions-selected-in-the-viewer).
+It also writes `hitl_export_settings.json` beside the context. In the viewer's
+**HITL seg crops** tab, load the context and use **Save areas and prepare
+annotation**. See [the viewer workflow](hitl/pilot-workflows.md#2b-regions-selected-in-the-viewer).
+
+## `merxen cellpose-hitl-import`, `cellpose-hitl-train`, `cellpose-hitl-seed`
+
+Validate completed packages under the configured `MERXEN_HITL_ROOT`, then train
+and publish a uniquely named candidate model:
+
+```bash
+merxen cellpose-hitl-import --package hitl-<timestamp>-<id>
+merxen cellpose-hitl-train --config training-template.json \
+  --model-name neuronal-pilot-v1 --species human --output training-report
+```
+
+`--hitl-root` overrides the import root; training accepts `hitl_root` in its JSON
+or reads it through the project configuration loader. `cellpose-hitl-seed --config
+seed.json` independently copies a processed source into a new run. Nextflow can
+run training before segmentation and perform this copy with
+`cellpose_hitl_source_zarr`/`cellpose_hitl_source_outdir`. See
+[the complete managed workflow](hitl/managed-annotation-training.md) for templates,
+relative transfer destinations, candidate opt-in and named reuse.
 
 ---
 

@@ -69,6 +69,7 @@ KNOWN: Final[tuple[str, ...]] = (
     "MERXEN_MERSCOPE_RAW_ROOT",
     "MERXEN_ATERA_RAW_ROOT",
     "MERXEN_ATERA_SOURCE_STORE",
+    "MERXEN_HITL_ROOT",
     # Data owned by others.
     "MERXEN_MS1_OWNER_ROOT",
     "MERXEN_MS1_CLUSTERED_H5AD",

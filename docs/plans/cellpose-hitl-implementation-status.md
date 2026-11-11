@@ -7,8 +7,12 @@ platform, segmentation-route and image-preprocessing changes. Initial HITL-2
 work now includes a tissue-spanning correction-pilot exporter, viewer-selected
 ROI exchange and a versioned annotation guide. The [pilot workflows](../hitl/pilot-workflows.md)
 cover both paths into the separate Cellpose drawing GUI.
-Full anatomical sampling, import, training and adoption are
-still future milestones; the historical acceptance results below cover HITL-0/1.
+Update 2026-11-11: managed local packages, viewer-launched annotation with verified
+save tracking, numeric-mask import and uniquely named candidate training are
+implemented. Optional `train_cellpose` runs before segmentation; named models
+can be reused without retraining. See [the current workflow](../hitl/managed-annotation-training.md).
+Full anatomical sampling, held-out evaluation and model adoption remain future
+work; the historical acceptance results below cover HITL-0/1.
 
 Implementation started on 2026-10-19 from `main` at `a9625a9`, on
 `codex/hitl-segmentation`. The design remains the

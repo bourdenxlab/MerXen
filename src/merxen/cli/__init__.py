@@ -37,7 +37,10 @@ from merxen.cli.run_atera_proseg import (
 from merxen.cli.run_build_spatialdata import build_spatialdata_command
 from merxen.cli.run_cellpose_hitl import (
     cellpose_hitl_export_command,
+    cellpose_hitl_import_command,
     cellpose_hitl_prepare_rois_command,
+    cellpose_hitl_seed_command,
+    cellpose_hitl_train_command,
 )
 from merxen.cli.run_clustering_squidpy import clustering_squidpy_command
 from merxen.cli.run_comparison import compare_command
@@ -96,6 +99,9 @@ main.add_command(segment_command)
 main.add_command(cellpose_segment_command)
 main.add_command(cellpose_hitl_export_command)
 main.add_command(cellpose_hitl_prepare_rois_command)
+main.add_command(cellpose_hitl_import_command)
+main.add_command(cellpose_hitl_train_command)
+main.add_command(cellpose_hitl_seed_command)
 main.add_command(cellpose_nuclei_segment_command)
 main.add_command(proseg_segment_command)
 main.add_command(native_latest_command)

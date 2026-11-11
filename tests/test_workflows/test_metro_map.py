@@ -73,6 +73,8 @@ STATION_ALIASES = {
         "CELLPOSE_SEGMENT",
         "ATERA_CELLPOSE_SEGMENT",
         "ATERA_TRANSCRIPT_DENSITY",
+        "CELLPOSE_HITL_TRAIN",
+        "CELLPOSE_HITL_SEED",
     },
     "mender": {
         "MENDER_PREPARE",

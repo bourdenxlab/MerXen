@@ -24,21 +24,43 @@ class AteraDensitySettings {
         return expected
     }
 
-    static Map config(source, params) {
+    static boolean enabledForMeta(meta, params) {
+        def selected = meta.cellpose_settings ?: [:]
+        return selected.containsKey('transcript_density_profile')
+            ? selected.transcript_density_profile != null : enabled(params)
+    }
+
+    static Map selectedProfile(selected, params) {
+        return selected.containsKey('transcript_density_profile')
+            ? selected.transcript_density_profile : (enabled(params) ? profile(params) : null)
+    }
+
+    static Map config(source, params, requestedProfile = null) {
         def result = [source_zarr_path: source.toString(), output_dir: 'density_out',
             min_qv: params.atera_transcript_density_min_qv == null ? 20.0 : params.atera_transcript_density_min_qv as double,
             sigma_um: params.atera_transcript_density_sigma_um == null ? 0.15 : params.atera_transcript_density_sigma_um as double,
             bin_size_px: params.atera_transcript_density_bin_size_px == null ? 1 : params.atera_transcript_density_bin_size_px as int]
+        if (requestedProfile != null) {
+            result.min_qv = requestedProfile.min_qv as double
+            result.sigma_um = requestedProfile.sigma_um as double
+            result.bin_size_px = requestedProfile.bin_size_px as int
+        }
         if (!Double.isFinite(result.sigma_um) || result.sigma_um <= 0 ||
             !Double.isFinite(result.min_qv) || result.min_qv < 0 ||
             result.bin_size_px < 1 || result.bin_size_px > 8) {
             throw new IllegalArgumentException('Invalid Atera transcript-density quality, smoothing or bin width')
         }
+        if (requestedProfile != null && requestedProfile != profileFromConfig(result)) {
+            throw new IllegalArgumentException('The named model requires an unsupported density recipe')
+        }
         return result
     }
 
     static Map profile(params) {
-        def values = config('', params)
+        return profileFromConfig(config('', params))
+    }
+
+    static Map profileFromConfig(values) {
         return [version: 1, min_qv: values.min_qv, bin_size_px: values.bin_size_px,
             sigma_um: values.sigma_um, gene_filter: 'is_gene', assignment_filter: 'none',
             z_projection: 'sum_all', units: 'transcripts_per_um2', boundary_mode: 'reflect',

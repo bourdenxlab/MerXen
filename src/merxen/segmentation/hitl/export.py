@@ -10,7 +10,7 @@ import tarfile
 from dataclasses import asdict, dataclass
 from importlib.resources import files as resource_files
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 import numpy as np
 import spatialdata as sd
@@ -61,6 +61,19 @@ class TileNormalization(TypedDict):
     batch_axis: bool
     percentile: list[int]
     channels: list[ChannelNormalization]
+
+
+class ViewerExportSettings(TypedDict):
+    """Portable descriptor for the viewer's local correction-package exporter."""
+
+    schema_version: int
+    model_channels: list[str]
+    input_normalization: str
+    transcript_density: dict[str, Any] | None
+    baseline_stats_model_identity: dict[str, Any] | None
+    guide_version: str
+    training_normalize: bool
+    source_metadata_sha256: NotRequired[str]
 
 
 class CropBox(BaseModel):
@@ -304,10 +317,58 @@ def prepare_viewer_roi_context(
         stats,
         _native_pixel_size(config, sdata),
     )
+    export_settings = viewer_export_settings(config)
+    export_settings["source_metadata_sha256"] = context.source_metadata_sha256
+    companion = output_path.parent / "hitl_export_settings.json"
+    if companion.exists() and json.loads(companion.read_text()) != export_settings:
+        raise ValueError("Crop export settings already exist; use a fresh setup folder")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("x") as stream:
         stream.write(json.dumps(asdict(context), indent=2) + "\n")
+    if not companion.exists():
+        with companion.open("x") as stream:
+            stream.write(json.dumps(export_settings, indent=2) + "\n")
     return context
+
+
+def viewer_export_settings(config: HitlExportConfig) -> ViewerExportSettings:
+    """Build portable channel/normalization settings for local GUI packages.
+
+    Args:
+        config: Original source, baseline statistics and optional density input.
+
+    Returns:
+        The companion descriptor consumed by the viewer's annotation manager.
+    """
+    stats = json.loads(config.baseline_stats_path.read_text())
+    identity = stats.get("model_identity") or {}
+    density = (identity.get("inference_context") or {}).get("transcript_density")
+    path = config.transcript_density_path
+    if path is None and density:
+        path = Path(density["raster_path"])
+    if path is not None:
+        from merxen.segmentation.transcript_density import density_input_identity
+
+        verified = density_input_identity(path)
+        assert verified is not None
+        density = verified.model_dump(mode="json")
+    channels = config.channels
+    if density is not None and "channels" not in config.model_fields_set:
+        channels = ["DAPI", "18S", "transcript_density"]
+    normalization = config.input_normalization or (
+        "per_channel"
+        if "transcript_density" in channels
+        else (identity.get("cellpose_config") or {}).get("input_normalization", "joint")
+    )
+    return {
+        "schema_version": 1,
+        "model_channels": channels,
+        "input_normalization": normalization,
+        "transcript_density": density,
+        "baseline_stats_model_identity": stats.get("model_identity"),
+        "guide_version": GUIDE_VERSION,
+        "training_normalize": False,
+    }
 
 
 def _require_fresh_output(config: HitlExportConfig) -> None:

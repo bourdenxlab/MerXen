@@ -47,6 +47,7 @@ converge at alignment; dashed stations are governed by a parameter. See
 - [Cellpose HITL model selection](stages/cellpose-hitl.md) (optional model plumbing)
 - [Cellpose annotation pilot](hitl/annotation-guide.md) (initial crop correction workflow)
 - [Choose and correct HITL crops](hitl/pilot-workflows.md) (automatic or viewer-selected regions)
+- [Managed annotation and model training](hitl/managed-annotation-training.md) (viewer editing, transfer and named model reuse)
 - [Enrichment](stages/enrichment.md)
 - [Image registration](stages/register-images.md) (post-Xenium IF onto the mask grid)
 - [Manual landmark registration](stages/manual-registration.md) (standalone workflows, not a stage of `main.nf`)
