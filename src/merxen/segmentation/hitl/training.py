@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from merxen import local_config
 from merxen.config import CellposeConfig, MaskFilterConfig, TilingConfig
 from merxen.gpu_lock import gpu_lock_path_from_env, gpu_process_lock
+from merxen.platforms import platform_spec
 from merxen.segmentation.hitl.import_annotations import (
     ImportedAnnotations,
     ImportedCrop,
@@ -335,7 +336,7 @@ def _fit_and_publish(
         platform=config.platform,
         species=config.species,
         channels=list(corpus.channels),
-        image_key="morphology_focus",
+        image_key=platform_spec(config.platform).native_image_key,
         pixel_size_um=corpus.pixel_size_um,
         tile_size=corpus.tile_size,
         normalization_route="A",

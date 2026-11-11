@@ -173,6 +173,14 @@ REASONS: dict[str, dict[str, str]] = {
     },
     "nuclei_mask_consumers": {
         "src/merxen/cli/__init__.py": "registers the nuclei segmentation command",
+        "src/merxen/segmentation/hitl/seed_inputs.py": (
+            "copies completed stock Cellpose nuclei artifacts into a fresh arm; "
+            "does not join vendor nucleus ids to cells"
+        ),
+        "workflows/lib/CellposeHitlSettings.groovy": (
+            "requires/stages existing stock Cellpose nuclei for late starts; "
+            "Atera retains vendor nuclei and never enters this copy path"
+        ),
         "src/merxen/cli/run_segmentation.py": "runs the nuclei segmentation",
         "src/merxen/config.py": "config fields of the nuclei mask",
         "src/merxen/enrichment/enrich.py": "builds the cellpose_nuclei layer (AT-6)",
@@ -191,6 +199,14 @@ REASONS: dict[str, dict[str, str]] = {
         ),
     },
     "platform_equality": {
+        "src/merxen/segmentation/hitl/import_annotations.py": (
+            "managed training pilot supports the same Atera/Xenium native ROI "
+            "contract as the exporter; MERSCOPE annotation support is deferred"
+        ),
+        "workflows/lib/CellposeHitlSettings.groovy": (
+            "training is restricted to the two platforms supported by the "
+            "current annotation exporter and CellposeTrainingConfig"
+        ),
         "src/merxen/segmentation/hitl/regions.py": (
             "initial native-pixel ROI exchange supports ATERA and XENIUM only; "
             "MERSCOPE affine ROI support is a later extension"
@@ -401,6 +417,8 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
     },
     "nuclei_mask_consumers": {
         "src/merxen/cli/__init__.py": (),
+        "src/merxen/segmentation/hitl/seed_inputs.py": (),
+        "workflows/lib/CellposeHitlSettings.groovy": (),
         "src/merxen/cli/run_segmentation.py": (),
         "src/merxen/config.py": (),
         "src/merxen/enrichment/enrich.py": (),
@@ -414,6 +432,13 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         "scripts/acceptance/segmentation_comparison.py": (),
     },
     "platform_equality": {
+        "src/merxen/segmentation/hitl/import_annotations.py": (
+            'platform not in {"ATERA", "XENIUM"}',
+        ),
+        "workflows/lib/CellposeHitlSettings.groovy": (
+            "if (!(spec.platform in ['ATERA', 'XENIUM']) || "
+            "!(spec.species in ['human', 'mouse'])) {",
+        ),
         "src/merxen/segmentation/hitl/regions.py": (
             'if self.schema_version != 1 or self.platform not in ("ATERA", "XENIUM"):',
         ),
