@@ -115,13 +115,13 @@ def test_dwight_gpu_processes_use_one_fixed_host_lock(
     ):
         assert f'withName: "{process_name}"' in dwight_config_text
     # Six tasks hold the lock for their whole run (AT-7 added
-    # ATERA_CELLPOSE_SEGMENT); BUILD_SPATIALDATA only exports the path (see the
-    # bead-removal test below).
+    # ATERA_CELLPOSE_SEGMENT); BUILD_SPATIALDATA and CELLPOSE_HITL_TRAIN only
+    # export the path because their Python GPU phases acquire the lock.
     assert (
         dwight_config_text.count(
             'MERXEN_GPU_LOCK_FILE="${params.gpu_process_lock_file}"'
         )
-        == 7
+        == 8
     )
     assert dwight_config_text.count('exec 9<"\\${MERXEN_GPU_LOCK_FILE}"') == 6
     assert 'exec 9>"\\${MERXEN_GPU_LOCK_FILE}"' not in dwight_config_text
@@ -134,6 +134,16 @@ def _process_block(config_text: str, process_name: str) -> str:
     start = config_text.index(f'withName: "{process_name}"')
     end = config_text.find("withName:", start + 1)
     return config_text[start:end]
+
+
+def test_dwight_training_exports_lock_without_taking_it(
+    dwight_config_text: str,
+) -> None:
+    """The Python trainer takes the lock; an outer shell lock would deadlock."""
+    block = _process_block(dwight_config_text, "CELLPOSE_HITL_TRAIN")
+    assert "maxForks = 1" in block
+    assert 'export MERXEN_GPU_LOCK_FILE="${params.gpu_process_lock_file}"' in block
+    assert "flock 9" not in block
 
 
 def test_dwight_bead_removal_runs_on_the_validated_gpu(

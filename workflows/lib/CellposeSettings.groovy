@@ -51,6 +51,7 @@ class CellposeSettings {
     }
 
     static List channelsForRow(row, platform, params = null) {
+        def spec = PlatformSpec.forName(platform)
         def explicit = row["${platform.toLowerCase()}_channels"]
         if (explicit != null && explicit.toString().trim()) {
             return explicit.toString().split(',').collect { it.trim() }.findAll { it }
@@ -62,7 +63,6 @@ class CellposeSettings {
         if (platform == 'ATERA' && params != null) {
             return AteraDensitySettings.channels(row, params)
         }
-        def spec = PlatformSpec.forName(platform)
         def raw = row["${platform.toLowerCase()}_channels"]
         return raw != null && raw.toString().trim()
             ? raw.toString().split(',').collect { it.trim() }.findAll { it }
