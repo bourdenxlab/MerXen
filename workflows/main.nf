@@ -2669,7 +2669,7 @@ def appendAteraPreflightChecks(errors, row, settings, params) {
             "clustering_squidpy or mender"
         )
     }
-    if (AnnotationSettings.isMapFirst(settings)) {
+    if (AnnotationSettings.isMapFirst(settings) && AnnotationPreflight.usesClusteredTables(settings)) {
         if (!params.annotation_hippocampal_resources) {
             errors.add("map_first annotation requires --annotation_hippocampal_resources for ATERA rows (AT-11)")
         }

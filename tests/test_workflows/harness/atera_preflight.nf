@@ -8,11 +8,12 @@
 // The workflow runs the checks inside one map over all rows, so an error in
 // any row aborts the whole run (a mixed samplesheet included).
 
-def check(String id, Map row) {
+def check(String id, Map row, Map overrides = [:]) {
     def value
     try {
-        def settings = rowSampleSettings(row, params)
-        runPreflightChecks(row, settings, params)
+        def runParams = params + overrides
+        def settings = rowSampleSettings(row, runParams)
+        runPreflightChecks(row, settings, runParams)
         value = [
             result: "OK",
             active_platforms: settings.active_platforms,
@@ -160,6 +161,15 @@ workflow {
     )
     // AT-7: Cellpose (DAPI + 18S) and Cellpose-prior tiled ProSeg on ATERA.
     def cellpose = atera + [segmentation_source: "cellpose_proseg"]
+    def mapFirst = cellpose + [clustering_squidpy_mode: "map_first"]
+    ["build_spatialdata", "segment", "enrich"].each { stage ->
+        check("cellpose/map_first_only_${stage}", mapFirst + [only_stage: stage])
+    }
+    check("cellpose/map_first_only_train_cellpose",
+        mapFirst + [only_stage: "train_cellpose"],
+        [cellpose_hitl_training_config: "unused-training.json"])
+    check("cellpose/map_first_only_clustering", mapFirst + [only_stage: "clustering_squidpy"])
+    check("cellpose/map_first_only_mender", mapFirst + [only_stage: "mender", mender_enabled: "true"])
     check("cellpose/default", cellpose)
     check(
         "cellpose/all_mender",
