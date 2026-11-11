@@ -239,6 +239,12 @@ _REFUSALS = {
         "map_first annotation requires --annotation_hippocampal_resources "
         "for ATERA rows"
     ),
+    "cellpose/map_first_only_clustering": (
+        "map_first annotation requires --annotation_hippocampal_resources"
+    ),
+    "cellpose/map_first_only_mender": (
+        "map_first annotation requires --annotation_hippocampal_resources"
+    ),
     "mixed/xenium_native": (
         "segmentation_source=native is not available for XENIUM rows yet; "
         "XENIUM supports: cellpose_proseg"
@@ -448,6 +454,18 @@ def test_global_legacy_mode_warns_only_for_non_atera_rows(tmp_path: Path) -> Non
     assert cases["log/atera_legacy_row"]["warn"] == []
     (warning,) = cases["log/mixed"]["warn"]
     assert warning.startswith("Human legacy clustering"), warning
+
+
+@pytest.mark.nextflow
+def test_early_map_first_atera_stages_need_no_annotation_resources(
+    preflight_cases: dict[str, dict[str, Any]],
+) -> None:
+    """Execute the full preflight, including the annotation library checks."""
+    for stage in ("build_spatialdata", "segment", "enrich", "train_cellpose"):
+        record = preflight_cases[f"cellpose/map_first_only_{stage}"]
+        assert record.get("result") == "OK", record
+        assert record["selected_stages"] == [stage]
+        assert record["clustering_squidpy_mode"] == "map_first"
 
 
 @pytest.mark.nextflow

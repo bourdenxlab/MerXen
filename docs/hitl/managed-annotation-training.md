@@ -170,7 +170,13 @@ weight decay `0.1`, batch size 1 and seed 0; edit the template to change them.
 Empty reviewed crops are recorded but omitted by the current positive-mask
 training path. All-empty training sets are refused.
 
-For training alone, set `only_stage` to `train_cellpose`. Alternatively:
+For training alone, set `only_stage` to `train_cellpose`.
+
+Training and other stages before clustering do not require annotation reference
+resources, even when a shared samplesheet names `map_first`. Atera clustering
+and MENDER still require the hippocampal resource manifest and region settings.
+
+Alternatively, run the trainer directly:
 
 ```bash
 merxen cellpose-hitl-train --config training-template.json \

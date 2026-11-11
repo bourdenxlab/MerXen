@@ -73,6 +73,9 @@ class AnnotationPreflight {
             errors << "${label}: ${AnnotationDefaults.emptySuffixMessage(species)}".toString()
         }
         if (settings.get("active_platforms")?.contains("ATERA")) {
+            if (!usesClusteredTables(settings)) {
+                return
+            }
             def resourcePath = params?.get("annotation_hippocampal_resources")
             if (!resourcePath || !new File(resourcePath.toString()).isFile()) {
                 errors << "${label}: annotation_hippocampal_resources must name an existing resource manifest".toString()
@@ -298,7 +301,8 @@ class AnnotationPreflight {
         }
     }
 
-    private static boolean usesClusteredTables(Map settings) {
+    /** Return whether selected stages produce or consume annotation tables. */
+    static boolean usesClusteredTables(Map settings) {
         return [
             "run_clustering_squidpy",
             "run_mapmycells",
