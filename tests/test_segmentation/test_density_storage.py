@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 from pathlib import Path
 
@@ -13,8 +14,11 @@ from spatialdata.models import Image2DModel
 from spatialdata.transformations import Identity
 
 from merxen.config import AteraTranscriptDensityConfig, EnrichmentConfig
+from merxen.io.points_aggregates import read_root_attrs
+from merxen.io.spatialdata_io import spatialdata_write_lock
 from merxen.segmentation import transcript_density
 from merxen.segmentation.density_storage import (
+    DENSITY_ATTR,
     DENSITY_IMAGE_KEY,
     embed_transcript_density,
     embedded_density_record,
@@ -211,3 +215,83 @@ def test_enrichment_installs_density_when_latest_was_created_before_it(
         embedded_density_record(latest)["fingerprint"]
         == embedded_density_record(source)["fingerprint"]
     )
+
+
+@pytest.mark.parametrize("legacy_binding", [False, True])
+def test_enrichment_reuses_density_after_image_metadata_is_rewritten(
+    density_config: AteraTranscriptDensityConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    legacy_binding: bool,
+) -> None:
+    """A resumed task accepts equivalent metadata and upgrades old bindings."""
+    from merxen.enrichment import enrich
+    from merxen.manual_registration.schema import write_root_attr
+
+    source = density_config.source_zarr_path
+    prepare_embedded_density(density_config)
+    latest = tmp_path / "latest.zarr"
+    shutil.copytree(source, latest)
+    if legacy_binding:
+        binding = dict(read_root_attrs(latest)[DENSITY_ATTR])
+        binding.pop("native_image_fingerprint")
+        binding.pop("binding_sha256")
+        binding["binding_sha256"] = hashlib.sha256(
+            json.dumps(binding, sort_keys=True).encode()
+        ).hexdigest()
+        with spatialdata_write_lock(latest):
+            write_root_attr(latest, DENSITY_ATTR, binding)
+    metadata = latest / "images/morphology_focus/zarr.json"
+    metadata.write_text(json.dumps(json.loads(metadata.read_text()), indent=4))
+    record = embedded_density_record(source)
+    assert (
+        transcript_density._file_tree_identity(metadata.parent)
+        != record["image_fingerprint"]
+    )
+    monkeypatch.setattr(enrich, "_enrich_native_in_place", lambda *args, **kwargs: None)
+    config = EnrichmentConfig(
+        dataset_name="PILOT",
+        platform="ATERA",
+        latest_zarr_path=latest,
+        original_data_path=source,
+        output_dir=tmp_path / "enriched",
+        mask_path=None,
+        nuclei_mask_path=None,
+        segmentation_source="native",
+        transcript_density_source_path=source,
+    )
+    enrich.enrich_single_latest(config)
+    assert embedded_density_record(latest)["fingerprint"] == record["fingerprint"]
+    assert "native_image_fingerprint" in read_root_attrs(latest)[DENSITY_ATTR]
+    # The upgraded binding is portable without the original source directory.
+    shutil.rmtree(source)
+    embed_transcript_density(latest, latest)
+
+
+@pytest.mark.parametrize("change", ["payload", "grid"])
+def test_embedded_density_refuses_changed_native_images(
+    density_config: AteraTranscriptDensityConfig, tmp_path: Path, change: str
+) -> None:
+    """Metadata tolerance must reject different morphology pixels or grids."""
+    source = density_config.source_zarr_path
+    prepare_embedded_density(density_config)
+    latest = tmp_path / "changed.zarr"
+    shutil.copytree(source, latest)
+    image = latest / "images/morphology_focus"
+    if change == "payload":
+        chunk = next(
+            path
+            for path in image.rglob("*")
+            if path.is_file() and path.name != "zarr.json"
+        )
+        chunk.write_bytes(b"changed native payload")
+    else:
+        metadata = image / "zarr.json"
+        content = json.loads(metadata.read_text())
+        scales = content["attributes"]["ome"]["multiscales"][0]["datasets"][0][
+            "coordinateTransformations"
+        ][0]["scale"]
+        scales[-1] *= 2
+        metadata.write_text(json.dumps(content))
+    with pytest.raises(ValueError, match="different native image"):
+        embed_transcript_density(latest, source)

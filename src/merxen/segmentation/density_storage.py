@@ -15,6 +15,7 @@ import zarr
 from merxen.config import AteraTranscriptDensityConfig
 from merxen.io.points_aggregates import read_root_attrs
 from merxen.io.spatialdata_io import spatialdata_write_lock
+from merxen.platforms import platform_spec
 
 DENSITY_ATTR = "merxen_transcript_density"
 DENSITY_IMAGE_KEY = "atera_transcript_density"
@@ -93,12 +94,14 @@ def embed_transcript_density(
         The updated SpatialData path. Existing different density is never replaced.
     """
     from merxen.segmentation.transcript_density import (
+        _native_image_identity,
         image_with_density,
         read_density_record,
     )
     from merxen.viewer_cache.build import build_image_pyramids_in_store
 
     target, density_source = target.resolve(), density_source.resolve()
+    native_image_key = platform_spec("ATERA").native_image_key
     record = read_density_record(density_source)
     with spatialdata_write_lock(target):
         sdata = sd.read_zarr(target, selection=("images",))
@@ -111,6 +114,23 @@ def embed_transcript_density(
                 raise ValueError(
                     "A different density image is already embedded; use a fresh run"
                 )
+            binding = dict(read_root_attrs(target)[DENSITY_ATTR])
+            if "native_image_fingerprint" not in binding:
+                # Upgrade legacy bindings only after image_with_density proved
+                # equivalence to the original image, preserving raster identity.
+                binding["native_image_fingerprint"] = _native_image_identity(
+                    target / "images" / native_image_key
+                )
+                binding["binding_sha256"] = _digest(
+                    {
+                        key: value
+                        for key, value in binding.items()
+                        if key != "binding_sha256"
+                    }
+                )
+                sdata.attrs[DENSITY_ATTR] = binding
+                sdata.write_attrs()
+                installed = True
         else:
             if element.exists():
                 raise ValueError(
@@ -137,6 +157,9 @@ def embed_transcript_density(
                 "image_key": DENSITY_IMAGE_KEY,
                 "record": record,
                 "payload_fingerprint": _payload_identity(element),
+                "native_image_fingerprint": _native_image_identity(
+                    target / "images" / native_image_key
+                ),
             }
             binding["binding_sha256"] = _digest(binding)
             sdata.attrs[DENSITY_ATTR] = binding
