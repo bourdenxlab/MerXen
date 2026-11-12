@@ -5082,9 +5082,10 @@ workflow {
                 enrichConfig.segmentation_source = rowSource
                 enrichConfig.mask_path = "enrich_input_mask.npy"
                 if (rowSource == 'cellpose_comparison') {
-                    enrichConfig.stock_cellpose_mask_path = publishedDatasetPath(
+                    enrichConfig.stock_cellpose_mask_path = file(publishedDatasetPath(
                         params.outdir, pairId, platform,
-                        'segmentation/stock_cellpose/cellpose_masks_tiled.npy').toString()
+                        'segmentation/stock_cellpose/cellpose_masks_tiled.npy'))
+                        .toAbsolutePath().toString()
                 }
             }
 
