@@ -13,6 +13,12 @@ https://github.com/acycliq/pciSeq_3d, commit
 notice are reproduced in `licenses/pciSeq-MIT.txt`. Installed dependencies
 retain their own licenses and notices.
 
+The optional disk-backed adapters in `merxen.pciseq_memory` and
+`merxen.pciseq_spot_batches` adapt pciSeq's MIT-licensed update routines while
+preserving their arithmetic and ordering. Those routines are copyright
+2026 Dimitris Nicoloutsopoulos; the same notice in `licenses/pciSeq-MIT.txt`
+also applies to these adaptations.
+
 ## Zeiss CZI reader runtime
 
 The optional CZI reader runtime (`envs/environment.czi.yml`, `requirements/requirements.czi.lock`)

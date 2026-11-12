@@ -202,6 +202,9 @@ per acquisition.
 | `pciseq_voxel_size_um` | `[1,1,1]` | 3D voxel dimensions, in x/y/z order. |
 | `pciseq_max_iter` | `1000` | Model iteration limit. |
 | `pciseq_n_neighbors` | `9` | Candidate parent count, capped at the available cells. |
+| `pciseq_memory_mode` | `standard` | `standard` or `batched`. **`batched` is experimental and not validated** (see [Large samples and memory](#large-samples-and-memory)): it runs the pinned model with disk-backed tensors, bounded independent calculations and streamed exports, in the separate `PCISEQ_COMPUTE_BATCHED` process. |
+| `pciseq_cell_batch_size` | `128` | Positive integer. Cells per independent tensor calculation in batched mode; does not split the global model. Unused in standard mode. |
+| `pciseq_spot_batch_size` | `20000` | Positive integer. Transcripts per independent calculation/export in batched mode. Unused in standard mode. |
 | `pciseq_options` | `{}` | Additional upstream model options, such as `Inefficiency`. |
 | `pciseq_write_spatialdata_table` | `true` | Publish the QC table, all-cell annotations, transcript assignments and viewer source under MerXen's store lock. |
 | `pciseq_conda` | `envs/environment.pciseq.yml` | Dedicated compute environment. |
@@ -214,6 +217,71 @@ for array/dictionary settings.
 
 Additional atlas, donor, taxonomy, and integrity settings are listed in
 [reference preparation](pciseq-references.md#parameters).
+
+### Large samples and memory
+
+**`batched` is experimental and not validated for production use.** The only
+large run so far (MS2) did not converge within six days and was stopped; no
+batched result has been used for analysis. Use the default `standard` mode
+unless you are working on this mode.
+
+The default `standard` mode is unchanged: it runs `PCISEQ_COMPUTE`, whose
+script text and cached tasks are the same as before the batched mode existed,
+and finalizes in memory. `pciseq_memory_mode=batched` runs the separate
+`PCISEQ_COMPUTE_BATCHED` process instead, and only results it produces (their
+compute manifest records `execution.memory_mode = "batched"`) are finalized and
+published with the streamed, disk-backed code below. The preflight refuses a
+memory mode other than `standard` or `batched`, and batch sizes that are not
+positive integers, before any pciSeq task starts.
+
+The optional `batched` mode preserves every prepared transcript, gene, class,
+candidate neighbor, model parameter and convergence threshold. It fits one
+global model. Large persistent cell tensors and transcript diagnostic arrays
+use task-local memory-mapped files; independent cell and transcript operations
+use bounded slices. The pinned upstream global eta/theta contractions remain
+unchanged. Ordered count and Gaussian reductions retain individual additions
+in the original spot/neighbor order; updates commit only after a complete pass.
+Initial uniform tensors use read-only broadcasts with the original dtypes.
+Mapped tensors also retain the upstream physical axis order and strides:
+equal tensor values in a different layout can select a different NumPy
+summation kernel and change the final probabilities.
+
+The adapter requires the exact pinned pciSeq source revision and records its
+source fingerprints, dependency versions, batch sizes and convergence history.
+Optional dense `elbo_per_step` diagnostics are rejected in this mode. Raw output
+formats, probability rounding, canonical identifiers and viewer sources are
+unchanged. Transcript exports, finalization and the viewer's transcript index
+are streamed to avoid rebuilding the entire JSON array as Python dictionaries.
+
+This trades substantial temporary disk space and I/O for lower RAM use. The
+MS2 run needed on the order of 1400 GiB of free storage for cell tensors,
+transcript buffers and output files. Nothing checks free space automatically,
+so confirm it before launching, and place the Nextflow work directory on
+healthy storage. Successful compute tasks remove
+their scratch files; a force-killed task may leave its owned
+`.pciseq-batched-*` directory for later cleanup. A Nextflow local executor's
+`memory` request is a scheduling reservation, not an operating-system memory
+limit; an external workload scope can enforce a limit and retain OOM records.
+
+For a failed fit whose preparation is still available, the standalone entry
+point below runs only compute and finalization, using the original preparation
+configuration. This avoids rebuilding masks or references and preserves the
+frozen model inputs:
+
+```bash
+nextflow run workflows/pciseq_resume.nf -profile conda \
+    --pciseq_prepared_dir /path/to/task/pciseq_prepared \
+    --pciseq_prepared_config /path/to/task/pciseq_config.json \
+    --pciseq_memory_mode batched \
+    --outdir results
+```
+
+On a Linux workstation with a systemd user manager,
+`scripts/run_pciseq_monitored.py` can enforce the total memory/CPU budget around
+that command. Its sampler runs outside the workload's memory group and records
+kernel memory peaks/events, terminal status, logs and the unit journal. It
+requires the requested memory budget plus 32 GiB of available host RAM, rejects
+existing units, and never changes other running workloads.
 
 ## Outputs and interpretation
 
@@ -241,8 +309,12 @@ Upstream's returned class probabilities are thresholded and truncated to three
 decimals. Missing classes are not measured zeros, and these summaries must not
 be treated as complete posterior distributions. `Zero` is a model class, not a
 biological cell type. The public `fit` API returns normally when the iteration
-limit is reached and does not expose convergence status; the computation
-manifest records that status as unavailable. Review upstream iteration logs
+limit is reached and does not expose convergence status; in standard mode the
+computation manifest records that status as unavailable
+(`convergence_status: not_exposed_by_fit`, `has_converged: null`). The
+experimental batched mode records `has_converged` from the pinned model
+(`convergence_status: exposed_by_pinned_model`) with its iteration history
+under `execution`. Review upstream iteration logs
 and assignment quality before using results for analysis.
 
 ## SpatialData and the napari viewer
@@ -296,7 +368,7 @@ lock and registers the viewer source only after its elements are written.
 ## Runtime and direct CLI
 
 `PCISEQ_REFERENCE`, `PCISEQ_PREPARE`, and `PCISEQ_FINALIZE` run in MerXen's standard environment.
-`PCISEQ_COMPUTE` uses the pinned upstream commit
+`PCISEQ_COMPUTE` (and the experimental `PCISEQ_COMPUTE_BATCHED`) uses the pinned upstream commit
 `5e2c0fd1841f8a4022a2fa341ece965687e343dd` in a separate runtime. The stage runs
 without a viewer or upstream SpatialData exports. Subsequent clustering
 consumers wait until all pciSeq tasks for the pair complete.

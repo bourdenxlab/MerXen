@@ -642,7 +642,9 @@ def test_prepare_releases_store_lock_after_input_failure(
         fcntl.flock(probe, fcntl.LOCK_UN)
 
 
-def _computed(tmp_path: Path, *, empty: bool = False) -> Path:
+def _computed(
+    tmp_path: Path, *, empty: bool = False, memory_mode: str = "standard"
+) -> Path:
     result = tmp_path / "computed"
     result.mkdir()
     cells = [
@@ -660,7 +662,11 @@ def _computed(tmp_path: Path, *, empty: bool = False) -> Path:
     ]
     (result / "cell_data.json").write_text(json.dumps(cells))
     (result / "gene_data.json").write_text(json.dumps(spots))
-    (result / "compute_manifest.json").write_text(json.dumps({"has_converged": None}))
+    compute: dict[str, Any] = {"has_converged": None}
+    if memory_mode == "batched":
+        # As written by run_pciseq_compute: only batched results record a mode.
+        compute["execution"] = {"memory_mode": "batched"}
+    (result / "compute_manifest.json").write_text(json.dumps(compute))
     return result
 
 
@@ -886,9 +892,39 @@ def test_reference_validation_rejects_duplicate_classes(tmp_path: Path) -> None:
         prepare_pciseq(config, tmp_path / "prepared")
 
 
-def test_finalize_adds_separate_table_with_aligned_region(
+def test_streamed_and_standard_finalization_write_identical_exports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The batched streaming finalization reproduces main's exports exactly."""
+    config, prepared = _prepare(tmp_path, monkeypatch)
+    outputs = {}
+    for mode in ("standard", "batched"):
+        root = tmp_path / mode
+        root.mkdir()
+        computed = _computed(root, memory_mode=mode)
+        outputs[mode] = finalize_pciseq(config, prepared, computed, root / "final")
+    for name in ("spot_assignments", "cell_assignments", "excluded_cells"):
+        assert (
+            outputs["standard"][name].read_bytes()
+            == outputs["batched"][name].read_bytes()
+        )
+    summaries = [
+        json.loads(outputs[mode]["summary"].read_text())
+        for mode in ("standard", "batched")
+    ]
+    for summary in summaries:
+        summary.pop("compute")
+    assert summaries[0] == summaries[1]
+
+
+@pytest.mark.parametrize("memory_mode", ["standard", "batched"])
+def test_finalize_adds_separate_table_with_aligned_region(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, memory_mode: str
+) -> None:
+    """Standard results hand the in-memory spot frame to the viewer, as on main.
+
+    Only batched results are streamed to CSV and indexed from disk by the viewer.
+    """
     config, prepared = _prepare(tmp_path, monkeypatch)
     config.write_spatialdata_table = True
     source = ad.read_h5ad(prepared / "source.h5ad")
@@ -906,12 +942,21 @@ def test_finalize_adds_separate_table_with_aligned_region(
         return {"embedding_table": "table_proseg_pciseq"}
 
     monkeypatch.setattr("merxen.analysis.pciseq_viewer.publish_pciseq_viewer", publish)
-    paths = finalize_pciseq(config, prepared, _computed(tmp_path), tmp_path / "final")
+    paths = finalize_pciseq(
+        config,
+        prepared,
+        _computed(tmp_path, memory_mode=memory_mode),
+        tmp_path / "final",
+    )
     assert captured["config"] is config
     assert captured["annotated"].uns["spatialdata_attrs"]["region"] == aligned
     assert captured["annotated"].obs.pciseq_cell_type.tolist() == ["type_b"]
     assert captured["cell_assignments"].instance_id.is_unique
-    assert captured["spot_assignments"].transcript_id.is_unique
+    if memory_mode == "standard":
+        assert captured["spot_assignments"].transcript_id.is_unique
+    else:
+        assert captured["spot_assignments"] is None
+    assert pd.read_csv(paths["spot_assignments"]).transcript_id.is_unique
     summary = json.loads(paths["summary"].read_text())
     assert summary["spatialdata_table_key"] == "table_proseg_pciseq"
 

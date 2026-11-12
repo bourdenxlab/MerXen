@@ -122,6 +122,44 @@ process PCISEQ_COMPUTE {
     """
 }
 
+// Experimental disk-backed fit (pciseq_memory_mode = "batched"). It is a
+// separate process so the PCISEQ_COMPUTE script text, and with it the cache of
+// every completed default-mode task, stays unchanged.
+process PCISEQ_COMPUTE_BATCHED {
+    tag "${pair_id}:${platform}:${segmentation}"
+
+    input:
+    tuple val(pair_id), val(segmentation), val(platform),
+        path(config), path(source_h5ad), path(prepared_dir)
+
+    output:
+    tuple val(pair_id), val(segmentation), val(platform),
+        path(config), path(source_h5ad), path(prepared_dir), path("pciseq_computed")
+
+    script:
+    """
+    set -euo pipefail
+    export CUDA_VISIBLE_DEVICES=""
+    export PYTHONPATH="${projectDir}/../src:\${PYTHONPATH:-}"
+    export OMP_NUM_THREADS="${task.cpus}"
+    export OPENBLAS_NUM_THREADS="${task.cpus}"
+    export MKL_NUM_THREADS="${task.cpus}"
+    export NUMBA_NUM_THREADS="${task.cpus}"
+    export LOKY_MAX_CPU_COUNT="${task.cpus}"
+    python -m merxen.pciseq_compute \
+        --prepared-dir "${prepared_dir}" \
+        --output-dir pciseq_computed \
+        --memory-mode batched \
+        --cell-batch-size '${params.pciseq_cell_batch_size}' \
+        --spot-batch-size '${params.pciseq_spot_batch_size}'
+    """
+
+    stub:
+    """
+    mkdir -p pciseq_computed
+    """
+}
+
 process PCISEQ_FINALIZE {
     tag "${pair_id}:${platform}:${segmentation}"
 

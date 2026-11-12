@@ -54,6 +54,8 @@
   "workflows/modules/native_segmentation.nf::NATIVE_LATEST::script": "93d3469121fbee784eda1b7477e111976d33718b357003c6d84a941285e87703",
   "workflows/modules/pciseq.nf::PCISEQ_COMPUTE::script": "3e661dbad73f638504ec360ed4f6aab78db3e508d6c962f2c1ac508a2de869c8",
   "workflows/modules/pciseq.nf::PCISEQ_COMPUTE::stub": "15d31ad0ae2def83de64a02cb63f80000bd8f89cfea2d5934ec6418efe2c0b84",
+  "workflows/modules/pciseq.nf::PCISEQ_COMPUTE_BATCHED::script": "1a1f639ecfdc5045085a191a20151acabaa3a18ea12f7789c7f63bc313d1c687",
+  "workflows/modules/pciseq.nf::PCISEQ_COMPUTE_BATCHED::stub": "15d31ad0ae2def83de64a02cb63f80000bd8f89cfea2d5934ec6418efe2c0b84",
   "workflows/modules/pciseq.nf::PCISEQ_FINALIZE::script": "5fd5ac2d14a4cb32051a68e87b9166e47f71c1933073ca48fbbb1ec9c60cb420",
   "workflows/modules/pciseq.nf::PCISEQ_FINALIZE::stub": "1e6e7be59301290e4e7657ae5279e4626031d2d2ae99039b7c5ca05f604fbd4b",
   "workflows/modules/pciseq.nf::PCISEQ_PREPARE::script": "5ef7d710c87c66c7efa7f0411faf86048125aa90a1288a4c1730da87aea82921",

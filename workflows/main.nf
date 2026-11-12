@@ -32,6 +32,7 @@ include {
     PCISEQ_REFERENCE;
     PCISEQ_PREPARE;
     PCISEQ_COMPUTE;
+    PCISEQ_COMPUTE_BATCHED;
     PCISEQ_FINALIZE
 } from "./modules/pciseq"
 include { MAPMYCELLS } from "./modules/mapmycells"
@@ -2478,6 +2479,7 @@ def appendPciseqPreflightChecks(errors, row, settings, params) {
     if (!(params.pciseq_geometry_mode in ["project_2d", "labels_3d"])) {
         errors << "pciseq_geometry_mode must be project_2d or labels_3d"
     }
+    errors.addAll(PciseqSettings.errors(params))
     if (params.pciseq_geometry_mode == "labels_3d") {
         appendPreflightFileCheck(errors, params.pciseq_labels_path, "PCISEQ 3D labels")
     }
@@ -6500,7 +6502,13 @@ workflow {
                 )
         }
     pciseq_prepared_ch = PCISEQ_PREPARE(pciseq_inputs_ch)
-    pciseq_computed_ch = PCISEQ_COMPUTE(pciseq_prepared_ch)
+    // The experimental batched fit is a separate process, so default runs keep
+    // the PCISEQ_COMPUTE script text and their cached tasks.
+    if (PciseqSettings.batched(params)) {
+        pciseq_computed_ch = PCISEQ_COMPUTE_BATCHED(pciseq_prepared_ch)
+    } else {
+        pciseq_computed_ch = PCISEQ_COMPUTE(pciseq_prepared_ch)
+    }
     pciseq_results_ch = PCISEQ_FINALIZE(pciseq_computed_ch)
 
     pciseq_completion_expectations_ch = sample_rows_ch

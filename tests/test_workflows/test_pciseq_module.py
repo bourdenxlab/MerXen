@@ -413,6 +413,48 @@ def test_pciseq_standalone_preflight_reports_missing_native_shape(
 
 
 @pytest.mark.nextflow
+def test_pciseq_preflight_rejects_invalid_memory_settings(tmp_path: Path) -> None:
+    """A bad memory mode or batch size fails before reference or preparation."""
+    reference = tmp_path / "reference.csv"
+    reference.write_text("gene,type_a\nG1,1\n")
+    zarr = tmp_path / "input.zarr"
+    _published_input(tmp_path / "results", "PCI_MEM", "XENIUM", "proseg_mask", zarr)
+    _write_samplesheet(
+        tmp_path / "samplesheet.csv",
+        [
+            {
+                "pair_id": "PCI_MEM",
+                "analysis_mode": "xenium",
+                "analysis_segmentation": "cellpose",
+                "only_stage": "pciseq",
+                "pciseq_enabled": "true",
+                "pciseq_region_mode": "whole_brain",
+                "xenium_spatialdata_path": str(zarr),
+            }
+        ],
+    )
+
+    result = _run_nextflow(
+        tmp_path,
+        "--pciseq_reference_path",
+        str(reference),
+        "--pciseq_memory_mode",
+        "Batched",
+        "--pciseq_spot_batch_size",
+        "0",
+        "--pciseq_cell_batch_size",
+        "2e4",
+    )
+
+    assert result.returncode != 0
+    log = (tmp_path / ".nextflow.log").read_text()
+    assert "pciseq_memory_mode must be standard or batched, not 'Batched'" in log
+    assert "pciseq_spot_batch_size must be a positive integer" in log
+    assert "pciseq_cell_batch_size must be a positive integer" in log
+    assert not list((tmp_path / "work").glob("*/*"))
+
+
+@pytest.mark.nextflow
 def test_pciseq_disabled_only_stage_explains_how_to_enable(tmp_path: Path) -> None:
     """Selecting an inactive optional stage fails before any tasks start."""
     _write_samplesheet(
