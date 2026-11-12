@@ -121,6 +121,54 @@ def test_compute_calls_public_api_and_preserves_reported_results(
     assert json.loads((output / "gene_data.json").read_text())[1]["neighbour"] == 0
 
 
+# The compute manifest keys of origin/main. A standard-mode manifest is copied
+# into finalized outputs and fingerprinted by the viewer, so it must not change.
+_MAIN_MANIFEST_KEYS = [
+    "prepared_manifest_sha256",
+    "upstream_repository",
+    "expected_upstream_commit",
+    "upstream_version",
+    "upstream_commit",
+    "geometry_mode",
+    "cell_count",
+    "spot_count",
+    "requested_options",
+    "resolved_options",
+    "upstream_options",
+    "class_token_map",
+    "ignored_cell_type_weight_names",
+    "has_converged",
+    "convergence_status",
+    "probability_semantics",
+]
+
+
+def test_standard_manifest_matches_main_and_ignores_batch_sizes(
+    prepared_input: Path, fake_upstream: SimpleNamespace, tmp_path: Path
+) -> None:
+    """Standard mode writes main's keys and never reads the batched settings."""
+    output = tmp_path / "computed"
+    default = json.loads(run_pciseq_compute(prepared_input, output).read_text())
+    explicit = json.loads(
+        run_pciseq_compute(
+            prepared_input,
+            output,
+            memory_mode="standard",
+            cell_batch_size=0,
+            spot_batch_size=-1,
+        ).read_text()
+    )
+    assert list(default) == _MAIN_MANIFEST_KEYS
+    assert explicit == default
+    with pytest.raises(ValueError, match="batch sizes must be positive"):
+        run_pciseq_compute(
+            prepared_input,
+            tmp_path / "batched",
+            memory_mode="batched",
+            spot_batch_size=0,
+        )
+
+
 @pytest.mark.parametrize(
     ("column", "value", "message"),
     [

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import shutil
@@ -13,8 +14,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.nextflow
-def test_prepared_resume_skips_reference_and_mask_preparation(tmp_path: Path) -> None:
+def _run_resume(tmp_path: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     if shutil.which("nextflow") is None:
         pytest.skip("Nextflow is unavailable")
     prepared = tmp_path / "prepared"
@@ -39,7 +39,7 @@ def test_prepared_resume_skips_reference_and_mask_preparation(tmp_path: Path) ->
     )
     limits = tmp_path / "limits.config"
     limits.write_text("process.resourceLimits = [cpus: 1, memory: 1.GB]\n")
-    result = subprocess.run(
+    return subprocess.run(
         [
             "nextflow",
             "run",
@@ -56,6 +56,7 @@ def test_prepared_resume_skips_reference_and_mask_preparation(tmp_path: Path) ->
             str(config),
             "--outdir",
             str(tmp_path / "results"),
+            *arguments,
         ],
         cwd=tmp_path,
         env={**os.environ, "MERXEN_DWIGHT_SITE_CONFIG": "none"},
@@ -64,17 +65,55 @@ def test_prepared_resume_skips_reference_and_mask_preparation(tmp_path: Path) ->
         check=False,
         timeout=120,
     )
+
+
+@pytest.mark.nextflow
+@pytest.mark.parametrize(
+    ("arguments", "compute"),
+    [
+        ((), "PCISEQ_COMPUTE"),
+        (("--pciseq_memory_mode", "batched"), "PCISEQ_COMPUTE_BATCHED"),
+    ],
+)
+def test_prepared_resume_skips_reference_and_mask_preparation(
+    tmp_path: Path, arguments: tuple[str, ...], compute: str
+) -> None:
+    """Only the fit and publication run; the memory mode picks the fit process.
+
+    The default keeps PCISEQ_COMPUTE, whose script text (and so every cached
+    task) is unchanged; the experimental batched mode has its own process.
+    """
+    result = _run_resume(tmp_path, *arguments)
     assert result.returncode == 0, result.stdout + result.stderr
-    submitted = [
-        line for line in result.stdout.splitlines() if "Submitted process" in line
-    ]
-    assert len(submitted) == 2
-    assert any("PCISEQ_COMPUTE" in line for line in submitted)
-    assert any("PCISEQ_FINALIZE" in line for line in submitted)
-    assert not any(
-        "PCISEQ_REFERENCE" in line or "PCISEQ_PREPARE" in line for line in submitted
-    )
+    # The trace lists every task the run executed. Console wording differs
+    # between Nextflow releases, so it is not used to count processes.
+    trace = tmp_path / "results/nextflow/trace.tsv"
+    with trace.open(newline="") as handle:
+        executed = sorted(
+            row["process"] for row in csv.DictReader(handle, delimiter="\t")
+        )
+    assert executed == sorted([compute, "PCISEQ_FINALIZE"])
     assert (
         tmp_path
         / "results/sample/proseg_hybrid/pciseq/pciseq_out/merscope/stub_manifest.json"
     ).is_file()
+
+
+@pytest.mark.nextflow
+def test_prepared_resume_rejects_invalid_memory_settings(tmp_path: Path) -> None:
+    """Mode and batch sizes are refused before the compute task starts."""
+    result = _run_resume(
+        tmp_path,
+        "--pciseq_memory_mode",
+        "Batched",
+        "--pciseq_spot_batch_size",
+        "0",
+        "--pciseq_cell_batch_size",
+        "2e4",
+    )
+    assert result.returncode != 0
+    output = result.stdout + result.stderr
+    assert "pciseq_memory_mode must be standard or batched" in output
+    assert "pciseq_spot_batch_size must be a positive integer" in output
+    assert "pciseq_cell_batch_size must be a positive integer" in output
+    assert not list((tmp_path / "work").glob("*/*"))

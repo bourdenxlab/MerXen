@@ -287,7 +287,7 @@ def run_pciseq_compute(
     """
     if memory_mode not in {"standard", "batched"}:
         raise ValueError("pciSeq memory_mode must be standard or batched")
-    if min(cell_batch_size, spot_batch_size) < 1:
+    if memory_mode == "batched" and min(cell_batch_size, spot_batch_size) < 1:
         raise ValueError("pciSeq batch sizes must be positive")
     manifest, spots, reference, planes = _load_prepared(prepared_dir)
     count, options = _validate_prepared(manifest, spots, reference, planes)
@@ -370,19 +370,20 @@ def run_pciseq_compute(
         "upstream_options": upstream_options,
         "class_token_map": token_map,
         "ignored_cell_type_weight_names": ignored_weights,
-        "execution": execution,
-        "has_converged": execution.get("has_converged"),
-        "convergence_status": (
-            "exposed_by_pinned_model"
-            if memory_mode == "batched"
-            else "not_exposed_by_fit"
-        ),
+        "has_converged": None,
+        "convergence_status": "not_exposed_by_fit",
         "probability_semantics": (
             "Upstream reported summaries: classes with probability >0.001 retained; "
             "probabilities truncated to three decimals. Missing entries are not "
             "measured zeros. fit returns normally when max_iter is exhausted."
         ),
     }
+    if memory_mode == "batched":
+        # Only the experimental mode records its execution; standard manifests
+        # keep main's keys, so their published fingerprints do not change.
+        metadata["has_converged"] = execution.get("has_converged")
+        metadata["convergence_status"] = "exposed_by_pinned_model"
+        metadata["execution"] = execution
     path = output_dir / "compute_manifest.json"
     path.write_text(json.dumps(metadata, indent=2, allow_nan=False) + "\n")
     return path

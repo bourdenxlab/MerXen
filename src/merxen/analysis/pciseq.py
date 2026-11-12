@@ -1086,28 +1086,55 @@ def finalize_pciseq(
             raise ValueError(
                 "Computed pciSeq results belong to different prepared inputs"
             )
-    from merxen.analysis.pciseq_streaming import stream_spot_assignments
-    from merxen.pciseq_records import iter_json_frames
+    # Only results of the experimental batched fit are streamed; standard
+    # results keep the in-memory finalization and viewer publication of main.
+    streamed = compute.get("execution", {}).get("memory_mode") == "batched"
+    spot_path = output_dir / "spot_assignments.csv"
+    spot_assignments: pd.DataFrame | None = None
+    if streamed:
+        from merxen.analysis.pciseq_streaming import stream_spot_assignments
+        from merxen.pciseq_records import iter_json_frames
 
-    cell_map = _read_cell_map(prepared_dir)
-    excluded = _read_exclusions(prepared_dir, metadata, cell_map)
-    # Gene-count diagnostics in raw cell records can be large; only reported
-    # class summaries are needed here. The original raw file is copied intact.
-    cell_frames = []
-    for frame in iter_json_frames(computed_dir / "cell_data.json"):
-        if not {"Cell_Num", "ClassName", "Prob"}.issubset(frame):
-            raise ValueError("pciSeq cell output lacks required columns")
-        cell_frames.append(frame[["Cell_Num", "ClassName", "Prob"]])
-    cells = pd.concat(cell_frames, ignore_index=True) if cell_frames else pd.DataFrame()
+        cell_map = _read_cell_map(prepared_dir)
+        model_spots = int(metadata["spot_count"])
+        excluded = _read_exclusions(prepared_dir, metadata, cell_map)
+        # Gene-count diagnostics in raw cell records can be large; only reported
+        # class summaries are needed here. The original raw file is copied intact.
+        cell_frames = []
+        for frame in iter_json_frames(computed_dir / "cell_data.json"):
+            if not {"Cell_Num", "ClassName", "Prob"}.issubset(frame):
+                raise ValueError("pciSeq cell output lacks required columns")
+            cell_frames.append(frame[["Cell_Num", "ClassName", "Prob"]])
+        cells = (
+            pd.concat(cell_frames, ignore_index=True) if cell_frames else pd.DataFrame()
+        )
+    else:
+        cell_map, spot_map = _read_id_maps(prepared_dir)
+        model_spots = len(spot_map)
+        excluded = _read_exclusions(prepared_dir, metadata, cell_map)
+        cells = pd.DataFrame(json.loads((computed_dir / "cell_data.json").read_text()))
+        genes = pd.DataFrame(json.loads((computed_dir / "gene_data.json").read_text()))
     classes = [*metadata["reference_classes"], "Zero"]
     assignments, probabilities = _summarize_cells(cells, cell_map, classes)
     assignments, probabilities = _include_excluded_cells(
         assignments, probabilities, excluded
     )
-    spot_path = output_dir / "spot_assignments.csv"
-    stream_spot_assignments(
-        prepared_dir, computed_dir, spot_path, cell_map, metadata["spot_count"]
-    )
+    if streamed:
+        stream_spot_assignments(
+            prepared_dir, computed_dir, spot_path, cell_map, metadata["spot_count"]
+        )
+    else:
+        spot_assignments = _summarize_spots(genes, spot_map, cell_map)
+        prepared_genes = pd.read_csv(
+            prepared_dir / "spots.csv", usecols=["gene_name"], dtype={"gene_name": str}
+        )["gene_name"]
+        reported_genes = genes.set_index("spot_id")["gene_name"].reindex(
+            np.arange(len(prepared_genes))
+        )
+        if not np.array_equal(prepared_genes.to_numpy(), reported_genes.to_numpy()):
+            raise ValueError(
+                "pciSeq output changed the prepared transcript gene mapping"
+            )
     annotated = ad.read_h5ad(prepared_dir / "source.h5ad")
     ids = _table_ids(annotated)
     positions = pd.Index(assignments.instance_id).get_indexer(ids)
@@ -1138,6 +1165,8 @@ def finalize_pciseq(
     annotated.write_h5ad(annotated_path)
     cell_path = output_dir / "cell_assignments.csv"
     assignments.to_csv(cell_path, index=False)
+    if spot_assignments is not None:
+        spot_assignments.to_csv(spot_path, index=False)
     for filename in ("cell_data.json", "gene_data.json", "compute_manifest.json"):
         shutil.copy2(computed_dir / filename, output_dir / filename)
     for filename in ("manifest.json", "cell_id_map.csv", "spot_id_map.csv"):
@@ -1156,7 +1185,7 @@ def finalize_pciseq(
         "segmentation": config.segmentation,
         "annotated_cells": annotated.n_obs,
         "model_cells": len(cell_map),
-        "model_spots": metadata["spot_count"],
+        "model_spots": model_spots,
         "excluded_cells": len(excluded),
         "excluded_annotated_cells": int(
             annotated.obs.pciseq_status.eq("excluded_overlap").sum()
@@ -1171,6 +1200,7 @@ def finalize_pciseq(
             config,
             output_dir,
             cell_assignments=assignments,
+            spot_assignments=spot_assignments,
             annotated=annotated,
         )
         summary["spatialdata_table_key"] = summary["viewer_source"]["embedding_table"]

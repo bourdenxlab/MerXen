@@ -3,7 +3,7 @@
 // Resume a frozen preparation without rebuilding masks or reference profiles.
 nextflow.enable.dsl = 2
 
-include { PCISEQ_COMPUTE; PCISEQ_FINALIZE } from './modules/pciseq'
+include { PCISEQ_COMPUTE; PCISEQ_COMPUTE_BATCHED; PCISEQ_FINALIZE } from './modules/pciseq'
 
 params.pciseq_prepared_dir = null
 params.pciseq_prepared_config = null
@@ -11,6 +11,10 @@ params.pciseq_prepared_config = null
 workflow {
     if (!params.pciseq_prepared_dir || !params.pciseq_prepared_config) {
         error "Provide --pciseq_prepared_dir and --pciseq_prepared_config"
+    }
+    def settingErrors = PciseqSettings.errors(params)
+    if (settingErrors) {
+        error settingErrors.join("\n")
     }
     def prepared = file(params.pciseq_prepared_dir, checkIfExists: true)
     def configFile = file(params.pciseq_prepared_config, checkIfExists: true)
@@ -41,6 +45,10 @@ workflow {
         source,
         prepared,
     ))
-    PCISEQ_COMPUTE(prepared_ch)
-    PCISEQ_FINALIZE(PCISEQ_COMPUTE.out)
+    if (PciseqSettings.batched(params)) {
+        computed_ch = PCISEQ_COMPUTE_BATCHED(prepared_ch)
+    } else {
+        computed_ch = PCISEQ_COMPUTE(prepared_ch)
+    }
+    PCISEQ_FINALIZE(computed_ch)
 }

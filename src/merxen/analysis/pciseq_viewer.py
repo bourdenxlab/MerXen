@@ -8,6 +8,7 @@ import logging
 import os
 import shutil
 import uuid
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,12 +46,23 @@ _CHUNK_ROWS = 500_000
 
 @dataclass(frozen=True)
 class _SpotIndex:
-    directory: Path
+    """Sorted modeled transcript IDs with their assigned cells and gene codes.
+
+    Standard results hold the arrays in memory (``loaded``), as on main; results
+    of the experimental batched fit keep them as files in ``directory``.
+    """
+
+    directory: Path | None
     count: int
     genes: tuple[str, ...]
+    loaded: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
 
-    def arrays(self) -> tuple[np.memmap, np.memmap, np.memmap]:
+    def arrays(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Open contiguous arrays without embedding their bytes in Dask tasks."""
+        if self.loaded is not None:
+            return self.loaded
+        if self.directory is None:
+            raise ValueError("Spot index has neither loaded arrays nor a directory")
         ids, assignments, genes = (
             np.memmap(self.directory / name, mode="r", dtype=dtype, shape=(self.count,))
             for name, dtype in [
@@ -119,9 +131,62 @@ def _matches(
     return positions, matched
 
 
+def _spot_index_in_memory(path: Path, frame: pd.DataFrame | None) -> _SpotIndex:
+    """Build the in-memory index of standard results (main's implementation)."""
+    columns = ["transcript_id", "instance_id", "gene_name"]
+    if frame is None:
+        chunks = pd.read_csv(
+            path,
+            usecols=columns,
+            dtype={column: "string" for column in columns},
+            keep_default_na=False,
+            na_values={"instance_id": [""]},
+            chunksize=_CHUNK_ROWS,
+        )
+    else:
+        if not set(columns).issubset(frame):
+            raise ValueError("Spot assignments lack exact transcript/cell IDs or genes")
+        chunks = (
+            frame.iloc[start : start + _CHUNK_ROWS][columns]
+            for start in range(0, len(frame), _CHUNK_ROWS)
+        )
+    ids, assignments, gene_codes = [], [], []
+    genes: dict[str, int] = {}
+    for chunk in chunks:
+        transcript_ids, _ = _ids(chunk.transcript_id, "spot assignment transcript_id")
+        cell_ids, _ = _ids(
+            chunk.instance_id, "spot assignment instance_id", nullable=True
+        )
+        if chunk.gene_name.isna().any() or chunk.gene_name.eq("").any():
+            raise ValueError("Modeled transcripts require gene names")
+        names = chunk.gene_name.astype(str)
+        for name in names.unique():
+            if name not in genes:
+                genes[name] = len(genes)
+        ids.append(transcript_ids)
+        assignments.append(cell_ids)
+        gene_codes.append(names.map(genes).to_numpy(dtype=np.uint32))
+    if not ids:
+        raise ValueError("pciSeq viewer publication requires modeled transcripts")
+    transcript_ids = np.concatenate(ids)
+    cell_ids = np.concatenate(assignments)
+    codes = np.concatenate(gene_codes)
+    order = np.argsort(transcript_ids)
+    transcript_ids = transcript_ids[order]
+    if len(transcript_ids) > 1 and np.any(transcript_ids[1:] == transcript_ids[:-1]):
+        raise ValueError("Spot assignments contain duplicate transcript identifiers")
+    return _SpotIndex(
+        None,
+        len(transcript_ids),
+        tuple(genes),
+        loaded=(transcript_ids, cell_ids[order], codes[order]),
+    )
+
+
 def _spot_index(
     path: Path, frame: pd.DataFrame | None, directory: Path, count: int
 ) -> _SpotIndex:
+    """Build the disk-backed index of batched results without full-size copies."""
     columns = ["transcript_id", "instance_id", "gene_name"]
     if frame is None:
         chunks = pd.read_csv(
@@ -196,6 +261,8 @@ def _spot_index(
 
 def _validate_native_ids(native: Any, index: _SpotIndex) -> int:
     """Check exact native uniqueness and modeled coverage one partition at a time."""
+    if index.directory is None:
+        raise ValueError("Native ID validation requires a disk-backed spot index")
     path = index.directory / "native_ids"
     count = 0
     with path.open("wb") as stream:
@@ -229,6 +296,8 @@ def _join_partition(
     positions, matched = _matches(transcript_ids, native_ids)
     selected = positions[matched]
     names = np.asarray(index.genes, dtype=object)[gene_codes[selected]]
+    # Prepared gene names are stripped (pciseq.prepare_pciseq), so the native
+    # names are stripped for the comparison only; the points keep them as read.
     if not np.array_equal(
         result.loc[matched, gene_column].astype(str).str.strip().to_numpy(), names
     ):
@@ -336,7 +405,11 @@ def _write_elements(
 
     path = Path(sdata.path)
     token = uuid.uuid4().hex
-    backup_root = path.parent / f".{path.name}.pciseq-backup-{token}"
+    # Backups sit beside the store's real directory: a store opened through a
+    # symlink may live on another filesystem than the link's parent, and
+    # os.replace cannot cross filesystems.
+    real_path = path.resolve()
+    backup_root = real_path.parent / f".{real_path.name}.pciseq-backup-{token}"
     root_attrs = deepcopy(sdata.attrs)
     originals = {
         (group, key): getattr(sdata, group).get(key) for group, key, _ in elements
@@ -477,9 +550,16 @@ def publish_pciseq_viewer(
     branch = _BRANCHES[config.segmentation]
     source_key = f"pciseq_{branch}"
     points_key = f"transcripts_pciseq_{branch}"
+    # Only results of the experimental batched fit use the disk-backed index;
+    # standard results keep main's in-memory index and validation.
+    disk_backed = compute.get("execution", {}).get("memory_mode") == "batched"
     with (
         spatialdata_write_lock(config.spatialdata_path),
-        TemporaryDirectory(prefix=".pciseq-viewer-", dir=output_dir) as temporary,
+        (
+            TemporaryDirectory(prefix=".pciseq-viewer-", dir=output_dir)
+            if disk_backed
+            else nullcontext(None)
+        ) as temporary,
     ):
         sdata = sd.read_zarr(config.spatialdata_path)
         shape_key, native_key, native_table = _resolve_native_keys(sdata, config)
@@ -551,13 +631,39 @@ def publish_pciseq_viewer(
                 "coverage": previous.get("coverage", {}),
             }
         else:
-            index = _spot_index(
-                output_dir / "spot_assignments.csv",
-                spot_assignments,
-                Path(temporary),
-                metadata["spot_count"],
-            )
-            native_count = _validate_native_ids(native, index)
+            if temporary is not None:
+                index = _spot_index(
+                    output_dir / "spot_assignments.csv",
+                    spot_assignments,
+                    Path(temporary),
+                    metadata["spot_count"],
+                )
+                native_count = _validate_native_ids(native, index)
+            else:
+                index = _spot_index_in_memory(
+                    output_dir / "spot_assignments.csv", spot_assignments
+                )
+                if index.count != metadata.get("spot_count", index.count):
+                    raise ValueError(
+                        "Modeled transcript count differs from prepared metadata"
+                    )
+                native_series = native["transcript_id"].compute()
+                native_ids, _ = _ids(native_series, "native transcript_id")
+                native_count = len(native_ids)
+                ordered_native = _unique(native_ids, "native transcript_id")
+                model_ids, model_assignments, _ = index.arrays()
+                _, present = _matches(ordered_native, model_ids)
+                if not present.all():
+                    raise ValueError(
+                        "Modeled transcripts are absent from native points"
+                    )
+                del native_series, native_ids, ordered_native
+                assigned = model_assignments[model_assignments != 0]
+                _, known = _matches(np.sort(shape_ids), assigned)
+                if not known.all():
+                    raise ValueError(
+                        "Transcript assignments reference unknown native cell IDs"
+                    )
             cells = cell_assignments
             if cells is None:
                 cells = pd.read_csv(
@@ -570,23 +676,31 @@ def publish_pciseq_viewer(
             excluded_ids = all_cells.obs.loc[
                 all_cells.obs.pciseq_status.eq("excluded_overlap"), "instance_id"
             ].to_numpy(dtype=np.uint64)
-            _, indexed_assignments, _ = index.arrays()
-            ordered_shapes = np.sort(shape_ids)
-            background_count = 0
-            for start in range(0, index.count, _CHUNK_ROWS):
-                part = indexed_assignments[start : start + _CHUNK_ROWS]
-                background_count += int(np.count_nonzero(part == 0))
-                assigned = part[part != 0]
-                _, known = _matches(ordered_shapes, assigned)
-                if not known.all():
-                    raise ValueError(
-                        "Transcript assignments reference unknown native cell IDs"
-                    )
+            if temporary is None:
                 if len(excluded_ids) and np.isin(assigned, excluded_ids).any():
                     raise ValueError(
                         "Transcripts cannot be assigned to cells excluded from fitting"
                     )
-            del indexed_assignments
+                background_count = int(np.count_nonzero(model_assignments == 0))
+            else:
+                _, indexed_assignments, _ = index.arrays()
+                ordered_shapes = np.sort(shape_ids)
+                background_count = 0
+                for start in range(0, index.count, _CHUNK_ROWS):
+                    part = indexed_assignments[start : start + _CHUNK_ROWS]
+                    background_count += int(np.count_nonzero(part == 0))
+                    assigned = part[part != 0]
+                    _, known = _matches(ordered_shapes, assigned)
+                    if not known.all():
+                        raise ValueError(
+                            "Transcript assignments reference unknown native cell IDs"
+                        )
+                    if len(excluded_ids) and np.isin(assigned, excluded_ids).any():
+                        raise ValueError(
+                            "Transcripts cannot be assigned to cells excluded "
+                            "from fitting"
+                        )
+                del indexed_assignments
             marker = {"analysis_id": analysis_id, "source_key": source_key}
             all_cells.uns[_MARKER] = marker
             gene_column = str(

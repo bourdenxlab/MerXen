@@ -14,6 +14,16 @@ from scipy.special import psi, softmax
 from merxen.pciseq_memory import CellBlockMixin
 
 
+@pytest.fixture
+def opt_einsum() -> Any:
+    """Gamma updates contract with opt_einsum from the optional pciSeq runtime.
+
+    CI installs only the dev extra, so tests that run a gamma update skip there
+    and run in the pciSeq environment (requirements/requirements.pciseq.lock).
+    """
+    return pytest.importorskip("opt_einsum")
+
+
 class SpotState:
     """Small upstream-compatible gamma state without importing optional pciSeq."""
 
@@ -156,6 +166,7 @@ def make_model(cls: type[Any], directory: Path, batch: int) -> Any:
 
 
 @pytest.mark.parametrize("batch", [1, 3, 7, 128])
+@pytest.mark.usefixtures("opt_einsum")
 def test_blocked_updates_are_bitwise_equal_and_keep_previous_state(
     tmp_path: Path, batch: int
 ) -> None:
@@ -214,6 +225,7 @@ def test_initial_priors_preserve_dtype_and_use_read_only_broadcasts(
 
 
 @pytest.mark.parametrize("batch", [1, 3, 128])
+@pytest.mark.usefixtures("opt_einsum")
 def test_full_panel_fortran_layout_preserves_upstream_summation(
     tmp_path: Path, batch: int
 ) -> None:
@@ -264,6 +276,7 @@ def test_full_panel_fortran_layout_preserves_upstream_summation(
     )
 
 
+@pytest.mark.usefixtures("opt_einsum")
 def test_gamma_queries_preserve_requested_indices_and_reject_unbounded_reads(
     tmp_path: Path,
 ) -> None:
@@ -289,6 +302,7 @@ def test_gamma_queries_preserve_requested_indices_and_reject_unbounded_reads(
         blocked.gamma_for_spots(cells, genes)
 
 
+@pytest.mark.usefixtures("opt_einsum")
 def test_bad_batch_or_missing_work_directory_is_explicit(tmp_path: Path) -> None:
     model = make_model(BlockReference, tmp_path, 0)
     with pytest.raises(ValueError, match="positive integer"):

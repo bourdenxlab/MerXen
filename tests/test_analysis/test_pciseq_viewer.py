@@ -21,6 +21,7 @@ import zarr
 from spatialdata.models import PointsModel, ShapesModel, TableModel
 from spatialdata.transformations import Affine, get_transformation
 
+from merxen.analysis import pciseq_viewer
 from merxen.analysis.pciseq_viewer import publish_pciseq_viewer
 from merxen.config import PciSeqConfig
 from merxen.io.spatialdata_schema import MERXEN_SCHEMA_ATTR
@@ -30,7 +31,10 @@ SPOT_IDS = np.array([2**63 + 91, 3, 2**53 + 17, 2**64 - 7, 7], dtype=np.uint64)
 
 
 def _fixture(
-    tmp_path: Path, *, native_genes: list[str] | None = None
+    tmp_path: Path,
+    *,
+    native_genes: list[str] | None = None,
+    memory_mode: str = "standard",
 ) -> tuple[PciSeqConfig, Path, pd.DataFrame]:
     from shapely.geometry import box
 
@@ -120,16 +124,16 @@ def _fixture(
         "spot_count": 3,
     }
     (output / "manifest.json").write_text(json.dumps(metadata))
-    (output / "compute_manifest.json").write_text(
-        json.dumps(
-            {
-                "prepared_manifest_sha256": hashlib.sha256(
-                    (output / "manifest.json").read_bytes()
-                ).hexdigest(),
-                "upstream_commit": "test",
-            }
-        )
-    )
+    compute: dict[str, Any] = {
+        "prepared_manifest_sha256": hashlib.sha256(
+            (output / "manifest.json").read_bytes()
+        ).hexdigest(),
+        "upstream_commit": "test",
+    }
+    if memory_mode == "batched":
+        # Only batched results record a mode; they use the disk-backed index.
+        compute["execution"] = {"memory_mode": "batched"}
+    (output / "compute_manifest.json").write_text(json.dumps(compute))
     cells = pd.DataFrame(
         {
             "instance_id": pd.Series(CELL_IDS[:3], dtype="uint64"),
@@ -166,11 +170,26 @@ def _fixture(
     return config, output, native_frame
 
 
+@pytest.mark.parametrize("memory_mode", ["standard", "batched"])
 def test_native_points_exact_large_ids_coordinates_background_and_all_cells(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, memory_mode: str
 ) -> None:
-    config, output, native = _fixture(tmp_path)
+    """Both index kinds publish the same source; only batched uses the disk."""
+    config, output, native = _fixture(tmp_path, memory_mode=memory_mode)
+    built: list[str] = []
+    for name in ("_spot_index", "_spot_index_in_memory"):
+        original = getattr(pciseq_viewer, name)
+
+        def record(*args: Any, _name: str = name, _original: Any = original) -> Any:
+            built.append(_name)
+            return _original(*args)
+
+        monkeypatch.setattr(pciseq_viewer, name, record)
     result = publish_pciseq_viewer(config, output)
+    assert built == [
+        "_spot_index" if memory_mode == "batched" else "_spot_index_in_memory"
+    ]
+    assert not list(output.glob(".pciseq-viewer-*"))
     store = sd.read_zarr(config.spatialdata_path)
     source = store.attrs[MERXEN_SCHEMA_ATTR]["analysis_sources"]["pciseq_proseg_hybrid"]
     actual = store.points[source["points"]].compute()
@@ -464,12 +483,50 @@ def test_committed_refresh_retains_backup_if_cleanup_fails(
     assert "recoverable backup cleanup failed" in caplog.text
 
 
-def test_prepare_gene_normalization_preserves_literal_native_genes(
-    tmp_path: Path,
+def test_refresh_through_symlink_keeps_backup_beside_the_real_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The prepared gene match strips whitespace without changing native points."""
+    """A linked store's backup goes beside its target, on the same filesystem."""
+    import shutil
+
+    config, output, _ = _fixture(tmp_path)
+    links = tmp_path / "links"
+    links.mkdir()
+    link = links / "linked.zarr"
+    link.symlink_to(config.spatialdata_path, target_is_directory=True)
+    config = config.model_copy(update={"spatialdata_path": link})
+    publish_pciseq_viewer(config, output)
+    annotated = ad.read_h5ad(output / "annotated.h5ad")
+    annotated.obsm["X_umap"][:] = [2.0, 3.0]
+    annotated.write_h5ad(output / "annotated.h5ad")
+    original = shutil.rmtree
+
+    def keep_backup(path: Any, *args: Any, **kwargs: Any) -> Any:
+        if ".pciseq-backup-" in Path(path).name:
+            raise OSError("Cleanup failed")
+        return original(path, *args, **kwargs)
+
+    # A retained backup shows where the refresh put it.
+    monkeypatch.setattr(shutil, "rmtree", keep_backup)
+    result = publish_pciseq_viewer(config, output)
+    assert not result["reused"]
+    assert len(list(tmp_path.glob(".native.zarr.pciseq-backup-*"))) == 1
+    assert not list(links.glob(".*pciseq-backup-*"))
+
+
+@pytest.mark.parametrize("memory_mode", ["standard", "batched"])
+def test_prepare_gene_normalization_preserves_literal_native_genes(
+    tmp_path: Path, memory_mode: str
+) -> None:
+    """The prepared gene match strips whitespace without changing native points.
+
+    This differs from main, which refused padded native gene names although
+    prepare strips them; it applies to standard results too.
+    """
     config, output, native = _fixture(
-        tmp_path, native_genes=[" A ", " B ", " A\t", "Blank-1", "other"]
+        tmp_path,
+        native_genes=[" A ", " B ", " A\t", "Blank-1", "other"],
+        memory_mode=memory_mode,
     )
     result = publish_pciseq_viewer(config, output)
     restored = sd.read_zarr(config.spatialdata_path)
