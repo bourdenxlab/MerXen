@@ -109,23 +109,24 @@ def test_dwight_gpu_processes_use_one_fixed_host_lock(
         "CELLPOSE_SEGMENT",
         "CELLPOSE_NUCLEI_SEGMENT",
         "ATERA_CELLPOSE_SEGMENT",
+        "ATERA_STOCK_CELLPOSE_SEGMENT",
         "ALIGN",
         "CLUSTERING_SQUIDPY_COMPUTE",
         "GASTON_TRAIN",
     ):
         assert f'withName: "{process_name}"' in dwight_config_text
-    # Six tasks hold the lock for their whole run (AT-7 added
-    # ATERA_CELLPOSE_SEGMENT); BUILD_SPATIALDATA and CELLPOSE_HITL_TRAIN only
+    # Seven tasks hold the lock for their whole run (including the stock
+    # Cellpose comparison); BUILD_SPATIALDATA and CELLPOSE_HITL_TRAIN only
     # export the path because their Python GPU phases acquire the lock.
     assert (
         dwight_config_text.count(
             'MERXEN_GPU_LOCK_FILE="${params.gpu_process_lock_file}"'
         )
-        == 8
+        == 9
     )
-    assert dwight_config_text.count('exec 9<"\\${MERXEN_GPU_LOCK_FILE}"') == 6
+    assert dwight_config_text.count('exec 9<"\\${MERXEN_GPU_LOCK_FILE}"') == 7
     assert 'exec 9>"\\${MERXEN_GPU_LOCK_FILE}"' not in dwight_config_text
-    assert dwight_config_text.count("set -o noclobber") == 6
+    assert dwight_config_text.count("set -o noclobber") == 7
     assert "${PWD}/.merxen_gpu.lock" not in combined_config_text
 
 

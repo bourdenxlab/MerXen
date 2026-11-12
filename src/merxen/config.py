@@ -11,7 +11,15 @@ from math import isfinite
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 from pydantic_settings import BaseSettings
 
 from merxen.annotation.config import (  # rca-hook:H8
@@ -74,6 +82,14 @@ class CellposeConfig(BaseModel):
         return v
 
 
+class MaskGeometryFilterConfig(BaseModel):
+    """Remove whole masks only when small, thin and concave simultaneously."""
+
+    max_area_um2: float = Field(default=100.0, gt=0, allow_inf_nan=False)
+    max_thickness_um: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    max_solidity: float = Field(default=0.75, gt=0, le=1, allow_inf_nan=False)
+
+
 class MaskFilterConfig(BaseModel):
     """Parameters for post-segmentation mask filtering."""
 
@@ -83,8 +99,21 @@ class MaskFilterConfig(BaseModel):
     final_min_area_um2: float | None = 5.0
     final_max_area_um2: float | None = 400.0
     final_filter_chunk_mb: int = 256
+    # Nextflow enables the current policy explicitly. Missing legacy provenance
+    # must continue to mean that this cleanup was not applied.
+    geometry_filter: MaskGeometryFilterConfig | None = None
     n_jobs: int = 16
     show_progress: bool = True
+
+    @model_serializer(mode="wrap")
+    def _serialize_filter(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        """Retain the exact legacy identity when geometry cleanup is absent."""
+        values: dict[str, Any] = handler(self)
+        if self.geometry_filter is None:
+            values.pop("geometry_filter", None)
+        return values
 
     @field_validator("final_min_area_um2", "final_max_area_um2")
     @classmethod
@@ -905,6 +934,8 @@ class AteraProsegStitchConfig(BaseModel):
     edge_tolerance_voxels: float = 1.0
     force: bool = False
     prior_kind: Literal["vendor", "cellpose"] = "vendor"
+    # Comparison only: counted from its own mask and never used as a ProSeg prior.
+    stock_cellpose_mask_path: Path | None = None
 
 
 class CellposeModelPolicy(BaseModel):
@@ -970,9 +1001,17 @@ class EnrichmentConfig(BaseModel):
     segmentation_source: SegmentationSource = "cellpose_proseg"
     native_label_check: bool = True
     transcript_density_source_path: Path | None = None
+    stock_cellpose_mask_path: Path | None = None
 
     @model_validator(mode="after")
     def _validate_segmentation_source(self: EnrichmentConfig) -> EnrichmentConfig:
+        if self.segmentation_source == "cellpose_comparison":
+            if self.platform != "ATERA" or self.stock_cellpose_mask_path is None:
+                raise ValueError(
+                    "cellpose_comparison requires ATERA and stock_cellpose_mask_path"
+                )
+        elif self.stock_cellpose_mask_path is not None:
+            raise ValueError("stock_cellpose_mask_path requires cellpose_comparison")
         if self.segmentation_source in ("native", "native_proseg"):
             if self.platform != "ATERA":
                 raise ValueError(
@@ -980,7 +1019,10 @@ class EnrichmentConfig(BaseModel):
                     f"vendor segmentation of ATERA rows only, not {self.platform}"
                 )
             return self
-        if self.platform == "ATERA" and self.segmentation_source == "cellpose_proseg":
+        if self.platform == "ATERA" and self.segmentation_source in (
+            "cellpose_proseg",
+            "cellpose_comparison",
+        ):
             # AT-7: the Cellpose mask builds the proseg_mask layer; ATERA keeps
             # the vendor nuclei, so no Cellpose nuclei mask exists.
             if self.mask_path is None:

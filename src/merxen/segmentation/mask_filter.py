@@ -13,9 +13,11 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.ndimage import find_objects
+from scipy.ndimage import distance_transform_edt, find_objects
 from skimage.measure import label, regionprops
 from tqdm.auto import tqdm
+
+from merxen.config import MaskGeometryFilterConfig
 
 _POOL_LABELED_MASKS: np.ndarray | None = None
 
@@ -323,6 +325,41 @@ def drop_labels_from_mask(
     return summary
 
 
+def _geometry_rejected_labels(
+    masks: np.ndarray,
+    eligible: np.ndarray,
+    geometry_filter: MaskGeometryFilterConfig,
+    pixel_size_um: tuple[float, float],
+) -> np.ndarray:
+    """Inspect eligible whole stitched objects without eroding retained masks."""
+    candidates = np.flatnonzero(eligible)
+    if not candidates.size:
+        return candidates
+    boxes = find_objects(masks, max_label=len(eligible) - 1)
+    rejected = []
+    for label_id in candidates:
+        box = boxes[label_id - 1]
+        if box is None:
+            continue
+        # A cell clipped by the outside of the entire image has an unknown
+        # complete shape. Tile seams are already resolved by stitching here.
+        if any(
+            axis.start == 0 or axis.stop == masks.shape[index]
+            for index, axis in enumerate(box)
+        ):
+            continue
+        binary = masks[box] == label_id
+        thickness = (
+            2 * distance_transform_edt(np.pad(binary, 1), sampling=pixel_size_um).max()
+        )
+        if thickness >= geometry_filter.max_thickness_um:
+            continue
+        solidity = regionprops(binary.astype(np.uint8))[0].solidity
+        if solidity < geometry_filter.max_solidity:
+            rejected.append(label_id)
+    return np.asarray(rejected, dtype=np.int64)
+
+
 def filter_labeled_mask_by_area(
     mask_path: Path | str,
     *,
@@ -332,13 +369,33 @@ def filter_labeled_mask_by_area(
     output_path: Path | str | None = None,
     chunk_mb: int = 256,
     show_progress: bool = False,
+    geometry_filter: MaskGeometryFilterConfig | None = None,
+    pixel_size_um: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
-    """Remove labeled mask objects outside absolute area bounds.
+    """Remove whole labeled objects outside area bounds or matching geometry.
 
     The input ``.npy`` mask is loaded as a memory map, label areas are computed
     with ``bincount``, and the filtered mask is streamed to a temporary ``.npy``
     in row chunks before replacing the original file. Kept labels are compactly
     relabeled from 1..N so downstream transcript seed IDs remain dense.
+    Geometry rejects an object only if its area, maximum local thickness and
+    solidity are all strictly below their respective thresholds. Retained
+    shapes, including their processes, are never eroded.
+
+    Args:
+        mask_path: Stitched nonnegative integer labels in a NumPy file.
+        pixel_area_um2: Physical area per native pixel.
+        min_area_um2: Optional lower area bound.
+        max_area_um2: Optional upper area bound.
+        output_path: Destination; defaults to replacing the input atomically.
+        chunk_mb: Memory budget for streamed rewriting.
+        show_progress: Display rewriting progress.
+        geometry_filter: Optional small/thin/concave whole-object rule.
+        pixel_size_um: Native row/column pixel spacing. If omitted, pixels are
+            assumed square with spacing derived from their area.
+
+    Returns:
+        Counts for removed objects and whether a replacement was written.
     """
     mask_path = Path(mask_path)
     output_path = Path(output_path) if output_path is not None else mask_path
@@ -346,7 +403,7 @@ def filter_labeled_mask_by_area(
     max_area_um2 = None if max_area_um2 is None else float(max_area_um2)
     pixel_area_um2 = float(pixel_area_um2)
 
-    if min_area_um2 is None and max_area_um2 is None:
+    if min_area_um2 is None and max_area_um2 is None and geometry_filter is None:
         return {
             "mask_path": str(output_path),
             "pixel_area_um2": pixel_area_um2,
@@ -354,6 +411,7 @@ def filter_labeled_mask_by_area(
             "n_kept": 0,
             "n_removed_small": 0,
             "n_removed_large": 0,
+            "n_removed_geometry": 0,
             "written": False,
         }
     if not np.isfinite(pixel_area_um2) or pixel_area_um2 <= 0:
@@ -390,6 +448,7 @@ def filter_labeled_mask_by_area(
             "n_kept": 0,
             "n_removed_small": 0,
             "n_removed_large": 0,
+            "n_removed_geometry": 0,
             "written": False,
         }
 
@@ -408,6 +467,20 @@ def filter_labeled_mask_by_area(
         large = foreground & (areas_um2 > max_area_um2)
         keep &= ~large
 
+    n_removed_geometry = 0
+    if geometry_filter is not None:
+        spacing = pixel_size_um or (np.sqrt(pixel_area_um2),) * 2
+        if len(spacing) != 2 or any(not np.isfinite(v) or v <= 0 for v in spacing):
+            raise ValueError(
+                "pixel_size_um must contain positive finite row/column spacing"
+            )
+        eligible = keep & (areas_um2 < geometry_filter.max_area_um2)
+        rejected = _geometry_rejected_labels(
+            mask_mmap, eligible, geometry_filter, spacing
+        )
+        keep[rejected] = False
+        n_removed_geometry = len(rejected)
+
     n_labels = int(np.count_nonzero(foreground))
     n_kept = int(np.count_nonzero(keep))
     n_removed_small = int(np.count_nonzero(small))
@@ -422,6 +495,7 @@ def filter_labeled_mask_by_area(
             "n_kept": n_kept,
             "n_removed_small": n_removed_small,
             "n_removed_large": n_removed_large,
+            "n_removed_geometry": n_removed_geometry,
             "min_area_um2": min_area_um2,
             "max_area_um2": max_area_um2,
             "written": False,
@@ -450,6 +524,7 @@ def filter_labeled_mask_by_area(
         "n_kept": n_kept,
         "n_removed_small": n_removed_small,
         "n_removed_large": n_removed_large,
+        "n_removed_geometry": n_removed_geometry,
         "min_area_um2": min_area_um2,
         "max_area_um2": max_area_um2,
         "written": True,

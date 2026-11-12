@@ -80,6 +80,9 @@ ANALYSIS_LAYER_KEYS: Final[Mapping[str, Mapping[str, AnalysisLayerKeys]]] = (
             "proseg_hybrid": _platform_independent(
                 "table_MOSAIK_proseg_hybrid", "MOSAIK_proseg_hybrid"
             ),
+            "stock_cellpose": _platform_independent(
+                "table_MOSAIK_stock_cellpose", "MOSAIK_stock_cellpose"
+            ),
             "cellpose": _CELLPOSE_KEYS,
             "proseg_mask": _CELLPOSE_KEYS,
             "proseg_geometry_assignment": _platform_independent(

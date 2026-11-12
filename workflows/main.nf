@@ -5,7 +5,7 @@ include { ENSURE_PROSEG } from "./modules/proseg_bootstrap"
 include { CELLPOSE_NUCLEI_SEGMENT; SEGMENT } from "./modules/segmentation"
 include { NATIVE_LATEST } from "./modules/native_segmentation"
 include { ATERA_PROSEG_PLAN; ATERA_PROSEG_PLAN_CELLPOSE; ATERA_PROSEG_TILE; ATERA_PROSEG_STITCH } from "./modules/atera_proseg"
-include { ATERA_CELLPOSE_SEGMENT } from "./modules/atera_cellpose"
+include { ATERA_CELLPOSE_SEGMENT; ATERA_STOCK_CELLPOSE_SEGMENT } from "./modules/atera_cellpose"
 include { ATERA_TRANSCRIPT_DENSITY } from "./modules/atera_transcript_density"
 include { CELLPOSE_HITL_TRAIN; CELLPOSE_HITL_SEED } from "./modules/cellpose_hitl"
 include { ENRICH } from "./modules/enrichment"
@@ -211,6 +211,7 @@ def normalizeSegmentationSource(rawValue) {
         "cellpose_only": "cellpose_only",
         "proseg": "cellpose_proseg",
         "cellpose_proseg": "cellpose_proseg",
+        "cellpose_comparison": "cellpose_comparison",
     ]
     if (!aliases.containsKey(key)) {
         throw new IllegalArgumentException(
@@ -262,6 +263,7 @@ def availableSegmentationLayers(segmentationSource, platforms = null) {
         "native_proseg": ["proseg_vendor", "original_seg"],
         "cellpose_proseg": ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"],
         "cellpose_only": ["proseg_mask", "original_seg"],
+        "cellpose_comparison": ["reseg", "original_seg", "proseg_mask", "stock_cellpose"],
     ]
     if (!layers.containsKey(segmentationSource)) {
         throw new IllegalArgumentException(
@@ -302,12 +304,12 @@ def runsAteraProseg(segmentationSource, platforms) {
     if (segmentationSource == "native_proseg") {
         return true
     }
-    return segmentationSource == "cellpose_proseg" && (platforms ?: []).contains("ATERA")
+    return segmentationSource in ["cellpose_proseg", "cellpose_comparison"] && (platforms ?: []).contains("ATERA")
 }
 
 // Whether a row runs Cellpose on the ATERA morphology image (DAPI + 18S, AT-7).
 def runsAteraCellpose(segmentationSource, platforms) {
-    return segmentationSource == "cellpose_proseg" && (platforms ?: []).contains("ATERA")
+    return segmentationSource in ["cellpose_proseg", "cellpose_comparison"] && (platforms ?: []).contains("ATERA")
 }
 
 // Keep the layers a source has (AT-6 rule): a default or group value ("all",
@@ -364,7 +366,7 @@ def filterSegmentationsForSource(
     return kept
 }
 
-def normalizeAnalysisSegmentation(rawValue) {
+def normalizeAnalysisSegmentation(rawValue, segmentationSource = null) {
     def raw = rawValue == null ? "all" : rawValue.toString().trim()
     if (!raw) {
         raw = "all"
@@ -380,6 +382,7 @@ def normalizeAnalysisSegmentation(rawValue) {
         "vendor_proseg": ["proseg_vendor"],
         "native_proseg": ["proseg_vendor"],
         "proseg_mask": ["proseg_mask"],
+        "stock_cellpose": ["stock_cellpose"],
         "cellpose": ["proseg_mask"],
         "cellpose_mask": ["proseg_mask"],
         "mask": ["proseg_mask"],
@@ -393,6 +396,7 @@ def normalizeAnalysisSegmentation(rawValue) {
         "instrument_seg": ["original_seg"],
         "instrument_segmentation": ["original_seg"],
     ]
+    if (segmentationSource == "cellpose_comparison") aliases.all << "stock_cellpose"
     def selected = []
     raw
         .split(",")
@@ -424,7 +428,7 @@ def normalizeAnalysisSegmentation(rawValue) {
     ]
 }
 
-def normalizeMenderSegmentations(rawValue) {
+def normalizeMenderSegmentations(rawValue, segmentationSource = null) {
     def values = rawValue instanceof Collection
         ? rawValue
         : rawValue.toString().split(",")
@@ -439,11 +443,13 @@ def normalizeMenderSegmentations(rawValue) {
         "original_seg": ["original_seg"],
         "instrument": ["original_seg"],
         "proseg_mask": ["proseg_mask"],
+        "stock_cellpose": ["stock_cellpose"],
         "cellpose": ["proseg_mask"],
         "mask": ["proseg_mask"],
         "proseg_hybrid": ["proseg_hybrid"],
         "hybrid": ["proseg_hybrid"],
     ]
+    if (segmentationSource == "cellpose_comparison") aliases.all << "stock_cellpose"
     def selected = []
     values.each { value ->
         def key = value
@@ -534,6 +540,7 @@ def normalizeGastonSegmentations(rawValue) {
         "original_segmentation": ["original_seg"],
         "instrument": ["original_seg"],
         "proseg_mask": ["proseg_mask"],
+        "stock_cellpose": ["stock_cellpose"],
         "cellpose": ["proseg_mask"],
         "cellpose_mask": ["proseg_mask"],
         "mask": ["proseg_mask"],
@@ -808,6 +815,12 @@ def analysisLayerKeys(platform, segmentation) {
             shape_key: "MOSAIK_proseg_hybrid",
         ]
     }
+    if (segmentation == "stock_cellpose") {
+        return [
+            table_key: "table_MOSAIK_stock_cellpose",
+            shape_key: "MOSAIK_stock_cellpose",
+        ]
+    }
     if (segmentation in ["cellpose", "proseg_mask"]) {
         return [
             table_key: "table_MOSAIK_cellpose",
@@ -924,6 +937,7 @@ def normalizeDistanceFromObjectSegmentations(rawValue) {
         "original_seg": "original",
         "instrument": "original",
         "proseg_mask": "cellpose",
+        "stock_cellpose": "stock_cellpose",
         "mask": "cellpose",
         "cellpose": "cellpose",
         "cellpose_mask": "cellpose",
@@ -2849,7 +2863,7 @@ def appendAteraProsegPreflightChecks(errors, row, settings, params) {
     if (!runsAteraProseg(settings.segmentation_source, settings.active_platforms)) {
         return
     }
-    def cellposePrior = settings.segmentation_source == "cellpose_proseg"
+    def cellposePrior = settings.segmentation_source in ["cellpose_proseg", "cellpose_comparison"]
     def checks = []
     if (cellposePrior) {
         def channels = parseChannels(row.atera_channels, [])
@@ -3237,7 +3251,7 @@ def rowSampleSettings(row, params) {
     def analysisSegmentations = resolveRowSegmentations(
         rowAnalysisSegmentation,
         rowFieldOrDefault(row, "analysis_segmentation", params.analysis_segmentation),
-        { value -> normalizeAnalysisSegmentation(value) },
+        { value -> normalizeAnalysisSegmentation(value, segmentationSource) },
         segmentationSource,
         "analysis_segmentation",
         pairId,
@@ -3360,7 +3374,7 @@ def rowSampleSettings(row, params) {
     def menderSegmentations = resolveRowSegmentations(
         rowMenderSegmentations,
         rowFieldOrDefault(row, "mender_segmentations", params.mender_segmentations),
-        { value -> normalizeMenderSegmentations(value) },
+        { value -> normalizeMenderSegmentations(value, segmentationSource) },
         segmentationSource,
         "mender_segmentations",
         pairId,
@@ -4120,11 +4134,13 @@ def segmentationConfigMap(pairId, platform, sourceSpatialdata, meta, params) {
             final_min_area_um2: params.cellpose_final_min_area_um2,
             final_max_area_um2: params.cellpose_final_max_area_um2,
             final_filter_chunk_mb: params.cellpose_final_filter_chunk_mb,
+            geometry_filter: CellposeSettings.geometryFilter(params),
         ],
         nuclei_mask_filter: [
             final_min_area_um2: params.cellpose_final_min_area_um2,
             final_max_area_um2: params.cellpose_final_max_area_um2,
             final_filter_chunk_mb: params.cellpose_final_filter_chunk_mb,
+            geometry_filter: CellposeSettings.geometryFilter(params),
         ],
         proseg: [
             binary_path: params.proseg_binary,
@@ -4576,6 +4592,21 @@ workflow {
 
     atera_cellpose_ch = ATERA_CELLPOSE_SEGMENT(atera_cellpose_inputs_ch).segmentation
 
+    // A controlled stock-weight comparison; only the main retrained masks feed ProSeg.
+    atera_comparison_gate_ch = sample_rows_ch.flatMap { pairId, _row, settings ->
+        settings.run_atera_cellpose && settings.segmentation_source == 'cellpose_comparison'
+            ? [tuple("${pairId}|ATERA", true)] : []
+    }
+    atera_stock_cellpose_inputs_ch = atera_cellpose_inputs_ch
+        .join(atera_comparison_gate_ch)
+        .map { key, pairId, platform, configJson, densityPath, _comparison ->
+            def config = CellposeSettings.stockComparisonConfig(
+                new groovy.json.JsonSlurper().parseText(configJson))
+            tuple(key, pairId, platform,
+                groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(config)), densityPath)
+        }
+    atera_stock_cellpose_ch = ATERA_STOCK_CELLPOSE_SEGMENT(atera_stock_cellpose_inputs_ch).segmentation
+
     // ATERA ProSeg route (plan AT-9; tiled, 2 mm tiles): the plan reads the
     // source store and the prior: the vendor cell mask (native_proseg, layer
     // proseg_vendor) or the ATERA Cellpose mask and logits (cellpose_proseg,
@@ -4854,10 +4885,23 @@ workflow {
                 )
         }
 
+    atera_proseg_stitch_with_stock_ch = atera_proseg_stitch_inputs_ch
+        .join(atera_stock_cellpose_ch.map { key, _pair, _platform, mask, _prob, _transform, _stats ->
+            tuple(key, mask)
+        }, remainder: true)
+        .filter { values -> values.size() == 8 && values[1] != null }
+        .map { key, pairId, platform, configJson, latest, plan, tileDirs, stockMask ->
+            def config = new groovy.json.JsonSlurper().parseText(configJson)
+            if (stockMask != null) config.stock_cellpose_mask_path = 'stock_cellpose_mask.npy'
+            tuple(key, pairId, platform,
+                groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(config)),
+                latest, plan, tileDirs, stockMask ?: [])
+        }
+
     // An ATERA cellpose_proseg row's SEGMENT tuple carries its Cellpose mask in
     // the mask slot (as a XENIUM row's does), for ENRICH's proseg_mask layer
     // and the image quantification; a native_proseg row keeps the placeholder.
-    atera_proseg_stitch_ch = ATERA_PROSEG_STITCH(atera_proseg_stitch_inputs_ch).segmentation
+    atera_proseg_stitch_ch = ATERA_PROSEG_STITCH(atera_proseg_stitch_with_stock_ch).segmentation
         .join(
             atera_cellpose_ch.map {
                 key, _pairId, _platform, cellposeMask, _cellprob, _transforms, _stats ->
@@ -4891,7 +4935,7 @@ workflow {
                     pairId,
                     platform,
                     publishedAteraProsegOutput(params, pairId, platform, "proseg_latest.zarr"),
-                    settings.segmentation_source == "cellpose_proseg"
+                    settings.segmentation_source in ["cellpose_proseg", "cellpose_comparison"]
                         ? publishedAteraCellposeMask(params, pairId, platform)
                         : publishedAteraProsegOutput(params, pairId, platform, "NO_CELLPOSE_MASK"),
                     publishedAteraProsegOutput(params, pairId, platform, "NO_TRANSCRIPTS_CSV"),
@@ -5034,9 +5078,15 @@ workflow {
             // An ATERA cellpose_proseg row (AT-7) checks its stitched ProSeg
             // layer (reseg) and builds its Cellpose layer (proseg_mask) from
             // the Cellpose mask in the mask slot; it has no Cellpose nuclei.
-            if (rowSource == "cellpose_proseg" && PlatformSpec.forName(platform).nativeLatestBase) {
-                enrichConfig.segmentation_source = "cellpose_proseg"
+            if (rowSource in ["cellpose_proseg", "cellpose_comparison"] && PlatformSpec.forName(platform).nativeLatestBase) {
+                enrichConfig.segmentation_source = rowSource
                 enrichConfig.mask_path = "enrich_input_mask.npy"
+                if (rowSource == 'cellpose_comparison') {
+                    enrichConfig.stock_cellpose_mask_path = file(publishedDatasetPath(
+                        params.outdir, pairId, platform,
+                        'segmentation/stock_cellpose/cellpose_masks_tiled.npy'))
+                        .toAbsolutePath().toString()
+                }
             }
 
             tuple(
@@ -5384,6 +5434,13 @@ workflow {
                         shape_key: "MOSAIK_cellpose",
                         table_key: "table_MOSAIK_cellpose_image_quantification",
                     ]
+                    if (rowSource == 'cellpose_comparison') {
+                        quantConfig.extra_layers << [
+                            mask_label_key: 'stock_cellpose_cell_labels',
+                            shape_key: 'MOSAIK_stock_cellpose',
+                            table_key: 'table_MOSAIK_stock_cellpose_image_quantification',
+                        ]
+                    }
                 }
             }
 

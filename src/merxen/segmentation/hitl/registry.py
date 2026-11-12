@@ -250,7 +250,12 @@ def preflight_custom_model(
             logger.warning(
                 "Explicit %s differs from the model's evaluation settings", field
             )
-    for field in ("final_min_area_um2", "final_max_area_um2", "max_eccentricity"):
+    for field in (
+        "final_min_area_um2",
+        "final_max_area_um2",
+        "max_eccentricity",
+        "geometry_filter",
+    ):
         if getattr(config.mask_filter, field) != getattr(
             metadata.evaluated_mask_filter, field
         ):

@@ -100,7 +100,12 @@ def test_atera_fields() -> None:
             "experiment.spatial",
         ),
         mask_pixel_convention="corner",
-        segmentation_sources=("native", "native_proseg", "cellpose_proseg"),
+        segmentation_sources=(
+            "native",
+            "native_proseg",
+            "cellpose_proseg",
+            "cellpose_comparison",
+        ),
         default_segmentation_source="native",
         original_label_keys=("cell_labels", "nucleus_labels"),
         rasterised_transcript_plots=True,

@@ -36,6 +36,7 @@ class AteraProsegLayers {
     static final Map<String, String> SOURCE_PRIOR_KIND = Collections.unmodifiableMap([
         native_proseg: 'vendor',
         cellpose_proseg: 'cellpose',
+        cellpose_comparison: 'cellpose',
     ] as LinkedHashMap<String, String>)
 
     /** The layer of a prior kind; throws for an unknown kind. */

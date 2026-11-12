@@ -694,3 +694,105 @@ def _rewrite(source: Path, target: Path) -> Path:
         target,
     )
     return target
+
+
+def test_comparison_counts_independent_stock_masks_without_proseg_on_stock(
+    route: Route, store: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One trained ProSeg result coexists with independent stock/raw cell counts."""
+    from merxen.config import CellposeConfig, MaskFilterConfig, TilingConfig
+    from merxen.enrichment import enrich as enrich_module
+    from merxen.segmentation import model_identity
+    from merxen.segmentation.model_identity import (
+        CPSAM_V2_SHA256,
+        CellposeInferenceContext,
+        CellposeModelIdentity,
+    )
+
+    vendor = np.asarray(_level0(route.source / "labels" / "cell_labels")[:])
+    stock = np.zeros_like(vendor, dtype=np.uint32)
+    stock[:, :-1] = vendor[:, 1:]
+    stock[stock > 0] = 5000 + stock[stock > 0] * 3
+    stock_path = tmp_path / "stock" / "cellpose_masks_tiled.npy"
+    stock_path.parent.mkdir()
+    np.save(stock_path, stock)
+    context = CellposeInferenceContext(
+        platform="ATERA",
+        species="human",
+        channels=["DAPI", "18S"],
+        image_key="morphology_focus",
+        pixel_size_um=(PS, PS),
+        mask_filter=MaskFilterConfig(),
+        tiling=TilingConfig(),
+    )
+    identity = CellposeModelIdentity(
+        status="verified",
+        model_name="cpsam_v2",
+        weights_sha256=CPSAM_V2_SHA256,
+        cellpose_version="4.2.1.1",
+        torch_version="2.14.0+cu130",
+        cellpose_config=CellposeConfig(gpu=False),
+        inference_context=context,
+    )
+
+    def read_identity(path: Path) -> CellposeModelIdentity:
+        if Path(path).resolve() == stock_path.resolve():
+            return identity
+        return identity.model_copy(update={"weights_sha256": "1" * 64})
+
+    monkeypatch.setattr(model_identity, "read_model_identity", read_identity)
+    monkeypatch.setattr(enrich_module, "read_model_identity", read_identity)
+    config = stitch_config(
+        store,
+        route.plan_path,
+        route.tile_dirs,
+        tmp_path / "stitch",
+        prior_kind="cellpose",
+    ).model_copy(update={"stock_cellpose_mask_path": stock_path})
+    stitch(config)
+    for path in points_parquet_dir(store, "transcripts").glob("*.parquet"):
+        rows = pq.read_table(path, columns=["x", "y", "stock_cellpose_assignment"])
+        expected = lookup_labels(stock, rows["x"].to_numpy(), rows["y"].to_numpy(), PS)
+        found = rows["stock_cellpose_assignment"].fill_null(0).to_numpy()
+        np.testing.assert_array_equal(found, expected)
+    enrich_config = _enrich_config(route, store, tmp_path / "enrich").model_copy(
+        update={
+            "segmentation_source": "cellpose_comparison",
+            "stock_cellpose_mask_path": stock_path,
+        }
+    )
+    enrich_single_latest(enrich_config, polygon_n_jobs=2)
+    dataset = sd.read_zarr(store, selection=("tables", "shapes", "labels"))
+    for segmentation, table, shape in [
+        ("reseg", "table_MOSAIK_proseg", "MOSAIK_proseg"),
+        ("proseg_mask", "table_MOSAIK_cellpose", "MOSAIK_cellpose"),
+        ("stock_cellpose", "table_MOSAIK_stock_cellpose", "MOSAIK_stock_cellpose"),
+        ("original_seg", "table_original", "atera_cell_boundaries"),
+    ]:
+        assert (
+            validate_analysis_layer(
+                store,
+                platform="ATERA",
+                segmentation=segmentation,
+                table_key=table,
+                shape_key=shape,
+            )["n_cells"]
+            > 0
+        )
+    stock_ids = set(dataset.tables["table_MOSAIK_stock_cellpose"].obs["instance_id"])
+    trained_ids = set(dataset.tables["table_MOSAIK_cellpose"].obs["instance_id"])
+    assert stock_ids == set(np.unique(stock)) - {0}
+    assert stock_ids.isdisjoint(trained_ids)
+    registry = dataset.attrs[MERXEN_SCHEMA_ATTR]["segmentations"]
+    assert (
+        registry["stock_cellpose"]["assignment_column"] == "stock_cellpose_assignment"
+    )
+    assert (
+        registry["stock_cellpose"]["model_identity"]["weights_sha256"]
+        == CPSAM_V2_SHA256
+    )
+    assert registry["cellpose"]["assignment_column"] == "cellpose_assignment"
+    # The same trained plan/tiles are reused; no stock ProSeg plan was introduced.
+    assert read_plan(route.plan_path)["prior"]["mask_path"] == str(
+        route.mask_path.resolve()
+    )

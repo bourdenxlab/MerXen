@@ -13,6 +13,7 @@
   "workflows/modules/annotation.nf::CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE::script": "c7da354b6c99969779584b3bf953ea8723db7b99aa21a7f60f4120e9e73e7512",
   "workflows/modules/annotation.nf::CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE::stub": "c207e153bb8e1b19a76a695dbb68a9315d3e97e39e42def49992fca3700fb5c1",
   "workflows/modules/atera_cellpose.nf::ATERA_CELLPOSE_SEGMENT::script": "f9fa20883111364417ddc272cd02e1a4c0102de7eb5f5c2265088ec14bfd6e95",
+  "workflows/modules/atera_cellpose.nf::ATERA_STOCK_CELLPOSE_SEGMENT::script": "f9fa20883111364417ddc272cd02e1a4c0102de7eb5f5c2265088ec14bfd6e95",
   "workflows/modules/atera_proseg.nf::ATERA_PROSEG_PLAN::script": "a72516474bbdc273c6d6d9b76ca718f6e12ef4f425585c562c816ab18775d6f9",
   "workflows/modules/atera_proseg.nf::ATERA_PROSEG_PLAN_CELLPOSE::script": "a72516474bbdc273c6d6d9b76ca718f6e12ef4f425585c562c816ab18775d6f9",
   "workflows/modules/atera_proseg.nf::ATERA_PROSEG_STITCH::script": "3e1ae890073dbe5132400973d9c47158da258b9eb9f7123c6f17e9edf096d109",

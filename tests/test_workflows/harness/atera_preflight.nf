@@ -171,6 +171,21 @@ workflow {
     check("cellpose/map_first_only_clustering", mapFirst + [only_stage: "clustering_squidpy"])
     check("cellpose/map_first_only_mender", mapFirst + [only_stage: "mender", mender_enabled: "true"])
     check("cellpose/default", cellpose)
+    def comparisonWeights = new File('comparison-model/model')
+    comparisonWeights.parentFile.mkdirs()
+    comparisonWeights.text = 'synthetic weights; preflight only'
+    def comparisonDensity = AteraDensitySettings.enabled(params) ? AteraDensitySettings.profile(params) : null
+    new File(comparisonWeights.parentFile, 'model.json').text = groovy.json.JsonOutput.toJson([
+        weights_sha256: java.security.MessageDigest.getInstance('SHA-256').digest(comparisonWeights.bytes).encodeHex().toString(),
+        platform: 'ATERA', species: 'human', channels: AteraDensitySettings.channels(atera, params),
+        image_key: 'morphology_focus', pixel_size_um: 0.2125, tile_size: 6144,
+        normalization_route: 'A', status: 'accepted', transcript_density_profile: comparisonDensity,
+        evaluated_cellpose: [input_normalization: comparisonDensity != null ? 'per_channel' : 'joint'],
+    ])
+    check("cellpose/comparison", cellpose + [segmentation_source: "cellpose_comparison",
+        atera_cellpose_model: comparisonWeights.absolutePath,
+        mender_enabled: "true", mender_segmentations: "all"],
+        [cellpose_tile_size_candidates: [6144], cellpose_protected_output_roots: [new File('published').absolutePath]])
     check(
         "cellpose/all_mender",
         cellpose + [analysis_segmentation: "all", mender_enabled: "true", stop_stage: "mender"],

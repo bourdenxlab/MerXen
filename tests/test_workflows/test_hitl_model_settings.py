@@ -12,7 +12,12 @@ from pathlib import Path
 
 import pytest
 
-from merxen.config import CellposeConfig, MaskFilterConfig, TilingConfig
+from merxen.config import (
+    CellposeConfig,
+    MaskFilterConfig,
+    MaskGeometryFilterConfig,
+    TilingConfig,
+)
 from merxen.segmentation.model_identity import (
     CELLPOSE_VERSION,
     CPSAM_V2_SHA256,
@@ -41,7 +46,11 @@ def _run_cases(tmp_path: Path, cases: list[dict]) -> list[dict]:
     # The builder lives in segmentationConfigMap since AT-7 (4-space body).
     block = re.search(r"def baseConfig = \[.*?^    \]$", text, re.MULTILINE | re.DOTALL)
     assert block is not None
-    base = block.group().replace("params.", "opts.")
+    base = (
+        block.group()
+        .replace("params.", "opts.")
+        .replace("geometryFilter(params)", "geometryFilter(opts)")
+    )
     hook = text.split("// hitl-hook:C4\n", 1)[1].split("def segmentConfig =", 1)[0]
     (tmp_path / "lib").symlink_to(ROOT / "workflows/lib", target_is_directory=True)
     (tmp_path / "cases.json").write_text(json.dumps(cases))
@@ -64,6 +73,10 @@ workflow {
             """
         + hook
         + """
+            if (entry.stock_comparison) {
+                baseConfig.dataset = entry.dataset
+                baseConfig = CellposeSettings.stockComparisonConfig(baseConfig)
+            }
             if (entry.check_preflight) {
                 CellposeSettings.preflight(entry.row,
                     [active_platforms: [platform], species: 'human', pair_id: 'P1',
@@ -414,7 +427,7 @@ def test_downstream_selector_requires_matching_published_identity(
             channels=["DAPI", "18S"],
             image_key="morphology_focus",
             pixel_size_um=(0.2125, 0.2125),
-            mask_filter=MaskFilterConfig(),
+            mask_filter=MaskFilterConfig(geometry_filter=MaskGeometryFilterConfig()),
             tiling=TilingConfig(tile_size_candidates=[6144]),
         ),
     )
@@ -585,7 +598,9 @@ def test_published_stock_identity_must_name_the_platform_native_image(
                 channels=_DEFAULT_CHANNELS[platform],
                 image_key=image_key,
                 pixel_size_um=(_PIXEL_SIZE[platform], _PIXEL_SIZE[platform]),
-                mask_filter=MaskFilterConfig(),
+                mask_filter=MaskFilterConfig(
+                    geometry_filter=MaskGeometryFilterConfig()
+                ),
                 tiling=TilingConfig(tile_size_candidates=[6144]),
             ),
         )
@@ -613,3 +628,69 @@ def test_published_stock_identity_must_name_the_platform_native_image(
     results = _run_cases(tmp_path, cases)
     assert "error" not in results[0], results[0]
     assert "identity mismatch" in results[1]["error"]
+
+
+@pytest.mark.nextflow
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow unavailable")
+def test_geometry_cleanup_defaults_apply_to_every_platform(tmp_path: Path) -> None:
+    """All native pixel sizes share one physical small/thin/concave policy."""
+    cases = [
+        {"options": _defaults(), "platform": platform, "row": {}}
+        for platform in ("XENIUM", "MERSCOPE", "ATERA")
+    ]
+    cases.append(
+        {
+            "options": {**_defaults(), "cellpose_geometry_filter_enabled": False},
+            "row": {},
+        }
+    )
+    results = _run_cases(tmp_path, cases)
+    for result in results[:3]:
+        assert "error" not in result, result
+        config = json.loads(result["after"])
+        assert config["mask_filter"]["geometry_filter"] == {
+            "max_area_um2": 100.0,
+            "max_thickness_um": 5.0,
+            "max_solidity": 0.75,
+        }
+    assert json.loads(results[3]["after"])["mask_filter"]["geometry_filter"] is None
+
+
+@pytest.mark.nextflow
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow unavailable")
+def test_stock_comparison_has_independent_paths_and_matching_recipe(
+    tmp_path: Path,
+) -> None:
+    """Only model selection and published destinations change in a stock arm."""
+    options = {**_defaults(), "atera_cellpose_final_max_area_um2": 2000}
+    dataset = {
+        "platform": "ATERA",
+        "name": "PAIR_A_ATERA",
+        "channels": ["DAPI", "18S", "transcript_density"],
+        "persistent_mask_path": "arm/segmentation/cellpose_masks_tiled.npy",
+    }
+    cases = [
+        {"platform": "ATERA", "row": {}, "options": options},
+        {
+            "platform": "ATERA",
+            "row": {},
+            "options": options,
+            "stock_comparison": True,
+            "dataset": dataset,
+        },
+    ]
+    control, result = _run_cases(tmp_path, cases)
+    assert "error" not in result, result
+    before, after = json.loads(control["after"]), json.loads(result["after"])
+    assert after["cellpose"]["pretrained_model"] == "cpsam_v2"
+    assert after["cellpose"]["flow_threshold"] == before["cellpose"]["flow_threshold"]
+    assert (
+        after["cellpose"]["cellprob_threshold"]
+        == before["cellpose"]["cellprob_threshold"]
+    )
+    assert after["mask_filter"] == before["mask_filter"]
+    assert after["dataset"]["channels"] == dataset["channels"]
+    assert (
+        after["dataset"]["persistent_mask_path"]
+        == "arm/segmentation/stock_cellpose/cellpose_masks_tiled.npy"
+    )

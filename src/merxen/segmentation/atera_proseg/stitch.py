@@ -85,6 +85,7 @@ from merxen.segmentation.atera_proseg import (
     PROSEG_LAYERS,
     PROVENANCE_ATTR,
     STITCH_FORMAT_VERSION,
+    STOCK_CELLPOSE_ASSIGNMENT_COLUMN,
     TILE_CELLS_NAME,
     TILE_CLAIMS_DIR,
     AteraProsegError,
@@ -327,13 +328,17 @@ def _load_tiles(cfg: AteraProsegStitchConfig) -> _Tiles:
     return _Tiles(plan, manifests, dirs, expected, grid, proseg_layer(kind))
 
 
-def stitch_fingerprint(tiles: _Tiles) -> str:
+def stitch_fingerprint(
+    tiles: _Tiles, stock_cellpose: dict[str, Any] | None = None
+) -> str:
     """Return the SHA-256 of the plan, the tile manifests and the stitch version."""
     payload = {
         "stitch_format_version": STITCH_FORMAT_VERSION,
         "plan": tiles.plan,
         "tiles": [tiles.manifests[tid] for tid in sorted(tiles.manifests)],
     }
+    if stock_cellpose is not None:
+        payload["stock_cellpose"] = stock_cellpose
     text = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -565,6 +570,7 @@ def _rewrite_points_file(
     labels: np.ndarray,
     pixel_size_um: float,
     cellpose_mask: np.ndarray | None = None,
+    stock_cellpose_mask: np.ndarray | None = None,
     released_cells: np.ndarray | None = None,
 ) -> _FileResult:
     from merxen.enrichment.label_lookup import PixelFrame, pixel_indices
@@ -578,6 +584,11 @@ def _rewrite_points_file(
         for name in (ASSIGNMENT_COLUMN, BACKGROUND_COLUMN, CELLPOSE_ASSIGNMENT_COLUMN)
         if name in table.column_names
     ]
+    if (
+        stock_cellpose_mask is not None
+        and STOCK_CELLPOSE_ASSIGNMENT_COLUMN in table.column_names
+    ):
+        drop.append(STOCK_CELLPOSE_ASSIGNMENT_COLUMN)
     if drop:
         table = table.drop_columns(drop)
     n_rows = table.num_rows
@@ -691,6 +702,14 @@ def _rewrite_points_file(
             pa.array(cellpose_label, pa.uint64(), mask=cellpose_label == 0),
         )
         added.append((CELLPOSE_ASSIGNMENT_COLUMN, "uint64", "UInt64"))
+    if stock_cellpose_mask is not None:
+        stock_labels = lookup_labels(stock_cellpose_mask, x, y, pixel_size_um)
+        table = table.add_column(
+            insert_at + len(added),
+            STOCK_CELLPOSE_ASSIGNMENT_COLUMN,
+            pa.array(stock_labels, pa.uint64(), mask=stock_labels == 0),
+        )
+        added.append((STOCK_CELLPOSE_ASSIGNMENT_COLUMN, "uint64", "UInt64"))
     pandas_meta = _pandas_metadata(table.schema, added)
     schema_meta = dict(table.schema.metadata or {})
     if pandas_meta:
@@ -792,6 +811,14 @@ def _points_columns(layer: ProsegLayer) -> set[str]:
     if layer.prior_kind == "cellpose":
         columns.add(CELLPOSE_ASSIGNMENT_COLUMN)
     return columns
+
+
+def _stock_assignment_present(latest: Path) -> bool:
+    directory = points_parquet_dir(latest, POINTS_KEY)
+    files = sorted(directory.glob("*.parquet"))
+    return bool(files) and all(
+        STOCK_CELLPOSE_ASSIGNMENT_COLUMN in pq.read_schema(path).names for path in files
+    )
 
 
 def _points_have_assignment(latest: Path, layer: ProsegLayer) -> bool:
@@ -1115,6 +1142,52 @@ def _finish_clip_record(
     return finished
 
 
+def _stock_comparison_identity(
+    cfg: AteraProsegStitchConfig, tiles: _Tiles
+) -> dict[str, Any] | None:
+    """Validate the comparison mask, which is never supplied to ProSeg."""
+    if cfg.stock_cellpose_mask_path is None:
+        return None
+    from merxen.segmentation.atera_proseg.prior import describe_cellpose_prior
+    from merxen.segmentation.model_identity import (
+        CPSAM_V2_SHA256,
+        read_model_identity,
+    )
+
+    if tiles.layer.prior_kind != "cellpose":
+        raise AteraProsegError("Stock comparison requires a retrained Cellpose prior")
+    path = cfg.stock_cellpose_mask_path
+    identity = read_model_identity(path)
+    trained = read_model_identity(Path(tiles.plan["prior"]["mask_path"]))
+    excluded = {"pretrained_model", "model_sha256", "model_metadata_path"}
+    if (
+        identity.status != "verified"
+        or identity.weights_sha256 != CPSAM_V2_SHA256
+        or identity.inference_context is None
+        or identity.inference_context != trained.inference_context
+        or identity.cellpose_config is None
+        or trained.cellpose_config is None
+        or identity.cellpose_config.model_dump(exclude=excluded)
+        != trained.cellpose_config.model_dump(exclude=excluded)
+        or identity.cellpose_version != trained.cellpose_version
+        or identity.torch_version != trained.torch_version
+    ):
+        raise AteraProsegError(
+            "Stock comparison requires verified stock weights "
+            "and the same input/filter recipe"
+        )
+    mask = open_mask(path)
+    if tuple(mask.shape) != tuple(tiles.plan["mask_shape_px"]):
+        raise AteraProsegError(
+            "Stock comparison mask does not match the native image grid"
+        )
+    del mask
+    return {
+        **describe_cellpose_prior(path, None),
+        "model_identity": identity.model_dump(mode="json"),
+    }
+
+
 def stitch(cfg: AteraProsegStitchConfig) -> dict[str, Any]:
     """Stitch the tiles of a plan into the latest store (or skip if current).
 
@@ -1134,7 +1207,8 @@ def stitch(cfg: AteraProsegStitchConfig) -> dict[str, Any]:
     latest = Path(os.path.realpath(target))
     tiles = _load_tiles(cfg)
     _check_latest_store(latest, tiles.plan, cfg.dataset_name)
-    fingerprint = stitch_fingerprint(tiles)
+    stock_comparison = _stock_comparison_identity(cfg, tiles)
+    fingerprint = stitch_fingerprint(tiles, stock_comparison)
     with spatialdata_write_lock(latest):
         recorded = dict(read_root_attrs(latest).get(PROVENANCE_ATTR) or {})
         if (
@@ -1142,6 +1216,7 @@ def stitch(cfg: AteraProsegStitchConfig) -> dict[str, Any]:
             and recorded.get("fingerprint") == fingerprint
             and _layer_complete(latest, tiles.layer)
             and _points_have_assignment(latest, tiles.layer)
+            and (stock_comparison is None or _stock_assignment_present(latest))
         ):
             logger.info(
                 "[%s] ProSeg layer already stitched from these tiles (%s); skipping",
@@ -1160,7 +1235,7 @@ def stitch(cfg: AteraProsegStitchConfig) -> dict[str, Any]:
                 report["removed_foreign_layer_without_restitch"] = removed
         else:
             try:
-                report = _stitch_into(cfg, latest, tiles, fingerprint)
+                report = _stitch_into(cfg, latest, tiles, fingerprint, stock_comparison)
             finally:
                 # The label raster (n_rows x n_cols uint32, about 10 GB for a
                 # full section) is scratch whether or not the stitch succeeds.
@@ -1178,6 +1253,7 @@ def _stitch_into(
     latest: Path,
     tiles: _Tiles,
     fingerprint: str,
+    stock_comparison: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     import anndata as ad
     import dask.array as da
@@ -1224,6 +1300,12 @@ def _stitch_into(
     cellpose_mask = (
         open_mask(Path(plan["prior"]["mask_path"]))
         if layer.prior_kind == "cellpose"
+        else None
+    )
+
+    stock_cellpose_mask = (
+        open_mask(cfg.stock_cellpose_mask_path)
+        if cfg.stock_cellpose_mask_path is not None
         else None
     )
 
@@ -1287,6 +1369,7 @@ def _stitch_into(
         labels=read_only,
         pixel_size_um=ps,
         cellpose_mask=cellpose_mask,
+        stock_cellpose_mask=stock_cellpose_mask,
         released_cells=released_cells,
     )
     try:
@@ -1412,6 +1495,8 @@ def _stitch_into(
         ),
         "control_assignment": CONTROL_ASSIGNMENT_RULE,
     }
+    if stock_comparison is not None:
+        stitch_record["stock_cellpose"] = stock_comparison
     if layer.prior_kind == "cellpose":
         stitch_record["cellpose_assignment_rule"] = "cellpose_mask_corner"
 
@@ -1441,6 +1526,8 @@ def _stitch_into(
         "tiles": [_compact_manifest(tiles.manifests[tid]) for tid in tiles.order],
         "stitch": stitch_record,
     }
+    if stock_comparison is not None:
+        provenance["stock_cellpose"] = stock_comparison
     adata.uns[PROVENANCE_ATTR] = {
         key: provenance[key]
         for key in (

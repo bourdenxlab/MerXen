@@ -72,6 +72,7 @@ STATION_ALIASES = {
     "cellpose_segment": {
         "CELLPOSE_SEGMENT",
         "ATERA_CELLPOSE_SEGMENT",
+        "ATERA_STOCK_CELLPOSE_SEGMENT",
         "ATERA_TRANSCRIPT_DENSITY",
         "CELLPOSE_HITL_TRAIN",
         "CELLPOSE_HITL_SEED",

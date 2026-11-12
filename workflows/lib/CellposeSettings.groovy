@@ -1,10 +1,40 @@
 import groovy.json.JsonSlurper
+import groovy.json.JsonOutput
 import java.security.MessageDigest
 import java.nio.file.Files
 
 /** Opt-in model settings; empty settings never alter legacy segment JSON. */
 class CellposeSettings {
     static final String STOCK_SHA256 = '0f1cc3f7ecdd8a037a57c6c48d9d8921391be4cbce3fa9f13c3e3a2e1253c667'
+
+    static Map geometryFilter(params) {
+        def enabled = params.cellpose_geometry_filter_enabled
+        if (!(enabled.toString().toLowerCase() in ['true', 'false'])) {
+            throw new IllegalArgumentException('--cellpose_geometry_filter_enabled must be true or false')
+        }
+        if (enabled.toString().toLowerCase() == 'false') return null
+        return [max_area_um2: params.cellpose_geometry_max_area_um2,
+            max_thickness_um: params.cellpose_geometry_max_thickness_um,
+            max_solidity: params.cellpose_geometry_max_solidity]
+    }
+
+    static Map stockComparisonConfig(Map configured) {
+        def config = new JsonSlurper().parseText(JsonOutput.toJson(configured))
+        if (config.dataset.platform != 'ATERA') {
+            throw new IllegalArgumentException('Stock comparison is an ATERA route')
+        }
+        config.cellpose.putAll([pretrained_model: 'cpsam_v2', model_sha256: null,
+            model_metadata_path: null])
+        config.dataset.name = "${config.dataset.name}_STOCK"
+        config.dataset.findAll { name, value ->
+            name.startsWith('persistent_') && value instanceof String &&
+                value.contains('/segmentation/')
+        }.each { name, value ->
+            config.dataset[name] = value.replace('/segmentation/', '/segmentation/stock_cellpose/')
+        }
+        config.cellpose_model_policy = (config.cellpose_model_policy ?: [:]) + [experimental_arm: true]
+        return config
+    }
 
     static Map selectedBundle(row, String platform, params) {
         def selected = value(row, params, "${platform.toLowerCase()}_cellpose_model")
@@ -158,8 +188,10 @@ class CellposeSettings {
             final_min_area_um2: params.cellpose_final_min_area_um2,
             final_max_area_um2: params.cellpose_final_max_area_um2,
             final_filter_chunk_mb: params.cellpose_final_filter_chunk_mb,
+            geometry_filter: geometryFilter(params),
             n_jobs: 16, show_progress: true,
         ] + selected.mask_filter
+        if (expectedFilter.geometry_filter == null) expectedFilter.remove('geometry_filter')
         def expectedTiling = [
             tile_size_candidates: params.cellpose_tile_size_candidates,
             stitch_overlap_px: params.cellpose_stitch_overlap_px,
@@ -259,6 +291,8 @@ class CellposeSettings {
             ]
         }
         if (result.cellpose || result.mask_filter) {
+            // The current cleanup policy also applies to older named models.
+            result.mask_filter.geometry_filter = geometryFilter(params)
             if (!result.cellpose_model_policy) {
                 def roots = params.cellpose_protected_output_roots
                 roots = roots instanceof Collection ? roots : (roots ? [roots] : [])
@@ -277,11 +311,15 @@ class CellposeSettings {
                 rowSettings.stage_order.indexOf('segment')
         rowSettings.active_platforms.each { platform ->
             def selected = settings(row, platform, params)
+            if (platform == 'ATERA' && rowSettings.segmentation_source == 'cellpose_comparison' &&
+                !selected.cellpose?.model_metadata_path) {
+                throw new IllegalArgumentException('cellpose_comparison requires a retrained --atera_cellpose_model')
+            }
             if (!selected.cellpose_model_policy) {
                 return
             }
             if (platform == 'ATERA' && rowSettings.segmentation_source != null &&
-                rowSettings.segmentation_source != 'cellpose_proseg') {
+                !(rowSettings.segmentation_source in ['cellpose_proseg', 'cellpose_comparison'])) {
                 throw new IllegalArgumentException(
                     'ATERA Cellpose model/overrides require segmentation_source=cellpose_proseg; ' +
                     'native and native_proseg use vendor masks and do not run Cellpose')

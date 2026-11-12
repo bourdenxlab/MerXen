@@ -45,7 +45,7 @@ PlatformFamily = Literal["10X", "MERSCOPE"]
 """Vendor family of a platform; members of a family share readers and layouts."""
 
 SegmentationSource = Literal[
-    "native", "native_proseg", "cellpose_only", "cellpose_proseg"
+    "native", "native_proseg", "cellpose_only", "cellpose_proseg", "cellpose_comparison"
 ]
 """Where the cells of a row come from.
 
@@ -70,6 +70,12 @@ _SEGMENTATION_LAYERS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
         "native_proseg": ("proseg_vendor", "original_seg"),
         "cellpose_proseg": ("reseg", "original_seg", "proseg_mask", "proseg_hybrid"),
         "cellpose_only": ("proseg_mask", "original_seg"),
+        "cellpose_comparison": (
+            "reseg",
+            "original_seg",
+            "proseg_mask",
+            "stock_cellpose",
+        ),
     }
 )
 
@@ -195,7 +201,12 @@ PLATFORM_SPECS: Final[Mapping[str, PlatformSpec]] = MappingProxyType(
                 "experiment.spatial",
             ),
             mask_pixel_convention="corner",
-            segmentation_sources=("native", "native_proseg", "cellpose_proseg"),
+            segmentation_sources=(
+                "native",
+                "native_proseg",
+                "cellpose_proseg",
+                "cellpose_comparison",
+            ),
             default_segmentation_source="native",
             original_label_keys=("cell_labels", "nucleus_labels"),
             rasterised_transcript_plots=True,

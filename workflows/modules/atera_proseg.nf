@@ -102,7 +102,7 @@ process ATERA_PROSEG_STITCH {
     publishDir { "${params.outdir}/${pair_id}/${platform.toLowerCase()}/segmentation" }, mode: "copy", overwrite: true, pattern: "stitch_out/atera_proseg_report.json"
 
     input:
-    tuple val(key), val(pair_id), val(platform), val(stitch_config_json), path(latest_zarr, stageAs: "native_latest.zarr"), path(tile_plan, stageAs: "tile_plan.json"), path(tile_dirs)
+    tuple val(key), val(pair_id), val(platform), val(stitch_config_json), path(latest_zarr, stageAs: "native_latest.zarr"), path(tile_plan, stageAs: "tile_plan.json"), path(tile_dirs), path(stock_cellpose_mask, stageAs: "stock_cellpose_mask.npy")
 
     output:
     tuple val(key),
