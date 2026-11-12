@@ -63,7 +63,7 @@ class PlatformSpec {
             ['atera_dir'],
             ['atera_spatialdata_path'],
             ['atera_spec_path'],
-            ['native', 'native_proseg', 'cellpose_proseg'],
+            ['native', 'native_proseg', 'cellpose_proseg', 'cellpose_comparison'],
             'native',
             true,
             false,

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from merxen.segmentation.mask_filter import (
     drop_labels_from_mask,
@@ -109,3 +110,117 @@ def test_drop_labels_from_mask_leaves_the_file_alone_when_nothing_is_dropped(
     assert summary == {"n_labels": 1, "n_kept": 1, "n_dropped": 0, "written": False}
     assert path.read_bytes() == before
     assert drop_labels_from_mask(path, []) == summary
+
+
+def test_geometry_filter_removes_crescent_and_preserves_round_cells_and_processes(
+    tmp_path: Path,
+) -> None:
+    """Only whole small/thin/concave objects are removed, across rewrite chunks."""
+    from merxen.config import MaskGeometryFilterConfig
+
+    yy, xx = np.indices((240, 280))
+    mask = np.zeros(yy.shape, dtype=np.uint32)
+    crescent = ((yy - 35) ** 2 + (xx - 35) ** 2 <= 12**2) & (
+        (yy - 35) ** 2 + (xx - 40) ** 2 > 11**2
+    )
+    circle = (yy - 35) ** 2 + (xx - 85) ** 2 <= 3**2
+    neuron = (yy - 135) ** 2 + (xx - 150) ** 2 <= 30**2
+    mask[crescent] = 2
+    mask[circle] = 5
+    mask[neuron] = 9
+    mask[134:137, 178:220] = 9  # A real process belongs to the wider soma.
+    path = tmp_path / "mask.npy"
+    np.save(path, mask)
+    stats = filter_labeled_mask_by_area(
+        path,
+        pixel_area_um2=0.25,
+        min_area_um2=5,
+        max_area_um2=2000,
+        geometry_filter=MaskGeometryFilterConfig(),
+        pixel_size_um=(0.5, 0.5),
+        chunk_mb=1,
+    )
+    out = np.load(path)
+    assert stats["n_removed_geometry"] == 1
+    assert stats["n_kept"] == 2
+    assert not out[crescent].any()
+    assert np.array_equal(out == 1, mask == 5)
+    assert np.array_equal(out == 2, mask == 9)
+
+
+def test_geometry_filter_uses_physical_thickness_and_protects_clipped_objects(
+    tmp_path: Path,
+) -> None:
+    """A long thin U is removed only below the physical thickness threshold."""
+    from merxen.config import MaskGeometryFilterConfig
+
+    mask = np.zeros((80, 100), dtype=np.uint32)
+    mask[20:40, 20:22] = 1
+    mask[20:22, 20:40] = 1
+    mask[38:40, 20:40] = 1
+    mask[0:20, 60:62] = 2
+    mask[0:2, 60:80] = 2
+    mask[18:20, 60:80] = 2
+    path = tmp_path / "mask.npy"
+    for spacing, expected_removed in [((0.5, 0.5), 1), ((2.0, 2.0), 0)]:
+        np.save(path, mask)
+        stats = filter_labeled_mask_by_area(
+            path,
+            pixel_area_um2=spacing[0] * spacing[1],
+            geometry_filter=MaskGeometryFilterConfig(max_area_um2=1000),
+            pixel_size_um=spacing,
+        )
+        assert stats["n_removed_geometry"] == expected_removed
+        assert np.count_nonzero(np.load(path)[mask == 2]) == np.count_nonzero(mask == 2)
+
+
+def test_geometry_filter_can_be_disabled_and_leaves_source_unchanged(
+    tmp_path: Path,
+) -> None:
+    """An absent geometry policy retains the previous area-only behaviour."""
+    mask = np.zeros((30, 30), dtype=np.uint32)
+    mask[5:20, 5] = 4
+    mask[5, 5:20] = 4
+    path = tmp_path / "mask.npy"
+    np.save(path, mask)
+    before = path.read_bytes()
+    stats = filter_labeled_mask_by_area(path, pixel_area_um2=1, min_area_um2=5)
+    assert stats["n_removed_geometry"] == 0
+    assert path.read_bytes() == before
+
+
+def test_geometry_identity_distinguishes_legacy_and_active_policies() -> None:
+    """Old provenance must not silently claim the new cleanup was applied."""
+    from merxen.config import MaskFilterConfig, MaskGeometryFilterConfig
+
+    legacy = MaskFilterConfig()
+    assert "geometry_filter" not in legacy.model_dump(mode="json")
+    current = MaskFilterConfig(geometry_filter=MaskGeometryFilterConfig())
+    assert current != legacy
+    assert current.model_dump(mode="json")["geometry_filter"]["max_solidity"] == 0.75
+    assert MaskFilterConfig.model_validate_json(current.model_dump_json()) == current
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [
+        {"max_area_um2": 1},
+        {"max_thickness_um": 0.5},
+        {"max_solidity": 0.01},
+    ],
+)
+def test_geometry_requires_all_three_conditions(tmp_path: Path, limits: dict) -> None:
+    """Passing any one threshold protects an otherwise small thin concave cell."""
+    from merxen.config import MaskGeometryFilterConfig
+
+    mask = np.zeros((40, 40), dtype=np.uint32)
+    mask[10:30, 10] = 1
+    mask[10, 10:25] = 1
+    mask[29, 10:25] = 1
+    path = tmp_path / "mask.npy"
+    np.save(path, mask)
+    stats = filter_labeled_mask_by_area(
+        path, pixel_area_um2=0.25, geometry_filter=MaskGeometryFilterConfig(**limits)
+    )
+    assert stats["n_removed_geometry"] == 0
+    np.testing.assert_array_equal(np.load(path), mask)

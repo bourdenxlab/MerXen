@@ -936,3 +936,22 @@ def test_hippocampal_resources_enable_only_the_explicit_human_domain(
         "suffix": "",
         "region": "frontal_cortex",
     }
+
+
+@pytest.mark.nextflow
+def test_comparison_rows_select_four_independent_analysis_layers(
+    preflight_cases: dict[str, dict[str, Any]],
+) -> None:
+    """Only retrained masks seed ProSeg; both unrefined model layers are analysed."""
+    record = preflight_cases["cellpose/comparison"]
+    assert record.get("result") == "OK", record
+    assert record["segmentation_source"] == "cellpose_comparison"
+    assert record["analysis_segmentations"] == [
+        "reseg",
+        "original_seg",
+        "proseg_mask",
+        "stock_cellpose",
+    ]
+    assert record["mender_segmentations"] == record["analysis_segmentations"]
+    assert record["run_atera_cellpose"] and record["run_atera_proseg"]
+    assert not record["run_segment_nuclei"]

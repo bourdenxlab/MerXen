@@ -42,6 +42,7 @@ from merxen.io.spatialdata_schema import ORIGINAL_ID_NAMESPACE, PROSEG_ID_NAMESP
 ASSIGNMENT_COLUMN: Final = "assignment"
 BACKGROUND_COLUMN: Final = "background"
 CELLPOSE_ASSIGNMENT_COLUMN: Final = "cellpose_assignment"
+STOCK_CELLPOSE_ASSIGNMENT_COLUMN: Final = "stock_cellpose_assignment"
 """Points column of a Cellpose-prior store: the Cellpose label at each row."""
 
 PriorKind = Literal["vendor", "cellpose"]
@@ -104,7 +105,11 @@ PROSEG_LAYERS: Final[Mapping[str, ProsegLayer]] = MappingProxyType(
 """The ProSeg layer of each prior kind (twin: ``AteraProsegLayers.groovy``)."""
 
 SOURCE_PRIOR_KIND: Final[Mapping[str, PriorKind]] = MappingProxyType(
-    {"native_proseg": "vendor", "cellpose_proseg": "cellpose"}
+    {
+        "native_proseg": "vendor",
+        "cellpose_proseg": "cellpose",
+        "cellpose_comparison": "cellpose",
+    }
 )
 """Prior kind of each segmentation source that runs the tiled ProSeg route."""
 

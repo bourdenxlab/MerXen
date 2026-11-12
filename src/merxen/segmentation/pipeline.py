@@ -648,9 +648,19 @@ def _preflight_model_selection(
     """Validate custom arms before any entry point creates or replaces output."""
     require_safe_custom_outputs(config)
     if not is_experimental_arm(config):
-        if config.dataset.transcript_density_path is not None:
-            from merxen.segmentation.transcript_density import density_input_identity
+        if (
+            config.dataset.transcript_density_path is not None
+            or config.mask_filter.geometry_filter is not None
+        ):
+            density_identity = None
+            if config.dataset.transcript_density_path is not None:
+                from merxen.segmentation.transcript_density import (
+                    density_input_identity,
+                )
 
+                density_identity = density_input_identity(
+                    config.dataset.transcript_density_path
+                )
             _sdata, _fetch, _h, _w, matrix, _points = _load_dataset_sdata(config)
             cellpose_version, torch_version = require_cellpose_runtime()
             inverse = np.linalg.inv(matrix)
@@ -672,9 +682,7 @@ def _preflight_model_selection(
                     ),
                     mask_filter=config.mask_filter,
                     tiling=config.tiling,
-                    transcript_density=density_input_identity(
-                        config.dataset.transcript_density_path
-                    ),
+                    transcript_density=density_identity,
                 ),
             )
         return None
@@ -937,6 +945,7 @@ def run_cellpose_segmentation(
     if (
         config.mask_filter.final_min_area_um2 is not None
         or config.mask_filter.final_max_area_um2 is not None
+        or config.mask_filter.geometry_filter is not None
     ):
         pixel_area_um2 = _pixel_area_um2_from_affine(x_transform, y_transform)
         _progress(
@@ -952,12 +961,18 @@ def run_cellpose_segmentation(
             max_area_um2=config.mask_filter.final_max_area_um2,
             chunk_mb=config.mask_filter.final_filter_chunk_mb,
             show_progress=config.mask_filter.show_progress,
+            geometry_filter=config.mask_filter.geometry_filter,
+            pixel_size_um=(
+                float(np.hypot(x_transform[1], y_transform[1])),
+                float(np.hypot(x_transform[0], y_transform[0])),
+            ),
         )
         log_status(
             f"[{dataset.name}] Cellpose area filter kept "
             f"{filter_stats['n_kept']:,}/{filter_stats['n_labels']:,} masks "
             f"(removed small={filter_stats['n_removed_small']:,}, "
-            f"large={filter_stats['n_removed_large']:,}; "
+            f"large={filter_stats['n_removed_large']:,}, "
+            f"geometry={filter_stats['n_removed_geometry']:,}; "
             f"bounds={config.mask_filter.final_min_area_um2}-"
             f"{config.mask_filter.final_max_area_um2} um2)"
         )
@@ -1278,6 +1293,7 @@ def run_cellpose_nuclei_segmentation(
     if (
         nuclei_config.mask_filter.final_min_area_um2 is not None
         or nuclei_config.mask_filter.final_max_area_um2 is not None
+        or nuclei_config.mask_filter.geometry_filter is not None
     ):
         filter_stats = filter_labeled_mask_by_area(
             mask_path,
@@ -1286,6 +1302,11 @@ def run_cellpose_nuclei_segmentation(
             max_area_um2=nuclei_config.mask_filter.final_max_area_um2,
             chunk_mb=nuclei_config.mask_filter.final_filter_chunk_mb,
             show_progress=nuclei_config.mask_filter.show_progress,
+            geometry_filter=nuclei_config.mask_filter.geometry_filter,
+            pixel_size_um=(
+                float(np.hypot(x_transform[1], y_transform[1])),
+                float(np.hypot(x_transform[0], y_transform[0])),
+            ),
         )
         _progress("cellpose_nuclei_area_filtered", **filter_stats)
         log_status(

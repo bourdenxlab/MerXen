@@ -166,14 +166,15 @@ def test_main_nf_defines_no_process() -> None:
 
 
 def test_pinned_inventory(pinned: dict[str, str]) -> None:
-    """Today's inventory: 64 ``script:`` and 17 ``stub:`` sections.
+    """Today's inventory: 65 ``script:`` and 17 ``stub:`` sections.
 
     AT-9 added the three ATERA ProSeg processes, RCA added annotation processes,
     AT-8 added the streaming MECR reference, and AT-7 added
-    ATERA_CELLPOSE_SEGMENT and ATERA_PROSEG_PLAN_CELLPOSE. No existing pin changed.
+    ATERA_CELLPOSE_SEGMENT and ATERA_PROSEG_PLAN_CELLPOSE. The stock-comparison
+    process adds one more script; no existing pin changed.
     """
     labels = [key.rsplit("::", 1)[1] for key in pinned]
-    assert labels.count("script") == 64
+    assert labels.count("script") == 65
     assert labels.count("stub") == 17
     assert {key for key in pinned if key.endswith("::stub")} == {
         f"workflows/modules/pciseq.nf::{name}::stub"

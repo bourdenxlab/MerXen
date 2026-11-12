@@ -50,7 +50,10 @@ from merxen.io.spatialdata_schema import (
     PROSEG_ID_NAMESPACE,
     register_segmentation_branch,
 )
-from merxen.segmentation.atera_proseg import CELLPOSE_ASSIGNMENT_COLUMN
+from merxen.segmentation.atera_proseg import (
+    CELLPOSE_ASSIGNMENT_COLUMN,
+    STOCK_CELLPOSE_ASSIGNMENT_COLUMN,
+)
 from merxen.segmentation.atera_proseg.prior import file_stat, open_mask
 from merxen.segmentation.atera_proseg.stitch import (
     CONTROL_COUNT_PREFIXES,
@@ -135,13 +138,13 @@ def _label_stats(mask: np.ndarray, n_labels: int) -> tuple[np.ndarray, np.ndarra
 
 
 def _count_file(
-    path: Path, gene_position: dict[str, int]
+    path: Path,
+    gene_position: dict[str, int],
+    assignment_column: str = CELLPOSE_ASSIGNMENT_COLUMN,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int, int]:
     """Count one points file's rows per (Cellpose cell, gene) and control class."""
-    table = pq.read_table(
-        path, columns=[CELLPOSE_ASSIGNMENT_COLUMN, "is_gene", "feature_name"]
-    )
-    label_column = table.column(CELLPOSE_ASSIGNMENT_COLUMN).combine_chunks()
+    table = pq.read_table(path, columns=[assignment_column, "is_gene", "feature_name"])
+    label_column = table.column(assignment_column).combine_chunks()
     valid = label_column.is_valid().to_numpy(zero_copy_only=False)
     labels = label_column.fill_null(0).to_numpy().astype(np.uint64)
     is_gene = table.column("is_gene").to_numpy(zero_copy_only=False).astype(bool)
@@ -186,11 +189,15 @@ class _ReducedFile:
 
 
 def _reduce_file(
-    path: Path, gene_position: dict[str, int], index_of: np.ndarray, n_genes: int
+    path: Path,
+    gene_position: dict[str, int],
+    index_of: np.ndarray,
+    n_genes: int,
+    assignment_column: str = CELLPOSE_ASSIGNMENT_COLUMN,
 ) -> _ReducedFile:
     """Count one file per (table row, gene); labels not in the mask are counted."""
     cell, gene, ctrl_cell, ctrl_cat, rows, genes, controls = _count_file(
-        path, gene_position
+        path, gene_position, assignment_column
     )
     n_max = index_of.size - 1
     unknown = 0
@@ -216,26 +223,38 @@ def _reduce_file(
     )
 
 
-def layer_fingerprint(latest: Path, mask_path: Path) -> dict[str, Any]:
+def layer_fingerprint(
+    latest: Path, mask_path: Path, *, stock: bool = False
+) -> dict[str, Any]:
     """Return what the layer was built from (mask identity, stitch fingerprint)."""
     stitch = dict(read_root_attrs(latest).get("merxen_atera_proseg") or {})
+    comparison = (
+        dict(stitch.get("stock_cellpose") or {})
+        if stock
+        else dict(stitch.get("prior") or {})
+    )
     return {
         "version": LAYER_VERSION,
         "mask_file": Path(mask_path).name,
         "mask_stat": file_stat(Path(os.path.realpath(mask_path))),
-        "prior_fingerprint": dict(stitch.get("prior") or {}).get("fingerprint"),
+        "prior_fingerprint": comparison.get("fingerprint"),
         "stitch_fingerprint": stitch.get("fingerprint"),
     }
 
 
-def _layer_present(latest: Path) -> bool:
+def _layer_present(
+    latest: Path,
+    shape_key: str = CELLPOSE_SHAPES_KEY,
+    table_key: str = CELLPOSE_TABLE_KEY,
+    label_key: str = CELLPOSE_LABEL_KEY,
+) -> bool:
     return all(
         (latest / kind / name / "zarr.json").is_file()
         or (latest / kind / name / ".zgroup").is_file()
         for kind, name in (
-            ("shapes", CELLPOSE_SHAPES_KEY),
-            ("tables", CELLPOSE_TABLE_KEY),
-            ("labels", CELLPOSE_LABEL_KEY),
+            ("shapes", shape_key),
+            ("tables", table_key),
+            ("labels", label_key),
         )
     )
 
@@ -250,6 +269,7 @@ def build_atera_cellpose_layer(
     model_identity: dict[str, Any] | None,
     force: bool = False,
     n_workers: int | None = None,
+    stock: bool = False,
 ) -> dict[str, Any]:
     """Write (or keep) the Cellpose layer of an ATERA ``cellpose_proseg`` store.
 
@@ -264,6 +284,7 @@ def build_atera_cellpose_layer(
         model_identity: The Cellpose model identity of the mask, or ``None``.
         force: Rebuild even when the store records the same inputs.
         n_workers: Threads over the points files.
+        stock: Build the independent stock comparison; never a ProSeg prior.
 
     Returns:
         The layer record (also in ``attrs["merxen_atera_cellpose_layer"]``).
@@ -284,14 +305,24 @@ def build_atera_cellpose_layer(
     from merxen.io.spatialdata_io import delete_element, write_or_replace_element
     from merxen.segmentation.atera_proseg.plan import mask_shape
 
+    branch = "stock_cellpose" if stock else CELLPOSE_BRANCH
+    shape_key = "MOSAIK_stock_cellpose" if stock else CELLPOSE_SHAPES_KEY
+    table_key = "table_MOSAIK_stock_cellpose" if stock else CELLPOSE_TABLE_KEY
+    label_key = "stock_cellpose_cell_labels" if stock else CELLPOSE_LABEL_KEY
+    assignment_column = (
+        STOCK_CELLPOSE_ASSIGNMENT_COLUMN if stock else CELLPOSE_ASSIGNMENT_COLUMN
+    )
+    aliases = ("stock_cellpose",) if stock else CELLPOSE_ALIASES
+    layer_attr = "merxen_atera_stock_cellpose_layer" if stock else LAYER_ATTR
+    source_id_prefix = "stock_cellpose" if stock else SOURCE_ID_PREFIX
     latest = Path(latest)
-    fingerprint = layer_fingerprint(latest, mask_path)
-    recorded = dict(read_root_attrs(latest).get(LAYER_ATTR) or {})
+    fingerprint = layer_fingerprint(latest, mask_path, stock=stock)
+    recorded = dict(read_root_attrs(latest).get(layer_attr) or {})
     if (
         not force
         and recorded.get("fingerprint") == fingerprint
         and recorded.get("check", {}).get("passed")
-        and _layer_present(latest)
+        and _layer_present(latest, shape_key, table_key, label_key)
     ):
         logger.info("[%s] Cellpose layer already built; skipping", dataset_name)
         return recorded
@@ -304,12 +335,14 @@ def build_atera_cellpose_layer(
             f"grid is {grid}"
         )
     stitch = dict(read_root_attrs(latest).get("merxen_atera_proseg") or {})
-    prior = dict(stitch.get("prior") or {})
+    prior = dict(stitch.get("stock_cellpose" if stock else "prior") or {})
     if stitch.get("prior_kind") != "cellpose":
         raise RuntimeError(
             f"[{dataset_name}] The store's ProSeg layer was not stitched from a "
             "Cellpose prior; run the segment stage (ATERA_PROSEG_STITCH) first"
         )
+    if stock and model_identity != prior.get("model_identity"):
+        raise RuntimeError("Stock model identity differs from the stitched comparison")
     found_stat = file_stat(Path(os.path.realpath(mask_path)))
     if prior.get("mask_stat") is not None and list(prior["mask_stat"]) != found_stat:
         raise RuntimeError(
@@ -320,10 +353,10 @@ def build_atera_cellpose_layer(
     directory = points_parquet_dir(latest, POINTS_KEY)
     files = sorted(directory.glob("*.parquet"))
     if not files or not all(
-        CELLPOSE_ASSIGNMENT_COLUMN in pq.read_schema(path).names for path in files
+        assignment_column in pq.read_schema(path).names for path in files
     ):
         raise RuntimeError(
-            f"[{dataset_name}] The points lack {CELLPOSE_ASSIGNMENT_COLUMN}; run the "
+            f"[{dataset_name}] The points lack {assignment_column}; run the "
             "segment stage (ATERA_PROSEG_STITCH) first"
         )
 
@@ -365,7 +398,10 @@ def build_atera_cellpose_layer(
     unknown = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for reduced in pool.map(
-            lambda path: _reduce_file(path, gene_position, index_of, n_genes), files
+            lambda path: _reduce_file(
+                path, gene_position, index_of, n_genes, assignment_column
+            ),
+            files,
         ):
             n_rows += reduced.n_rows
             n_gene_rows += reduced.n_gene_rows
@@ -381,7 +417,7 @@ def build_atera_cellpose_layer(
                 )
     if unknown:
         raise RuntimeError(
-            f"[{dataset_name}] {unknown} points carry a {CELLPOSE_ASSIGNMENT_COLUMN} "
+            f"[{dataset_name}] {unknown} points carry a {assignment_column} "
             "that is not a label of the Cellpose mask"
         )
     keys = np.concatenate(file_keys) if file_keys else np.zeros(0, np.int64)
@@ -402,11 +438,11 @@ def build_atera_cellpose_layer(
     ).astype(np.int64)
     n_counted = int(transcript_counts.sum())
     area = np.asarray(shapely.area(geometries), dtype=np.float64)
-    source_ids = np.asarray([f"{SOURCE_ID_PREFIX}_{int(v)}" for v in labels], object)
+    source_ids = np.asarray([f"{source_id_prefix}_{int(v)}" for v in labels], object)
     obs = pd.DataFrame(
         {
             "instance_id": labels,
-            "region": pd.Categorical([CELLPOSE_SHAPES_KEY] * labels.size),
+            "region": pd.Categorical([shape_key] * labels.size),
             "source_cell_id": source_ids,
             "cell_area": area,
             "mask_area_um2": counts_px[labels.astype(np.int64)] * pixel_size_um**2,
@@ -422,7 +458,7 @@ def build_atera_cellpose_layer(
     adata.obsm["spatial"] = centroid.astype(np.float64)
     table = TableModel.parse(
         adata,
-        region=CELLPOSE_SHAPES_KEY,
+        region=shape_key,
         region_key="region",
         instance_key="instance_id",
     )
@@ -453,32 +489,32 @@ def build_atera_cellpose_layer(
     sdata = sd.read_zarr(latest, selection=("shapes", "tables", "labels"))
     # Tables computed from earlier Cellpose cells (image quantification,
     # clustering) would be reused against the new polygons: they go.
-    stale = derived_tables(latest, CELLPOSE_SHAPES_KEY, CELLPOSE_TABLE_KEY)
+    stale = derived_tables(latest, shape_key, table_key)
     for key in stale:
         delete_element(sdata, key, "tables")
-    write_or_replace_element(sdata, CELLPOSE_SHAPES_KEY, "shapes", shapes)
-    write_or_replace_element(sdata, CELLPOSE_LABEL_KEY, "labels", label_element)
-    write_or_replace_element(sdata, CELLPOSE_TABLE_KEY, "tables", table)
+    write_or_replace_element(sdata, shape_key, "shapes", shapes)
+    write_or_replace_element(sdata, label_key, "labels", label_element)
+    write_or_replace_element(sdata, table_key, "tables", table)
     register_segmentation_branch(
         sdata,
-        CELLPOSE_BRANCH,
+        branch,
         points_key=POINTS_KEY,
-        assignment_column=CELLPOSE_ASSIGNMENT_COLUMN,
-        shape_key=CELLPOSE_SHAPES_KEY,
-        table_key=CELLPOSE_TABLE_KEY,
-        id_namespace=PROSEG_ID_NAMESPACE,
-        legacy_aliases=CELLPOSE_ALIASES,
-        label_key=CELLPOSE_LABEL_KEY,
+        assignment_column=assignment_column,
+        shape_key=shape_key,
+        table_key=table_key,
+        id_namespace="stock_cellpose_label_v1" if stock else PROSEG_ID_NAMESPACE,
+        legacy_aliases=aliases,
+        label_key=label_key,
     )
     schema = dict(sdata.attrs[MERXEN_SCHEMA_ATTR])
     registry = dict(schema["segmentations"])
     if model_identity is not None:
-        registry[CELLPOSE_BRANCH] = {
-            **registry[CELLPOSE_BRANCH],
+        registry[branch] = {
+            **registry[branch],
             "model_identity": model_identity,
         }
         identities = dict(schema.get("model_identities") or {})
-        identities[CELLPOSE_BRANCH] = model_identity
+        identities[branch] = model_identity
         schema["model_identities"] = identities
     schema["segmentations"] = registry
     sdata.attrs[MERXEN_SCHEMA_ATTR] = schema
@@ -506,7 +542,7 @@ def build_atera_cellpose_layer(
         "deleted_derived_tables": stale,
         "check": check,
     }
-    sdata.attrs[LAYER_ATTR] = record
+    sdata.attrs[layer_attr] = record
     sdata.write_attrs()
     sdata.write_consolidated_metadata()
     del sdata, mask

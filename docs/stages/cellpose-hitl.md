@@ -140,3 +140,58 @@ and [compatibility audit](../hitl/atera-compatibility.md).
 See the [testing guide](../hitl/testing-guide.md) for a stock-checkpoint fixture,
 fast validation tests and the locked HD1 tile check. A passing fixture confirms
 plumbing; it does not establish that a fine-tune improves segmentation.
+
+
+## Whole-mask geometry cleanup
+
+Every new Nextflow Cellpose run (Xenium, MERSCOPE and Atera, including stock
+weights) enables a physical geometry filter after whole-image mask stitching
+and before transcript seeding and ProSeg. A mask is removed only when **all**
+three conditions hold:
+
+- area below 100 µm²;
+- maximum local thickness below 5 µm;
+- solidity (area divided by convex-hull area) below 0.75.
+
+This rejects thin concave crescents while protecting compact small cells.
+Retained cell masks keep every original pixel, including attached processes.
+Objects clipped by the outside of the full image are retained because their
+complete geometry is unknown. The maximum thickness uses calibrated native
+row/column pixel spacing. No erosion or per-crop cleanup is performed.
+
+The shared controls are `cellpose_geometry_filter_enabled` (default `true`),
+`cellpose_geometry_max_area_um2`, `cellpose_geometry_max_thickness_um` and
+`cellpose_geometry_max_solidity`. Set the enabled flag to `false` to reproduce
+an older area-only recipe. These controls do not change Cellpose flow or
+cell-probability settings. Final minimum/maximum area bounds still apply;
+use an appropriate `atera_cellpose_final_max_area_um2` for larger neurons.
+
+Geometry settings form part of the saved mask/model identity. Old identities
+without this field retain their original meaning; enabling cleanup requires
+fresh masks in a separate output directory, rather than relabeling old outputs
+as cleaned. Removed-mask probabilities are cleared before transcript assignment.
+
+## Four-way Atera comparison
+
+Select `segmentation_source=cellpose_comparison` with a named retrained model to
+retain independent analysis branches:
+
+| Analysis selector | SpatialData cell table | Segmentation |
+| --- | --- | --- |
+| `original_seg` | `table_original` | Vendor masks, no ProSeg |
+| `stock_cellpose` | `table_MOSAIK_stock_cellpose` | Stock weights, no ProSeg |
+| `proseg_mask` | `table_MOSAIK_cellpose` | Retrained weights, no ProSeg |
+| `reseg` | `table_MOSAIK_proseg` | Retrained weights followed by ProSeg |
+
+Both Cellpose jobs use identical channels, native tiles, normalization and mask
+filtering. Stock outputs are published under `segmentation/stock_cellpose/`;
+retrained outputs retain `segmentation/`. ProSeg receives only the retrained
+masks. During its final transcript pass, the stitch also looks up stock labels
+without refining them. Each branch has separate assignment columns, masks,
+shapes, expression/control counts and model provenance. Viewer caches and image
+quantification include the stock branch. Select all four branches explicitly
+in analysis/MENDER settings to apply the configured downstream analyses to each.
+The `all` analysis selector includes all four on comparison rows.
+
+Use a fresh output directory to preserve earlier runs. This route does not
+retrain weights or overwrite a published model bundle.

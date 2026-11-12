@@ -987,7 +987,11 @@ def enrich_single_latest(
                 write_path=write_path,
                 force_rerun=force_rerun,
             )
-            if config.segmentation_source in ("native_proseg", "cellpose_proseg"):
+            if config.segmentation_source in (
+                "native_proseg",
+                "cellpose_proseg",
+                "cellpose_comparison",
+            ):
                 _check_atera_proseg_layer(config, write_path=write_path)
             if _is_atera_cellpose_row(config):
                 _enrich_atera_cellpose_layer(
@@ -1018,7 +1022,7 @@ def enrich_single_latest(
 def _is_atera_cellpose_row(config: EnrichmentConfig) -> bool:
     """Whether a config enriches an ATERA ``cellpose_proseg`` store (AT-7)."""
     return (
-        config.segmentation_source == "cellpose_proseg"
+        config.segmentation_source in ("cellpose_proseg", "cellpose_comparison")
         and platform_spec(config.platform).native_latest_base
     )
 
@@ -1052,6 +1056,18 @@ def _enrich_atera_cellpose_layer(
         model_identity=identity,
         force=force_rerun,
     )
+    if config.stock_cellpose_mask_path is not None:
+        stock_mask = config.stock_cellpose_mask_path
+        build_atera_cellpose_layer(
+            write_path,
+            stock_mask,
+            pixel_size_um=_native_pixel_size(config, platform_spec(config.platform)),
+            dataset_name=str(config.dataset_name).upper(),
+            n_jobs=polygon_n_jobs,
+            model_identity=read_model_identity(stock_mask).model_dump(mode="json"),
+            force=force_rerun,
+            stock=True,
+        )
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "atera_cellpose_layer_check.json").write_text(
