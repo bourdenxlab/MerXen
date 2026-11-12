@@ -33,8 +33,11 @@ def build_spatialdata_artifact(
         ValueError: If a force rebuild is requested but only an existing zarr
             was provided and no raw input folder is available, or if the
             cached MERSCOPE zarr was built with other bead-removal settings
-            than requested.
+            than requested, or a complete ATERA store was built from other
+            inputs or options.
     """
+    if config.platform.upper() == "ATERA":
+        return _build_atera_artifact(config, force_rerun=force_rerun)
     output_path = Path(config.output_path)
     persistent_output_path = (
         Path(config.persistent_output_path)
@@ -116,6 +119,106 @@ def build_spatialdata_artifact(
         stage_existing_output(target_path, output_path)
         return output_path
     return target_path
+
+
+def _build_atera_artifact(
+    config: SpatialDataBuildConfig,
+    *,
+    force_rerun: bool,
+) -> Path:
+    """Build or reuse an ATERA store, reusing only complete, matching stores.
+
+    A store is reused only when it carries the completion marker and, when
+    the raw folder is available, the fingerprint of the requested build
+    (plan §3.12). An incomplete store (a killed or failed build) is rebuilt;
+    a complete store built from other inputs or options is refused unless
+    ``force_rerun``. Messages name the dataset by ``dataset_name`` and print
+    no input path: Atera run folders are named after the instrument and slide.
+    """
+    from merxen.io.builders.atera import (
+        atera_build_fingerprint,
+        check_cached_atera_build,
+        resolve_atera_input,
+        write_atera_spatialdata,
+    )
+
+    name = config.dataset_name
+    output_path = Path(config.output_path)
+    persistent_output_path = (
+        Path(config.persistent_output_path)
+        if config.persistent_output_path is not None
+        else None
+    )
+    input_path = Path(config.input_path)
+    if input_path.is_file():
+        raise ValueError(
+            f"[{name}] The ATERA input is a file; extract the outs bundle and "
+            "point atera_dir at the ROI folder."
+        )
+    raw_input_path = _resolve_raw_input_path(input_path, platform=config.platform)
+    bundle = (
+        resolve_atera_input(
+            raw_input_path, config.atera, atera_spec_path=config.atera_spec_path
+        )
+        if raw_input_path is not None
+        else None
+    )
+    fingerprint = (
+        atera_build_fingerprint(bundle, config.atera) if bundle is not None else None
+    )
+    candidates = [
+        path
+        for path in (
+            persistent_output_path,
+            input_path if input_path.suffix == ".zarr" else None,
+            output_path,
+        )
+        if path is not None and path.exists()
+    ]
+    # A forced rebuild from the raw folder looks at no existing store.
+    if not (force_rerun and raw_input_path is not None):
+        for candidate in candidates:
+            reusable = check_cached_atera_build(
+                candidate, fingerprint, force_rerun=force_rerun
+            )
+            if reusable and not force_rerun:
+                logger.info("[%s] Reusing the complete ATERA SpatialData store", name)
+                if candidate != output_path:
+                    _stage_existing_output(candidate, output_path)
+                return output_path
+            if not reusable:
+                logger.warning(
+                    "[%s] An existing ATERA SpatialData store is incomplete (no "
+                    "completion marker); it is not reused",
+                    name,
+                )
+
+    if raw_input_path is None:
+        if candidates and force_rerun:
+            raise ValueError(
+                f"[{name}] --force-rerun was requested but only an existing "
+                "SpatialData zarr is available. Provide atera_dir to rebuild "
+                "from source data."
+            )
+        raise FileNotFoundError(
+            f"[{name}] Found neither the ATERA ROI folder (atera_dir) nor a "
+            "complete SpatialData store (atera_spatialdata_path)."
+        )
+
+    target_path = persistent_output_path or output_path
+    if target_path != output_path:
+        remove_path(output_path)
+    write_atera_spatialdata(
+        input_path=raw_input_path,
+        output_path=target_path,
+        build_config=config.atera,
+        atera_spec_path=config.atera_spec_path,
+        dataset_name=name,
+        bundle=bundle,
+    )
+    if target_path != output_path:
+        stage_existing_output(target_path, output_path)
+    return output_path
 
 
 def _check_cached_bead_removal(

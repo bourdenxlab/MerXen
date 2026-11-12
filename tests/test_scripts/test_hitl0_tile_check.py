@@ -231,3 +231,67 @@ def test_main_follows_a_symlinked_baseline_mask_to_its_sidecar(
 
     with pytest.raises(ValueError, match="validation error"):
         tile_check.main(args)
+
+
+@pytest.mark.parametrize("tile_size,overlap", [(4096, 256), (6144, 128)])
+def test_experimental_check_refuses_another_grid_before_loading_image(
+    tile_check: ModuleType,
+    tmp_path: Path,
+    tile_size: int,
+    overlap: int,
+) -> None:
+    source = _source_with_record(tmp_path, enabled=False)
+    args = _tile_check_args(tmp_path, source)
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "dataset": {
+                    "name": "ATERA_SYNTH",
+                    "platform": "ATERA",
+                    "data_path": str(source),
+                    "output_dir": "unused",
+                    "image_key": "morphology_focus",
+                    "channels": ["DAPI", "18S"],
+                    "proseg_transcripts": "none",
+                },
+                "cellpose_model_policy": {"experimental_arm": True},
+                "tiling": {"tile_size_candidates": [6144], "stitch_overlap_px": 256},
+            }
+        )
+    )
+    (tmp_path / "stats.json").write_text(
+        json.dumps({"tile_size": tile_size, "stitch_overlap_px": overlap})
+    )
+    with pytest.raises(ValueError, match="pinned baseline grid"):
+        tile_check.main(args)
+    assert not (tmp_path / "trial").exists()
+
+
+def test_bead_veto_uses_the_halo_origin_and_global_dapi_reader(
+    tile_check: ModuleType,
+) -> None:
+    from merxen.config import BeadMaskVetoConfig
+    from merxen.segmentation.bead_mask_veto import PreparedBeadMaskVeto
+
+    calls = []
+
+    def read(y0: int, y1: int, x0: int, x1: int) -> np.ndarray:
+        calls.append((y0, y1, x0, x1))
+        return np.ones((y1 - y0, x1 - x0), np.float32)
+
+    prepared = PreparedBeadMaskVeto(
+        config=BeadMaskVetoConfig(),
+        identity={"version": 2},
+        bead_y=np.array([110.0]),
+        bead_x=np.array([220.0]),
+        n_table_beads=1,
+        read_dapi=read,
+        dapi_floor=4.0,
+    )
+    translated = tile_check._tile_bead_veto(prepared, {"tile_y0": 100, "tile_x0": 200})
+    np.testing.assert_array_equal(translated.bead_y, [10.0])
+    np.testing.assert_array_equal(translated.bead_x, [20.0])
+    translated.read_dapi(1, 5, 2, 8)
+    assert calls == [(101, 105, 202, 208)]
+    assert translated.dapi_floor == prepared.dapi_floor
+    np.testing.assert_array_equal(prepared.bead_y, [110.0])

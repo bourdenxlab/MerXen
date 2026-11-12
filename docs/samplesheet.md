@@ -7,9 +7,11 @@ object-distance settings, MENDER and GASTON settings, `--start_stage`,
 `--stop_stage`, and `--only_stage`
 from the Nextflow command or config, but each row can override those settings
 with optional columns. In the default `analysis_mode=paired`, a row must contain
-one MERSCOPE and one Xenium dataset. In `analysis_mode=merscope` or
-`analysis_mode=xenium`, only the selected platform's source/cache columns are
-required. A template lives at
+one MERSCOPE and one Xenium dataset. In `analysis_mode=merscope`,
+`analysis_mode=xenium` or `analysis_mode=atera`, only the selected platform's
+source/cache columns are required. An `atera` row is one 10x Atera ROI and runs
+the native (vendor-segmentation) route (see [Atera rows](#atera-rows)). A
+template lives at
 [workflows/samplesheet.example.csv](../workflows/samplesheet.example.csv).
 
 > [!WARNING]
@@ -31,15 +33,16 @@ required. A template lives at
 | Column | Required | Description |
 |--------|----------|-------------|
 | `pair_id` | **yes** | Unique identifier for this row. Used as the top-level output directory name. |
-| `analysis_mode` | no | Row-level mode: `paired`, `merscope`, or `xenium`. Blank inherits `--analysis_mode`. |
+| `analysis_mode` | no | Row-level mode: `paired`, `merscope`, `xenium` or `atera`. Blank inherits `--analysis_mode`. |
 | `enable_alignment` | no | Row-level alignment switch: `true` or `false`. Blank inherits `--enable_alignment`; only paired rows can run alignment. |
-| `analysis_segmentation` | no | Row-level downstream branch set: `all`, `both`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, `proseg_hybrid`, or comma-separated combinations. `all` expands to all four branches and is the global default; `both` restricts analysis to `reseg,original_seg`; blank inherits `--analysis_segmentation`. |
+| `segmentation_source` | no | Where the row's cells come from: `native` (vendor segmentation), `native_proseg` (vendor segmentation plus ProSeg cells refined from the vendor masks; ATERA only, opt-in), `cellpose_only` or `cellpose_proseg`. Blank inherits `--segmentation_source`, then the platform default (`native` for ATERA, `cellpose_proseg` for XENIUM and MERSCOPE). ATERA accepts `native`, `native_proseg` and `cellpose_proseg` (Cellpose on DAPI + 18S, then tiled ProSeg; AT-7); XENIUM and MERSCOPE accept only their default for now. |
+| `analysis_segmentation` | no | Row-level downstream branch set: `all`, `both`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, `proseg_hybrid`, `proseg_vendor`, or comma-separated combinations. `all` (the global default) expands to every layer the row's `segmentation_source` produces (XENIUM/MERSCOPE `cellpose_proseg`: `reseg`, `original_seg`, `proseg_mask`, `proseg_hybrid`; ATERA `cellpose_proseg`: `reseg`, `original_seg`, `proseg_mask`; ATERA `native_proseg`: `proseg_vendor`, `original_seg`; `native`: `original_seg`); `both` is `reseg,original_seg`, plus `proseg_vendor` on a `native_proseg` row. A layer named explicitly that the source lacks is an error; the members of `all` or `both` that it lacks are dropped, also in a mixed value such as `all,original_seg`. Blank inherits `--analysis_segmentation`. |
 | `start_stage` | no | Row-level first stage. Blank inherits `--start_stage` unless `only_stage` applies. |
 | `stop_stage` | no | Row-level final stage. Blank inherits `--stop_stage` unless `only_stage` applies. |
 | `only_stage` | no | Row-level single-stage override. If set, it overrides that row's start/stop stage settings. |
 | `mecr_enabled` | no | Row-level MECR switch. Blank inherits its species-dependent default (`true` for human, `false` for mouse). Set `true` for mouse to use the complete WMB reference. |
 | `spatial_gene_analysis_enabled` | no | Row-level switch for the complete spatial-gene-analysis stage. Blank inherits `--spatial_gene_analysis_enabled`, which defaults to `true`. When `false`, clustering follows visualization directly. |
-| `spatial_gene_analysis_transcript_analysis_enabled` | no | Row-level switch for the annotation-dependent transcript analysis within spatial-gene analysis. Blank inherits `--spatial_gene_analysis_transcript_analysis_enabled`. Set this to `false` to retain cell-level autocorrelation without requiring tissue GeoJSON files. |
+| `spatial_gene_analysis_transcript_analysis_enabled` | no | Row-level switch for the transcript analysis within spatial-gene analysis. Blank inherits `--spatial_gene_analysis_transcript_analysis_enabled`. Set this to `false` to retain cell-level autocorrelation without requiring tissue GeoJSON files (XENIUM and MERSCOPE rows need them; ATERA rows do not). |
 | `cortical_depth_enabled` | no | Row-level cortical-depth switch. Blank inherits `--cortical_depth_enabled`. |
 | `distance_from_object_enabled` | no | Row-level polygon-distance switch. Blank inherits `--distance_from_object_enabled`. |
 | `distance_from_object_segmentations` | no | Comma-separated object-distance branches: `proseg`, `original`, and/or `cellpose`; optional `proseg_geometry_assignment` and `proseg_hybrid` are also accepted when present. Legacy names remain aliases. Blank uses the three defaults. |
@@ -66,7 +69,9 @@ required. A template lives at
 | `gaston_keep_checkpoints` | no | Checkpoint publication policy: `none`, `best`, or `all`. |
 | `gaston_max_genes` | no | Maximum eligible non-control panel genes; defaults to `10000`. |
 | `mender_enabled` | no | Row-level MENDER switch. Blank inherits `--mender_enabled`, which defaults to `false`. |
-| `mender_segmentations` | no | One MENDER branch, a comma-separated subset, or `all`. Blank inherits `--mender_segmentations`, which defaults to `proseg_hybrid`. |
+| `mender_segmentations` | no | One MENDER branch, a comma-separated subset, or `all`. Blank inherits `--mender_segmentations`, which defaults to `proseg_hybrid` (a source without it, such as any ATERA route, falls back to every layer it has). Group and explicit names follow the `analysis_segmentation` rule. |
+| `clustering_squidpy_mode` | no | This row's clustering mode: `legacy` or `map_first`. Blank follows the run (`--clustering_squidpy_mode`, else `--clustering_squidpy_mode_human` / `_mouse`; both default to `map_first`, human since M8 and mouse since M9). Lets one run opt single datasets in or out of map-first annotation; a `legacy` row of either species logs a deprecation warning. ATERA rows are the exception: a blank column clusters in `legacy` mode whatever the run's mode, `map_first` is refused, and neither logs the warning (AT-11; see [ATERA rows](configuration.md#atera-rows)). The launch log lists every row's resolved mode, marking an ATERA row held in legacy mode `(ATERA)`. See [Map-first clustering runs](stages/annotation.md#map-first-clustering-runs-m5). |
+| `mouse_section_regions` | no | Mouse `map_first` annotation: `auto` (infer the section's CCF divisions), `none` (no region pruning) or `;`-separated divisions (`Isocortex;HPF;TH;...`, from Isocortex, OLF, OB, HPF, CTXsp, STR, PAL, TH, HY, MB, P, MY, CB). Blank inherits `--annotation_mouse_section_regions` (`auto`). Parsed and checked now; the pipeline passes it to MAP from M5 (pipeline wiring: M5), until then use `merxen annotate --mouse-section-regions`. See [Mouse region step](stages/annotation.md#mouse-region-step-m6). |
 | `merscope_dir` | required for MERSCOPE modes if no cache | Path to the raw MERSCOPE region export folder, a direct `.vzg2` archive, or a folder containing exactly one `.vzg2`. Canonical raw folders retain transcript points. A VZG2-only build recovers the Vizualizer image, original cell polygons, centroids, volumes, and cell-by-gene table, but not packed transcript coordinates. |
 | `merscope_spatialdata_path` | required for MERSCOPE modes if no raw dir | Path to an existing (or desired) reusable MERSCOPE SpatialData zarr. If it exists, the build step is **skipped** unless `--force_spatialdata_build true` is passed to Nextflow. For a downstream-only restart, an explicit path overrides `${outdir}/${pair_id}/merscope/latest/latest_spatialdata.zarr` and must point to the durable enriched latest zarr required by that stage. |
 | `merscope_image_prefix` | no | Prefix used to match z-plane image keys when more than one run is present. |
@@ -81,6 +86,9 @@ required. A template lives at
 | `xenium_min_qv` | no | Minimum transcript quality value to retain. Defaults to `20`. |
 | `xenium_voxel_layers` | no | ProSeg voxel layer count for Xenium. Defaults to `2`. |
 | `xenium_spec_path` | no | Override path to `experiment.xenium` or `specs.json` used to derive the micron→pixel transform. |
+| `atera_dir` | required for Atera rows if no cache | One **extracted** Atera ROI folder (`experiment.spatial`, `morphology_2d/`, the three zarr zips); see [staging](stages/spatialdata-build.md#required-files-and-staging). |
+| `atera_spatialdata_path` | required for Atera rows if no raw dir | Persistent target of the Atera build. Reused only when it is complete and was built from the same inputs and options; a store built with other settings is refused unless `--force_spatialdata_build true`. |
+| `atera_spec_path` | no | Replacement `experiment.spatial` for metadata only; the files still resolve against `atera_dir`. |
 | `xenium_registered_images_csv` | no | CSV listing post-Xenium images (e.g. IF) of this section to register onto the Xenium mask grid, one row per image with its Xenium Explorer matrix. Enables the `register_images` stage for the row. See [Registered-image CSV](#registered-image-csv). |
 
 ### Registered-image CSV
@@ -155,6 +163,13 @@ From [workflows/main.nf](../workflows/main.nf):
 - In `analysis_mode=merscope`, only MERSCOPE source/cache columns are
   required.
 - In `analysis_mode=xenium`, only Xenium source/cache columns are required.
+- In `analysis_mode=atera`, the row must provide `atera_dir` or
+  `atera_spatialdata_path`. It runs the native segmentation route; stages and
+  options it does not cover are refused when the row sets them (see
+  [ATERA rows](configuration.md#atera-rows)); the global switches of those
+  stages are ignored on ATERA rows with a log note. Preflight checks every row before
+  any task starts, so one refused ATERA row stops the whole run, including the
+  other rows of a mixed samplesheet.
 - Blank row-level analysis, alignment, optional-analysis, or stage settings inherit the matching Nextflow
   parameter. Row-level `only_stage` overrides row-level `start_stage` and
   `stop_stage`; when a row sets either start/stop column, the global
@@ -164,6 +179,28 @@ The Python-side parser lives in
 [src/merxen/io/samplesheet.py:52](../src/merxen/io/samplesheet.py#L52). It is
 used by unit tests and can be invoked directly by scripts, but the Nextflow
 workflow parses the CSV itself.
+
+## Atera rows
+
+One row per ROI: each Atera ROI has its own micron frame, so two ROIs of one
+slide are unrelated datasets. Name the row by an alias, never by the run,
+slide, region or instrument names of the ROI folder. An Atera row runs the
+native segmentation route (the vendor cells; no Cellpose or ProSeg) through
+clustering, and on to MENDER with `mender_enabled=true`:
+
+```csv
+pair_id,analysis_mode,atera_dir,atera_spatialdata_path,mender_enabled
+EXAMPLE02,atera,$MERXEN_ATERA_RAW_ROOT/<dataset>/outs,/path/to/cache/EXAMPLE02_atera_source.zarr,true
+```
+
+`atera_spatialdata_path` is the build's source store; a restart from a later
+stage always reads the published latest store of the row, never this path.
+The stages, the analysis layer (`original_seg` only) and what is refused for
+ATERA rows are listed under [ATERA rows](configuration.md#atera-rows).
+
+(Write real paths in the samplesheet; `$MERXEN_ATERA_RAW_ROOT` stands for the
+`.env` location here.) The build's options and the store it writes are
+described in [Stage 1 — Atera](stages/spatialdata-build.md#atera).
 
 ## Minimal example
 

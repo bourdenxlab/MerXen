@@ -108,22 +108,25 @@ def test_dwight_gpu_processes_use_one_fixed_host_lock(
     for process_name in (
         "CELLPOSE_SEGMENT",
         "CELLPOSE_NUCLEI_SEGMENT",
+        "ATERA_CELLPOSE_SEGMENT",
+        "ATERA_STOCK_CELLPOSE_SEGMENT",
         "ALIGN",
         "CLUSTERING_SQUIDPY_COMPUTE",
         "GASTON_TRAIN",
     ):
         assert f'withName: "{process_name}"' in dwight_config_text
-    # Five tasks hold the lock for their whole run; BUILD_SPATIALDATA only
-    # exports the path (see the bead-removal test below).
+    # Seven tasks hold the lock for their whole run (including the stock
+    # Cellpose comparison); BUILD_SPATIALDATA and CELLPOSE_HITL_TRAIN only
+    # export the path because their Python GPU phases acquire the lock.
     assert (
         dwight_config_text.count(
             'MERXEN_GPU_LOCK_FILE="${params.gpu_process_lock_file}"'
         )
-        == 6
+        == 9
     )
-    assert dwight_config_text.count('exec 9<"\\${MERXEN_GPU_LOCK_FILE}"') == 5
+    assert dwight_config_text.count('exec 9<"\\${MERXEN_GPU_LOCK_FILE}"') == 7
     assert 'exec 9>"\\${MERXEN_GPU_LOCK_FILE}"' not in dwight_config_text
-    assert dwight_config_text.count("set -o noclobber") == 5
+    assert dwight_config_text.count("set -o noclobber") == 7
     assert "${PWD}/.merxen_gpu.lock" not in combined_config_text
 
 
@@ -132,6 +135,16 @@ def _process_block(config_text: str, process_name: str) -> str:
     start = config_text.index(f'withName: "{process_name}"')
     end = config_text.find("withName:", start + 1)
     return config_text[start:end]
+
+
+def test_dwight_training_exports_lock_without_taking_it(
+    dwight_config_text: str,
+) -> None:
+    """The Python trainer takes the lock; an outer shell lock would deadlock."""
+    block = _process_block(dwight_config_text, "CELLPOSE_HITL_TRAIN")
+    assert "maxForks = 1" in block
+    assert 'export MERXEN_GPU_LOCK_FILE="${params.gpu_process_lock_file}"' in block
+    assert "flock 9" not in block
 
 
 def test_dwight_bead_removal_runs_on_the_validated_gpu(
@@ -220,19 +233,21 @@ def test_resolved_bead_removal_device_lock_export_and_gpu_container(
     assert "--gpus-per-node=1" in build["clusterOptions"]
 
 
+# The directive closures read the process input ``platform``, as in the real
+# BUILD_SPATIALDATA; the ATERA task must never get the GPU.
 _DIRECTIVE_PROBE = """
 process BUILD_SPATIALDATA {
     input:
-    val x
+    val platform
     output:
     stdout
     script:
     \"\"\"
-    echo "RESULT queue=${task.queue} cluster=[${task.clusterOptions}] nv=\\
+    echo "RESULT ${platform} queue=${task.queue} cluster=[${task.clusterOptions}] nv=\\
 ${task.containerOptions.contains('--nv')}"
     \"\"\"
 }
-workflow { BUILD_SPATIALDATA(1) | view }
+workflow { BUILD_SPATIALDATA(channel.of("MERSCOPE", "ATERA")) | view }
 """
 
 # The build asks for more CPUs and memory than a CI runner has, and the local
@@ -245,6 +260,7 @@ process {
     }
 }
 """
+_ATERA_RESULT = "RESULT ATERA queue=htc cluster=[] nv=false"
 
 
 @pytest.mark.nextflow
@@ -334,9 +350,10 @@ def test_build_gets_a_gpu_queue_and_nv_only_for_the_gpu_device(
     assert completed.returncode == 0, (
         completed.stdout[-3000:] + completed.stderr[-2000:]
     )
-    assert f"RESULT {expected}" in completed.stdout, (
+    assert f"RESULT MERSCOPE {expected}" in completed.stdout, (
         completed.stdout[-3000:] + completed.stderr[-2000:]
     )
+    assert _ATERA_RESULT in completed.stdout, completed.stdout[-3000:]
 
 
 @pytest.mark.nextflow
@@ -388,6 +405,12 @@ def test_default_standard_and_dwight_profiles_resolve_equivalently(
             script = process[f"withName:{process_name}"]["beforeScript"]
             assert f'MERXEN_GPU_LOCK_FILE="{lock_path}"' in script
             assert 'exec 9<"${MERXEN_GPU_LOCK_FILE}"' in script
+        # The map_first compute (plan §3.5): Dwight concurrency, no GPU lock.
+        compute_cpu = process["withName:CLUSTERING_SQUIDPY_COMPUTE_CPU"]
+        assert compute_cpu["maxForks"] == 4
+        assert compute_cpu["cpus"] == 8
+        assert "beforeScript" not in compute_cpu
+        assert "conda" not in compute_cpu
 
 
 def test_dwight_sends_task_temporary_files_to_the_site_config_directory() -> None:

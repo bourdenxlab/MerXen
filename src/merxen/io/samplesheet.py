@@ -8,6 +8,8 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from merxen.annotation.samplesheet_columns import parse_optional_columns  # rca-hook:H9
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,6 +37,12 @@ class SamplePair:
         xenium_cellpose_model: Optional registry hash or model-bundle path.
         merscope_voxel_layers: ProSeg voxel layers for MERSCOPE.
         xenium_voxel_layers: ProSeg voxel layers for Xenium.
+        atera_dir: Path to one extracted Atera ROI folder.
+        atera_spatialdata_path: Optional path to a reusable built Atera
+            SpatialData zarr (reused only when complete and built with the
+            same inputs and options).
+        atera_spec_path: Optional metadata-only replacement of the ROI's
+            ``experiment.spatial``.
         analysis_mode: Optional row-level override for the pipeline analysis
             mode. Blank or omitted values inherit the Nextflow parameter.
         enable_alignment: Optional row-level override for optional alignment
@@ -82,6 +90,9 @@ class SamplePair:
     merscope_voxel_layers: int = 7
     xenium_voxel_layers: int = 2
     xenium_spec_path: Path | None = None
+    atera_dir: Path | None = None
+    atera_spatialdata_path: Path | None = None
+    atera_spec_path: Path | None = None
     merscope_bead_removal: bool | None = None
     merscope_cellpose_model: str | None = None
     xenium_cellpose_model: str | None = None
@@ -126,6 +137,10 @@ class SamplePair:
     gaston_keep_seed_models: bool | None = None
     gaston_keep_checkpoints: str | None = None
     gaston_max_genes: int | None = None
+    # rca-site:H9: optional annotation columns (plan §3.7); None inherits the param.
+    anatomical_region: str | None = None
+    mouse_section_regions: str | None = None
+    clustering_squidpy_mode: str | None = None
 
 
 def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
@@ -209,6 +224,11 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
                     row.get("xenium_voxel_layers"), default=2
                 ),
                 xenium_spec_path=_optional_path(row.get("xenium_spec_path")),
+                atera_dir=_optional_path(row.get("atera_dir")),
+                atera_spatialdata_path=_optional_path(
+                    row.get("atera_spatialdata_path")
+                ),
+                atera_spec_path=_optional_path(row.get("atera_spec_path")),
                 merscope_bead_removal=_parse_optional_bool(
                     row.get("merscope_bead_removal")
                 ),
@@ -296,6 +316,16 @@ def parse_samplesheet(csv_path: Path) -> list[SamplePair]:
                 ),
                 gaston_max_genes=_parse_optional_int(row.get("gaston_max_genes")),
             )
+            # rca-site:H9: blank or absent annotation columns stay None.
+            try:
+                annotation_columns = parse_optional_columns(row)
+            except ValueError as exc:
+                raise ValueError(
+                    f"[{pair.pair_id}] samplesheet row {row_num}: {exc}"
+                ) from exc
+            pair.anatomical_region = annotation_columns.anatomical_region
+            pair.mouse_section_regions = annotation_columns.mouse_section_regions
+            pair.clustering_squidpy_mode = annotation_columns.clustering_squidpy_mode
             pairs.append(pair)
             logger.info("Parsed sample pair %d: %s", row_num - 1, pair.pair_id)
 
@@ -312,11 +342,12 @@ def required_platforms_for_mode(analysis_mode: str = "paired") -> tuple[str, ...
         "merscope": ("MERSCOPE",),
         "merfish": ("MERSCOPE",),
         "xenium": ("XENIUM",),
+        "atera": ("ATERA",),
     }
     if mode not in aliases:
         raise ValueError(
             f"Unknown analysis_mode={analysis_mode!r}. "
-            "Valid values: paired, merscope, xenium."
+            "Valid values: paired, merscope, xenium, atera."
         )
     return aliases[mode]
 
@@ -331,7 +362,7 @@ def validate_samplesheet(
     Args:
         pairs: List of SamplePair instances to validate.
         analysis_mode: Required platform mode: ``paired`` (default),
-            ``merscope``, or ``xenium``.
+            ``merscope``, ``xenium`` or ``atera``.
 
     Raises:
         FileNotFoundError: If any required path does not exist.
@@ -408,8 +439,32 @@ def validate_samplesheet(
             errors.append(
                 f"[{pair.pair_id}] Xenium spec not found: {pair.xenium_spec_path}"
             )
+        if "ATERA" in required_platforms:
+            errors.extend(_atera_errors(pair))
     if errors:
         raise FileNotFoundError("Samplesheet validation failed:\n" + "\n".join(errors))
+
+
+def _atera_errors(pair: SamplePair) -> list[str]:
+    """Check the Atera fields of a row without printing their paths.
+
+    Atera run folders are named after the instrument and slide, so the
+    messages name the field, not the path.
+    """
+    if pair.atera_dir is None and pair.atera_spatialdata_path is None:
+        return [f"[{pair.pair_id}] Provide either atera_dir or atera_spatialdata_path."]
+    errors = []
+    has_dir = pair.atera_dir is not None and pair.atera_dir.is_dir()
+    has_store = (
+        pair.atera_spatialdata_path is not None and pair.atera_spatialdata_path.exists()
+    )
+    if not has_dir and not has_store:
+        errors.append(
+            f"[{pair.pair_id}] Neither atera_dir nor atera_spatialdata_path exists."
+        )
+    if pair.atera_spec_path is not None and not pair.atera_spec_path.is_file():
+        errors.append(f"[{pair.pair_id}] atera_spec_path does not exist.")
+    return errors
 
 
 def _parse_range(

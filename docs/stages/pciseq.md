@@ -67,6 +67,19 @@ JSONs and MapMyCells precomputed statistics are different formats and cannot be
 used directly as this matrix. Choose a biologically appropriate reference for
 the sample's species and tissue.
 
+### Whole-transcriptome panels
+
+When the transcripts carry more than 5,000 distinct non-control genes
+(`merxen.gene_sets.WHOLE_TRANSCRIPTOME_MIN_GENES`, e.g. Xenium Prime 5K),
+`PCISEQ_PREPARE` refuses an atlas reference (WMB, WHB, SEA-AD) prepared without
+an explicit gene list (`PciSeqReferenceConfig.gene_names` is `None`): pciSeq
+would otherwise model every panel gene. Prepare a reference restricted to the
+genes to model with `gene_names` in the
+[direct preparation](pciseq-references.md#direct-preparation) config, and
+supply its `reference.csv` as `pciseq_reference_path` (a custom reference). A
+custom matrix counts as an explicit gene list. The 300-gene panels never reach
+the threshold. ATERA rows are refused by the preflight in any case.
+
 ## Geometry and identifiers
 
 The default `project_2d` mode uses MerXen's native cell polygons and measured

@@ -11,8 +11,31 @@ from math import isfinite
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 from pydantic_settings import BaseSettings
+
+from merxen.annotation.config import (  # rca-hook:H8
+    AdaptiveSplitConfig,
+    AnnotationConfig,
+    ClusteringMode,
+    LeafSource,
+    TableKeySuffix,
+    UnassignedStatePolicy,
+    check_clustering_mode_settings,
+)
+from merxen.annotation.samplesheet_columns import (
+    AnatomicalRegionValue,
+    MouseSectionRegionsValue,
+)
+from merxen.platforms import PlatformName, SegmentationSource
 
 
 class CellposeConfig(BaseModel):
@@ -31,6 +54,7 @@ class CellposeConfig(BaseModel):
     bsize: int = 256
     factor_rescale: float = 1.0
     use_bfloat16: bool = False
+    input_normalization: Literal["joint", "per_channel"] = "joint"
 
     @field_validator("model_type")
     @classmethod
@@ -58,6 +82,14 @@ class CellposeConfig(BaseModel):
         return v
 
 
+class MaskGeometryFilterConfig(BaseModel):
+    """Remove whole masks only when small, thin and concave simultaneously."""
+
+    max_area_um2: float = Field(default=100.0, gt=0, allow_inf_nan=False)
+    max_thickness_um: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    max_solidity: float = Field(default=0.75, gt=0, le=1, allow_inf_nan=False)
+
+
 class MaskFilterConfig(BaseModel):
     """Parameters for post-segmentation mask filtering."""
 
@@ -67,8 +99,21 @@ class MaskFilterConfig(BaseModel):
     final_min_area_um2: float | None = 5.0
     final_max_area_um2: float | None = 400.0
     final_filter_chunk_mb: int = 256
+    # Nextflow enables the current policy explicitly. Missing legacy provenance
+    # must continue to mean that this cleanup was not applied.
+    geometry_filter: MaskGeometryFilterConfig | None = None
     n_jobs: int = 16
     show_progress: bool = True
+
+    @model_serializer(mode="wrap")
+    def _serialize_filter(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        """Retain the exact legacy identity when geometry cleanup is absent."""
+        values: dict[str, Any] = handler(self)
+        if self.geometry_filter is None:
+            values.pop("geometry_filter", None)
+        return values
 
     @field_validator("final_min_area_um2", "final_max_area_um2")
     @classmethod
@@ -396,25 +441,117 @@ class XeniumBuildConfig(BaseModel):
     cells_table: bool = True
 
 
+#: Rows per ``row_range`` transcript partition must be a multiple of this, the
+#: vendor's chunk rows, so partition edges cost no extra chunk decode.
+ATERA_PARTITION_ROW_ALIGNMENT = 1_048_576
+
+
+class AteraBuildConfig(BaseModel):
+    """Options for constructing an Atera SpatialData object (plan §4.3).
+
+    The build options select and shape the elements; ``max_rss_gb`` and
+    ``polygon_n_jobs`` only govern how the build runs, so they are left out
+    of its reuse fingerprint.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    transcripts: bool = True
+    min_qv: float | None = Field(default=20.0, ge=0.0)
+    transcript_partition_rows: int = Field(default=4_194_304, gt=0)
+    # tile_blocks decodes each tile once per block it is split into: about 20x
+    # the decode time of row_range on the public dataset (368 s against 18 s
+    # for its largest tile), so it stays opt-in until AT-5 decides its fate.
+    spatial_order: Literal["row_range", "tile_blocks"] = "row_range"
+    spatial_block_um: float = Field(default=500.0, gt=0.0)
+    min_block_rows: int = Field(default=1_048_576, ge=1)
+    max_tiles_in_flight: int = Field(default=4, ge=1)
+    emit_codeword_index: bool = False
+    tile_allowlist: list[str] | None = None
+    cells_labels: bool = True
+    nucleus_labels: bool = True
+    cells_boundaries: bool = True
+    nucleus_boundaries: bool = True
+    boundary_source: Literal["masks", "vendor_polygons"] = "masks"
+    boundary_simplify_px: float = Field(default=0.25, ge=0.0)
+    polygon_n_jobs: int | None = Field(default=None, ge=1)
+    cells_table: bool = True
+    table_gex_only: bool = True
+    keep_vendor_annotations: bool = True
+    morphology_2d: bool = True
+    morphology_levels: int = Field(default=5, ge=1)
+    species: Literal["human", "mouse"] | None = None
+    max_rss_gb: float | None = Field(default=None, gt=0.0)
+    transcripts_path: Path | None = None
+    cells_path: Path | None = None
+    cell_feature_matrix_path: Path | None = None
+
+    @field_validator("transcript_partition_rows")
+    @classmethod
+    def _aligned_partition_rows(cls: type[AteraBuildConfig], value: int) -> int:
+        if value % ATERA_PARTITION_ROW_ALIGNMENT:
+            raise ValueError(
+                "transcript_partition_rows must be a multiple of "
+                f"{ATERA_PARTITION_ROW_ALIGNMENT:,} (the vendor chunk rows)"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _table_needs_cell_shapes(self: AteraBuildConfig) -> AteraBuildConfig:
+        if self.cells_table and not self.cells_boundaries:
+            raise ValueError(
+                "cells_table needs cells_boundaries: the table is annotated by "
+                "the cell shapes"
+            )
+        return self
+
+
 class SpatialDataBuildConfig(BaseModel):
     """Configuration for the raw-input to SpatialData build step."""
 
     dataset_name: str
-    platform: Literal["MERSCOPE", "XENIUM"]
+    platform: PlatformName
     input_path: Path
     output_path: Path
     persistent_output_path: Path | None = None
     merscope_transform_path: Path | None = None
     xenium_spec_path: Path | None = None
+    atera_spec_path: Path | None = None
     merscope: MerscopeBuildConfig = MerscopeBuildConfig()
     xenium: XeniumBuildConfig = XeniumBuildConfig()
+    atera: AteraBuildConfig = AteraBuildConfig()
+
+
+class AteraTranscriptDensityConfig(BaseModel):
+    """Rasterize gene transcripts on the native Atera morphology grid.
+
+    Gaussian width is in physical microns. Counts include unassigned genes
+    across all z planes, independently of any existing segmentation.
+    """
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    source_zarr_path: Path
+    output_dir: Path
+    min_qv: float = Field(default=20, ge=0)
+    bin_size_px: int = Field(default=1, ge=1, le=8)
+    sigma_um: float = Field(default=0.15, gt=0)
+    batch_rows: int = Field(default=524_288, ge=1)
+    chunk_size_px: int = Field(default=1024, ge=64)
 
 
 class DatasetConfig(BaseModel):
-    """Configuration for a single dataset (one half of a pair)."""
+    """Configuration for a single dataset (one half of a pair).
+
+    ATERA (plan AT-7, ``cellpose_proseg``) runs Cellpose only: on the
+    native morphology image of its built store (``image_key`` required),
+    with every requested channel present (DAPI + 18S by default) and
+    ``proseg_transcripts="none"``, because the tiled ATERA ProSeg route reads
+    the store's parquet instead of a transcript CSV.
+    """
 
     name: str
-    platform: Literal["MERSCOPE", "XENIUM"]
+    platform: PlatformName
     data_path: Path
     channels: list[str]
     output_dir: Path
@@ -436,6 +573,369 @@ class DatasetConfig(BaseModel):
     xenium_spec_path: Path | None = None
     min_qv: float | None = None
     proseg_overrides: dict[str, Any] = Field(default_factory=dict)
+
+    # "csv" seeds the ProSeg transcript CSV from the masks (XENIUM, MERSCOPE);
+    # "none" writes no CSV (ATERA: tiled ProSeg reads the store's parquet).
+    proseg_transcripts: Literal["csv", "none"] = "csv"
+    transcript_density_path: Path | None = None
+
+    @model_validator(mode="after")
+    def _validate_atera(self: DatasetConfig) -> DatasetConfig:
+        if self.transcript_density_path is not None and (
+            self.platform != "ATERA"
+            or self.channels != ["DAPI", "18S", "transcript_density"]
+        ):
+            raise ValueError(
+                "Atera density requires DAPI, 18S, transcript_density in that order"
+            )
+        if (
+            "transcript_density" in self.channels
+            and self.transcript_density_path is None
+        ):
+            raise ValueError("The transcript_density channel requires its raster path")
+        if self.platform == "ATERA":
+            if self.proseg_transcripts != "none":
+                raise ValueError(
+                    "ATERA Cellpose writes no ProSeg transcript CSV; set "
+                    "proseg_transcripts='none' (the tiled ProSeg route reads the "
+                    "store's parquet)"
+                )
+            if self.image_key is None:
+                raise ValueError(
+                    "ATERA Cellpose needs image_key (the native morphology image)"
+                )
+            if not self.channels:
+                raise ValueError("ATERA Cellpose needs at least one channel")
+        elif self.proseg_transcripts != "csv":
+            raise ValueError(
+                f"{self.platform} Cellpose seeds the ProSeg transcript CSV; "
+                "proseg_transcripts='none' is for ATERA"
+            )
+        return self
+
+
+class NativeLatestConfig(BaseModel):
+    """Configuration of NATIVE_LATEST, the vendor-segmentation latest store.
+
+    The latest store of a native ATERA row is built from the source store:
+    immutable payloads (image, label and transcript chunks) are hardlinked
+    (``link_mode="hardlink"``) or copied, metadata is copied, and the renamed
+    vendor shapes and ``table_original`` are written fresh.
+
+    Attributes:
+        dataset_name: Dataset alias used in log lines and provenance.
+        platform: Platform of the row (ATERA only).
+        source_zarr_path: The built source store (``BUILD_SPATIALDATA``).
+        output_dir: Task output folder (report, staged latest link).
+        persistent_latest_zarr_path: Where the latest store is built.
+        link_mode: How payload files reach the latest store.
+        readonly_payloads: Remove write permission from linked payloads, so
+            an in-place write fails instead of changing the source.
+        force: Rebuild a target that is not a reusable native latest store.
+    """
+
+    dataset_name: str
+    platform: Literal["ATERA"]
+    source_zarr_path: Path
+    output_dir: Path
+    persistent_latest_zarr_path: Path
+    link_mode: Literal["hardlink", "copy"] = "hardlink"
+    readonly_payloads: bool = True
+    force: bool = False
+
+
+class AteraProsegModelParams(BaseModel):
+    """ProSeg model and schedule of the tiled ATERA route (``native_proseg``).
+
+    The model values are the ProSeg values the Cellpose route uses
+    (``proseg_*`` params); the schedule is the short one validated by the
+    AT-5(b) benchmark. ``prior_seg_reassignment_prob`` and
+    ``use_cell_initialization`` default to ProSeg's own defaults, as in the
+    benchmark, not to :class:`ProsegConfig`'s.
+
+    Attributes:
+        voxel_size: ``--voxel-size`` (microns).
+        burnin_voxel_size: ``--burnin-voxel-size`` (microns).
+        voxel_layers: ``--voxel-layers``.
+        nuclear_reassignment_prob: ``--nuclear-reassignment-prob``.
+        diffusion_probability: ``--diffusion-probability``.
+        cell_compactness: ``--cell-compactness``.
+        burnin_samples: ``--burnin-samples``.
+        samples: ``--samples``.
+        hillclimb: ``--hillclimb``.
+        recorded_samples: ``--recorded-samples``.
+        prior_weight_effective: The effective prior weight ProSeg reports
+            (``prior weight`` line). The ``--prior-weight`` multiplier of each
+            tile is chosen so that ProSeg's own scaling gives this value.
+        prior_weight_tolerance: Largest relative difference between the
+            reported and the requested effective weight.
+        min_qv: ``--min-qv`` (the store already holds QV >= 20 rows only).
+        prior_seg_reassignment_prob: ``--prior-seg-reassignment-prob``, or
+            ``None`` for ProSeg's default.
+        use_cell_initialization: Pass ``--use-cell-initialization``.
+        nuclear_compartment: Give ProSeg the vendor ``overlaps_nucleus`` flag
+            (its nuclear compartment model); ``False`` writes 0 for every row.
+    """
+
+    voxel_size: float = 0.5
+    burnin_voxel_size: float = 1.0
+    voxel_layers: int = 2
+    nuclear_reassignment_prob: float = 0.2
+    diffusion_probability: float = 0.2
+    cell_compactness: float = 0.04
+    burnin_samples: int = 100
+    samples: int = 200
+    hillclimb: int = 20
+    recorded_samples: int = 100
+    prior_weight_effective: float = 140.0
+    prior_weight_tolerance: float = 0.02
+    min_qv: float = 20.0
+    prior_seg_reassignment_prob: float | None = None
+    use_cell_initialization: bool = False
+    nuclear_compartment: bool = True
+
+    @model_validator(mode="after")
+    def _validate_schedule(self: AteraProsegModelParams) -> AteraProsegModelParams:
+        for name in ("burnin_samples", "hillclimb", "recorded_samples"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be at least 0")
+        if self.samples < 1:
+            raise ValueError("samples must be at least 1")
+        if self.recorded_samples > self.samples:
+            raise ValueError(
+                f"recorded_samples ({self.recorded_samples}) must not exceed "
+                f"samples ({self.samples})"
+            )
+        weight = self.prior_weight_effective
+        if not isfinite(weight) or weight <= 0:
+            raise ValueError("prior_weight_effective must be a positive number")
+        if not 0 < self.prior_weight_tolerance < 1:
+            raise ValueError("prior_weight_tolerance must lie in (0, 1)")
+        for name in ("voxel_size", "burnin_voxel_size"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive")
+        if self.voxel_layers < 1:
+            raise ValueError("voxel_layers must be at least 1")
+        return self
+
+
+ATERA_PROSEG_MIN_HALO_UM = 100.0
+"""Smallest halo of the ATERA ProSeg tiles (plan AT-9; tests lower it)."""
+
+
+class AteraProsegPrior(BaseModel):
+    """The prior of a tiled ATERA ProSeg run (plans AT-9 and AT-7).
+
+    Attributes:
+        kind: ``"vendor"`` (``native_proseg``: the store's vendor cell labels)
+            or ``"cellpose"`` (``cellpose_proseg``: MerXen's Cellpose masks).
+        mask_path: The Cellpose label mask (``.npy``); required for a
+            Cellpose prior, refused for the vendor prior.
+        cellprob_path: The Cellpose cell-probability logits (``.npy``,
+            float32) given to ProSeg (``--cellpose-cellprobs``), or ``None``.
+    """
+
+    kind: Literal["vendor", "cellpose"] = "vendor"
+    mask_path: Path | None = None
+    cellprob_path: Path | None = None
+
+    @model_validator(mode="after")
+    def _validate_files(self: AteraProsegPrior) -> AteraProsegPrior:
+        if self.kind == "cellpose" and self.mask_path is None:
+            raise ValueError("a Cellpose prior needs mask_path")
+        if self.kind == "vendor" and (
+            self.mask_path is not None or self.cellprob_path is not None
+        ):
+            raise ValueError("the vendor prior is read from the store; give no files")
+        return self
+
+
+class AteraProsegTilePrior(BaseModel):
+    """The Cellpose prior of one tile, copied from the plan (AT-7).
+
+    Attributes:
+        kind: Always ``"cellpose"`` (a vendor-prior tile has no entry).
+        mask_path: Real path of the Cellpose label mask.
+        cellprob_path: Real path of the logits, or ``None``.
+        mask_stat: ``[size, mtime_ns]`` of the mask when the plan was made.
+        cellprob_stat: The same for the logits.
+        fingerprint: SHA-256 over the two files' SHA-256 (provenance).
+    """
+
+    kind: Literal["cellpose"] = "cellpose"
+    mask_path: Path
+    cellprob_path: Path | None = None
+    mask_stat: list[int]
+    cellprob_stat: list[int] | None = None
+    fingerprint: str
+
+
+class AteraProsegPlanConfig(BaseModel):
+    """Configuration of ATERA_PROSEG_PLAN, the tile plan of a tiled ProSeg row.
+
+    Attributes:
+        dataset_name: Dataset alias used in logs and provenance.
+        platform: Platform of the row (ATERA only).
+        source_zarr_path: The built source store.
+        output_dir: Task output folder (``tile_plan.json``).
+        tile_um: Edge of a tile core in microns (grid origin 0, 0).
+        halo_um: Margin around a core that a tile also reads.
+        min_halo_um: Smallest halo accepted.
+        owned_margin_um: Margin around the bounding box of every owned cell
+            that the window must cover.
+        max_window_extension_um: How far the window may reach beyond the
+            halo to cover owned cells; ``None`` means ``halo_um``.
+        tile_subset: Tile ids to run (a check run); ``None`` runs every tile
+            that owns cells. A plan with a subset cannot be stitched.
+        prior: The prior; ``None`` is the vendor prior (``native_proseg``).
+        prior_weight_effective: Effective prior weight of every tile of a
+            Cellpose plan; ``None`` uses the weight ProSeg would choose for
+            one whole-section run (``max(gene rows / labels / 100, 1)``).
+    """
+
+    dataset_name: str
+    platform: Literal["ATERA"]
+    source_zarr_path: Path
+    output_dir: Path
+    tile_um: float = 2000.0
+    halo_um: float = 100.0
+    min_halo_um: float = ATERA_PROSEG_MIN_HALO_UM
+    owned_margin_um: float = 20.0
+    max_window_extension_um: float | None = None
+    tile_subset: list[str] | None = None
+    prior: AteraProsegPrior | None = None
+    prior_weight_effective: float | None = None
+
+    @model_validator(mode="after")
+    def _validate_grid(self: AteraProsegPlanConfig) -> AteraProsegPlanConfig:
+        if self.halo_um < self.min_halo_um:
+            raise ValueError(
+                f"halo_um={self.halo_um} is below the minimum of "
+                f"{self.min_halo_um} microns"
+            )
+        if self.tile_um <= 2 * self.halo_um:
+            raise ValueError(
+                f"tile_um={self.tile_um} must exceed twice the halo ({self.halo_um})"
+            )
+        if self.owned_margin_um < 0:
+            raise ValueError("owned_margin_um must be at least 0")
+        extension = self.max_window_extension_um
+        if extension is not None and extension < 0:
+            raise ValueError("max_window_extension_um must be at least 0")
+        if self.tile_subset is not None and not self.tile_subset:
+            raise ValueError("tile_subset must name at least one tile")
+        weight = self.prior_weight_effective
+        if weight is not None:
+            if self.prior is None or self.prior.kind != "cellpose":
+                raise ValueError(
+                    "prior_weight_effective belongs to a Cellpose plan; the vendor "
+                    "prior's weight is a tile model parameter"
+                )
+            if not isfinite(weight) or weight <= 0:
+                raise ValueError("prior_weight_effective must be a positive number")
+        return self
+
+
+class AteraProsegTileConfig(BaseModel):
+    """Configuration of one ATERA_PROSEG_TILE task.
+
+    The tile entry is copied from the plan, so the task's inputs are the
+    config value and the source store (never the plan file).
+
+    Attributes:
+        dataset_name: Dataset alias.
+        platform: ATERA.
+        tile_id: Tile id (``c{col}_r{row}``).
+        source_zarr_path: The built source store the tile reads.
+        source_build_fingerprint: Build fingerprint of that store.
+        pixel_size_um: Microns per morphology pixel.
+        core_um: ``[x0, y0, x1, y1]`` of the tile core (half-open).
+        window_px: ``[col0, col1, row0, row1]`` of the window (end-exclusive).
+        mask_shape_px: ``[n_rows, n_cols]`` of the prior mask.
+        owned_labels: Prior labels whose centroid lies in the core.
+        output_dir: Folder of the tile result (``tile_<id>``).
+        num_threads: ProSeg ``--nthreads``.
+        max_rss_gb: Cap on the anonymous memory of the task's process tree.
+        model: ProSeg model and schedule.
+        proseg_git_rev: Git revision of the ProSeg build (provenance).
+        keep_inputs: Keep the exported parquet, prior and raw ProSeg outputs.
+        edge_tolerance_voxels: Distance (in voxels) from an interior window
+            edge at which an owned polygon is reported.
+        allow_untested_version: Run a ProSeg version other than the verified
+            one (``atera_proseg_allow_untested_version``), with a warning.
+        prior: The Cellpose prior (``cellpose_proseg``); ``None`` takes the
+            vendor ``labels/cell_labels`` of the store (``native_proseg``).
+    """
+
+    dataset_name: str
+    platform: Literal["ATERA"]
+    tile_id: str
+    source_zarr_path: Path
+    source_build_fingerprint: str
+    pixel_size_um: float
+    core_um: list[float]
+    window_px: list[int]
+    mask_shape_px: list[int]
+    owned_labels: list[int]
+    output_dir: Path
+    num_threads: int = 16
+    max_rss_gb: float | None = None
+    model: AteraProsegModelParams = AteraProsegModelParams()
+    proseg_git_rev: str | None = None
+    keep_inputs: bool = False
+    edge_tolerance_voxels: float = 1.0
+    allow_untested_version: bool = False
+    prior: AteraProsegTilePrior | None = None
+
+    @model_validator(mode="after")
+    def _validate_window(self: AteraProsegTileConfig) -> AteraProsegTileConfig:
+        if len(self.core_um) != 4 or len(self.window_px) != 4:
+            raise ValueError("core_um and window_px need four values")
+        if len(self.mask_shape_px) != 2:
+            raise ValueError("mask_shape_px needs [n_rows, n_cols]")
+        col0, col1, row0, row1 = self.window_px
+        if not (0 <= col0 < col1 and 0 <= row0 < row1):
+            raise ValueError(f"empty or negative window {self.window_px}")
+        if not self.owned_labels:
+            raise ValueError(f"tile {self.tile_id} owns no label; it is not run")
+        if self.num_threads < 1:
+            raise ValueError("num_threads must be at least 1")
+        return self
+
+
+class AteraProsegStitchConfig(BaseModel):
+    """Configuration of ATERA_PROSEG_STITCH.
+
+    Attributes:
+        dataset_name: Dataset alias.
+        platform: ATERA.
+        latest_zarr_path: The staged NATIVE_LATEST output (a link to the
+            persistent latest store).
+        persistent_latest_zarr_path: The latest store written in place.
+        plan_path: ``tile_plan.json``.
+        tile_dirs: Tile result folders, one per tile the plan runs.
+        output_dir: Task output folder (``stitch_out``).
+        n_workers: Worker threads; ``None`` uses ``DASK_NUM_WORKERS``.
+        edge_tolerance_voxels: As in :class:`AteraProsegTileConfig`.
+        force: Re-stitch even when the store records the same fingerprint.
+        prior_kind: The plan's prior kind, which names the layer written
+            (``proseg_vendor`` or ``reseg``); a plan of another kind is
+            refused.
+    """
+
+    dataset_name: str
+    platform: Literal["ATERA"]
+    latest_zarr_path: Path
+    persistent_latest_zarr_path: Path | None = None
+    plan_path: Path
+    tile_dirs: list[Path]
+    output_dir: Path
+    n_workers: int | None = None
+    edge_tolerance_voxels: float = 1.0
+    force: bool = False
+    prior_kind: Literal["vendor", "cellpose"] = "vendor"
+    # Comparison only: counted from its own mask and never used as a ProSeg prior.
+    stock_cellpose_mask_path: Path | None = None
 
 
 class CellposeModelPolicy(BaseModel):
@@ -464,19 +964,84 @@ class SegmentationConfig(BaseModel):
     proseg_hybrid: ProsegHybridConfig = ProsegHybridConfig()
     memory: MemoryConfig = MemoryConfig()
 
+    @model_validator(mode="after")
+    def _density_normalization(self) -> SegmentationConfig:
+        if (
+            self.dataset.transcript_density_path is not None
+            and self.cellpose.input_normalization != "per_channel"
+        ):
+            raise ValueError(
+                "Atera density inputs require input_normalization='per_channel'"
+            )
+        return self
+
 
 class EnrichmentConfig(BaseModel):
-    """Configuration for the SpatialData enrichment step."""
+    """Configuration for the SpatialData enrichment step.
+
+    ``segmentation_source="native"`` (ATERA only) enriches the vendor
+    segmentation of a NATIVE_LATEST store: no Cellpose masks are read, so
+    ``mask_path`` and ``nuclei_mask_path`` may be ``None``.
+    ``"native_proseg"`` does the same and also checks the stitched ProSeg
+    layer of the store (AT-9). ATERA ``"cellpose_proseg"`` (AT-7) enriches
+    the vendor layer natively, checks the stitched ProSeg layer and builds the
+    Cellpose layer from ``mask_path``; it has no ``nuclei_mask_path``. Every
+    other source needs both masks.
+    """
 
     dataset_name: str
-    platform: Literal["MERSCOPE", "XENIUM"]
+    platform: PlatformName
     latest_zarr_path: Path
-    mask_path: Path
-    nuclei_mask_path: Path
+    mask_path: Path | None
+    nuclei_mask_path: Path | None
     original_data_path: Path
     output_dir: Path
     persistent_output_path: Path | None = None
     transform_path: Path | None = None
+    segmentation_source: SegmentationSource = "cellpose_proseg"
+    native_label_check: bool = True
+    transcript_density_source_path: Path | None = None
+    stock_cellpose_mask_path: Path | None = None
+
+    @model_validator(mode="after")
+    def _validate_segmentation_source(self: EnrichmentConfig) -> EnrichmentConfig:
+        if self.segmentation_source == "cellpose_comparison":
+            if self.platform != "ATERA" or self.stock_cellpose_mask_path is None:
+                raise ValueError(
+                    "cellpose_comparison requires ATERA and stock_cellpose_mask_path"
+                )
+        elif self.stock_cellpose_mask_path is not None:
+            raise ValueError("stock_cellpose_mask_path requires cellpose_comparison")
+        if self.segmentation_source in ("native", "native_proseg"):
+            if self.platform != "ATERA":
+                raise ValueError(
+                    f"segmentation_source={self.segmentation_source} enriches the "
+                    f"vendor segmentation of ATERA rows only, not {self.platform}"
+                )
+            return self
+        if self.platform == "ATERA" and self.segmentation_source in (
+            "cellpose_proseg",
+            "cellpose_comparison",
+        ):
+            # AT-7: the Cellpose mask builds the proseg_mask layer; ATERA keeps
+            # the vendor nuclei, so no Cellpose nuclei mask exists.
+            if self.mask_path is None:
+                raise ValueError(
+                    "mask_path (the ATERA Cellpose mask) required for "
+                    "segmentation_source=cellpose_proseg"
+                )
+            return self
+        missing = [
+            name
+            for name in ("mask_path", "nuclei_mask_path")
+            if getattr(self, name) is None
+        ]
+        if missing:
+            raise ValueError(
+                f"{' and '.join(missing)} required for segmentation_source="
+                f"{self.segmentation_source}"
+            )
+        return self
 
 
 class ViewerCacheConfig(BaseModel):
@@ -494,7 +1059,7 @@ class ViewerCacheConfig(BaseModel):
     """
 
     dataset_name: str
-    platform: Literal["MERSCOPE", "XENIUM"] | None = None
+    platform: PlatformName | None = None
     latest_zarr_path: Path
     original_data_path: Path | None = None
     output_dir: Path
@@ -507,6 +1072,8 @@ class ViewerCacheConfig(BaseModel):
     build_image_pyramid: bool = True
     image_only: bool = False
     image_keys: list[str] | None = None
+    # Image the base masks are drawn on; None keeps the built-in selection.
+    base_image_key: str | None = None
 
     @model_validator(mode="after")
     def _validate_mode(self: ViewerCacheConfig) -> ViewerCacheConfig:
@@ -526,17 +1093,40 @@ class ViewerCacheConfig(BaseModel):
         return self
 
 
+class MiqLayer(BaseModel):
+    """A further mask layer quantified by the same MIQ task.
+
+    Attributes:
+        mask_label_key: Label element of the store holding the layer's cells.
+        shape_key: Shapes element whose ``instance_id`` the labels hold.
+        table_key: Table written for the layer.
+    """
+
+    mask_label_key: str
+    shape_key: str
+    table_key: str
+
+
 class MaskImageQuantificationConfig(BaseModel):
-    """Configuration for Cellpose-mask image-channel quantification."""
+    """Configuration for mask image-channel quantification.
+
+    The mask is either a Cellpose ``.npy`` label image (``mask_path``) or a
+    label element of the store (``mask_label_key``, such as the vendor
+    ``cell_labels`` of a native ATERA row); exactly one of the two is set.
+    ``extra_layers`` (ATERA ``native_proseg`` rows: the ProSeg labels) are
+    quantified after the main layer, one table each, by the same task.
+    """
 
     dataset_name: str
-    platform: Literal["MERSCOPE", "XENIUM"]
+    platform: PlatformName
     latest_zarr_path: Path
-    mask_path: Path
+    mask_path: Path | None
     output_dir: Path
     table_key: str = "table_MOSAIK_cellpose_image_quantification"
     shape_key: str = "MOSAIK_cellpose"
     tile_size: int = 2048
+    mask_label_key: str | None = None
+    extra_layers: list[MiqLayer] = Field(default_factory=list)
 
     @field_validator("tile_size")
     @classmethod
@@ -547,6 +1137,20 @@ class MaskImageQuantificationConfig(BaseModel):
         if int(value) <= 0:
             raise ValueError("tile_size must be positive")
         return int(value)
+
+    @model_validator(mode="after")
+    def _validate_mask_source(
+        self: MaskImageQuantificationConfig,
+    ) -> MaskImageQuantificationConfig:
+        if (self.mask_path is None) == (self.mask_label_key is None):
+            raise ValueError(
+                "set exactly one of mask_path (a .npy label image) and "
+                "mask_label_key (a label element of the store)"
+            )
+        tables = [self.table_key, *(layer.table_key for layer in self.extra_layers)]
+        if len(set(tables)) != len(tables):
+            raise ValueError(f"every MIQ layer needs its own table, got {tables}")
+        return self
 
 
 _IMAGE_KEY_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
@@ -680,6 +1284,8 @@ class CorticalDepthTableConfig(BaseModel):
     segmentation: str
     table_key: str
     shape_key: str | None = None
+    # rca-site:H8: suffix of the clustered table the depth violins read (§4.8).
+    clustered_table_key_suffix: TableKeySuffix = ""
 
 
 class CorticalDepthConfig(BaseModel):
@@ -1255,7 +1861,7 @@ class VisualizationSampleConfig(BaseModel):
     """One SpatialData sample to include in visualization output."""
 
     sample_id: str
-    platform: Literal["MERSCOPE", "XENIUM"]
+    platform: PlatformName
     zarr_path: Path
     segmentation: str | None = None
     table_key: str | None = None
@@ -1311,14 +1917,26 @@ class VisualizationConfig(BaseModel):
 
 
 class ClusteringSquidpySampleConfig(BaseModel):
-    """One SpatialData sample to cluster with Scanpy/Squidpy."""
+    """One SpatialData sample to cluster with Scanpy/Squidpy.
+
+    ``expected_panel_gene_count`` is the gene count the panel check expects
+    (``None`` skips it, for whole-transcriptome panels); ``hvg_n_top_genes``
+    selects that many highly variable genes for the PCA (``None`` uses every
+    gene for panels of up to 5,000 genes, as the 300-gene XENIUM and MERSCOPE
+    rows do, and 2,000 highly variable genes for wider panels).
+    """
 
     sample_id: str
-    platform: Literal["MERSCOPE", "XENIUM"]
+    platform: PlatformName
     zarr_path: Path
     segmentation: str | None = None
     table_key: str | None = None
     shape_key: str | None = None
+    expected_panel_gene_count: int | None = Field(default=300, gt=0)
+    hvg_n_top_genes: int | None = Field(default=None, gt=0)
+    # rca-site:H8: per-row annotation columns; None inherits the global params.
+    anatomical_region: AnatomicalRegionValue = None
+    mouse_section_regions: MouseSectionRegionsValue = None
 
 
 class ClusteringSquidpyRoundConfig(BaseModel):
@@ -1407,6 +2025,42 @@ class ClusteringSquidpyConfig(BaseModel):
         default_factory=ClusteringSquidpyAnnotationConfig
     )
     min_branch_cells: int = Field(default=50, ge=1)
+    # rca-site:H8: map-first mode fields (plan §3.7); the defaults are legacy.
+    mode: ClusteringMode = "legacy"
+    labels_dir: Path | None = None
+    leaf_source: LeafSource = "mapped"
+    adaptive_split: AdaptiveSplitConfig = Field(default_factory=AdaptiveSplitConfig)
+    qc_leiden_resolution: float = Field(default=0.5, gt=0.0)
+    table_key_suffix: TableKeySuffix = ""
+
+    @model_validator(mode="after")
+    def _check_mode_settings(
+        self: ClusteringSquidpyConfig,
+    ) -> ClusteringSquidpyConfig:
+        check_clustering_mode_settings(
+            mode=self.mode,
+            leaf_source=self.leaf_source,
+            adaptive_split=self.adaptive_split,
+            table_key_suffix=self.table_key_suffix,
+        )
+        return self
+
+    def coupled_annotation_config(
+        self: ClusteringSquidpyConfig, annotation: AnnotationConfig
+    ) -> AnnotationConfig:
+        """Return ``annotation`` coupled to this run's ``min_counts``.
+
+        Args:
+            annotation: The annotation configuration of the same run.
+
+        Returns:
+            A copy whose ``min_counts`` and ``thresholds.hard_min_counts``
+            equal ``min_counts`` (plan §3.7, §4.4).
+
+        Raises:
+            ValueError: If ``annotation`` sets another ``min_counts``.
+        """
+        return annotation.coupled_to_clustering(self.min_counts)
 
 
 class MenderConfig(BaseModel):
@@ -1414,7 +2068,7 @@ class MenderConfig(BaseModel):
 
     pair_id: str
     sample_id: str
-    platform: Literal["MERSCOPE", "XENIUM"]
+    platform: PlatformName
     segmentation: str
     source_h5ad: Path
     source_h5ad_origin: Path | None = None
@@ -1436,6 +2090,8 @@ class MenderConfig(BaseModel):
     run_umap: bool = True
     write_spatialdata_table: bool = True
     figure_dpi: int = Field(default=180, ge=72)
+    # rca-site:H8: unassigned cells as a MENDER state (legacy) or not (§4.9).
+    unassigned_state_policy: UnassignedStatePolicy = "state"
 
     @field_validator("cell_state_key", "source_spatialdata_table", "native_shape_key")
     @classmethod
@@ -1526,7 +2182,7 @@ class SpatialGeneAnalysisSampleConfig(BaseModel):
     """One SpatialData sample for per-gene spatial autocorrelation."""
 
     sample_id: str
-    platform: Literal["MERSCOPE", "XENIUM"]
+    platform: PlatformName
     zarr_path: Path
     segmentation: str | None = None
     table_key: str | None = None
@@ -1610,7 +2266,7 @@ class MecrSampleConfig(BaseModel):
     """One SpatialData cell-count table to score with MECR."""
 
     sample_id: str
-    platform: Literal["MERSCOPE", "XENIUM"]
+    platform: PlatformName
     zarr_path: Path
     segmentation: str | None = None
     table_key: str | None = None
@@ -1637,6 +2293,17 @@ class MecrReferenceConfig(BaseModel):
     marker_max_other_fraction: float = Field(default=0.01, ge=0.0, le=1.0)
     normalize_target_sum: float = Field(default=10_000.0, gt=0.0)
     reference_chunk_rows: int = Field(default=5_000, ge=1)
+    # How the reference is held (Atera plan AT-8, Q22). ``in_memory`` keeps
+    # the panel-restricted matrix of every retained cell and runs the
+    # Wilcoxon test on every panel gene. ``streaming`` reads the reference
+    # twice: the first pass counts detections per broad class without keeping
+    # the matrix; the second keeps only the genes that pass the detection
+    # thresholds and runs the Wilcoxon test on them. ``auto`` streams when the
+    # panel has more than ``merxen.gene_sets.WHOLE_TRANSCRIPTOME_MIN_GENES``
+    # non-control genes. Markers and MECR values do not depend on the mode.
+    reference_mode: Literal["auto", "in_memory", "streaming"] = "auto"
+    # Processes that decode reference row chunks in parallel (1 = in-process).
+    reference_workers: int = Field(default=1, ge=1)
     wilcoxon_tie_correct: bool = True
     figure_dpi: int = Field(default=180, ge=72)
 
@@ -1870,6 +2537,7 @@ class PciSeqReferenceConfig(BaseModel):
     verify_checksums: bool = True
     chunk_rows: int = Field(default=2048, ge=1)
     gene_id_mode: Literal["symbol", "ensembl"] = "symbol"
+    # Required (atlas sources) when the pciSeq panel is whole-transcriptome.
     gene_names: list[str] | None = None
     output_dir: Path = Path("pciseq_reference_out")
 

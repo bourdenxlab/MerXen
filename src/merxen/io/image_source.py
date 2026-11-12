@@ -317,6 +317,8 @@ def fetch_merscope_projected_tile(
 def prepare_cellpose_input(
     image: np.ndarray,
     factor_rescale: float = 1.0,
+    *,
+    normalization: str = "joint",
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Normalize an image tile for Cellpose input.
 
@@ -326,6 +328,9 @@ def prepare_cellpose_input(
     Args:
         image: Input image tile (H, W) or (H, W, C).
         factor_rescale: Must be 1.0 (native resolution only).
+        normalization: ``joint`` preserves the historical stain conversion;
+            ``per_channel`` keeps a physical density channel from disappearing
+            beside the much larger fluorescence intensities.
 
     Returns:
         Tuple of (img8, img_seg, scale_factor). Both img8 and img_seg
@@ -338,7 +343,10 @@ def prepare_cellpose_input(
         raise ValueError("factor_rescale > 1.0 is disabled for native-resolution mode.")
 
     img = image.astype(np.float32, copy=False)
-    p2, p98 = np.percentile(img, (2, 98))
+    if normalization not in ("joint", "per_channel"):
+        raise ValueError("Unknown Cellpose input normalization")
+    axes = (0, 1) if normalization == "per_channel" and img.ndim == 3 else None
+    p2, p98 = np.percentile(img, (2, 98), axis=axes)
     img = np.clip((img - p2) / (p98 - p2 + 1e-8), 0, 1)
     img8 = (img * 255).astype(np.uint8)
 

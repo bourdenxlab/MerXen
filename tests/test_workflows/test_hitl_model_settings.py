@@ -12,7 +12,12 @@ from pathlib import Path
 
 import pytest
 
-from merxen.config import CellposeConfig, MaskFilterConfig, TilingConfig
+from merxen.config import (
+    CellposeConfig,
+    MaskFilterConfig,
+    MaskGeometryFilterConfig,
+    TilingConfig,
+)
 from merxen.segmentation.model_identity import (
     CELLPOSE_VERSION,
     CPSAM_V2_SHA256,
@@ -38,11 +43,14 @@ def _defaults() -> dict:
 
 def _run_cases(tmp_path: Path, cases: list[dict]) -> list[dict]:
     text = (ROOT / "workflows/main.nf").read_text()
-    block = re.search(
-        r"def baseConfig = \[.*?^            \]", text, re.MULTILINE | re.DOTALL
-    )
+    # The builder lives in segmentationConfigMap since AT-7 (4-space body).
+    block = re.search(r"def baseConfig = \[.*?^    \]$", text, re.MULTILINE | re.DOTALL)
     assert block is not None
-    base = block.group().replace("params.", "opts.")
+    base = (
+        block.group()
+        .replace("params.", "opts.")
+        .replace("geometryFilter(params)", "geometryFilter(opts)")
+    )
     hook = text.split("// hitl-hook:C4\n", 1)[1].split("def segmentConfig =", 1)[0]
     (tmp_path / "lib").symlink_to(ROOT / "workflows/lib", target_is_directory=True)
     (tmp_path / "cases.json").write_text(json.dumps(cases))
@@ -54,7 +62,8 @@ workflow {
     def results = cases.collect { entry ->
         try {
             def opts = entry.options
-            def chosen = CellposeSettings.settings(entry.row, 'XENIUM', opts)
+            def platform = entry.platform ?: 'XENIUM'
+            def chosen = CellposeSettings.settings(entry.row, platform, opts)
             def meta = [cellpose_settings: chosen]
             """
         + base
@@ -64,14 +73,20 @@ workflow {
             """
         + hook
         + """
+            if (entry.stock_comparison) {
+                baseConfig.dataset = entry.dataset
+                baseConfig = CellposeSettings.stockComparisonConfig(baseConfig)
+            }
             if (entry.check_preflight) {
                 CellposeSettings.preflight(entry.row,
-                    [active_platforms: ['XENIUM'], species: 'human', pair_id: 'P1',
+                    [active_platforms: [platform], species: 'human', pair_id: 'P1',
                      run_segment: entry.containsKey('run_segment')
                          ? entry.run_segment : true,
                      stage_order: ['build_spatialdata', 'segment_nuclei',
                          'segment', 'enrich', 'qc'],
-                     start_stage: entry.start_stage ?: 'enrich'],
+                     start_stage: entry.start_stage ?: 'enrich',
+                     segmentation_source: entry.segmentation_source
+                         ?: 'cellpose_proseg'],
                     opts)
             }
             return [before: before, after: groovy.json.JsonOutput.prettyPrint(
@@ -112,6 +127,44 @@ def test_required_hitl_hooks_occur_once() -> None:
     assert CPSAM_V2_SHA256 in library
     assert CELLPOSE_VERSION in library
     assert f"startsWith('{TORCH_MINOR}.')" in library
+
+
+@pytest.mark.nextflow
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow unavailable")
+def test_atera_controls_refuse_routes_that_do_not_use_cellpose(tmp_path: Path) -> None:
+    options = {
+        **_defaults(),
+        "atera_cellpose_cellprob": 0,
+        "cellpose_protected_output_roots": [str(tmp_path / "published")],
+        "cellpose_tile_size_candidates": [6144],
+        "outdir": str(tmp_path / "arm"),
+    }
+    cases = [
+        {
+            "platform": "ATERA",
+            "options": options,
+            "row": {},
+            "check_preflight": True,
+            "segmentation_source": source,
+        }
+        for source in ("native", "native_proseg", "cellpose_proseg")
+    ]
+    cases.append(
+        {
+            "platform": "ATERA",
+            "options": {**options, "atera_cellpose_cellprob": None},
+            "row": {},
+            "check_preflight": True,
+            "segmentation_source": "native",
+        }
+    )
+    results = _run_cases(tmp_path, cases)
+    for result in results[:2]:
+        assert "require segmentation_source=cellpose_proseg" in result["error"]
+    assert "error" not in results[2]
+    assert results[2]["selected"]["cellpose"]["cellprob_threshold"] == 0
+    assert "error" not in results[3]
+    assert results[3]["selected"] == {}
 
 
 @pytest.mark.nextflow
@@ -374,7 +427,7 @@ def test_downstream_selector_requires_matching_published_identity(
             channels=["DAPI", "18S"],
             image_key="morphology_focus",
             pixel_size_um=(0.2125, 0.2125),
-            mask_filter=MaskFilterConfig(),
+            mask_filter=MaskFilterConfig(geometry_filter=MaskGeometryFilterConfig()),
             tiling=TilingConfig(tile_size_candidates=[6144]),
         ),
     )
@@ -446,3 +499,198 @@ def test_downstream_selector_requires_matching_published_identity(
     assert "error" not in results[2], results[2]
     assert "identity mismatch" in results[3]["error"]
     assert (sidecar.read_bytes(), stats.read_bytes()) == before
+
+
+_NATIVE_IMAGE = {"MERSCOPE": "MERSCOPE_z_projection", "XENIUM": "morphology_focus"}
+_DEFAULT_CHANNELS = {"MERSCOPE": ["DAPI", "PolyT"], "XENIUM": ["DAPI", "18S"]}
+_PIXEL_SIZE = {"MERSCOPE": 0.108, "XENIUM": 0.2125}
+
+
+def _other_platform(platform: str) -> str:
+    return "XENIUM" if platform == "MERSCOPE" else "MERSCOPE"
+
+
+def _write_model(bundle: Path, platform: str, image_key: str) -> Path:
+    """Write a candidate model bundle for a platform; return its weights file."""
+    bundle.mkdir(parents=True)
+    model = bundle / "model"
+    model.write_bytes(b"test only")
+    (bundle / "model.json").write_text(
+        json.dumps(
+            {
+                "weights_sha256": hashlib.sha256(model.read_bytes()).hexdigest(),
+                "platform": platform,
+                "species": "human",
+                "channels": _DEFAULT_CHANNELS[platform],
+                "tile_size": 6144,
+                "status": "candidate",
+                "image_key": image_key,
+                "pixel_size_um": _PIXEL_SIZE[platform],
+                "normalization_route": "A",
+            }
+        )
+    )
+    return model
+
+
+@pytest.mark.nextflow
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow unavailable")
+@pytest.mark.parametrize("platform", ["MERSCOPE", "XENIUM"])
+def test_model_metadata_must_name_the_platform_native_image(
+    tmp_path: Path, platform: str
+) -> None:
+    """A custom model passes preflight only with its platform's native image."""
+    prefix = platform.lower()
+    native = _write_model(tmp_path / "native", platform, _NATIVE_IMAGE[platform])
+    foreign = _write_model(
+        tmp_path / "foreign", platform, _NATIVE_IMAGE[_other_platform(platform)]
+    )
+    options = {
+        **_defaults(),
+        "cellpose_protected_output_roots": [str(tmp_path / "published")],
+        "cellpose_tile_size_candidates": [6144],
+        "allow_candidate_model": True,
+        "outdir": str(tmp_path / "arm"),
+    }
+    cases = [
+        {
+            "platform": platform,
+            "options": {**options, f"{prefix}_cellpose_model": str(model.parent)},
+            "row": {},
+            "check_preflight": True,
+        }
+        for model in (native, foreign)
+    ]
+    results = _run_cases(tmp_path, cases)
+    assert "error" not in results[0], results[0]
+    assert "Model requires native image" in results[1]["error"]
+
+
+@pytest.mark.nextflow
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow unavailable")
+@pytest.mark.parametrize("platform", ["MERSCOPE", "XENIUM"])
+def test_published_stock_identity_must_name_the_platform_native_image(
+    tmp_path: Path, platform: str
+) -> None:
+    """A downstream stock arm accepts only masks made from the native image."""
+    prefix = platform.lower()
+    cases = []
+    for name, image_key in (
+        ("native-arm", _NATIVE_IMAGE[platform]),
+        ("foreign-arm", _NATIVE_IMAGE[_other_platform(platform)]),
+    ):
+        arm = tmp_path / name
+        directory = arm / f"P1/{prefix}/segmentation"
+        directory.mkdir(parents=True)
+        (directory / "cellpose_masks_tiled.npy").write_bytes(b"stock artifact")
+        identity = CellposeModelIdentity(
+            status="verified",
+            model_name="cpsam_v2",
+            weights_sha256=CPSAM_V2_SHA256,
+            cellpose_version="4.2.1.1",
+            torch_version="2.14.0+cu130",
+            cellpose_config=CellposeConfig(
+                gpu=False, model_type="cyto3", flow_threshold=0.7, cellprob_threshold=0
+            ),
+            inference_context=CellposeInferenceContext(
+                platform=platform,
+                species="human",
+                channels=_DEFAULT_CHANNELS[platform],
+                image_key=image_key,
+                pixel_size_um=(_PIXEL_SIZE[platform], _PIXEL_SIZE[platform]),
+                mask_filter=MaskFilterConfig(
+                    geometry_filter=MaskGeometryFilterConfig()
+                ),
+                tiling=TilingConfig(tile_size_candidates=[6144]),
+            ),
+        )
+        (directory / "cellpose_model_identity.json").write_text(
+            identity.model_dump_json()
+        )
+        (directory / "cellpose_stitching_stats.json").write_text(
+            json.dumps({"model_identity": identity.model_dump(mode="json")})
+        )
+        cases.append(
+            {
+                "platform": platform,
+                "options": {
+                    **_defaults(),
+                    f"{prefix}_cellpose_cellprob": 0,
+                    "cellpose_protected_output_roots": [str(tmp_path / "published")],
+                    "cellpose_tile_size_candidates": [6144],
+                    "outdir": str(arm),
+                },
+                "row": {},
+                "check_preflight": True,
+                "run_segment": False,
+            }
+        )
+    results = _run_cases(tmp_path, cases)
+    assert "error" not in results[0], results[0]
+    assert "identity mismatch" in results[1]["error"]
+
+
+@pytest.mark.nextflow
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow unavailable")
+def test_geometry_cleanup_defaults_apply_to_every_platform(tmp_path: Path) -> None:
+    """All native pixel sizes share one physical small/thin/concave policy."""
+    cases = [
+        {"options": _defaults(), "platform": platform, "row": {}}
+        for platform in ("XENIUM", "MERSCOPE", "ATERA")
+    ]
+    cases.append(
+        {
+            "options": {**_defaults(), "cellpose_geometry_filter_enabled": False},
+            "row": {},
+        }
+    )
+    results = _run_cases(tmp_path, cases)
+    for result in results[:3]:
+        assert "error" not in result, result
+        config = json.loads(result["after"])
+        assert config["mask_filter"]["geometry_filter"] == {
+            "max_area_um2": 100.0,
+            "max_thickness_um": 5.0,
+            "max_solidity": 0.75,
+        }
+    assert json.loads(results[3]["after"])["mask_filter"]["geometry_filter"] is None
+
+
+@pytest.mark.nextflow
+@pytest.mark.skipif(shutil.which("nextflow") is None, reason="nextflow unavailable")
+def test_stock_comparison_has_independent_paths_and_matching_recipe(
+    tmp_path: Path,
+) -> None:
+    """Only model selection and published destinations change in a stock arm."""
+    options = {**_defaults(), "atera_cellpose_final_max_area_um2": 2000}
+    dataset = {
+        "platform": "ATERA",
+        "name": "PAIR_A_ATERA",
+        "channels": ["DAPI", "18S", "transcript_density"],
+        "persistent_mask_path": "arm/segmentation/cellpose_masks_tiled.npy",
+    }
+    cases = [
+        {"platform": "ATERA", "row": {}, "options": options},
+        {
+            "platform": "ATERA",
+            "row": {},
+            "options": options,
+            "stock_comparison": True,
+            "dataset": dataset,
+        },
+    ]
+    control, result = _run_cases(tmp_path, cases)
+    assert "error" not in result, result
+    before, after = json.loads(control["after"]), json.loads(result["after"])
+    assert after["cellpose"]["pretrained_model"] == "cpsam_v2"
+    assert after["cellpose"]["flow_threshold"] == before["cellpose"]["flow_threshold"]
+    assert (
+        after["cellpose"]["cellprob_threshold"]
+        == before["cellpose"]["cellprob_threshold"]
+    )
+    assert after["mask_filter"] == before["mask_filter"]
+    assert after["dataset"]["channels"] == dataset["channels"]
+    assert (
+        after["dataset"]["persistent_mask_path"]
+        == "arm/segmentation/stock_cellpose/cellpose_masks_tiled.npy"
+    )

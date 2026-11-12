@@ -58,7 +58,8 @@ workflow {
         gaston: [gaston_enabled: true],
         both: [mender_enabled: true, gaston_enabled: true],
         exact: [mender_enabled: true, gaston_enabled: true, only_stage: 'gaston'],
-        map: [mender_enabled: true, gaston_enabled: true, stop_stage: 'mapmycells'],
+        map: [mender_enabled: true, gaston_enabled: true, stop_stage: 'mapmycells',
+            clustering_squidpy_mode: 'legacy'],
     ]
     def caseSettings = cases.collectEntries { name, controls ->
         def row = [pair_id: name, analysis_mode: 'xenium',
@@ -73,7 +74,8 @@ workflow {
     def ready = caseSettings.both + [pair_id: 'READY']
     def mapped = rowSampleSettings([pair_id: 'MAPPED', analysis_mode: 'xenium',
         analysis_segmentation: 'reseg,original_seg', mender_enabled: true,
-        gaston_enabled: true, stop_stage: 'gaston'], options)
+        gaston_enabled: true, stop_stage: 'gaston',
+        clustering_squidpy_mode: 'legacy'], options)
     def published = caseSettings.exact + [pair_id: 'PUBLISHED']
     post_pciseq_sample_rows_ch = Channel.of(tuple('READY', [:], ready),
         tuple('MAPPED', [:], mapped), tuple('PUBLISHED', [:], published))

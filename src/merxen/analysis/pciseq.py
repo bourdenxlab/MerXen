@@ -21,6 +21,7 @@ from skimage.draw import polygon
 
 from merxen.config import PciSeqConfig
 from merxen.control_features import classify_control_transcripts
+from merxen.gene_sets import WHOLE_TRANSCRIPTOME_MIN_GENES, is_whole_transcriptome
 from merxen.io.spatialdata_schema import (
     MERXEN_SCHEMA_ATTR,
     MERXEN_SCHEMA_VERSION,
@@ -30,6 +31,7 @@ from merxen.io.spatialdata_schema import (
     choose_primary_points_key,
 )
 from merxen.io.transcript_io import iter_points_chunks, resolve_col
+from merxen.platforms import platform_spec
 
 _BRANCHES = {
     "reseg": "proseg",
@@ -239,7 +241,7 @@ def _check_native_vendor_frame(
         or original.get("shape") != shape_key
         or original.get("id_namespace") != ORIGINAL_ID_NAMESPACE
         or original.get("coordinate_variant_of") is not None
-        or shape_key != f"{config.platform.lower()}_cell_boundaries"
+        or shape_key != platform_spec(config.platform).original_cell_shape_key
     ):
         return
     point_matrix = _affine(sdata_obj.points[points_key], "global", 2)
@@ -264,7 +266,12 @@ def _load_spots(
     *,
     config: PciSeqConfig,
     reference: pd.DataFrame,
-) -> tuple[pd.DataFrame, dict[str, int], np.ndarray]:
+) -> tuple[pd.DataFrame, dict[str, int], np.ndarray, int]:
+    """Read the modelled spots; the last value is the panel's gene count.
+
+    The panel gene count is the number of distinct non-control genes among the
+    valid transcripts, before gene exclusion and reference matching.
+    """
     axes = ["x", "y"]
     candidates = [["x", "global_x", "x_location"], ["y", "global_y", "y_location"]]
     if config.geometry_mode == "labels_3d":
@@ -293,6 +300,7 @@ def _load_spots(
         "unmatched_gene_spots": 0,
     }
     excluded = config.options.get("exclude_genes", [])
+    panel_genes: set[str] = set()
     for chunk in iter_points_chunks(points_obj, columns, desc="pciSeq transcripts"):
         counts["input_spots"] += len(chunk)
         coordinates = chunk[coord_cols].apply(pd.to_numeric, errors="coerce").to_numpy()
@@ -309,6 +317,7 @@ def _load_spots(
         ).control
         counts["control_spots"] += int((valid & controls).sum())
         valid &= ~controls
+        panel_genes.update(genes.iloc[np.flatnonzero(valid)].unique().tolist())
         exclude_mask = genes.isin(excluded).to_numpy()
         counts["excluded_spots"] += int((valid & exclude_mask).sum())
         valid &= ~exclude_mask
@@ -327,7 +336,24 @@ def _load_spots(
     spots["transcript_id"] = _positive_ids(
         spots["transcript_id"], "native transcript_id"
     ).to_numpy(dtype=np.uint64)
-    return spots, counts, matrix
+    return spots, counts, matrix, len(panel_genes)
+
+
+def _reference_gene_list_is_explicit(reference_origin: dict[str, Any] | None) -> bool:
+    """Return whether the reference genes were chosen explicitly.
+
+    A matrix supplied without a preparation manifest, or prepared from a
+    custom matrix, carries the user's own gene rows. An atlas reference (WMB,
+    WHB, SEA-AD) is explicit only when it was prepared with ``gene_names``.
+    """
+    if reference_origin is None:
+        return True
+    specification = reference_origin.get("specification") or {}
+    source = reference_origin.get("resolved_source") or specification.get("source")
+    if source == "custom":
+        return True
+    configuration = specification.get("configuration") or {}
+    return configuration.get("gene_names") is not None
 
 
 def _project_shapes(
@@ -544,7 +570,11 @@ def _rasterize(
 
 
 def prepare_pciseq_inputs(
-    sdata_obj: Any, *, config: PciSeqConfig, reference: pd.DataFrame
+    sdata_obj: Any,
+    *,
+    config: PciSeqConfig,
+    reference: pd.DataFrame,
+    reference_gene_list_is_explicit: bool = True,
 ) -> PciSeqInputs:
     """Build native-coordinate model arrays with explicit stable ID mappings.
 
@@ -552,16 +582,33 @@ def prepare_pciseq_inputs(
         sdata_obj: Open MerXen SpatialData object.
         config: One platform and segmentation's pciSeq settings.
         reference: Validated genes-by-cell-types mean expression matrix.
+        reference_gene_list_is_explicit: Whether the reference genes were
+            chosen explicitly (see :func:`_reference_gene_list_is_explicit`).
 
     Returns:
         Sparse masks, filtered model coordinates, ID maps, and provenance.
+
+    Raises:
+        ValueError: The panel is whole-transcriptome (more than
+            :data:`~merxen.gene_sets.WHOLE_TRANSCRIPTOME_MIN_GENES` non-control
+            genes) and the reference genes were not chosen explicitly.
     """
     shape_key, points_key, table_key = _resolve_native_keys(sdata_obj, config)
     shapes = sdata_obj.shapes[shape_key]
     _check_native_vendor_frame(sdata_obj, config, shape_key, points_key)
-    spots, counts, point_matrix = _load_spots(
+    spots, counts, point_matrix, n_panel_genes = _load_spots(
         sdata_obj.points[points_key], config=config, reference=reference
     )
+    if is_whole_transcriptome(n_panel_genes) and not reference_gene_list_is_explicit:
+        raise ValueError(
+            f"pciSeq panel has {n_panel_genes} non-control genes (more than "
+            f"{WHOLE_TRANSCRIPTOME_MIN_GENES}: whole-transcriptome), but its atlas "
+            "reference was prepared without an explicit gene list "
+            "(PciSeqReferenceConfig.gene_names is None), so pciSeq would model "
+            "every panel gene. Prepare a reference restricted to the genes to "
+            "model (gene_names in the merxen prepare-pciseq-reference config) "
+            "and supply its reference.csv as pciseq_reference_path."
+        )
     shape_ids = _positive_ids(
         canonical_shape_instance_series(shapes), "pciSeq shape instances"
     ).to_numpy(dtype=np.uint64)
@@ -715,7 +762,14 @@ def prepare_pciseq(config: PciSeqConfig, output_dir: Path) -> Path:
     # Lazy point reads must finish before another stage replaces store elements.
     with spatialdata_write_lock(config.spatialdata_path):
         sdata_obj = sd.read_zarr(config.spatialdata_path)
-        inputs = prepare_pciseq_inputs(sdata_obj, config=config, reference=reference)
+        inputs = prepare_pciseq_inputs(
+            sdata_obj,
+            config=config,
+            reference=reference,
+            reference_gene_list_is_explicit=_reference_gene_list_is_explicit(
+                reference_origin
+            ),
+        )
     observed_genes = inputs.spots["gene_name"].unique()
     unsupported_classes = reference.columns[
         reference.loc[observed_genes].sum(axis=0) <= 0

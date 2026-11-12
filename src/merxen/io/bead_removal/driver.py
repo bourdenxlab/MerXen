@@ -485,7 +485,8 @@ def available_cpu_count() -> int:
         Usable CPUs, at least 1.
     """
     try:
-        n = len(os.sched_getaffinity(0))
+        cpu_affinity = getattr(os, "sched_getaffinity", None)
+        n = len(cpu_affinity(0)) if cpu_affinity else os.cpu_count() or 1
     except (AttributeError, OSError):  # not Linux
         n = os.cpu_count() or 1
     quota = cgroup_cpu_limit()

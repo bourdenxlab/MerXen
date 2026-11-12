@@ -1,0 +1,307 @@
+"""Smoke tests for the M3 stage-C2 shadow scripts (``scripts/acceptance/``)."""
+
+from __future__ import annotations
+
+import importlib.util
+import re
+import sys
+from pathlib import Path
+from types import ModuleType
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from merxen import privacy
+from merxen.annotation.shadow import (
+    E1_REFEREE_MARKERS,
+    evaluate_human_rules,
+    rule_inputs_from_provisional,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SCRIPTS = REPO_ROOT / "scripts" / "acceptance"
+NAMES = (
+    "shadow_baselines",
+    "shadow_ll",
+    "heldout_genes",
+    "shadow_x1",
+    "shadow_flags",
+    "shadow_e8",
+    "shadow_glial_jsd",
+)
+
+
+def _load(name: str) -> ModuleType:
+    if str(SCRIPTS) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS))
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, SCRIPTS / f"{name}.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def scripts() -> dict[str, ModuleType]:
+    return {name: _load(name) for name in NAMES}
+
+
+@pytest.mark.parametrize("name", NAMES[1:])
+def test_script_help_runs(scripts: dict[str, ModuleType], name: str) -> None:
+    with pytest.raises(SystemExit) as raised:
+        scripts[name].main(["--help"])
+    assert raised.value.code == 0
+
+
+def _sample(baselines: ModuleType, n_cells: int = 40) -> object:
+    rng = np.random.default_rng(0)
+    astro = np.arange(n_cells) % 2 == 0
+    labels = pd.DataFrame(
+        {
+            "total_counts": np.where(np.arange(n_cells) < 10, 30, 100),
+            "ct_lineage_name": np.where(astro, "Astrocytes", "Neurons"),
+            "ct_lineage_raw": np.full(n_cells, 0.9),
+            "ct_broad_name": np.where(astro, "Astrocytes", "Neurons"),
+            "ct_broad_raw": np.full(n_cells, 0.9),
+            "mmc_whb_supercluster_name": np.where(
+                astro, "Astrocyte", "Upper-layer intratelencephalic"
+            ),
+            "mmc_whb_supercluster_bp": np.full(n_cells, 0.9),
+        },
+        index=pd.Index([f"c{i}" for i in range(n_cells)], name="cell_id"),
+    )
+    sea_broad = labels["ct_broad_name"].to_numpy(object).copy()
+    sea_broad[:4] = "Microglia"  # SEA-AD disagrees on four cells below 60 counts
+    sea = pd.DataFrame(
+        {"broad": sea_broad, "broad_raw": np.full(n_cells, 0.9)}, index=labels.index
+    )
+    scores = np.zeros((n_cells, len(E1_REFEREE_MARKERS)))
+    classes = list(E1_REFEREE_MARKERS)
+    scores[astro, classes.index("Astrocytes")] = 0.3
+    scores[~astro, classes.index("Neurons")] = 0.3
+    rules = {
+        vote: evaluate_human_rules(
+            rule_inputs_from_provisional(labels, sea),
+            platform="MERSCOPE",
+            second_vote=vote,
+        )
+        for vote in baselines.VOTES
+    }
+    return baselines.Sample(
+        sample_id="PX_MERSCOPE",
+        platform="MERSCOPE",
+        labels=labels,
+        sea=sea,
+        xy=rng.random((n_cells, 2)) * 2000,
+        legacy_broad=np.full(n_cells, "Neurons", dtype=object),
+        scores=scores,
+        aligned_frame=True,
+        rules=rules,
+    )
+
+
+def test_ll_score_sample_and_decision(scripts: dict[str, ModuleType]) -> None:
+    sample = _sample(scripts["shadow_baselines"])
+    labels = sample.labels  # type: ignore[attr-defined]
+    calls = pd.DataFrame(
+        {
+            "ll_broad_name": labels["ct_broad_name"].to_numpy(object),
+            "ll_mix_fraction": np.zeros(len(labels)),
+        },
+        index=labels.index,
+    )
+    row, referee = scripts["shadow_ll"].score_sample(
+        sample,
+        calls,
+        pair="HD1",
+        seg="proseg_hybrid",
+        variant="capped",
+        n_segmented=None,
+    )
+    # LL agrees with WHB on the four cells SEA-AD disputes below 60 counts.
+    assert row["od_b8_coverage_gain"] == pytest.approx(4 / 40)
+    assert row["n_gained_v11"] == 4
+    assert row["cost_sea_below60"] == pytest.approx(4 / 40)
+    assert row["ll_whb_agree_all"] == 1.0
+    assert referee[0]["comparison"].startswith("WHB argmax vs LL")
+    metrics = pd.DataFrame([row, {**row, "pair": "HD2"}])
+    decisions = {
+        item["decision"]: item for item in scripts["shadow_ll"].decision_rows(metrics)
+    }
+    vote = decisions["OD-B8 (v1.1 below-60 vote)"]
+    assert vote["passes"]  # a 10-point coverage gain
+    # The v1.1 gain never exceeds the below-60 SEA-AD cost.
+    assert row["v11_within_bound"]
+    assert vote["max_coverage_bound_all"] == pytest.approx(0.1)
+    assert vote["max_coverage_gain_all"] <= vote["max_coverage_bound_all"]
+    assert "OD-B8 (LL as tie-breaker)" in decisions
+    assert decisions["OD-B13"]["max_cost_sea_below60"] == pytest.approx(0.1)
+
+
+def test_ll_decision_finds_the_development_pairs_by_alias(
+    scripts: dict[str, ModuleType], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An alias table with invented pair ids (never real ones); the metrics
+    # carry the data's ids.
+    table = tmp_path / "aliases.tsv"
+    table.write_text(
+        "HD1\thuman_paired_donor\tpair_id\ttoken\tQ0101\n"
+        "HD3\thuman_paired_donor\tpair_id\ttoken\tQ0303\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(privacy.ALIAS_FILE_VAR, str(table))
+    privacy.clear_cache()
+    sample = _sample(scripts["shadow_baselines"])
+    labels = sample.labels  # type: ignore[attr-defined]
+    calls = pd.DataFrame(
+        {
+            "ll_broad_name": labels["ct_broad_name"].to_numpy(object),
+            "ll_mix_fraction": np.zeros(len(labels)),
+        },
+        index=labels.index,
+    )
+    row, _ = scripts["shadow_ll"].score_sample(
+        sample,
+        calls,
+        pair="Q0303",
+        seg="proseg_hybrid",
+        variant="capped",
+        n_segmented=None,
+    )
+    assert row["held_out"] is True
+    metrics = pd.DataFrame(
+        [
+            {**row, "pair": "Q0101", "od_b8_coverage_gain": 0.01},
+            {**row, "od_b8_coverage_gain": 0.5},
+        ]
+    )
+    vote = scripts["shadow_ll"].decision_rows(metrics)[0]
+    assert vote["max_coverage_gain_dev"] == pytest.approx(0.01)
+    assert vote["max_coverage_gain_all"] == pytest.approx(0.5)
+
+
+class _FirstPairError(Exception):
+    """Raised by a stand-in loader with the first pair a script reads."""
+
+
+def _invented_alias_table(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # An alias table with invented pair ids (never real ones).
+    table = tmp_path / "aliases.tsv"
+    table.write_text(
+        "".join(
+            f"HD{n}\thuman_paired_donor\tpair_id\ttoken\tQ0{n}0{n}\n"
+            for n in range(1, 5)
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(privacy.ALIAS_FILE_VAR, str(table))
+    privacy.clear_cache()
+
+
+def _stop_at_first_pair(*args: object) -> None:
+    raise _FirstPairError([arg for arg in args if isinstance(arg, str)])
+
+
+@pytest.mark.parametrize(
+    ("name", "loader"),
+    [("shadow_flags", "human_inputs"), ("shadow_glial_jsd", "load_sample")],
+)
+def test_c2_scripts_read_the_default_pairs_under_their_data_ids(
+    scripts: dict[str, ModuleType],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    loader: str,
+) -> None:
+    _invented_alias_table(tmp_path, monkeypatch)
+    runs = tmp_path / "runs"
+    (runs / "Q0101" / "proseg_hybrid").mkdir(parents=True)
+    (runs / "Q0101" / "proseg_hybrid" / "map_manifest.json").write_text("{}")
+    (tmp_path / "research" / "lowcount").mkdir(parents=True)
+    (tmp_path / "research" / "lowcount" / "qc_summary.csv").write_text(
+        "sample,seg,platform,n_cells\n"
+    )
+    monkeypatch.setattr(scripts[name], loader, _stop_at_first_pair)
+    argv = ["--runs-root", str(runs), "--results-root", str(tmp_path)]
+    argv += ["--out", str(tmp_path / "out")]
+    if name == "shadow_flags":
+        argv += ["--evidence-root", str(tmp_path)]
+        argv += ["--gene-id-fallback-csv", "x.csv"]
+        argv += ["--mouse-gene-id-fallback-csv", "y.csv"]
+    with pytest.raises(_FirstPairError) as stopped:
+        scripts[name].main(argv)
+    assert "Q0101" in stopped.value.args[0]
+
+
+@pytest.mark.parametrize("name", [*NAMES, "draw_spread", "marker_referee"])
+def test_scripts_compare_pairs_with_the_alias_constants_by_alias(name: str) -> None:
+    # The pair constants of shadow_baselines are aliases; the scripts read
+    # pairs given as aliases or data ids (data_pairs) and look them up by
+    # alias (is_held_out, to_alias), never by the raw value.
+    source = (SCRIPTS / f"{name}.py").read_text(encoding="utf-8")
+    assert "args.pairs.split(" not in source
+    assert not re.search(r"[^)] in HELD_OUT_PAIRS", source)
+
+
+def test_heldout_h4_rows_count_passing_classes(scripts: dict[str, ModuleType]) -> None:
+    enrichment = pd.DataFrame(
+        {
+            "pair": ["HD1"] * 7,
+            "platform": ["XENIUM"] * 7,
+            "variant": ["set_a"] * 7,
+            "label_set": ["heldout_argmax"] * 7,
+            "broad_class": list("ABCDEFG"),
+            "passes": [True] * 6 + [False],
+        }
+    )
+    [row] = scripts["heldout_genes"].h4_rows(enrichment)
+    assert row["n_pass"] == 6 and row["h4_pass"] and row["failing"] == "G"
+    # M8 D6: H4 is scored on resolve_criteria.py's WHB-only set, not here.
+    assert row["h4_assigned_class"] is False
+
+
+def test_x1_labelling_matrices_have_the_three_kinds(
+    scripts: dict[str, ModuleType],
+) -> None:
+    sample = _sample(scripts["shadow_baselines"])
+    matrices, argmax, coverage = scripts["shadow_x1"].labelling_matrices(
+        sample.labels,  # type: ignore[attr-defined]
+        sample,
+        None,
+    )
+    assert set(matrices) == {"soft", "argmax", "confident"}
+    assert len(argmax) == 40
+    assert coverage == pytest.approx(36 / 40)
+
+
+def test_ll_fidelity_rows_compare_the_port_with_e1_vii(
+    scripts: dict[str, ModuleType], tmp_path: Path
+) -> None:
+    preds = tmp_path / "preds"
+    calls = tmp_path / "calls"
+    preds.mkdir()
+    calls.mkdir()
+    pd.DataFrame(
+        {
+            "pred_broad": ["Neurons", "Astrocytes", "Microglia"],
+            "pred_supercluster": ["MGE interneuron", "Astrocyte", "Microglia"],
+        },
+        index=pd.Index([1, 2, 3]),
+    ).to_csv(preds / "LLmix_wbctx+platform__HD1_XENIUM.pred.csv")
+    pd.DataFrame(
+        {
+            "ll_broad_name": ["Neurons", "Astrocytes", "Astrocytes"],
+            "ll_supercluster_name": ["CGE interneuron", "Astrocyte", "Astrocyte"],
+        },
+        index=pd.Index(["1", "2", "3"], name="cell_id"),
+    ).to_parquet(calls / "HD1_proseg_hybrid_HD1_XENIUM_capped.parquet")
+
+    [row] = scripts["shadow_ll"].e1_fidelity_rows(calls, preds)
+
+    assert row["n_shared"] == 3
+    assert row["broad_agreement"] == pytest.approx(2 / 3)
+    assert row["supercluster_agreement"] == pytest.approx(1 / 3)

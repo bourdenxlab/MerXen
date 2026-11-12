@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import spatialdata as sd
 
+from merxen.io.points_aggregates import read_points_aggregates
 from merxen.io.spatialdata_schema import choose_primary_points_key
 from merxen.io.transcript_io import (
     assignment_mask_from_points,
@@ -74,8 +75,28 @@ def _compute_cell_metrics_from_points(
     points_obj: Any,
     assign_col: str,
     gene_col: str,
+    *,
+    allow_pandas_fallback: bool = True,
 ) -> tuple[int, int, pd.DataFrame]:
-    """Compute assignment counts and per-cell transcript/gene metrics."""
+    """Compute assignment counts and per-cell transcript/gene metrics.
+
+    Args:
+        points_obj: Pandas- or dask-backed points.
+        assign_col: Column holding the cell assignment.
+        gene_col: Column holding the gene name.
+        allow_pandas_fallback: When the dask aggregation fails, log a warning
+            and load the points into pandas (the historical XENIUM and
+            MERSCOPE behaviour). False raises instead; stores with build
+            aggregates (ATERA) hold over a billion rows and must never be
+            materialised.
+
+    Returns:
+        The total and assigned transcript counts and one row of metrics per
+        cell.
+
+    Raises:
+        RuntimeError: The dask aggregation failed and the fallback is off.
+    """
     cols = set(map(str, list(points_obj.columns)))
     has_background = "background" in cols
     point_cols = [assign_col, gene_col] + (["background"] if has_background else [])
@@ -106,6 +127,14 @@ def _compute_cell_metrics_from_points(
             cell_metrics = cell_metrics.reset_index(drop=False)
             return n_total, n_assigned, cell_metrics
         except Exception as exc:  # noqa: BLE001
+            if not allow_pandas_fallback:
+                # An ATERA section holds over a billion rows.
+                raise RuntimeError(
+                    "QC could not aggregate the dask-backed transcript points "
+                    f"(columns {point_cols}): {exc}. MerXen does not fall back "
+                    "to loading every transcript of this store into memory; fix "
+                    "the points element or the assignment column."
+                ) from exc
             logger.warning(
                 "Dask QC aggregation failed (%s); falling back to pandas.", exc
             )
@@ -165,9 +194,24 @@ def _cell_ids_from_table(adata_obj: Any) -> pd.Index:
 
 
 def _compute_cell_metrics_from_table(adata_obj: Any) -> tuple[int, pd.DataFrame]:
-    """Compute assigned transcript and gene counts from an AnnData cell table."""
+    """Compute assigned transcript and gene counts from an AnnData cell table.
+
+    Each cell's counts are summed in float64 and the assigned total is the sum
+    of the rounded per-cell sums in int64, so the total is exact on every
+    platform. A float32 ``X`` summed in float32 drifts once the total passes
+    2**24 (a few tens of millions of counts, reached by large XENIUM, MERSCOPE
+    and ATERA sections).
+
+    Args:
+        adata_obj: The cell table; ``X`` holds counts.
+
+    Returns:
+        The assigned transcript total and one row of metrics per cell.
+    """
     x_matrix = adata_obj.X
-    transcripts_per_cell = np.asarray(x_matrix.sum(axis=1)).ravel()
+    transcripts_per_cell = np.asarray(x_matrix.sum(axis=1, dtype=np.float64)).ravel()
+    finite = transcripts_per_cell[np.isfinite(transcripts_per_cell)]
+    n_assigned = int(np.rint(finite).astype(np.int64).sum(dtype=np.int64))
     if hasattr(x_matrix, "getnnz"):
         genes_per_cell = np.asarray(x_matrix.getnnz(axis=1)).ravel()
     else:
@@ -180,7 +224,6 @@ def _compute_cell_metrics_from_table(adata_obj: Any) -> tuple[int, pd.DataFrame]
             "genes_per_cell": genes_per_cell.astype(float),
         }
     )
-    n_assigned = int(np.nansum(transcripts_per_cell))
     return n_assigned, cell_metrics
 
 
@@ -259,7 +302,7 @@ def compute_dataset_qc(
         )
 
     if resolved_table_key is not None:
-        n_total = _point_count(points_obj)
+        n_total = _point_count(points_obj, latest_zarr_path, points_key)
         n_assigned, cell_metrics = _compute_cell_metrics_from_table(
             sdata.tables[resolved_table_key]
         )
@@ -274,6 +317,10 @@ def compute_dataset_qc(
             points_obj,
             assign_col=assign_col,
             gene_col=gene_col,
+            # Stores with build aggregates (ATERA) never load every transcript.
+            allow_pandas_fallback=(
+                read_points_aggregates(latest_zarr_path, points_key) is None
+            ),
         )
     cell_metrics["dataset"] = dataset_name
     pct_assigned = 100.0 * n_assigned / max(n_total, 1)
@@ -320,6 +367,10 @@ def compute_dataset_qc(
             shape_key=resolved_shape_key,
             points_key=points_key,
             reference_shape_key=registration_reference_shape_key,
+            zarr_path=latest_zarr_path,
+            # No platform: control probes are dropped only with
+            # exclude_control_features (off here), and platform=None would
+            # then apply the rules of every platform.
         )
         registration_qc = registration.to_dict()
         summary.update(
@@ -357,8 +408,40 @@ def compute_dataset_qc(
     }
 
 
-def _point_count(points_obj: Any) -> int:
-    """Return row count for pandas or dask-backed SpatialData points."""
+def _point_count(
+    points_obj: Any,
+    zarr_path: Path | None = None,
+    points_key: str | None = None,
+) -> int:
+    """Return the row count of pandas- or dask-backed SpatialData points.
+
+    A store whose build recorded transcript aggregates (ATERA) is counted from
+    ``n_points_written`` while the points index still matches the parquet
+    files, which avoids a pass over every row. XENIUM and MERSCOPE stores carry
+    no aggregates and are counted as before.
+
+    Args:
+        points_obj: The points element.
+        zarr_path: Store the points were read from, if known.
+        points_key: Name of the points element in that store.
+
+    Returns:
+        Number of transcript rows.
+    """
+    if zarr_path is not None and points_key is not None:
+        aggregates = read_points_aggregates(Path(zarr_path), points_key)
+        if aggregates is not None:
+            if aggregates.fingerprint_matches():
+                logger.info(
+                    "Counting the transcripts of %s from the build aggregates.",
+                    points_key,
+                )
+                return int(aggregates.n_points_written)
+            logger.info(
+                "Points aggregates of %s do not match its parquet files; counting "
+                "the points with dask.",
+                points_key,
+            )
     if hasattr(points_obj, "npartitions") and hasattr(points_obj, "partitions"):
         return int(points_obj.shape[0].compute())
     return int(len(points_obj))

@@ -21,9 +21,17 @@ pytest
 # Run tests excluding slow markers
 pytest -m "not slow"
 
-# Pre-push checks (fast test tier) and everything CI runs (full tier)
+# Pre-push checks: 'fast' (the default) runs the whole fast tier; 'changed'
+# runs only the fast-tier tests your changes since main's remote
+# (MERXEN_CI_BASE_REF) can reach; 'full' runs everything CI runs
 scripts/run_ci_checks.sh
+MERXEN_CI_TEST_TIER=changed scripts/run_ci_checks.sh
 MERXEN_CI_TEST_TIER=full scripts/run_ci_checks.sh
+
+# Which tests CI would run for this branch (FULL or a list; docs/development.md,
+# Test selection). CI shards them over 7 runners (scripts/ci/pytest_shard.py);
+# the PR label full-ci forces the full suite
+python scripts/ci/select_tests.py --base origin/main --worktree --format paths
 
 # Lint (auto-fix) and format
 ruff check . --fix
@@ -44,7 +52,7 @@ python scripts/update_env_lock_hash.py
 - Run `pytest` before pushing. The pre-push hook enforces this.
 - Do not install packages with `pip install <package>`. Add to `pyproject.toml` and regenerate the lockfile.
 - Do not commit to `main` directly. Use a feature branch and open a PR.
-- Exception: the robust cell-type annotation effort (`docs/plans/robust-celltype-annotation-plan.md`) uses the long-lived integration branch `feature/robust-celltype-annotation`. Milestone branches `feature/rca-m<N>-<slug>` are cut from it and merged into it by PR. Keep it current by merging `main` into it; never rebase it. Only acceptance-gate PRs merge it into `main`. Data-integrity bugfixes still go to `main` first and are then merged into it.
+- The Atera, robust cell-type annotation and HITL integration histories are promoted together by acceptance-gate PR #127 (user authorization, 2026-11-11). The integration branches close with that merge. Further work uses short-lived branches from `main` and merges by PR; do not resume the former integration branches. Historical validation limits and future work remain recorded in their plans.
 
 ## Privacy: no host paths, no sample names
 

@@ -20,6 +20,8 @@ from shapely.geometry import box
 
 from merxen.analysis.gaston import (
     GASTON_OWNED_COLUMNS,
+    _control_feature_mask,
+    _eligible_counts,
     import_gaston_annotations,
     postprocess_gaston,
     prepare_gaston_input,
@@ -199,6 +201,40 @@ def test_prepare_refuses_noninteger_counts(
 
     with pytest.raises(ValueError, match="non-integer"):
         prepare_gaston_input(config, tmp_path / "bundle")
+
+
+def test_eligible_genes_above_max_genes_raise_instead_of_truncating() -> None:
+    """GASTON never silently keeps the first ``max_genes`` genes in var order."""
+    clustered = _clustered_adata(["c1", "c2", "c3"])
+
+    with pytest.raises(ValueError, match=r"2 eligible .*gaston_max_genes=1"):
+        _eligible_counts(clustered, max_genes=1)
+
+    counts, gene_names, gene_indices = _eligible_counts(clustered, max_genes=2)
+    assert gene_names == ["GeneA", "GeneB"]
+    assert gene_indices == [0, 2]
+    assert counts.shape == (3, 2)
+
+
+def test_control_feature_mask_uses_the_shared_control_tokens() -> None:
+    """GASTON drops the same control-like genes as clustering."""
+    adata = ad.AnnData(
+        X=np.zeros((1, 5)),
+        var=pd.DataFrame(
+            {
+                "feature_types": [
+                    "Gene Expression",
+                    "Gene Expression",
+                    "Gene Expression",
+                    "Gene Expression",
+                    "Negative Control Codeword",
+                ]
+            },
+            index=["GFAP", "Intergenic_Region_1", "Blank-3", "BLNK", "Odd_1"],
+        ),
+    )
+
+    assert _control_feature_mask(adata).tolist() == [False, True, True, False, True]
 
 
 def test_glmpca_loads_sparse_bundle_and_records_convergence(

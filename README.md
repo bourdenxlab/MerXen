@@ -241,7 +241,9 @@ Day-to-day mechanics — testing, hooks, CI, debugging, adding a new pipeline st
 
 The [Cellpose HITL testing guide](docs/hitl/testing-guide.md) covers runtime
 acceptance, a read-only comparison with one published tile, and the planned
-custom-model checks.
+custom-model checks. The [managed annotation and training guide](docs/hitl/managed-annotation-training.md)
+covers viewer crop preparation, Cellpose editing, returning completed folders,
+training before segmentation and reusing a uniquely named model.
 
 ## Built on
 

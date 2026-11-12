@@ -27,8 +27,12 @@ shape:
 Aligned shapes and `obsm["spatial"]` are deliberately ignored. Preparation
 rejects duplicate or unmatched cell IDs, non-finite coordinates, invalid
 counts, and empty expression matrices. It uses all cells surviving clustering,
-retains eligible non-control genes up to `gaston_max_genes`, and writes a
-checksum-bearing portable input bundle. Multiple substantial spatial
+keeps every eligible non-control gene, and writes a checksum-bearing portable
+input bundle. When the eligible genes exceed `gaston_max_genes` (default
+10,000) preparation stops with an error naming both counts: raise
+`gaston_max_genes` or turn GASTON off for the row. Before AT-8 it silently kept
+the first `gaston_max_genes` genes in var order, which depends on the vendor's
+feature table rather than on the biology. Multiple substantial spatial
 components produce a warning but are never cropped automatically.
 
 ## Process graph
@@ -74,6 +78,11 @@ segmentation table and native shapes are never modified.
 Use `--only_stage gaston` to consume already-published clustered H5ADs and
 latest zarrs. Missing files or clustered tables fail during preflight; the
 workflow does not silently recluster them.
+
+On a `map_first` row ([reference-based annotation](annotation.md)) GASTON
+reads that run's clustered table, `<...>_clustering_squidpy_<suffix>`, and
+its clustered H5AD under `clustering_squidpy_<suffix>/`, as MENDER does; a
+legacy row reads the unsuffixed ones.
 
 See [Configuration](../configuration.md) for all controls and
 [Outputs](../outputs.md) for the published layout.

@@ -9,9 +9,13 @@ matches the current format is skipped unless ``force`` is set.
 
 from __future__ import annotations
 
+import hashlib
 import logging
-from collections.abc import Sequence
-from dataclasses import dataclass
+import os
+import shutil
+import uuid
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -30,8 +34,12 @@ from merxen.io.spatialdata_io import (
     write_or_replace_element,
     write_spatialdata_metadata,
 )
+from merxen.io.spatialdata_schema import MERXEN_SCHEMA_ATTR, ORIGINAL_ID_NAMESPACE
 from merxen.masks import discover_masks, register_missing_mask_branches
 from merxen.memory import force_release, log_status
+from merxen.path_utils import remove_path
+from merxen.platforms import PLATFORM_SPECS, find_platform_spec
+from merxen.segmentation.native import NUCLEUS_CELL_KEY, NUCLEUS_ID_NAMESPACE
 from merxen.viewer_cache.format import (
     DERIVED_CACHE_ATTR,
     LABEL_CACHE_ATTR,
@@ -67,24 +75,17 @@ from merxen.viewer_cache.transform import resolve_mask_affine
 
 logger = logging.getLogger(__name__)
 
+_BASE_SHAPE_KEYS: tuple[str, ...] = (
+    "MOSAIK_proseg",
+    "MOSAIK_proseg_hybrid",
+    "MOSAIK_cellpose",
+    "cellpose_nuclei",
+)
 # Retained as a source-compatible discovery hint for callers that imported the
 # old constant. Runtime defaults now come exclusively from ``discover_masks``.
 DEFAULT_SHAPE_KEYS: dict[str, tuple[str, ...]] = {
-    "MERSCOPE": (
-        "MOSAIK_proseg",
-        "MOSAIK_proseg_hybrid",
-        "MOSAIK_cellpose",
-        "cellpose_nuclei",
-        "merscope_cell_boundaries",
-    ),
-    "XENIUM": (
-        "MOSAIK_proseg",
-        "MOSAIK_proseg_hybrid",
-        "MOSAIK_cellpose",
-        "cellpose_nuclei",
-        "xenium_cell_boundaries",
-        "xenium_nucleus",
-    ),
+    name: _BASE_SHAPE_KEYS + spec.original_shape_keys
+    for name, spec in PLATFORM_SPECS.items()
 }
 
 
@@ -99,6 +100,7 @@ class ViewerCacheParams:
     shape_keys: tuple[str, ...] | None = None
     build_image_pyramid: bool = True
     force: bool = False
+    base_image_key: str | None = None
 
 
 def build_viewer_caches(
@@ -150,7 +152,7 @@ def _build_viewer_caches_in_store(
     if register_missing_mask_branches(sdata):
         write_spatialdata_metadata(sdata, write_attrs=True)
     image_key, base_cyx, channels, image_transform, image_cs = _resolve_base_image(
-        sdata
+        sdata, params.base_image_key
     )
     height = int(base_cyx.sizes["y"])
     width = int(base_cyx.sizes["x"])
@@ -182,12 +184,26 @@ def _build_viewer_caches_in_store(
             )
     existing_labels = {str(k) for k in sdata.labels}
     summary: dict[str, Any] = {"masks": {}, "image_pyramid": None}
+    vendor_labels = vendor_label_keys(sdata, platform)
 
     for shape_key in shape_keys:
         if shape_key not in sdata.shapes:
             log_status(f"[{platform}] Shape '{shape_key}' absent; skipping mask build.")
             continue
         label_key = label_key_for_shape_key(shape_key, existing_labels)
+        if shape_key in vendor_labels:
+            summary["masks"][shape_key] = _build_vendor_mask_and_derived(
+                sdata=sdata,
+                zarr_path=zarr_path,
+                platform=platform,
+                shape_key=shape_key,
+                vendor_label_key=vendor_labels[shape_key],
+                label_key=label_key,
+                params=params,
+            )
+            force_release(note=f"after viewer-cache build for {shape_key}")
+            continue
+        _refuse_rasterised_mask_on_vendor_platform(platform, shape_key)
         summary["masks"][shape_key] = _build_mask_and_derived(
             sdata=sdata,
             zarr_path=zarr_path,
@@ -219,23 +235,41 @@ def _build_viewer_caches_in_store(
     return summary
 
 
-def _resolve_base_image(sdata: Any) -> tuple[str, Any, list[str], Any, str]:
+def _resolve_base_image(
+    sdata: Any, base_image_key: str | None = None
+) -> tuple[str, Any, list[str], Any, str]:
     """Return (key, (c,y,x) DataArray, channels, global transform) of the real image.
 
-    Skips derived image caches so the label grid is never sized off a downsampled
-    cache -- the same rule the viewer's ``_image_grid_for_labels`` uses.
+    An explicit ``base_image_key`` (the platform's native image, set by the
+    workflow for ATERA) is used as is. Otherwise derived image caches and
+    registered post-run images are skipped so the label grid is never sized off
+    a downsampled cache -- the same rule the viewer's ``_image_grid_for_labels``
+    uses.
+
+    Raises:
+        RuntimeError: If no usable image exists.
+        KeyError: If ``base_image_key`` is not a base image element.
     """
-    # Registered post-run images share the grid but may sort before the
-    # instrument image, so they must never become the base image.
-    registered = registered_image_keys(sdata)
-    image_key = next(
-        (
-            str(k)
-            for k in sdata.images
-            if not is_derived_cache_key(str(k)) and str(k) not in registered
-        ),
-        None,
-    )
+    image_key: str | None
+    if base_image_key is not None:
+        image_key = str(base_image_key)
+        if image_key not in sdata.images or is_derived_cache_key(image_key):
+            raise KeyError(
+                f"base_image_key={base_image_key!r} is not a base image element "
+                f"(images: {sorted(map(str, sdata.images.keys()))})"
+            )
+    else:
+        # Registered post-run images share the grid but may sort before the
+        # instrument image, so they must never become the base image.
+        registered = registered_image_keys(sdata)
+        image_key = next(
+            (
+                str(k)
+                for k in sdata.images
+                if not is_derived_cache_key(str(k)) and str(k) not in registered
+            ),
+            None,
+        )
     if image_key is None:
         raise RuntimeError(
             f"No non-derived image found to size the label grid "
@@ -431,6 +465,359 @@ def _build_mask_and_derived(
         coordinate_system=coordinate_system,
     )
     return result
+
+
+def vendor_label_keys(sdata: Any, platform: str) -> dict[str, str]:
+    """Return ``shape key -> vendor label key`` for the vendor-backed masks.
+
+    A platform that ships its segmentation as label images aligned with its
+    original shapes (``PlatformSpec.original_label_keys``, ATERA) gets its
+    viewer base masks from those labels: their values are the shapes'
+    ``instance_id``. On such a platform a registry branch with a ``label``
+    element (the stitched ProSeg layer of a ``native_proseg`` or
+    ``cellpose_proseg`` row, the Cellpose layer of a ``cellpose_proseg`` row) is backed
+    by that element in the same way. Only pairs whose shape and label are both
+    in the store are returned; XENIUM and MERSCOPE declare none.
+
+    Args:
+        sdata: The store.
+        platform: Platform name.
+
+    Returns:
+        The mapping, empty when the platform declares no vendor labels.
+    """
+    spec = find_platform_spec(platform)
+    if spec is None or not spec.original_label_keys:
+        return {}
+    labels = {str(k) for k in sdata.labels}
+    shapes = {str(k) for k in sdata.shapes}
+    found = {
+        shape_key: label_key
+        for shape_key, label_key in zip(
+            spec.original_shape_keys, spec.original_label_keys, strict=False
+        )
+        if shape_key in shapes and label_key in labels
+    }
+    # Registry branches that carry their own label element on the image grid
+    # (the stitched ATERA ProSeg layers, e.g. MOSAIK_proseg -> proseg_cell_labels,
+    # and the ATERA Cellpose layer MOSAIK_cellpose -> cellpose_cell_labels).
+    registry = (sdata.attrs.get(MERXEN_SCHEMA_ATTR) or {}).get("segmentations") or {}
+    for entry in registry.values():
+        if not isinstance(entry, dict) or entry.get("coordinate_variant_of"):
+            continue
+        shape_key, label_key = entry.get("shape"), entry.get("label")
+        if (
+            shape_key
+            and label_key
+            and str(shape_key) in shapes
+            and str(label_key) in labels
+            and str(shape_key) not in found
+        ):
+            found[str(shape_key)] = str(label_key)
+    return found
+
+
+def _refuse_rasterised_mask_on_vendor_platform(platform: str, shape_key: str) -> None:
+    """Refuse to rasterize a mask on a platform whose masks are vendor labels.
+
+    The ``global`` coordinate system of such a store (ATERA) is in morphology
+    pixels, so the pixel-to-micron transform of the rasterized path would
+    misplace the mask. Only vendor-backed masks are supported there until a
+    rasterized mask gets its own transform.
+
+    Raises:
+        ValueError: If the platform declares ``original_label_keys``.
+    """
+    spec = find_platform_spec(platform)
+    if spec is None or not spec.original_label_keys:
+        return
+    raise ValueError(
+        f"[{spec.name}] viewer mask for shapes[{shape_key}] has no vendor label "
+        f"element ({', '.join(spec.original_label_keys)}); rasterized masks are "
+        f"not supported for {spec.name} (its global coordinate system is in "
+        "pixels). Pass shape_keys to build only the vendor-backed masks."
+    )
+
+
+#: Zarr metadata files, copied (never linked) when a label element is aliased:
+#: every writer rewrites them in place.
+_ZARR_METADATA_NAMES = frozenset(
+    {"zarr.json", ".zattrs", ".zgroup", ".zarray", ".zmetadata"}
+)
+
+#: ``source`` recorded in the base-mask marker of a vendor-backed mask.
+VENDOR_LABEL_SOURCE = "vendor_labels"
+
+#: Link function of the alias builder (a seam for tests of the copy fallback).
+_hardlink = os.link
+
+
+def _build_vendor_mask_and_derived(
+    *,
+    sdata: Any,
+    zarr_path: Path,
+    platform: str,
+    shape_key: str,
+    vendor_label_key: str,
+    label_key: str,
+    params: ViewerCacheParams,
+) -> dict[str, Any]:
+    """Use a vendor label element as the base mask, then build its caches.
+
+    The vendor labels already hold the shapes' instance ids on the image grid,
+    so nothing is rasterized. The base mask the viewer looks up
+    (``label_key``, e.g. ``atera_cell_boundaries_labels``) is an alias of the
+    vendor element: its chunk files are hardlinks of the vendor chunks (copies
+    across filesystems) and its metadata files are copies. The label pyramid
+    and outline are then built from it with the vendor element's own
+    transform. The base-mask marker records the vendor element, its
+    fingerprint (:func:`vendor_label_fingerprint`; a changed vendor element
+    rebuilds the alias), the link mode and the label id namespace.
+    """
+    vendor_element = sdata.labels[vendor_label_key]
+    transformations = get_transformation(vendor_element, get_all=True)
+    coordinate_system = (
+        "global" if "global" in transformations else sorted(transformations)[0]
+    )
+    transform = transformations[coordinate_system]
+    result: dict[str, Any] = {
+        "label_key": label_key,
+        "source_label_key": vendor_label_key,
+    }
+    marker = _read_marker(zarr_path, "labels", label_key, LABEL_CACHE_ATTR)
+    vendor_base = da.from_zarr(str(zarr_path / "labels" / vendor_label_key / "s0"))
+    fingerprint = vendor_label_fingerprint(zarr_path / "labels" / vendor_label_key)
+    mask_complete = (
+        marker.get("complete")
+        and marker.get("version") == LABEL_CACHE_VERSION
+        and marker.get("source_shape_key") == str(shape_key)
+        and marker.get("source_label_key") == str(vendor_label_key)
+        and marker.get("source_fingerprint") == fingerprint
+        and marker.get("shape") == [int(s) for s in vendor_base.shape]
+    )
+    if mask_complete and not params.force:
+        log_status(
+            f"[{platform}] Base mask labels[{label_key}] (vendor "
+            f"labels[{vendor_label_key}]) already current; skipping."
+        )
+        result["mask"] = "skipped"
+    else:
+        link_mode = _alias_label_element(sdata, zarr_path, vendor_label_key, label_key)
+        base_marker = label_cache_marker(
+            source_shape_key=shape_key,
+            shape=(int(vendor_base.shape[0]), int(vendor_base.shape[1])),
+            chunks=(
+                int(vendor_base.chunksize[0]),
+                int(vendor_base.chunksize[1]),
+            ),
+        )
+        base_marker.update(
+            {
+                "source": VENDOR_LABEL_SOURCE,
+                "source_label_key": str(vendor_label_key),
+                "source_fingerprint": fingerprint,
+                "link_mode": link_mode,
+                **_label_id_namespace(sdata, platform, shape_key),
+            }
+        )
+        _stamp_marker(zarr_path, "labels", label_key, LABEL_CACHE_ATTR, base_marker)
+        log_status(
+            f"[{platform}] Base mask labels[{label_key}] = vendor "
+            f"labels[{vendor_label_key}] ({link_mode})."
+        )
+        result["mask"] = f"vendor_{link_mode}"
+    result["link_mode"] = _read_marker(
+        zarr_path, "labels", label_key, LABEL_CACHE_ATTR
+    ).get("link_mode")
+
+    # A re-aliased base (new or changed vendor labels) rebuilds its pyramid and
+    # outline: their markers name the base key, not its content.
+    derived_params = (
+        params if result["mask"] == "skipped" else replace(params, force=True)
+    )
+    base_da = da.from_zarr(str(zarr_path / "labels" / label_key / "s0"))
+    result["label_pyramid"] = _build_label_pyramid(
+        zarr_path=zarr_path,
+        sdata=sdata,
+        label_key=label_key,
+        base_da=base_da,
+        transform=transform,
+        params=derived_params,
+        coordinate_system=coordinate_system,
+    )
+    result["outline"] = _build_outline(
+        zarr_path=zarr_path,
+        sdata=sdata,
+        label_key=label_key,
+        base_da=base_da,
+        transform=transform,
+        params=derived_params,
+        coordinate_system=coordinate_system,
+    )
+    return result
+
+
+def vendor_label_fingerprint(element_dir: Path) -> str:
+    """Return a fingerprint of a vendor label element on disk.
+
+    Covers every file of the element: chunk files by relative path, size and
+    modification time (stat only; a hardlinked alias shares them), metadata
+    files by relative path and content (writers may rewrite them unchanged).
+    A re-linked, rewritten or reshaped vendor element gives a new fingerprint.
+
+    Args:
+        element_dir: ``labels/<key>`` directory of the store.
+
+    Returns:
+        ``sha256:<hex>``.
+    """
+    digest = hashlib.sha256()
+    for path in sorted(p for p in Path(element_dir).rglob("*") if p.is_file()):
+        relative = path.relative_to(element_dir).as_posix()
+        if path.name in _ZARR_METADATA_NAMES:
+            content = hashlib.sha256(path.read_bytes()).hexdigest()
+            digest.update(f"M {relative} {content}\n".encode())
+        else:
+            stat = path.stat()
+            digest.update(f"C {relative} {stat.st_size} {stat.st_mtime_ns}\n".encode())
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _label_id_namespace(sdata: Any, platform: str, shape_key: str) -> dict[str, str]:
+    """Return the id namespace (and cell join key) of a vendor-backed mask.
+
+    The label values are the shapes' instance ids, so they carry the id
+    namespace of the segmentation branch registered for the shapes. Cell
+    labels hold cell ids. On a platform whose nucleus ids are not cell ids
+    (ATERA: nucleus row + 1), the nucleus labels hold nucleus ids and join to
+    cells only through the nucleus shapes' ``cell_instance_id`` column
+    (``cell_join_key``), never by value. Without a registry entry the
+    platform registry decides.
+    """
+    registry = (sdata.attrs.get(MERXEN_SCHEMA_ATTR) or {}).get("segmentations") or {}
+    for entry in registry.values():
+        if (
+            isinstance(entry, dict)
+            and entry.get("shape") == str(shape_key)
+            and entry.get("coordinate_variant_of") is None
+            and entry.get("id_namespace")
+        ):
+            found = {"id_namespace": str(entry["id_namespace"])}
+            if entry.get("cell_key"):
+                found["cell_join_key"] = str(entry["cell_key"])
+            return found
+    spec = find_platform_spec(platform)
+    if (
+        spec is None
+        or spec.nucleus_ids_are_cell_ids
+        or shape_key != spec.original_nucleus_shape_key
+    ):
+        return {"id_namespace": ORIGINAL_ID_NAMESPACE}
+    return {
+        "id_namespace": NUCLEUS_ID_NAMESPACE,
+        "cell_join_key": NUCLEUS_CELL_KEY,
+    }
+
+
+def _alias_label_element(
+    sdata: Any, zarr_path: Path, source_key: str, alias_key: str
+) -> str:
+    """Make ``labels/<alias_key>`` an alias of ``labels/<source_key>`` on disk.
+
+    Chunk files are hardlinked (copied when the filesystem refuses a link);
+    metadata files are copied so later attribute writes never reach the
+    source through a shared inode. The alias is assembled under a hidden
+    sibling and renamed into place, replacing any previous alias. The alias is
+    added to the labels group's OME list and the root metadata is
+    re-consolidated; ``sdata`` is not given the alias in memory.
+
+    Returns:
+        ``"hardlink"`` when every chunk was linked, else ``"copy"``.
+    """
+    if str(alias_key) == str(source_key):
+        raise ValueError(
+            f"labels[{source_key}] cannot be aliased onto itself; the alias "
+            "would replace the vendor element"
+        )
+    labels_dir = zarr_path / "labels"
+    source = labels_dir / source_key
+    target = labels_dir / alias_key
+    staging = labels_dir / f".{alias_key}.partial-{uuid.uuid4().hex}"
+    linked_all = True
+    try:
+        for root, _dirs, files in os.walk(source):
+            relative = Path(root).relative_to(source)
+            (staging / relative).mkdir(parents=True, exist_ok=True)
+            for name in files:
+                src = Path(root) / name
+                dst = staging / relative / name
+                if name in _ZARR_METADATA_NAMES:
+                    shutil.copyfile(src, dst)
+                    continue
+                try:
+                    _hardlink(src, dst)
+                except OSError:
+                    shutil.copyfile(src, dst)
+                    linked_all = False
+        _rename_multiscales(staging, alias_key)
+        if target.exists() or target.is_symlink():
+            remove_path(target)
+        os.replace(staging, target)
+    finally:
+        if staging.exists():
+            remove_path(staging)
+    _add_ome_label_name(labels_dir, alias_key)
+    has_consolidated = getattr(sdata, "has_consolidated_metadata", None)
+    write_consolidated = getattr(sdata, "write_consolidated_metadata", None)
+    if (
+        callable(has_consolidated)
+        and callable(write_consolidated)
+        and has_consolidated()
+    ):
+        write_consolidated()
+    return "hardlink" if linked_all else "copy"
+
+
+def _ome_attrs(attrs: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Return the OME attrs dict and whether it is nested under ``ome``."""
+    ome = attrs.get("ome")
+    if isinstance(ome, dict):
+        return dict(ome), True
+    return dict(attrs), False
+
+
+def _rename_multiscales(element_dir: Path, name: str) -> None:
+    """Set the multiscales ``name`` of a copied label element to its new key."""
+    group = zarr.open_group(str(element_dir), mode="r+", use_consolidated=False)
+    attrs = dict(group.attrs.asdict())
+    ome, nested = _ome_attrs(attrs)
+    multiscales = ome.get("multiscales")
+    if not isinstance(multiscales, list):
+        return
+    ome["multiscales"] = [
+        {**entry, "name": name} if isinstance(entry, dict) else entry
+        for entry in multiscales
+    ]
+    if nested:
+        group.attrs["ome"] = ome
+    else:
+        group.attrs["multiscales"] = ome["multiscales"]
+
+
+def _add_ome_label_name(labels_dir: Path, name: str) -> None:
+    """Append a label element to the labels group's OME ``labels`` list."""
+    group = zarr.open_group(str(labels_dir), mode="r+", use_consolidated=False)
+    attrs = dict(group.attrs.asdict())
+    ome, nested = _ome_attrs(attrs)
+    names = ome.get("labels")
+    names = list(names) if isinstance(names, list) else []
+    if name in names:
+        return
+    names.append(name)
+    if nested:
+        group.attrs["ome"] = {**ome, "labels": names}
+    else:
+        group.attrs["labels"] = names
 
 
 def _rasterize_base_mask(

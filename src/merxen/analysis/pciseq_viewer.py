@@ -608,6 +608,7 @@ def publish_pciseq_viewer(
                     feature_key=gene_column,
                     instance_key="assignment",
                     transformations=deepcopy(get_transformation(native, get_all=True)),
+                    sort=True,
                 )
             points.attrs[_MARKER] = marker
             elements = [

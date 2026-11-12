@@ -10,7 +10,14 @@ single-platform mode it writes one-dataset alternatives for the paired plots.
 1. In paired mode, rerun the gene comparison internally (re-opens the enriched zarrs) and
    plot log-log scatter plots of MERSCOPE vs Xenium normalized counts.
    In single-platform mode, plot top gene abundance for total and assigned
-   normalized counts.
+   normalized counts. Both modes drop control features with
+   `apply_dataset_filter` before normalising
+   ([comparison.md](comparison.md#walkthrough)). Xenium plots written before
+   that filter used the shared control rules are stale when the transcripts
+   hold the features it now also drops:
+   `<pair_id>_gene_scatter_total_normalized.png` and
+   `<sample_id>_gene_abundance_total_normalized.png`, plus the assigned
+   plots when the table was built from the `cell_feature_matrix` files.
 2. Recompute per-dataset QC metrics and plot either combined paired QC plots
    or one-platform geometry/cell-metric plots.
 3. Plot a paired 3x2 or single-platform 3x1 transcript overview with density
@@ -18,6 +25,9 @@ single-platform mode it writes one-dataset alternatives for the paired plots.
 4. Plot paired or single 250 um sanity crops with image backgrounds, all shape
    contours, and ProSeg assigned/unassigned transcripts.
 5. Plot an assignment-rate bar chart for the available platform(s).
+
+ATERA (whole-transcriptome) rows draw steps 3 and 4 as density rasters over
+every transcript instead; see [ATERA figures](#atera-figures-density-over-every-transcript).
 
 ## Nextflow process
 
@@ -45,6 +55,8 @@ runs after QC or after restored published zarrs.
 | `plot_single_transcript_overview` | [visualization/density_overview.py](../../src/merxen/visualization/density_overview.py) |
 | `plot_pair_sanity_crops` | [visualization/sanity_plots.py](../../src/merxen/visualization/sanity_plots.py) |
 | `plot_single_sanity_crop` | [visualization/sanity_plots.py](../../src/merxen/visualization/sanity_plots.py) |
+| `plot_rasterised_transcript_overview` | [visualization/density_overview.py](../../src/merxen/visualization/density_overview.py) |
+| `stream_hist2d`, `composite_rgba` | [visualization/raster_density.py](../../src/merxen/visualization/raster_density.py) |
 
 ## Config schema
 
@@ -97,3 +109,56 @@ Each listed `.png` plot is also written as a same-stem `.pdf`.
 - Points coordinate columns are resolved with `first_existing_col` across
   `x`, `x_micron`, `x_location`, `global_x`, `x_global_px`, `observed_x`
   (and the corresponding `y_*`) for transcript plotting.
+
+## ATERA figures: density over every transcript
+
+A whole-transcriptome section holds more than a billion transcripts. MerXen
+neither caps nor subsamples them ("every transcript" means every row of the
+points element, which the build has already restricted to QV >= 20 with
+`atera_min_qv`; the public section keeps 1,409,601,228 of 1,640,508,930
+vendor rows): platforms whose registry entry sets
+`rasterised_transcript_plots` (ATERA) draw their transcripts as density rasters
+binned over all of them. XENIUM and MERSCOPE figures are unchanged. On the
+public full section VISUALIZE bins all 1,409,601,228 transcripts in about
+3.5 min at 4.5 GB peak memory (AT-6 exit run).
+
+- **Streaming binner.** `raster_density.stream_hist2d` reads the points
+  element one parquet file at a time, in record batches of the needed columns
+  only, and adds each batch to `uint64` accumulators with `np.bincount`.
+  Memory is bounded by one batch plus the grid. Bins follow `np.histogram2d`:
+  each holds `[edge, next edge)` and the last also holds its right edge.
+- **Pruning.** When the build's points index still matches the parquet
+  listing and footers (`points_aggregates.fingerprint_matches`: file names and
+  row counts), only the files whose x/y range meets the window are read;
+  otherwise every file is. Each file's range is read from its own parquet
+  footer statistics, not from the index, so a rewrite that moves rows between
+  files while keeping their row counts cannot drop transcripts from a window
+  (QC's registration windows do the same). Section bounds also come from the
+  footer statistics (a file without them is streamed); the build's recorded
+  `bounds_um` can be wider than the rows the QV filter kept.
+- **Transcript overview** (`<sample_id>_transcript_overview.png`), from one
+  pass over the section and one pruned pass over the crop:
+  1. density over the section in about `heatmap_bins` (400) square bins per
+     axis, summed from the 10 um raster of panel 2 (the bin edge is the
+     multiple of 10 um closest to `span / 400`), colour limit at the 99.5th
+     percentile of the non-empty bins (not the fixed 1,700 used by the
+     XENIUM/MERSCOPE panels);
+  2. 10 um bins over the section, log colour scale (replaces the 250,000-point
+     scatter subsample);
+  3. 1 um bins over the 2 mm centre crop, log colour scale (replaces the
+     200,000-point crop subsample).
+  Titles say "all transcripts" and give the binned count.
+- **Sanity overlay** (`<sample_id>_sanity_overlay.png`): the transcripts of the
+  250 um crop are a two-layer 0.5 um raster, assigned (yellow, on top) and
+  unassigned (red), with per-bin opacity `log1p(count) / log1p(p99.5)`. The
+  split reads the registered assignment column of the layer
+  (`original_assignment` for the native `original_seg` layer, from the
+  `merxen_schema` registry), not a polygon join. The legend gives the exact
+  counts. The panel has a 100 um scale bar (all 10x-family platforms).
+- **Image placement.** The background image is placed with the pixel size the
+  build recorded (`atera/experiment.spatial` in the store; never a fallback)
+  and the SpatialData corner convention: pixel `i` covers
+  `[i * ps, (i + 1) * ps)` microns.
+- **Crop location** (`<sample_id>_sanity_overlay_crop_location.png`): the crop
+  box is drawn over the build's transcript density grid (or, with a stale
+  index, a 50 um raster of every transcript), not over sampled cell outlines.

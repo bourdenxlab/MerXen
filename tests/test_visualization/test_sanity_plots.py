@@ -15,7 +15,9 @@ from shapely.geometry import box
 
 from merxen.visualization.sanity_plots import (
     _crop_points,
+    _ordered_sanity_shape_keys,
     _prepare_overlay_image,
+    _resolve_dataset_mask_affine,
     plot_pair_sanity_crops,
     plot_sanity_crop_panel,
     plot_sanity_overlay,
@@ -241,3 +243,105 @@ def test_crop_points_rejects_missing_assignment_column() -> None:
             assignment_shape_key="MOSAIK_proseg",
             assignment_column="assignment",
         )
+
+
+@pytest.mark.parametrize(
+    ("dataset_name", "um_per_px"),
+    [("MERSCOPE", 0.108), ("merscope", 0.108), ("XENIUM", 0.2125), ("Xenium", 0.2125)],
+)
+def test_dataset_mask_affine_falls_back_per_platform(
+    tmp_path: Path, dataset_name: str, um_per_px: float
+) -> None:
+    """Without a sidecar transform the platform's default pixel size is used."""
+    store = tmp_path / "a" / "b" / "latest.zarr"
+    store.mkdir(parents=True)
+    expected = ((um_per_px, 0.0, 0.0), (0.0, um_per_px, 0.0))
+
+    assert _resolve_dataset_mask_affine(dataset_name, zarr_path=store) == expected
+    assert _resolve_dataset_mask_affine(dataset_name, zarr_path=None) == expected
+
+
+def test_dataset_mask_affine_rejects_an_unknown_dataset() -> None:
+    with pytest.raises(ValueError, match="Unknown dataset"):
+        _resolve_dataset_mask_affine("COSMX", zarr_path=None)
+
+
+def _shapes_namespace(*keys: str) -> SimpleNamespace:
+    return SimpleNamespace(shapes=dict.fromkeys(keys, object()))
+
+
+_ALL_SANITY_SHAPES = (
+    "MOSAIK_proseg_hybrid",
+    "MOSAIK_proseg",
+    "MOSAIK_cellpose",
+    "xenium_cell_boundaries",
+    "merscope_cell_boundaries",
+    "xenium_nucleus",
+    "cellpose_nuclei",
+)
+
+
+@pytest.mark.parametrize(
+    ("dataset_name", "expected"),
+    [
+        (
+            "MERSCOPE",
+            [
+                "merscope_cell_boundaries",
+                "MOSAIK_cellpose",
+                "MOSAIK_proseg",
+                "MOSAIK_proseg_hybrid",
+            ],
+        ),
+        (
+            "xenium",
+            [
+                "xenium_cell_boundaries",
+                "MOSAIK_cellpose",
+                "MOSAIK_proseg",
+                "MOSAIK_proseg_hybrid",
+            ],
+        ),
+        # Any other label keeps both vendor shapes (no platform filter).
+        (
+            "PAIR_A",
+            [
+                "merscope_cell_boundaries",
+                "xenium_cell_boundaries",
+                "MOSAIK_cellpose",
+                "MOSAIK_proseg",
+                "MOSAIK_proseg_hybrid",
+            ],
+        ),
+    ],
+)
+def test_ordered_sanity_shape_keys_filters_the_other_vendor_shape(
+    dataset_name: str, expected: list[str]
+) -> None:
+    """Only the dataset's own vendor cell shape is drawn, in draw order."""
+    sdata = _shapes_namespace(*_ALL_SANITY_SHAPES)
+
+    assert (
+        _ordered_sanity_shape_keys(
+            sdata, dataset_name=dataset_name, prefer_aligned=False
+        )
+        == expected
+    )
+
+
+def test_ordered_sanity_shape_keys_prefers_aligned_and_falls_back() -> None:
+    """Aligned keys are preferred; without any, the unaligned ones are used."""
+    aligned = _shapes_namespace(
+        "xenium_cell_boundaries",
+        "xenium_cell_boundaries_aligned_nonrigid",
+        "merscope_cell_boundaries_aligned_nonrigid",
+        "MOSAIK_proseg_aligned_nonrigid",
+    )
+    assert _ordered_sanity_shape_keys(
+        aligned, dataset_name="XENIUM", prefer_aligned=True
+    ) == ["xenium_cell_boundaries_aligned_nonrigid", "MOSAIK_proseg_aligned_nonrigid"]
+
+    unaligned = _shapes_namespace("xenium_cell_boundaries", "MOSAIK_proseg")
+    assert _ordered_sanity_shape_keys(
+        unaligned, dataset_name="XENIUM", prefer_aligned=True
+    ) == ["xenium_cell_boundaries", "MOSAIK_proseg"]

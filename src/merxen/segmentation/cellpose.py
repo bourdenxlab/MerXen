@@ -8,7 +8,7 @@ import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 from scipy.ndimage import find_objects
@@ -279,7 +279,9 @@ def choose_working_tile_size(
         tile = img_seg = masks = flows = styles = None
         try:
             tile = fetch_tile_fn(y0, y1, x0, x1)
-            _, img_seg, _ = prepare_cellpose_input(tile, factor_rescale=1.0)
+            _, img_seg, _ = prepare_cellpose_input(
+                tile, factor_rescale=1.0, normalization=config.input_normalization
+            )
             masks, flows, styles = run_cellpose_model_eval(model, img_seg, config)
             log_status(
                 f"[{dataset_name}] Tile size {ts} succeeded "
@@ -535,7 +537,9 @@ def run_cellpose_tile(
     source = fetch_tile_fn(
         tile["tile_y0"], tile["tile_y1"], tile["tile_x0"], tile["tile_x1"]
     )
-    _, model_input, _ = prepare_cellpose_input(source, factor_rescale=1.0)
+    _, model_input, _ = prepare_cellpose_input(
+        source, factor_rescale=1.0, normalization=cellpose_config.input_normalization
+    )
     masks, flows, _styles = run_cellpose_model_eval(model, model_input, cellpose_config)
     logits = (
         extract_cellpose_probability_logits(flows, masks.shape)
@@ -872,6 +876,7 @@ def assign_labels_from_masks(
     masks: np.ndarray,
     a_inv: np.ndarray,
     b: np.ndarray,
+    pixel_convention: Literal["center", "corner"] = "center",
 ) -> np.ndarray:
     """Assign transcript points to cell mask labels via inverse affine transform.
 
@@ -884,15 +889,32 @@ def assign_labels_from_masks(
         masks: 2D labeled mask array (H, W).
         a_inv: 2x2 inverse affine matrix.
         b: Translation vector (2,).
+        pixel_convention: How a pixel coordinate maps to a mask index.
+            ``"center"`` rounds to the nearest integer (``np.rint``, half to
+            even), treating integer coordinates as pixel centres; this is the
+            convention of the Cellpose masks written by MerXen. ``"corner"``
+            takes the floor, so pixel ``i`` covers ``[i, i + 1)``; this matches
+            10x vendor masks, where pixel ``i`` covers ``[i * ps, (i + 1) * ps)``
+            microns. A point exactly on a pixel edge can land on either side
+            when ``ps`` is not exactly representable in binary, because the
+            affine is applied in floating point.
 
     Returns:
         Array of cell labels (0 = unassigned).
+
+    Raises:
+        ValueError: If ``pixel_convention`` is not ``"center"`` or ``"corner"``.
     """
+    if pixel_convention not in ("center", "corner"):
+        raise ValueError(
+            f"pixel_convention must be 'center' or 'corner', got {pixel_convention!r}"
+        )
     coords = np.vstack([x_micron, y_micron])
     pix = a_inv @ (coords - b[:, None])
+    pix_index = np.rint(pix) if pixel_convention == "center" else np.floor(pix)
 
-    x_px = np.rint(pix[0]).astype(np.int64)
-    y_px = np.rint(pix[1]).astype(np.int64)
+    x_px = pix_index[0].astype(np.int64)
+    y_px = pix_index[1].astype(np.int64)
 
     h, w = masks.shape
     valid = (x_px >= 0) & (x_px < w) & (y_px >= 0) & (y_px < h)

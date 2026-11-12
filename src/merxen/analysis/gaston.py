@@ -34,6 +34,7 @@ from scipy.sparse import csgraph
 from scipy.spatial import cKDTree
 
 from merxen.config import GastonConfig
+from merxen.control_features import control_token_mask
 from merxen.memory import force_release
 
 logger = logging.getLogger(__name__)
@@ -51,14 +52,6 @@ GASTON_OWNED_COLUMNS = (
     "gaston_isodepth",
     "gaston_model_seed",
     "gaston_num_domains",
-)
-CONTROL_TOKENS = (
-    "blank",
-    "control",
-    "negative",
-    "negcontrol",
-    "unassigned",
-    "deprecated",
 )
 ISODEPTH_ORIENTATION_NOTE = (
     "GASTON isodepth direction is unanchored and arbitrary; values are raw and "
@@ -1027,7 +1020,15 @@ def _eligible_counts(
     eligible_indices = np.flatnonzero(~control_mask)
     if eligible_indices.size == 0:
         raise ValueError("No eligible non-control genes remain for GASTON")
-    eligible_indices = eligible_indices[: int(max_genes)]
+    if eligible_indices.size > int(max_genes):
+        # Truncating would silently keep the first genes in var order, which
+        # depends on the vendor's feature table rather than on biology.
+        raise ValueError(
+            f"GASTON has {eligible_indices.size} eligible non-control genes, more "
+            f"than gaston_max_genes={int(max_genes)}. Raise gaston_max_genes to "
+            "at least the panel size or turn GASTON off for this row; GASTON "
+            "no longer keeps the first genes in var order."
+        )
     matrix = clustered.layers["counts"][:, eligible_indices]
     counts = sparse.csr_matrix(matrix)
     counts.eliminate_zeros()
@@ -1051,10 +1052,7 @@ def _control_feature_mask(adata: ad.AnnData) -> np.ndarray:
         if column in adata.var:
             candidates.append(adata.var[column].astype(str))
     for values in candidates:
-        lower = values.astype(str).str.lower()
-        mask |= lower.apply(
-            lambda value: any(token in value for token in CONTROL_TOKENS)
-        ).to_numpy()
+        mask |= control_token_mask(values)
     return mask
 
 

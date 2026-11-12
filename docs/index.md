@@ -36,11 +36,18 @@ converge at alignment; dashed stations are governed by a parameter. See
 - [Outputs](outputs.md) — directory layout and artifacts produced by each stage.
 - [Manual landmark registration](stages/manual-registration.md) — standalone
   prepare, label and register workflows for image pairs, including Zeiss CZI.
+- [Cell-type annotation overview](annotation-overview.md) — what the map-first
+  annotation does, its outputs, how panels are trusted, and the exact rule
+  behind each cell-type level.
 
 ### Pipeline stages
 - [SpatialData build](stages/spatialdata-build.md)
 - [Segmentation](stages/segmentation.md) (Cellpose-SAM + ProSeg)
+- [Atera transcript-density input](stages/atera-transcript-density.md) (native-grid third channel before Cellpose)
 - [Cellpose HITL model selection](stages/cellpose-hitl.md) (optional model plumbing)
+- [Cellpose annotation pilot](hitl/annotation-guide.md) (initial crop correction workflow)
+- [Choose and correct HITL crops](hitl/pilot-workflows.md) (automatic or viewer-selected regions)
+- [Managed annotation and model training](hitl/managed-annotation-training.md) (viewer editing, transfer and named model reuse)
 - [Enrichment](stages/enrichment.md)
 - [Image registration](stages/register-images.md) (post-Xenium IF onto the mask grid)
 - [Manual landmark registration](stages/manual-registration.md) (standalone workflows, not a stage of `main.nf`)
@@ -56,6 +63,9 @@ converge at alignment; dashed stations are governed by a parameter. See
 - [Distance from object](stages/distance-from-object.md)
 - [MapMyCells](stages/mapmycells.md)
 - [GASTON spatial domains](stages/gaston.md)
+- [Reference-based annotation](stages/annotation.md) (in development); start
+  with the [annotation overview and method](annotation-overview.md) for what
+  the annotation does and how each cell type is defined.
 
 ### Developer reference
 - [Pipeline architecture](pipeline.md) — stage graph and data flow.
@@ -65,6 +75,10 @@ converge at alignment; dashed stations are governed by a parameter. See
 - [Development workflow](development.md) — testing, linting, contributing.
 - [Cellpose HITL testing guide](hitl/testing-guide.md) — runtime acceptance and
   the planned custom-model checks.
+
+### Plans
+- [10x Atera support](plans/atera-support-plan.md) — reading Atera
+  whole-transcriptome bundles in the build stage, and the downstream changes.
 
 ## Project files at a glance
 

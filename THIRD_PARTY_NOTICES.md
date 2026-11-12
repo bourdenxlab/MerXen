@@ -33,6 +33,21 @@ The small CZI test files in `tests/test_data/czi/` were generated once with Zeis
 not a MerXen dependency and is not distributed with MerXen. "CZI" names the file format only; no
 endorsement by Carl Zeiss is implied.
 
+## spatialdata-io (10x cell IDs)
+
+`src/merxen/io/tenx_cell_ids.py` contains `cell_id_str_from_prefix_suffix_uint32`,
+ported from spatialdata-io 0.6.0 (https://github.com/scverse/spatialdata-io,
+`src/spatialdata_io/readers/xenium.py`), Copyright (c) 2022, scverse®, BSD
+3-Clause License. The license is reproduced in
+`licenses/spatialdata-io-BSD-3-Clause.txt`. The port keeps the upstream
+algorithm and adds input validation and type hints. The Atera readers in
+`src/merxen/io/atera_reader.py` follow the I/O patterns of the open
+spatialdata-io pull request for Atera bundles (per-task `ZipStore`, tile
+row-range partitions, `gene_offset` decoding, stored-pyramid reads) but contain
+no further copied code; the same holds for the Atera builder
+(`src/merxen/io/builders/atera.py`), which assembles their elements. No endorsement by scverse or the spatialdata-io
+contributors is implied.
+
 ## GASTON
 
 - Upstream: https://github.com/raphael-group/GASTON

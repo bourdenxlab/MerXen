@@ -2,13 +2,29 @@
 
 MENDER is an opt-in terminal analysis that identifies spatial domains from a
 categorical cell-state annotation and native cell centroids. MerXen runs every
-MERSCOPE or Xenium acquisition independently with `MENDER_single`; platforms
-and segmentation branches are never concatenated as slices.
+MERSCOPE, Xenium or ATERA acquisition independently with `MENDER_single`;
+platforms and segmentation branches are never concatenated as slices.
+
+ATERA rows use the native (vendor) segmentation, whose only analysis layer is
+`original_seg` (shape `atera_cell_boundaries`). A default or `all`
+`mender_segmentations` value resolves to `original_seg` on those rows; naming
+another layer for an ATERA row is an error.
 
 MENDER is listed after existing stages. Its inputs are released by the shared
 per-pair token only when that pair's current terminal stage is complete. The
 token excludes other independent terminal analyses such as GASTON, so the two
 may overlap and neither consumes the other's output.
+
+The token comes from matching the pair's terminal events (clustering,
+mapmycells, distance-from-object and cortical-depth results) with the pair's
+one barrier spec, keeping the events of the terminal stage. Every run,
+legacy or `map_first`, `combine`s each event with the spec, which keeps it,
+so no count of the events is needed. A `join` would pair items one to one:
+the pair's first event would consume the spec even when it belongs to an
+earlier stage, the terminal stage's own events would then find none, and
+MENDER and GASTON would be silently skipped (for example `stop_stage=mender`
+with cortical depth enabled, where FINALIZE's clustering event arrives
+first).
 
 Enable the default ProSeg-hybrid analysis with:
 
@@ -36,7 +52,9 @@ visualization, or spatial-gene analysis.
 ## Data contract
 
 `MENDER_PREPARE` reads the clustered H5AD and its corresponding derived
-SpatialData table in MerXen's modern environment. It requires the configured
+SpatialData table in MerXen's modern environment. Only `obs` and `uns` of the
+H5AD are read (through `h5py`); `X`, layers and embeddings, which are large for
+a whole-transcriptome table, are never loaded. It requires the configured
 categorical state column (default `hierarchical_cluster`) and never falls back
 to ordinary Leiden. It then replaces any aligned coordinates with centroids
 loaded from the explicit native shape and exports only:
@@ -62,6 +80,40 @@ model.run_representation()
 model.run_clustering_normal(-0.8, run_umap=True)
 ```
 
+On a `map_first` clustered table the unassigned states (`Mixed/Unknown`
+and the `*/unresolved` branches) follow the run's
+`mender_unassigned_state_policy`, recorded in the table (default
+`exclude_from_features`: those cells stay spatial nodes and get a domain but
+add no state to any neighbourhood); legacy tables keep every state as a
+feature. The MENDER manifests record the policy, the excluded states, the
+dataset gate, the panel trust and the pair's cross-platform scope
+([Map-first clustering runs](annotation.md#map-first-clustering-runs-m5)).
+
+They also record `cross_platform_comparable` and its reasons: niches may be
+compared across platforms (or datasets) only when both runs use
+`--mender_cell_state_key ct_mender_state` (plan §4.9) and the pair's scope
+allows its branch-level states (`full`). The default `hierarchical_cluster`
+follows each dataset's gate and resolvability (HD2 MERSCOPE, broad-only,
+has 11 branch-level states where its Xenium partner has 20 leaves), so its
+niches are recorded as not comparable (`state_key:hierarchical_cluster`);
+cross-platform niche comparison needs a `ct_mender_state` run.
+
+When every state of a `map_first` table is unassigned under
+`exclude_from_features` (a refused panel or a failed gate), there is no
+neighbourhood feature: MENDER_PREPARE records
+`status: skipped_no_assigned_state` with its reasons, MENDER_COMPUTE and
+MENDER_FINALIZE write their manifests without domains, MENDER_IMPORT writes
+nothing to the store (`imported: false`), and the end-of-run summary lists
+the sample. It is a data-quality outcome, not a failed task.
+
+A MENDER-only restart reads the published clustered H5AD; for a `map_first`
+row it looks in `clustering_squidpy_<suffix>/` first, then in
+`clustering_squidpy/`. MENDER_PREPARE and MENDER_IMPORT refuse an H5AD whose
+mode or table-key suffix does not match the table they write (a `map_first`
+H5AD goes only to `<...>_clustering_squidpy_<its suffix>`, a legacy one never
+to a suffixed key), because legacy and `map_first` tables hold the same
+cells and cannot be told apart by their ids.
+
 These layer-focused defaults use five separate 20 µm shells spanning a
 maximum radius of 100 µm. Excluding the central cell reduces sensitivity to
 isolated cell-state assignments, while the lower Leiden resolution favours
@@ -80,7 +132,11 @@ coordinates, omits a domain, produces only one domain, or fails to create its
 context AnnData.
 
 `MENDER_FINALIZE` joins domains by immutable cell ID and publishes the
-annotated source H5AD, context H5AD, manifests, tables, and plots.
+annotated source H5AD, context H5AD, manifests, tables, and plots. It also
+opens the source H5AD backed (`backed="r"`), which keeps `X` on disk; anndata
+still loads layers (such as `counts`) and embeddings into memory, so the saving
+is the `X` part of the table. The annotated copy is written from it and is
+byte-identical to the copy an in-memory read writes.
 `MENDER_IMPORT` then takes the shared `<zarr>.merxen-write.lock` (beside the
 real store, with the staged symlink resolved, so every writer reaching the
 store takes the same lock), rereads the latest store, and updates only `mender_domain` and `uns["merxen_mender"]` in
@@ -108,7 +164,12 @@ corresponding derived clustered table in the published
 
 Only `MENDER_COMPUTE` uses `envs/environment.mender.yml`. The environment contains
 the old AnnData 0.9, Scanpy 1.9, and Squidpy 1.2-era stack; these packages are
-not added to MerXen's base project dependencies. Build a portable CPU image and
+not added to MerXen's base project dependencies. It also pins umap-learn's
+nearest-neighbour stack (`pynndescent` 0.5.13, `numba` 0.55.2, `llvmlite`
+0.38.1): left open, a fresh environment resolved `pynndescent` 0.7, whose
+parallel subtree builder numba 0.55 cannot compile, and `MENDER_COMPUTE`
+failed in `sc.pp.neighbors` on the full ATERA section (91,381 cells; under
+4,096 cells Scanpy 1.9 computes exact neighbours and never reaches it). Build a portable CPU image and
 override its path as needed:
 
 ```bash

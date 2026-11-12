@@ -1,19 +1,37 @@
 name: CI
 on:
   push:
-    branches: [main]
+    # feature/atera-support: the integration branch of
+    # docs/plans/atera-support-plan.md (§8), which also carries the robust
+    # cell-type annotation work since RCA was merged into it; gated like main.
+    # (feature/robust-celltype-annotation is frozen and gets no more pushes.)
+    branches: [main, feature/atera-support]
+  # 'labeled' lets the full-ci label replace a PR's selected run with a full
+  # one (docs/development.md, Test selection).
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  # Nightly full run on main.
+  schedule:
+    - cron: "23 2 * * *"
+  workflow_dispatch:
 
-# A new push to a PR cancels that PR's run in progress. Runs for pushes to
-# main always finish.
+permissions:
+  contents: read
+
+# A new push (or the full-ci label) on a PR cancels that PR's run in
+# progress. Any other label gets a group of its own, so it cannot cancel the
+# PR's real run (its own run then just repeats the plan). Runs for pushes to
+# main or the integration branch, the nightly run and manual runs always
+# finish.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}${{ (github.event.action == 'labeled' && github.event.label.name != 'full-ci') && format('-label-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Lint, format and type checks run beside the tests, not before them.
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -21,7 +39,7 @@ jobs:
           python-version: "3.12"
       - name: Install uv
         run: pip install uv
-      # The test job saves this cache; restoring it skips rebuilding the Git
+      # Test shard 1 saves this cache; restoring it skips rebuilding the Git
       # dependencies.
       - name: Restore uv cache
         uses: actions/cache/restore@v6
@@ -40,8 +58,11 @@ jobs:
         run: ruff check .
       - name: Format check
         run: ruff format --check .
-      # mypy starts from the cache of the latest push to main and rechecks
-      # only what changed since.
+      # nf-metro comes from the dev extra in the lockfile, as in the pre-push venv.
+      - name: Metro map
+        run: nf-metro validate assets/metro_map.mmd
+      # mypy starts from the cache of the latest push to the base branch (main
+      # or the integration branch) and rechecks only what changed since.
       - name: Restore mypy cache
         uses: actions/cache/restore@v6
         with:
@@ -59,8 +80,112 @@ jobs:
           path: .mypy_cache
           key: mypy-${{ runner.os }}-${{ hashFiles('requirements/requirements.lock') }}-${{ github.sha }}
 
-  test:
+  # Decides what the test shards run: the full suite (pushes to main, the
+  # nightly and manual runs, integration branches into main, the full-ci
+  # label, and any change the selector cannot map), or the tests the PR's
+  # changed files can reach. Needs no dependencies: scripts/ci is stdlib-only.
+  plan:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # pull-requests/issues: read the PR's current labels (see Select tests).
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    outputs:
+      mode: ${{ steps.select.outputs.mode }}
+      shards: ${{ steps.select.outputs.shards }}
+      count: ${{ steps.select.outputs.count }}
+      # Names this attempt's shard reports, so a "Re-run all jobs" (which
+      # may plan a different shard count) never mixes in an older attempt's.
+      # "Re-run failed jobs" keeps the plan and therefore this id.
+      plan_id: ${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # The PR diff (base...head) needs the history, not the blobs.
+          fetch-depth: 0
+          filter: blob:none
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      # Durations measured by the latest full run on main (saved by the test
+      # job below); the committed file is the fallback.
+      - name: Restore the latest test durations
+        uses: actions/cache/restore@v6
+        with:
+          path: .ci-durations/test-durations.json
+          key: test-durations-${{ github.run_id }}
+          restore-keys: |
+            test-durations-
+      - name: Select tests
+        id: select
+        shell: bash
+        # Branch names and labels are untrusted: they reach the script through
+        # the environment, never through ${{ }} in the script text.
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PAYLOAD_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          GH_TOKEN: ${{ github.token }}
+          PLAN_DIR: ${{ runner.temp }}/plan
+        run: |
+          mkdir -p "$PLAN_DIR"
+          # The PR's labels now, not the event's: "gh pr create --label
+          # full-ci" fires opened (without the label) then labeled, and a
+          # re-run reuses the old event. The event's labels are the fallback.
+          LABELS="$PAYLOAD_LABELS"
+          if [[ -n "$PR_NUMBER" ]]; then
+            if current=$(gh api "repos/$REPO/issues/$PR_NUMBER/labels" --jq '[.[].name]'); then
+              LABELS="$current"
+            else
+              echo "Could not read the PR's labels; using the event's."
+            fi
+          fi
+          echo "Labels: $LABELS"
+          if [[ -s .ci-durations/test-durations.json ]]; then
+            cp .ci-durations/test-durations.json "$PLAN_DIR/durations.json"
+            echo "Durations: the latest full run on main."
+          else
+            cp scripts/ci/test_durations.json "$PLAN_DIR/durations.json"
+            echo "Durations: the committed scripts/ci/test_durations.json."
+          fi
+          python scripts/ci/select_tests.py \
+            --event "$EVENT" --base "$BASE_SHA" --head "$HEAD_SHA" \
+            --base-ref "$BASE_REF" --head-ref "$HEAD_REF" \
+            --head-repo "$HEAD_REPO" --repo "$REPO" --labels "$LABELS" \
+            --durations "$PLAN_DIR/durations.json" \
+            --selection-file "$PLAN_DIR/selection.txt" \
+            --summary "$GITHUB_STEP_SUMMARY" \
+            --format github
+      # Every shard partitions with this one durations file, so all shards
+      # agree on the split even if main saves new durations meanwhile.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ci-plan
+          path: ${{ runner.temp }}/plan
+          retention-days: 7
+          overwrite: true
+
+  # The plan's shards, each identical to a single full test job: same
+  # install, Nextflow, four pytest-xdist workers and one thread per worker.
+  # scripts/ci/pytest_shard.py picks each shard's tests by recorded duration.
+  shard:
+    needs: plan
+    name: test shard ${{ matrix.shard }}/${{ needs.plan.outputs.count }}
+    runs-on: ubuntu-latest
+    # One hung test must not hold a runner for the default six hours.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -68,8 +193,18 @@ jobs:
           python-version: "3.12"
       - name: Install uv
         run: pip install uv
+      # One shard saves the uv cache; the others only restore it.
       - name: Cache uv
+        if: matrix.shard == 1
         uses: actions/cache@v6
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('requirements/requirements.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
+      - name: Restore uv cache
+        if: matrix.shard != 1
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/uv
           key: uv-${{ runner.os }}-${{ hashFiles('requirements/requirements.lock') }}
@@ -106,10 +241,21 @@ jobs:
           curl -fsSL "https://github.com/nextflow-io/nextflow/releases/download/v${NXF_VER}/nextflow" -o "$HOME/.local/bin/nextflow"
           chmod +x "$HOME/.local/bin/nextflow"
           "$HOME/.local/bin/nextflow" -version
+          # The workflow tests run stub tasks with the pipeline's real resource
+          # directives (8+ CPUs, tens of GB), which the local executor refuses on
+          # a 4-vCPU runner. Raise its limits for every launch; the project and
+          # profile configs still take precedence over this home config.
+          mkdir -p "$HOME/.nextflow"
+          printf 'executor {\n    cpus = 128\n    memory = "2 TB"\n}\n' > "$HOME/.nextflow/config"
           echo "NXF_VER=${NXF_VER}" >> "$GITHUB_ENV"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@v8
+        with:
+          name: ci-plan
+          path: ${{ runner.temp }}/plan
       # The full test tier (docs/development.md): every test except the slow
-      # ones, which need GPUs, site images or extra environments.
+      # ones, which need GPUs, site images or extra environments; on a
+      # selected run, only the plan's test files (pytest reads @file).
       - name: Tests
         shell: bash
         env:
@@ -119,17 +265,96 @@ jobs:
           MKL_NUM_THREADS: "1"
           OPENBLAS_NUM_THREADS: "1"
           NUMBA_NUM_THREADS: "1"
+          MODE: ${{ needs.plan.outputs.mode }}
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ needs.plan.outputs.count }}
+          PLAN_DIR: ${{ runner.temp }}/plan
         run: |
           set -o pipefail
-          pytest -n 4 --dist load -m "not slow" --durations=20 | tee pytest.log
+          args=(-n 4 --dist load -m "not slow" --durations=20
+            -p pytest_shard --shard-count="$SHARDS" --shard-index="$SHARD"
+            --shard-durations="$PLAN_DIR/durations.json"
+            --shard-report="shard-report/shard-$SHARD.json")
+          if [[ "$MODE" == "selected" ]]; then
+            args+=("@$PLAN_DIR/selection.txt")
+          fi
+          PYTHONPATH="$PWD/scripts/ci${PYTHONPATH:+:$PYTHONPATH}" pytest "${args[@]}" | tee pytest.log
       - name: List the slowest tests in the job summary
         if: always()
         shell: bash
         run: |
           [[ -f pytest.log ]] || exit 0
           {
-            echo "### Slowest tests"
+            echo "### Slowest tests (shard ${{ matrix.shard }})"
             echo '```'
             sed -n '/slowest 20 durations/,/^=====/p' pytest.log | sed '1d;$d'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: shard-report-${{ needs.plan.outputs.plan_id }}-${{ matrix.shard }}
+          path: shard-report/
+          if-no-files-found: ignore
+          retention-days: 7
+          overwrite: true
+
+  # The single pass/fail signal (the check to require on main): green only
+  # when the plan and every shard succeeded and the shards together ran each
+  # collected test exactly once.
+  test:
+    needs: [plan, shard]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Only full runs on main (push, nightly, manual) refresh the durations.
+      SAVE_DURATIONS: ${{ needs.plan.outputs.mode == 'full' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    steps:
+      - name: Require the plan and every shard
+        if: needs.plan.result != 'success' || needs.shard.result != 'success'
+        env:
+          PLAN: ${{ needs.plan.result }}
+          SHARDS: ${{ needs.shard.result }}
+        run: |
+          echo "plan: $PLAN, shards: $SHARDS"
+          exit 1
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: scripts/ci
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: shard-report-${{ needs.plan.outputs.plan_id }}-*
+          path: shard-reports
+          merge-multiple: true
+      - name: Check that the shards ran every test once
+        env:
+          COUNT: ${{ needs.plan.outputs.count }}
+          MODE: ${{ needs.plan.outputs.mode }}
+        run: |
+          echo "Mode: $MODE" >> "$GITHUB_STEP_SUMMARY"
+          python scripts/ci/check_shards.py verify shard-reports/*.json \
+            --expected-count "$COUNT" --summary "$GITHUB_STEP_SUMMARY"
+      # A full run on main refreshes the durations the next plans use.
+      - name: Merge the measured durations
+        if: env.SAVE_DURATIONS == 'true'
+        run: |
+          python scripts/ci/check_shards.py merge-durations shard-reports/*.json \
+            --out .ci-durations/test-durations.json
+      - name: Save the durations for the next plans
+        if: env.SAVE_DURATIONS == 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .ci-durations/test-durations.json
+          key: test-durations-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Upload the durations
+        if: env.SAVE_DURATIONS == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-durations
+          path: .ci-durations/test-durations.json
+          retention-days: 30
+          overwrite: true

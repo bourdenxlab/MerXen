@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -28,8 +29,22 @@ from shapely.geometry import box
 from shapely.geometry.base import BaseGeometry
 
 from merxen.analysis.clustering_squidpy import (
+    _control_feature_mask,
     load_spatialdata_adata,
     remove_control_features,
+)
+from merxen.analysis.transcript_patterns_raster import (
+    DEFAULT_SETTINGS,
+    GeneDiagnosticRaster,
+    RasterEngineSettings,
+    RasterTranscriptPatternResults,
+    gene_diagnostic_rasters,
+    layer_label_keys,
+    raster_transcript_counts,
+    run_raster_transcript_pattern_analysis,
+)
+from merxen.analysis.transcript_patterns_raster import (
+    ENGINE_NAME as LABEL_RASTER_ENGINE,
 )
 from merxen.analysis.transcript_spatial_patterns import (
     COMPARTMENTS,
@@ -37,17 +52,83 @@ from merxen.analysis.transcript_spatial_patterns import (
     run_transcript_pattern_analysis,
     transcript_indices_for_gene,
 )
-from merxen.config import SpatialGeneAnalysisConfig
+from merxen.config import SpatialGeneAnalysisConfig, SpatialGeneAnalysisSampleConfig
+from merxen.gene_sets import WHOLE_TRANSCRIPTOME_MIN_GENES, is_whole_transcriptome
 from merxen.memory import force_release, log_status
 from merxen.plotting import prepare_plot_output, save_figure
+from merxen.visualization.raster_density import composite_rgba, single_colour_cmap
 
 logger = logging.getLogger(__name__)
+
+POLYGON_ENGINE = "polygon"
+"""Name of the shape-tree transcript engine (cortical annotations, <= 5,000 genes)."""
+
+COMPARTMENT_COLOURS: dict[str, str] = {
+    "nuclear": "#805ad5",
+    "cytoplasmic": "#dd6b20",
+    "extracellular": "#319795",
+}
+"""Colours of the three transcript compartments in the diagnostics."""
+
+
+def select_transcript_engine(
+    sample: SpatialGeneAnalysisSampleConfig,
+    *,
+    n_panel_genes: int,
+) -> str:
+    """Choose the transcript-pattern engine of a sample by capability.
+
+    - The layer has cell and nucleus label elements (ATERA original and
+      ProSeg layers): the label-raster engine, over every transcript.
+    - Else a whole-transcriptome panel (more than
+      :data:`~merxen.gene_sets.WHOLE_TRANSCRIPTOME_MIN_GENES` genes): refused,
+      since the polygon engine keeps every transcript in memory.
+    - Else the polygon engine (XENIUM and MERSCOPE layers, unchanged).
+
+    Args:
+        sample: The sample.
+        n_panel_genes: Non-control genes of the sample's table.
+
+    Returns:
+        ``"label_raster"`` or ``"polygon"``.
+
+    Raises:
+        ValueError: For a whole-transcriptome panel without label elements.
+    """
+    if layer_label_keys(sample.zarr_path, sample.platform, sample.segmentation):
+        return LABEL_RASTER_ENGINE
+    if is_whole_transcriptome(n_panel_genes):
+        raise ValueError(
+            f"[{sample.sample_id}] transcript spatial patterns: the "
+            f"{sample.platform} layer {sample.segmentation!r} has {n_panel_genes:,} "
+            f"genes (more than {WHOLE_TRANSCRIPTOME_MIN_GENES:,}) and no cell and "
+            "nucleus label elements, so only the polygon engine could run, and it "
+            "keeps every transcript in memory. Set "
+            "spatial_gene_analysis_transcript_analysis_enabled=false for this row."
+        )
+    return POLYGON_ENGINE
+
+
+def _panel_gene_count(adata: ad.AnnData) -> int:
+    """Return the non-control genes of a cell table."""
+    return int(adata.n_vars - int(np.count_nonzero(_control_feature_mask(adata))))
 
 
 def run_spatial_gene_analysis(
     config: SpatialGeneAnalysisConfig,
+    *,
+    raster_settings: RasterEngineSettings = DEFAULT_SETTINGS,
 ) -> dict[str, dict[str, Path]]:
-    """Run per-gene Moran's I and Geary's C analysis for every sample."""
+    """Run per-gene Moran's I and Geary's C analysis for every sample.
+
+    Args:
+        config: Stage configuration.
+        raster_settings: Label-raster engine settings (transcript patterns of
+            layers with label elements); the pipeline uses the defaults.
+
+    Returns:
+        Output paths per sample.
+    """
     config.output_dir.mkdir(parents=True, exist_ok=True)
     results: dict[str, dict[str, Path]] = {}
 
@@ -64,6 +145,13 @@ def run_spatial_gene_analysis(
             platform=sample.platform,
             table_key=sample.table_key,
             shape_key=sample.shape_key,
+        )
+        # Choose the transcript engine before the cell-level work, so a
+        # refused whole-transcriptome layer fails fast.
+        transcript_engine = (
+            select_transcript_engine(sample, n_panel_genes=_panel_gene_count(adata))
+            if config.transcript_analysis_enabled
+            else None
         )
         analysis_adata = prepare_spatial_autocorr_adata(
             adata,
@@ -114,7 +202,21 @@ def run_spatial_gene_analysis(
         transcript_outputs: dict[str, Path] = {}
         transcript_counts: dict[str, int | float] = {}
         transcript_gene_plots: dict[str, Path] = {}
-        if config.transcript_analysis_enabled:
+        transcript_engine_record: dict[str, Any] | None = None
+        if transcript_engine == LABEL_RASTER_ENGINE:
+            (
+                transcript_outputs,
+                transcript_counts,
+                transcript_gene_plots,
+                transcript_engine_record,
+            ) = _run_raster_transcript_analysis(
+                sample,
+                config=config,
+                sample_dir=sample_dir,
+                settings=raster_settings,
+            )
+            force_release(note=f"after transcript spatial analysis {sample.sample_id}")
+        elif transcript_engine == POLYGON_ENGINE:
             import spatialdata as sd
 
             sdata_obj = sd.read_zarr(sample.zarr_path)
@@ -222,6 +324,7 @@ def run_spatial_gene_analysis(
             transcript_outputs=transcript_outputs,
             transcript_counts=transcript_counts,
             transcript_gene_plots=transcript_gene_plots,
+            transcript_engine=transcript_engine_record,
         )
 
         results[sample.sample_id] = {
@@ -246,8 +349,32 @@ def prepare_spatial_autocorr_adata(
     normalize_exclude_highly_expressed: bool = False,
     normalize_max_fraction: float = 0.05,
 ) -> ad.AnnData:
-    """Return a filtered, log-normalized AnnData for gene autocorrelation."""
-    prepared = remove_control_features(adata) if drop_control_features else adata.copy()
+    """Return a filtered, log-normalized AnnData for gene autocorrelation.
+
+    Args:
+        adata: Cell-by-gene table.
+        drop_control_features: Remove blank/negative/control features first.
+        min_counts: Minimum counts per cell; ``0`` keeps every cell.
+        min_cells: Minimum cells expressing a gene.
+        normalize_target_sum: Target sum of ``normalize_total``.
+        normalize_exclude_highly_expressed: Passed to ``normalize_total``.
+        normalize_max_fraction: Passed to ``normalize_total``.
+
+    Returns:
+        The filtered, normalised and log-transformed copy.
+
+    Raises:
+        ValueError: If fewer than three cells or no genes remain.
+    """
+    # Spatial gene analysis checks no panel size, so the control-filter
+    # summary records no expected gene count (a 300-gene expectation would be
+    # wrong for whole-transcriptome ATERA tables). The summary lives only in
+    # this in-memory copy's uns, which is never written.
+    prepared = (
+        remove_control_features(adata, expected_panel_gene_count=None)
+        if drop_control_features
+        else adata.copy()
+    )
     if min_counts > 0:
         sc.pp.filter_cells(prepared, min_counts=int(min_counts))
     sc.pp.filter_genes(prepared, min_cells=int(min_cells))
@@ -598,6 +725,262 @@ def plot_transcript_pattern_diagnostics(
     return paths
 
 
+def _run_raster_transcript_analysis(
+    sample: SpatialGeneAnalysisSampleConfig,
+    *,
+    config: SpatialGeneAnalysisConfig,
+    sample_dir: Path,
+    settings: RasterEngineSettings = DEFAULT_SETTINGS,
+) -> tuple[dict[str, Path], dict[str, int | float], dict[str, Path], dict[str, Any]]:
+    """Run the label-raster engine for one sample and write its outputs.
+
+    The output files have the polygon engine's names; the pair-correlation
+    table is empty (pair correlation is off on this engine) and the tissue
+    support is written next to them.
+
+    Returns:
+        ``(outputs, counts, gene_plots, engine_record)`` for the manifest.
+    """
+    results = run_raster_transcript_pattern_analysis(
+        sample=sample, config=config, settings=settings
+    )
+    stem = sample_dir / sample.sample_id
+    summary_path = Path(f"{stem}_transcript_spatial_patterns.csv")
+    paircorr_path = Path(f"{stem}_transcript_pair_correlation.parquet")
+    signed_distance_path = Path(f"{stem}_transcript_signed_distance.parquet")
+    rankings_path = Path(f"{stem}_transcript_spatial_pattern_rankings.csv")
+    tissue_path = Path(f"{stem}_transcript_tissue_mask.npz")
+    results.summary.to_csv(summary_path, index=False)
+    results.signed_distance.to_parquet(signed_distance_path, index=False)
+    results.paircorr.to_parquet(paircorr_path, index=False)
+    results.rankings.to_csv(rankings_path, index=False)
+    np.savez_compressed(
+        tissue_path,
+        inside=results.tissue.inside,
+        origin_um=np.asarray(results.tissue.origin_um),
+        bin_um=np.asarray(results.tissue.bin_um),
+    )
+    plot_dir = sample_dir / "plots" / "transcript_patterns"
+    started = time.monotonic()
+    genes = _select_transcript_diagnostic_genes(
+        results.rankings,
+        top_n=config.transcript_diagnostic_top_n,
+        max_genes=config.transcript_diagnostic_max_genes,
+    )
+    rasters = gene_diagnostic_rasters(results, genes, config=config)
+    gene_plots = plot_raster_transcript_diagnostics(
+        results,
+        rasters,
+        output_dir=plot_dir,
+        sample_id=sample.sample_id,
+        dpi=config.figure_dpi,
+    )
+    tissue_plot = plot_tissue_support(
+        results,
+        plot_dir / f"{sample.sample_id}_tissue_support.png",
+        sample_id=sample.sample_id,
+        dpi=config.figure_dpi,
+    )
+    results.record["timings_s"]["diagnostics_s"] = time.monotonic() - started
+    outputs = {
+        "transcript_summary_csv": summary_path,
+        "signed_distance_parquet": signed_distance_path,
+        "paircorr_parquet": paircorr_path,
+        "transcript_rankings_csv": rankings_path,
+        "transcript_diagnostics_dir": plot_dir,
+        "transcript_tissue_mask_npz": tissue_path,
+        "transcript_tissue_support_plot": tissue_plot,
+    }
+    return outputs, raster_transcript_counts(results), gene_plots, results.record
+
+
+def plot_tissue_support(
+    results: RasterTranscriptPatternResults,
+    output_path: Path,
+    *,
+    sample_id: str,
+    dpi: int = 180,
+) -> Path:
+    """Plot the tissue support over the all-transcript density it came from."""
+    output_path = prepare_plot_output(output_path)
+    tissue = results.tissue
+    fig, ax = plt.subplots(figsize=(8.0, 8.0))
+    density = tissue.density
+    if density is not None:
+        shown = np.ma.masked_less_equal(np.log10(density.astype(float) + 1.0), 0.0)
+        image = ax.imshow(
+            shown,
+            origin="lower",
+            extent=tissue.extent,
+            cmap=single_colour_cmap("#2d3748"),
+            interpolation="nearest",
+        )
+        cbar = fig.colorbar(image, ax=ax, fraction=0.046, pad=0.02)
+        cbar.set_label(f"log10(1 + transcripts per {tissue.bin_um:g} um bin)")
+    ax.contour(
+        tissue.support().astype(float),
+        levels=[0.5],
+        origin="lower",
+        extent=tissue.extent,
+        colors="#e53e3e",
+        linewidths=0.8,
+    )
+    record = tissue.record()
+    ax.set_title(
+        f"{sample_id}: tissue support ({tissue.method}), "
+        f"{record['area_um2'] / 1e6:.2f} mm2"
+    )
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("x (um)")
+    ax.set_ylabel("y (um)")
+    fig.tight_layout()
+    save_figure(fig, output_path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
+def plot_raster_transcript_diagnostics(
+    results: RasterTranscriptPatternResults,
+    rasters: dict[str, GeneDiagnosticRaster],
+    *,
+    output_dir: Path,
+    sample_id: str,
+    dpi: int = 180,
+) -> dict[str, Path]:
+    """Plot rasterised diagnostics of the selected genes (every transcript).
+
+    Panels: the gene's in-tissue density on the tissue grid with the tissue
+    outline; a three-colour compartment composite of its densest window at
+    the fine bin with the cell (grey) and nucleus (blue) label edges; the
+    signed-distance profile; the compartment fractions against all
+    transcripts.
+    """
+    summary_by_gene = results.summary.set_index("gene")
+    background = results.counts.compartment_counts.sum(axis=0).astype(float)
+    background = background / max(background.sum(), 1.0)
+    paths: dict[str, Path] = {}
+    tissue = results.tissue
+    for gene, raster in rasters.items():
+        fig, axes = plt.subplots(2, 2, figsize=(13.0, 11.0))
+        counts = raster.tissue_counts.astype(float)
+        shown = np.ma.masked_less_equal(counts, 0.0)
+        image = axes[0, 0].imshow(
+            np.ma.log10(shown),
+            origin="lower",
+            extent=tissue.extent,
+            cmap=single_colour_cmap("#2b6cb0"),
+            interpolation="nearest",
+        )
+        axes[0, 0].contour(
+            tissue.support().astype(float),
+            levels=[0.5],
+            origin="lower",
+            extent=tissue.extent,
+            colors="#262626",
+            linewidths=0.6,
+        )
+        x0, y0 = raster.window_origin_um
+        axes[0, 0].add_patch(
+            plt.Rectangle(
+                (x0, y0),
+                raster.window_um,
+                raster.window_um,
+                fill=False,
+                edgecolor="#e53e3e",
+                linewidth=1.0,
+            )
+        )
+        cbar = fig.colorbar(image, ax=axes[0, 0], fraction=0.046, pad=0.02)
+        cbar.set_label(f"log10 transcripts per {tissue.bin_um:g} um bin")
+        axes[0, 0].set_title(
+            f"All {int(counts.sum()):,} in-tissue transcripts "
+            f"({tissue.bin_um:g} um bins)"
+        )
+        axes[0, 0].set_aspect("equal", adjustable="box")
+
+        layers = [
+            (raster.window_counts[name], COMPARTMENT_COLOURS[name])
+            for name in ("extracellular", "cytoplasmic", "nuclear")
+        ]
+        axes[0, 1].set_facecolor("white")
+        if raster.cell_edges is not None and raster.edges_extent is not None:
+            for edges, colour in (
+                (raster.cell_edges, (0.45, 0.45, 0.45, 0.6)),
+                (raster.nucleus_edges, (0.17, 0.42, 0.69, 0.7)),
+            ):
+                if edges is None:
+                    continue
+                overlay = np.zeros((*edges.shape, 4), dtype=np.float32)
+                overlay[edges] = colour
+                axes[0, 1].imshow(
+                    overlay,
+                    origin="lower",
+                    extent=raster.edges_extent,
+                    interpolation="nearest",
+                )
+        axes[0, 1].imshow(
+            composite_rgba(layers),
+            origin="lower",
+            extent=raster.window_extent,
+            interpolation="nearest",
+        )
+        handles = [
+            plt.Line2D([], [], color=COMPARTMENT_COLOURS[name], lw=6, label=name)
+            for name in COMPARTMENTS
+        ]
+        axes[0, 1].legend(handles=handles, loc="upper right", frameon=False)
+        n_window = int(sum(int(v.sum()) for v in raster.window_counts.values()))
+        axes[0, 1].set_title(
+            f"Densest {raster.window_um:g} um window, {raster.window_bin_um:g} um "
+            f"bins ({n_window:,} transcripts)"
+        )
+        axes[0, 1].set_xlim(x0, x0 + raster.window_um)
+        axes[0, 1].set_ylim(y0, y0 + raster.window_um)
+        axes[0, 1].set_aspect("equal", adjustable="box")
+        for ax in axes[0]:
+            ax.set_xlabel("x (um)")
+            ax.set_ylabel("y (um)")
+
+        _plot_signed_distance_profile(axes[1, 0], results, gene)
+        row = summary_by_gene.loc[gene]
+        fractions = [float(row[f"fraction_{name}"]) for name in COMPARTMENTS]
+        positions = np.arange(len(COMPARTMENTS))
+        axes[1, 1].bar(
+            positions - 0.2,
+            fractions,
+            width=0.4,
+            color=[COMPARTMENT_COLOURS[name] for name in COMPARTMENTS],
+            label=gene,
+        )
+        axes[1, 1].bar(
+            positions + 0.2,
+            background,
+            width=0.4,
+            color="#a0aec0",
+            label="all transcripts",
+        )
+        axes[1, 1].set_xticks(positions, list(COMPARTMENTS))
+        axes[1, 1].set_ylabel("fraction of transcripts")
+        axes[1, 1].set_title(
+            "Compartments (pair correlation: off on the label-raster engine)"
+        )
+        axes[1, 1].legend(frameon=False)
+        axes[1, 1].grid(axis="y", color="#e4e4e4", linewidth=0.6)
+        fig.suptitle(
+            f"{sample_id}: {gene} · {row['pattern_label']} · "
+            f"n={int(row['n_transcripts']):,}",
+            fontsize=14,
+        )
+        fig.tight_layout()
+        out_path = prepare_plot_output(
+            output_dir / f"{sample_id}_{_safe_filename(gene)}.png"
+        )
+        save_figure(fig, out_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+        paths[gene] = out_path
+    return paths
+
+
 def _select_transcript_diagnostic_genes(
     rankings: pd.DataFrame,
     *,
@@ -738,7 +1121,7 @@ def _plot_geometry_outline(
 
 def _plot_signed_distance_profile(
     ax: plt.Axes,
-    results: TranscriptPatternResults,
+    results: TranscriptPatternResults | RasterTranscriptPatternResults,
     gene: str,
 ) -> None:
     rows = results.signed_distance[results.signed_distance["gene"] == gene]
@@ -817,8 +1200,13 @@ def write_spatial_gene_analysis_manifest(
     transcript_outputs: dict[str, Path] | None = None,
     transcript_counts: dict[str, int | float] | None = None,
     transcript_gene_plots: dict[str, Path] | None = None,
+    transcript_engine: dict[str, Any] | None = None,
 ) -> Path:
-    """Write a compact JSON manifest for one sample's outputs."""
+    """Write a compact JSON manifest for one sample's outputs.
+
+    ``transcript_engine`` (label-raster runs only) is written under that key;
+    polygon-engine manifests are unchanged.
+    """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     manifest = {
         "sample_id": sample_id,
@@ -868,6 +1256,8 @@ def write_spatial_gene_analysis_manifest(
         },
         "transcript_counts": transcript_counts or {},
     }
+    if transcript_engine is not None:
+        manifest["transcript_engine"] = transcript_engine
     output_path.write_text(json.dumps(manifest, indent=2) + "\n")
     return output_path
 

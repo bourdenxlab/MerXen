@@ -11,6 +11,10 @@ def test_nextflow_exposes_analysis_segmentation_branches() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     main_text = (repo_root / "workflows" / "main.nf").read_text()
     config_text = (repo_root / "workflows" / "nextflow.config").read_text()
+    # Original shape names come from the platform registry.
+    registry_text = (
+        repo_root / "workflows" / "lib" / "PlatformSpec.groovy"
+    ).read_text()
 
     for expected in [
         'analysis_segmentation = "all"',
@@ -26,7 +30,12 @@ def test_nextflow_exposes_analysis_segmentation_branches() -> None:
         '"xenium_cell_boundaries"',
         "samplesJsonForSegmentation",
     ]:
-        assert expected in main_text or expected in config_text
+        assert (
+            expected in main_text
+            or expected in config_text
+            or expected.replace('"', "'") in registry_text
+        )
+    assert "shape_key: spec.originalCellShapeKey" in main_text
 
     assert (
         '"all": ["reseg", "original_seg", "proseg_mask", "proseg_hybrid"]' in main_text
@@ -61,16 +70,18 @@ def test_downstream_modules_publish_under_segmentation_branch() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     module_dir = repo_root / "workflows" / "modules"
 
-    expectations = {
-        "qc.nf": "/${segmentation}/qc",
-        "comparison.nf": "/${segmentation}/comparison",
-        "visualization.nf": "/${segmentation}/visualization",
-        "spatial_gene_analysis.nf": "/${segmentation}/spatial_gene_analysis",
-        "clustering_squidpy.nf": "/${segmentation}/clustering_squidpy",
-        "mapmycells.nf": "/${segmentation}/mapmycells",
-    }
-    for filename, expected in expectations.items():
-        assert expected in (module_dir / filename).read_text()
+    expectations = [
+        ("qc.nf", "/${segmentation}/qc"),
+        ("comparison.nf", "/${segmentation}/comparison"),
+        ("visualization.nf", "/${segmentation}/visualization"),
+        ("spatial_gene_analysis.nf", "/${segmentation}/spatial_gene_analysis"),
+        ("clustering_squidpy.nf", "/${segmentation}/clustering_squidpy"),
+        ("mapmycells.nf", "/${segmentation}/mapmycells"),
+        ("annotation.nf", "/${segmentation}/annotation_map"),
+        ("annotation.nf", "/${segmentation}/annotation_resolve"),
+    ]
+    for filename, expected in expectations:
+        assert expected in (module_dir / filename).read_text(), (filename, expected)
 
 
 def test_nextflow_uses_row_level_settings_and_continues_after_task_errors() -> None:
@@ -164,8 +175,12 @@ def test_mask_image_quantification_resume_reuses_published_inputs() -> None:
     ]
     assert "settings.need_enriched_zarrs && !settings.run_enrich" in enrich_resume
     assert '"latest/latest_spatialdata.zarr"' in enrich_resume
-    assert 'chooseField(row, ["xenium_spatialdata_path"])' in enrich_resume
-    assert '"merscope_spatialdata_path"' in enrich_resume
+    assert "PlatformSpec.forName(platform).spatialdataPathFields" in enrich_resume
+    registry_text = (
+        repo_root / "workflows" / "lib" / "PlatformSpec.groovy"
+    ).read_text()
+    assert "['xenium_spatialdata_path']" in registry_text
+    assert "['merscope_spatialdata_path', 'merscope_zarr_path']" in registry_text
     assert "isBlankPath(explicitLatestZarr)" in enrich_resume
     assert "def enrichOut = latestZarr" in enrich_resume
     assert '"enrich/enrich_out"' not in enrich_resume
@@ -281,7 +296,12 @@ def test_segment_bootstraps_proseg_from_configured_paths(
 
     for expected in [
         'include { ENSURE_PROSEG } from "./modules/proseg_bootstrap"',
-        "proseg_trigger_ch = cellpose_segment_inputs_ch.map { true }.take(1)",
+        # The ATERA ProSeg plan (AT-9) also triggers the bootstrap; the value
+        # ENSURE_PROSEG receives is the same ``true``.
+        "proseg_trigger_ch = cellpose_segment_inputs_ch\n        .map { true }\n"
+        "        .mix(atera_proseg_plan_inputs_ch.map { true })\n"
+        "        .mix(atera_proseg_cellpose_plan_inputs_ch.map { true })\n"
+        "        .take(1)",
         "proseg_path_ch = ENSURE_PROSEG(proseg_trigger_ch)",
         "nuclei_task_results_ch = CELLPOSE_NUCLEI_SEGMENT(",
         "segment_task_results_ch = SEGMENT(",
@@ -406,7 +426,7 @@ def test_mecr_stage_is_default_enabled_and_uses_one_reference_task(
     module_text = (repo_root / "workflows" / "modules" / "mecr.nf").read_text()
 
     for expected in [
-        'include { MECR_REFERENCE; MECR } from "./modules/mecr"',
+        'include { MECR_REFERENCE; MECR_REFERENCE_ATERA; MECR } from "./modules/mecr"',
         '"mecr": "mecr"',
         'stages += ["mecr"]',
         "settings.run_mecr",
@@ -416,6 +436,8 @@ def test_mecr_stage_is_default_enabled_and_uses_one_reference_task(
         ".collect()",
         ".filter { samplesJsonValues -> !samplesJsonValues.isEmpty() }",
         "MECR_REFERENCE(mecr_reference_inputs_ch)",
+        "MECR_REFERENCE_ATERA(",
+        "mecrSamplesUseAteraReference(samplesJson)",
         "MECR(mecr_inputs_ch)",
     ]:
         assert expected in main_text
@@ -430,6 +452,7 @@ def test_mecr_stage_is_default_enabled_and_uses_one_reference_task(
         "mecr_barnyard_max_points = 50000",
         "mecr_barnyard_log1p = false",
         'withName: "MECR_REFERENCE"',
+        'withName: "MECR_REFERENCE_ATERA"',
         'withName: "MECR"',
     ]:
         assert expected in config_text

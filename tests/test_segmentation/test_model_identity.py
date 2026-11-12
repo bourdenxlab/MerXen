@@ -563,3 +563,41 @@ def test_enrichment_and_later_registration_keep_original_model_provenance(
     model_identity_path(cell_mask).unlink()
     assert not _record_mask_model_identities(dst, config)
     assert registered["cellpose"]["model_identity"]["status"] == "verified"
+
+
+def test_standard_stock_geometry_run_records_its_filter_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Normal stock jobs record geometry too, without requiring a custom arm."""
+    from merxen.config import MaskGeometryFilterConfig, SegmentationConfig
+    from merxen.segmentation import pipeline
+
+    config = SegmentationConfig.model_validate(
+        {
+            "dataset": {
+                "name": "fixture",
+                "platform": "XENIUM",
+                "data_path": tmp_path / "source.zarr",
+                "channels": ["DAPI", "18S"],
+                "output_dir": tmp_path / "output",
+            },
+            "mask_filter": {"geometry_filter": MaskGeometryFilterConfig()},
+        }
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_load_dataset_sdata",
+        lambda _: (None, None, 1, 1, np.diag([4, 4, 1]), None),
+    )
+    monkeypatch.setattr(
+        pipeline, "require_cellpose_runtime", lambda: ("4.2.1.1", "2.14.0+cu130")
+    )
+    identity = pipeline._preflight_model_selection(config, check_cell_cache=False)
+    assert identity is not None and identity.inference_context is not None
+    assert (
+        identity.inference_context.mask_filter.geometry_filter
+        == MaskGeometryFilterConfig()
+    )
+    assert identity.inference_context.transcript_density is None
+    assert identity.inference_context.pixel_size_um == (0.25, 0.25)

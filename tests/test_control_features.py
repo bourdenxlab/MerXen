@@ -8,6 +8,7 @@ import pytest
 
 from merxen.analysis import clustering_squidpy
 from merxen.control_features import (
+    CONTROL_FEATURE_TYPES,
     CONTROL_TOKENS,
     classify_control_transcripts,
     control_token_mask,
@@ -42,6 +43,151 @@ def test_control_token_mask_matches_scalar_rule_and_handles_missing() -> None:
 
     assert mask.tolist() == [False, True, False, True, False, False]
     assert control_token_mask([]).tolist() == []
+
+
+def test_control_tokens_match_genomic_control_names() -> None:
+    """10x genomic controls (``Intergenic_Region_*``) carry a control token."""
+    assert has_control_token("Intergenic_Region_12")
+    assert control_token_mask(["Intergenic_Region_12", "GFAP"]).tolist() == [
+        True,
+        False,
+    ]
+
+
+def test_atera_platform_uses_the_xenium_pattern() -> None:
+    """Atera control names follow Xenium; MERSCOPE blanks are not Atera names."""
+    assert matches_control_name_pattern("Intergenic_Region_1", "ATERA")
+    assert matches_control_name_pattern("Intergenic_Region_1", "atera")
+    assert not matches_control_name_pattern("Blank-3", "ATERA")
+
+
+# Feature-type categories and control-name prefixes of the Atera cell-feature
+# matrix (``var.feature_type``); Xenium uses the same ones.
+TENX_CONTROL_CATEGORIES: list[tuple[str, str]] = [
+    ("Negative Control Codeword", "NegControlCodeword_0500"),
+    ("Negative Control Probe", "NegControlProbe_00002"),
+    ("Genomic Control", "Intergenic_Region_12"),
+    ("Unassigned Codeword", "UnassignedCodeword_0003"),
+    ("Deprecated Codeword", "DeprecatedCodeword_0001"),
+]
+
+TENX_CONTROL_NAMES: list[str] = [name for _, name in TENX_CONTROL_CATEGORIES]
+
+# Gene symbols that contain fragments of control prefixes or tokens. ``CTRL``
+# is a real Atera gene and the closest miss: the token is ``control``.
+TOKEN_LIKE_GENES: list[str] = [
+    "GFAP",
+    "HLA-DMB",
+    "Nkx6-1",
+    "BLNK",
+    "NEGR1",
+    "DEPP1",
+    "UNC13A",
+    "INTS1",
+    "CNTNAP2",
+    "INTS6L",
+    "CTRL",
+]
+
+
+@pytest.mark.parametrize("platform", ["XENIUM", "ATERA", None])
+@pytest.mark.parametrize("name", TENX_CONTROL_NAMES)
+def test_every_10x_control_category_is_a_control_by_name(
+    platform: str | None, name: str
+) -> None:
+    """Each control category is recognised from its name alone."""
+    assert matches_control_name_pattern(name, platform)
+    assert is_registered_control_name(name, platform)
+    assert control_transcript_mask([name], platform=platform).tolist() == [True]
+    assert control_token_mask([name]).tolist() == [True]
+
+
+@pytest.mark.parametrize("platform", ["XENIUM", "ATERA", "MERSCOPE", None])
+def test_token_like_gene_names_are_not_controls(platform: str | None) -> None:
+    """Names that only contain control-like fragments stay genes."""
+    assert not control_transcript_mask(TOKEN_LIKE_GENES, platform=platform).any()
+    assert not control_token_mask(TOKEN_LIKE_GENES).any()
+
+
+def test_feature_type_flags_every_10x_control_category() -> None:
+    """``feature_type`` decides for unknown names; ``Gene Expression`` is a gene."""
+    types = [feature_type for feature_type, _ in TENX_CONTROL_CATEGORIES]
+    names = [f"Odd_{i}" for i in range(len(types))]
+
+    mask = control_transcript_mask(
+        [*names, "GFAP", "gfap2"],
+        platform="ATERA",
+        feature_type=[*types, "Gene Expression", " gene expression "],
+    )
+
+    assert mask.tolist() == [True] * len(types) + [False, False]
+
+
+def test_control_feature_types_cover_every_10x_control_category() -> None:
+    """The registry lists every 10x control category, plus the old blank name."""
+    assert {feature_type for feature_type, _ in TENX_CONTROL_CATEGORIES} | {
+        "Blank Codeword"
+    } == CONTROL_FEATURE_TYPES
+
+
+def test_unrecognised_feature_types_fall_back_to_names() -> None:
+    """Non-control types and stringified missing values leave it to the name."""
+    names = ["Protein_1", "GFAP", "Odd_1", "NegControlProbe_1", "Odd_2"]
+    feature_type = ["Protein Expression", "nan", "None", "nan", "Blank Codeword"]
+
+    mask = control_transcript_mask(names, platform="XENIUM", feature_type=feature_type)
+
+    assert mask.tolist() == [False, False, False, True, True]
+
+
+def test_feature_type_gene_keeps_control_like_name_and_falls_back() -> None:
+    """A gene feature type overrides names; a missing type uses the name."""
+    names = ["Intergenic_Region_4", "NegControlProbe_1", "Odd_1", "GFAP"]
+    feature_type = pd.Series(["Gene Expression", None, "", "Gene Expression"])
+
+    flags = classify_control_transcripts(
+        names, platform="ATERA", feature_type=feature_type
+    )
+
+    assert flags.control.tolist() == [False, True, False, False]
+    assert flags.kept_by_feature_type.tolist() == [True, False, False, False]
+
+
+def test_is_gene_and_codeword_category_take_precedence_over_feature_type() -> None:
+    """``feature_type`` fills only rows the transcript columns leave unknown."""
+    names = ["Odd_1", "Odd_2", "Odd_3"]
+    feature_type = ["Genomic Control", "Gene Expression", "Genomic Control"]
+
+    mask = control_transcript_mask(
+        names,
+        platform="ATERA",
+        is_gene=pd.Series([True, pd.NA, pd.NA], dtype="boolean"),
+        codeword_category=[None, "negative_control_codeword", None],
+        feature_type=feature_type,
+    )
+
+    assert mask.tolist() == [False, True, True]
+
+
+def test_atera_boosted_gene_with_is_gene_is_not_a_control() -> None:
+    """``is_gene`` keeps a boosted gene whose category is not a gene category."""
+    mask = control_transcript_mask(
+        ["GFAP", "Intergenic_Region_1"],
+        platform="ATERA",
+        is_gene=[True, False],
+        codeword_category=["boosted_gene", "genomic_control"],
+    )
+
+    assert mask.tolist() == [False, True]
+
+
+def test_merscope_blanks_are_unaffected_by_the_10x_rules() -> None:
+    """MERSCOPE ``Blank-*`` codewords stay controls; hyphenated genes stay genes."""
+    names = ["Blank-0", "Blank-84", "Nkx6-1", "Gad1"]
+
+    mask = control_transcript_mask(names, platform="MERSCOPE")
+
+    assert mask.tolist() == [True, True, False, False]
 
 
 @pytest.mark.parametrize(
@@ -191,6 +337,8 @@ def test_control_transcript_mask_rejects_misaligned_feature_types() -> None:
         control_transcript_mask(["GFAP"], is_gene=[True, False])
     with pytest.raises(ValueError, match="codeword_category"):
         control_transcript_mask(["GFAP"], codeword_category=[])
+    with pytest.raises(ValueError, match="feature_type"):
+        control_transcript_mask(["GFAP"], feature_type=["a", "b"])
 
 
 def test_is_registered_control_name_combines_patterns_and_tokens() -> None:

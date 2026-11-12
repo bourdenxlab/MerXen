@@ -61,10 +61,9 @@ process QC {
         val(shape_key)
 
     script:
-    // The platform's own cells are the reference for the registration offset.
-    def registrationReferenceShapeKey = platform == "MERSCOPE"
-        ? "merscope_cell_boundaries"
-        : "xenium_cell_boundaries"
+    // The platform's own cells (registry entry) are the reference for the
+    // registration offset.
+    def registrationReferenceShapeKey = PlatformSpec.forName(platform).originalCellShapeKey
     def registrationStrict = params.qc_registration_strict ? "true" : "false"
     """
     set -euo pipefail

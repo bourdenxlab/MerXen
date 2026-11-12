@@ -11,10 +11,10 @@ MerXen configuration lives in four places:
 3. **Execution profiles** — host capacity, local software paths, hardware
    choices, concurrency, and GPU locking. The default Dwight settings live in
    [workflows/conf/dwight.config](../workflows/conf/dwight.config). The data
-   locations of a host (reference sources and caches, the Cellpose model
-   store, the task temporary directory, container images and bind mounts) are
-   in no tracked file: two private, gitignored site configs hold them
-   ([Site configs](#site-configs-private-host-locations)).
+   locations of a host (reference sources, caches and stores, the Cellpose
+   model store, the task temporary directory, container images and bind
+   mounts) are in no tracked file: two private, gitignored site configs hold
+   them ([Site configs](#site-configs-private-host-locations)).
 4. **Pydantic models** — [src/merxen/config.py](../src/merxen/config.py) — the
    authoritative schema every CLI command validates its JSON config against.
 
@@ -38,9 +38,10 @@ The `MERXEN_` prefix is wired up via `model_config = {"env_prefix": "MERXEN_"}`
 in [config.py:202](../src/merxen/config.py#L202).
 
 `.env.example` also lists the location variables of this host (storage roots,
-reference caches, the results root, ...), all commented out. Code reads them
-through `merxen.local_config`; a variable that is not set is an error that
-names it, never a built-in default. Docs write them as `$MERXEN_...`.
+reference stores and caches, the results root, the evidence archive, ...), all
+commented out. Code reads them through `merxen.local_config`; a variable that is
+not set is an error that names it, never a built-in default. Docs write them as
+`$MERXEN_...`.
 
 ## Nextflow parameters
 
@@ -59,14 +60,15 @@ the values):
 | File | Template | Included by | Sets |
 |------|----------|-------------|------|
 | `workflows/conf/site.config` | `site.config.example` | `nextflow.config`, so every profile | `apptainer_container`, `apptainer_bind_paths`, `clustering_squidpy_gpu_container`, `mender_container`, `manual_registration_czi_python` |
-| `workflows/conf/dwight.site.config` | `dwight.site.config.example` | `conf/dwight.config`, so the `standard`, `dwight` and `local` profiles | the legacy MapMyCells / WHB sources and caches, `annotation_gene_id_fallback_csv`, `cellpose_model_store`, `cellpose_protected_output_roots`, `task_tmp_dir`, and the task environment (`TMPDIR`, `MERXEN_ALIAS_FILE`) |
+| `workflows/conf/dwight.site.config` | `dwight.site.config.example` | `conf/dwight.config`, so the `standard`, `dwight` and `local` profiles | the legacy MapMyCells / WHB sources and caches, `annotation_gene_id_fallback_csv`, the annotation reference stores and sources, `cellpose_model_store`, `cellpose_protected_output_roots`, `task_tmp_dir`, and the task environment (`TMPDIR`, `MERXEN_ALIAS_FILE`) |
 
 Each file is found at the path in `MERXEN_SITE_CONFIG` /
 `MERXEN_DWIGHT_SITE_CONFIG`, else beside its template in `workflows/conf/`. An
 unset or empty variable means "look beside the template"; `none` (or
 `/dev/null`) means "no file, on purpose"; a variable naming a file that does not
 exist makes Nextflow stop with "Unable to parse config file" (the cause is in
-`.nextflow.log`). A git worktree and a code export contain neither file, so
+`.nextflow.log`; `scripts/annotation_dev/launch_guard.sh` and `run_template.sh`
+name the variable). A git worktree and a code export contain neither file, so
 set the variables there; the private `.env` names both
 ([Local configuration](local-configuration.md)). A site config may only set
 params that a tracked config declares, and the two files share no param (a test
@@ -74,11 +76,13 @@ checks both). In the tables below, a Dwight value written `$MERXEN_...` is the
 value of that `.env` variable, which `dwight.site.config` also holds.
 
 Without a site config several params stay `null`, and a `null` here does not
-always fail by itself: the reference caches fall back to `<outdir>` and the
-reference downloads default to on, task temporary files land on the small root
-disk, and the `apptainer` profile runs its tasks without a container. `main.nf`
-therefore stops a launch with an error in two cases, unless the variable is set
-to `none` or `/dev/null` on purpose:
+always fail by itself: the reference caches fall back to `<outdir>`,
+`annotation_reference_store` falls back to `<outdir>/annotation_references`
+(every reference bundle is rebuilt, about 40 minutes and 48-57 GB each, instead
+of reusing the store), the reference downloads default to on, task temporary
+files land on the small root disk, and the `apptainer` profile runs its tasks
+without a container. `main.nf` therefore stops a launch with an error in two
+cases, unless the variable is set to `none` or `/dev/null` on purpose:
 
 - a `standard`, `dwight` or `local` launch with no `task_tmp_dir` (no Dwight
   site config): "no Dwight site config ... set `MERXEN_DWIGHT_SITE_CONFIG`,
@@ -111,15 +115,17 @@ to `none` or `/dev/null` on purpose:
 |-------|---------|-------------|
 | `outdir` | `./results` | Output root. |
 | `species` | `human` | Dataset species for the whole invocation: `human` or `mouse`. Controls reference-backed defaults; mixed-species samplesheets are not supported. |
-| `analysis_mode` | `paired` | Fallback row mode: `paired`, `merscope`, or `xenium`. A non-empty samplesheet `analysis_mode` value overrides this per row. |
+| `analysis_mode` | `paired` | Fallback row mode: `paired`, `merscope`, `xenium` or `atera` (alias `a`; the native segmentation route, see [ATERA rows](#atera-rows)). A non-empty samplesheet `analysis_mode` value overrides this per row. |
 | `enable_alignment` | `false` | Fallback row alignment switch. A non-empty samplesheet `enable_alignment` value overrides this per row; alignment only applies to paired rows. |
+| `segmentation_source` | `null` | Where the cells of a row come from: `native` (the vendor segmentation; aliases `vendor`, `instrument`), `native_proseg` (the vendor segmentation plus ProSeg cells refined from the vendor masks, ATERA only; aliases `vendor_proseg`, `instrument_proseg`), `cellpose_only` (alias `cellpose`) or `cellpose_proseg` (alias `proseg`). `null` uses the platform default: `native` for ATERA, `cellpose_proseg` for XENIUM and MERSCOPE. ATERA accepts `native`, `native_proseg` and `cellpose_proseg` (AT-7: Cellpose on DAPI + 18S, then tiled ProSeg), XENIUM and MERSCOPE `cellpose_proseg`; any other is refused before a task starts. A non-empty samplesheet `segmentation_source` overrides this per row. |
+| `native_latest_link_mode` | `hardlink` | How `NATIVE_LATEST` brings image, label and transcript payload files into the latest store of a native row: `hardlink` (shared with the source store and made read-only) or `copy` (when the latest store is on another filesystem). |
 | `analysis_segmentation` | `all` | Fallback downstream analysis branches after enrichment. Valid values: `all`, `both`, `reseg`, `original_seg`, `proseg_mask`/`cellpose`, `proseg_hybrid`; comma-separated combinations are accepted. `all` includes all four branches, while `both` restricts analysis to `reseg,original_seg`. A non-empty samplesheet value overrides this per row. |
 | `register_images_refine_affine` | `true` | Refine each Xenium Explorer matrix with a robust DAPI-to-DAPI affine fit before resampling registered images. The stage itself is enabled per row by `xenium_registered_images_csv`; see [stages/register-images.md](stages/register-images.md). |
 | `register_post_xenium_if_nonrigid` | `false` | Fallback switch for guarded post-Xenium IF DAPI TV-L1 refinement after the affine fit. A samplesheet value overrides this per row. |
 | `mask_image_quantification_enabled` | `true` | Insert the Cellpose-mask image quantification stage between enrichment and QC. A non-empty samplesheet `mask_image_quantification_enabled` value overrides this per row. |
 | `mecr_enabled` | species-dependent | Insert species-matched whole-brain mutually exclusive co-expression rate analysis after QC. Defaults to `true` for human and `false` for mouse; mouse may opt in to the complete WMB reference. |
 | `spatial_gene_analysis_enabled` | `true` | Insert spatial gene analysis between visualization and clustering. A non-empty samplesheet value overrides this per row; disabled rows proceed directly from visualization to clustering. |
-| `spatial_gene_analysis_transcript_analysis_enabled` | `true` | Run the annotation-dependent transcript-pattern component inside spatial gene analysis. A non-empty samplesheet value overrides this per row; `false` retains cell-level autocorrelation without requiring tissue GeoJSON files. |
+| `spatial_gene_analysis_transcript_analysis_enabled` | `true` | Run the transcript-pattern component inside spatial gene analysis. XENIUM and MERSCOPE rows need tissue GeoJSON files for it; ATERA rows (label-raster engine) derive the tissue from the transcript density when they have none. A non-empty samplesheet value overrides this per row; `false` retains cell-level autocorrelation only. |
 | `cortical_depth_enabled` | `false` | Insert the cortical-depth stage after clustering. Requires per-sample pial/tissue-edge annotations, with optional gray/white boundaries for depth pieces. A non-empty samplesheet `cortical_depth_enabled` value overrides this per row. |
 | `distance_from_object_enabled` | `false` | Insert registered polygon-edge distance analysis after cortical depth/clustering. A non-empty samplesheet value overrides this per row. |
 | `distance_from_object_segmentations` | `proseg, original, cellpose` | Cell-table branches for object distance. Legacy `reseg`, `original_seg`, and `proseg_mask` values remain accepted aliases. A samplesheet value may override this per row. |
@@ -365,6 +371,108 @@ install paths trigger a `sudo` prompt.
 | Param | Default | Description |
 |-------|---------|-------------|
 | `xenium_min_qv` | `20.0` | Minimum transcript QV to retain. |
+| `atera_min_qv` | `20.0` | Minimum transcript QV the Atera build keeps (`null` keeps all); 20 reproduces the vendor matrix. |
+| `atera_build_cpus` | `16` | CPUs of an ATERA `BUILD_SPATIALDATA` task (other platforms keep 8). |
+| `atera_build_memory_gb` | `64` | Memory reservation of an ATERA build task, doubled on its one retry after an external kill (exit 137 or 140). Other platforms keep 80 GB. |
+| `atera_build_max_rss_gb` | `48` | Watchdog cap on the ATERA build's anonymous memory; above it the build exits with status 99 (not retried). Raise it together with `atera_build_memory_gb`. |
+| `default_atera_voxel_layers` | `2` | ProSeg voxel layers of the ATERA ProSeg routes (`native_proseg`, ATERA `cellpose_proseg`). |
+| `atera_proseg_tile_um` | `2000` | Edge of an ATERA ProSeg tile core in microns (grid origin 0, 0). Must exceed twice the halo. |
+| `atera_proseg_halo_um` | `100` | Margin a tile also reads around its core; at least 100 (refused below). |
+| `atera_proseg_owned_margin_um` | `20` | Margin around the bounding box of every cell a tile owns that its window must cover. |
+| `atera_proseg_burnin_samples`, `atera_proseg_samples`, `atera_proseg_hillclimb`, `atera_proseg_recorded_samples` | `100`, `200`, `20`, `100` | ProSeg schedule of every tile (the AT-5(b) short schedule). The voxel sizes, nuclear reassignment, diffusion and compactness come from the `proseg_*` params. |
+| `atera_proseg_prior_weight` | `140.0` | Effective prior weight ProSeg reports for every tile (its own `max(mean transcripts per cell / 100, 1)` scaling is undone per tile). Fixed because ProSeg's automatic value follows each tile's density (about 113-152 over AT-9's tiles, towards 1 on sparse edge tiles). A tile whose reported weight is more than 2% off is stopped and restarted once with the multiplier rescaled by requested / reported, and fails if it is still off. |
+| `atera_proseg_nuclear_compartment` | `true` | Give ProSeg the vendor `overlaps_nucleus` flag (its nuclear compartment model); `false` writes 0. |
+| `atera_proseg_tile_cpus`, `atera_proseg_tile_memory_gb` | `16`, `32` | CPUs (ProSeg `--nthreads`) and memory reservation of a tile task; the reservation doubles on the one retry (any failure other than exit 99 or 3). |
+| `atera_proseg_tile_max_rss_gb` | `40` | Watchdog cap on a tile task's anonymous memory; above it the task exits 99 (not retried) and the row stops after `segment` on both layers (the log names the failed tile). |
+| `atera_proseg_tile_max_forks` | `4` | Tile tasks at once (also set in `conf/dwight.config`). |
+| `atera_proseg_stitch_cpus`, `atera_proseg_stitch_memory_gb` | `16`, `64` | Resources of `ATERA_PROSEG_STITCH`. |
+| `atera_proseg_keep_tile_inputs` | `false` | Keep each tile's exported parquet, prior mask and raw ProSeg transcript metadata. |
+| `atera_proseg_tile_subset` | `null` | Comma list of tile ids (`c2_r1`) to run as a check; no stitch, and any stage after `segment` is refused. |
+| `atera_proseg_allow_untested_version` | `false` | Allow a `proseg_version` other than 3.2.0 (the only one whose Xenium-layout reader and flags were verified) on tiled ATERA ProSeg rows; the preflight and every tile then run it with a warning. |
+| `atera_cellpose_proseg_prior_weight` | `140.0` | ATERA `cellpose_proseg` rows: effective prior weight of every tile, fixed like `atera_proseg_prior_weight`. `null` uses the weight ProSeg would choose for one whole-section run, `max(gene rows / Cellpose cells / 100, 1)` (computed by the plan). The tiles, halo, schedule and resources are the `atera_proseg_*` ones. |
+| `atera_cellpose_proseg_nuclear_compartment` | `false` | ATERA `cellpose_proseg` rows: give ProSeg the vendor `overlaps_nucleus` flag. Off: no vendor segmentation feeds the Cellpose route (as the XENIUM CSV route has no compartment). |
+| `atera_cellpose_proseg_cellprobs` | `true` | ATERA `cellpose_proseg` rows: give ProSeg the Cellpose logits (`--cellpose-cellprobs`), as XENIUM does. |
+| `atera_cellpose_segment_memory_gb` | `212` | Memory reservation of `ATERA_CELLPOSE_SEGMENT` (12 CPUs, GPU queue, GPU lock as `CELLPOSE_SEGMENT`). |
+| `atera_cellpose_model`, `atera_cellpose_cellprob`, `atera_cellpose_flow_threshold`, `atera_cellpose_diameter`, `atera_cellpose_final_max_area_um2`, `atera_mask_max_eccentricity` | `null` | The ATERA twins of the per-platform Cellpose overrides. ATERA `cellpose_proseg` rows run Cellpose with the global `cellpose_*` settings; any of these makes the row an experimental arm (as on XENIUM, it needs `--cellpose_protected_output_roots`). Native ATERA rows run no Cellpose. |
+| `atera_clustering_hvg_n_top_genes` | `2000` | Highly variable genes the clustering PCA of an ATERA (whole-transcriptome) sample uses. ATERA samples also skip the 300-gene panel check; XENIUM and MERSCOPE samples are unchanged. `null` leaves the choice to the panel-width rule, which also selects 2,000 genes for any panel above 5,000 genes ([clustering](stages/clustering-squidpy.md#whole-transcriptome-panels-more-than-5000-genes)). |
+
+#### ATERA rows
+
+ATERA rows run the native segmentation route (`segmentation_source=native`):
+the vendor cell and nucleus segmentation of the build becomes the latest store,
+and no Cellpose or ProSeg task runs. See
+[Stage 1 — Atera](stages/spatialdata-build.md#atera) for the build.
+
+| Stage | ATERA native row |
+|-------|------------------|
+| `build_spatialdata` | Runs (or reuses the store). |
+| `segment_nuclei` | Not a stage of native rows; asking for it is refused. |
+| `segment` | `NATIVE_LATEST`: builds `<outdir>/<pair>/atera/latest/latest_spatialdata.zarr` from the source store (payloads hardlinked read-only, metadata copied, vendor shapes and table renamed to `atera_cell_boundaries`, `atera_nucleus` and `table_original`). |
+| `enrich` | Native enrichment: no Cellpose masks. |
+| `build_viewer_caches` | Vendor label masks on `morphology_focus`. |
+| `mask_image_quantification` | Quantifies the vendor `cell_labels`. |
+| `mecr` | Runs by default on human rows (as for XENIUM and MERSCOPE), with the ATERA streaming reference `MECR_REFERENCE_ATERA` ([MECR](stages/mecr.md#whole-transcriptome-panels-and-atera-rows)); a row `mecr_enabled=false` switches it off. |
+| `qc`, `visualize`, `spatial_gene_analysis`, `clustering_squidpy` | Run on the `original_seg` layer. Spatial gene analysis includes the transcript spatial patterns, on the label-raster engine over every transcript ([spatial gene analysis](stages/spatial-gene-analysis.md#label-raster-engine-atera)); no tissue annotations are needed. `clustering_squidpy` runs in legacy mode: map_first annotation ([Cell-type annotation overview](annotation-overview.md)) is not covered for ATERA rows yet (AT-11, RCA on Atera; [Atera plan §8](plans/atera-support-plan.md)). |
+| `mender` | Runs when `mender_enabled` (on `original_seg`). An explicit `stop_stage=mender` passes over the standalone `mapmycells` stage, which ATERA rows do not run. |
+
+Native rows have one analysis layer, `original_seg`. A global
+`analysis_segmentation` (such as the default `all`) or `mender_segmentations`
+(default `proseg_hybrid`) resolves to the layers the row has, and the run log
+says so; a samplesheet value that names `reseg`, `proseg_mask` or
+`proseg_hybrid` on a native row is an error.
+
+`segmentation_source=native_proseg` (opt-in, AT-9) runs the same stages and
+adds the vendor-prior ProSeg layer `proseg_vendor` (shapes
+`MOSAIK_proseg_vendor`, table `table_MOSAIK_proseg_vendor`; named `reseg` /
+`MOSAIK_proseg` before AT-7): its `segment` stage is `NATIVE_LATEST`, then
+`ATERA_PROSEG_PLAN`, one `ATERA_PROSEG_TILE` task per 2 mm tile and
+`ATERA_PROSEG_STITCH` ([segmentation](stages/segmentation.md#atera-proseg-route-native_proseg-at-9)).
+`analysis_segmentation=all` resolves to `proseg_vendor, original_seg`, and QC,
+VISUALIZE, MECR, spatial gene analysis, clustering and MENDER run on both layers; the
+MENDER default resolves to both layers too. ENRICH checks the stitched layer,
+MIQ quantifies both label elements in one task and the viewer cache draws both
+masks. `reseg`, `proseg_mask` and `proseg_hybrid` are not layers of such a row
+(a samplesheet value naming them is an error). The `atera_proseg_*` params
+above are checked before a task starts.
+
+`segmentation_source=cellpose_proseg` (opt-in, AT-7) segments like XENIUM:
+`ATERA_CELLPOSE_SEGMENT` runs Cellpose-SAM on DAPI + 18S of `morphology_focus`
+(`atera_channels`), and the tiled ProSeg route above refines the Cellpose masks
+(`ATERA_PROSEG_PLAN_CELLPOSE`, the tiles, the stitch;
+[segmentation](stages/segmentation.md#atera-cellpose-route-cellpose_proseg-at-7)).
+The row has the XENIUM layers `reseg` (ProSeg cells) and `proseg_mask`
+(Cellpose cells) beside the vendor `original_seg`; `all` and the MENDER default
+resolve to those three. There is no `proseg_hybrid` and no Cellpose nuclei
+stage on ATERA.
+
+Refused for ATERA rows, before any task starts (each switch message ends
+with "remove `<setting>` from row `<pair>` or set it to false"):
+
+| Request | Message |
+|---------|---------|
+| `mapmycells` selected (`stop_stage=mapmycells`) | standalone MapMyCells is not covered for ATERA rows; stop at clustering_squidpy or mender |
+| row `gaston_enabled=true` | GASTON is not covered for ATERA rows |
+| row `pciseq_enabled=true` | pciSeq is off for ATERA rows |
+| row `cortical_depth_enabled=true` or `distance_from_object_enabled=true` | cortical depth and distance from object are off for non-cortical ATERA sections |
+| row `enable_alignment` or `xenium_registered_images_csv` | image registration and alignment are not covered for ATERA rows (AT-10) |
+| `segmentation_source=cellpose_only` | segmentation_source=cellpose_only is not available for ATERA rows yet; ATERA supports: native, native_proseg, cellpose_proseg |
+| `native_proseg` or ATERA `cellpose_proseg` with `atera_proseg_halo_um` below 100, a tile no wider than twice the halo, an invalid schedule or prior weight (`atera_proseg_prior_weight`, `atera_cellpose_proseg_prior_weight`), `proseg_version` other than 3.2.0, `atera_proseg_tile_subset` with a stage after `segment`, or a blank `atera_channels` | one message each, naming the param |
+| `start_stage`, `stop_stage` or `only_stage` naming a stage ATERA rows do not run (such as `pciseq`, `gaston`) | … is not active for this run. ATERA rows run only build_spatialdata, segment, … |
+| row `clustering_squidpy_mode=map_first` without a hippocampal resource manifest | requires `annotation_hippocampal_resources`, human species and explicit `anatomical_region=hippocampus` |
+
+The global `pciseq_enabled`, `gaston_enabled`,
+`cortical_depth_enabled` and `distance_from_object_enabled` do not apply to
+ATERA rows:
+the stages stay off there and the run log says when a global `true` is ignored,
+so a mixed samplesheet keeps them for its XENIUM and MERSCOPE rows. The
+transcript spatial patterns (`spatial_gene_analysis_transcript_analysis_enabled`,
+default `true`) apply to ATERA rows like any other (AT-8). Only a
+value set on the ATERA row itself is refused. The clustering mode follows the
+same rule without a bound hippocampal resource manifest: the species default
+(map_first for human and mouse) and a global `clustering_squidpy_mode` do not
+apply to ATERA rows, which cluster in legacy
+mode (the run log names them), while the XENIUM and MERSCOPE rows of a mixed
+samplesheet keep map_first.
 
 ### Alignment
 
@@ -673,13 +781,14 @@ contracts.
 | `mecr_marker_max_other_fraction` | `0.01` | A marker must be detected in strictly less than this fraction of the remaining retained cells. |
 | `mecr_normalize_target_sum` | `10000.0` | Full-library per-cell normalization target before `log1p` and Wilcoxon. |
 | `mecr_reference_chunk_rows` | `5000` | Reference rows streamed from each raw H5AD at a time. |
+| (no param) `reference_mode` | `auto` (`MECR_REFERENCE`); `streaming` (`MECR_REFERENCE_ATERA`) | Config key of the reference task, not a workflow param. `auto` streams the reference when the panel has more than 5,000 non-control genes (`merxen.gene_sets.WHOLE_TRANSCRIPTOME_MIN_GENES`); see [MECR](stages/mecr.md#whole-transcriptome-panels-and-atera-rows). |
 | `mecr_wilcoxon_tie_correct` | `true` | Enable tie correction in Scanpy's Python Wilcoxon implementation. |
 | `mecr_figure_dpi` | `180` | Pair-rate distribution plot DPI. |
 | `mecr_barnyard_top_n_pairs` | `6` | Maximum canonical/high-MECR/high-detection pairs selected for barnyard count plots. Set to `0` to disable them. |
-| `mecr_barnyard_max_points` | `50000` | Deterministic maximum plotted cells per platform and barnyard pair; exact MECR still uses every cell. |
+| `mecr_barnyard_max_points` | `50000` | Deterministic maximum plotted cells per platform and barnyard pair for XENIUM and MERSCOPE; exact MECR still uses every cell. ATERA barnyard plots draw every cell as a binned density and ignore it. |
 | `mecr_barnyard_random_seed` | `0` | Seed for barnyard display-point downsampling. |
 | `mecr_barnyard_log1p` | `false` | Plot barnyard axes in natural count space by default. Set to `true` for `log1p`-transformed display coordinates. |
-| `mecr_max_forks` | Dwight: `4` | Maximum concurrent branch-scoring tasks. The shared reference task always has one fork. |
+| `mecr_max_forks` | Dwight: `4` | Maximum concurrent branch-scoring tasks. Each reference task (`MECR_REFERENCE`, `MECR_REFERENCE_ATERA`) always has one fork. |
 
 The reference task uses the union of genes in all selected spatial panels,
 runs once, and is shared across all samples and segmentation branches. See
@@ -719,6 +828,256 @@ runs once, and is shared across all samples and segmentation branches. See
 | `mapmycells_gene_id_column` | `ensembl_id` | `var` column used as query gene identifiers. Human `ENSG` and mouse `ENSMUSG` IDs are preserved; missing mouse IDs can be recovered from WMB metadata or the gene-mapper DB. |
 | `mapmycells_obs_id_column` | `null` | Optional `obs` column used as cell identifiers for the query H5AD. |
 | `annotation_gene_id_fallback_csv` | `null`; Dwight: WHB `WHB-10Xv3-Nonneurons-raw.h5ad` on SSD1 | Local symbol-to-Ensembl table (Allen `gene.csv` layout, or a reference `.h5ad` whose `var` index holds the IDs) used only when preparing the MapMyCells query, for features still lacking an ID after the `var` column and the cached reference metadata. Applied only when `mapmycells_gene_id_column` is `ensembl_id`, and only IDs of the query species are used (a table with none, such as the human Dwight default in a mouse run, is skipped and recorded as `gene_id_fallback_ignored`); nothing is downloaded. Preflight checks that the file exists. Recovered and unresolved genes are listed in `<sample_id>_mapmycells_query_gene_ids.json` and the pair manifest. Legacy clustering annotation is unaffected. Set to `null` to disable. |
+
+### Reference-based annotation (in development)
+
+These params drive the reference-bundle, mapping and resolving processes of
+the new annotation ([Reference-based annotation](stages/annotation.md)). They
+are read only by `--annotation_prepare_only` runs and by `map_first` runs;
+legacy runs ignore them. Defaults are in `workflows/conf/annotation.config`,
+the dwight values in `workflows/conf/dwight.annotation.config`.
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `clustering_squidpy_mode_human`, `clustering_squidpy_mode_mouse` | `map_first`; `map_first` | Clustering mode per species: `legacy` or `map_first` ([Map-first clustering runs](stages/annotation.md#map-first-clustering-runs-m5)). Human flipped to `map_first` at M8 (pre-registration §20), mouse at M9 (gate M, §25); `legacy` is deprecated for both and warns. A samplesheet row's `clustering_squidpy_mode` column overrides these for that row. |
+| `clustering_squidpy_mode` | `null` | Explicit mode for both species; overrides the species params (a row's `clustering_squidpy_mode` column overrides it in turn). |
+| `clustering_squidpy_table_key_suffix` | `null` | Clustered table-key suffix of a `map_first` run: `null` means `mapfirst` while the species has not flipped (`""` after), so the legacy clustered table is never overwritten; an empty suffix before the flip is refused. Legacy runs always write the unsuffixed key. |
+| `mender_unassigned_state_policy` | `exclude_from_features` | MENDER policy of `map_first` tables (plan §4.9): unassigned cells (`Mixed/Unknown`, `*/unresolved`) stay spatial nodes but add no neighbourhood state. Recorded in the clustered table, which MENDER applies; legacy tables keep `state`. |
+| `annotation_hippocampal_resources` | `null` | Local resource manifest for the full 18,049-gene human hippocampal ATERA profile. Requires explicit `anatomical_region=hippocampus`; validates frozen SEA-AD/WHB artifacts, policies and reused-diagnostic qualifications. Writes separate `rcahippocampal` tables; see the [AT-11 plan](plans/atera-celltype-annotation-plan.md#explicit-whole-panel-workflow). |
+| `annotation_prepare_only` | `false` | Build the reference bundles of `annotation_panel_genes_path` for every row and segmentation, and run no pipeline stage. |
+| `annotation_panel_genes_path` | `null` | Declared panel of a prepare-only run (any gene list `merxen annotation-panel --panel-genes-path` reads). A human gene list of the seeded set-a family also gets its curated set c. |
+| `annotation_human_references`, `annotation_mouse_references` | `whb_frontal_supc_clus,seaad_mr_panel`; `wmb_panel,wmb_region_share` | Reference ids per species. |
+| `annotation_reference_store` | `null` (`<outdir>/annotation_references`); Dwight: `$MERXEN_REFERENCE_STORE` | Store root. Bundles are added, never modified or deleted; finished bundles are read-only. |
+| `annotation_reference_store_large` | `null` (the main store); Dwight: `$MERXEN_REFERENCE_STORE_LARGE` | Store of bundles on panels above 1,000 genes, which keep their reference markers ([Annotation](stages/annotation.md#large-panels-m3b)). |
+| `annotation_prep_large_memory` | `64 GB` | `ANNOTATE_REFERENCE_PREP` memory for panels above 1,000 genes (24 h instead of 8 h). Set from the M3b 5K measurement (OD-E8): the WMB marker steps of the Xenium Prime 5K Mouse panel peaked at 37.7 GB with the prefilter and 27.2 GB without it (the default) at 8 processes and `--max-gb 40`; + 30% = 49 GB ([Annotation](stages/annotation.md#large-panels-m3b)). A large WMB panel whose predicted query-marker peak + 30% exceeds the reserve is refused: raise this value. The per-parent marker prefilter has no pipeline parameter; it is set only through `--annotation-config` (`panel.large_panel_marker_prefilter`, `panel.large_panel_prefilter_cap`) of the standalone `annotation-reference-prep` and `annotation-panel-simulate`. |
+| `annotation_auto_download` | `true` | Fetch missing pinned files (SEA-AD Multiregion, the MERFISH CCF metadata) into `<annotation_reference_store>/.downloads`, verified by size and sha256. |
+| `annotation_ctm_version` | `1.7.2` | `cell_type_mapper` version PREP and MAP require (each task checks it before running). |
+| `annotation_resolvability` | `true` | Resolvability self-map (M3b): PREP simulates held-out reference cells on the panel and writes the resolvability tables into the WHB, SEA-AD and WMB bundles ([Annotation](stages/annotation.md#resolvability-self-map-m3b)). While true, `wmb_panel` needs `annotation_wmb_selfmap_test_cells_path`, and the WHB and SEA-AD bundles need `annotation_whb_region_precompute_source`, `annotation_whb_h5ad_dir` and `annotation_whb_metadata_dir` (the held-out test set; the preflight checks all three). The self-map recipe enters `build_hash`; the RESOLVE-time decision settings do not. |
+| `annotation_xplat_sensitivity`, `annotation_xplat_sensitivity_segmentations` | `geneset_c`; `proseg_hybrid` | Whether same-panel human pairs get a set-c bundle, and on which segmentations. |
+| `annotation_panel_mode` | `auto` | `auto` (intersection when the two platform panels have Jaccard ≥ 0.9, else `per_platform`; always `per_platform` when exactly one declared panel is refused, so the valid platform keeps its panel), `intersection` or `per_platform`. |
+| `annotation_human_gene_table`, `annotation_mouse_gene_table` | `null`; Dwight: the WHB-10Xv3 `var` (`WHB-10Xv3-Nonneurons-raw.h5ad`, still on SSD1) and the WMB-10X `gene.csv` (20241115; the md5-checked copy under `$MERXEN_ABC_ATLAS_DIR/metadata/WMB-10X/20241115/`) | Local gene tables (Allen `gene.csv` layout or a reference `.h5ad` whose `var` index holds the IDs; nothing is downloaded). The run species' table is the symbol fallback and the release-drift reference of the gene-ID resolver (else `annotation_gene_id_fallback_csv`); both feed the exact-case species test, which refuses a mouse panel run as human and vice versa ([Annotation](stages/annotation.md#declared-panels-gene-ids-and-controls-m3b)). Preflight checks that set files exist. |
+| `annotation_gene_alias_table`, `annotation_gene_id_overrides_csv` | `null` | Optional local HGNC / MGI alias table (previous and alias symbols; only single-target aliases resolve) and extra curated overrides (`symbol`, `ensembl_id`, `reason`, optional `species`) on top of the packaged `gene_id_overrides_<species>.csv`. |
+| `annotation_whb_region_precompute_source` | `null`; Dwight: the SSD1 frontal region reference | WHB frontal region precompute (directory or `precomputed_stats.h5`), copied into each WHB bundle. |
+| `annotation_whb_h5ad_dir`, `annotation_whb_metadata_dir` | `null`; Dwight: the SSD1 ABC WHB cache | Inputs to rebuild the region precompute when no source precompute is given, and the held-out resolvability test set's raw h5ads, taxonomy tables and WHB cell metadata (the other-region non-neuronal test cells; WHB and SEA-AD bundles) while `annotation_resolvability` is true. |
+| `annotation_seaad_precomputed_stats_path`, `annotation_seaad_metadata_dir` | `null` | Local SEA-AD Multiregion files; unset, they come from the pinned download cache. |
+| `annotation_wmb_h5ad_dir` | `null`; Dwight: `$MERXEN_ABC_ATLAS_DIR/expression_matrices/WMB-10Xv3/20230630` | Directory of `WMB-10Xv3-*-raw.h5ad`; only those files enter `build_hash`. |
+| `annotation_wmb_metadata_dir` | `null`; Dwight: `$MERXEN_ABC_ATLAS_DIR/metadata` | WMB-10X cell metadata and the WMB taxonomy tables. |
+| `annotation_wmb_mapping_stats_path` | `null`; Dwight: the Allen `precomputed_stats_ABC_revision_230821.h5` | Allen WMB means, copied as the mapping precompute. |
+| `annotation_wmb_selfmap_test_cells_path` | `null`; Dwight: `$MERXEN_WMB_SELFMAP_TEST_CELLS`, a byte-identical copy of `research/selfmap/truth.csv` of the evidence archive | The 11,913 self-map test cells kept out of the marker training cells. A copy matching the pinned sha256 is seeded into `<store>/.downloads/local/wmb_selfmap/`, and bundles hash that copy. Required while `annotation_resolvability` is true. |
+| `annotation_wmb_marker_gene_universe_path` | `null` | Override of the `wmb_panel` marker gene universe. Unset, a panel inside the validated MS1 ∪ MS2 union (899 genes) uses that union and any other panel its own genes. |
+| `annotation_wmb_max_cells_per_cluster` | `50` | Marker training cells per WMB cluster. |
+| `annotation_merfish_ccf_metadata_path` | `null`; Dwight: the verified `cell_metadata_with_parcellation_annotation.csv` under `$MERXEN_ABC_ATLAS_DIR/metadata/MERFISH-C57BL6J-638850-CCF/20231215/views/` | Local MERFISH-C57BL6J-638850-CCF cell metadata; unset, it comes from the pinned download cache. |
+| `annotation_prep_max_forks` | Dwight: `1` | Concurrent `ANNOTATE_REFERENCE_PREP` tasks. |
+| `annotation_max_forks` | `2` (applied on Dwight) | Concurrent `CLUSTERING_SQUIDPY_ANNOTATE_MAP` tasks (6 CPUs, 4 for a mouse section, and 24 GB each, 48 GB above 1,000 panel genes). The CPUs are the MapMyCells processes; mouse maps with 4, the count gate M measured (pre-registration §25.1). |
+| `annotation_resolve_max_forks` | Dwight: `4` | Concurrent `CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE` tasks (2 CPUs and 16 GB each, 32 GB above 1,000 panel genes; about a minute per pair × segmentation). |
+| `annotation_allow_single_method` | `false` | Human degraded mode: in the WHB-only mode (no usable SEA-AD run), let WHB decide alone below 60 counts, recorded in the provenance (otherwise those cells get status `single_method`; plan §5.3). Only RESOLVE reads it, so changing it re-runs `CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE` alone under `-resume`, never MAP. |
+| `annotation_allow_fine_levels` | `false` | Report-only fine levels (OD-E4): the WHB cluster (human) or WMB supertype (mouse) columns `ct_cluster_*` / `ct_supertype_*` in the label table, emitted only where resolvability validates them; never a hierarchy leaf. PREP's fine-level seed check reads it too, so it is in the shared annotation config. |
+| `annotation_human_region` | `frontal_cortex` | Human anatomical region (also the samplesheet column `anatomical_region`): which WHB superclusters are region-plausible (`flag_implausible`, H2). Only `frontal_cortex` is validated; any other value is refused (plan §8.9, OD-C7). |
+| `annotation_human_microglia_flag` | `false` | Human microglial spill-over flag (OD-C5: off; RESOLVE writes `flag_microglial_spillover` as null with the reason in the provenance). Not wired yet. |
+| `annotation_mouse_section_regions`, `annotation_mouse_lkloc` | `auto`; `false` | Mouse region inference and pruning (`auto`, `none` or `;`-separated CCF divisions; also the samplesheet column `mouse_section_regions`, which wins once M5 wires it; [Mouse region step](stages/annotation.md#mouse-region-step-m6)) and the optional mouse glial second opinion (report only; not wired yet). Coronal sections only (AP 2.4–10.4 mm); give a sagittal, OB- or CB-dominated section an explicit list or `none`. The mouse RESOLVE rules, gate and flags have no pipeline params (below). |
+| `annotation_calibration_holdout_donor` | `auto` | The held-out WHB donor of the resolvability test set (`auto` = H19.30.002); v1.1 calibration uses it too. |
+| `annotation_report_enabled`, `annotation_report_max_forks` | `true`; Dwight: `2` | `ANNOTATION_REPORT` (M7): the annotation QC report of each map_first pair × segmentation (`false`: no report); at most this many at a time on the-dwight. |
+| `annotation_mode_mapmycells_stage` | `null` | The legacy `mapmycells` stage in `map_first` rows: `null` means `skip` for a species that has flipped (both, since M9) and `legacy` otherwise; set `legacy` or `skip` to choose. |
+| `annotation_reuse_published` | `true` | MAP copies a run from the published `<pair>/<seg>/annotation_map/annotation_map_out/map_manifest.json` instead of re-mapping when its query fingerprint, `build_hash`, engine parameters and ctm version are unchanged (Dwight prunes work directories, so `-resume` alone cannot). |
+| `annotation_keep_extended_json` | `false` | Keep each MapMyCells extended JSON, gzipped, next to its tidy parquet (by default it is parsed and deleted). |
+
+#### Dwight reference sources and the SSD1 launch guard
+
+SSD1 (`$MERXEN_SSD1_ROOT`) is failing: most of the reference bundles and
+sources stored there no longer match their recorded hashes, and the store's
+reuse check compares only the size of files above 64 MB. The Dwight mouse
+sources therefore default (as set in the private `dwight.site.config`) to the
+verified ABC Atlas download under `$MERXEN_REFERENCES_DIR`
+(`annotation_wmb_h5ad_dir`, `annotation_wmb_metadata_dir`,
+`annotation_merfish_ccf_metadata_path`, `annotation_mouse_gene_table`,
+`annotation_wmb_selfmap_test_cells_path`; the strings of the MS2 `map_first`
+run, because `build_hash` covers the resolved source paths). Both reference
+stores (`annotation_reference_store` and `annotation_reference_store_large`)
+default to `$MERXEN_STORAGE_ROOT`, so a launch does not pass them. The store
+has no human bundles yet: a human run finds none and rebuilds from the human
+sources, which the guard refuses until they move. Still on SSD1 by default,
+until the human sources are re-downloaded: `annotation_whb_*`, the legacy
+`mecr_*`, `mapmycells_*` and `clustering_squidpy_*` sources, and the human gene
+table (only its `var` index is read).
+
+`scripts/annotation_dev/launch_guard.sh` refuses a launch whose resolved
+configuration reads from SSD1. Give it the arguments of the `nextflow run`
+call; it runs `nextflow config` (with the caller's environment, so the site
+configs the launch will include are included, and it reports which), applies
+the launch's `--param` overrides and exits 1 if any value still contains the
+refused prefix, before any task starts. The prefix is `MERXEN_REFUSED_PATH_PREFIX`
+and the one allow-listed human gene table is `MERXEN_HUMAN_GENE_TABLE`, both read
+from the `.env` that `MERXEN_ENV_FILE` names (else the checkout's own; the
+environment wins over the file), or `LAUNCH_GUARD_PREFIX` / `LAUNCH_GUARD_HUMAN_GENE_TABLE`;
+`LAUNCH_GUARD_PREFIX=none` switches the guard off. Other exceptions are the
+values or params named in `LAUNCH_GUARD_ALLOW` and `LAUNCH_GUARD_ALLOW_KEYS`,
+and, for `--species mouse`, the human WHB and SEA-AD source params. A site
+variable that names a missing file is an error (exit 2). `scripts/annotation_dev/run_template.sh`
+is a launch script that calls it: it reads `MERXEN_ENV_FILE`, exports the
+alias and site-config variables to the launch, and lets a variable the operator
+exported (for example `MERXEN_DWIGHT_SITE_CONFIG=none`) win over the file.
+
+#### Annotation config fields of milestone M3c (`--annotation-config`)
+
+The standalone commands (`annotation-reference-prep`, `annotation-panel-simulate`,
+`annotate`) read an `AnnotationConfig` JSON (`merxen.annotation.config`); these
+fields were added by milestone M3c (plan §3.7, §8.3 "Resolvability version 7",
+§8.8). They have no Nextflow parameter yet. The version-7 simulation inputs
+(members, assets, chemistry, grid, top-up rule) enter a version-7 bundle's
+`build_hash`; the decision settings are recorded, not hashed.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `resolvability.version` | `auto` | `auto`: 6 for the families of `validated_panels.csv` and `resolvability_v6_pins.csv`, 7 for every other family. `6` forces version 6; forcing `7` on a version-6 family is refused (use `annotation-panel-simulate --resolvability-version 7` for the diagnostic). |
+| `resolvability.ensemble_r1_seeds`, `resolvability.ensemble_r3_seeds` | `null`, `null` | Seeds of the `R1_contam_HO` and `R3_measured_HO` emission members. `null`: eight members (amendment of 2026-09-29, pre-registration §22.3), R1 `[0, 6, 7, 8, 9, 10]` + R3 `[2, 3]` where the species x chemistry has a measured factor table, else R1 `[0, 6, ..., 12]` (seed 0 is the pre-registered draw; stage D used R1 `[0, 1, 2]` + R3 `[0]`). |
+| `resolvability.ensemble_spread_floor`, `resolvability.ensemble_spread_se_multiplier`, `resolvability.ensemble_member_min_confident` | `0.03`, `3.5`, `10` | The E2 spread rule: member precisions within max(floor, multiplier x SE), each member with at least this many check-half confident calls. |
+| `resolvability.ensemble_spread_wilson_margin_se` | `1.0` | The spread route of E2 also needs the pooled Wilson bound to clear target - 0.02 by this many standard errors `sqrt(p (1 - p) / n_eff)` of the pooled precision (amendment of 2026-09-29); the unanimous route needs none. Bundles built before the amendment record no margin and re-derive with 0. |
+| `resolvability.saturated_bp_share` | `0.90` | A tested set without a local threshold whose fit-half calls are more than this share at bp = 1 is judged at the 0.99 cap. |
+| `resolvability.monotone_depth`, `resolvability.nonneuronal_monotone_max_depth` | `true`, `1000` | The monotone fill of deeper bins, never for non-neuronal classes at or above this depth. |
+| `resolvability.topup_min_class_test_cells` | `200` | Classes of the leaf's parent level with fewer test cells are topped up before mapping (`0` turns the top-up off). |
+| `resolvability.r3_table_rule`, `resolvability.r3_residual_sd_log2` | `restricted`, `0.20` | The `R3_measured_HO` table rule (`all_measured` only for the D3 regression) and its residual SD. |
+| `resolvability.neighbour_structured_spill` | `false` | Experimental and not implemented (user decision 7); `true` is refused. |
+| `panel.panel_chemistry` | `auto` | `auto` (MERSCOPE -> `merscope`; a Xenium panel with Jaccard >= 0.95 to a pinned Prime list -> `xenium_prime`; else unknown), or a declared `xenium_prime`, `xenium_v1`, `merscope`. Only `xenium_prime` mouse has a measured factor table (the R3 member). |
+| `real_qc.enabled` | `true` | Run the downgrade-only real-data QC in RESOLVE (plan §8.8): human (M13) and mouse (M13b C22, warn-only: it records the mouse gate's G1-G5 and the other checks and changes no gate, label or trust). `false` gives the QC-free run that pre-registration NR1 compares with (`real_qc.downgrade_only_violations`): no check runs, nothing is lowered, and each sample's `real_qc` summary block says the QC is disabled. |
+| `real_qc.marker_consistency_warn`, `real_qc.marker_consistency_broad_only` | `null` (human 0.75, mouse 0.80), `0.70` | Marker referee (human, §8.8): a warning below the first; below the second the dataset gate is capped at `broad_only` (trust and margins unchanged). Mouse G2 keeps its own threshold in the mouse gate. |
+| `real_qc.paired_broad_jsd_warn` | `0.20` | Paired concordance: above this soft broad JSD on the shared-tissue mask (point estimate) the pair's supercluster-level cross-platform statistics are withheld (`pair.cross_platform` capped at `broad_only`, reason `real_qc:paired_concordance`). `not_applicable` for an unpaired section. |
+| `real_qc.uninformative_strata_warn_frac` | `0.5` | Flag rates: warn when more than this share of a dataset's (class x platform) strata are uninformative under H16's 15% marking. |
+| `real_qc.prefilter_spotcheck_min_agreement` | `0.95` | 5K prefilter spot check: an emitted level whose prefiltered vs unfiltered lookup agreement is below this becomes `not_resolvable` for the dataset. RESOLVE has no spot-check input yet, so the check is `not_evaluable` on a prefiltered bundle and `not_applicable` otherwise. |
+| `real_qc.coverage_warn_margin`, `real_qc.coverage_min_cells` | `0.10`, `200` | Per-class real vs simulated coverage: warn per (level, called class) with at least this many cells when the real confident share is below the class-depth prediction at the dataset's own per-class depth by more than the margin (user decision 4; warning only, never an offset). Keep `coverage_min_cells` at 100 or more: a class with fewer cells takes the label-free depth histogram for its prediction (`real_qc.CLASS_DEPTH_MIN_CLASS_CELLS`), which should not decide a warning. |
+| `real_qc.factor_remeasure_min_r` | `0.9` | First in-house dataset of a family with a measured factor table: warn (and recommend a PREP re-run with the in-house table as a new asset) when the re-measured factors correlate below this with the stored table on the informative genes. |
+| `real_qc.nonneuronal_high_depth_counts` | `1000` | Non-neuronal cells at or above this depth in `nonneuronal_high_depth` bins get the report-only `flag_nonneuronal_high_depth` (RESOLVE, version-7 bundles). |
+| `real_qc.genes_per_count_gap_warn` | `0.45` | Gene-complexity warning: native cells carry more than this share more genes than simulated cells at matched depth; the warning says simulated coverage predictions are unreliable for the dataset. |
+| `real_qc.gene_complexity_matching` | `interpolated` | Which simulated cells a native depth bin is compared with in the gene-complexity check: `interpolated` (inside the grid, each test cell's simulated genes interpolated, linearly in log depth, between the bin's edges to the bin's native median total; the open top bin at its lower edge; the user's ruling of 2026-10-07, pre-registration §23.19) or `lower_edge` (the simulated cells at the bin's lower edge, which shows a gap where there is none, because native cells in a bin carry more counts than its lower edge). |
+| `real_qc.seeded_families_warn_only_until_gate` | `{"human": "pending", "mouse": "pending"}` | Per species, whether its gate (human H, mouse M) has merged. While `pending`, the checks `real_qc` adds (marker referee, paired concordance, flag rates, gene complexity, prefilter spot check) only warn on the seeded real-data families of that species. A gate counts as merged only after its acceptance-gate PR into `main`. The earlier bool still loads (`true`: both pending; `false`: both merged). Mouse RESOLVE ignores the `mouse` entry: its QC is warn-only for every family (M13b C22), because applying mouse QC effects is not wired, so `"mouse": "merged"` changes nothing. |
+| `real_qc.marker_referee_min_group_markers`, `real_qc.marker_referee_min_marker_units`, `real_qc.marker_referee_min_marker_share`, `real_qc.marker_referee_min_pseudo_confident` | `3`, `1.5`, `0.6`, `200` | Human marker referee (mouse G2's values): broad classes with fewer derived markers are left out (fewer than 2 classes left: `not_evaluable`); a marker pseudo-label needs this many units and this share of the summed units; the statistic needs this many scored cells (pseudo-labelled table cells with a confident `ct_broad`). Mouse G2 reads `mouse_gate.g2_*`. |
+| `real_qc.marker_referee_comparator` | `node` | How the human referee derives its per-panel marker sets from the WHB profiles with the specificity rule: `node` (mouse G2's rule: each broad class's mean supercluster profile against every other supercluster; the M13 C13 specification, `not_evaluable` on every set a sample) or `class` (the broad-class profile, the `n_cells`-weighted mean of its superclusters' `expected_fraction`, against the other broad classes; not `flags.class_profiles`, which weights `mean_cpm`). A family listed in `real_qc.marker_referee_comparator_by_family` takes its own. |
+| `real_qc.marker_referee_comparator_by_family` | `{"human_merscope_aa25d5a241d0": "class"}` | The referee comparator of each family the user ruled on, by the panel's family id. The user's ruling of 2026-10-07 (pre-registration §23.18, §23.19, C1 (b)) decides the referee for the new-panel human MERSCOPE family only: it takes `class`, with the 0.75 / 0.70 thresholds unchanged. Every other family, the seeded set a sections included, keeps `real_qc.marker_referee_comparator`. The outcome's settings record the comparator and the family it was ruled for (`comparator_family`). |
+| `real_qc.registration_g1_effect` | `gate_failed` | What human registration G1's fail rule (the segmentation registration check's density ratio below `mouse_gate.g1_density_ratio_fail` 1.5 or shift above `mouse_gate.g1_shift_fail_um` 5 µm) does: `gate_failed` (the dataset gate fails, as plan §8.8 registers; the default since the user's ruling of 2026-10-07, pre-registration §23.19, after the set a regression showed no false G1 failure) or `warning` (warn-only, the M13 setting until then). The warning rule (density ratio below `mouse_gate.g1_density_ratio_warn` 2.0) is a warning under either setting. |
+
+The `real_qc` checks are implemented in `merxen.annotation.real_qc`. RESOLVE
+reads `real_qc.nonneuronal_high_depth_counts` for version-7 bundles (the M3c
+follow-up); `real_qc.real_data_qc` reads the other fields, and human RESOLVE
+runs it on every sample (M13; see
+[Real-data QC in RESOLVE](stages/annotation.md#real-data-qc-in-resolve-m13)).
+Mouse RESOLVE runs it warn-only (M13b C22; see
+[Mouse real-data QC in RESOLVE](stages/annotation.md#mouse-real-data-qc-in-resolve-m13b-warn-only)).
+None raises a trust state, a gate level or an emission.
+
+#### Gate-P settings (`--annotation-config`, M13)
+
+Gate P (`annotation-panel-simulate --gate-p`, `scripts/acceptance/new_panel.py`;
+[Gate P](stages/annotation.md#gate-p-simulation-based-validation-of-a-panel-family-m13))
+reads these `resolvability` fields of the `AnnotationConfig` JSON. They have
+no Nextflow parameter: gate P is a standalone acceptance programme, never a
+pipeline stage. The thresholds are the pre-registered values of plan §3.7
+and §14 (pre-registration §23.9); the criteria revision of §23.21 changed how
+some criteria are read, not a threshold. Changing one is a rule change that
+needs its own PR, a loosening needs the user's written approval, and the
+dry run of the species is re-run under the changed rule before any family is
+scored.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `resolvability.gate_p_seeds` | `[0, 1]` | MapMyCells mapping seeds of the replicates (D6). Seed 1 re-maps seed 0's simulated cells. The list must hold 0 and another seed. |
+| `resolvability.gate_p_human_donors` | `["H19.30.002", "H19.30.001", "H18.30.002"]` | The frontal WHB donors: the held-out donor of the production test set (scored on its check half) and the two leave-one-donor-out donors. They must be distinct frontal donors of the held-out bundle, at least two, with the default held-out donor among them. |
+| `resolvability.gate_p_min_confident_n`, `resolvability.gate_p_replicate_min_confident_n` | `200`, `100` | Confident held-out calls a pooled tested set needs (NP3–NP7), and a replicate needs for NP4's floor and range. |
+| `resolvability.gate_p_class_min_test_cells` | `700` | Pooled test cells a class needs to enter C_P (which must hold ≥ 90% of a level's test cells). |
+| `resolvability.gate_p_spread_se_multiplier` | `3.5` | NP4's replicate range limit max(0.03, multiplier × SE). |
+| `resolvability.gate_p_min_coverage` | `0.30` | Coverage NP3 requires of each tested set. |
+| `resolvability.gate_p_stress.spill_fraction`, `.gene_efficiency_sigma`, `.platform_factor_cap_log2` | `0.35`, `1.0`, `2.0` | NP6's stress members: foreign-class spill, LogNormal(0, sigma) efficiency, and the cap on the cross-platform offsets (log2). |
+| `resolvability.weight_min_type_cells`, `resolvability.weight_trim_factor` | `20`, `10.0` | Shared with RESOLVE's composition reweighting. In NP3 and NP6's weighted rows a truth type with fewer test cells in the set's scope takes its truth class's weight, and each call's weight is capped at this multiple of the set's median positive weight. Kept by the user's ruling A2 (a) of 2026-10-07 (a loosening approved in writing, pre-registration §23.19); since revision R1 (§23.21) the weights are read on the test cells of the set's scope (`gate_p.np3_test_cell_weights`). |
+| `resolvability.holdout_other_region_donor_only` | `false` | Set only by gate P on its leave-one-donor-out builds (D2 (d)): the held-out test set draws its other-region top-up from the held-out donor only. It enters that bundle's `build_hash` only when set, so every production bundle is unchanged. |
+| `resolvability.gate_p_mouse_test_draws` | `2` | Disjoint WMB test draws of the mouse path (plan §14 NP4: "the two disjoint test draws"). Gate P's mouse path scores draw 1 (the production self-map's test set, on its check half) and draw 2 and refuses any other value. |
+| `resolvability.gate_p_wmb_draw` | `1` | The WMB test draw a `wmb_selfmap_testset` build makes: `1` is the production self-map's test set, `2` gate P's second disjoint draw (M13b C20a; `reference.wmb_second_draw`, built by `scripts/annotation/build_wmb_draw2.py`). Draw 2 holds the self-map list's design (≤ 10 cells per supertype plus the non-neuronal extra per supertype) on cells that are neither marker-training, self-map-list nor draw-1 cells, then tops each class up to `gate_p_class_min_test_cells` pooled with draw 1's check half, taking at most `gate_p_topup_max_cluster_frac` (0.05) of any cluster's 10Xv3 cells; it records the availability per class. The draw-2 rule enters the test set's `build_hash` only when set, so every production bundle is unchanged; `wmb_panel` refuses draw 2. (`gate_p_topup_max_cluster_frac` is also read by the version-7 mouse class top-up of PREP.) |
+
+NP6's Wilson margin is `resolvability.wilson_margin` (0.02), shared with
+the self-map. NP4's seed criterion uses the pre-registered constant 0.02
+(`gate_p.NP4_MAX_SEED_CHANGE`), not `resolvability.seed_stability_max_change`,
+which belongs to the fine-level opt-in (both are 0.02). The NP3, NP5, NP6 and
+NP7 limits not listed above are module constants of `merxen.annotation.gate_p`
+(`Np3Settings`–`Np9Settings`). NP1 and NP2 read `panel.min_gene_id_resolution`
+(0.95) and `panel.min_root_markers` (10), and NP9 `panel.large_panel_genes`
+(1,000).
+
+#### Gate-P command options (M13)
+
+`scripts/acceptance/new_panel.py --species human|mouse <options>` passes every
+other option to `merxen annotation-panel-simulate --gate-p` unchanged (the
+full list is in the [CLI reference](cli.md#merxen-annotation-panel-simulate)).
+It exits 0 when gate P was scored and 3 when gate P stopped before any
+leave-one-donor-out build (`stop_reasons` in `gate_p_run.json`). Run it from a
+`git archive` export with a `COMMIT` file at its root, so the reports record
+the code that ran.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--species` | required | The species chosen when the check starts (M13 D4); a mouse family is refused until M13b. |
+| `--store`, `--store-large` | required; the config's `reference_store_large` | Both must name the separate gate-P store (D11 (b)): a store root that is, or lies inside, the config's `reference_store` or `reference_store_large` (the production stores) is refused before any compute. Without `--store-large` the config's `reference_store_large` is used when it is set, and is then refused. |
+| `--depth-profile-asset ID`, `--expected-depth N` | none | NP5's expected depth: a registered profile asset (a family with real sections: `np5_depth__<family_id>`) or the label-free pooled median. One is required; a per-class CSV (`--depth-profile`) is never read for NP5. |
+| `--gate-p-other-region donor_own\|shared` | `donor_own` | The leave-one-donor-out sets' other-region test cells: each donor's own (D2 (d)) or the production draw (the fallback (c)). By the user's ruling A48 (b), a run that stops on the pool sizes alone is re-run in place with `shared`. |
+| `--gate-p-accept-small-pools` | off | Run D2 (d) although a donor's pool is too small. |
+| `--gate-p-accepted-parents LIST` | none | Comma-separated weak or collapsed parents the user accepted (NP2), each by lookup key, node label or node name; given before the run. |
+| `--gate-p-run-with-unaccepted-parents` | off | Run although PREP lists a parent the user has not accepted (NP2 stays pending, so the family cannot pass). |
+| `--gate-p-unresolved-reviewed` | off | The user reviewed NP1's unresolved gene list in the gate-P PR. |
+| `--gate-p-dry-run` | off | Also score the seeded family's dry-run rule (D28, R5). |
+| `--gate-p-version auto\|7` | `auto` | `7` scores a version-6 family's version-7 ensemble (D5 (c)); nothing is written to a store. |
+| `--gate-p-dry-run-seconds S`, `--gate-p-dry-run-simulated-cells N` | none | NP9's version-7 time reference (D10 (a)): the set a version-7 dry run's `measured_seconds` and `simulated_cells` from its `gate_p_run.json` (since 2026-10-07: 4,259.36 s and 6,744,671 cells, run `v7_rev1`). Without them NP9's time part is not evaluable for a version-7 family. |
+| `--gate-p-time-reference-seconds S`, `--gate-p-time-reference-basis TEXT` | none | NP9's time reference of a version-6 family and its source; not used for version 7. |
+| `--gate-p-skip-prep-identity` | off | Do not rebuild PREP for NP9's identity part (NP9 is then not evaluable). |
+| `--gate-p-x1-factors PATH` | none | The X1 factor table, reported beside NP6's offsets (D7 (b)). |
+| `--gate-p-wmb-draw2 PATH` | none | A mouse family's second disjoint WMB test draw (M13b C20a; `scripts/annotation/build_wmb_draw2.py`). Required for mouse. |
+
+**The NP5 depth-profile asset.** A family with real sections takes its own
+profile, built by `scripts/annotation/build_np5_depth_profile.py` from its
+first provisional `map_first` run (pre-registration §23.20) and committed to
+`src/merxen/assets/annotation/sim_inputs/` as `np5_depth__<family_id>.csv`
+with its `.provenance.json` sidecar (role `gate_p_profile`). Only gate P reads
+it; PREP never selects it, so it enters no `build_hash`. The builder takes
+`--labels` (one RESOLVE label table per section, repeated), `--sections` (the
+family's sections by sample or pair id), `--family-id`, `--panel-hash`
+(checked), `--segmentation` (default `proseg_hybrid`), `--tissue`, `--date`,
+`--evidence-root` and `--manifest` (the source manifest, written under the
+evidence root), and `--check` (write nothing; exit 1 when a committed file is
+stale). Re-run `scripts/annotation/build_sim_inputs.py` afterwards so the
+`NOTICE` lists the asset. The registered asset of the new-panel human
+MERSCOPE family is `np5_depth__human_merscope_aa25d5a241d0` (sha256
+`79026806…`, pre-registration §23.24): 390,686 confident broad calls over the
+four sections, overall median 328 counts; Fibroblast (3 calls) takes the
+overall median. Gate P refuses an asset whose tables were resolved with
+another primary bundle than the one its own PREP builds.
+
+**RESOLVE rule settings have no pipeline params.** The thresholds, targets,
+floors, dataset gate and flag settings RESOLVE applies are the
+pre-registered defaults of `merxen.annotation.config` (plan §3.7, §14);
+changing one is a rule change that needs its own PR (and, for a criterion's
+threshold, the loosening rule of the pre-registration). The standalone
+commands take them from `--annotation-config`; the pipeline writes the
+defaults into each task's `annotation_config.json`, and the RESOLVE rules
+fingerprint re-runs RESOLVE when the packaged tables or the code change.
+
+| Model | Setting | Default | Meaning |
+|---|---|---|---|
+| `AnnotationThresholds` | `whb_broad`, `whb_supercluster`, `seaad_broad` | 0.73, 0.69, 0.68 | Raw bootstrap-probability thresholds (lineage and NT use `whb_broad`); raised (never lowered) to a bundle's recorded default or, outside real-data-validated families, to the resolvability table's local threshold. |
+| | `seaad_subclass_below60`, `seaad_subclass_from60`, `second_vote_below_counts` | 0.55, 0.45, 60 | SEA-AD subclass thresholds, and the depth below which SEA-AD must agree (from 60 counts it may only veto). |
+| | `target_*`, `provisional_target_margin`, `provisional_target_margin_below60`, `provisional_target_cap` | 0.90 (lineage, broad, NT, class), 0.85 (supercluster, subclass); 0.05, 0.10, 0.97 | Resolvability precision targets, and the margins of provisional and simulation-validated families. |
+| | `floors_path`, `allow_fine_levels`, `max_leaf_level` | packaged `floors_<species>.csv`; `false`; human `supercluster`, mouse `subclass` | Class × platform count floors (unknown panels take the maximum over platforms), the report-only fine levels, the deepest emitted level. |
+| `AnnotationGate` | `depth_counts`, `min_frac_ge30`, `min_table_broad_coverage`, `warn_segmented_broad_coverage`, `warn_unvalidated_share` | 30, 0.30, 0.25, 0.15, 0.10 | Dataset gate: `broad_only` when fewer than 30% of table cells reach 30 counts, `failed` below 25% confident broad coverage of table cells; a warning (never a lower level) below 15% coverage of segmented objects or, for simulation-validated families, above 10% confident calls outside the validated region (the 10% rule also applies to the mouse gate, over broad, class, nt and subclass). |
+| `AnnotationFlagsConfig` | `contamination_alpha`, `contamination_min_neg_counts`, `contamination_null_depth_quantile`, `contamination_min_null_cells`, `negative_gene_max_fraction` | 0.01, 3, 0.75, 30, 0.01 | Contamination flag: beta-binomial null fitted per class × platform on the confident cells in the top depth quartile (at least 30), flag at p < 0.01 with at least 3 negative counts; negative genes detected in < 1% of the class's cells in both references. |
+| | `flag_rate_uninformative_above`, `diffuse_quantile`, `diffuse_n_simulations`, `diffuse_rate_uninformative_above` | 0.15, 0.95, 200, 0.30 | Realised-rate switches (a contamination stratum above 15%, a diffuse stratum above 30% is uninformative and its flag null; H16 marks every stratum above 15%), and the diffuse flag's multinomial q95. |
+| | `ood_robust_z`, `ood_min_cells` | -3.0, 30 | OOD flag: robust z of `avg_correlation` within class × platform × depth bin (strata of at least 30 cells). |
+| | `microglial_spillover_enabled`, `microglia_stat_min`, `microglia_weight_min`, `microglia_fpr_max` | `None` (mouse on, human off; OD-C5), 10.0, 0.05, 0.005 | Mouse spill-over flag (§7.4): E3's likelihood-ratio statistic and spill weight a flagged cell needs; the flag is null when more than 0.5% of the marker astrocytes are flagged. |
+| | `specific_gene_ratio`, `specific_gene_min_share`, `min_specific_genes`, `astro_lowcount_below` | 20, 0.001, 3, 100 | The derived microglia genes (§8.6: microglia subclass profile ≥ 20× every non-Immune class, share ≥ 1/1000; fewer than 3 make the flag null) and the depth below which an Astro-Epen call gets `flag_astro_lowcount`. |
+| `AnnotationThresholds` (mouse) | `wmb_class`, `wmb_subclass`, `wmb_class_min_corr`, `provisional_mouse_subclass_floor` | 0.90, 0.80, `None`, 60 | Mouse class and subclass bootstrap thresholds (§7.3; minimums a panel's resolvability may raise); the class `avg_correlation` floor (`None`: the M6 shadow study selected none, pre-registration §16; a configured floor applies to the real-data-validated mouse families only); the subclass count floor of a provisional mouse panel. |
+| `MouseGateConfig` (`mouse_gate`) | `g1_density_ratio_fail`, `g1_density_ratio_warn`, `g1_shift_fail_um`, `g1_radius_um` | 1.5, 2.0, 5.0, 4.0 | G1 registration (§7.6): `failed` below a transcript-density ratio of 1.5 (4 µm around centroids vs random points) or above a 5 µm shift against the platform's own cells, warning below 2.0 or when no check is given. |
+| | `g2_marker_consistency_fail`, `g2_marker_consistency_warn`, `g2_min_group_markers`, `g2_min_marker_units`, `g2_min_marker_share`, `g2_min_pseudo_confident` | 0.70, 0.80, 3, 1.5, 0.6, 200 | G2 derived marker referee: `failed` below 0.70, warning below 0.80 (provisional on derived markers [L]); class groups with fewer than 3 derived genes are left out; a pseudo-label needs 1.5 marker units and 60% of them; fewer than 200 pseudo-labelled cells warn. |
+| | `g3_implausible_warn`, `g3_t2_max_present_share` | 0.03, 0.25 | G3: warning above a 3% pre-pruning share of calls to subclasses with less than 25% of their MERFISH grey-matter cells in the present divisions (E7's T2: subclasses with at least `mouse_regions.min_merfish_cells_subclass` MERFISH cells, outside `mouse_regions.never_drop_classes`). |
+| | `g4_window_sections`, `g4_ap_estimate`, `g4_astro_epen_band_points`, `g4_immune_band_points` | `[]`, `true`, 5.0, 1.0 | G4: the MERFISH-638850 sections of the composition window (standalone `--mouse-g4-sections`); empty: the AP estimate (plan §7.8 item 4) chooses the best-matching section of all 53 and its neighbours, unless `g4_ap_estimate` is off (G4 then not evaluated); the warning bands in percentage points. |
+| | `g5_spillover_warn` | 0.15 | G5: warning above a 15% spill-over flag rate. |
+| `MouseRegionConfig` (`mouse_regions`; read by MAP) | `tile_um`, `min_neurons_per_tile`, `confident_neuron_min_bp`, `min_tile_fraction`, `min_component_tiles`, `min_assigned_tiles` | 200, 2, 0.9, 0.01, 3, 200 | Region inference (§7.2, E7): tile edge, confident neurons per assigned tile and their class / subclass bootstrap probability, a division's share of assigned tiles and its connected component, and the tile count below which pruning is skipped with a warning. The defaults are the rule M6b selected, `a+f:tile200,nn2` (pre-registration §24); the v1 rule (`MouseRegionConfig.v1()`) has 150 µm tiles and 3 neurons per tile. |
+| | `class_low_share`, `subclass_share_in_low_class`, `subclass_share_default`, `min_merfish_cells_subclass`, `min_merfish_cells_class`, `never_drop_classes` | 0.20, 0.30, 0.10, 20, 100, Pineal, Astro-Epen, OPC-Oligo, Vascular, Immune | The two-tier drop rule ([Mouse region step](stages/annotation.md#mouse-region-step-m6)). |
+| | `coherence_k`, `coherence_min`, `coherence_max_conf` | 30, 0.1, 0.8 | F1 (`flag_region_incoherent`): kNN30 same-class coherence below 0.1 and class bootstrap below 0.8. |
+| | `rule_variant`, `coupled_regions`, `coupling_home_structures`, `coupling_min_tile_fraction`, `conditional_never_drop`, `region_min_tile_fraction` | `m6b`, `{"OB": ["OLF"]}`, `{"OB": ["AON"]}`, 0.01, `[]`, `{}` | M6b rule variants (plan §7.8; [Mouse AP axis](stages/annotation.md#mouse-ap-axis-m6b)): (a) region coupling (the default `{"OB": ["OLF"]}`: OB counts as present when OLF is and the tiles whose majority structure-level home is AON hold at least 1% of the assigned tiles; needs structure-level homes, which a `wmb_region_share` bundle has from revision 2), (b, c) nodes kept when regions are present (`{"level": "class", "name": "05 OB-IMN GABA", "when_any_present": ["STR", "OLF"]}`), (d) per-division tile fractions (`{"OB": 0.005}`). `m6b` (the default) accepts any combination; `v1` refuses the last three fields (`MouseRegionConfig.v1()` sets `v1`, no coupling and v1's tile fields). The tile parameters (variant (f)) are the fields above. |
+| | `ap_scope_min_mm`, `ap_scope_max_mm` | 2.4, 10.4 | The coronal AP scope; the AP estimate records whether a section lies inside it and the report (M7) warns outside. |
 
 ### Resource limits
 
@@ -766,6 +1125,7 @@ for every task. Portable per-process CPU/memory requests remain in
 | `MECR_REFERENCE` | 16 | 240 GB | 1 |
 | `MECR` | 4 | 48 GB | `mecr_max_forks` = 4 |
 | `CLUSTERING_SQUIDPY` | 8 | 32 GB | `clustering_squidpy_max_forks` = 4 |
+| `CLUSTERING_SQUIDPY_COMPUTE_CPU` (`map_first`) | 8 | 32 GB | `clustering_squidpy_max_forks` = 4; CPU only, no GPU lock |
 | `MAPMYCELLS` | 8 | 160 GB | unbounded |
 | `GASTON_PREPARE` | 4 | 64 GB | 2 |
 | `GASTON_GLM_PCA` | 16 | 160 GB | 2 |

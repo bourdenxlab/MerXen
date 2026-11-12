@@ -65,6 +65,18 @@ reference assets.
 6. Write per-round UMAP/spatial plots, annotation heatmaps, marker tables,
    branch H5ADs, and a manifest under `<sample_id>_hierarchical/`.
 
+In `map_first` mode (the default of both species: human since M8, mouse
+since M9; a run selects `legacy` with `--clustering_squidpy_mode legacy` or
+`--clustering_squidpy_mode_<species> legacy`, and a row with its
+`clustering_squidpy_mode` column; ATERA rows always cluster in `legacy`
+mode for now, see [ATERA rows](../configuration.md#atera-rows)) the hierarchy
+comes from reference-based labels instead:
+`CLUSTERING_SQUIDPY_COMPUTE_CPU` replaces the GPU compute between the same
+PREPARE and FINALIZE, the branches and leaves are the confident mapped
+classes, and the clustered table gets the `_mapfirst` suffix before the
+species' flip. See
+[Map-first clustering runs](annotation.md#map-first-clustering-runs-m5).
+
 ## Nextflow process
 
 [`CLUSTERING_SQUIDPY`](../../workflows/modules/clustering_squidpy.nf) — one
@@ -104,7 +116,7 @@ reference expression matrix and writes separate annotated outputs.
 |-------|-------------|
 | `pair_id` | Pair identifier used in output paths. |
 | `output_dir` | Where `clustering_squidpy_out/` is populated. |
-| `samples` | One or two sample configs: `sample_id`, `platform`, `zarr_path`, optional `table_key`, optional `shape_key`. |
+| `samples` | One or two sample configs: `sample_id`, `platform`, `zarr_path`, optional `table_key`, optional `shape_key`, `expected_panel_gene_count` (default `300`; `null` skips the panel-size check) and `hvg_n_top_genes` (default `null`: PCA on every gene). The workflow sets the last two for ATERA samples only; see [ATERA (whole-transcriptome) samples](#atera-whole-transcriptome-samples). |
 | `drop_control_features` | Remove blank/negative/control-like variables before clustering. |
 | `min_counts` / `min_cells` | Gentle cell and gene filtering thresholds. |
 | `normalize_target_sum` | Optional `scanpy.pp.normalize_total` target sum. `null` uses Scanpy's default. |
@@ -149,6 +161,126 @@ nextflow run workflows/main.nf \
     --species mouse \
     --clustering_squidpy_broad_reference_cache_dir /durable/mapmycells-cache
 ```
+
+## Whole-transcriptome panels (more than 5,000 genes)
+
+A sample whose panel has more than 5,000 non-control genes
+(`merxen.gene_sets.WHOLE_TRANSCRIPTOME_MIN_GENES`; Xenium Prime 5K with 5,001
+or 5,006 genes counts, as does ATERA) runs the PCA on highly variable genes even
+when its sample JSON sets no `hvg_n_top_genes` (Atera plan AT-8, user decision
+of 2026-11-07). The rule is the panel width, whatever the platform:
+
+- The width is counted on the clustering input before the min-cell filter and
+  without control features, so genes detected in no cell do not move a 5,001-gene
+  panel back under the threshold. Branch and neuron rounds, which receive the
+  broad round's gene-filtered matrix, inherit the width the broad round
+  recorded, so all rounds of a sample follow the same rule.
+- The automatic count is `WHOLE_TRANSCRIPTOME_HVG_N_TOP_GENES` = 2,000
+  (`cell_ranger`, the same selection as below), equal to the default of
+  `params.atera_clustering_hvg_n_top_genes`; a test keeps the two in step.
+- The round's `uns` parameters add `hvg_selection_reason`
+  (`whole_transcriptome_panel`, or `requested` when the sample set
+  `hvg_n_top_genes`), `n_panel_genes` and `whole_transcriptome_min_genes`.
+- The rule lives in Python, not in the workflow: no sample JSON or process
+  script changes, so the clustering task hashes of every row are unchanged.
+  The 300-gene XENIUM and MERSCOPE rows keep the all-gene PCA and their exact
+  `uns` records. (Like any edit of this module, the change does alter the
+  map_first hierarchy fingerprint, so the annotation `COMPUTE_CPU` task re-runs
+  once under `-resume`.)
+  A cached 5K clustering task is therefore not re-run by `-resume`; re-run it
+  (or clear its work directory) to get the HVG PCA.
+- An explicit `hvg_n_top_genes` always wins. There is no opt-out back to the
+  all-gene PCA for a wide panel; setting `atera_clustering_hvg_n_top_genes` to
+  `null` now gives ATERA rows the same automatic 2,000 genes.
+- The map_first QC embedding (`clustering/representation.py`: `seurat` flavour,
+  panels above 1,000 genes) is a separate rule and is unchanged.
+
+## ATERA (whole-transcriptome) samples
+
+ATERA rows (AT-6, native segmentation) cluster the vendor cells of
+`table_original` on `atera_cell_boundaries`. Four things differ from the
+300-gene XENIUM and MERSCOPE panels; each is switched by a sample key or a
+panel size those panels never reach, so their outputs are unchanged.
+
+**The broad atlas labels of ATERA rows are provisional.** On the public human
+hippocampus section the WHB supercluster markers (`CCN202210140_SUPC`) call
+mature oligodendrocytes (MOBP, PLP1 and MOG high, PDGFRA near zero)
+"Oligodendrocyte precursor", give the PDGFRA/VCAN-high cluster "Committed
+oligodendrocyte precursor", and give cerebellar labels ("Upper rhombic lip",
+"Cerebellar inhibitory") to PROX1/CALB1/SLC17A7-positive excitatory neurons.
+The names carry into `broad_class`, the subcluster names and the MENDER cell
+states. Treat them as cluster names to be checked against markers, not as
+cell types, until the robust annotation work restricts the atlas classes by
+region and adds a marker sanity gate.
+
+- **Nucleus metrics are joined through the owning cell.** ATERA nuclei are one
+  row per nucleus (`atera_nucleus`, id = nucleus row + 1, the same integer
+  range as cell ids), so they are never keyed by their own id. The stage reads
+  the nucleus layer from the segmentation registry (the entry with a
+  `cell_key`, normally `cell_instance_id`) and aggregates per cell:
+  `nucleus_area` is the largest nucleus, `nucleus_area_total` the sum and
+  `nucleus_count` the number of nuclei. It fills a column only when the table
+  lacks it or it is all NaN; the build already writes all three from the vendor
+  data, so on ATERA they are kept as built. `uns["merxen_clustering_squidpy"]`
+  records `nucleus_shape_key` and `nucleus_join`. A source-named
+  `nucleus_boundaries` layer is never used for ATERA.
+- **PCA on highly variable genes.** The workflow passes
+  `hvg_n_top_genes = params.atera_clustering_hvg_n_top_genes` (default 2000).
+  Each round (broad, branch and neuron rounds alike) selects that many genes on
+  its own cells with Scanpy's `cell_ranger` flavour on the log-normalised
+  matrix into `var["merxen_highly_variable"]` and runs the PCA with
+  `mask_var="merxen_highly_variable"` (GPU: the same `mask_var` to
+  rapids-singlecell). The round's `uns["merxen_clustering_params_<key>"]`
+  records `hvg_method`, `hvg_n_top_genes`, `n_highly_variable_genes` and
+  `pca_mask_var`. The vendor's `vendor_highly_variable` column is never read.
+  (`seurat_v3` would need scikit-misc, which MerXen does not declare.)
+- **Scale.** On the public full section (91,381 cells after filtering, 18,049
+  genes) prepare, compute (GPU) and finalize take 6.5 min in all, at 19.4 GB
+  peak memory (AT-6 exit run).
+- **No 300-gene panel check.** `expected_panel_gene_count` is `null` for ATERA,
+  so the "Expected 300 genes" warning and the `has_expected_panel_gene_count*`
+  flags of the control-filter summary are left out.
+- **Bounded summaries.** This is a panel-width rule, not a platform rule: it
+  applies to any panel past the limit (a XENIUM 5K panel would take it too),
+  and the 300-gene panels never reach it. Above 1,000 genes the per-cluster
+  means and fractions expressing (atlas scoring and dotplot tables) come from
+  one sparse group-indicator product accumulated in float64; the matrix is
+  never densified. Dotplots (below) select genes for every panel size; before
+  AT-6 an ATERA dotplot of every gene exceeded the 65,000 px render limit.
+
+## Branch dotplots: top 5 genes per cluster
+
+Every branch dotplot (`plots/dotplot/<prefix>_gene_dotplot.png`), whatever the
+panel size and in both clustering modes, draws the top 5 genes of each
+subcluster by cluster-mean z-score (z over subclusters, per gene). In
+`map_first` mode the subclusters are a branch's mapped leaves; legacy and
+`map_first` share one helper (`clustering_squidpy.plot_top_gene_dotplot`):
+
+- Only genes expressed in at least 10% of a subcluster's cells are its
+  candidates (z ties go to the higher fraction expressing, then panel order),
+  so a gene with a few transcripts in one cluster cannot take a marker's
+  place. A subcluster with fewer than 5 candidates contributes only those it
+  has; if no gene reaches the floor in any subcluster, the floor is dropped
+  and recorded as 0.
+- Genes are deduplicated and drawn in subcluster order (each subcluster's
+  genes best first; a gene shared by several subclusters sits with the first),
+  so the plot runs along the diagonal.
+- At most 400 genes are drawn (only reached with more than 80 subclusters);
+  subclusters then take turns adding their next best gene, so each keeps its
+  best ones. The axis label says how many of the panel's genes are shown.
+- The dotplot CSV tables keep every gene. Legacy writes them in
+  hierarchically clustered order for panels up to 400 genes and in var order
+  for wider panels; `map_first` writes them in var order.
+- The selection (rule, floor, plotted genes and table order) is recorded in
+  `uns["merxen_dotplot_gene_selection"][<prefix>]`: in the branch H5AD in
+  legacy mode, in the clustered table in `map_first` mode (one record per
+  `<sample_id>_map_first_branch_<token>`).
+
+Before 2026-11 legacy panels up to 400 genes plotted every panel gene in
+clustered order, and only wider panels took the top-5 selection (then ordered
+hierarchically). `map_first` plotted every gene of panels up to 300 genes and
+the 300 most variable genes of wider panels (hierarchically ordered), and its
+tables of wider panels held only those 300 genes.
 
 ## Outputs
 
@@ -222,10 +354,10 @@ With hierarchical mode enabled, additional artifacts are written under
 | Broad scores | `<sample_id>_broad_annotation_scores.csv` | Cluster-by-atlas marker z-score table. |
 | Broad markers | `<sample_id>_broad_resolved_markers.csv` | Reference markers that overlapped the query panel. |
 | Broad heatmap | `plots/annotation/<sample_id>_broad_annotation_score_heatmap.png` | QC heatmap of broad cluster marker scores. |
-| Branch plots/H5ADs | `branch_<class>/...` | Per-class `.h5ad`, UMAP under `plots/umap/`, spatial plot under `plots/spatial/`, spatial grid under `plots/spatial_grid/`, and panel-gene dotplot under `plots/dotplot/`. |
+| Branch plots/H5ADs | `branch_<class>/...` | Per-class `.h5ad`, UMAP under `plots/umap/`, spatial plot under `plots/spatial/`, spatial grid under `plots/spatial_grid/`, and top-gene dotplot under `plots/dotplot/`. |
 | Branch dotplot tables | `branch_<class>/tables/dotplot/...` | Per-subcluster mean expression and fraction-expressing summaries for panel genes. |
 | Neuron split | `branch_neurons/<sample_id>_neurons_split_*` | Excitatory/Inhibitory/Other annotation tables, split `.h5ad`, heatmap under `plots/annotation/`, and plots under `plots/*/`. |
-| Neuron subclusters | `branch_neurons/split_<label>/...` | Per-split neuron subtype `.h5ad`, UMAP, spatial plot, spatial grid, panel-gene dotplot, and dotplot tables. |
+| Neuron subclusters | `branch_neurons/split_<label>/...` | Per-split neuron subtype `.h5ad`, UMAP, spatial plot, spatial grid, top-gene dotplot, and dotplot tables. |
 
 ## CPU and GPU engines
 

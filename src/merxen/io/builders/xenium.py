@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 from pathlib import Path
+from typing import Final
 
 from merxen.config import XeniumBuildConfig
 from merxen.io.spatialdata_io import (
@@ -13,6 +15,45 @@ from merxen.io.spatialdata_io import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Gene panels above this size are whole-transcriptome (Atera WTA has 18,049
+#: genes); the Xenium path has none of the scale guards they need. Xenium
+#: Prime 5K panels (about 5,000 genes plus add-ons) stay below it.
+MAX_XENIUM_PANEL_GENES: Final = 10_000
+
+
+def check_not_atera_preview(input_path: Path) -> None:
+    """Refuse an Atera "preview" bundle laid out like a Xenium output.
+
+    Such bundles carry ``experiment.xenium`` but are Atera runs: the onboard
+    analysis version starts with ``atera-``, or the panel is whole-transcriptome.
+    They need the ATERA build (plan §3.10, open question Q16).
+
+    Args:
+        input_path: Xenium output directory.
+
+    Raises:
+        ValueError: If the bundle is an Atera run.
+    """
+    try:
+        experiment = json.loads((Path(input_path) / "experiment.xenium").read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(experiment, dict):
+        return
+    version = str(experiment.get("analysis_sw_version", ""))
+    n_genes = 0
+    for key in ("panel_num_targets_predesigned", "panel_num_targets_custom"):
+        value = experiment.get(key)
+        if isinstance(value, int | float):
+            n_genes += int(value)
+    if version.startswith("atera-") or n_genes > MAX_XENIUM_PANEL_GENES:
+        raise ValueError(
+            "This Xenium-layout bundle is an Atera run "
+            f"(analysis_sw_version {version!r}, {n_genes} panel targets). "
+            "Atera preview bundles are not supported yet; use analysis_mode "
+            "atera with an Atera ROI folder (plan open question Q16)."
+        )
 
 
 def write_xenium_spatialdata(
@@ -40,6 +81,7 @@ def write_xenium_spatialdata(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    check_not_atera_preview(input_path)
     logger.info("[XENIUM] Building SpatialData from %s", input_path)
     sdata = xenium_reader(
         input_path,

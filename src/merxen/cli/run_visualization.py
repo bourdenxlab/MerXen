@@ -14,6 +14,7 @@ from merxen.config import (
     load_config_from_json,
 )
 from merxen.io.spatialdata_schema import PROSEG_ASSIGNMENT_COLUMN
+from merxen.platforms import find_platform_spec
 from merxen.qc.gene_comparison import (
     compute_gene_comparison_from_paths,
     compute_gene_summary_from_path,
@@ -34,7 +35,11 @@ from merxen.visualization.qc_plots import (
 from merxen.visualization.sanity_plots import (
     plot_pair_sanity_crops,
     plot_single_sanity_crop,
+    registered_assignment_column,
 )
+
+#: Analysis segmentation names of the vendor (original) segmentation layer.
+_ORIGINAL_SEGMENTATIONS = frozenset({"original_seg", "original"})
 
 
 @click.command(name="visualize")
@@ -231,13 +236,14 @@ def _write_single_visualizations(
         overlay_plot,
         zarr_path=sample.zarr_path,
         assignment_shape_key=sample.shape_key,
-        assignment_column=_sanity_assignment_column(sample),
+        assignment_column=_sanity_assignment_column(sample, sdata_obj),
     )
     transcript_overview_plot = cfg.output_dir / f"{sample_id}_transcript_overview.png"
     plot_single_transcript_overview(
         sdata_obj,
         dataset_name,
         transcript_overview_plot,
+        zarr_path=sample.zarr_path,
     )
     paths.extend([overlay_plot, crop_location_plot, transcript_overview_plot])
 
@@ -255,16 +261,42 @@ def _write_single_visualizations(
     return paths
 
 
-def _sanity_assignment_column(sample: VisualizationSampleConfig) -> str | None:
+def _sanity_assignment_column(
+    sample: VisualizationSampleConfig, sdata_obj: object | None = None
+) -> str | None:
     """Return the stored per-transcript assignment column for a sanity overlay.
 
     ProSeg writes its own transcript assignment, so reseg overlays read it
     rather than testing which ProSeg polygon each transcript falls inside.
-    The other branches keep their shape-based or hybrid assignment sources.
+    The original layer of a native-segmentation platform (ATERA) reads the
+    vendor assignment the registry records for its shape
+    (``original_assignment``), and every other ATERA layer the column its
+    registry entry records. The other branches keep their shape-based or
+    hybrid assignment sources.
     """
     segmentation = (
         "" if sample.segmentation is None else str(sample.segmentation).strip().lower()
     )
     if segmentation == "reseg":
         return PROSEG_ASSIGNMENT_COLUMN
+    spec = find_platform_spec(sample.platform)
+    if (
+        sdata_obj is not None
+        and spec is not None
+        and spec.default_segmentation_source == "native"
+        and segmentation in _ORIGINAL_SEGMENTATIONS
+    ):
+        return registered_assignment_column(
+            sdata_obj, sample.shape_key or spec.original_cell_shape_key
+        )
+    # Every other ATERA layer reads the assignment its registry entry records
+    # (AT-7: proseg_mask reads cellpose_assignment, not ProSeg's assignment;
+    # proseg_vendor reads assignment).
+    if (
+        sdata_obj is not None
+        and spec is not None
+        and spec.native_latest_base
+        and sample.shape_key is not None
+    ):
+        return registered_assignment_column(sdata_obj, sample.shape_key)
     return None

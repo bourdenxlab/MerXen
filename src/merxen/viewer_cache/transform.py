@@ -5,8 +5,11 @@ transform written here must map the morphology-image pixel grid into the micron
 coordinate system the shapes live in. The primary source is the same transform
 enrichment used to build the shapes (guaranteeing alignment); if that file is
 unavailable at cache-build time we fall back to the viewer's own defaults
-(``resolve_dataset_mask_affine``): 0.108 um/px isotropic for MERSCOPE, 0.2125 for
-XENIUM.
+(``resolve_dataset_mask_affine``): the platform's isotropic
+``PlatformSpec.fallback_um_per_px`` (0.108 um/px for MERSCOPE, 0.2125 for XENIUM).
+A platform whose viewer masks are its vendor labels (ATERA) never falls back: its
+pixel size comes from the spec sidecars the build copied into the store
+(``atera/experiment.spatial``), else the stage fails.
 """
 
 from __future__ import annotations
@@ -15,14 +18,11 @@ import logging
 from pathlib import Path
 
 from merxen.enrichment.enrich import resolve_px_to_um_transform
+from merxen.platforms import platform_spec
 
 logger = logging.getLogger(__name__)
 
 AffineRows = tuple[tuple[float, float, float], tuple[float, float, float]]
-
-#: Viewer fallbacks (``resolve_dataset_mask_affine``) when no transform file is found.
-_MERSCOPE_FALLBACK_UM_PER_PX = 0.108
-_XENIUM_FALLBACK_UM_PER_PX = 0.2125
 
 
 def resolve_mask_affine(
@@ -43,12 +43,20 @@ def resolve_mask_affine(
             original_data_path=Path(original_data_path),
             transform_path=Path(transform_path) if transform_path is not None else None,
         )
-    except FileNotFoundError:
-        mpp = (
-            _MERSCOPE_FALLBACK_UM_PER_PX
-            if platform == "MERSCOPE"
-            else _XENIUM_FALLBACK_UM_PER_PX
-        )
+    except FileNotFoundError as error:
+        # resolve_px_to_um_transform rejects an unknown platform with a
+        # ValueError first, so only registered platforms get here.
+        spec = platform_spec(platform)
+        if spec.original_label_keys:
+            # The base masks of this platform are its vendor labels, placed by
+            # the pixel size the build recorded (atera/experiment.spatial in
+            # the store); a guessed fallback would misplace every mask.
+            raise FileNotFoundError(
+                f"[{spec.name}] no pixel size in the store's spec sidecars "
+                f"({', '.join(spec.spec_sidecar_names)}) or transform_path; "
+                "refusing the fallback pixel size"
+            ) from error
+        mpp = spec.fallback_um_per_px
         logger.warning(
             "[%s] No transform file found; falling back to %.4f um/px isotropic "
             "(matches the viewer's resolve_dataset_mask_affine default).",

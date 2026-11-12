@@ -13,10 +13,35 @@ from merxen.cli.run_alignment import (
     check_alignment_deps_command,
     materialize_alignment_command,
 )
+from merxen.cli.run_analysis_gene_set import analysis_gene_set_command
 from merxen.cli.run_analysis_layer_validation import (
     validate_analysis_layer_command,
 )
+from merxen.cli.run_annotation import (
+    annotate_command,
+    annotate_resolve_command,
+    annotation_panel_command,
+    annotation_reference_prep_command,
+    annotation_store_group,
+)
+from merxen.cli.run_annotation_panels import (
+    annotation_panel_fetch_command,
+    annotation_panel_simulate_command,
+)
+from merxen.cli.run_annotation_report import annotation_report_command
+from merxen.cli.run_atera_proseg import (
+    atera_proseg_plan_command,
+    atera_proseg_stitch_command,
+    atera_proseg_tile_command,
+)
 from merxen.cli.run_build_spatialdata import build_spatialdata_command
+from merxen.cli.run_cellpose_hitl import (
+    cellpose_hitl_export_command,
+    cellpose_hitl_import_command,
+    cellpose_hitl_prepare_rois_command,
+    cellpose_hitl_seed_command,
+    cellpose_hitl_train_command,
+)
 from merxen.cli.run_clustering_squidpy import clustering_squidpy_command
 from merxen.cli.run_comparison import compare_command
 from merxen.cli.run_convert_czi import convert_czi_command
@@ -40,6 +65,7 @@ from merxen.cli.run_mask_image_quantification import (
     mask_image_quantification_command,
 )
 from merxen.cli.run_mecr import mecr_command, mecr_reference_command
+from merxen.cli.run_native_latest import native_latest_command
 from merxen.cli.run_pciseq import pciseq_command, publish_pciseq_viewer_command
 from merxen.cli.run_pciseq_reference import prepare_pciseq_reference_command
 from merxen.cli.run_qc import qc_command
@@ -50,6 +76,10 @@ from merxen.cli.run_segmentation import (
     segment_command,
 )
 from merxen.cli.run_spatial_gene_analysis import spatial_gene_analysis_command
+from merxen.cli.run_transcript_density import (
+    atera_transcript_density_command,
+    embed_transcript_density_command,
+)
 from merxen.cli.run_viewer_cache import build_viewer_caches_command
 from merxen.cli.run_visualization import visualize_command
 
@@ -67,10 +97,21 @@ def main() -> None:
 
 
 main.add_command(build_spatialdata_command)
+main.add_command(atera_transcript_density_command)
+main.add_command(embed_transcript_density_command)
 main.add_command(segment_command)
 main.add_command(cellpose_segment_command)
+main.add_command(cellpose_hitl_export_command)
+main.add_command(cellpose_hitl_prepare_rois_command)
+main.add_command(cellpose_hitl_import_command)
+main.add_command(cellpose_hitl_train_command)
+main.add_command(cellpose_hitl_seed_command)
 main.add_command(cellpose_nuclei_segment_command)
 main.add_command(proseg_segment_command)
+main.add_command(native_latest_command)
+main.add_command(atera_proseg_plan_command)
+main.add_command(atera_proseg_tile_command)
+main.add_command(atera_proseg_stitch_command)
 main.add_command(enrich_command)
 main.add_command(register_images_command)
 main.add_command(build_viewer_caches_command)
@@ -99,3 +140,12 @@ main.add_command(manual_registration_prepare_command)
 main.add_command(manual_registration_register_command)
 main.add_command(manual_registration_fit_command)
 main.add_command(manual_registration_compare_command)
+main.add_command(analysis_gene_set_command)
+main.add_command(annotation_panel_command)
+main.add_command(annotation_reference_prep_command)
+main.add_command(annotation_store_group)
+main.add_command(annotation_panel_fetch_command)
+main.add_command(annotation_panel_simulate_command)
+main.add_command(annotate_command)
+main.add_command(annotate_resolve_command)
+main.add_command(annotation_report_command)
