@@ -2,6 +2,12 @@
 
 ## 0.2.0 (unreleased; gates H and M of the robust cell-type annotation plan)
 
+### Added: public Xenium hippocampus intake and pre-2.0 Xenium channel naming
+
+- **Pre-2.0 Xenium builds.** The Xenium build names the single unnamed channel of a pre-2.0 `morphology_focus` / `morphology_mip` image `DAPI`, so DAPI-only Xenium data (Onboard Analysis below 2.0) segments with `xenium_channels=DAPI` without manual fixes ([spatialdata build](docs/stages/spatialdata-build.md#common-pitfalls)).
+- **Public intake scripts.** `scripts/public_data/xenium_hippocampus/` fetches, prepares and writes samplesheets for two public fresh-frozen human hippocampus Xenium datasets (Zenodo 14879552 + 14879626, six sections; GEO GSE317381, four dentate-gyrus sections on a prototype 5K panel) for a supplementary Xenium-versus-Atera comparison. Fetch is a dry run by default; downloads resume and are verified. The dentate-gyrus preparation projects the deposited z-stack and synthesises `experiment.xenium` with recorded provenance.
+- **New location variable.** `MERXEN_XENIUM_PUBLIC_ROOT` (`.env`) holds the raw and prepared public Xenium data.
+
 ### Changed: human clustering is map-first by default
 
 - Human runs now label cells with MapMyCells against the packaged reference bundles (WHB frontal cortex, with SEA-AD as the second vote), then build the hierarchy from those labels (`clustering_squidpy_mode_human = "map_first"`). This replaces the legacy Leiden-then-label flow. Mouse follows at M9 (next section).

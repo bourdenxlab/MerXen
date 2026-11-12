@@ -6,7 +6,7 @@ import json
 import logging
 import shutil
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Any, Final
 
 from merxen.config import XeniumBuildConfig
 from merxen.io.spatialdata_io import (
@@ -14,12 +14,21 @@ from merxen.io.spatialdata_io import (
     write_spatialdata_zarr,
 )
 
+if TYPE_CHECKING:
+    from packaging.version import Version
+
 logger = logging.getLogger(__name__)
 
 #: Gene panels above this size are whole-transcriptome (Atera WTA has 18,049
 #: genes); the Xenium path has none of the scale guards they need. Xenium
 #: Prime 5K panels (about 5,000 genes plus add-ons) stay below it.
 MAX_XENIUM_PANEL_GENES: Final = 10_000
+
+#: Channel name of the nuclear stain, the only stain of pre-2.0 Xenium images.
+DAPI_CHANNEL: Final = "DAPI"
+
+#: Images that pre-2.0 Xenium writes as single-channel DAPI without names.
+PRE_V2_MORPHOLOGY_IMAGES: Final = ("morphology_focus", "morphology_mip")
 
 
 def check_not_atera_preview(input_path: Path) -> None:
@@ -54,6 +63,81 @@ def check_not_atera_preview(input_path: Path) -> None:
             "Atera preview bundles are not supported yet; use analysis_mode "
             "atera with an Atera ROI folder (plan open question Q16)."
         )
+
+
+def _xenium_analyzer_version(input_path: Path) -> Version | None:
+    """Return the onboard-analysis version as spatialdata-io parses it.
+
+    The reader's own parser is used so the version (including a Xenium Ranger
+    re-segmentation version, which takes precedence) matches the branch the
+    reader took when it named the image channels.
+
+    Args:
+        input_path: Xenium output directory.
+
+    Returns:
+        The parsed version, or ``None`` when ``experiment.xenium`` is missing,
+        unreadable or has a version the reader cannot parse. For ``None`` the
+        reader assumes the latest layout for labels and tables but reads the
+        pre-2.0 single-file morphology images.
+    """
+    from spatialdata_io.readers.xenium import _parse_version_of_xenium_analyzer
+
+    try:
+        specs = json.loads((Path(input_path) / "experiment.xenium").read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(specs, dict):
+        return None
+    try:
+        version: Version | None = _parse_version_of_xenium_analyzer(specs)
+    except (KeyError, TypeError):
+        return None
+    return version
+
+
+def name_pre_v2_dapi_channels(sdata: Any, input_path: Path) -> list[str]:
+    """Name the single channel of pre-2.0 morphology images ``DAPI``.
+
+    Xenium Onboard Analysis before 2.0 writes one DAPI-only
+    ``morphology_focus.ome.tif`` (and ``morphology_mip.ome.tif``) without
+    channel names, so spatialdata-io labels the channel ``0``. MerXen selects
+    the nuclear channel by name (``DAPI``), so the channel is renamed here. An
+    image with several channels, or one already named otherwise, is left as
+    read; version 2.0 and later name their channels themselves. An
+    unparsable version is treated as pre-2.0, because spatialdata-io 0.6 then
+    reads the pre-2.0 single-file images too.
+
+    Args:
+        sdata: SpatialData object returned by the Xenium reader; changed in
+            place.
+        input_path: Xenium output directory it was read from.
+
+    Returns:
+        The image keys that were renamed.
+    """
+    version = _xenium_analyzer_version(input_path)
+    if version is not None and version.major >= 2:
+        return []
+    from spatialdata.models import get_channel_names, set_channel_names
+
+    renamed: list[str] = []
+    for key in PRE_V2_MORPHOLOGY_IMAGES:
+        if key not in sdata.images:
+            continue
+        names = list(get_channel_names(sdata.images[key]))
+        if len(names) != 1 or str(names[0]) != "0":
+            continue
+        sdata.images[key] = set_channel_names(sdata.images[key], [DAPI_CHANNEL])
+        renamed.append(key)
+    if renamed:
+        logger.info(
+            "[XENIUM] Named the single channel of %s %r (analysis version %s)",
+            ", ".join(renamed),
+            DAPI_CHANNEL,
+            version,
+        )
+    return renamed
 
 
 def write_xenium_spatialdata(
@@ -96,6 +180,7 @@ def write_xenium_spatialdata(
         aligned_images=build_config.aligned_images,
         cells_table=build_config.cells_table,
     )
+    name_pre_v2_dapi_channels(sdata, input_path)
     prepare_source_spatialdata_contract(sdata, platform="XENIUM")
     write_spatialdata_zarr(sdata, output_path, overwrite=True)
     _copy_xenium_sidecars(
