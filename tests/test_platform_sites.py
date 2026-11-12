@@ -118,6 +118,18 @@ REASONS: dict[str, dict[str, str]] = {
         ),
     },
     "vendor_nucleus_names": {
+        "scripts/public_data/xenium_hippocampus/fetch_dg_lifespan.py": (
+            "public-data intake shim: writes and checks the vendor Xenium"
+            " output layout (file names), not registry layers"
+        ),
+        "scripts/public_data/xenium_hippocampus/prepare_dg_lifespan.py": (
+            "public-data intake shim: writes and checks the vendor Xenium"
+            " output layout (file names), not registry layers"
+        ),
+        "scripts/public_data/xenium_hippocampus/prepare_ki_hippocampus.py": (
+            "public-data intake shim: writes and checks the vendor Xenium"
+            " output layout (file names), not registry layers"
+        ),
         "src/merxen/analysis/clustering_squidpy.py": (
             "nucleus shape priority list for platforms whose nucleus ids are cell "
             "ids; ATERA uses the registered nucleus layer instead (AT-6)"
@@ -146,6 +158,10 @@ REASONS: dict[str, dict[str, str]] = {
         "src/merxen/segmentation/pipeline.py": "Xenium reader option",
     },
     "nucleus_joins": {
+        "scripts/public_data/xenium_hippocampus/prepare_dg_lifespan.py": (
+            "public-data intake shim: writes and checks the vendor Xenium"
+            " output layout (file names), not registry layers"
+        ),
         "scripts/acceptance/atera_build.py": (
             "Atera acceptance compares the table's nucleus_area with "
             "cell_summary and skips the vendor float32 copy (AT-5)"
@@ -275,6 +291,18 @@ REASONS: dict[str, dict[str, str]] = {
         ),
     },
     "native_image_names": {
+        "scripts/public_data/xenium_hippocampus/make_samplesheet_dg_lifespan.py": (
+            "public-data intake shim: writes and checks the vendor Xenium"
+            " output layout (file names), not registry layers"
+        ),
+        "scripts/public_data/xenium_hippocampus/prepare_dg_lifespan.py": (
+            "public-data intake shim: writes and checks the vendor Xenium"
+            " output layout (file names), not registry layers"
+        ),
+        "scripts/public_data/xenium_hippocampus/prepare_ki_hippocampus.py": (
+            "public-data intake shim: writes and checks the vendor Xenium"
+            " output layout (file names), not registry layers"
+        ),
         "scripts/manual_registration/export_reference_image.py": (
             "standalone export script; --image-key is a user-overridable default"
         ),
@@ -284,7 +312,9 @@ REASONS: dict[str, dict[str, str]] = {
         "src/merxen/config.py": "alignment and registration defaults, reader option",
         "src/merxen/enrichment/enrich.py": "raw Xenium reader option",
         "src/merxen/image_registration.py": "docstring",
-        "src/merxen/io/builders/xenium.py": "Xenium reader option",
+        "src/merxen/io/builders/xenium.py": (
+            "Xenium reader option; pre-2.0 single-channel images named DAPI"
+        ),
         "src/merxen/io/image_source.py": "the MERSCOPE image name constant",
         "src/merxen/segmentation/pipeline.py": (
             "dispatch that raises for an unknown platform, error messages, and the "
@@ -327,6 +357,24 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         "src/merxen/masks.py": ('f"{ORIGINAL_ID_NAMESPACE}_nucleus",',),
     },
     "vendor_nucleus_names": {
+        "scripts/public_data/xenium_hippocampus/fetch_dg_lifespan.py": (
+            '"nucleus_boundaries.parquet.gz": "nucleus_boundaries",',
+        ),
+        "scripts/public_data/xenium_hippocampus/prepare_dg_lifespan.py": (
+            '"nucleus_boundaries": "nucleus_boundaries.parquet",',
+            '"nucleus_boundaries.parquet": ("cell_id", "vertex_x", "vertex_y"),',
+            "``nucleus_boundaries.parquet``, ``transcripts.parquet``: decompressed from",  # noqa: E501
+            'nucleus_boundaries, index, image.pixel_size_um, label_by="polygon"',
+            "nucleus_boundaries: Nucleus polygon parquet.",
+            "nucleus_boundaries: Path,",
+            'nucleus_boundaries=out_dir / "nucleus_boundaries.parquet",',
+            "path: ``cell_boundaries.parquet`` or ``nucleus_boundaries.parquet``.",
+        ),
+        "scripts/public_data/xenium_hippocampus/prepare_ki_hippocampus.py": (
+            '"nucleus_boundaries.parquet",',
+            '"nucleus_boundaries.parquet": ("cell_id", "vertex_x", "vertex_y"),',
+            'for name in ("cell_boundaries.parquet", "nucleus_boundaries.parquet"):',
+        ),
         "src/merxen/analysis/clustering_squidpy.py": (
             '"nucleus_boundaries",',
             '"xenium_nucleus",',
@@ -361,6 +409,11 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         "src/merxen/segmentation/pipeline.py": ("nucleus_boundaries=False,",),
     },
     "nucleus_joins": {
+        "scripts/public_data/xenium_hippocampus/prepare_dg_lifespan.py": (
+            '"nucleus_area",',
+            'if "nucleus_area" in cells:',
+            'summary[:, 5] = cells["nucleus_area"].to_numpy()',
+        ),
         "scripts/acceptance/atera_build.py": (
             'VENDOR_OBS_NOT_COPIED = frozenset({"cell_area", "nucleus_area"})',
             '"nucleus_area": "nucleus_area",',
@@ -552,6 +605,24 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         ),
     },
     "native_image_names": {
+        "scripts/public_data/xenium_hippocampus/make_samplesheet_dg_lifespan.py": (
+            "#: ``morphology_focus/`` folder ``DAPI`` whatever its OME-XML says, so this is",  # noqa: E501
+        ),
+        "scripts/public_data/xenium_hippocampus/prepare_dg_lifespan.py": (
+            '"morphology_focus_0000.ome.tif is a MerXen projection of the deposited "',
+            "- ``morphology_focus/morphology_focus_0000.ome.tif``: a 2-D projection of the",  # noqa: E501
+            'FOCUS_FILE: Final = Path("morphology_focus") / "morphology_focus_0000.ome.tif"',  # noqa: E501
+            "spatialdata-io names a one-file XOA 2/3 ``morphology_focus/``",
+        ),
+        "scripts/public_data/xenium_hippocampus/prepare_ki_hippocampus.py": (
+            '"morphology_focus.ome.tif",',
+            "# spatialdata-io gives a pre-2.0 morphology_focus no channel names.",
+            "#: fixed build options (labels, boundaries, transcripts, morphology_focus).",  # noqa: E501
+            "The ``morphology_focus.ome.tif`` of XOA below 2.0 holds one channel (DAPI) that",  # noqa: E501
+            'f"{section}: morphology_focus.ome.tif has {size_c} channels; one "',
+            "morphology_channels: OME channel names of ``morphology_focus.ome.tif``.",
+            'size_c, names, physical = _ome_channels(folder / "morphology_focus.ome.tif")',  # noqa: E501
+        ),
         "scripts/manual_registration/export_reference_image.py": (
             "``morphology_focus`` image lives inside a SpatialData store, so a ground-truth",  # noqa: E501
             "Xenium stores keep ``morphology_focus`` in pixel units (an identity ``global``",  # noqa: E501
@@ -574,6 +645,8 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
             "image level-0 pixels to reference (``morphology_focus``) level-0 pixels. The",  # noqa: E501
         ),
         "src/merxen/io/builders/xenium.py": (
+            'PRE_V2_MORPHOLOGY_IMAGES: Final = ("morphology_focus", "morphology_mip")',
+            "``morphology_focus.ome.tif`` (and ``morphology_mip.ome.tif``) without",
             "morphology_focus=build_config.morphology_focus,",
         ),
         "src/merxen/io/image_source.py": (

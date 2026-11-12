@@ -870,6 +870,13 @@ panel) are refused by the XENIUM builder.
   ([qc.md](qc.md)) flags any remaining offset.
 - **Xenium spec ambiguity.** If the Xenium export contains a non-standard
   `specs.json` location, set `xenium_spec_path` in the samplesheet.
+- **Xenium before 2.0 (DAPI only).** Xenium Onboard Analysis below 2.0 writes
+  one unnamed DAPI channel in `morphology_focus.ome.tif` and
+  `morphology_mip.ome.tif`, which spatialdata-io names `0`. The build renames
+  that single channel `DAPI` (`name_pre_v2_dapi_channels`), so set
+  `xenium_channels` to `DAPI` for these rows. Images with several channels or
+  a name already set are left as read. A store built before this change keeps
+  `0`; rebuild it with `--force_spatialdata_build true`.
 - **Partial builds.** If a build crashes half-way, delete the target zarr
   before rerunning — SpatialData does not currently distinguish a
   half-written zarr from a valid one.
