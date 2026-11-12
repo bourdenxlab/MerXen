@@ -298,6 +298,7 @@ def test_no_gpu_lock_or_gpu_queue_on_the_annotation_processes() -> None:
     )
     assert set(locked) == {
         "ATERA_CELLPOSE_SEGMENT",
+        "ATERA_STOCK_CELLPOSE_SEGMENT",
         "CELLPOSE_SEGMENT",
         "CELLPOSE_NUCLEI_SEGMENT",
         "ALIGN",
