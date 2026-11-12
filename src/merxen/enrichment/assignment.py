@@ -507,10 +507,11 @@ def run_per_shape_assignment_for_dataset(
         warn_ram_gb: Memory warning threshold of the spatial join.
         platform: Platform of the store (required for a native store).
         segmentation_source: ``native`` or ``native_proseg`` for a
-            vendor-segmentation store, or ``cellpose_proseg`` on a platform
-            whose latest store is always a NATIVE_LATEST store (ATERA, whose
-            ProSeg and Cellpose tables exist already); ``None`` or any other
-            value keeps the Cellpose/ProSeg behaviour.
+            vendor-segmentation store, or ``cellpose_proseg`` or
+            ``cellpose_comparison`` on a platform whose latest store is always
+            a NATIVE_LATEST store (ATERA, whose ProSeg and Cellpose tables exist
+            already); ``None`` or any other value keeps the Cellpose/ProSeg
+            behaviour.
 
     Returns:
         One summary per table added or registered.
@@ -520,11 +521,12 @@ def run_per_shape_assignment_for_dataset(
     """
     latest_path = Path(latest_path)
     native_spec = None
-    atera_cellpose = segmentation_source == "cellpose_proseg" and bool(
-        getattr(find_platform_spec(platform), "native_latest_base", False)
-    )
-    # An ATERA cellpose_proseg store is a NATIVE_LATEST store whose ProSeg and
-    # Cellpose layers have their own tables already (stitch, ENRICH; AT-7).
+    atera_cellpose = segmentation_source in (
+        "cellpose_proseg",
+        "cellpose_comparison",
+    ) and bool(getattr(find_platform_spec(platform), "native_latest_base", False))
+    # ATERA Cellpose routes retain the native store layout. Their derived
+    # layers already have tables from stitch/ENRICH, including stock comparison.
     if segmentation_source in ("native", "native_proseg") or atera_cellpose:
         native_spec = find_platform_spec(platform)
         if (

@@ -29,6 +29,7 @@ from spatialdata.transformations import get_transformation
 from merxen.config import AteraTranscriptDensityConfig
 from merxen.enrichment.label_lookup import PixelFrame, pixel_indices
 from merxen.io.image_source import image_to_cyx
+from merxen.io.points_aggregates import read_root_attrs
 from merxen.platforms import find_um_per_px, platform_spec
 from merxen.visualization.raster_density import points_files
 
@@ -85,6 +86,58 @@ def _file_tree_identity(root: Path) -> str:
                 (str(path.relative_to(root)), stat.st_size, stat.st_mtime_ns)
             )
     return _json_hash(entries)
+
+
+def _native_image_identity(root: Path) -> str:
+    """Bind image chunks and semantic metadata without metadata timestamps."""
+    metadata_files = {"zarr.json", ".zattrs", ".zarray", ".zgroup", ".zmetadata"}
+    entries: list[tuple[str, str] | tuple[str, int, int]] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = str(path.relative_to(root))
+        if path.name in metadata_files:
+            entries.append((relative, _json_hash(json.loads(path.read_text()))))
+        else:
+            stat = path.stat()
+            entries.append((relative, stat.st_size, stat.st_mtime_ns))
+    return _json_hash(entries)
+
+
+def _density_matches_native_image(
+    source: Path, density_path: Path, record: dict[str, Any]
+) -> bool:
+    """Verify an original image or a proven equivalent enriched copy."""
+    from merxen.segmentation.density_storage import (
+        DENSITY_ATTR,
+        embedded_density_record,
+        has_embedded_density,
+    )
+
+    key = platform_spec("ATERA").native_image_key
+    image = source / "images" / key
+    if _file_tree_identity(image) == record["image_fingerprint"]:
+        return True
+    current = _native_image_identity(image)
+    if has_embedded_density(source):
+        installed = embedded_density_record(source)
+        binding = read_root_attrs(source)[DENSITY_ATTR]
+        if (
+            installed["fingerprint"] == record["fingerprint"]
+            and binding.get("native_image_fingerprint") == current
+        ):
+            return True
+    # Legacy manifests included metadata timestamps. An untouched original
+    # proves that only metadata serialization changed in the enriched copy.
+    for candidate in (density_path, Path(record["source_zarr"])):
+        original = candidate / "images" / key
+        if (
+            original.is_dir()
+            and _file_tree_identity(original) == record["image_fingerprint"]
+            and _native_image_identity(original) == current
+        ):
+            return True
+    return False
 
 
 def native_density_geometry(source: Path) -> DensityGeometry:
@@ -452,7 +505,7 @@ def image_with_density(sdata: Any, source: Path, density_path: Path | None) -> A
     if density_path is None:
         return native
     record = read_density_record(density_path)
-    if record["image_fingerprint"] != _file_tree_identity(source / "images" / key):
+    if not _density_matches_native_image(source, density_path, record):
         raise ValueError("Transcript density belongs to a different native image")
     if source.resolve() == Path(record["source_zarr"]).resolve():
         files, _, _ = points_files(source)

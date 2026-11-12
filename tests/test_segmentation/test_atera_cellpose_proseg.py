@@ -762,7 +762,22 @@ def test_comparison_counts_independent_stock_masks_without_proseg_on_stock(
         }
     )
     enrich_single_latest(enrich_config, polygon_n_jobs=2)
+    # The CLI follows enrichment with assignment registration. Native ATERA
+    # comparison stores have four named tables and no legacy ProSeg "table".
+    summaries = run_per_shape_assignment_for_dataset(
+        dataset_name=DATASET,
+        latest_path=store,
+        platform="ATERA",
+        segmentation_source="cellpose_comparison",
+    )
+    assert [summary["table_key"] for summary in summaries] == ["table_original"]
     dataset = sd.read_zarr(store, selection=("tables", "shapes", "labels"))
+    assert set(dataset.tables) == {
+        "table_original",
+        "table_MOSAIK_cellpose",
+        "table_MOSAIK_stock_cellpose",
+        "table_MOSAIK_proseg",
+    }
     for segmentation, table, shape in [
         ("reseg", "table_MOSAIK_proseg", "MOSAIK_proseg"),
         ("proseg_mask", "table_MOSAIK_cellpose", "MOSAIK_cellpose"),
