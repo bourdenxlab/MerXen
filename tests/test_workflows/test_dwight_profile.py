@@ -124,9 +124,9 @@ def test_dwight_gpu_processes_use_one_fixed_host_lock(
         )
         == 9
     )
-    assert dwight_config_text.count('exec 9<"\\${MERXEN_GPU_LOCK_FILE}"') == 6
+    assert dwight_config_text.count('exec 9<"\\${MERXEN_GPU_LOCK_FILE}"') == 7
     assert 'exec 9>"\\${MERXEN_GPU_LOCK_FILE}"' not in dwight_config_text
-    assert dwight_config_text.count("set -o noclobber") == 6
+    assert dwight_config_text.count("set -o noclobber") == 7
     assert "${PWD}/.merxen_gpu.lock" not in combined_config_text
 
 
