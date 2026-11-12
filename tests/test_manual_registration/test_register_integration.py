@@ -217,10 +217,12 @@ def pair_a(root: Path) -> Prepared:
     )
 
 
-@pytest.fixture(scope="module")
-def pair_mirrored(root: Path) -> Prepared:
+@pytest.fixture
+def pair_mirrored(tmp_path: Path) -> Prepared:
+    # These tests edit saved landmarks and durable outputs. CI schedules them
+    # by duration, so sharing a prepared store leaks edits into the next test.
     return _prepare(
-        root,
+        tmp_path,
         "SYN2",
         noise_um=0.5,
         outlier_um=30.0,
