@@ -126,6 +126,12 @@ class PlatformSpec {
         return new ArrayList<String>(defaultChannels)
     }
 
+    /** Parameter holding the default cell ceiling; nuclei keep the shared one. */
+    String getCellposeMaxAreaParam() {
+        return [XENIUM: 'xenium_cellpose_default_max_area_um2']
+            .get(name, 'cellpose_final_max_area_um2')
+    }
+
     /** Plain map of every field (the Python parity test reads it). */
     Map toMap() {
         return [

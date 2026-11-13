@@ -73,6 +73,7 @@
   "workflows/modules/spatialdata_build.nf::BUILD_SPATIALDATA::script": "ad87aae07e5e6dc55dde91eede1e8e42d373f0a50b92fa74ccac50399a6f5935",
   "workflows/modules/viewer_cache.nf::VIEWER_CACHE::script": "b73804d72318eb607b6965501fbaeae989fccae02854a0d73f5b2accf8223aff",
   "workflows/modules/visualization.nf::VISUALIZE::script": "fe9580e307429e89f0745833afd786dd86df070d8aee339bdcb9de5180890f80",
+  "workflows/prepare_hitl_viewer.nf::PREPARE_HITL_VIEWER::script": "194fa2dbc9904ac059d1f8508edccf5fca4269fbeab4cd1fc9d8db176c65ce62",
   "workflows/subworkflows/hippocampal_annotation.nf::HIPPOCAMPAL_COMPUTE::script": "0d2d950eb1e363f17e935b63bb740be2882c99a07b6d9ef0bb26352968b063b6",
   "workflows/subworkflows/hippocampal_annotation.nf::HIPPOCAMPAL_COMPUTE::stub": "42b11cc3117ec1c7f9a99e5aceaa21a17aa5ad62fda6287f5fd680e2435cf58e",
   "workflows/subworkflows/hippocampal_annotation.nf::HIPPOCAMPAL_MAP::script": "6c6dc68f919d09af6b98f712436bb2531d6c5a32ee7247b563dba5eaa9f8770e",

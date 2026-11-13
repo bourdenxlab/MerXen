@@ -49,6 +49,7 @@ def _run_cases(tmp_path: Path, cases: list[dict]) -> list[dict]:
     base = (
         block.group()
         .replace("params.", "opts.")
+        .replace("params[", "opts[")
         .replace("geometryFilter(params)", "geometryFilter(opts)")
     )
     hook = text.split("// hitl-hook:C4\n", 1)[1].split("def segmentConfig =", 1)[0]
@@ -243,6 +244,9 @@ def test_default_config_and_individual_platform_overrides(tmp_path: Path) -> Non
     results = _run_cases(tmp_path, cases)
     assert results[0]["before"] == results[0]["after"]
     assert results[0]["selected"] == {}
+    default = json.loads(results[0]["after"])
+    assert default["mask_filter"]["final_max_area_um2"] == 2000.0
+    assert default["nuclei_mask_filter"]["final_max_area_um2"] == 400.0
     assert results[-2]["before"] == results[-2]["after"]
     for result, (_name, group, field, value) in zip(
         results[1:6], overrides, strict=True
@@ -427,7 +431,10 @@ def test_downstream_selector_requires_matching_published_identity(
             channels=["DAPI", "18S"],
             image_key="morphology_focus",
             pixel_size_um=(0.2125, 0.2125),
-            mask_filter=MaskFilterConfig(geometry_filter=MaskGeometryFilterConfig()),
+            mask_filter=MaskFilterConfig(
+                final_max_area_um2=2000.0,
+                geometry_filter=MaskGeometryFilterConfig(),
+            ),
             tiling=TilingConfig(tile_size_candidates=[6144]),
         ),
     )
@@ -599,7 +606,8 @@ def test_published_stock_identity_must_name_the_platform_native_image(
                 image_key=image_key,
                 pixel_size_um=(_PIXEL_SIZE[platform], _PIXEL_SIZE[platform]),
                 mask_filter=MaskFilterConfig(
-                    geometry_filter=MaskGeometryFilterConfig()
+                    final_max_area_um2=2000.0 if platform == "XENIUM" else 400.0,
+                    geometry_filter=MaskGeometryFilterConfig(),
                 ),
                 tiling=TilingConfig(tile_size_candidates=[6144]),
             ),

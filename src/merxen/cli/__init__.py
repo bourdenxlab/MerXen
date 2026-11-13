@@ -39,6 +39,7 @@ from merxen.cli.run_cellpose_hitl import (
     cellpose_hitl_export_command,
     cellpose_hitl_import_command,
     cellpose_hitl_prepare_rois_command,
+    cellpose_hitl_prepare_viewer_command,
     cellpose_hitl_seed_command,
     cellpose_hitl_train_command,
 )
@@ -79,6 +80,7 @@ from merxen.cli.run_spatial_gene_analysis import spatial_gene_analysis_command
 from merxen.cli.run_transcript_density import (
     atera_transcript_density_command,
     embed_transcript_density_command,
+    transcript_density_command,
 )
 from merxen.cli.run_viewer_cache import build_viewer_caches_command
 from merxen.cli.run_visualization import visualize_command
@@ -98,11 +100,13 @@ def main() -> None:
 
 main.add_command(build_spatialdata_command)
 main.add_command(atera_transcript_density_command)
+main.add_command(transcript_density_command)
 main.add_command(embed_transcript_density_command)
 main.add_command(segment_command)
 main.add_command(cellpose_segment_command)
 main.add_command(cellpose_hitl_export_command)
 main.add_command(cellpose_hitl_prepare_rois_command)
+main.add_command(cellpose_hitl_prepare_viewer_command)
 main.add_command(cellpose_hitl_import_command)
 main.add_command(cellpose_hitl_train_command)
 main.add_command(cellpose_hitl_seed_command)

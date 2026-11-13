@@ -14,6 +14,30 @@ from merxen.segmentation.hitl.export import (
 )
 
 
+@click.command(name="cellpose-hitl-prepare-viewer")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    required=True,
+)
+def cellpose_hitl_prepare_viewer_command(config_path: Path) -> None:
+    """Add viewing density and crop setup while retaining existing Xenium masks.
+
+    Args:
+        config_path: Existing review store, original build and baseline tile grid.
+    """
+    from merxen.segmentation.hitl.preparation import (
+        HitlViewerPreparationConfig,
+        prepare_hitl_viewer,
+    )
+
+    config = load_config_from_json(config_path, HitlViewerPreparationConfig)
+    assert isinstance(config, HitlViewerPreparationConfig)
+    result = prepare_hitl_viewer(config)
+    click.echo(f"HITL viewer preparation complete: {result}")
+
+
 @click.command(name="cellpose-hitl-export")
 @click.option(
     "--config",

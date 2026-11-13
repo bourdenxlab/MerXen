@@ -186,7 +186,7 @@ class CellposeSettings {
         def expectedFilter = [
             max_eccentricity: 0.99, min_area_percentile: 1.0, min_area_px: null,
             final_min_area_um2: params.cellpose_final_min_area_um2,
-            final_max_area_um2: params.cellpose_final_max_area_um2,
+            final_max_area_um2: params[PlatformSpec.forName(platform).cellposeMaxAreaParam],
             final_filter_chunk_mb: params.cellpose_final_filter_chunk_mb,
             geometry_filter: geometryFilter(params),
             n_jobs: 16, show_progress: true,
@@ -265,6 +265,13 @@ class CellposeSettings {
                 }
                 result.cellpose = inherited + result.cellpose
                 result.mask_filter = (model.evaluated_mask_filter ?: [:]) + result.mask_filter
+                // Older evaluated models retain their recipe; the current
+                // Xenium neuron ceiling follows the pipeline unless overridden.
+                def areaParam = PlatformSpec.forName(platform).cellposeMaxAreaParam
+                if (areaParam != 'cellpose_final_max_area_um2' &&
+                    value(row, params, "${prefix}_cellpose_final_max_area_um2") == null) {
+                    result.mask_filter.final_max_area_um2 = params[areaParam]
+                }
                 result.tiling = model.training_tiling ?: [tile_size_candidates: [model.tile_size],
                     min_tile_size: Math.min(params.cellpose_min_tile_size as int, model.tile_size as int)]
                 result.transcript_density_profile = model.transcript_density_profile
