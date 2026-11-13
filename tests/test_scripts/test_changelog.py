@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from types import ModuleType
 
@@ -64,6 +65,48 @@ def test_notes_stop_at_the_next_section_and_the_links() -> None:
     assert changelog.notes(GOOD, "1.0.0") == "### Added\n\n- First release."
     with pytest.raises(KeyError):
         changelog.notes(GOOD, "2.0.0")
+
+
+def test_a_link_definition_inside_a_section_does_not_end_it() -> None:
+    text = GOOD.replace(
+        "- Big things.\n",
+        "- Big things, see [#12].\n\n"
+        "[#12]: https://github.com/o/r/pull/12\n\n- More.\n",
+    )
+    body = changelog.notes(text, "1.1.0")
+    assert "[#12]: https://github.com/o/r/pull/12" in body
+    assert body.endswith("- A fix.")
+    assert changelog.validate(text) == []
+
+
+def test_headings_inside_code_fences_are_text() -> None:
+    fenced = "```text\n## not a heading\n### Nor this\n```\n\n"
+    text = GOOD.replace("### Fixed\n", fenced + "### Fixed\n")
+    assert changelog.validate(text) == []
+    body = changelog.notes(text, "1.1.0")
+    assert "## not a heading" in body and body.endswith("- A fix.")
+
+
+def test_release_notes_links_can_be_made_absolute() -> None:
+    text = GOOD.replace(
+        "- First release.",
+        "- See [docs](docs/a.md#part), [web](https://x.org/y), [here](#top) "
+        "and [root](/abs).",
+    )
+    plain = changelog.notes(text, "1.0.0")
+    assert "](docs/a.md#part)" in plain
+    linked = changelog.notes(text, "1.0.0", "https://github.com/o/r/blob/v1.0.0/")
+    assert "](https://github.com/o/r/blob/v1.0.0/docs/a.md#part)" in linked
+    assert "](https://x.org/y)" in linked
+    assert "](#top)" in linked and "](/abs)" in linked
+
+
+def test_this_changelog_has_no_relative_links_in_published_notes() -> None:
+    version, _ = changelog.check_versions(REPO_ROOT)
+    assert version is not None
+    text = (REPO_ROOT / "CHANGELOG.md").read_text()
+    notes = changelog.notes(text, version, "https://github.com/o/r/blob/v1/")
+    assert changelog.RELATIVE_LINK.search(notes) is None
 
 
 def test_a_good_changelog_has_no_problems() -> None:
@@ -198,7 +241,11 @@ def test_this_repository_is_consistent() -> None:
 
 def test_bump_config_finds_every_version_string(tmp_path: Path) -> None:
     """A dry-run bump finds the search strings in every configured file."""
-    bump = shutil.which("bump-my-version")
+    # The tool sits next to the interpreter in the pre-push venv, which is not
+    # on PATH there.
+    bump = shutil.which(
+        "bump-my-version", path=str(Path(sys.executable).parent)
+    ) or shutil.which("bump-my-version")
     if bump is None:
         pytest.skip("bump-my-version is not installed")
     result = subprocess.run(

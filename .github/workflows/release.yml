@@ -54,16 +54,21 @@ jobs:
           mapfile -t tags < <(git tag --list 'v[0-9]*')
           python3 scripts/ci/changelog.py versions --newer-than-tags "${tags[@]}"
           python3 scripts/ci/changelog.py validate
-          python3 scripts/ci/changelog.py notes "$VERSION" > "$RUNNER_TEMP/notes.md"
+          # Relative links (docs/...) would break in a release body: point them
+          # at the tagged tree.
+          python3 scripts/ci/changelog.py notes "$VERSION" \
+            --link-base "https://github.com/${GITHUB_REPOSITORY}/blob/v${VERSION}" \
+            > "$RUNNER_TEMP/notes.md"
       - name: Tag and publish
         if: steps.version.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          # Tag the commit that set this version (the merged release PR), also
-          # when a manual re-run starts from a later main.
-          target="$(git log -1 --format=%H -S "version = \"${VERSION}\"" -- pyproject.toml)"
+          # Tag the commit on main that set this version (the merged release
+          # PR), also when a manual re-run starts from a later main.
+          # --first-parent: a merge commit, not a release-branch commit behind it.
+          target="$(git log -1 --first-parent --format=%H -S "version = \"${VERSION}\"" -- pyproject.toml)"
           gh release create "v${VERSION}" \
             --target "${target:-$GITHUB_SHA}" \
             --title "MerXen v${VERSION}" \

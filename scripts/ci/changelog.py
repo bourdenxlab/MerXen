@@ -82,25 +82,61 @@ def parse_version(text: str) -> tuple[int, int, int]:
     return major, minor, patch
 
 
+def _structural_lines(lines: Sequence[str]) -> list[bool]:
+    """Per line: True outside fenced code blocks (where headings count)."""
+    result = []
+    fence: str | None = None
+    for line in lines:
+        stripped = line.lstrip()
+        marker = stripped[:3] if stripped[:3] in ("```", "~~~") else None
+        if fence is None and marker is not None:
+            fence = marker
+            result.append(False)
+        elif fence is not None:
+            if marker == fence:
+                fence = None
+            result.append(False)
+        else:
+            result.append(True)
+    return result
+
+
+def _trailing_links_start(lines: Sequence[str]) -> int:
+    """Index where the closing block of link definitions starts."""
+    start = len(lines)
+    for index in range(len(lines) - 1, -1, -1):
+        line = lines[index].rstrip()
+        if not line:
+            continue
+        if LINK_DEFINITION.fullmatch(line):
+            start = index
+        else:
+            break
+    return start
+
+
 def releases(changelog: str) -> list[Release]:
-    """The release sections of a changelog, in file order."""
+    """The release sections of a changelog, in file order.
+
+    A section runs to the next ``## `` heading outside a code fence, or to the
+    link definitions that close the file. Link definitions inside a section are
+    part of it.
+    """
     lines = changelog.splitlines()
+    structural = _structural_lines(lines)
+    links_start = _trailing_links_start(lines)
     found: list[tuple[str, str, int]] = []
-    for index, line in enumerate(lines):
+    for index, line in enumerate(lines[:links_start]):
         match = RELEASE_HEADING.fullmatch(line.rstrip())
-        if match:
+        if match and structural[index]:
             found.append((match["version"], match["date"], index))
     result = []
-    for position, (version, date, start) in enumerate(found):
-        end = len(lines)
-        for index in range(start + 1, len(lines)):
-            if lines[index].startswith("## ") or LINK_DEFINITION.fullmatch(
-                lines[index].rstrip()
-            ):
+    for version, date, start in found:
+        end = links_start
+        for index in range(start + 1, links_start):
+            if structural[index] and lines[index].startswith("## "):
                 end = index
                 break
-        if position + 1 < len(found):
-            end = min(end, found[position + 1][2])
         body = "\n".join(lines[start + 1 : end]).strip("\n")
         result.append(Release(version, date, start + 1, body))
     return result
@@ -110,8 +146,11 @@ def validate(changelog: str) -> list[str]:
     """Layout problems of CHANGELOG.md (empty when it is well formed)."""
     problems: list[str] = []
     lines = changelog.splitlines()
+    structural = _structural_lines(lines)
     level_two = [
-        (i, line.rstrip()) for i, line in enumerate(lines) if line.startswith("## ")
+        (i, line.rstrip())
+        for i, line in enumerate(lines)
+        if structural[i] and line.startswith("## ")
     ]
     if not level_two or level_two[0][1] != UNRELEASED_HEADING:
         problems.append(f"the first section must be '{UNRELEASED_HEADING}'")
@@ -143,7 +182,7 @@ def validate(changelog: str) -> list[str]:
         if not release.body.strip():
             problems.append(f"line {release.line}: release {release.version} is empty")
     for index, line in enumerate(lines):
-        if line.startswith("### "):
+        if structural[index] and line.startswith("### "):
             kind = line[4:].strip()
             if kind not in CHANGE_TYPES:
                 problems.append(
@@ -152,8 +191,9 @@ def validate(changelog: str) -> list[str]:
                 )
     links = {
         match["label"]
-        for line in lines
-        if (match := LINK_DEFINITION.fullmatch(line.rstrip())) is not None
+        for index, line in enumerate(lines)
+        if structural[index]
+        and (match := LINK_DEFINITION.fullmatch(line.rstrip())) is not None
     }
     if "Unreleased" not in links:
         problems.append("no link definition for [Unreleased]")
@@ -163,11 +203,27 @@ def validate(changelog: str) -> list[str]:
     return problems
 
 
-def notes(changelog: str, version: str) -> str:
-    """The body of one release's section."""
+# A markdown link target that is relative to the repository: not a URL, not an
+# in-page anchor and not root-relative.
+RELATIVE_LINK = re.compile(r"\]\((?![a-zA-Z][a-zA-Z0-9+.-]*:|#|/)([^)\s]+)\)")
+
+
+def absolute_links(text: str, base_url: str) -> str:
+    """Point repository-relative link targets at ``base_url`` (e.g. a tag tree).
+
+    A GitHub release body is not rendered against the repository, so the
+    relative ``docs/...`` links of CHANGELOG.md would break there.
+    """
+    base = base_url.rstrip("/") + "/"
+    return RELATIVE_LINK.sub(lambda match: f"]({base}{match[1]})", text)
+
+
+def notes(changelog: str, version: str, link_base: str | None = None) -> str:
+    """The body of one release's section, links made absolute with ``link_base``."""
     for release in releases(changelog):
         if release.version == version:
-            return release.body
+            body = release.body
+            return absolute_links(body, link_base) if link_base else body
     raise KeyError(f"CHANGELOG.md has no section '## [{version}] - <date>'")
 
 
@@ -235,7 +291,9 @@ def check_versions(
 def changed_files(base: str, head: str = "HEAD") -> list[str]:
     """Files a branch changed since it left ``base`` (``git diff base...head``)."""
     result = subprocess.run(
-        ["git", "diff", "--name-only", f"{base}...{head}"],
+        # --no-renames: a file moved out of a user-facing folder lists its old
+        # path too.
+        ["git", "diff", "--name-only", "--no-renames", f"{base}...{head}"],
         cwd=REPO_ROOT,
         check=True,
         capture_output=True,
@@ -266,6 +324,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands.add_parser("validate", help="check the layout of CHANGELOG.md")
     notes_parser = commands.add_parser("notes", help="print one release's notes")
     notes_parser.add_argument("version")
+    notes_parser.add_argument(
+        "--link-base",
+        help="make relative links absolute under this URL "
+        "(the release workflow passes the tag's tree)",
+    )
     pr_parser = commands.add_parser("check-pr", help="require a changelog entry")
     pr_parser.add_argument("--base", required=True, help="base ref, e.g. origin/main")
     pr_parser.add_argument("--head", default="HEAD")
@@ -286,7 +349,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1 if problems else 0
     if args.command == "notes":
         try:
-            print(notes(_read(REPO_ROOT / "CHANGELOG.md"), args.version))
+            print(
+                notes(_read(REPO_ROOT / "CHANGELOG.md"), args.version, args.link_base)
+            )
         except KeyError as error:
             print(f"error: {error.args[0]}", file=sys.stderr)
             return 1

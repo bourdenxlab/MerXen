@@ -4241,19 +4241,12 @@ def segmentationConfigMap(pairId, platform, sourceSpatialdata, meta, params) {
 workflow {
     // The MerXen release of this run (docs/versioning.md): logged, and appended
     // to <outdir>/nextflow/merxen_versions.jsonl except under -preview.
-    def pipelineVersion = PipelineVersion.info(workflow, nextflow.version.toString())
-    log.info(PipelineVersion.banner(pipelineVersion))
-    if (!PipelineVersion.isPreview(workflow)) {
-        def versionRecordProblem = PipelineVersion.record(
-            pipelineVersion,
-            file(params.outdir).toAbsolutePath(),
-        )
-        if (versionRecordProblem) {
-            log.warn(
-                "Could not append the MerXen version to " +
-                "${params.outdir}/nextflow/${PipelineVersion.RECORD_FILE}: ${versionRecordProblem}"
-            )
-        }
+    def pipelineVersion = PipelineVersion.launch(
+        workflow, nextflow.version.toString(), file(params.outdir).toAbsolutePath(),
+    )
+    log.info(pipelineVersion.banner)
+    if (pipelineVersion.warning) {
+        log.warn(pipelineVersion.warning)
     }
 
     // Private site configs (docs/local-configuration.md): stop a launch whose

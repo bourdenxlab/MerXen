@@ -22,13 +22,12 @@ WORKFLOWS = REPO_ROOT / "workflows"
 
 HARNESS = """
 workflow {
-    def info = PipelineVersion.info(workflow, nextflow.version.toString())
-    println "BANNER\\t" + PipelineVersion.banner(info)
+    def launch = PipelineVersion.launch(
+        workflow, nextflow.version.toString(), file(params.outdir).toAbsolutePath(),
+    )
+    println "BANNER\\t" + launch.banner
     println "PREVIEW\\t" + PipelineVersion.isPreview(workflow)
-    if (!PipelineVersion.isPreview(workflow)) {
-        def problem = PipelineVersion.record(info, file(params.outdir).toAbsolutePath())
-        println "PROBLEM\\t" + (problem ?: "")
-    }
+    println "PROBLEM\\t" + (launch.warning ?: "")
 }
 """
 
@@ -131,10 +130,29 @@ def test_preview_writes_no_record(tmp_path: Path) -> None:
     assert not (outdir / "nextflow" / "merxen_versions.jsonl").exists()
 
 
-def test_main_nf_logs_and_records_the_version_first() -> None:
-    """The version is logged before any launch check can stop the run."""
-    main = (WORKFLOWS / "main.nf").read_text()
-    body = main[main.index("\nworkflow {\n") :]
-    assert body.index("PipelineVersion.banner") < body.index("SiteConfigCheck")
-    assert "PipelineVersion.record(" in body
-    assert "PipelineVersion.isPreview(workflow)" in body
+ENTRY_SCRIPTS = (
+    "main.nf",
+    "manual_registration_prepare.nf",
+    "manual_registration_register.nf",
+    "pciseq_resume.nf",
+    "prepare_hitl_viewer.nf",
+)
+
+
+@pytest.mark.parametrize("script", ENTRY_SCRIPTS)
+def test_every_entry_script_logs_and_records_the_version_first(script: str) -> None:
+    """Each launch logs and records its release before any check can stop it."""
+    text = (WORKFLOWS / script).read_text()
+    body = text[text.index("\nworkflow {\n") :]
+    launch_at = body.index("PipelineVersion.launch(")
+    for marker in ("error", "SiteConfigCheck"):
+        if marker in body:
+            assert launch_at < body.index(marker)
+    assert "log.info(pipelineVersion.banner)" in body
+    assert "log.warn(pipelineVersion.warning)" in body
+
+
+def test_every_workflow_script_is_listed() -> None:
+    """A new entry script also records its version (add it to ENTRY_SCRIPTS)."""
+    scripts = {path.name for path in WORKFLOWS.glob("*.nf")}
+    assert scripts == set(ENTRY_SCRIPTS)

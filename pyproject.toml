@@ -142,6 +142,9 @@ merxen = [
 current_version = "1.0.0"
 parse = "(?P<major>0|[1-9]\\d*)\\.(?P<minor>0|[1-9]\\d*)\\.(?P<patch>0|[1-9]\\d*)"
 serialize = ["{major}.{minor}.{patch}"]
+# The release branch carries uncommitted [Unreleased] edits when bumping;
+# bump-my-version neither commits nor tags here, so a dirty tree is safe.
+allow_dirty = true
 commit = false
 tag = false
 tag_name = "v{new_version}"

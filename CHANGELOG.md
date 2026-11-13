@@ -26,21 +26,22 @@ was set, mostly the reference-based cell-type annotation.
 
 - **Three platforms.** MERSCOPE, Xenium (including Onboard Analysis below 2.0)
   and 10x Atera, paired or single-platform, human or mouse.
-- **Segmentation from scratch.** Cellpose-SAM seeds ProSeg 3.2.0 on every
-  platform. Optional steps: MERSCOPE fiducial-bead removal, Cellpose
-  human-in-the-loop training with model reuse, and the tiled ProSeg route for
-  Atera.
+- **Segmentation from scratch.** Cellpose-SAM seeds ProSeg 3.2.0 on MERSCOPE
+  and Xenium. Atera keeps its native vendor segmentation by default, with
+  opt-in routes: Cellpose-prior ProSeg and tiled ProSeg seeded by the vendor
+  mask. Optional steps: MERSCOPE fiducial-bead removal and Cellpose
+  human-in-the-loop training with model reuse.
 - **Registration.** VALIS DAPI alignment of adjacent sections with residual
   optic flow and per-cell quality, post-Xenium IF registration, and the
   standalone manual landmark registration workflows (with Zeiss CZI input).
 - **Cell-type annotation is map-first.** MapMyCells against packaged references
   (WHB and SEA-AD for human, WMB for mouse), with resolvability, panel trust
   states, real-data QC and a per-pair annotation report. Legacy Leiden-then-label
-  clustering is deprecated. pciSeq cell typing is optional, with a batched,
-  streaming mode.
+  clustering is deprecated. pciSeq cell typing is optional; its batched,
+  streaming mode is experimental and not yet validated.
 - **Downstream analyses.** QC, cross-platform comparison, MENDER, GASTON,
   cortical depth, distance from object, MECR and spatial gene analysis.
-- **Release versions.** Each run logs its MerXen release and records it in
+- **Release versions.** Every launch logs its MerXen release and records it in
   `<outdir>/nextflow/merxen_versions.jsonl`, and this changelog lists the
   changes of every release ([versioning](docs/versioning.md)).
 
@@ -48,7 +49,10 @@ was set, mostly the reference-based cell-type annotation.
 
 - **From `main` at #135:** nothing changes but the version: a launch logs
   `MerXen 1.0.0` and appends to `<outdir>/nextflow/merxen_versions.jsonl`, and
-  `merxen --version` reports it. Outputs are unchanged.
+  `merxen --version` reports it. Outputs are unchanged apart from the
+  `merxen_version` stamps some of them already carried (annotation provenance
+  and `report_run.json`, the manual-registration manifests, the OME-TIFF
+  `Creator` tag), which change from 0.2.0 to 1.0.0.
 - **From an older `main`:** read Changed below. Human and mouse clustering
   default to `map_first` and write the unsuffixed clustered tables, so a rerun
   into an existing results folder replaces the legacy tables. Keep a snapshot,
@@ -56,13 +60,17 @@ was set, mostly the reference-based cell-type annotation.
   `legacy`. Launches need the local configuration files (`.env` and the site
   configs, [local configuration](docs/local-configuration.md)). QC totals of
   very large sections can differ slightly.
+- **Real-data QC in RESOLVE only warns** for both species in 1.0.0: the
+  species gates are still recorded as pending
+  (`real_qc.seeded_families_warn_only_until_gate`), so no QC check lowers a
+  dataset yet.
 
 ### Added
 
 #### Release versions and this changelog
 
-- **Release identity.** `workflows/nextflow.config` declares a Nextflow `manifest` whose `version` is the MerXen release, kept equal to `pyproject.toml` and `merxen.__version__` by `bump-my-version` ([versioning](docs/versioning.md)). Nextflow prints it at launch and in `report.html`.
-- **Version record.** `main.nf` logs `MerXen <version>` with where the code came from (the pulled revision and commit, or `git describe` of a local checkout, `-dirty` for uncommitted edits) and appends the same facts, one JSON line per launch, to `<outdir>/nextflow/merxen_versions.jsonl`, so a results folder resumed across releases lists every release that wrote to it. `-preview` writes nothing.
+- **Release identity.** `workflows/nextflow.config` declares a Nextflow `manifest` whose `version` is the MerXen release, kept equal to `pyproject.toml` and `merxen.__version__` by `bump-my-version` ([versioning](docs/versioning.md)). `report.html` shows it.
+- **Version record.** Every entry script (`main.nf` and the standalone workflows) logs `MerXen <version>` with `git describe` of the checkout it ran from (`-dirty` for uncommitted edits) and appends the same facts, one JSON line per launch, to `<outdir>/nextflow/merxen_versions.jsonl`, so a results folder resumed across releases lists every release that wrote to it. `-preview` writes nothing.
 - **`merxen --version`** prints the installed release.
 - **Changelog and releases.** This file follows Keep a Changelog. CI asks every pull request that changes the pipeline for an [Unreleased] entry (`skip-changelog` label to exempt), and checks that the versions in `pyproject.toml`, `src/merxen/__init__.py` and the Nextflow manifest agree. Merging a release PR into `main` tags the release `vX.Y.Z` and publishes a GitHub release with its changelog section (`.github/workflows/release.yml`).
 
@@ -123,7 +131,7 @@ was set, mostly the reference-based cell-type annotation.
 #### Mouse AP axis and G4 windows (M6b; the exit is unmet)
 
 - **AP estimate.** Mouse RESOLVE estimates each section's position on the AP axis from the subclass composition of its confident neurons against the 53 MERFISH-638850 sections of the region-share bundle (`mouse_ap.estimate_ap`) and records it under `mouse_gate.ap_estimate`. The estimate is reported, not gated: on held-out MERFISH sections it is within one section step on 53/53 Allen sections and on 38/38, 37/38 and 38/38 of the sections of the MERFISH 500, MS1 and MS2 gene sets.
-- **G4 for every section.** With no `g4_window_sections`, G4 compares the section's class composition with the estimate's section and its two neighbours (`g4_ap_estimate`, on by default; warning only, OD-C4). Before, G4 was not evaluated unless sections were given. It is still not evaluated when the region-share bundle has no section composition or fewer than 100 neurons are confident. Mouse resolve summaries gain the `ap_estimate` key and a changed G4 note, and the mouse version-6 golden digests moved with them (the justification is next to them in `tests/test_annotation/test_resolve_v7.py`). Mouse `map_first` stays opt-in, so no production output changes.
+- **G4 for every section.** With no `g4_window_sections`, G4 compares the section's class composition with the estimate's section and its two neighbours (`g4_ap_estimate`, on by default; warning only, OD-C4). Before, G4 was not evaluated unless sections were given. It is still not evaluated when the region-share bundle has no section composition or fewer than 100 neurons are confident. Mouse resolve summaries gain the `ap_estimate` key and a changed G4 note, and the mouse version-6 golden digests moved with them (the justification is next to them in `tests/test_annotation/test_resolve_v7.py`). Mouse runs use `map_first` by default (see Changed), so default mouse output carries these keys.
 - **Report.** Item 10 reads the estimate (MO11's AP estimate and bin, and the anterior-section banner for AP < 6.0 mm) and the rule variant (MO10) from the gate and region records. Before, the report looked for flat keys no stage wrote, so those fields would have stayed pending.
 - **Rule variants, inert.** `MouseRegionConfig.rule_variant = "m6b"` enables (a) OB–OLF coupling through AON-home tiles, (b) and (c) conditional never-drop nodes, (d) OB at 0.5% of the assigned tiles and (f) other tile settings; the default `v1` refuses the fields. `scripts/acceptance/mouse_ap_axis.py` scores them on MERFISH-638850 under pre-registration §24.
 - **The exit is unmet.** No candidate is admissible: every rule, `v1` included, leaves the bin-mean T2 above 0.1% in some AP bin. `v1` stays the production rule, and MO10 scored on it fails (bin 3.0–4.5 mm harm 0.16–0.21% against 0.10%, largest section harm 0.59–0.76% against 0.30%, T2, and the missed-region clause at three sections). The choice of rule goes to the user.
@@ -146,7 +154,7 @@ was set, mostly the reference-based cell-type annotation.
   - The mouse gate's G1–G5 are recorded as checks (`registration_g1`, `marker_consistency`, `g3_implausibility`, `g4_composition`, `g5_spillover`, next to `dataset_gate`). The summary block's `gate_signals` gives each signal's status, values and reasons, and G4's MERFISH window with the AP estimate that chose it (`window_source`). The gate applied these signals itself; the QC never re-applies them.
   - Flag rates are evaluated. Checks that do not apply are `not_applicable` with the reason: on MS1 and MS2 (version 6, ≤ 1,000 genes, MERSCOPE only) these are paired concordance, the prefilter spot check, per-class coverage, the non-neuronal depth trend and the factor re-measure. Gene complexity is `not_evaluable` on version-6 bundles. A mouse pair with both platforms records paired concordance `not_evaluable`, because mouse RESOLVE computes no cross-platform composition in v1.
 - **Warn-only.** Gate M is pending (D20 (b)), so every effect that would lower a mouse section becomes a warning, whatever the family and `real_qc.seeded_families_warn_only_until_gate`. No QC warning joins the mouse gate. Labels, statuses, flags, the gate and trust are exactly those of a run without the QC.
-- **Records.** Mouse resolve summaries gain the per-sample `real_qc` block (with `gate_signals` and `effects_withheld`) and the pair's `real_qc_config`, at `schema_version` 3. The provenance gains `panel.real_data_qc`, with no downgrades. The mouse version-6 golden digests moved in the provenance only; the justification is next to them in `tests/test_annotation/test_resolve_v7.py`. Human RESOLVE output is byte-identical. Mouse `map_first` stays opt-in, so no production output changes.
+- **Records.** Mouse resolve summaries gain the per-sample `real_qc` block (with `gate_signals` and `effects_withheld`) and the pair's `real_qc_config`, at `schema_version` 3. The provenance gains `panel.real_data_qc`, with no downgrades. The mouse version-6 golden digests moved in the provenance only; the justification is next to them in `tests/test_annotation/test_resolve_v7.py`. Human RESOLVE output is byte-identical. Mouse runs use `map_first` by default (see Changed), so default mouse output carries these records.
 - **Regression rows.** `scripts/acceptance/m13_real_qc_regression.py mouse --mouse-resolve <dataset>/<segmentation>=<annotation_resolve_out>` tabulates the MS1 and MS2 rows from mouse RESOLVE outputs. It also reports any QC effect a mouse sample applied. The rows stay pending until the gate M runs write those outputs.
 
 #### Mouse gate P and the second WMB test draw (M13b C20)
@@ -167,7 +175,7 @@ was set, mostly the reference-based cell-type annotation.
 
 #### Mouse clustering is map-first by default (M9, gate M)
 
-- **The switch.** Mouse runs now label cells with MapMyCells against the WMB panel bundle, with the region step and the mouse gate, then build the hierarchy from those labels (`clustering_squidpy_mode_mouse = "map_first"`; `FLIPPED_SPECIES` and `DEFAULT_CLUSTERING_MODE` include mouse in Python and in `AnnotationDefaults.groovy`). Everything that follows the flip per species now does so for mouse as for human: the unsuffixed table keys, the default `skip` of the legacy MAPMYCELLS stage, the per-row `clustering_squidpy_mode` column and the preflight. This change merges into the integration branch only after the user has reviewed the gate M reports and exceptions (pre-registration §25.4, U9).
+- **The switch.** Mouse runs now label cells with MapMyCells against the WMB panel bundle, with the region step and the mouse gate, then build the hierarchy from those labels (`clustering_squidpy_mode_mouse = "map_first"`; `FLIPPED_SPECIES` and `DEFAULT_CLUSTERING_MODE` include mouse in Python and in `AnnotationDefaults.groovy`). Everything that follows the flip per species now does so for mouse as for human: the unsuffixed table keys, the default `skip` of the legacy MAPMYCELLS stage, the per-row `clustering_squidpy_mode` column and the preflight.
 - **Gate M.** The mouse flip rule (MO1–MO8 and MO10) passes on MS1 and MS2 with the user's written exceptions: MO10's three missed-region rows (§24, U1), MO8's reference-prep memory peak on the two gate M panels (§25.1.1), and MO8's section time, MS1 1.56 h and MS2 2.30 h against 1.25 h (§25.4). Expect about 1.5–2.3 h of annotation task time per 4-segmentation section on a loaded host. MO9 [L] is reported, and MO11 is untested (both sections lie posterior of AP 6.0 mm).
 - **Tables.** A mouse `map_first` run writes the unsuffixed clustered tables, so a rerun into an existing results directory or store replaces the legacy tables. Keep a snapshot first, or set `--clustering_squidpy_table_key_suffix mapfirst`.
 - **The first mouse section's store belongs to another lab member**, who still uses its legacy tables. No unsuffixed mouse run may target that store without the agreement of both the user and that store's owner. Gate M wrote only suffixed tables there, with that agreement.
@@ -189,7 +197,7 @@ was set, mostly the reference-based cell-type annotation.
 #### The mouse region rule is M6b's selection (M6b-R)
 
 - **Default rule.** `MouseRegionConfig` now defaults to `a+f:tile200,nn2`: 200 µm tiles, 2 confident neurons per tile, and OB counted as present with OLF when AON-home tiles hold at least 1% of the assigned tiles (`rule_variant = "m6b"`). It is the rule M6b selected under the T2 reading the user approved on 2026-10-14 ("T2 no higher than the Allen labels' own T2, with the same regions"; pre-registration §24; a loosening, approved in writing). The old rule is `MouseRegionConfig.v1()`.
-- **What it changes.** On MS1 and MS2 the default rule infers the same regions and drop list as v1, so their re-mapped cells do not change. Mouse `map_first` stays opt-in until the mouse flip (M9), so no production output changes.
+- **What it changes.** On MS1 and MS2 the default rule infers the same regions and drop list as v1, so their re-mapped cells do not change.
 - **MO10.** Scored on the selected rule, MO10 fails only its missed-region clause, at two MERFISH sections: .35 (STR) and .46 (CTXsp). Gate M carries a written exception for these.
 - **Region-share bundle, revision 2.** The `wmb_region_share` builder also writes `region_structure_home.parquet`, the structure-level subclass homes that the OB–OLF coupling reads. The revision is in the bundle's `build_hash`, so the bundle is rebuilt once; a standalone `--store` lookup takes the current revision when an older bundle is still in the store. MAP refuses a bundle without the structure homes before mapping and says how to rebuild it.
 - **Scoring script.** `scripts/acceptance/mouse_ap_axis.py`:

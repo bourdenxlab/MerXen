@@ -7,6 +7,16 @@ include { MANUAL_REGISTRATION_PREPARE } from "./modules/manual_registration"
 include { VIEWER_CACHE } from "./modules/viewer_cache"
 
 workflow {
+    // The MerXen release of this run (docs/versioning.md): logged, and appended
+    // to <outdir>/nextflow/merxen_versions.jsonl except under -preview.
+    def pipelineVersion = PipelineVersion.launch(
+        workflow, nextflow.version.toString(), file(params.outdir).toAbsolutePath(),
+    )
+    log.info(pipelineVersion.banner)
+    if (pipelineVersion.warning) {
+        log.warn(pipelineVersion.warning)
+    }
+
     def siteConfigProblems = SiteConfigCheck.problems(
         workflow.profile, workflow.containerEngine, params, System.getenv(),
     )

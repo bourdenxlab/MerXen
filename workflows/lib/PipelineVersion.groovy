@@ -13,8 +13,9 @@ import java.util.concurrent.TimeUnit
  * git checkout also records `git describe` of that checkout, so a run from an
  * untagged or edited checkout is told apart from the release it started from:
  * `v1.2.0` is the release itself, `v1.2.0-3-gabc1234` three commits after it and
- * a `-dirty` suffix uncommitted edits. A run that Nextflow pulled itself
- * (`nextflow run bourdenxlab/MerXen -r v1.2.0`) records the revision and commit.
+ * a `-dirty` suffix uncommitted edits. `revision` and `commit_id` are filled only
+ * when Nextflow pulled the project itself, which the repository layout does not
+ * support yet (the entry scripts live in workflows/), so they are null today.
  */
 class PipelineVersion {
 
@@ -33,11 +34,16 @@ class PipelineVersion {
             def process = new ProcessBuilder(command).redirectErrorStream(false).start()
             def stdout = new StringBuilder()
             def stderr = new StringBuilder()
-            process.consumeProcessOutput(stdout, stderr)
+            def stdoutReader = process.consumeProcessOutputStream(stdout)
+            def stderrReader = process.consumeProcessErrorStream(stderr)
             if (!process.waitFor(10, TimeUnit.SECONDS)) {
                 process.destroyForcibly()
                 return null
             }
+            // The readers may still be copying after git exits; joining them
+            // makes the whole output visible before it is read.
+            stdoutReader.join(2000)
+            stderrReader.join(2000)
             def text = stdout.toString().trim()
             return process.exitValue() == 0 && text ? text : null
         } catch (Exception ignored) {
@@ -84,8 +90,30 @@ class PipelineVersion {
         try {
             return workflow.preview as boolean
         } catch (MissingPropertyException ignored) {
-            return false
+            // Nextflow releases without workflow.preview keep it on the session.
+            try {
+                return nextflow.Global.session?.preview as boolean
+            } catch (Exception alsoIgnored) {
+                return false
+            }
         }
+    }
+
+    /**
+     * The launch step every entry script runs first: the banner to log, and a
+     * warning when the record could not be written (null otherwise). `-preview`
+     * writes no record.
+     */
+    static Map launch(def workflow, String nextflowVersion, Path outdir) {
+        def info = info(workflow, nextflowVersion)
+        def problem = isPreview(workflow) ? null : record(info, outdir)
+        return [
+            info: info,
+            banner: banner(info),
+            warning: problem
+                ? "Could not append the MerXen version to ${outdir}/nextflow/${RECORD_FILE}: ${problem}"
+                : null,
+        ]
     }
 
     /**

@@ -7,6 +7,16 @@ nextflow.enable.dsl = 2
 include { MANUAL_REGISTRATION_REGISTER; MANUAL_REGISTRATION_COMPARE } from "./modules/manual_registration"
 
 workflow {
+    // The MerXen release of this run (docs/versioning.md): logged, and appended
+    // to <outdir>/nextflow/merxen_versions.jsonl except under -preview.
+    def pipelineVersion = PipelineVersion.launch(
+        workflow, nextflow.version.toString(), file(params.outdir).toAbsolutePath(),
+    )
+    log.info(pipelineVersion.banner)
+    if (pipelineVersion.warning) {
+        log.warn(pipelineVersion.warning)
+    }
+
     def siteConfigProblems = SiteConfigCheck.problems(
         workflow.profile, workflow.containerEngine, params, System.getenv(),
     )
