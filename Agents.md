@@ -235,7 +235,12 @@ Use imperative mood. Reference issue numbers where applicable.
 [refactor]: extract preprocessing into separate module
 [test]: add coverage for edge cases in validation
 [chore]: refresh CI dependency pins
+[release]: v1.3.0
 ```
+
+A change users would notice also adds its entry under `## [Unreleased]` in
+`CHANGELOG.md`, in the same PR ([versioning and releases](docs/versioning.md)).
+Only release PRs change the version.
 
 Commit title format is required:
 - `[feature]:` changes intended behavior of the code.
@@ -246,6 +251,7 @@ Commit title format is required:
 - `[test]:` testing-related changes.
 - `[docs]:` documentation, comments, or docstrings.
 - `[chore]:` maintenance/configuration changes.
+- `[release]:` release PRs only: the version bump and the release's changelog section (docs/versioning.md).
 
 A commit message, branch name or PR text never names a sample or a host path (the commit-msg and pre-push hooks check).
 

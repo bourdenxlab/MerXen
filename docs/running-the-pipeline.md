@@ -331,6 +331,10 @@ Three reports are written to `${outdir}/nextflow/` automatically
 | `timeline.html` | Gantt chart of process execution. |
 | `trace.tsv` | Tab-separated per-process metrics incl. peak RSS, realtime, workdir. |
 
+The launch log's first line names the MerXen release (`MerXen 1.2.0 (checkout
+v1.2.0)`), and every launch appends it to
+`${outdir}/nextflow/merxen_versions.jsonl` ([versioning](versioning.md)).
+
 Nextflow also writes live logs to `.nextflow.log` and a rolling history in
 `.nextflow.log.1`, `.nextflow.log.2`, ...; tail the most recent to debug
 failures.

@@ -31,6 +31,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import merxen
 from merxen.annotation import resolvability as res
 from merxen.annotation.config import AnnotationConfig, AnnotationThresholds
 from merxen.annotation.pipeline import (
@@ -1151,6 +1152,19 @@ def _without_c15(payload: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
+# The provenance stamps the package release (``merxen_version``), which moves
+# with every release (docs/versioning.md). The digests were computed at 0.2.0, so
+# the digested record carries that value; the live stamp is checked against the
+# package instead.
+GOLDEN_MERXEN_VERSION = "0.2.0"
+
+
+def _with_golden_release(record: dict[str, Any]) -> dict[str, Any]:
+    """The provenance record with the release stamp the digests were made at."""
+    assert record.get("merxen_version") == merxen.__version__
+    return {**record, "merxen_version": GOLDEN_MERXEN_VERSION}
+
+
 def _v6_digests(result: ResolveResult, root: Path) -> dict[str, str]:
     """Return the digests of a RESOLVE result that version 6 must keep."""
 
@@ -1165,7 +1179,11 @@ def _v6_digests(result: ResolveResult, root: Path) -> dict[str, str]:
         labels = labels.drop(columns=[NEW_FLAG_COLUMN], errors="ignore")
         digests[f"{sample_id}/labels"] = _digest(_canonical_table(labels))
         digests[f"{sample_id}/provenance"] = _digest(
-            scrub(_without_c11_panel_fields(provenance.model_dump(mode="json")))
+            scrub(
+                _without_c11_panel_fields(
+                    _with_golden_release(provenance.model_dump(mode="json"))
+                )
+            )
         )
         digests[f"{sample_id}/summary"] = _digest(scrub(_without_c15(sample.summary)))
     pair = _without_c15(dict(result.summary))

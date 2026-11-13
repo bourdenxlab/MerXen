@@ -10,7 +10,8 @@ ${outdir}/
 ├── nextflow/
 │   ├── report.html
 │   ├── timeline.html
-│   └── trace.tsv
+│   ├── trace.tsv
+│   └── merxen_versions.jsonl
 ├── mecr_reference/
 │   └── mecr_reference_out/
 ├── mecr_reference_atera/           # ATERA rows only
@@ -804,10 +805,12 @@ Path: `${outdir}/nextflow/`
 | `report.html` | HTML summary of each process: status, duration, CPU, memory. |
 | `timeline.html` | Per-task Gantt chart. |
 | `trace.tsv` | Tab-separated per-task metrics incl. peak RSS, peak VMEM, realtime, workdir. |
+| `merxen_versions.jsonl` | The MerXen release of each launch into this folder, one JSON line per launch: release, `git_describe` of the checkout, Nextflow version, run name, session, `resume`, profile and start time ([versioning](versioning.md#which-version-did-i-run)). Not written under `-preview`. |
 
-All three are configured in
-[workflows/nextflow.config:75-96](../workflows/nextflow.config#L75-L96) and
-are overwritten on each run.
+The report, timeline and trace are configured in
+[workflows/nextflow.config](../workflows/nextflow.config) and are overwritten
+on each run. `merxen_versions.jsonl` is appended to, so a folder resumed across
+releases lists every release that wrote to it.
 
 ## Nextflow working directory
 

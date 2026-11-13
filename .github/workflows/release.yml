@@ -1,0 +1,76 @@
+name: Release
+# Publishes a MerXen release (docs/versioning.md). A release PR raises the
+# version with bump-my-version and turns CHANGELOG.md's [Unreleased] section into
+# the release's section; once it is merged into main, this workflow tags that
+# commit vX.Y.Z and publishes a GitHub release whose notes are the release's
+# CHANGELOG section. A push that does not raise the version finds its tag
+# already there and does nothing. workflow_dispatch re-runs it on main, e.g.
+# after a failed publish.
+on:
+  push:
+    branches: [main]
+    paths: [pyproject.toml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Release version
+        id: version
+        run: |
+          version="$(python3 scripts/ci/changelog.py versions)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
+            echo "v${version} is already tagged; nothing to release."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Check the release
+        if: steps.version.outputs.exists == 'false'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # Newer than every earlier release tag, and a well-formed changelog
+          # with a section for this version.
+          mapfile -t tags < <(git tag --list 'v[0-9]*')
+          python3 scripts/ci/changelog.py versions --newer-than-tags "${tags[@]}"
+          python3 scripts/ci/changelog.py validate
+          # Relative links (docs/...) would break in a release body: point them
+          # at the tagged tree.
+          python3 scripts/ci/changelog.py notes "$VERSION" \
+            --link-base "https://github.com/${GITHUB_REPOSITORY}/blob/v${VERSION}" \
+            > "$RUNNER_TEMP/notes.md"
+      - name: Tag and publish
+        if: steps.version.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # Tag the commit on main that set this version (the merged release
+          # PR), also when a manual re-run starts from a later main.
+          # --first-parent: a merge commit, not a release-branch commit behind it.
+          target="$(git log -1 --first-parent --format=%H -S "version = \"${VERSION}\"" -- pyproject.toml)"
+          gh release create "v${VERSION}" \
+            --target "${target:-$GITHUB_SHA}" \
+            --title "MerXen v${VERSION}" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --latest

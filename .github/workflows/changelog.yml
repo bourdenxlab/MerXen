@@ -1,0 +1,39 @@
+name: Changelog
+# Every PR keeps CHANGELOG.md and the release version consistent
+# (docs/versioning.md): the version agrees across pyproject.toml,
+# src/merxen/__init__.py and the Nextflow manifest, CHANGELOG.md is well formed,
+# and a PR that changes what users run adds an [Unreleased] entry unless it
+# carries the skip-changelog label. A light job of its own, so adding or removing
+# the label re-checks without re-running the tests.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  changelog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Version agreement
+        run: python3 scripts/ci/changelog.py versions
+      - name: CHANGELOG.md layout
+        run: python3 scripts/ci/changelog.py validate
+      - name: Changelog entry
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-changelog') }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/ci/changelog.py check-pr --base "$BASE_SHA" --head "$HEAD_SHA"

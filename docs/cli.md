@@ -15,6 +15,8 @@ Examples name samples by their aliases (HD1, MS1, ...; see
 variables (`$MERXEN_...`). The `merxen` commands read the samplesheet's pair
 ids, so give the real pair id (`.aliases.tsv`) where an example shows an alias.
 
+`merxen --version` prints the installed MerXen release ([versioning](versioning.md)).
+
 ```
 $ merxen --help
 Usage: merxen [OPTIONS] COMMAND [ARGS]...

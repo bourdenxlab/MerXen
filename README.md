@@ -187,7 +187,7 @@ Every `.png` is also written as a same-stem `.pdf`. Nextflow's own `./work/` dir
 
 Full documentation lives in [docs/](docs/) — start at [docs/index.md](docs/index.md).
 
-- **Usage** — [Getting started](docs/getting-started.md) · [Samplesheet format](docs/samplesheet.md) · [Running the pipeline](docs/running-the-pipeline.md) · [Configuration](docs/configuration.md) · [Local configuration and privacy](docs/local-configuration.md) · [Outputs](docs/outputs.md) · [Manual landmark registration](docs/stages/manual-registration.md)
+- **Usage** — [Getting started](docs/getting-started.md) · [Samplesheet format](docs/samplesheet.md) · [Running the pipeline](docs/running-the-pipeline.md) · [Configuration](docs/configuration.md) · [Local configuration and privacy](docs/local-configuration.md) · [Outputs](docs/outputs.md) · [Manual landmark registration](docs/stages/manual-registration.md) · [Versions and releases](docs/versioning.md)
 - **Developer reference** — [Pipeline architecture](docs/pipeline.md) · [Metro map](docs/metro-map.md) · [Python API](docs/python-api.md) · [CLI reference](docs/cli.md) · [Development workflow](docs/development.md)
 - **GASTON** — [Spatial domains](docs/stages/gaston.md)
 
@@ -242,6 +242,8 @@ MERXEN_CI_TEST_TIER=full scripts/run_ci_checks.sh  # every test CI runs
 ```
 
 Day-to-day mechanics — testing, hooks, CI, debugging, adding a new pipeline stage — are in [Development workflow](docs/development.md).
+
+User-facing changes get an entry under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md). Releases follow [semantic versioning](docs/versioning.md); each is tagged `vX.Y.Z` and published on the [releases page](https://github.com/bourdenxlab/MerXen/releases).
 
 The [Cellpose HITL testing guide](docs/hitl/testing-guide.md) covers runtime
 acceptance, a read-only comparison with one published tile, and the planned

@@ -7,6 +7,7 @@ import sys
 
 import click
 
+from merxen import __version__
 from merxen.cli.run_alignment import (
     align_command,
     alignment_qc_command,
@@ -87,6 +88,7 @@ from merxen.cli.run_visualization import visualize_command
 
 
 @click.group(name="merxen")
+@click.version_option(version=__version__, prog_name="merxen")
 def main() -> None:
     """MerXen spatial transcriptomics pipeline CLI."""
     logging.basicConfig(

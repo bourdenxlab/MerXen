@@ -38,6 +38,16 @@ PY
 }
 
 workflow {
+    // The MerXen release of this run (docs/versioning.md): logged, and appended
+    // to <outdir>/nextflow/merxen_versions.jsonl except under -preview.
+    def pipelineVersion = PipelineVersion.launch(
+        workflow, nextflow.version.toString(), file(params.outdir).toAbsolutePath(),
+    )
+    log.info(pipelineVersion.banner)
+    if (pipelineVersion.warning) {
+        log.warn(pipelineVersion.warning)
+    }
+
     if (!params.hitl_preparation_manifest) {
         error('Provide --hitl_preparation_manifest with existing review/native stores and baseline grids')
     }

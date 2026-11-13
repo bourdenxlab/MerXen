@@ -345,24 +345,15 @@ MERXEN_CI_TEST_TIER=full git push
 MERXEN_CI_TEST_TIER=full scripts/run_ci_checks.sh
 ```
 
-## Version bumps
+## Versions, changelog and releases
 
-MerXen uses semantic versions in [pyproject.toml](../pyproject.toml) and
-[src/merxen/__init__.py](../src/merxen/__init__.py). Keep both files in sync
-with `bump-my-version`:
-
-```bash
-uv run bump-my-version bump patch  # bug fixes and small changes
-uv run bump-my-version bump minor  # backwards-compatible features
-uv run bump-my-version bump major  # breaking changes
-```
-
-For a release commit and tag from a clean working tree:
-
-```bash
-uv run bump-my-version bump patch --commit --tag
-git push origin HEAD --tags
-```
+MerXen follows semantic versioning. A pull request that changes what users run
+adds its entry under `## [Unreleased]` in [CHANGELOG.md](../CHANGELOG.md); the
+`Changelog` CI job checks this (label `skip-changelog` to exempt a PR users would
+not notice). Only release PRs change the version, with `bump-my-version`, which
+keeps `pyproject.toml`, `src/merxen/__init__.py` and the Nextflow manifest in
+step. [Versioning and releases](versioning.md) covers what counts as a major,
+minor or patch change and the release steps.
 
 ## Dependency management
 
