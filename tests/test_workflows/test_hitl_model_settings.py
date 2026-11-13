@@ -49,6 +49,7 @@ def _run_cases(tmp_path: Path, cases: list[dict]) -> list[dict]:
     base = (
         block.group()
         .replace("params.", "opts.")
+        .replace("params[", "opts[")
         .replace("geometryFilter(params)", "geometryFilter(opts)")
     )
     hook = text.split("// hitl-hook:C4\n", 1)[1].split("def segmentConfig =", 1)[0]

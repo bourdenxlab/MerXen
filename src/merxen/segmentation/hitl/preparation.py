@@ -17,6 +17,7 @@ from spatialdata.transformations import get_transformation
 from merxen.config import TranscriptDensityConfig
 from merxen.io.image_source import image_to_cyx
 from merxen.io.spatialdata_io import spatialdata_write_lock
+from merxen.platforms import platform_spec
 from merxen.segmentation.density_storage import (
     embed_transcript_density,
     has_embedded_density,
@@ -123,12 +124,9 @@ def prepare_hitl_viewer(config: HitlViewerPreparationConfig) -> Path:
     _install_setup_file(spec, source / spec.name)
     # Old processing copies rewrote chunk timestamps. Compare coordinate grids
     # rather than treating those copies as immutable raster payloads.
-    native_image = sd.read_zarr(native_source, selection=("images",)).images[
-        "morphology_focus"
-    ]
-    review_image = sd.read_zarr(source, selection=("images",)).images[
-        "morphology_focus"
-    ]
+    image_key = platform_spec(config.platform).native_image_key
+    native_image = sd.read_zarr(native_source, selection=("images",)).images[image_key]
+    review_image = sd.read_zarr(source, selection=("images",)).images[image_key]
     native_grid = get_transformation(native_image, to_coordinate_system="global")
     review_grid = get_transformation(review_image, to_coordinate_system="global")
     if image_to_cyx(native_image).shape != image_to_cyx(
@@ -153,7 +151,7 @@ def prepare_hitl_viewer(config: HitlViewerPreparationConfig) -> Path:
         record = read_density_record(source)
         if (
             record["profile"] != density_profile(density_config)
-            or record.get("platform") != "XENIUM"
+            or record.get("platform") != config.platform
         ):
             raise ValueError("Existing density has a different platform or recipe")
         embed_transcript_density(source, source)

@@ -52,9 +52,10 @@ def density_image_key(platform: str) -> str:
     Returns:
         The platform-specific density image element key.
     """
-    if platform not in {"ATERA", "XENIUM"}:
+    key = platform_spec(platform).transcript_density_image_key
+    if key is None:
         raise ValueError("Native transcript density supports ATERA and XENIUM")
-    return f"{platform.lower()}_transcript_density"
+    return key
 
 
 @dataclass(frozen=True)
@@ -175,7 +176,7 @@ def native_density_geometry(source: Path, platform: str = "ATERA") -> DensityGeo
                 .get("experiment", {})
                 .get("pixel_size", 0)
             )
-            if platform == "ATERA"
+            if platform_spec(platform).native_latest_base
             else 0.0
         )
     if not math.isfinite(pixel_size) or pixel_size <= 0:

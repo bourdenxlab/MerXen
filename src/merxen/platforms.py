@@ -149,6 +149,14 @@ class PlatformSpec:
     proseg_hybrid: bool = True
 
     @property
+    def transcript_density_image_key(self) -> str | None:
+        """Return the native density image key, or None when unsupported."""
+        return {
+            "ATERA": "atera_transcript_density",
+            "XENIUM": "xenium_transcript_density",
+        }.get(self.name)
+
+    @property
     def original_shape_keys(self) -> tuple[str, ...]:
         """Return the original cell shape key, then the nucleus key if any."""
         if self.original_nucleus_shape_key is None:
