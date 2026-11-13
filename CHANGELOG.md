@@ -13,6 +13,50 @@ turns [Unreleased] into the release's section.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-13
+
+The first tagged release of MerXen: `main` as of pull request #135, with release
+versions added. Earlier versions (0.1.0, 0.2.0) were never released; the changes
+before this release are in the merged
+[pull requests](https://github.com/bourdenxlab/MerXen/pulls?q=is%3Apr+is%3Amerged)
+#1–#135. The entries below are the changes made since the 0.2.0 version number
+was set, mostly the reference-based cell-type annotation.
+
+### Highlights
+
+- **Three platforms.** MERSCOPE, Xenium (including Onboard Analysis below 2.0)
+  and 10x Atera, paired or single-platform, human or mouse.
+- **Segmentation from scratch.** Cellpose-SAM seeds ProSeg 3.2.0 on every
+  platform. Optional steps: MERSCOPE fiducial-bead removal, Cellpose
+  human-in-the-loop training with model reuse, and the tiled ProSeg route for
+  Atera.
+- **Registration.** VALIS DAPI alignment of adjacent sections with residual
+  optic flow and per-cell quality, post-Xenium IF registration, and the
+  standalone manual landmark registration workflows (with Zeiss CZI input).
+- **Cell-type annotation is map-first.** MapMyCells against packaged references
+  (WHB and SEA-AD for human, WMB for mouse), with resolvability, panel trust
+  states, real-data QC and a per-pair annotation report. Legacy Leiden-then-label
+  clustering is deprecated. pciSeq cell typing is optional, with a batched,
+  streaming mode.
+- **Downstream analyses.** QC, cross-platform comparison, MENDER, GASTON,
+  cortical depth, distance from object, MECR and spatial gene analysis.
+- **Release versions.** Each run logs its MerXen release and records it in
+  `<outdir>/nextflow/merxen_versions.jsonl`, and this changelog lists the
+  changes of every release ([versioning](docs/versioning.md)).
+
+### Upgrading
+
+- **From `main` at #135:** nothing changes but the version: a launch logs
+  `MerXen 1.0.0` and appends to `<outdir>/nextflow/merxen_versions.jsonl`, and
+  `merxen --version` reports it. Outputs are unchanged.
+- **From an older `main`:** read Changed below. Human and mouse clustering
+  default to `map_first` and write the unsuffixed clustered tables, so a rerun
+  into an existing results folder replaces the legacy tables. Keep a snapshot,
+  or set `--clustering_squidpy_table_key_suffix mapfirst`, or set the mode to
+  `legacy`. Launches need the local configuration files (`.env` and the site
+  configs, [local configuration](docs/local-configuration.md)). QC totals of
+  very large sections can differ slightly.
+
 ### Added
 
 #### Release versions and this changelog
@@ -194,4 +238,5 @@ turns [Unreleased] into the release's section.
 - The protocol and the user's decisions are in `docs/acceptance/annotation-v1-preregistration.md` §18–§20.
 - The mouse acceptance (gate M) is scored on MS1 and MS2 under the protocol of pre-registration §25, with the user's review decisions in §25.4. The re-score with the section-time exception gives 67 PASS and 7 FAIL (excepted), with no open problem; the user's review of the two original_seg reports (U9) is pending.
 
-[Unreleased]: https://github.com/bourdenxlab/MerXen/commits/main
+[Unreleased]: https://github.com/bourdenxlab/MerXen/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/bourdenxlab/MerXen/releases/tag/v1.0.0

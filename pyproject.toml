@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "merxen"
-version = "0.2.0"
+version = "1.0.0"
 description = "Pre-processing, segmentation, and comparative analysis of paired MERSCOPE and Xenium spatial transcriptomics datasets"
 readme = "README.md"
 license = "MIT"
@@ -139,7 +139,7 @@ merxen = [
 # commits nor tags: the release PR is squash-merged and the release workflow
 # (.github/workflows/release.yml) tags main and publishes the GitHub release.
 [tool.bumpversion]
-current_version = "0.2.0"
+current_version = "1.0.0"
 parse = "(?P<major>0|[1-9]\\d*)\\.(?P<minor>0|[1-9]\\d*)\\.(?P<patch>0|[1-9]\\d*)"
 serialize = ["{major}.{minor}.{patch}"]
 commit = false
