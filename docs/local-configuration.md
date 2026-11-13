@@ -249,7 +249,12 @@ hit through; each lies outside the rules by construction.
 - The synthetic donor ids `P0001`, `P0002`, `P9999`.
 
 Not sample names either: public references (WHB, WMB, SEA-AD, MERFISH-638850
-and its sections, the ABC atlas, public 10x and Vizgen datasets).
+and its sections, the ABC atlas, public 10x and Vizgen datasets, and the public
+Xenium hippocampus deposits used for the Xenium-versus-Atera comparison: KI
+hippocampus, Zenodo 14879552 and 14879626, and JHU/LIBD dentate gyrus lifespan,
+GEO GSE317381). Their section, slide, run, instrument and donor ids are public
+too. Personal data inside a deposit, such as a contact email in its metadata,
+stays private.
 
 ## Tests
 
