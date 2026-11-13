@@ -1,4 +1,4 @@
-"""Segmentation-independent Atera gene density on the native morphology grid.
+"""Segmentation-independent native gene density on the native morphology grid.
 
 Read parquet columns in bounded batches, count every eligible gene (including
 unassigned rows), sum over z, and smooth in microns. Integer bins are anchored
@@ -26,7 +26,7 @@ from scipy import ndimage as ndi
 from spatialdata.models import Image2DModel
 from spatialdata.transformations import get_transformation
 
-from merxen.config import AteraTranscriptDensityConfig
+from merxen.config import TranscriptDensityConfig
 from merxen.enrichment.label_lookup import PixelFrame, pixel_indices
 from merxen.io.image_source import image_to_cyx
 from merxen.io.points_aggregates import read_root_attrs
@@ -41,6 +41,20 @@ DENSITY_IMAGE_KEY = "atera_transcript_density"
 DENSITY_CHANNEL = "transcript_density"
 DENSITY_MANIFEST = "transcript_density.json"
 DENSITY_VERSION = 1
+
+
+def density_image_key(platform: str) -> str:
+    """Return the permanent image key for a supported density platform.
+
+    Args:
+        platform: Canonical ATERA or XENIUM platform name.
+
+    Returns:
+        The platform-specific density image element key.
+    """
+    if platform not in {"ATERA", "XENIUM"}:
+        raise ValueError("Native transcript density supports ATERA and XENIUM")
+    return f"{platform.lower()}_transcript_density"
 
 
 @dataclass(frozen=True)
@@ -114,7 +128,7 @@ def _density_matches_native_image(
         has_embedded_density,
     )
 
-    key = platform_spec("ATERA").native_image_key
+    key = platform_spec(record.get("platform", "ATERA")).native_image_key
     image = source / "images" / key
     if _file_tree_identity(image) == record["image_fingerprint"]:
         return True
@@ -140,31 +154,36 @@ def _density_matches_native_image(
     return False
 
 
-def native_density_geometry(source: Path) -> DensityGeometry:
-    """Read Atera geometry from the native image and retained vendor metadata.
+def native_density_geometry(source: Path, platform: str = "ATERA") -> DensityGeometry:
+    """Read native geometry from the native image and retained vendor metadata.
 
     Args:
-        source: A built/latest/review Atera SpatialData store.
+        source: A built/latest/review SpatialData store.
+        platform: Platform whose vendor pixel-size metadata is retained.
 
     Returns:
         Native dimensions and positive pixel size, without loading points/tables.
     """
     sdata = sd.read_zarr(source, selection=("images",))
-    image = image_to_cyx(sdata.images[platform_spec("ATERA").native_image_key])
+    image = image_to_cyx(sdata.images[platform_spec(platform).native_image_key])
     try:
-        pixel_size = find_um_per_px(source, "ATERA")
+        pixel_size = find_um_per_px(source, platform)
     except FileNotFoundError:
-        pixel_size = float(
-            sdata.attrs.get("merxen_atera", {})
-            .get("experiment", {})
-            .get("pixel_size", 0)
+        pixel_size = (
+            float(
+                sdata.attrs.get("merxen_atera", {})
+                .get("experiment", {})
+                .get("pixel_size", 0)
+            )
+            if platform == "ATERA"
+            else 0.0
         )
     if not math.isfinite(pixel_size) or pixel_size <= 0:
-        raise ValueError("Atera transcript density needs a native pixel size")
+        raise ValueError("Transcript density needs a native pixel size")
     return DensityGeometry(int(image.sizes["y"]), int(image.sizes["x"]), pixel_size)
 
 
-def density_profile(config: AteraTranscriptDensityConfig) -> dict[str, Any]:
+def density_profile(config: TranscriptDensityConfig) -> dict[str, Any]:
     """Return output-relevant parameters, independent of paths or batch sizes.
 
     Args:
@@ -191,7 +210,7 @@ def density_profile(config: AteraTranscriptDensityConfig) -> dict[str, Any]:
 def accumulate_density_counts(
     source: Path,
     geometry: DensityGeometry,
-    config: AteraTranscriptDensityConfig,
+    config: TranscriptDensityConfig,
     *,
     window: tuple[int, int, int, int] | None = None,
 ) -> DensityCounts:
@@ -275,7 +294,7 @@ def accumulate_density_counts(
 def smooth_density_counts(
     counts: DensityCounts,
     geometry: DensityGeometry,
-    config: AteraTranscriptDensityConfig,
+    config: TranscriptDensityConfig,
 ) -> np.ndarray:
     """Convert counts to transcripts/µm² and apply one global Gaussian.
 
@@ -342,8 +361,8 @@ def reconstruct_density_window(
     )
 
 
-def create_transcript_density(config: AteraTranscriptDensityConfig) -> Path:
-    """Write an independent, complete density store before Atera segmentation.
+def create_transcript_density(config: TranscriptDensityConfig) -> Path:
+    """Write an independent density store on the native morphology grid.
 
     Args:
         config: Native source, fresh output directory and raster parameters.
@@ -352,12 +371,16 @@ def create_transcript_density(config: AteraTranscriptDensityConfig) -> Path:
         SpatialData density store. Source data and previous outputs are untouched.
     """
     source, output = config.source_zarr_path.resolve(), config.output_dir.resolve()
-    if output.is_relative_to(source) or source.is_relative_to(output):
-        raise ValueError("Density output must be separate from the source store")
+    points_source = (config.transcripts_source_zarr_path or source).resolve()
+    if any(
+        output.is_relative_to(root) or root.is_relative_to(output)
+        for root in (source, points_source)
+    ):
+        raise ValueError("Density output must be separate from the source stores")
     if output.exists() and any(output.iterdir()):
         raise ValueError("Density output must be new or empty")
-    geometry = native_density_geometry(source)
-    points = sd.read_zarr(source, selection=("points",)).points["transcripts"]
+    geometry = native_density_geometry(source, config.platform)
+    points = sd.read_zarr(points_source, selection=("points",)).points["transcripts"]
     transform = get_transformation(
         points, to_coordinate_system="global"
     ).to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y"))
@@ -368,9 +391,9 @@ def create_transcript_density(config: AteraTranscriptDensityConfig) -> Path:
         atol=1e-10,
     ):
         raise ValueError(
-            "Density requires Atera micron transcripts in the native frame"
+            "Density requires original micron transcripts in the native frame"
         )
-    counts = accumulate_density_counts(source, geometry, config)
+    counts = accumulate_density_counts(points_source, geometry, config)
     if not counts.n_binned:
         raise ValueError("No eligible gene transcripts lie in the native image")
     density = smooth_density_counts(counts, geometry, config)
@@ -400,7 +423,7 @@ def create_transcript_density(config: AteraTranscriptDensityConfig) -> Path:
         )
     )
     original = sd.read_zarr(source, selection=("images",))
-    native = original.images[platform_spec("ATERA").native_image_key]
+    native = original.images[platform_spec(config.platform).native_image_key]
     image = Image2DModel.parse(
         array,
         dims=("c", "y", "x"),
@@ -412,8 +435,8 @@ def create_transcript_density(config: AteraTranscriptDensityConfig) -> Path:
     output.mkdir(parents=True, exist_ok=True)
     target = output / "transcript_density.zarr"
     with dask.config.set(scheduler="threads", num_workers=4):
-        sd.SpatialData(images={DENSITY_IMAGE_KEY: image}).write(target)
-    files, _, _ = points_files(source)
+        sd.SpatialData(images={density_image_key(config.platform): image}).write(target)
+    files, _, _ = points_files(points_source)
     record = {
         "schema_version": 1,
         "source_zarr": str(source),
@@ -421,12 +444,12 @@ def create_transcript_density(config: AteraTranscriptDensityConfig) -> Path:
         "profile": density_profile(config),
         "totals": totals,
         "image_fingerprint": _file_tree_identity(
-            source / "images" / platform_spec("ATERA").native_image_key
+            source / "images" / platform_spec(config.platform).native_image_key
         ),
         "points_fingerprint": _json_hash(
             [
                 (
-                    str(path.relative_to(source)),
+                    str(path.relative_to(points_source)),
                     path.stat().st_size,
                     path.stat().st_mtime_ns,
                 )
@@ -435,6 +458,10 @@ def create_transcript_density(config: AteraTranscriptDensityConfig) -> Path:
         ),
         "raster_fingerprint": _file_tree_identity(target),
     }
+    if config.platform != "ATERA":
+        record["platform"] = config.platform
+    if points_source != source:
+        record["points_source_zarr"] = str(points_source)
     record["fingerprint"] = _json_hash(record)
     (target / DENSITY_MANIFEST).write_text(json.dumps(record, indent=2) + "\n")
     (output / DENSITY_MANIFEST).write_text(json.dumps(record, indent=2) + "\n")
@@ -490,7 +517,7 @@ def density_input_identity(path: Path | None) -> TranscriptDensityInputIdentity 
 
 
 def image_with_density(sdata: Any, source: Path, density_path: Path | None) -> Any:
-    """Append a verified auxiliary density channel to the native Atera image.
+    """Append a verified auxiliary density channel to its native image.
 
     Args:
         sdata: Source SpatialData, with images loaded.
@@ -500,19 +527,23 @@ def image_with_density(sdata: Any, source: Path, density_path: Path | None) -> A
     Returns:
         Lazy CYX array, retaining native stains and adding density when requested.
     """
-    key = platform_spec("ATERA").native_image_key
+    record = read_density_record(density_path) if density_path is not None else None
+    key = platform_spec(
+        record.get("platform", "ATERA") if record else "ATERA"
+    ).native_image_key
     native = image_to_cyx(sdata.images[key])
     if density_path is None:
         return native
-    record = read_density_record(density_path)
+    assert record is not None
     if not _density_matches_native_image(source, density_path, record):
         raise ValueError("Transcript density belongs to a different native image")
     if source.resolve() == Path(record["source_zarr"]).resolve():
-        files, _, _ = points_files(source)
+        points_source = Path(record.get("points_source_zarr", str(source)))
+        files, _, _ = points_files(points_source)
         found = _json_hash(
             [
                 (
-                    str(path.relative_to(source)),
+                    str(path.relative_to(points_source)),
                     path.stat().st_size,
                     path.stat().st_mtime_ns,
                 )
@@ -522,7 +553,7 @@ def image_with_density(sdata: Any, source: Path, density_path: Path | None) -> A
         if found != record["points_fingerprint"]:
             raise ValueError("Source transcripts changed since density generation")
     density_store = sd.read_zarr(density_path, selection=("images",))
-    element = density_store.images[DENSITY_IMAGE_KEY]
+    element = density_store.images[density_image_key(record.get("platform", "ATERA"))]
     density = image_to_cyx(element)
     if density.shape[1:] != native.shape[1:]:
         raise ValueError("Transcript density shape differs from native morphology")

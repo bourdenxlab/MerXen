@@ -522,8 +522,8 @@ class SpatialDataBuildConfig(BaseModel):
     atera: AteraBuildConfig = AteraBuildConfig()
 
 
-class AteraTranscriptDensityConfig(BaseModel):
-    """Rasterize gene transcripts on the native Atera morphology grid.
+class TranscriptDensityConfig(BaseModel):
+    """Rasterize gene transcripts on a native Atera or Xenium morphology grid.
 
     Gaussian width is in physical microns. Counts include unassigned genes
     across all z planes, independently of any existing segmentation.
@@ -532,12 +532,20 @@ class AteraTranscriptDensityConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     source_zarr_path: Path
+    transcripts_source_zarr_path: Path | None = None
     output_dir: Path
+    platform: Literal["ATERA", "XENIUM"] = "ATERA"
     min_qv: float = Field(default=20, ge=0)
     bin_size_px: int = Field(default=1, ge=1, le=8)
     sigma_um: float = Field(default=0.15, gt=0)
     batch_rows: int = Field(default=524_288, ge=1)
     chunk_size_px: int = Field(default=1024, ge=64)
+
+
+class AteraTranscriptDensityConfig(TranscriptDensityConfig):
+    """Retain the Atera-only command and its existing configuration contract."""
+
+    platform: Literal["ATERA"] = "ATERA"
 
 
 class DatasetConfig(BaseModel):

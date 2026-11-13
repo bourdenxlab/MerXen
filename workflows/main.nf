@@ -4134,7 +4134,9 @@ def segmentationConfigMap(pairId, platform, sourceSpatialdata, meta, params) {
         ],
         mask_filter: [
             final_min_area_um2: params.cellpose_final_min_area_um2,
-            final_max_area_um2: params.cellpose_final_max_area_um2,
+            final_max_area_um2: platform == 'XENIUM'
+                ? params.xenium_cellpose_default_max_area_um2
+                : params.cellpose_final_max_area_um2,
             final_filter_chunk_mb: params.cellpose_final_filter_chunk_mb,
             geometry_filter: CellposeSettings.geometryFilter(params),
         ],

@@ -1,10 +1,40 @@
-"""Pre-segmentation Atera transcript-density command."""
+"""Native transcript-density generation and installation commands."""
 
 from pathlib import Path
 
 import click
 
-from merxen.config import AteraTranscriptDensityConfig, load_config_from_json
+from merxen.config import (
+    AteraTranscriptDensityConfig,
+    TranscriptDensityConfig,
+    load_config_from_json,
+)
+
+
+@click.command(name="transcript-density")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    required=True,
+)
+@click.option("--embed/--no-embed", default=True, show_default=True)
+def transcript_density_command(config_path: Path, embed: bool) -> None:
+    """Generate native Atera or Xenium density, independently of model channels.
+
+    Args:
+        config_path: Original native store, platform and raster settings.
+        embed: Install the raster and viewer pyramids in the source store.
+    """
+    from merxen.segmentation.density_storage import prepare_embedded_density
+    from merxen.segmentation.transcript_density import create_transcript_density
+
+    config = load_config_from_json(config_path, TranscriptDensityConfig)
+    assert isinstance(config, TranscriptDensityConfig)
+    result = (
+        prepare_embedded_density(config) if embed else create_transcript_density(config)
+    )
+    click.echo(f"Transcript density written: {result}")
 
 
 @click.command(name="atera-transcript-density")

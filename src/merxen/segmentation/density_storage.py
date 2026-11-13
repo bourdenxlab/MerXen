@@ -12,7 +12,7 @@ from typing import Any
 import spatialdata as sd
 import zarr
 
-from merxen.config import AteraTranscriptDensityConfig
+from merxen.config import TranscriptDensityConfig
 from merxen.io.points_aggregates import read_root_attrs
 from merxen.io.spatialdata_io import spatialdata_write_lock
 from merxen.platforms import platform_spec
@@ -63,11 +63,12 @@ def embedded_density_record(
     signed = {key: value for key, value in binding.items() if key != "binding_sha256"}
     if (
         binding.get("schema_version") != 1
-        or binding.get("image_key") != DENSITY_IMAGE_KEY
+        or binding.get("image_key")
+        not in {DENSITY_IMAGE_KEY, "xenium_transcript_density"}
         or binding.get("binding_sha256") != _digest(signed)
     ):
         raise ValueError("Embedded transcript density metadata is inconsistent")
-    element = path / "images" / DENSITY_IMAGE_KEY
+    element = path / "images" / binding["image_key"]
     if not element.is_dir() or (
         verify_payload and _payload_identity(element) != binding["payload_fingerprint"]
     ):
@@ -95,18 +96,21 @@ def embed_transcript_density(
     """
     from merxen.segmentation.transcript_density import (
         _native_image_identity,
+        density_image_key,
         image_with_density,
         read_density_record,
     )
     from merxen.viewer_cache.build import build_image_pyramids_in_store
 
     target, density_source = target.resolve(), density_source.resolve()
-    native_image_key = platform_spec("ATERA").native_image_key
     record = read_density_record(density_source)
+    platform = record.get("platform", "ATERA")
+    native_image_key = platform_spec(platform).native_image_key
+    image_key = density_image_key(platform)
     with spatialdata_write_lock(target):
         sdata = sd.read_zarr(target, selection=("images",))
         image_with_density(sdata, target, density_source)
-        element = target / "images" / DENSITY_IMAGE_KEY
+        element = target / "images" / image_key
         installed = False
         if has_embedded_density(target):
             existing = embedded_density_record(target)
@@ -136,7 +140,7 @@ def embed_transcript_density(
                 raise ValueError(
                     "An unverified density image already exists in this store"
                 )
-            source_element = density_source / "images" / DENSITY_IMAGE_KEY
+            source_element = density_source / "images" / image_key
             if target.is_relative_to(source_element):
                 raise ValueError(
                     "Density source and destination must be separate elements"
@@ -154,7 +158,7 @@ def embed_transcript_density(
             sdata = sd.read_zarr(target, selection=("images",))
             binding = {
                 "schema_version": 1,
-                "image_key": DENSITY_IMAGE_KEY,
+                "image_key": image_key,
                 "record": record,
                 "payload_fingerprint": _payload_identity(element),
                 "native_image_fingerprint": _native_image_identity(
@@ -167,7 +171,7 @@ def embed_transcript_density(
             installed = True
         if build_pyramids:
             statuses = build_image_pyramids_in_store(
-                sdata, target, image_keys=[DENSITY_IMAGE_KEY]
+                sdata, target, image_keys=[image_key]
             )
             installed = installed or "built" in statuses.values()
         if installed:
@@ -175,11 +179,11 @@ def embed_transcript_density(
     return target
 
 
-def prepare_embedded_density(config: AteraTranscriptDensityConfig) -> Path:
+def prepare_embedded_density(config: TranscriptDensityConfig) -> Path:
     """Generate or reuse density, retaining its only permanent payload in SpatialData.
 
     Args:
-        config: Validated AteraTranscriptDensityConfig for this source/recipe.
+        config: Validated TranscriptDensityConfig for this source/recipe.
 
     Returns:
         A task-output alias to the self-contained source SpatialData store.

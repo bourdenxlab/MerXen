@@ -195,3 +195,7 @@ The `all` analysis selector includes all four on comparison rows.
 
 Use a fresh output directory to preserve earlier runs. This route does not
 retrain weights or overwrite a published model bundle.
+
+For two-stain Xenium training with a density image used only as a viewing guide,
+see [Xenium HITL preparation](xenium-hitl-preparation.md). Its preparation workflow
+retains existing masks and annotations and embeds the portable crop setup.
