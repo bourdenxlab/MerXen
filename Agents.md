@@ -235,7 +235,12 @@ Use imperative mood. Reference issue numbers where applicable.
 [refactor]: extract preprocessing into separate module
 [test]: add coverage for edge cases in validation
 [chore]: refresh CI dependency pins
+[release]: v1.3.0
 ```
+
+A change users would notice also adds its entry under `## [Unreleased]` in
+`CHANGELOG.md`, in the same PR ([versioning and releases](docs/versioning.md)).
+Only release PRs change the version.
 
 Commit title format is required:
 - `[feature]:` changes intended behavior of the code.

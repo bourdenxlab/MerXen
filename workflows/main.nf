@@ -4239,6 +4239,23 @@ def segmentationConfigMap(pairId, platform, sourceSpatialdata, meta, params) {
 }
 
 workflow {
+    // The MerXen release of this run (docs/versioning.md): logged, and appended
+    // to <outdir>/nextflow/merxen_versions.jsonl except under -preview.
+    def pipelineVersion = PipelineVersion.info(workflow, nextflow.version.toString())
+    log.info(PipelineVersion.banner(pipelineVersion))
+    if (!PipelineVersion.isPreview(workflow)) {
+        def versionRecordProblem = PipelineVersion.record(
+            pipelineVersion,
+            file(params.outdir).toAbsolutePath(),
+        )
+        if (versionRecordProblem) {
+            log.warn(
+                "Could not append the MerXen version to " +
+                "${params.outdir}/nextflow/${PipelineVersion.RECORD_FILE}: ${versionRecordProblem}"
+            )
+        }
+    }
+
     // Private site configs (docs/local-configuration.md): stop a launch whose
     // site locations are missing instead of letting null params fall back.
     def siteConfigProblems = SiteConfigCheck.problems(
