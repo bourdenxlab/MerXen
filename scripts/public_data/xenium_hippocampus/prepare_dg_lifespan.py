@@ -501,6 +501,77 @@ def control_name_problems(features: pd.DataFrame) -> list[str]:
     return problems
 
 
+def cast_binary_columns_to_utf8(path: Path) -> list[str]:
+    """Rewrite a parquet file's binary columns as UTF-8 strings, in place.
+
+    The deposited ``transcripts.parquet`` was re-written with Polars, which
+    stores ``cell_id``, ``feature_name`` and ``fov_name`` as ``large_binary``;
+    Xenium writes them as strings. The file is rewritten one row group at a
+    time (row groups, other columns and the compression codec are kept) into a
+    ``.partial`` file that replaces the original only when complete. Values
+    that are not valid UTF-8 make the cast fail. A file without binary columns
+    is left untouched, so the step is idempotent.
+
+    Args:
+        path: Parquet file.
+
+    Returns:
+        Names of the columns that were cast (empty when none were binary).
+
+    Raises:
+        PrepareError: If a binary value is not valid UTF-8.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    source = pq.ParquetFile(path)
+    schema = source.schema_arrow
+    binary = [
+        field.name
+        for field in schema
+        if pa.types.is_binary(field.type) or pa.types.is_large_binary(field.type)
+    ]
+    if not binary:
+        return []
+    target_schema = pa.schema(
+        [
+            field.with_type(pa.large_string()) if field.name in binary else field
+            for field in schema
+        ],
+        metadata=schema.metadata,
+    )
+    metadata = source.metadata
+    codec = (
+        metadata.row_group(0).column(0).compression.lower()
+        if metadata.num_row_groups
+        else "zstd"
+    )
+    partial = path.with_name(path.name + ".partial")
+    logger.info("  cast %s binary columns %s to UTF-8", path.name, binary)
+    try:
+        with pq.ParquetWriter(partial, target_schema, compression=codec) as writer:
+            for index in range(metadata.num_row_groups):
+                table = source.read_row_group(index)
+                try:
+                    table = table.cast(target_schema)
+                except (pa.ArrowInvalid, pa.ArrowTypeError) as exc:
+                    raise PrepareError(
+                        f"{path.name}: row group {index} is not valid UTF-8: {exc}"
+                    ) from exc
+                writer.write_table(table)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
+    rows = pq.ParquetFile(partial).metadata.num_rows
+    if rows != metadata.num_rows:
+        partial.unlink(missing_ok=True)
+        raise PrepareError(
+            f"{path.name}: cast wrote {rows} rows, expected {metadata.num_rows}"
+        )
+    partial.replace(path)
+    return binary
+
+
 def parquet_column_problems(path: Path) -> list[str]:
     """Return missing required columns (footer read only)."""
     import pyarrow.parquet as pq
@@ -1452,6 +1523,12 @@ def prepare_section(
         if not is_done(out_dir / name):
             gunzip_file(inputs.files[role], out_dir / name)
             steps.append(f"{name}: gunzip")
+    cast_columns: dict[str, list[str]] = dict(previous.get("utf8_cast_columns") or {})
+    for name in GUNZIP_OUTPUTS.values():
+        cast = cast_binary_columns_to_utf8(out_dir / name)
+        if cast:
+            cast_columns[name] = cast
+            steps.append(f"{name}: cast {', '.join(cast)} binary -> UTF-8")
 
     checks: list[str] = []
     for name in GUNZIP_OUTPUTS.values():
@@ -1540,6 +1617,7 @@ def prepare_section(
         },
         "image": image_record or asdict(image),
         "cells_zarr": zarr_stats,
+        "utf8_cast_columns": cast_columns,
         "steps_this_run": steps,
         "steps_history": [*list(previous.get("steps_history") or []), steps],
         "notes": [
@@ -1558,6 +1636,9 @@ def prepare_section(
             "and nucleus centroids are NaN.",
             "gene_panel.json is synthesised from the h5 features (genes and "
             "negative control probes); probe coverage is unknown.",
+            "Binary parquet columns (utf8_cast_columns; the deposited "
+            "transcripts.parquet was re-written with Polars) were cast to UTF-8 "
+            "strings as Xenium writes them; values and row groups are unchanged.",
             "transcripts.parquet has no is_gene/codeword_category; every h5 "
             "feature was checked to be classified correctly by MerXen's "
             "control-name rule.",
