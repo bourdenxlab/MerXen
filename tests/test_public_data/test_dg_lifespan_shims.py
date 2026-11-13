@@ -863,3 +863,71 @@ def test_merxen_build_spatialdata_accepts_the_prepared_folder(
     assert built.tables["table"].n_obs == 4
     sidecar = json.loads((zarr_path / "experiment.xenium").read_text())
     assert sidecar["pixel_size"] == pytest.approx(PIXEL_SIZE)
+
+
+# --------------------------------------------------------------------------
+# binary -> UTF-8 cast of Polars-written parquet columns
+
+
+def _binary_transcripts(path: Path, cell_ids: list[bytes]) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    n = len(cell_ids)
+    table = pa.table(
+        {
+            "transcript_id": pa.array(range(n), pa.uint64()),
+            "cell_id": pa.array(cell_ids, pa.large_binary()),
+            "feature_name": pa.array([b"ABAT"] * n, pa.large_binary()),
+            "qv": pa.array([30.0] * n, pa.float32()),
+        }
+    )
+    pq.write_table(table, path, row_group_size=2, compression="zstd")
+
+
+def test_binary_columns_are_cast_to_utf8_in_place(
+    prepare: ModuleType, tmp_path: Path
+) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    path = tmp_path / "transcripts.parquet"
+    ids = [b"UNASSIGNED", b"aaab-1", b"aaac-1", b"UNASSIGNED", b"x"]
+    _binary_transcripts(path, ids)
+
+    assert prepare.cast_binary_columns_to_utf8(path) == ["cell_id", "feature_name"]
+
+    source = pq.ParquetFile(path)
+    assert source.schema_arrow.field("cell_id").type == pa.large_string()
+    assert source.schema_arrow.field("feature_name").type == pa.large_string()
+    assert source.schema_arrow.field("qv").type == pa.float32()
+    assert source.metadata.num_row_groups == 3
+    assert source.metadata.row_group(0).column(0).compression == "ZSTD"
+    table = source.read()
+    assert table.column("cell_id").to_pylist() == [
+        "UNASSIGNED",
+        "aaab-1",
+        "aaac-1",
+        "UNASSIGNED",
+        "x",
+    ]
+    assert table.column("transcript_id").to_pylist() == [0, 1, 2, 3, 4]
+    assert not [p for p in prepare.parquet_column_problems(path) if "cell_id" in p]
+    # A second call finds nothing to cast and leaves the file alone.
+    before = path.stat().st_mtime_ns
+    assert prepare.cast_binary_columns_to_utf8(path) == []
+    assert path.stat().st_mtime_ns == before
+
+
+def test_invalid_utf8_fails_and_keeps_the_original(
+    prepare: ModuleType, tmp_path: Path
+) -> None:
+    path = tmp_path / "transcripts.parquet"
+    _binary_transcripts(path, [b"ok-1", b"\xff\xfe"])
+    original = path.read_bytes()
+
+    with pytest.raises(prepare.PrepareError, match="not valid UTF-8"):
+        prepare.cast_binary_columns_to_utf8(path)
+
+    assert path.read_bytes() == original
+    assert not (tmp_path / "transcripts.parquet.partial").exists()
