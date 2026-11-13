@@ -74,4 +74,7 @@ python scripts/update_env_lock_hash.py
 - The hooks enforce this (`pre-commit install`). Before `gh pr create` or `gh pr edit`, pipe the
   title and body through `python3 scripts/privacy/check_private_text.py --stdin`.
 - Not sample names: public references (WHB, WMB, SEA-AD, MERFISH-638850 and its sections, the ABC
-  atlas, public 10x and Vizgen datasets) and the `.vzg2` file format.
+  atlas, public 10x and Vizgen datasets, and the public Xenium hippocampus deposits: KI hippocampus,
+  Zenodo 14879552 and 14879626, and JHU/LIBD dentate gyrus lifespan, GEO GSE317381, with their
+  section, slide, run, instrument and donor ids) and the `.vzg2` file format. Personal data inside
+  a deposit, such as a contact email in its metadata, stays private.
