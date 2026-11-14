@@ -51,9 +51,11 @@ python scripts/update_env_lock_hash.py
 - Run `ruff check` and `ruff format` before every commit.
 - Run `pytest` before pushing. The pre-push hook enforces this.
 - Do not install packages with `pip install <package>`. Add to `pyproject.toml` and regenerate the lockfile.
-- Do not commit to `main` directly. Use a feature branch and open a PR.
+- Commit routine work directly to `main`. Put serious, risky or breaking changes, and changes
+  that span unrelated areas, on a short-lived branch from `main` and merge it by PR; ask first
+  when unsure which applies (Agents.md, Git Workflow).
 - Add a `CHANGELOG.md` entry under `## [Unreleased]` for every user-facing change, in the same PR. Only release PRs change the version (`bump-my-version`; docs/versioning.md).
-- The Atera, robust cell-type annotation and HITL integration histories are promoted together by acceptance-gate PR #127 (user authorization, 2026-11-11). The integration branches close with that merge. Further work uses short-lived branches from `main` and merges by PR; do not resume the former integration branches. Historical validation limits and future work remain recorded in their plans.
+- The Atera, robust cell-type annotation and HITL integration histories are promoted together by acceptance-gate PR #127 (user authorization, 2026-11-11). The integration branches close with that merge. Further work follows the branch rule above (`main`, or a short-lived branch merged by PR); do not resume the former integration branches. Historical validation limits and future work remain recorded in their plans.
 
 ## Privacy: no host paths, no sample names
 

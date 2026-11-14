@@ -219,10 +219,11 @@ for attempt in range(MAX_RETRIES):
 
 ### Branches
 
-- Commit directly to `main` by default for normal local work.
-- If changes are serious, risky, breaking, or span unrelated areas, ask whether they should go on a new branch before committing.
+- Commit routine work directly to `main`.
+- Serious, risky or breaking changes, and changes that span unrelated areas, go on a short-lived branch and merge via pull request. When unsure which applies, ask before committing.
 - When using branches, branch from `main`, keep them short-lived, merge via pull request, and delete them after merge.
 - Exception: a long-lived integration branch is allowed only when a plan in `docs/plans/` names it; it follows the same PR, CI and commit-prefix rules and is deleted when the effort closes. Milestone branches may be cut from it and merged back into it by PR, and are deleted after merge.
+- The Atera, robust cell-type annotation and HITL integration branches closed when acceptance-gate PR #127 merged them into `main` (2026-11-11).
 
 ### Commit messages
 
@@ -412,7 +413,7 @@ Rules:
 - Type hints on all public functions
 - Docstrings on all public functions (Google-style)
 - README covers install, run, test, deploy
-- Feature branches merged via PR
+- Routine work committed to `main`; serious, risky, breaking or wide changes on a short-lived branch merged via PR
 - Meaningful commit messages with conventional prefixes
 - Ruff for linting and formatting
 - Pre-commit hooks for linting, pre-push hooks for testing

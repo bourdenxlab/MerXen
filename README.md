@@ -228,7 +228,7 @@ Stages with conflicting dependency stacks run in their own environments: `envs/e
 
 ## Contributing
 
-Project standards — layout, dependencies, naming, type hints, docstrings, git workflow, commit prefixes — are defined in [Agents.md](Agents.md) and apply to human and AI contributors alike. Do not commit to `main`; use a feature branch and open a PR.
+Project standards — layout, dependencies, naming, type hints, docstrings, git workflow, commit prefixes — are defined in [Agents.md](Agents.md) and apply to human and AI contributors alike. Routine work is committed to `main`; serious, risky, breaking or wide changes go on a short-lived branch and merge by PR.
 
 ```bash
 pre-commit install                    # every hook type, privacy hooks included

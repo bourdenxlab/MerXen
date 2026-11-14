@@ -457,11 +457,14 @@ pip install -e . --no-deps
 
 ## Git workflow
 
-- Branch from `main`, merge via PR, never push directly to `main`.
+- Commit routine work directly to `main`.
+- Put serious, risky or breaking changes, and changes that span unrelated
+  areas, on a short-lived branch from `main` and merge it via PR. When unsure
+  which applies, ask first.
 - Commit titles follow the conventional prefix scheme from
   [Agents.md](../Agents.md#commit-messages): `[feature]`, `[bugfix]`,
   `[refactor]`, `[style]`, `[test]`, `[docs]`, `[chore]`, `[minor]`.
-- Delete feature branches after merge.
+- Delete branches after merge.
 
 ## Robust cell-type annotation work
 
@@ -477,19 +480,16 @@ written approval in the gate PR.
 ### Integration branch
 
 The work was developed on the integration branch
-`feature/robust-celltype-annotation` (plan §2.2). That branch has been merged
-into the Atera integration branch `feature/atera-support` and is now frozen:
-it gets no more commits and never merges into `main` by itself, so it has no
-gate PR. Further RCA work, including AT-11 (map_first annotation for ATERA
-rows, [Atera plan §8](plans/atera-support-plan.md)), lands on
-`feature/atera-support`. Each milestone is a branch `feature/rca-m<N>-<slug>`
-cut from its head and merged back by PR; merge the integration head into the
-milestone branch before its PR. The integration branch is kept current by
-merging `main` into it, never by rebasing it, and only the Atera
-acceptance-gate PRs merge it into `main`; the first of them carries RCA too
-(the human and mouse map_first default and version 0.2.0), so it also needs
-RCA's gate H/M sign-off. Data-integrity fixes go to `main` first. Until a
-species flips, no milestone may change legacy results.
+`feature/robust-celltype-annotation` (plan §2.2), which was merged into the
+Atera integration branch `feature/atera-support`. Milestones were branches
+`feature/rca-m<N>-<slug>` cut from the integration head and merged back by PR;
+the integration branch was kept current by merging `main` into it, never by
+rebasing it. Acceptance-gate PR #127 (2026-11-11) promoted the Atera,
+robust cell-type annotation and HITL integration histories to `main` together,
+and those integration branches closed with that merge; do not resume them.
+Further RCA work follows the [git workflow](#git-workflow) above. Human and
+mouse runs now default to `map_first`; the legacy flow stays available and
+pinned ([Legacy clustering pin](#legacy-clustering-pin)).
 
 ### Hook points shared with `feature/gaston`
 
