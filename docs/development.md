@@ -466,6 +466,24 @@ pip install -e . --no-deps
   `[refactor]`, `[style]`, `[test]`, `[docs]`, `[chore]`, `[minor]`.
 - Delete branches after merge.
 
+### Worktrees and running pipelines
+
+A pipeline run executes from its own pinned worktree or code export, checked
+out at a fixed commit or release tag (`git worktree add --detach <dir> <commit>`,
+or `git worktree add <dir> v1.2.0` as in
+[running a release](versioning.md#running-a-release)), never from the checkout
+you develop in. Develop features in a separate checkout or worktree; committing,
+switching branches or pulling there then never changes the code under a
+running pipeline, and `-resume` keeps working against the code the run started
+with.
+
+- Never edit, check out, reset, pull or remove a pinned run worktree while its
+  run is live or may be resumed. A fix lands on `main` (or a branch) and
+  reaches a run only through a new pinned worktree.
+- Worktrees and code exports have no private files; point them at the main
+  checkout's with `MERXEN_ENV_FILE` and the site-config variables
+  ([discovery](local-configuration.md#discovery-checkouts-worktrees-and-code-exports)).
+
 ## Robust cell-type annotation work
 
 The effort planned in
