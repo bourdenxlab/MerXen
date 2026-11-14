@@ -316,7 +316,8 @@ Use imperative mood. Reference issue numbers where applicable.
 ```
 
 A change users would notice also adds its entry under `## [Unreleased]` in
-`CHANGELOG.md`, in the same PR ([versioning and releases](docs/versioning.md)).
+`CHANGELOG.md`, in the same commit, or in the same PR when the change goes on a branch
+([versioning and releases](docs/versioning.md)).
 Only release PRs change the version.
 
 Commit title format is required:
@@ -407,12 +408,12 @@ pre-merge-commit, commit-msg, pre-push) come from `default_install_hook_types` i
 pre-commit install
 ```
 
-Note: these are local guardrails. Contributors can bypass them with `--no-verify`. CI (see below) is the authoritative gate that cannot be bypassed.
+Note: these are local guardrails, and for work committed directly to `main` they are the only gate before the push: the PR-only Changelog and Privacy jobs never run on a direct push, and `ci.yml` runs only after it. Never bypass them with `--no-verify`. On a push to `main` the pre-push hook also runs the Changelog job's entry check (`scripts/run_ci_checks.sh`; `MERXEN_SKIP_CHANGELOG=1` stands in for the `skip-changelog` label). For branches, CI (see below) is the gate before merge.
 
 
 ## CI (GitHub Actions)
 
-Every pull request must pass CI before merge. Configure branch protection rules on `main` to enforce this.
+Every pull request must pass CI before merge. Branch protection on `main` may require status checks, but must not require pull requests: routine work is committed to `main` directly (Git Workflow).
 
 ```yaml
 # .github/workflows/ci.yml
@@ -449,7 +450,7 @@ jobs:
 Notes:
 - CI uses `requirements/requirements.lock` for deterministic installs — not a fresh resolve.
 - CI uses pip/uv directly, not conda. Conda is a local development convenience; CI needs speed and reproducibility. If you need system-level libraries in CI, install them with `apt-get` in a prior step.
-- Set up branch protection: Settings → Branches → Add rule for `main` → check "Require status checks to pass before merging" and select the CI job.
+- Branch protection, if used: Settings → Branches → Add rule for `main` → check "Require status checks to pass before merging" and select the CI job. Leave "Require a pull request before merging" off.
 
 
 ## Testing
@@ -482,7 +483,7 @@ Rules:
 
 ## Rule Severity Reference
 
-**Must** — non-negotiable. Violations block merge.
+**Must** — non-negotiable. Violations block merge or push.
 - Standard project layout (`src/`, `tests/`, `docs/`)
 - `pyproject.toml` as single source of truth for dependencies
 - PEP 8 naming

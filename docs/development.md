@@ -347,10 +347,11 @@ MERXEN_CI_TEST_TIER=full scripts/run_ci_checks.sh
 
 ## Versions, changelog and releases
 
-MerXen follows semantic versioning. A pull request that changes what users run
-adds its entry under `## [Unreleased]` in [CHANGELOG.md](../CHANGELOG.md); the
-`Changelog` CI job checks this (label `skip-changelog` to exempt a PR users would
-not notice). Only release PRs change the version, with `bump-my-version`, which
+MerXen follows semantic versioning. A change to what users run adds its entry
+under `## [Unreleased]` in [CHANGELOG.md](../CHANGELOG.md), in the same commit or
+PR; the `Changelog` CI job checks PRs (label `skip-changelog` to exempt a PR users
+would not notice) and the pre-push hook checks direct pushes to `main`
+(`MERXEN_SKIP_CHANGELOG=1` to exempt one). Only release PRs change the version, with `bump-my-version`, which
 keeps `pyproject.toml`, `src/merxen/__init__.py` and the Nextflow manifest in
 step. [Versioning and releases](versioning.md) covers what counts as a major,
 minor or patch change and the release steps.

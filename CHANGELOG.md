@@ -6,12 +6,17 @@ uses [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 [Versioning and releases](docs/versioning.md) says what counts as a major,
 minor or patch change for this pipeline and how a release is made.
 
-A pull request that changes what the pipeline does, how it is configured or
-what it writes adds its entry under [Unreleased] (CI checks this; the
-`skip-changelog` label exempts a PR with nothing users would notice). A release
-turns [Unreleased] into the release's section.
+A commit or pull request that changes what the pipeline does, how it is
+configured or what it writes adds its entry under [Unreleased] (CI checks pull
+requests and the pre-push hook checks pushes to `main`; the `skip-changelog`
+label, or `MERXEN_SKIP_CHANGELOG=1` for a push, exempts a change with nothing
+users would notice). A release turns [Unreleased] into the release's section.
 
 ## [Unreleased]
+
+### Changed
+
+- **Hooks.** A push to `main` now runs the `Changelog` CI job's entry check in the pre-push hook (`scripts/run_ci_checks.sh`), since direct commits to `main` get no pull request. Push with `MERXEN_SKIP_CHANGELOG=1` when users would notice nothing ([versioning and releases](docs/versioning.md#changelog-entries)).
 
 ## [1.0.0] - 2026-11-13
 

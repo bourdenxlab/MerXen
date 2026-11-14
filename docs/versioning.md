@@ -113,12 +113,18 @@ stamped `merxen_version` 0.1.0 or 0.2.0 do not identify a commit.
 
 [CHANGELOG.md](../CHANGELOG.md) follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/).
 
-- **Every PR adds an entry.** A pull request that changes what users run adds
-  its entry under `## [Unreleased]` in the same PR. The `Changelog` CI job
-  fails a PR that changes `src/`, `workflows/`, `envs/`, `containers/`,
-  `assets/` or `requirements/` without touching `CHANGELOG.md`. Label the PR
-  `skip-changelog` when users would notice nothing, such as a refactor with
-  identical outputs or a test-only change.
+- **Every user-facing change adds an entry.** A change to what users run adds
+  its entry under `## [Unreleased]` in the same commit, or in the same PR when
+  the change goes on a branch. The `Changelog` CI job fails a PR that changes
+  `src/`, `workflows/`, `envs/`, `containers/`, `assets/` or `requirements/`
+  without touching `CHANGELOG.md`. Label the PR `skip-changelog` when users
+  would notice nothing, such as a refactor with identical outputs or a
+  test-only change.
+- **Direct commits to `main`.** The `Changelog` job runs only on PRs, and the
+  `skip-changelog` label has no effect on a direct commit. The pre-push hook
+  (`scripts/run_ci_checks.sh`) runs the same entry check on every push to
+  `main`; push with `MERXEN_SKIP_CHANGELOG=1` when users would notice nothing.
+  Without the hook, run the `check-pr` command below before pushing.
 - **Change types.** File the entry under one of these `###` headings: `Added`,
   `Changed`, `Deprecated`, `Removed`, `Fixed` or `Security`. A release can also
   have `Highlights` (a short summary at the top), `Upgrading` (what users must

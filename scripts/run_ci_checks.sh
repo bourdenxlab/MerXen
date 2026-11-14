@@ -150,6 +150,31 @@ if command -v nextflow >/dev/null 2>&1; then
     NXF_DISABLE_CHECK_LATEST=true nextflow lint -project-dir workflows -o concise workflows/
 fi
 
+# A direct push to main has no PR, so the Changelog CI job never sees it
+# (docs/versioning.md). The push hook runs that job's entry check instead,
+# against the remote main being pushed over (pre-commit sets
+# PRE_COMMIT_FROM_REF), else MERXEN_CI_BASE_REF or the remote main.
+# MERXEN_SKIP_CHANGELOG=1 is the local stand-in for the skip-changelog label.
+check_changelog_entry() {
+    local to_ref="${PRE_COMMIT_TO_REF:-HEAD}"
+    local base_ref="${PRE_COMMIT_FROM_REF:-}"
+    if [[ -z "${base_ref}" || "${base_ref}" =~ ^0+$ ]] \
+        || ! git rev-parse --verify --quiet "${base_ref}^{commit}" >/dev/null; then
+        base_ref="${MERXEN_CI_BASE_REF:-$(default_base_ref)}"
+    fi
+    if ! "${venv_dir}/bin/python" scripts/ci/changelog.py check-pr \
+        --base "${base_ref}" --head "${to_ref}"; then
+        echo "Pushing to main: add the CHANGELOG.md entry, or push with" \
+            "MERXEN_SKIP_CHANGELOG=1 if users would notice nothing." >&2
+        return 1
+    fi
+}
+
+if [[ "${PRE_COMMIT_REMOTE_BRANCH:-}" == "refs/heads/main" \
+    && "${MERXEN_SKIP_CHANGELOG:-0}" != "1" ]]; then
+    check_changelog_entry
+fi
+
 case "${run_tests}" in
     true | 1 | yes)
         # Tests run on parallel pytest-xdist workers (0 runs them in this
