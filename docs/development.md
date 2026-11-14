@@ -479,8 +479,15 @@ running pipeline, and `-resume` keeps working against the code the run started
 with.
 
 - Never edit, check out, reset, pull or remove a pinned run worktree while its
-  run is live or may be resumed. A fix lands on `main` (or a branch) and
+  run is live or may be resumed. Tasks import the worktree's own `src/` at run
+  time (`PYTHONPATH="${projectDir}/../src"` in the modules), so an edit there
+  changes the results of every task that runs or re-runs afterwards without
+  invalidating the `-resume` cache. A fix lands on `main` (or a branch) and
   reaches a run only through a new pinned worktree.
+- Launch `-resume` from the same worktree path the run started in.
+  `${projectDir}` is part of each task script, so resuming from another path
+  re-runs those tasks; a fix in a new worktree therefore means a new run, or
+  accepting that the resumed run re-executes its tasks.
 - Worktrees and code exports have no private files; point them at the main
   checkout's with `MERXEN_ENV_FILE` and the site-config variables
   ([discovery](local-configuration.md#discovery-checkouts-worktrees-and-code-exports)).
