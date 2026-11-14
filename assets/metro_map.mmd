@@ -27,6 +27,15 @@
 %%metro grid: comparative | 1,1
 %%metro grid: annotation | 0,1
 
+%% Segmentation lays its lines out centred on the section midline rather than
+%% stacked down from the top line. ProSeg tiles is a fan-in (Atera Cellpose and
+%% Vendor masks both feed it), so nf-metro routes the solid Atera line around
+%% it; with the default stacking that detour runs along the trunk through the
+%% ProSeg refine marker, which --validate --strict rejects. Centred, the
+%% MERSCOPE/Xenium pair drops to ProSeg refine's row and the Atera line passes
+%% above it. See the editing notes in docs/metro-map.md.
+%%metro line_spread: centered | segmentation
+
 %% Lines. These are the MerXen brand colours, taken from the title logo in
 %% assets/MerXen_title.svg: the MERSCOPE line matches the purple of "Mer", the
 %% Xenium line the teal of "Xen", and the paired line the blue midpoint of the
@@ -53,7 +62,7 @@
 
 graph LR
     subgraph ingest [Ingest and build]
-        %%metro exit: right | merscope, xenium, atera
+        %%metro exit: right | merscope, xenium, atera, optional
         merscope_in[ ]
         xenium_in[ ]
         atera_in[ ]
@@ -64,19 +73,31 @@ graph LR
         atera_in -->|atera| build_spatialdata
     end
 
+    %% Segmentation holds two separate Cellpose routes. Cellpose nuclei ->
+    %% Cellpose-SAM cells -> ProSeg refine is MERSCOPE/Xenium (SEGMENT). The
+    %% opt-in Atera Cellpose route (segmentation_source=cellpose_proseg) is
+    %% RNA density (ATERA_TRANSCRIPT_DENSITY, the model's third input channel)
+    %% -> Atera Cellpose (ATERA_CELLPOSE_SEGMENT) -> ProSeg tiles, whose plan
+    %% (ATERA_PROSEG_PLAN_CELLPOSE) stages the Cellpose mask. Vendor masks also
+    %% feeds ProSeg tiles: ATERA_PROSEG_STITCH writes the stitched cells into
+    %% the store NATIVE_LATEST built, on the vendor-prior route as well.
     subgraph segmentation [Segmentation]
-        %%metro entry: left | merscope, xenium, atera
+        %%metro entry: left | merscope, xenium, atera, optional
         %%metro exit: right | merscope, xenium, optional, atera
         cellpose_nuclei_segment[Cellpose nuclei]
         cellpose_segment[Cellpose-SAM cells]
         proseg_segment[ProSeg refine]
         proseg_hybrid[ProSeg hybrid]
         native_latest[Vendor masks]
+        atera_transcript_density[RNA density]
+        atera_cellpose_segment[Atera Cellpose]
         atera_proseg[ProSeg tiles]
 
         cellpose_nuclei_segment -->|merscope,xenium| cellpose_segment
         cellpose_segment -->|merscope,xenium| proseg_segment
         proseg_segment -->|optional| proseg_hybrid
+        atera_transcript_density -->|optional| atera_cellpose_segment
+        atera_cellpose_segment -->|optional| atera_proseg
         native_latest -->|optional| atera_proseg
     end
 
@@ -162,6 +183,7 @@ graph LR
     %% Inter-section edges
     build_spatialdata -->|merscope,xenium| cellpose_nuclei_segment
     build_spatialdata -->|atera| native_latest
+    build_spatialdata -->|optional| atera_transcript_density
     native_latest -->|atera| enrich
     atera_proseg -->|optional| enrich
     proseg_segment -->|merscope,xenium| enrich

@@ -74,14 +74,17 @@ STATION_ALIASES = {
     },
     # The XENIUM/MERSCOPE reference and the ATERA streaming reference (AT-8).
     "mecr_reference": {"MECR_REFERENCE", "MECR_REFERENCE_ATERA"},
-    # Atera's native-grid density preparation belongs to its Cellpose route.
     "cellpose_segment": {
         "CELLPOSE_SEGMENT",
-        "ATERA_CELLPOSE_SEGMENT",
-        "ATERA_STOCK_CELLPOSE_SEGMENT",
-        "ATERA_TRANSCRIPT_DENSITY",
         "CELLPOSE_HITL_TRAIN",
         "CELLPOSE_HITL_SEED",
+    },
+    # The Atera Cellpose route has its own station (fed by atera_transcript_
+    # density, which is a station of its own); the stock-weight comparison
+    # run is a control of that same segmentation.
+    "atera_cellpose_segment": {
+        "ATERA_CELLPOSE_SEGMENT",
+        "ATERA_STOCK_CELLPOSE_SEGMENT",
     },
     "mender": {
         "MENDER_PREPARE",

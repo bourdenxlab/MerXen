@@ -16,6 +16,7 @@ users would notice). A release turns [Unreleased] into the release's section.
 
 ### Changed
 
+- **Metro map.** The pipeline overview now shows the opt-in Atera Cellpose route: `RNA density` feeds a separate `Atera Cellpose` station, which feeds `ProSeg tiles` together with `Vendor masks` ([metro map](docs/metro-map.md)).
 - **Hooks.** A push to `main` now runs the `Changelog` CI job's entry check in the pre-push hook (`scripts/run_ci_checks.sh`), since direct commits to `main` get no pull request. Push with `MERXEN_SKIP_CHANGELOG=1` when users would notice nothing ([versioning and releases](docs/versioning.md#changelog-entries)).
 
 ## [1.0.0] - 2026-11-13

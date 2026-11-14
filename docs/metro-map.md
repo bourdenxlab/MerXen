@@ -100,6 +100,25 @@ everything below, stays in [Pipeline architecture](pipeline.md).
   `CLUSTERING_SQUIDPY_FINALIZE`.
 - **`ProSeg hybrid` is a station but not a process.** It is a branch of
   `PROSEG_SEGMENT` selected by `proseg_hybrid_enabled`.
+- **The Atera ProSeg routes keep only their defining inputs.** Both are
+  opt-in, so they are dashed. On the Atera Cellpose route
+  (`segmentation_source=cellpose_proseg` or `cellpose_comparison`), `RNA
+  density` (`ATERA_TRANSCRIPT_DENSITY`, see
+  [stages/atera-transcript-density.md](stages/atera-transcript-density.md))
+  feeds `Atera Cellpose` (`ATERA_CELLPOSE_SEGMENT`), whose mask feeds
+  `ProSeg tiles` (`ATERA_PROSEG_PLAN_CELLPOSE`). The stock-weight
+  `ATERA_STOCK_CELLPOSE_SEGMENT` of a comparison run shares the station, but
+  its mask reaches only `ATERA_PROSEG_STITCH`, as a comparison mask. This is a separate station
+  from `Cellpose-SAM cells`, which is the MERSCOPE/Xenium Cellpose and feeds
+  `ProSeg refine`, not `ProSeg tiles`. `Vendor masks` → `ProSeg tiles` is
+  `ATERA_PROSEG_STITCH`, which writes the stitched cells into the store
+  `NATIVE_LATEST` built, on both the Cellpose and the vendor-prior route. Two
+  real inputs are not drawn: `Atera Cellpose` also reads DAPI and 18S from the
+  built store (and with `--atera_transcript_density_enabled false` it runs
+  without `RNA density`), and every ProSeg plan, including the vendor-prior
+  `ATERA_PROSEG_PLAN`, reads the built store. Both come from `SpatialData
+  build`, already upstream on the same dashed line, so leaving them out drops
+  an edge but draws no false one.
 
 Station labels are shortened to keep the map legible — `Spatial genes` is
 `SPATIAL_GENE_ANALYSIS`, `Mask image quant.` is `MASK_IMAGE_QUANTIFICATION`.
@@ -175,7 +194,8 @@ delegates to nf-metro's own CLI. It overrides:
 | `LEGEND_SWATCH_WIDTH` | 24.0 | 56.0 | Longer swatches make the dash pattern legible |
 | `LEGEND_LINE_HEIGHT` | 24.0 | 40.0 | Not scaled by `--font-scale`, so 24.0 is tighter than the 26.6px type is tall |
 | `STROKE_DASHARRAY["dashed"]` | `8,4` | `12,10` | See below |
-| `_pack_cells` | right-aligns | left edges aligned | See below |
+| `_pack_cells` | right-aligns | left edges aligned, blank margin trimmed | See below |
+| `_route_diagonal` | bends at a fork | bends just before a merge | See below |
 
 The dash override is not cosmetic. nf-metro's `8,4` assumes the default 3.0
 stroke, and round line caps extend half the stroke width past each dash end. At
@@ -194,7 +214,21 @@ their *drawn* left edge. It aligns `offset_x + bbox_x`, not `offset_x`: the
 terminus icons on Ingest and build push that section's bbox further left, and
 aligning the raw offsets leaves the boxes 8px apart. Annotation moves right to
 meet Ingest rather than the other way round, because the return row already has
-slack next to Comparative analysis while the top row does not.
+slack next to Comparative analysis while the top row does not. Moving it right
+empties the strip it used to overhang, and nf-metro only ever widens its left
+margin, so the patch then shifts the whole figure left by the same amount
+(about 220px): nothing moves relative to anything else, and the canvas is that
+much narrower.
+
+The `_route_diagonal` override (`merge_late_into_joins`) keeps a line that
+skips ahead to a merge on its own track until it reaches the merge. nf-metro
+bends an edge near its source whenever the source feeds more than one station,
+so the dashed `Vendor masks` → `ProSeg tiles` edge (Vendor masks also feeds
+Enrich) dropped onto the Atera Cellpose row before `Atera Cellpose` and read as
+a Cellpose input. For an edge between two stations that leaves a fork and
+enters a join, the override drops the fork bias, so the bend sits just before
+the join. Edges to or from section ports keep nf-metro's placement, and the
+render is still validated.
 
 `station_radius` is deliberately left at its 6.0 default: enlarging it to match
 the heavier strokes widens each station enough to hyphenate `Spatial genes` and
@@ -242,6 +276,16 @@ way against nf-metro 1.1.0:
   is the wrong one: **widening the spacing makes the on-screen text smaller**,
   because the figure grows faster than the type does. The narrowest wrap-free
   configuration wins. At the current labels that is `--x-spacing 88
-  --font-scale 1.4`; raising the font further hyphenates `Cellpose-SAM cells`.
-  Sweep both together and check `test_station_labels_are_not_wrapped` rather
-  than nudging one value.
+  --font-scale 1.4` (1848px wide); raising the font past 1.4 hyphenates
+  `Cellpose-SAM cells`. Sweep both together and check
+  `test_station_labels_are_not_wrapped` rather than nudging one value.
+- Segmentation uses `%%metro line_spread: centered`. `ProSeg tiles` has two
+  in-section inputs (`Atera Cellpose` and `Vendor masks`), and at such a merge
+  nf-metro inserts a hidden helper station to route the solid Atera line,
+  which `ProSeg tiles` does not consume, around it. With the default spread or
+  `bundle` that detour runs along the trunk through the `ProSeg refine` marker
+  and `--validate --strict` rejects it, whatever the station order, line order,
+  `diamond_style` or `line_order`; `rails` fails on collinear lines. Centred, the
+  MERSCOPE/Xenium pair dips to `ProSeg refine`'s row and the Atera line passes
+  above it. That dip, and the Atera line crossing the pair to reach the top
+  lane, are layout artefacts with no meaning.

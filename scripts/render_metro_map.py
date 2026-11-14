@@ -67,7 +67,7 @@ DASH_OFF = 10.0
 # "Ingest and build" on the top row and the wider "Annotation and DE" on the
 # return row — ends up flush right, and the wider box juts out to the left with
 # the bottom-left legend trailing after it. Aligning the left edges instead
-# reads as a deliberate margin. See _align_column_left_edges.
+# reads as a deliberate margin. See align_column_left_edges.
 LEFT_ALIGNED_COLUMN = 0
 
 # Shared render options.
@@ -76,8 +76,10 @@ LEFT_ALIGNED_COLUMN = 0
 # checking every station label still renders as one unwrapped line. (The
 # spacing was 90 until the RCA annotation chain and the Atera ProSeg station
 # together pushed the map to 2013px; 88 brings it back under the 2000px limit
-# with every label still on one line.) They are not
-# independent: raising the font past 1.4 at this spacing hyphenates
+# with every label still on one line. The Atera Cellpose route then added a
+# column to Segmentation; align_column_left_edges now also trims the blank
+# margin its alignment used to leave, which keeps 1.4 under the limit.) They
+# are not independent: raising the font past 1.4 at this spacing hyphenates
 # "Cellpose-SAM cells", and *widening* the spacing makes the on-screen text
 # smaller, because the figure grows faster than the type does. Re-run the sweep
 # rather than nudging either value alone.
@@ -146,6 +148,12 @@ def align_column_left_edges(column: int = LEFT_ALIGNED_COLUMN) -> None:
     right — rather than pulling the narrower one left — spends slack that
     already exists on the return row instead of opening a new gap on the top
     row.
+
+    Moving it right empties the strip it used to overhang, and nf-metro never
+    narrows its left margin (Stage 1.5 of ``compute_layout`` only widens it), so
+    that strip would stay on the canvas as blank space. The whole figure is
+    therefore shifted left by the same amount: every relative position is
+    unchanged, and the canvas is that much narrower.
     """
     from nf_metro.layout import section_placement
 
@@ -177,11 +185,63 @@ def align_column_left_edges(column: int = LEFT_ALIGNED_COLUMN) -> None:
         # at offset_x + bbox_x, and bbox_x differs between these two: the
         # terminus icons on "Ingest and build" push its bbox left to make room
         # for them. Aligning the raw offsets leaves the boxes 8px apart.
-        left_edge = max(section.offset_x + section.bbox_x for section in members)
+        left_edges = [section.offset_x + section.bbox_x for section in members]
+        left_edge = max(left_edges)
         for section in members:
             section.offset_x = left_edge - section.bbox_x
+        # Translate everything, not just this column, so no gap opens anywhere.
+        blank_margin = left_edge - min(left_edges)
+        for section in scoped.values():
+            section.offset_x -= blank_margin
 
     section_placement._pack_cells = patched
+
+
+def merge_late_into_joins() -> None:
+    """Draw a line that skips ahead into a merge station's track at the merge.
+
+    nf-metro bends an in-section edge near its source whenever the source is a
+    fork (feeds more than one station). When the target is also a join, the
+    bend then lands the line on the target's track several stations early, so
+    it reads as feeding every station it runs through on the way. Here that is
+    the dashed Vendor masks -> ProSeg tiles edge: Vendor masks is a fork (it
+    also feeds Enrich), and bent at the source the line joins the Atera
+    Cellpose row before Atera Cellpose, as if the vendor masks were a Cellpose
+    input. Treating such an edge as a join only, so the bend sits just before
+    the merge, keeps it on its own track until it reaches its real target.
+
+    Only edges between two real stations change; edges to or from a section
+    port keep nf-metro's placement. This changes where a diagonal is drawn, not
+    what is validated: ``--validate --strict`` still checks the result.
+    """
+    from nf_metro.layout.routing import intra_handlers
+
+    if not hasattr(intra_handlers, "_route_diagonal"):
+        raise AttributeError(
+            "nf_metro.layout.routing.intra_handlers no longer defines "
+            "_route_diagonal; the merge-late patch in this script needs updating."
+        )
+
+    original = intra_handlers._route_diagonal
+
+    def patched(edge: Any, src: Any, tgt: Any, ctx: Any) -> Any:
+        fork_into_join = (
+            edge.source in ctx.fork_stations
+            and edge.target in ctx.join_stations
+            and not src.is_port
+            and not tgt.is_port
+        )
+        if not fork_into_join:
+            return original(edge, src, tgt, ctx)
+        # The fork set is shared routing state: hide the source only for the
+        # duration of this one call.
+        ctx.fork_stations.discard(edge.source)
+        try:
+            return original(edge, src, tgt, ctx)
+        finally:
+            ctx.fork_stations.add(edge.source)
+
+    intra_handlers._route_diagonal = patched
 
 
 def render(destination: Path, *extra: str) -> None:
@@ -216,6 +276,7 @@ def main() -> int:
 
     apply_style_overrides()
     align_column_left_edges()
+    merge_late_into_joins()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     render(STATIC_SVG)
