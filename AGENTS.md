@@ -366,39 +366,11 @@ known-first-party = ["my_package"]
 
 Two stages of automated checks:
 
-**On every commit** — fast checks only (linting, formatting, file hygiene). These run in seconds and keep the codebase clean without slowing you down.
+**On every commit** — fast checks only (linting, formatting, file hygiene, and the privacy check of the staged lines and the commit message). These run in seconds and keep the codebase clean without slowing you down.
 
-**On every push** — the full test suite. Catches broken code before it reaches the remote, without blocking rapid work-in-progress commits locally.
+**On every push** — the privacy check of the pushed commits and branch name, then `scripts/run_ci_checks.sh`: ruff, mypy, the Nextflow lint, the changelog entry check on pushes to `main`, and the fast test tier (docs/development.md, Test tiers; on macOS the tests are skipped unless `MERXEN_CI_RUN_TESTS=true`). Catches broken code before it reaches the remote, without blocking rapid work-in-progress commits locally.
 
-```yaml
-# .pre-commit-config.yaml
-repos:
-  - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.6.0
-    hooks:
-      - id: trailing-whitespace
-      - id: end-of-file-fixer
-      - id: check-yaml
-      - id: check-added-large-files
-        args: ['--maxkb=500']
-
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.4.4
-    hooks:
-      - id: ruff
-        args: [--fix]
-      - id: ruff-format
-
-  - repo: local
-    hooks:
-      - id: pytest
-        name: pytest
-        entry: pytest
-        language: system
-        stages: [pre-push]
-        always_run: true
-        pass_filenames: false
-```
+The hooks themselves are defined in `.pre-commit-config.yaml`; its ruff `rev` must match the ruff pinned in `pyproject.toml` and the lockfile.
 
 After cloning, every contributor must install the hooks. The hook types (pre-commit,
 pre-merge-commit, commit-msg, pre-push) come from `default_install_hook_types` in
@@ -415,37 +387,7 @@ Note: these are local guardrails, and for work committed directly to `main` they
 
 Every pull request must pass CI before merge. Branch protection on `main` may require status checks, but must not require pull requests: routine work is committed to `main` directly (Git Workflow).
 
-```yaml
-# .github/workflows/ci.yml
-name: CI
-on:
-  push:
-    branches: [main]
-  pull_request:
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - name: Install uv
-        run: pip install uv
-      - name: Install dependencies
-        run: |
-          uv pip install --system -r requirements/requirements.lock
-          uv pip install --system -e . --no-deps
-      - name: Lint
-        run: ruff check .
-      - name: Format check
-        run: ruff format --check .
-      - name: Type check
-        run: mypy src/
-      - name: Tests
-        run: pytest
-```
+The workflows live in `.github/workflows/`: `ci.yml` (lint, types and the tests, sharded over several runners, with test selection on PRs and a nightly full run), `changelog.yml` and `privacy.yml` (PR-only) and `release.yml`. docs/development.md, Test selection, explains which tests a PR runs.
 
 Notes:
 - CI uses `requirements/requirements.lock` for deterministic installs — not a fresh resolve.
