@@ -802,6 +802,19 @@ The segment stage runs:
   crop's dense tile 140 and 38.8 gave the same cells (1,381 and 1,382 of
   3,141 owned cells without transcripts). A weight of 1 is not printed by
   ProSeg and is accepted.
+- **Sparse tiles.** A Cellpose tile can own objects where the vendor has
+  none, e.g. at a section edge (full public section: tile `c0_r3`, 228
+  Cellpose objects, 11,962 rows over 4,957 genes in its window, most of them
+  in the halo). With factorization on (the default when the panel has more
+  genes than `--nunfactored`), ProSeg 3.2.0 picks the genes it models
+  directly from 10,000 random 20 µm regions and keeps genes averaging at least
+  0.05 transcripts per region; on such a tile none does and ProSeg panics
+  (`featureselection.rs`, `EmptyInput`). The tile then runs ProSeg once more
+  with `--no-factorization` (genes modelled directly, as ProSeg itself does
+  for a small panel) and records `factorization: {enabled: false, reason}` in
+  its manifest; any other ProSeg failure still fails the tile. Commands and
+  manifests of the other tiles are unchanged, and the vendor prior never
+  plans a tile without a vendor centroid in its core.
 - **Nuclear compartment** off (`atera_cellpose_proseg_nuclear_compartment`):
   no vendor segmentation feeds the Cellpose route, and the XENIUM CSV has none.
 - **ENRICH** enriches the vendor layer natively, checks the stitched `reseg`
