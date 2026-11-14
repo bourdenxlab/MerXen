@@ -57,7 +57,7 @@ and the default landmark channel.
   It reaches `main` only with the user's approval, and is deleted when the effort closes.
 - Viewer repository: `feature/manual-registration` with work-package branches
   `feature/manual-registration-<wp>`; viewer version 0.4.0.
-- Commit prefixes per Agents.md. PR titles and bodies go through
+- Commit prefixes per AGENTS.md. PR titles and bodies go through
   `python3 scripts/privacy/check_private_text.py --stdin`.
 
 ## Conventions (shared by both repositories)

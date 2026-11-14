@@ -219,7 +219,7 @@ MerXen/
 ├── envs/                       # Base env + isolated alignment / clustering-GPU / MENDER envs
 ├── containers/                 # Base, clustering-GPU and MENDER image definitions
 ├── requirements*.lock          # Pinned dependency trees
-└── Agents.md                   # Project standards (must-read for contributors)
+└── AGENTS.md                   # Project standards (must-read for contributors)
 ```
 
 Stages with conflicting dependency stacks run in their own environments: `envs/environment.alignment.yml` pins the VALIS 1.2 image-registration stack for `ALIGN`, `envs/environment.clustering-gpu.yml` provides RAPIDS, and `envs/environment.mender.yml` isolates MENDER's AnnData 0.9 / Scanpy 1.9 requirement. Optional pciSeq computation uses `envs/environment.pciseq.yml`; preparation and finalization use the base environment. Other standard stages use `envs/environment.yml`.
@@ -228,7 +228,7 @@ Stages with conflicting dependency stacks run in their own environments: `envs/e
 
 ## Contributing
 
-Project standards — layout, dependencies, naming, type hints, docstrings, git workflow, commit prefixes — are defined in [Agents.md](Agents.md) and apply to human and AI contributors alike. Routine work is committed to `main`; serious, risky, breaking or wide changes go on a short-lived branch and merge by PR.
+Project standards — layout, dependencies, naming, type hints, docstrings, git workflow, commit prefixes — are defined in [AGENTS.md](AGENTS.md) and apply to human and AI contributors alike. Routine work is committed to `main`; serious, risky, breaking or wide changes go on a short-lived branch and merge by PR.
 
 ```bash
 pre-commit install                    # every hook type, privacy hooks included

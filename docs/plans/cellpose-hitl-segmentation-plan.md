@@ -386,14 +386,14 @@ Strata are disjoint, and the boundary band takes precedence over deep GM and WM.
 ## 7. Laptop setup (for the annotator)
 
 - `envs/environment.cellpose-gui.yml` pins `cellpose[gui]` to the **same version** as the lock (4.2.1.1 after HITL-0) and the same numpy major version, because `_seg.npy` is a pickled dict and must round-trip; this is a precaution, not a documented issue [L, CP §5.3]. A test (like `test_env_lock_sync.py`) asserts that the pin equals the lock's cellpose version.
-- This deviates from the pyproject-only rule (Agents.md) on purpose: the laptop env installs only the GUI, not MerXen. The alternative is a `[hitl-gui]` extra, which would pull all of MerXen's dependencies onto the laptop (OD-20).
+- This deviates from the pyproject-only rule (AGENTS.md) on purpose: the laptop env installs only the GUI, not MerXen. The alternative is a `[hitl-gui]` extra, which would pull all of MerXen's dependencies onto the laptop (OD-20).
 - The GUI runs on CPU; no GPU is needed for editing. Unpack the package, open any crop and cycle with A/D; the `context/` folder holds the orientation images. Which laptop you use (OS, Apple Silicon or not, memory) sets the env file and the crop-size test (OD-26). An Apple Silicon laptop could train through MPS, but training still runs in the pipeline (§3.2).
 
 ---
 
 ## 8. Milestones (PR-sized; each merges with defaults unchanged)
 
-Branches: short-lived `feature/hitl-<n>-<slug>` from `main`, one PR each into `main` (OD-21). No integration branch is needed, because every milestone is inert until a run sets a model. Commit prefixes follow Agents.md. Before each commit run `ruff check . --fix`, `ruff format .` and `mypy src/`; before each push run `pytest` (the pre-push hook). Tests that need real data or a GPU are marked `@pytest.mark.slow`.
+Branches: short-lived `feature/hitl-<n>-<slug>` from `main`, one PR each into `main` (OD-21). No integration branch is needed, because every milestone is inert until a run sets a model. Commit prefixes follow AGENTS.md. Before each commit run `ruff check . --fix`, `ruff format .` and `mypy src/`; before each push run `pytest` (the pre-push hook). Tests that need real data or a GPU are marked `@pytest.mark.slow`.
 
 ### HITL-0 `[bugfix]`: pin Cellpose and torch, name the model, record it (on `main`; recommended now, independent of HITL; 1.5–2 days)
 - **Scope:** `pyproject.toml` pins cellpose (OD-2: recommended `==4.2.1.1`) and bounds torch to one minor release that the lock, the container (CUDA 12.6) and the conda env all resolve; lock regenerated; the env lock-hash header refreshed (`scripts/update_env_lock_hash.py`). Add `CellposeConfig.pretrained_model = "cpsam_v2"`; `model_type` is kept, deprecated and warned about. `build_cellpose_model` always passes `use_bfloat16` (K17); decide whether the Python default should match production (False). The nuclei config names its model the same way. Record the model name, the weights sha256 and the cellpose and torch versions in the identity sidecar and the stitching stats, only when Cellpose runs; legacy masks get `unverified` sidecars (§4.6). Fix `docs/configuration.md:117`. Side fix: the `gpu` profile lacks `--nv` for `CELLPOSE_NUCLEI_SEGMENT` (`nextflow.config:629-646`).

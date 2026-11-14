@@ -4,7 +4,7 @@ Everything below assumes you've finished the [Getting started](getting-started.m
 setup and have the `merxen` conda environment active.
 
 All project standards (layout, dependencies, naming, type hints, docstrings,
-git, commit messages) are defined in [Agents.md](../Agents.md). This page
+git, commit messages) are defined in [AGENTS.md](../AGENTS.md). This page
 documents the day-to-day mechanics of working in the repo.
 
 ## Running tests
@@ -462,7 +462,7 @@ pip install -e . --no-deps
   areas, on a short-lived branch from `main` and merge it via PR. When unsure
   which applies, ask first.
 - Commit titles follow the conventional prefix scheme from
-  [Agents.md](../Agents.md#commit-messages): `[feature]`, `[bugfix]`,
+  [AGENTS.md](../AGENTS.md#commit-messages): `[feature]`, `[bugfix]`,
   `[refactor]`, `[style]`, `[test]`, `[docs]`, `[chore]`, `[minor]`.
 - Delete branches after merge.
 
@@ -608,7 +608,7 @@ enrichment, segmentation), and its analysis-mode alias in all three mode maps
 
 ## Project standards summary
 
-For the full standards, see [Agents.md](../Agents.md). The short version:
+For the full standards, see [AGENTS.md](../AGENTS.md). The short version:
 
 - One package per repo, `src/merxen/` layout.
 - `pyproject.toml` is the single source of truth for dependencies.

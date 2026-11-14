@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Read and follow all standards in `Agents.md` before doing any work in this repo.
+Read and follow all standards in `AGENTS.md` before doing any work in this repo.
 
 ## Project overview
 
@@ -53,7 +53,7 @@ python scripts/update_env_lock_hash.py
 - Do not install packages with `pip install <package>`. Add to `pyproject.toml` and regenerate the lockfile.
 - Commit routine work directly to `main`. Put serious, risky or breaking changes, and changes
   that span unrelated areas, on a short-lived branch from `main` and merge it by PR; ask first
-  when unsure which applies (Agents.md, Git Workflow).
+  when unsure which applies (AGENTS.md, Git Workflow).
 - Add a `CHANGELOG.md` entry under `## [Unreleased]` for every user-facing change, in the same PR. Only release PRs change the version (`bump-my-version`; docs/versioning.md).
 - The Atera, robust cell-type annotation and HITL integration histories are promoted together by acceptance-gate PR #127 (user authorization, 2026-11-11). The integration branches close with that merge. Further work follows the branch rule above (`main`, or a short-lived branch merged by PR); do not resume the former integration branches. Historical validation limits and future work remain recorded in their plans.
 

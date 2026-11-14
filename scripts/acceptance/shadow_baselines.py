@@ -92,7 +92,7 @@ from merxen.privacy import to_alias, to_real
 logger = logging.getLogger("shadow_baselines")
 
 # The gene-ID fallback tables the shadow runs used (M0e); host paths never
-# live in the scripts (Agents.md): give them as options or environment.
+# live in the scripts (AGENTS.md): give them as options or environment.
 HUMAN_FALLBACK_ENV = "MERXEN_GENE_ID_FALLBACK_CSV"
 MOUSE_FALLBACK_ENV = "MERXEN_MOUSE_GENE_ID_FALLBACK_CSV"
 

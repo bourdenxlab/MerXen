@@ -78,7 +78,7 @@ SIM_INPUTS_SCHEMA_VERSION: Final = 1
 SIM_INPUTS_DIR: Final[Path] = ASSET_DIR / "sim_inputs"
 SIDECAR_SUFFIX: Final = ".provenance.json"
 NOTICE_FILE: Final = "NOTICE"
-# Repository assets stay small derived tables (Agents.md); anything larger is
+# Repository assets stay small derived tables (AGENTS.md); anything larger is
 # a store asset with its sha256 in build_hash.
 MAX_ASSET_BYTES: Final = 1_000_000
 TRUST_EFFECT: Final = "none"

@@ -1608,7 +1608,7 @@ write_atera_bundle(root, *, tiles={"0,0": 40, "-1,1": 3, "1,0": 0, "0,1": 25},
   sign-off as well as the Atera exit checks; RCA plan §2.2 left that flip to merge into `main` "only
   when you say so" (U10).
 
-**Conventions:** commit prefixes follow Agents.md; PR text goes through
+**Conventions:** commit prefixes follow AGENTS.md; PR text goes through
 `scripts/privacy/check_private_text.py --stdin`.
 
 **Coordination:**

@@ -1,4 +1,4 @@
-# Agents.md — Project Standards
+# AGENTS.md — Project Standards
 
 This file defines the rules and conventions for this repository. All contributors and AI assistants must follow these standards when writing, reviewing, or modifying code.
 

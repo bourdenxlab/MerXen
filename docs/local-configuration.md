@@ -1,7 +1,7 @@
 # Local configuration and privacy
 
 Nothing committed to this repository may contain an absolute path of a
-machine or the name of a sample (CLAUDE.md, [Agents.md](../Agents.md)). This
+machine or the name of a sample (CLAUDE.md, [AGENTS.md](../AGENTS.md)). This
 page describes where locations and real names live instead, how code reads
 them, and the hooks that keep them out of commits.
 
