@@ -1,7 +1,7 @@
 # Local configuration and privacy
 
 Nothing committed to this repository may contain an absolute path of a
-machine or the name of a sample (CLAUDE.md, [AGENTS.md](../AGENTS.md)). This
+machine or the name of a sample ([AGENTS.md](../AGENTS.md), Privacy). This
 page describes where locations and real names live instead, how code reads
 them, and the hooks that keep them out of commits.
 
@@ -162,7 +162,7 @@ replaced without new brackets. The rewrite brackets every substitution on a
 blockquote line and flags inline quotations and a created `](` for the manual
 pass. A document with such a substitution says once, at its top: "Inside
 quotations, names and paths in square brackets are aliases or `.env`
-variables standing for the originals (privacy rule, CLAUDE.md); the originals
+variables standing for the originals (privacy rule, AGENTS.md); the originals
 are kept in the private records."
 
 ## The hooks

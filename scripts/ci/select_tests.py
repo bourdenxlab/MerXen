@@ -41,7 +41,7 @@ from pathlib import Path, PurePosixPath
 # Policy. Every rule that decides between FULL and a selection lives here.
 # ---------------------------------------------------------------------------
 
-#: Long-lived integration branches (CLAUDE.md, Workflow). A PR that merges one
+#: Long-lived integration branches (AGENTS.md, Git Workflow). A PR that merges one
 #: of them into main always runs the full suite.
 INTEGRATION_BRANCHES = (
     "feature/robust-celltype-annotation",

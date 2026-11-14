@@ -108,4 +108,4 @@ converge at alignment; dashed stations are governed by a parameter. See
 
 Contribution rules and code standards live in [AGENTS.md](../AGENTS.md). All
 contributors (human and AI) are expected to follow them. [CLAUDE.md](../CLAUDE.md)
-provides a short project overview and a pointer into `AGENTS.md`.
+imports `AGENTS.md` for Claude Code and adds only Claude-specific notes.

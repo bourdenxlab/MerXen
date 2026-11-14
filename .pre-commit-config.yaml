@@ -26,7 +26,7 @@ repos:
 
   - repo: local
     hooks:
-      # No host paths or sample names in anything committed (CLAUDE.md).
+      # No host paths or sample names in anything committed (AGENTS.md).
       # Stdlib only, run by the system python3; the alias table and .env are
       # found as described in docs/local-configuration.md.
       - id: privacy-staged

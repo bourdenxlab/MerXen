@@ -1,6 +1,53 @@
 # AGENTS.md — Project Standards
 
-This file defines the rules and conventions for this repository. All contributors and AI assistants must follow these standards when writing, reviewing, or modifying code.
+This file defines the rules and conventions for this repository. All contributors and AI assistants must follow these standards when writing, reviewing, or modifying code. `CLAUDE.md` imports this file; tool-neutral rules belong here, not there.
+
+## Project overview
+
+This project is used for pre-processing and then analysing human or mouse spatial transcriptomic datasets. The datasets can be generated in pairs to enable direct comparison between two spatial transcriptomic platforms: 10x Genomics' Xenium and Vizgen's MERSCOPE. For each pair of adjacent brain sections, one is processed with Xenium and the other with MERSCOPE using the same custom gene panel. This project takes the data output from each platform and performs the following, matching all steps of analysis after the initial pre-processing steps to coerce the data into the same formats between platforms:
+
+- Performs cell segmentation from scratch using Cellpose-SAM image based segmentation, followed by ProSeg transcript based segmentation with the cellpose assignment as a prior.
+- Aligns each pair of adjacent tissue sections so that they share a common coordinate system
+- Performs comparative analysis of each paired dataset
+
+This workflow is achieved by using Nextflow to run different modules of pre-processing, segmentation, analysis etc. in a way that can be monitored per sample and scaled to many sample pairs with logging etc.
+
+## Commands
+
+```bash
+# Run tests
+pytest
+
+# Run tests excluding slow markers
+pytest -m "not slow"
+
+# Pre-push checks: 'fast' (the default) runs the whole fast tier; 'changed'
+# runs only the fast-tier tests your changes since main's remote
+# (MERXEN_CI_BASE_REF) can reach; 'full' runs everything CI runs
+scripts/run_ci_checks.sh
+MERXEN_CI_TEST_TIER=changed scripts/run_ci_checks.sh
+MERXEN_CI_TEST_TIER=full scripts/run_ci_checks.sh
+
+# Which tests CI would run for this branch (FULL or a list; docs/development.md,
+# Test selection). CI shards them over 7 runners (scripts/ci/pytest_shard.py);
+# the PR label full-ci forces the full suite
+python scripts/ci/select_tests.py --base origin/main --worktree --format paths
+
+# Lint (auto-fix) and format
+ruff check . --fix
+ruff format .
+
+# Type check
+mypy src/
+
+# Regenerate lockfile after changing dependencies
+uv pip compile pyproject.toml --extra dev -o requirements/requirements.lock
+# ...then refresh the lock checksum header in envs/environment.yml
+python scripts/update_env_lock_hash.py
+```
+
+- Run `ruff check` and `ruff format` before every commit.
+- Run `pytest` before pushing. The pre-push hook enforces this.
 
 ## Project Structure
 
@@ -27,7 +74,8 @@ my_project/
 ├── .pre-commit-config.yaml
 ├── .env.example         # Template for environment variables (never commit .env)
 ├── .gitignore
-├── CLAUDE.md
+├── AGENTS.md            # Project standards (tool-neutral)
+├── CLAUDE.md            # Imports AGENTS.md; Claude-specific notes only
 └── README.md
 ```
 
@@ -112,6 +160,33 @@ Never hand-edit the lockfile. Never install packages by running `pip install <pa
   sections, slides, runs or instruments. Use the neutral aliases of the gitignored `.aliases.tsv`
   (template `.aliases.example.tsv`). This applies to file names, commit messages, branch names and
   pull-request text as well.
+
+### Privacy: no host paths, no sample names
+
+- Nothing committed may contain an absolute path of a machine (storage roots, mounts, home
+  directories, another host's directories) or the name of a sample: donor, section, slide, run or
+  instrument ids taken from a samplesheet, and colleagues' user names. This covers code, configs,
+  tests, docs, notebooks, file names, commit messages, branch names, PR titles and PR descriptions.
+- Locations live in gitignored files: `.env` (Python, scripts, tests, notebooks; template
+  `.env.example`), and the Nextflow site configs `workflows/conf/site.config` and
+  `workflows/conf/dwight.site.config` (templates `*.example`). Python reads `.env` through
+  `merxen.local_config`; a missing value is an error, never a built-in default.
+- Samples are named by aliases (HD1-HD4 paired human donors, HD1_IF / HD3_IF IF samples, HM1-HM4
+  new-panel human MERSCOPE donors, MS1 / MS2 mouse sections; docs/local-configuration.md). The
+  gitignored `.aliases.tsv` maps them to the real names. Code that reads a real name from data
+  translates it with `merxen.privacy.to_alias`; paths to existing data are built with
+  `merxen.privacy.to_real`.
+- Docs write locations as `.env` variables (`$MERXEN_EVIDENCE_ROOT/...`). Inside a verbatim
+  quotation a name or path is replaced by its alias or variable in square brackets.
+- The hooks enforce this (`pre-commit install`). They check real names only when they find the
+  alias table (docs/local-configuration.md, Discovery); "real-name check skipped" in their output
+  means it was not found. Before `gh pr create` or `gh pr edit`, pipe the title and body through
+  `python3 scripts/privacy/check_private_text.py --stdin`.
+- Not sample names: public references (WHB, WMB, SEA-AD, MERFISH-638850 and its sections, the ABC
+  atlas, public 10x and Vizgen datasets, and the public Xenium hippocampus deposits: KI hippocampus,
+  Zenodo 14879552 and 14879626, and JHU/LIBD dentate gyrus lifespan, GEO GSE317381, with their
+  section, slide, run, instrument and donor ids) and the `.vzg2` file format. Personal data inside
+  a deposit, such as a contact email in its metadata, stays private.
 
 
 ## Naming Conventions
@@ -223,7 +298,8 @@ for attempt in range(MAX_RETRIES):
 - Serious, risky or breaking changes, and changes that span unrelated areas, go on a short-lived branch and merge via pull request. When unsure which applies, ask before committing.
 - When using branches, branch from `main`, keep them short-lived, merge via pull request, and delete them after merge.
 - Exception: a long-lived integration branch is allowed only when a plan in `docs/plans/` names it; it follows the same PR, CI and commit-prefix rules and is deleted when the effort closes. Milestone branches may be cut from it and merged back into it by PR, and are deleted after merge.
-- The Atera, robust cell-type annotation and HITL integration branches closed when acceptance-gate PR #127 merged them into `main` (2026-11-11).
+- Do not resume the former integration branches (see docs/development.md, Integration branch).
+- Never edit, check out, reset, pull or remove a worktree or code export a pipeline run executes from; see docs/development.md, Worktrees and running pipelines.
 
 ### Commit messages
 

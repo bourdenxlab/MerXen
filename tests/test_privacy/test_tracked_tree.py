@@ -1,4 +1,4 @@
-"""The tracked tree holds no host path and no sample name (CLAUDE.md, privacy).
+"""The tracked tree holds no host path and no sample name (AGENTS.md, privacy).
 
 The checker's ``--tree`` mode runs over every tracked file, as the hooks would
 over a commit that added them all:

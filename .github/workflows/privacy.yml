@@ -1,6 +1,6 @@
 name: Privacy
 # PR title, description and commit messages must not name a host path or a
-# sample (CLAUDE.md, docs/local-configuration.md). A light job of its own, so
+# sample (AGENTS.md, docs/local-configuration.md). A light job of its own, so
 # an edited description is re-checked without re-running the test job. CI has
 # no alias table, so only the generic rules run here (host paths, donor ids);
 # real names are checked by the local hooks.

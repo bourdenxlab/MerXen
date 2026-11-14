@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Refuse host paths and sample names in commits, messages, branches and PR text.
 
-The privacy hook of the repository (CLAUDE.md, docs/local-configuration.md).
+The privacy hook of the repository (AGENTS.md, docs/local-configuration.md).
 Stdlib only: it runs under the system ``python3`` and imports
 ``merxen.privacy`` from this checkout's ``src``.
 
