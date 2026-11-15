@@ -14,6 +14,10 @@ users would notice). A release turns [Unreleased] into the release's section.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Interrupted tasks.** A task stopped or failed part-way no longer has its incomplete outputs reused on `-resume`. Before, a Cellpose task cut off while writing `transcripts_for_proseg.csv` was resumed as complete, and a partly written nuclei mask, ProSeg `latest_spatialdata.zarr` or build-step `*_spatialdata_path` store was reused in the same way. These steps now write a hidden `.<name>.merxen-incomplete` marker before they change those outputs and remove it after their last write; a resumed task that finds it deletes the outputs and runs the step again. The ProSeg CSV is written under a temporary name and renamed when complete. A run started at a later stage (`--start_stage`) refuses a published output that still has a marker, and the HITL seed refuses a marked source store or nuclei mask. Outputs left incomplete by earlier versions have no marker and still have to be deleted by hand ([resuming a run](docs/running-the-pipeline.md#resuming-a-run)).
+
 ### Changed
 
 - **Metro map.** The pipeline overview now shows the opt-in Atera Cellpose route: `RNA density` feeds a separate `Atera Cellpose` station, which feeds `ProSeg tiles` together with `Vendor masks` ([metro map](docs/metro-map.md)).

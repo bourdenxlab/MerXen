@@ -175,6 +175,7 @@ Path: `${outdir}/<pair_id>/<platform>/segmentation/`
 | `cellpose_nuclei_stitching_stats.json` | Equivalent stitching diagnostics for the nuclei mask. |
 | `transcripts_for_proseg.csv` | ProSeg input: per-transcript rows with seeded `cell_id`. Retained for debugging. |
 | `transcripts_for_proseg.transforms.json` | Pixel-to-micron affine that seeded `transcripts_for_proseg.csv`. A re-run refuses to reuse the CSV when it differs from the current transform. |
+| `.cellpose_cell_masks.merxen-incomplete`, `.cellpose_nuclei_masks.merxen-incomplete` (in `segmentation/`), `.latest_spatialdata.zarr.merxen-incomplete` (in `latest/`) | Hidden markers that exist only while a step writes these outputs. One left behind means the task was stopped or failed part-way; the next run deletes the incomplete outputs and runs the step again ([Resuming a run](running-the-pipeline.md#resuming-a-run)). `transcripts_for_proseg.csv` is written as `.transcripts_for_proseg.csv.partial` and renamed when complete. |
 
 ### Enrichment
 

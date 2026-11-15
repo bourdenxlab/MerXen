@@ -15,6 +15,10 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 
 from merxen.segmentation.hitl.import_annotations import artifact_sha256
+from merxen.segmentation.output_markers import (
+    nuclei_mask_marker_path,
+    store_marker_path,
+)
 
 
 class HitlSeedConfig(BaseModel):
@@ -91,6 +95,12 @@ def seed_hitl_inputs(config: HitlSeedConfig) -> SeededHitlInputs:
     )
     if not source.is_dir():
         raise ValueError("The processed source SpatialData store does not exist.")
+    if any(store_marker_path(path).exists() for path in (config.source_zarr, source)):
+        raise ValueError(
+            "The source run's SpatialData build was interrupted; its store is "
+            "incomplete and cannot seed a HITL run. Let the source run rebuild it "
+            "first."
+        )
     if source.is_relative_to(destination) or destination.is_relative_to(source):
         raise ValueError("HITL source and destination stores must be separate.")
     destinations = [destination]
@@ -144,6 +154,14 @@ def seed_hitl_inputs(config: HitlSeedConfig) -> SeededHitlInputs:
     if config.nuclei_source_dir is not None:
         if config.nuclei_destination_dir is None:
             raise ValueError("Nuclei reuse requires its destination directory.")
+        if nuclei_mask_marker_path(
+            config.nuclei_source_dir / "cellpose_nuclei_masks_tiled.npy"
+        ).exists():
+            raise ValueError(
+                "The source run's nuclei segmentation was interrupted; its nuclei "
+                "mask is incomplete and cannot seed a HITL run. Let the source "
+                "run finish its nuclei step first."
+            )
         paths = sorted(config.nuclei_source_dir.glob("cellpose_nuclei*"))
         if not any(path.suffix == ".npy" for path in paths):
             raise ValueError(
