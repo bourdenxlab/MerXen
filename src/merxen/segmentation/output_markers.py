@@ -37,6 +37,21 @@ def store_marker_path(store_path: Path) -> Path:
     return incomplete_marker_path(Path(store_path))
 
 
+ENRICH_MARKER_STAGE = "enrich"
+
+
+def enrichment_marker_path(store_path: Path) -> Path:
+    """Marker beside the real store (symlinks resolved) that ENRICH changes.
+
+    ENRICH has a marker of its own, ``.<store>.enrich.merxen-incomplete``: the
+    ProSeg marker beside the same store sends it back to ProSeg, while an
+    interrupted enrichment only has to be enriched again. Resolving the path
+    puts the marker in one place whichever staged link reached the store.
+    """
+    store = Path(store_path).resolve()
+    return incomplete_marker_path(store, name=f"{store.name}.{ENRICH_MARKER_STAGE}")
+
+
 def leftover_temporaries(path: Path) -> list[Path]:
     """Hidden temporary files an interrupted writer of ``path`` can leave behind.
 

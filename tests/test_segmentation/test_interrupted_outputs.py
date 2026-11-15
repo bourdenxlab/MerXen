@@ -8,6 +8,7 @@ complete outputs, including those from before the markers existed, are reused.
 
 from __future__ import annotations
 
+import os
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -17,14 +18,20 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import merxen.segmentation.pipeline as pipeline_module
 from merxen.config import SegmentationConfig, SpatialDataBuildConfig
 from merxen.io.bead_removal.provenance import (
     STORE_SIDECAR_NAME,
+    read_store_proseg_inputs,
     segmentation_sidecar_path,
     write_store_segmentation_sidecar,
 )
 from merxen.io.builders.pipeline import build_spatialdata_artifact
-from merxen.io.spatialdata_io import _copy_non_spatialdata_sidecars
+from merxen.io.spatialdata_io import (
+    _copy_non_spatialdata_sidecars,
+    _write_locks_held_by_this_thread,
+    spatialdata_write_lock_path,
+)
 from merxen.io.transcript_io import write_proseg_csv_from_points
 from merxen.path_utils import (
     clear_incomplete,
@@ -40,6 +47,7 @@ from merxen.segmentation.output_markers import (
     store_marker_path,
 )
 from merxen.segmentation.pipeline import (
+    proseg_input_identity,
     run_cellpose_nuclei_segmentation,
     run_cellpose_segmentation,
     run_proseg_segmentation,
@@ -698,3 +706,147 @@ class TestHelpers:
         for name in names:
             (tmp_path / name).write_text("x")
         assert [p.name for p in leftover_temporaries(mask)] == sorted(names[:3])
+
+
+def _rebuilt(path: Path) -> None:
+    """Give a file the identity of a rebuild.
+
+    A real rebuild takes minutes; in a test it can land in the same timestamp
+    tick with the same size, so the timestamp is moved on explicitly.
+    """
+    stat = path.stat()
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+
+
+class TestProsegStoreLock:
+    def test_an_interrupted_store_is_discarded_and_rebuilt_under_its_lock(
+        self, tmp_path: Path, cellpose: CellposeRuns, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ENRICH and the later stages write into the latest store under its
+        lock; ProSeg must not delete it under them."""
+        cfg, latest, kwargs, events = TestProsegStore._prepare(tmp_path, monkeypatch)
+        lock = spatialdata_write_lock_path(latest)
+        held: dict[str, list[bool]] = {"discard": [], "convert": []}
+        convert = pipeline_module.convert_to_latest_zarr
+        discard = pipeline_module._discard_interrupted_outputs
+
+        def _convert(*args: Any, **kw: Any) -> Path:
+            held["convert"].append(lock in _write_locks_held_by_this_thread())
+            return Path(convert(*args, **kw))
+
+        def _discard(name: str, marker: Path, outputs: Any, **kw: Any) -> bool:
+            if marker == store_marker_path(latest) and marker.exists():
+                held["discard"].append(lock in _write_locks_held_by_this_thread())
+            return bool(discard(name, marker, outputs, **kw))
+
+        monkeypatch.setattr(pipeline_module, "convert_to_latest_zarr", _convert)
+        monkeypatch.setattr(pipeline_module, "_discard_interrupted_outputs", _discard)
+        events.append("kill-convert")
+        with pytest.raises(Killed):
+            run_proseg_segmentation(cfg, **kwargs)
+
+        run_proseg_segmentation(cfg, **kwargs)
+
+        assert events == ["proseg", "convert", "convert"]
+        assert held == {"discard": [True], "convert": [True, True]}
+
+
+class TestProsegInputs:
+    def test_a_store_built_from_a_rebuilt_cellpose_output_is_not_reused(
+        self, tmp_path: Path, cellpose: CellposeRuns, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg, latest, kwargs, events = TestProsegStore._prepare(tmp_path, monkeypatch)
+        run_proseg_segmentation(cfg, **kwargs)
+        recorded = read_store_proseg_inputs(latest)
+        assert recorded is not None
+        assert set(recorded["files"]) == {
+            "transcripts_csv",
+            "cellpose_mask",
+            "cellpose_cellprob",
+        }
+
+        outputs = run_cellpose_segmentation(cfg, force_rerun=True)
+        _rebuilt(outputs["transcripts_csv"])
+        run_proseg_segmentation(cfg, **kwargs)
+
+        assert events == ["proseg", "convert", "proseg", "convert"]
+        assert read_store_proseg_inputs(latest) != recorded
+        # The rebuilt store records the new CSV and is reused from now on.
+        run_proseg_segmentation(cfg, **kwargs)
+        assert events == ["proseg", "convert", "proseg", "convert"]
+
+    def test_a_store_built_with_other_proseg_settings_is_not_reused(
+        self, tmp_path: Path, cellpose: CellposeRuns, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg, _, kwargs, events = TestProsegStore._prepare(tmp_path, monkeypatch)
+        run_proseg_segmentation(cfg, **kwargs)
+        cfg.proseg.num_threads += 1  # no effect on the cells: still reused
+        run_proseg_segmentation(cfg, **kwargs)
+        assert events == ["proseg", "convert"]
+
+        cfg.proseg.samples += 100
+        run_proseg_segmentation(cfg, **kwargs)
+
+        assert events == ["proseg", "convert", "proseg", "convert"]
+
+    def test_a_raw_store_of_other_inputs_is_not_converted(
+        self, tmp_path: Path, cellpose: CellposeRuns, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg, _, kwargs, events = TestProsegStore._prepare(tmp_path, monkeypatch)
+        events.append("kill-convert")
+        with pytest.raises(Killed):
+            run_proseg_segmentation(cfg, **kwargs)
+        _rebuilt(Path(kwargs["cellpose_mask_path"]))
+
+        run_proseg_segmentation(cfg, **kwargs)
+
+        assert events == ["proseg", "convert", "proseg", "convert"]
+
+    def test_a_deleted_csv_does_not_discard_the_store(
+        self, tmp_path: Path, cellpose: CellposeRuns, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The CSV is kept for debugging only; deleting it changes no input."""
+        cfg, _, kwargs, events = TestProsegStore._prepare(tmp_path, monkeypatch)
+        run_proseg_segmentation(cfg, **kwargs)
+        Path(kwargs["transcripts_csv"]).resolve().unlink()
+
+        run_proseg_segmentation(cfg, **kwargs)
+
+        assert events == ["proseg", "convert"]
+
+    def test_a_store_without_recorded_inputs_is_reused_as_before(
+        self, tmp_path: Path, cellpose: CellposeRuns, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg, latest, kwargs, events = TestProsegStore._prepare(tmp_path, monkeypatch)
+        run_proseg_segmentation(cfg, **kwargs)
+        write_store_segmentation_sidecar(latest, None)
+        _rebuilt(Path(kwargs["transcripts_csv"]))
+
+        run_proseg_segmentation(cfg, **kwargs)
+
+        assert events == ["proseg", "convert"]
+
+    def test_the_shortcut_does_not_reuse_a_store_of_older_cellpose_outputs(
+        self, tmp_path: Path, cellpose: CellposeRuns, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg, latest, events = TestCompleteOutputShortcut._prepare(tmp_path, monkeypatch)
+        seg = _seg_dir(cfg)
+        csv = seg / "transcripts_for_proseg.csv"
+        write_store_segmentation_sidecar(
+            latest,
+            None,
+            proseg_inputs=proseg_input_identity(
+                transcripts_csv=csv,
+                cellpose_mask_path=seg / "cellpose_masks_tiled.npy",
+                cellpose_cellprob_path=seg / "cellpose_cellprobs_tiled.npy",
+                proseg_params=cfg.proseg.model_dump(),
+            ),
+        )
+        run_segmentation_pipeline(cfg)
+        assert events == []
+
+        _rebuilt(csv)
+        run_segmentation_pipeline(cfg)
+
+        assert cellpose.calls == 2
+        assert events == ["proseg", "convert"]

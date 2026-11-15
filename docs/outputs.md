@@ -123,7 +123,9 @@ Path: `${outdir}/<pair_id>/<platform>/latest/`
 
 | File | Contents |
 |------|----------|
-| `latest_spatialdata.zarr` | Durable current SpatialData artifact. Segmentation writes the refined ProSeg result here, then enrichment updates it in place with additive shapes, images, and tables. This is the primary downstream input. Its root also holds `segmentation_image_preprocessing.json`, the bead-removal identity of the image its prior masks (and so its cells) came from; it is checked before the store is reused or enriched. |
+| `latest_spatialdata.zarr` | Durable current SpatialData artifact. Segmentation writes the refined ProSeg result here, then enrichment updates it in place with additive shapes, images, and tables. This is the primary downstream input. Its root also holds `segmentation_image_preprocessing.json`, the bead-removal identity of the image its prior masks (and so its cells) came from; it is checked before the store is reused or enriched. Stores built since the input record was added also record there (`proseg_inputs`) the size and modification time of `transcripts_for_proseg.csv`, the Cellpose mask and probabilities, and the ProSeg settings that change the cells; a re-run rebuilds a store whose recorded inputs differ from the current ones ([Resuming a run](running-the-pipeline.md#resuming-a-run)). |
+| `.latest_spatialdata.zarr.enrich.merxen-incomplete` | Hidden marker that exists only while ENRICH writes into the store. One left behind means the enrichment was stopped or failed part-way; the next ENRICH rebuilds it instead of skipping it. |
+| `latest_spatialdata.zarr/<type>/.<element>.merxen-backup-*`, `.<element>.merxen-replacing.json` | The previous version of an element while it is replaced, and the journal that names it. Both left behind mean the writer was stopped part-way; the next writer of the store puts the previous version back ([Resuming a run](running-the-pipeline.md#resuming-a-run)). A backup without a journal, left by an earlier MerXen version, is not touched. |
 
 #### SpatialData identifier contract
 

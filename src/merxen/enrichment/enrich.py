@@ -54,7 +54,12 @@ from merxen.io.spatialdata_schema import (
 )
 from merxen.masks import register_missing_mask_branches
 from merxen.memory import force_release, log_status
-from merxen.path_utils import remove_path, stage_existing_output
+from merxen.path_utils import (
+    clear_incomplete,
+    mark_incomplete,
+    remove_path,
+    stage_existing_output,
+)
 from merxen.platforms import (
     PlatformSpec,
     find_platform_spec,
@@ -69,6 +74,7 @@ from merxen.segmentation.model_identity import (
     find_model_identity_path,
     read_model_identity,
 )
+from merxen.segmentation.output_markers import enrichment_marker_path
 
 logger = logging.getLogger(__name__)
 
@@ -833,7 +839,13 @@ def _remove_partial_enrichment_artifacts_from_zarr_path(
 ) -> None:
     """Delete known rebuildable enrichment artifacts from an on-disk zarr."""
     zarr_path = Path(zarr_path)
-    rel_paths = _partial_enrichment_artifact_paths(zarr_path, platform)
+    _remove_zarr_paths(
+        zarr_path, _partial_enrichment_artifact_paths(zarr_path, platform)
+    )
+
+
+def _remove_zarr_paths(zarr_path: Path, rel_paths: set[str]) -> None:
+    """Delete store-relative element paths and their consolidated entries."""
     for rel_path in sorted(rel_paths):
         remove_path(zarr_path / rel_path)
 
@@ -855,12 +867,38 @@ def _is_partial_enrichment_read_error(exc: Exception) -> bool:
     return isinstance(exc, KeyError) and exc.args == ("ome",)
 
 
+def _enrichment_rebuilt_paths(zarr_path: Path, platform: str) -> set[str]:
+    """Return the elements a full enrichment copies or derives again.
+
+    The rebuildable artifacts (:func:`_partial_enrichment_artifact_paths`)
+    without the tables derived from them and without ``MOSAIK_proseg``, which
+    may be the store's only copy of the ProSeg cells. Empty for a native store.
+    """
+    return (
+        _partial_enrichment_artifact_paths(zarr_path, platform)
+        - _derived_table_paths(zarr_path)
+        - {f"shapes/{MOSAIK_PROSEG_SHAPE_NAME}"}
+    )
+
+
 def _read_latest_zarr_for_enrichment(
     write_path: Path,
     platform: str,
     dataset_name: str,
+    *,
+    interrupted: bool = False,
 ) -> Any:
     """Read latest zarr, recovering from interrupted partial enrichment writes.
+
+    Args:
+        write_path: The store.
+        platform: Its platform.
+        dataset_name: Dataset label for messages.
+        interrupted: The previous enrichment of this store was cut off (its
+            marker is present). An element it was writing for the first time
+            may then be partial and block the read; a store that cannot be read
+            loses the elements the rebuild writes again
+            (:func:`_enrichment_rebuilt_paths`) and is read once more.
 
     Raises:
         RuntimeError: If a native store has an unreadable raster: its rasters
@@ -869,13 +907,27 @@ def _read_latest_zarr_for_enrichment(
     try:
         return sd.read_zarr(write_path)
     except Exception as exc:
-        if not _is_partial_enrichment_read_error(exc):
-            raise
         try:
             attrs = read_root_attrs(Path(write_path))
         except (OSError, ValueError):
             attrs = {}
-        if _is_native_store(platform, attrs):
+        is_native = _is_native_store(platform, attrs)
+        rebuilt = (
+            _enrichment_rebuilt_paths(Path(write_path), platform)
+            if interrupted and not is_native
+            else set()
+        )
+        if rebuilt:
+            log_status(
+                f"[{dataset_name}] Latest zarr cannot be read after an interrupted "
+                f"enrichment ({exc!r}); removing the elements it rebuilds."
+            )
+            _remove_zarr_paths(Path(write_path), rebuilt)
+            force_release(note=f"after interrupted enrichment cleanup {dataset_name}")
+            return sd.read_zarr(write_path)
+        if not _is_partial_enrichment_read_error(exc):
+            raise
+        if is_native:
             # A native store's rasters are payloads shared with the source
             # store; deleting derived tables cannot make them readable.
             raise RuntimeError(
@@ -978,14 +1030,27 @@ def enrich_single_latest(
             embed_transcript_density(write_path, config.transcript_density_source_path)
     # Enrichment adds and replaces elements and rewrites the store's attrs, so
     # the store lock is held from the read until the metadata is persisted.
+    marker = enrichment_marker_path(write_path)
     with spatialdata_write_lock(write_path):
+        # Before anything is read or written, also when the store is skipped as
+        # already enriched; a refusal here leaves no marker.
+        _check_store_matches_source(write_path, config, dataset_name)
+        # The element checks cannot tell an enrichment cut off before its attrs
+        # write from a complete one; the marker can.
+        interrupted = marker.exists()
+        if interrupted:
+            log_status(
+                f"[{dataset_name}] The previous enrichment of {write_path.name} was "
+                f"interrupted ({marker.name} is present); rebuilding it."
+            )
+        mark_incomplete(marker, step="ENRICH")
         if config.segmentation_source in ("native", "native_proseg") or (
             _is_atera_cellpose_row(config)
         ):
             _enrich_native_in_place(
                 config,
                 write_path=write_path,
-                force_rerun=force_rerun,
+                force_rerun=force_rerun or interrupted,
             )
             if config.segmentation_source in (
                 "native_proseg",
@@ -997,7 +1062,7 @@ def enrich_single_latest(
                 _enrich_atera_cellpose_layer(
                     config,
                     write_path=write_path,
-                    force_rerun=force_rerun,
+                    force_rerun=force_rerun or interrupted,
                     polygon_n_jobs=polygon_n_jobs,
                 )
         else:
@@ -1005,9 +1070,11 @@ def enrich_single_latest(
                 config,
                 write_path=write_path,
                 force_rerun=force_rerun,
+                rebuild_incomplete=interrupted,
                 polygon_n_jobs=polygon_n_jobs,
                 polygon_show_progress=polygon_show_progress,
             )
+        clear_incomplete(marker)
 
     if keep_backup:
         log_status(
@@ -1167,10 +1234,17 @@ def _enrich_store_in_place(
     *,
     write_path: Path,
     force_rerun: bool,
+    rebuild_incomplete: bool = False,
     polygon_n_jobs: int,
     polygon_show_progress: bool,
 ) -> None:
-    """Enrich the store at ``write_path``; the caller holds its write lock."""
+    """Enrich the store at ``write_path``; the caller holds its write lock.
+
+    ``rebuild_incomplete`` (an earlier enrichment was cut off) takes the
+    rebuild path even when every element is present: the elements may be
+    partial and the record, branches and alignment invalidation unwritten.
+    The caller has checked the store against the source.
+    """
     if config.mask_path is None or config.nuclei_mask_path is None:
         # The config validator allows this only for segmentation_source=native,
         # which enrich_single_latest sends to _enrich_native_in_place.
@@ -1183,13 +1257,12 @@ def _enrich_store_in_place(
     dataset_name = str(config.dataset_name).upper()
     platform = config.platform.upper()
 
-    # Before anything is read or written, also when the store is skipped as
-    # already enriched.
-    _check_store_matches_source(write_path, config, dataset_name)
     log_status(f"[{dataset_name}] Loading latest zarr for enrichment: {write_path}")
-    dst = _read_latest_zarr_for_enrichment(write_path, platform, dataset_name)
+    dst = _read_latest_zarr_for_enrichment(
+        write_path, platform, dataset_name, interrupted=rebuild_incomplete
+    )
 
-    already_enriched = _is_already_enriched(dst, platform)
+    already_enriched = not rebuild_incomplete and _is_already_enriched(dst, platform)
     if already_enriched and (not force_rerun):
         # The record is refreshed here too: a store enriched before the source
         # was corrected (or by an older version) has none, and quantification
@@ -1204,7 +1277,12 @@ def _enrich_store_in_place(
         return
 
     nuclei_missing = CELLPOSE_NUCLEI_SHAPE_NAME not in dst.shapes
-    if not force_rerun and nuclei_missing and _is_enriched_except_nuclei(dst, platform):
+    if (
+        not force_rerun
+        and not rebuild_incomplete
+        and nuclei_missing
+        and _is_enriched_except_nuclei(dst, platform)
+    ):
         log_status(
             f"[{dataset_name}] Existing enrichment predates the nuclei layer; "
             "adding nuclei without rebuilding existing shapes or tables."
@@ -1722,6 +1800,8 @@ def _enrich_native_in_place(
 ) -> None:
     """Enrich a native (vendor-segmentation) store; the caller holds its lock.
 
+    The caller has checked the store against the source.
+
     The store comes from NATIVE_LATEST: the vendor shapes and table are already
     registered under their latest names. This verifies and completes those
     elements, runs the streaming label check (vendor assignments against the
@@ -1741,7 +1821,6 @@ def _enrich_native_in_place(
             f"[{dataset_name}] {spec.name} has no vendor labels for native enrichment"
         )
 
-    _check_store_matches_source(write_path, config, dataset_name)
     log_status(
         f"[{dataset_name}] Loading native latest zarr for enrichment: {write_path}"
     )
