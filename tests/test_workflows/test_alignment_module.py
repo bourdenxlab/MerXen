@@ -117,3 +117,22 @@ def test_alignment_environment_uses_the_generated_runtime_lock() -> None:
     assert "opencv-contrib-python-headless==4.12.0.88" in lock_text
     assert "conda.enabled = true" in config_text
     assert "conda = params.alignment_conda" in config_text
+
+
+def test_align_exports_the_allocator_setting_only_when_set() -> None:
+    """An unset param renders as "null", which torch 2.14 aborts on at import."""
+    repo_root = Path(__file__).resolve().parents[2]
+    module_text = (repo_root / "workflows" / "modules" / "alignment.nf").read_text()
+    config_text = (repo_root / "workflows" / "nextflow.config").read_text()
+
+    assert "alignment_pytorch_cuda_alloc_conf = null" in config_text
+    assert (
+        'export PYTORCH_CUDA_ALLOC_CONF="${params.alignment_pytorch_cuda_alloc_conf}"'
+        not in module_text
+    )
+    guard = "if [[ -n \"${params.alignment_pytorch_cuda_alloc_conf ?: ''}\" ]]; then"
+    export = (
+        'export PYTORCH_CUDA_ALLOC_CONF="${params.alignment_pytorch_cuda_alloc_conf'
+        " ?: ''}\""
+    )
+    assert module_text.index(guard) < module_text.index(export)

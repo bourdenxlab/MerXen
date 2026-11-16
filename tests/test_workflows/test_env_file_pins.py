@@ -24,7 +24,7 @@ Changes made so far:
   ``# requirements.lock sha256:`` header of its regenerated lock (torch 2.14.1
   for the PyTorch advisories, previously 2.7.1). The header makes Nextflow build
   a fresh env whenever the lock changes; this first change recomputes the
-  ``ALIGN`` and ``MATERIALIZE_ALIGNMENT`` tasks of every pair once.
+  ``ALIGN`` task of every pair, and the tasks using its outputs, once.
 """
 
 from __future__ import annotations

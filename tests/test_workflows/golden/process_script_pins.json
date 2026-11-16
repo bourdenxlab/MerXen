@@ -1,6 +1,6 @@
 {
   "workflows/acceptance/hitl0_tile_check.nf::HITL0_TILE_CHECK::script": "03e4d7a3f4ccdda6bc18a7a70c358b897843b2b8426026ab813633f998dde72f",
-  "workflows/modules/alignment.nf::ALIGN::script": "b610faa9f5198eaf2a60df6c283cb0dbf7db15a6f240cf9a0112622801169ce8",
+  "workflows/modules/alignment.nf::ALIGN::script": "4cf3468e04872958a2b6175ae51e0b01fe3901330b92064628af90b050feec6c",
   "workflows/modules/alignment.nf::ALIGN_QC::script": "ecee3dcc0353a0e29abbd9b9e95815e61c583bb56f7ef8344c0ba7e02aa18344",
   "workflows/modules/alignment.nf::MATERIALIZE_ALIGNMENT::script": "a96db9fd49ec640e280999645a590c39470221f7875a6201cff7fa7d807bacc9",
   "workflows/modules/annotation.nf::ANNOTATE_PANEL::script": "78c157d874825c84e3c9c124f2e9fd158ca043f47a21c727d335b5ac83f3e267",

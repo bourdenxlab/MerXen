@@ -390,8 +390,8 @@ minor or patch change and the release steps.
   `envs/environment.alignment.yml`, so that Nextflow builds a fresh `ALIGN` env.
   The env installs the lock with pip, which rejects a git package pinned to a
   commit when the package that needs it asks for another URL (cell_type_mapper
-  `@v1.7.2`, mmc_gene_mapper `@v0.2.1`, unpinned abc_atlas_access, bkbit and
-  schemasheets). The lock therefore leaves those five out, and pip installs them
+  `@v1.7.2`, mmc_gene_mapper `@v0.2.1`, bkbit by tag, and unpinned
+  abc_atlas_access and schemasheets). The lock therefore leaves those five out, and pip installs them
   from the URLs their dependents declare, as in the base env; every other
   package stays pinned:
 

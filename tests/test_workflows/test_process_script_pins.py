@@ -14,6 +14,11 @@ and say in the pull request which caches it invalidates and why.
 
 Changes made so far:
 
+- v1.0.2 security fix: ``ALIGN`` (``modules/alignment.nf``) exports
+  ``PYTORCH_CUDA_ALLOC_CONF`` only when ``alignment_pytorch_cuda_alloc_conf``
+  is set. Unset, it rendered the literal ``null``, on which torch 2.14 (the
+  alignment env's new torch) aborts at import. The env change re-runs
+  ``ALIGN`` once anyway.
 - Embedded density adds ``--embed`` to ATERA_TRANSCRIPT_DENSITY so cached
   independent-raster tasks are upgraded. Only that existing process script pin
   changes; matching embedded rasters are reused without scanning transcripts.
