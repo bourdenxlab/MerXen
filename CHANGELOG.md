@@ -14,6 +14,10 @@ users would notice). A release turns [Unreleased] into the release's section.
 
 ## [Unreleased]
 
+### Security
+
+- **PyTorch in the alignment environment.** The `ALIGN` environment (`envs/environment.alignment.yml`) now installs torch 2.14.1 and torchvision 0.29.2 instead of 2.7.1 and 0.22.1, which fixes the PyTorch advisories GHSA-63cw-57p8-fm3p (code execution from untrusted checkpoint files), GHSA-rrmf-rvhw-rf47, GHSA-qfhq-4f3w-5fph, GHSA-vgrw-7cvw-pwgx and GHSA-887c-mr87-cxwp. The other environments already used torch 2.14. The alignment lock had not been regenerated since the base dependencies moved to torch 2.14 and cell_type_mapper 1.7.2, so it conflicted with them; it is now resolved for the environment's Python 3.12, leaves out the five git-hosted packages pip cannot install from a lock (pip takes them from the URLs their dependents declare, as in the base environment), and the environment file records the lock's checksum, so Nextflow builds a fresh `ALIGN` env on the next run with `--enable_alignment` ([development](docs/development.md#dependency-management)). The registration stack (NumPy, OpenCV, Kornia, SimpleITK, VALIS 1.2.0) keeps its versions. Because the env file changed, a resumed run with alignment recomputes `ALIGN` and `MATERIALIZE_ALIGNMENT` once, and VALIS's DISK/LightGlue feature matching now runs on torch 2.14, so registration transforms can differ slightly from runs on the old env.
+
 ## [1.0.1] - 2026-11-16
 
 ### Fixed
