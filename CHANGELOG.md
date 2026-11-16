@@ -14,6 +14,8 @@ users would notice). A release turns [Unreleased] into the release's section.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-16
+
 ### Fixed
 
 - **Interrupted tasks.** A task stopped or failed part-way no longer has its incomplete outputs reused on `-resume`. Before, a Cellpose task cut off while writing `transcripts_for_proseg.csv` was resumed as complete, and a partly written nuclei mask, ProSeg `latest_spatialdata.zarr` or build-step `*_spatialdata_path` store was reused in the same way. These steps now write a hidden `.<name>.merxen-incomplete` marker before they change those outputs and remove it after their last write; a resumed task that finds it deletes the outputs and runs the step again. The ProSeg CSV is written under a temporary name and renamed when complete. A run started at a later stage (`--start_stage`) refuses a published output that still has a marker, and the HITL seed refuses a marked source store or nuclei mask. Outputs left incomplete by earlier versions have no marker and still have to be deleted by hand ([resuming a run](docs/running-the-pipeline.md#resuming-a-run)).
@@ -257,5 +259,6 @@ was set, mostly the reference-based cell-type annotation.
 - The protocol and the user's decisions are in `docs/acceptance/annotation-v1-preregistration.md` §18–§20.
 - The mouse acceptance (gate M) is scored on MS1 and MS2 under the protocol of pre-registration §25, with the user's review decisions in §25.4. The re-score with the section-time exception gives 67 PASS and 7 FAIL (excepted), with no open problem; the user's review of the two original_seg reports (U9) is pending.
 
-[Unreleased]: https://github.com/bourdenxlab/MerXen/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/bourdenxlab/MerXen/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/bourdenxlab/MerXen/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/bourdenxlab/MerXen/releases/tag/v1.0.0
