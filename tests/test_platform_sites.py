@@ -203,6 +203,9 @@ REASONS: dict[str, dict[str, str]] = {
         "src/merxen/masks.py": "mask-branch discovery of cellpose_nuclei (AT-6)",
         "src/merxen/registration_quality.py": "reads the nuclei mask (AT-6)",
         "src/merxen/segmentation/pipeline.py": "writes the nuclei mask",
+        "src/merxen/segmentation/output_markers.py": (
+            "names the marker of an interrupted nuclei step (all platforms)"
+        ),
         "src/merxen/viewer_cache/build.py": "default viewer layer list",
         "workflows/main.nf": "routes the nuclei mask between stages",
         "workflows/modules/enrichment.nf": "passes the nuclei mask to enrichment",
@@ -478,6 +481,7 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
         "src/merxen/masks.py": (),
         "src/merxen/registration_quality.py": (),
         "src/merxen/segmentation/pipeline.py": (),
+        "src/merxen/segmentation/output_markers.py": (),
         "src/merxen/viewer_cache/build.py": (),
         "workflows/main.nf": (),
         "workflows/modules/enrichment.nf": (),

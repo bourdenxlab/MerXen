@@ -243,6 +243,20 @@ nextflow run workflows/main.nf \
 
 Completed stages are skipped; only the failed stage and its downstreams re-run.
 
+Some stages write outside the task's work directory: `BUILD_SPATIALDATA` into a
+samplesheet `*_spatialdata_path`, the Cellpose steps into
+`<outdir>/<pair_id>/<platform>/segmentation/`, and ProSeg into
+`latest/latest_spatialdata.zarr`. A task that is stopped (for example by
+cancelling the run) or fails part-way leaves those outputs incomplete. Each of
+these steps writes a hidden `.<name>.merxen-incomplete` marker before it starts
+changing its outputs and removes it after its last write. The resumed task finds
+the marker, deletes the incomplete outputs (logging that it does) and runs the
+step again. An interrupted ProSeg store goes back to ProSeg, because its points
+may already have been rewritten. A run that starts at a later stage
+(`--start_stage`) refuses a published output that still has a marker, and names
+it. Outputs left incomplete by a MerXen version without markers are not
+recognised: delete them by hand before resuming.
+
 A task's hash covers its inputs, script text and environment definition, not
 the MerXen Python source. The Conda env installs MerXen in editable mode, so a
 change under `src/merxen/` leaves every hash unchanged. After a code fix,

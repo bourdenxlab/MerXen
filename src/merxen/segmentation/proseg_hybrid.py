@@ -6,7 +6,7 @@ import json
 import logging
 import tempfile
 from collections import defaultdict, deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -1083,6 +1083,8 @@ def run_proseg_hybrid_refinement(
     transforms_path: Path | str,
     config: ProsegHybridConfig,
     temp_root: Path | str | None = None,
+    *,
+    before_first_write: Callable[[], object] | None = None,
 ) -> dict[str, int | float | str]:
     """Build and persist the hybrid shape, assignments, and count table.
 
@@ -1095,6 +1097,10 @@ def run_proseg_hybrid_refinement(
             during the refinement (several GB for a full section). Defaults to
             ``$MERXEN_TMPDIR`` or the working directory, never the system
             temporary directory (see ``tempdirs.large_temp_root``).
+        before_first_write: Called once, under the store lock, after every
+            check and computation and immediately before the store is first
+            changed (the caller marks the store incomplete there, so a refused
+            or failed refinement leaves an intact store unmarked).
 
     Returns:
         Run-level refinement summary.
@@ -1124,6 +1130,7 @@ def run_proseg_hybrid_refinement(
             cellpose_polygons,
             config,
             temp_root=temp_root,
+            before_first_write=before_first_write,
         )
 
 
@@ -1133,6 +1140,7 @@ def _refine_and_persist_hybrid_branch(
     config: ProsegHybridConfig,
     *,
     temp_root: Path | str | None,
+    before_first_write: Callable[[], object] | None = None,
 ) -> dict[str, int | float | str]:
     """Build the hybrid branch in one store; the caller holds the store lock."""
     points_key = choose_primary_points_key(sdata_obj)
@@ -1280,6 +1288,9 @@ def _refine_and_persist_hybrid_branch(
             instance_key=PROSEG_ASSIGNMENT_COLUMN,
             sort=True,
         )
+        # The points rewrite is the first change to the store.
+        if before_first_write is not None:
+            before_first_write()
         write_or_replace_element(
             sdata_obj,
             points_key,

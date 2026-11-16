@@ -228,6 +228,11 @@ Two independent reuse paths and one Nextflow cache:
   artifact from `${outdir}` and errors if it is missing. This is useful when
   `-resume` would pick the wrong Nextflow run lineage. The same fields can be
   set per row in the samplesheet.
+- **Interrupted writes.** The build, Cellpose cell, Cellpose nuclei and ProSeg
+  steps mark their persistent outputs with a hidden `.<name>.merxen-incomplete`
+  file while they write them, and discard outputs that still carry it, so a
+  task stopped part-way is recomputed rather than reused. See
+  [Resuming a run](running-the-pipeline.md#resuming-a-run).
 - **Nextflow work-dir caching.** Resume a run with `nextflow run ... -resume`
   and completed processes will be skipped. `publishDir` modes are set so that
   SpatialData-heavy stages are symlinked rather than copied.

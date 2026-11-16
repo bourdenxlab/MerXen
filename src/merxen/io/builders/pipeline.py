@@ -6,7 +6,13 @@ import logging
 from pathlib import Path
 
 from merxen.config import SpatialDataBuildConfig
-from merxen.path_utils import remove_path, stage_existing_output
+from merxen.path_utils import (
+    clear_incomplete,
+    incomplete_marker_path,
+    mark_incomplete,
+    remove_path,
+    stage_existing_output,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +51,14 @@ def build_spatialdata_artifact(
         else None
     )
     input_path = Path(config.input_path)
+
+    # A store this step was writing when its task was killed or failed carries
+    # a marker. spatialdata writes the root attrs (with the bead-removal record)
+    # before any element, so such a store passes every check below; it is
+    # deleted before they run. The input zarr itself is never written here.
+    for written in (output_path, persistent_output_path):
+        if written is not None:
+            _discard_interrupted_store(config.dataset_name, written)
 
     reusable_source = _find_reusable_source(
         input_path=input_path,
@@ -90,8 +104,12 @@ def build_spatialdata_artifact(
     target_path = persistent_output_path or output_path
     if target_path != output_path:
         remove_path(output_path)
-    remove_path(target_path)
     target_path.parent.mkdir(parents=True, exist_ok=True)
+    # Before the old store is deleted; removed once the store and its sidecar
+    # files are all written.
+    marker = incomplete_marker_path(target_path)
+    mark_incomplete(marker, step="build_spatialdata")
+    remove_path(target_path)
 
     platform = config.platform.upper()
     if platform == "MERSCOPE":
@@ -114,11 +132,27 @@ def build_spatialdata_artifact(
         )
     else:
         raise ValueError(f"Unsupported platform: {config.platform}")
+    clear_incomplete(marker)
 
     if target_path != output_path:
         stage_existing_output(target_path, output_path)
         return output_path
     return target_path
+
+
+def _discard_interrupted_store(dataset_name: str, store: Path) -> None:
+    """Delete a SpatialData store whose build was interrupted (marker present)."""
+    marker = incomplete_marker_path(store)
+    if not marker.exists():
+        return
+    logger.warning(
+        "[%s] The previous build of %s was interrupted (%s is present); "
+        "discarding the partial store and building it again",
+        dataset_name,
+        store,
+        marker,
+    )
+    remove_path(store)
 
 
 def _build_atera_artifact(

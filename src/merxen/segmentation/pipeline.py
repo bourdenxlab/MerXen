@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -40,13 +42,20 @@ from merxen.io.spatialdata_io import (
 from merxen.io.spatialdata_schema import choose_primary_points_key
 from merxen.io.transcript_io import resolve_col, write_proseg_csv_from_points
 from merxen.memory import force_release, log_status
-from merxen.path_utils import remove_path, stage_existing_output
+from merxen.path_utils import (
+    clear_incomplete,
+    mark_incomplete,
+    remove_path,
+    stage_existing_output,
+    write_text_atomic,
+)
 from merxen.platforms import platform_spec
 from merxen.segmentation.bead_mask_veto import (
     apply_bead_mask_veto,
     bead_mask_veto_identity,
     prepare_bead_mask_veto,
     remove_veto_sidecar,
+    veto_sidecar_path,
 )
 from merxen.segmentation.cellpose import (
     assign_labels_from_masks,
@@ -71,6 +80,12 @@ from merxen.segmentation.model_identity import (
     ensure_model_identity,
     model_identity_path,
     require_cellpose_runtime,
+)
+from merxen.segmentation.output_markers import (
+    cell_mask_marker_path,
+    leftover_temporaries,
+    nuclei_mask_marker_path,
+    store_marker_path,
 )
 from merxen.segmentation.proseg import run_proseg_refinement
 from merxen.segmentation.proseg_hybrid import (
@@ -276,9 +291,9 @@ def _write_transforms_json(
     y_transform: AffineComponent,
 ) -> Path:
     """Write a mask-to-micron affine as ``{"x_transform", "y_transform"}`` JSON."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    # Atomic: a truncated record would make every later reuse fail to parse it.
+    return write_text_atomic(
+        Path(path),
         json.dumps(
             {
                 "x_transform": list(x_transform),
@@ -286,9 +301,51 @@ def _write_transforms_json(
             },
             indent=2,
         )
-        + "\n"
+        + "\n",
     )
-    return path
+
+
+def _write_stats_fallback(path: Path) -> None:
+    """Record that no stitching statistics were written (atomically)."""
+    write_text_atomic(
+        Path(path), json.dumps({"write_stitching_stats": False}, indent=2) + "\n"
+    )
+
+
+def _discard_interrupted_outputs(
+    dataset_name: str,
+    marker: Path,
+    outputs: Iterable[Path],
+    *,
+    step: str,
+) -> bool:
+    """Delete the outputs an interrupted run of a step left behind its marker.
+
+    The marker (:mod:`merxen.segmentation.output_markers`) is written before a
+    step changes its persistent outputs and removed after its last write, so
+    finding it means the earlier run was killed or failed part-way. Its outputs
+    may be truncated (a partial ProSeg CSV), partly filled (a memory-mapped mask)
+    or unfiltered, and must not be reused. They are deleted here, before any
+    check that would otherwise refuse or reuse them; the marker stays until the
+    step finishes again.
+
+    Returns:
+        True when outputs were discarded.
+    """
+    if not marker.exists():
+        return False
+    message = (
+        f"[{dataset_name}] The previous {step} run on these outputs was "
+        f"interrupted ({marker} is present); discarding its partial outputs "
+        "and running the step again"
+    )
+    logger.warning(message)
+    log_status(message)
+    for output in outputs:
+        remove_path(output)
+        for leftover in leftover_temporaries(output):
+            remove_path(leftover)
+    return True
 
 
 def _write_cellpose_transforms(
@@ -709,6 +766,10 @@ def _preflight_model_selection(
     mask_path = config.dataset.persistent_mask_path or (
         config.dataset.output_dir / "cellpose_masks_tiled.npy"
     )
+    if cell_mask_marker_path(Path(mask_path)).exists():
+        # Outputs of an interrupted run: run_cellpose_segmentation discards them
+        # before it checks anything, so they are not a cache to validate.
+        return identity
     require_matching_cached_model(mask_path, config, identity)
     if mask_path.exists():
         required: tuple[Path, ...] = (
@@ -732,10 +793,8 @@ def run_cellpose_segmentation(
     force_rerun: bool = False,
 ) -> dict[str, Path]:
     """Run Cellpose and prepare its mask-derived inputs for ProSeg."""
-    expected_identity = _preflight_model_selection(config)
     dataset = config.dataset
     out_dir = Path(dataset.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
     # ATERA (AT-7): no ProSeg transcript CSV; the tiled ProSeg route reads the
     # store's parquet.
     writes_csv = dataset.proseg_transcripts == "csv"
@@ -771,6 +830,30 @@ def run_cellpose_segmentation(
     stitching_stats_path = (
         persistent_stitching_stats_path or staged_stitching_stats_path
     )
+    # Written before the masks are replaced and removed after the last output
+    # (the segmentation sidecar), so its presence means an interrupted run.
+    cell_marker = cell_mask_marker_path(mask_path)
+    # Nothing may be deleted in a protected baseline root (a misdirected
+    # custom-model arm); the full preflight comes after the discard.
+    require_safe_custom_outputs(config)
+    _discard_interrupted_outputs(
+        dataset.name,
+        cell_marker,
+        (
+            mask_path,
+            cellprob_path,
+            transcripts_csv,
+            _seeding_transforms_path(transcripts_csv),
+            stitching_stats_path,
+            model_identity_path(mask_path),
+            segmentation_sidecar_path(mask_path),
+            veto_sidecar_path(mask_path),
+        ),
+        step="Cellpose cell segmentation",
+    )
+    expected_identity = _preflight_model_selection(config)
+    # Only once the request is accepted: a refused run creates nothing.
+    out_dir.mkdir(parents=True, exist_ok=True)
     # hitl-hook:C3
     require_matching_cached_model(mask_path, config, expected_identity)
     progress_path = out_dir / "cellpose_progress.json"
@@ -816,12 +899,15 @@ def run_cellpose_segmentation(
         )
 
     # The masks and probabilities are written in place, tile by tile, so their
-    # existence does not mean a finished run. With a CSV, the CSV (written
-    # after Cellpose) marks completion; without one (ATERA), the segmentation
-    # sidecar does: _finish_cellpose_without_csv writes it last and
-    # run_tiled_cellpose removes it (before_overwrite) before it opens them.
+    # existence does not mean a finished run. The marker is what says the last
+    # run was interrupted (outputs from before markers existed have none). With
+    # a CSV, the CSV (written after Cellpose) also has to exist; without one
+    # (ATERA), the segmentation sidecar does: _finish_cellpose_without_csv
+    # writes it last and run_tiled_cellpose removes it (before_overwrite)
+    # before it opens them.
     reusable_outputs_exist = (
-        (
+        not cell_marker.exists()
+        and (
             transcripts_csv.exists()
             if writes_csv
             else segmentation_sidecar_path(mask_path).exists()
@@ -864,9 +950,7 @@ def run_cellpose_segmentation(
             log_status(f"[{dataset.name}] Reusing existing Cellpose outputs")
             if not stitching_stats_path.exists():
                 stitching_stats_path.parent.mkdir(parents=True, exist_ok=True)
-                stitching_stats_path.write_text(
-                    json.dumps({"write_stitching_stats": False}, indent=2) + "\n"
-                )
+                _write_stats_fallback(stitching_stats_path)
             (
                 staged_transcripts,
                 staged_mask,
@@ -903,10 +987,18 @@ def run_cellpose_segmentation(
     )
 
     def _discard_stale_sidecars() -> None:
+        # Called once nothing can refuse the run any more. The marker comes first:
+        # from here on the outputs are being replaced, and a kill must not leave
+        # them looking complete (or legacy).
+        mark_incomplete(cell_marker, step="Cellpose cell segmentation")
         # Records of an earlier image or veto must not outlive the masks they
         # described, and must stay while a refused run leaves those masks in place.
         remove_segmentation_sidecar(mask_path)
         remove_veto_sidecar(mask_path)
+        if writes_csv:
+            # Nor may a CSV seeded from those masks, or its seeding record.
+            remove_path(transcripts_csv)
+            remove_path(_seeding_transforms_path(transcripts_csv))
 
     _progress("cellpose_starting")
     mask_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1006,6 +1098,7 @@ def run_cellpose_segmentation(
             bead_veto=bead_veto,
             stage_outputs=_stage_outputs,
             progress=_progress,
+            marker=cell_marker,
         )
 
     x_col = resolve_col(points_obj, ["x", "global_x", "x_location"])
@@ -1044,10 +1137,13 @@ def run_cellpose_segmentation(
     transcripts_csv.parent.mkdir(parents=True, exist_ok=True)
     # A record of an earlier seeding must not outlive the CSV it described.
     _seeding_transforms_path(transcripts_csv).unlink(missing_ok=True)
+    # Written under a hidden name and renamed when complete, so the CSV path
+    # never holds part of a file (it is appended chunk by chunk).
+    partial_csv = transcripts_csv.with_name(f".{transcripts_csv.name}.partial")
     mask_mmap = np.load(mask_path, mmap_mode="r")
     prep_stats = write_proseg_csv_from_points(
         points_obj=points_obj,
-        csv_path=transcripts_csv,
+        csv_path=partial_csv,
         masks=mask_mmap,
         x_transform=x_transform,
         y_transform=y_transform,
@@ -1067,6 +1163,7 @@ def run_cellpose_segmentation(
         max_ram_gb=config.memory.max_system_ram_gb,
         warn_ram_gb=config.memory.memory_warn_gb,
     )
+    os.replace(partial_csv, transcripts_csv)
     log_status(
         f"[{dataset.name}] Seeded transcripts for ProSeg: "
         f"{prep_stats['n_seeded']:,} ({prep_stats['pct_seeded']:.2f}%)"
@@ -1079,15 +1176,14 @@ def run_cellpose_segmentation(
         _seeding_transforms_path(transcripts_csv), x_transform, y_transform
     )
     if not stitching_stats_path.exists():
-        stitching_stats_path.write_text(
-            json.dumps({"write_stitching_stats": False}, indent=2) + "\n"
-        )
+        _write_stats_fallback(stitching_stats_path)
     # Last, so that masks without a sidecar are never complete outputs.
     write_segmentation_sidecar(
         mask_path,
         source_preprocessing,
         bead_mask_veto=None if bead_veto is None else bead_veto.identity,
     )
+    clear_incomplete(cell_marker)
 
     del mask_mmap, points_obj, sdata
     force_release(note=f"after {dataset.name} Cellpose segmentation")
@@ -1140,22 +1236,23 @@ def _finish_cellpose_without_csv(
     bead_veto: Any,
     stage_outputs: Any,
     progress: Any,
+    marker: Path,
 ) -> dict[str, Path]:
     """Finish a Cellpose run that writes no ProSeg transcript CSV (ATERA, AT-7).
 
     The transforms and the stitching statistics are written, then (last, so
-    masks without it are never complete outputs) the segmentation sidecar.
+    masks without it are never complete outputs) the segmentation sidecar, and
+    the incomplete marker is removed.
     """
     _write_transforms_json(transforms_path, x_transform, y_transform)
     if not stitching_stats_path.exists():
-        stitching_stats_path.write_text(
-            json.dumps({"write_stitching_stats": False}, indent=2) + "\n"
-        )
+        _write_stats_fallback(stitching_stats_path)
     write_segmentation_sidecar(
         mask_path,
         source_preprocessing,
         bead_mask_veto=None if bead_veto is None else bead_veto.identity,
     )
+    clear_incomplete(marker)
     force_release(note=f"after {config.dataset.name} Cellpose segmentation")
     progress("done")
     _transcripts, staged_mask, staged_cellprob, staged_stats, staged_transforms = (
@@ -1172,10 +1269,8 @@ def run_cellpose_nuclei_segmentation(
     force_rerun: bool = False,
 ) -> dict[str, Path]:
     """Run an independently reusable DAPI-only Cellpose nuclei segmentation."""
-    _preflight_model_selection(config, check_cell_cache=False)
     dataset = config.dataset
     out_dir = Path(dataset.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     staged_mask_path = out_dir / "cellpose_nuclei_masks_tiled.npy"
     staged_stats_path = out_dir / "cellpose_nuclei_stitching_stats.json"
@@ -1191,6 +1286,22 @@ def run_cellpose_nuclei_segmentation(
     )
     mask_path = persistent_mask_path or staged_mask_path
     stats_path = persistent_stats_path or staged_stats_path
+    # Written before the mask is replaced and removed after its sidecar.
+    nuclei_marker = nuclei_mask_marker_path(mask_path)
+    require_safe_custom_outputs(config)
+    _discard_interrupted_outputs(
+        dataset.name,
+        nuclei_marker,
+        (
+            mask_path,
+            stats_path,
+            model_identity_path(mask_path),
+            segmentation_sidecar_path(mask_path, nuclei=True),
+        ),
+        step="Cellpose nuclei segmentation",
+    )
+    _preflight_model_selection(config, check_cell_cache=False)
+    out_dir.mkdir(parents=True, exist_ok=True)
     progress_path = out_dir / "cellpose_nuclei_progress.json"
     started_at = time.monotonic()
 
@@ -1218,7 +1329,7 @@ def run_cellpose_nuclei_segmentation(
         )
 
     source_preprocessing = _source_image_preprocessing(config)
-    if mask_path.exists() and not force_rerun:
+    if mask_path.exists() and not force_rerun and not nuclei_marker.exists():
         if _labeled_mask_has_foreground(mask_path):
             check_segmentation_sidecar(
                 mask_path,
@@ -1229,9 +1340,7 @@ def run_cellpose_nuclei_segmentation(
             log_status(f"[{dataset.name}] Reusing existing DAPI-only nuclei mask")
             if not stats_path.exists():
                 stats_path.parent.mkdir(parents=True, exist_ok=True)
-                stats_path.write_text(
-                    json.dumps({"write_stitching_stats": False}, indent=2) + "\n"
-                )
+                _write_stats_fallback(stats_path)
             staged_mask, staged_stats = _stage_outputs()
             return {
                 "nuclei_mask_path": staged_mask,
@@ -1266,6 +1375,13 @@ def run_cellpose_nuclei_segmentation(
     sdata, fetch_tile_fn, height, width, matrix, points_obj = _load_dataset_sdata(
         nuclei_config
     )
+
+    def _before_overwrite() -> None:
+        # The marker first, so a kill from here on cannot leave a mask that looks
+        # complete (or legacy); then the record of the mask being replaced.
+        mark_incomplete(nuclei_marker, step="Cellpose nuclei segmentation")
+        remove_segmentation_sidecar(mask_path, nuclei=True)
+
     _progress("cellpose_nuclei_starting")
     mask_path.parent.mkdir(parents=True, exist_ok=True)
     stats_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1281,7 +1397,7 @@ def run_cellpose_nuclei_segmentation(
         memory_config=nuclei_config.memory,
         output_stitching_stats_path=stats_path,
         progress_callback=_progress,
-        before_overwrite=lambda: remove_segmentation_sidecar(mask_path, nuclei=True),
+        before_overwrite=_before_overwrite,
     )
 
     x_transform, y_transform = build_cellpose_affine_to_microns(
@@ -1321,10 +1437,9 @@ def run_cellpose_nuclei_segmentation(
         )
 
     if not stats_path.exists():
-        stats_path.write_text(
-            json.dumps({"write_stitching_stats": False}, indent=2) + "\n"
-        )
+        _write_stats_fallback(stats_path)
     write_segmentation_sidecar(mask_path, source_preprocessing, nuclei=True)
+    clear_incomplete(nuclei_marker)
     del points_obj, sdata
     force_release(note=f"after {dataset.name} DAPI-only nuclei segmentation")
     _progress("done")
@@ -1366,6 +1481,8 @@ def run_proseg_segmentation(
     transforms_path = Path(transforms_path)
     progress_path = out_dir / "proseg_progress.json"
     started_at = time.monotonic()
+    latest_marker = store_marker_path(latest_output)
+    raw_marker = store_marker_path(raw_output)
 
     def _progress(stage: str, **extra: object) -> None:
         _write_progress(
@@ -1408,38 +1525,60 @@ def run_proseg_segmentation(
         ):
             return
         _progress("proseg_hybrid_starting")
+        # The refinement rewrites the store's points, shapes and tables in place;
+        # a kill part-way leaves damaged points, so the marker (set just before
+        # the first change) sends the next run back to ProSeg. The callers clear
+        # it once this returns.
         summary = run_proseg_hybrid_refinement(
             latest_output,
             cellpose_mask_path,
             transforms_path,
             config.proseg_hybrid,
+            before_first_write=lambda: mark_incomplete(
+                latest_marker, step="ProSeg hybrid refinement"
+            ),
         )
         _progress("proseg_hybrid_done", **summary)
+
+    # Discarded before anything reads them: a store whose ProSeg run, conversion
+    # or hybrid refinement was interrupted can look complete to every check
+    # below. The raw store has its own marker, so a complete one still resumes.
+    _discard_interrupted_outputs(dataset.name, raw_marker, (raw_output,), step="ProSeg")
+    _discard_interrupted_outputs(
+        dataset.name,
+        latest_marker,
+        (latest_output,),
+        step="ProSeg latest conversion or hybrid refinement",
+    )
 
     # The ProSeg output is built from the Cellpose masks, so reusing it needs the
     # same image-identity guard as reusing the masks themselves.
     source_preprocessing = _source_image_preprocessing(config)
-    if latest_output.exists() and not force_rerun:
+    if latest_output.exists() and not force_rerun and not latest_marker.exists():
         check_store_segmentation_sidecar(
             latest_output, source_preprocessing, dataset_name=dataset.name
         )
         log_status(f"[{dataset.name}] Reusing existing latest output: {latest_output}")
         _ensure_hybrid()
+        clear_incomplete(latest_marker)
         return {"latest_output": _stage_latest()}
 
-    if raw_output.exists() and not force_rerun:
+    if raw_output.exists() and not force_rerun and not raw_marker.exists():
         check_store_segmentation_sidecar(
             raw_output, source_preprocessing, dataset_name=dataset.name
         )
         latest_output.parent.mkdir(parents=True, exist_ok=True)
+        mark_incomplete(latest_marker, step="ProSeg latest conversion")
         convert_to_latest_zarr(
             raw_output,
             latest_output,
             quality_column_alias=platform_spec(dataset.platform).quality_column_alias,
             platform=dataset.platform,
         )
+        clear_incomplete(latest_marker)
         remove_path(raw_output)
         _ensure_hybrid()
+        clear_incomplete(latest_marker)
         return {"latest_output": _stage_latest()}
 
     transforms = json.loads(transforms_path.read_text())
@@ -1449,6 +1588,8 @@ def run_proseg_segmentation(
         raise ValueError("Cellpose transform metadata must contain 3-value affines.")
 
     _progress("proseg_starting")
+    # Until the raw store is complete (its sidecar is written last).
+    mark_incomplete(raw_marker, step="ProSeg")
     proseg_params = config.proseg.model_dump()
     proseg_params.update(dataset.proseg_overrides)
     if proseg_binary is not None:
@@ -1497,7 +1638,11 @@ def run_proseg_segmentation(
     # Written to the raw output first, so that an interrupted run that is resumed
     # from it keeps the record (the conversion copies it to the latest zarr).
     write_store_segmentation_sidecar(raw_out, source_preprocessing)
+    clear_incomplete(raw_marker)
     latest_output.parent.mkdir(parents=True, exist_ok=True)
+    # From the delete of the old store to its sidecar; the hybrid refinement
+    # sets the marker again for its own in-place writes.
+    mark_incomplete(latest_marker, step="ProSeg latest conversion")
     latest_out = convert_to_latest_zarr(
         raw_out,
         latest_output,
@@ -1505,8 +1650,10 @@ def run_proseg_segmentation(
         platform=dataset.platform,
     )
     write_store_segmentation_sidecar(latest_out, source_preprocessing)
+    clear_incomplete(latest_marker)
     remove_path(raw_out)
     _ensure_hybrid()
+    clear_incomplete(latest_marker)
     staged_out = _stage_latest()
     log_status(f"[{dataset.name}] Wrote latest output: {latest_out}")
     force_release(note=f"after {dataset.name} ProSeg refinement")
@@ -1555,15 +1702,30 @@ def run_segmentation_pipeline(
         if dataset.persistent_nuclei_mask_path
         else staged_nuclei_mask_path
     )
-    if not is_experimental_arm(config):
+    # Outputs an interrupted step left behind are never reused; each step
+    # discards its own below. Nor is the store read here, since part of it may
+    # be missing.
+    interrupted = any(
+        marker.exists()
+        for marker in (
+            cell_mask_marker_path(reusable_mask),
+            nuclei_mask_marker_path(reusable_nuclei_mask),
+            store_marker_path(persistent_latest_output),
+        )
+    )
+    if not is_experimental_arm(config) and not interrupted:
         require_matching_cached_model(reusable_mask, config)
-    hybrid_complete = not config.proseg_hybrid.enabled or has_proseg_hybrid_refinement(
-        persistent_latest_output,
-        config.proseg_hybrid,
+    hybrid_complete = not interrupted and (
+        not config.proseg_hybrid.enabled
+        or has_proseg_hybrid_refinement(
+            persistent_latest_output,
+            config.proseg_hybrid,
+        )
     )
 
     if (
-        persistent_latest_output.exists()
+        not interrupted
+        and persistent_latest_output.exists()
         and reusable_transcripts.exists()
         and reusable_mask.exists()
         and reusable_cellprob.exists()
@@ -1596,12 +1758,19 @@ def run_segmentation_pipeline(
             dataset_name=dataset.name,
         )
         if not hybrid_complete:
+            # In place, as in run_proseg_segmentation: a kill once the store
+            # starts changing must send the next run back to ProSeg.
+            shortcut_marker = store_marker_path(persistent_latest_output)
             run_proseg_hybrid_refinement(
                 persistent_latest_output,
                 reusable_mask,
                 staged_transforms_path,
                 config.proseg_hybrid,
+                before_first_write=lambda: mark_incomplete(
+                    shortcut_marker, step="ProSeg hybrid refinement"
+                ),
             )
+            clear_incomplete(shortcut_marker)
         if persistent_latest_output != staged_latest_output:
             stage_existing_output(persistent_latest_output, staged_latest_output)
         transcripts = reusable_transcripts

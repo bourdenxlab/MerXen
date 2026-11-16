@@ -1464,6 +1464,29 @@ def currentPairTerminalExpectedCount(settings, terminalStage) {
     return 0
 }
 
+// The hidden marker a step leaves beside an output it did not finish writing
+// (merxen.path_utils.incomplete_marker_path), or null. Stores have their own
+// `.<name>.merxen-incomplete`; the Cellpose steps share one per folder.
+def incompleteOutputMarker(java.nio.file.Path p) {
+    def name = p.fileName.toString()
+    def candidates = [p.resolveSibling(".${name}.merxen-incomplete")]
+    if (name.startsWith("cellpose_nuclei")) {
+        candidates << p.resolveSibling(".cellpose_nuclei_masks.merxen-incomplete")
+    } else if (name in [
+        "cellpose_masks_tiled.npy",
+        "cellpose_cellprobs_tiled.npy",
+        "cellpose_stitching_stats.json",
+        "cellpose_model_identity.json",
+        "transcripts_for_proseg.csv",
+        "transcripts_for_proseg.transforms.json",
+    ]) {
+        // The Cellpose cell step's outputs share one marker
+        // (src/merxen/segmentation/output_markers.py).
+        candidates << p.resolveSibling(".cellpose_cell_masks.merxen-incomplete")
+    }
+    return candidates.find { candidate -> candidate.toFile().exists() }
+}
+
 def requireExistingPath(rawPath, label) {
     def p = java.nio.file.Paths.get(rawPath.toString()).toAbsolutePath().normalize()
     if (!p.toFile().exists()) {
@@ -1471,6 +1494,17 @@ def requireExistingPath(rawPath, label) {
             "Missing expected ${label}: ${p}\n" +
             "This path is required because an upstream stage was skipped. " +
             "Either run from an earlier stage or restore the published output."
+        )
+    }
+    // A staged link (segment_out/proseg_base_latest.zarr) has its marker beside
+    // the real output.
+    def marker = [p, p.toRealPath()].unique().findResult { path -> incompleteOutputMarker(path) }
+    if (marker != null) {
+        throw new IllegalArgumentException(
+            "Incomplete ${label}: ${p}\n" +
+            "The step that wrote it was stopped or failed part-way (${marker} is " +
+            "present), so it cannot be used. Run from that stage again; it " +
+            "discards the incomplete output and recomputes it."
         )
     }
     return p
