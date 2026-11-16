@@ -14,6 +14,8 @@ users would notice). A release turns [Unreleased] into the release's section.
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-11-16
+
 ### Security
 
 - **PyTorch in the alignment environment.** The `ALIGN` environment (`envs/environment.alignment.yml`) now installs torch 2.14.1 and torchvision 0.29.2 instead of 2.7.1 and 0.22.1, which fixes the PyTorch advisories GHSA-63cw-57p8-fm3p (code execution from untrusted checkpoint files), GHSA-rrmf-rvhw-rf47, GHSA-qfhq-4f3w-5fph, GHSA-vgrw-7cvw-pwgx and GHSA-887c-mr87-cxwp. The base and HITL GUI environments already used torch 2.14; the optional GASTON environment (`envs/environment.gaston.yml`, `containers/Dockerfile.gaston`) still pins PyTorch 2.0.1 and is not changed here. The alignment lock had not been regenerated since the base dependencies moved to torch 2.14 and cell_type_mapper 1.7.2, so it conflicted with them; it is now resolved for the environment's Python 3.12, leaves out the five git-hosted packages pip cannot install from a lock (pip takes them from the URLs their dependents declare, as in the base environment), and the environment file records the lock's checksum, so Nextflow builds a fresh `ALIGN` env on the next run with `--enable_alignment` ([development](docs/development.md#dependency-management)). The registration stack (NumPy, OpenCV, Kornia, SimpleITK, VALIS 1.2.0) keeps its versions. Because the env file and the `ALIGN` script changed, a resumed run with alignment re-runs `ALIGN` and the tasks that use its outputs (`ALIGN_QC`, `MATERIALIZE_ALIGNMENT` and, with map-first annotation, `ANNOTATE_PANEL` and its dependents) once, and VALIS's DISK/LightGlue feature matching now runs on torch 2.14, so registration transforms can differ slightly from runs on the old env. `ALIGN` also no longer exports `PYTORCH_CUDA_ALLOC_CONF=null` when `alignment_pytorch_cuda_alloc_conf` is unset (every profile but dwight): torch 2.14 aborts at import on that value.
@@ -263,6 +265,7 @@ was set, mostly the reference-based cell-type annotation.
 - The protocol and the user's decisions are in `docs/acceptance/annotation-v1-preregistration.md` §18–§20.
 - The mouse acceptance (gate M) is scored on MS1 and MS2 under the protocol of pre-registration §25, with the user's review decisions in §25.4. The re-score with the section-time exception gives 67 PASS and 7 FAIL (excepted), with no open problem; the user's review of the two original_seg reports (U9) is pending.
 
-[Unreleased]: https://github.com/bourdenxlab/MerXen/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/bourdenxlab/MerXen/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/bourdenxlab/MerXen/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/bourdenxlab/MerXen/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/bourdenxlab/MerXen/releases/tag/v1.0.0
