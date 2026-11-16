@@ -229,7 +229,9 @@ def test_gaston_only_stage_rows_normalize_segmentations_and_pass_preflight(
         capture_output=True,
         text=True,
         check=False,
-        timeout=60,
+        # The launch takes 10-40 s, but a shard that also renders the platform
+        # config goldens in Nextflow can push it past 60 s on a CI runner.
+        timeout=300,
     )
     output = result.stdout + result.stderr
     assert result.returncode != 0, output

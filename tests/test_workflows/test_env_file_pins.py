@@ -20,6 +20,11 @@ Changes made so far:
   resolved pynndescent 0.7, which fails to compile under numba 0.55 on inputs
   above 4,096 cells. The pin changes the ``MENDER_COMPUTE`` task hash of every
   platform once (docs/plans/atera-support-plan.md, AT-6).
+- v1.0.2 security fix: ``environment.alignment.yml`` gains the
+  ``# requirements.lock sha256:`` header of its regenerated lock (torch 2.14.1
+  for the PyTorch advisories, previously 2.7.1). The header makes Nextflow build
+  a fresh env whenever the lock changes; this first change recomputes the
+  ``ALIGN`` task of every pair, and the tasks using its outputs, once.
 """
 
 from __future__ import annotations

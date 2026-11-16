@@ -385,11 +385,26 @@ minor or patch change and the release steps.
   merging a lockfile change, snapshot the published outputs you need to keep
   and plan a full rerun.
 
-  When the dedicated registration stack changes, regenerate its separate lock:
+  When the dedicated registration stack or the base dependencies change,
+  regenerate its separate lock and the checksum header of
+  `envs/environment.alignment.yml`, so that Nextflow builds a fresh `ALIGN` env.
+  The env installs the lock with pip, which rejects a git package pinned to a
+  commit when the package that needs it asks for another URL (cell_type_mapper
+  `@v1.7.2`, mmc_gene_mapper `@v0.2.1`, bkbit by tag, and unpinned
+  abc_atlas_access and schemasheets). The lock therefore leaves those five out, and pip installs them
+  from the URLs their dependents declare, as in the base env; every other
+  package stays pinned:
 
   ```bash
   uv pip compile pyproject.toml --extra dev --group alignment-runtime \
-    --python-platform linux -o requirements/requirements.alignment.lock
+    --python-version 3.12 --python-platform linux \
+    --no-emit-package cell-type-mapper --no-emit-package mmc-gene-mapper \
+    --no-emit-package abc-atlas-access --no-emit-package bkbit \
+    --no-emit-package schemasheets \
+    -o requirements/requirements.alignment.lock
+  python scripts/update_env_lock_hash.py \
+    --lock requirements/requirements.alignment.lock \
+    --env envs/environment.alignment.yml
   ```
 
 - **The isolated CZI runtime** (`envs/environment.czi.yml`, lock

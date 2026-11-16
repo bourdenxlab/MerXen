@@ -198,7 +198,11 @@ process ALIGN {
 }
 JSON
 
-    export PYTORCH_CUDA_ALLOC_CONF="${params.alignment_pytorch_cuda_alloc_conf}"
+    # Export only a set value: torch 2.14 aborts at import on the literal "null"
+    # that an unset param renders to.
+    if [[ -n "${params.alignment_pytorch_cuda_alloc_conf ?: ''}" ]]; then
+        export PYTORCH_CUDA_ALLOC_CONF="${params.alignment_pytorch_cuda_alloc_conf ?: ''}"
+    fi
     merxen align --config align_config.json
     """
 }
