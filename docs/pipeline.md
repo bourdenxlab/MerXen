@@ -231,7 +231,10 @@ Two independent reuse paths and one Nextflow cache:
 - **Interrupted writes.** The build, Cellpose cell, Cellpose nuclei and ProSeg
   steps mark their persistent outputs with a hidden `.<name>.merxen-incomplete`
   file while they write them, and discard outputs that still carry it, so a
-  task stopped part-way is recomputed rather than reused. See
+  task stopped part-way is recomputed rather than reused. ENRICH has its own
+  marker beside the latest store, a replaced store element is rolled back by
+  the next writer if its replacement was cut off, and a ProSeg store built from
+  older Cellpose outputs or other ProSeg settings is rebuilt. See
   [Resuming a run](running-the-pipeline.md#resuming-a-run).
 - **Nextflow work-dir caching.** Resume a run with `nextflow run ... -resume`
   and completed processes will be skipped. `publishDir` modes are set so that

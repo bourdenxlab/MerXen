@@ -273,7 +273,9 @@ def build_atera_cellpose_layer(
 ) -> dict[str, Any]:
     """Write (or keep) the Cellpose layer of an ATERA ``cellpose_proseg`` store.
 
-    The caller holds the store's write lock.
+    The caller holds the store's write lock. The record is removed before the
+    first write and written after the last, so a build cut off part-way is
+    rebuilt, not skipped.
 
     Args:
         latest: The latest store (stitched by ATERA_PROSEG_STITCH).
@@ -302,7 +304,11 @@ def build_atera_cellpose_layer(
     from spatialdata.models import Labels2DModel, ShapesModel, TableModel
     from spatialdata.transformations import Identity, Scale
 
-    from merxen.io.spatialdata_io import delete_element, write_or_replace_element
+    from merxen.io.spatialdata_io import (
+        delete_element,
+        remove_root_attr,
+        write_or_replace_element,
+    )
     from merxen.segmentation.atera_proseg.plan import mask_shape
 
     branch = "stock_cellpose" if stock else CELLPOSE_BRANCH
@@ -486,6 +492,11 @@ def build_atera_cellpose_layer(
         transformations={"global": Identity()},
     )
 
+    # The store changes from here. The record goes first: a build cut off
+    # part-way (or refused by the count check below) must not be taken for a
+    # build of this mask, nor, after a killed build from another mask, of the
+    # mask it last recorded.
+    remove_root_attr(latest, layer_attr)
     sdata = sd.read_zarr(latest, selection=("shapes", "tables", "labels"))
     # Tables computed from earlier Cellpose cells (image quantification,
     # clustering) would be reused against the new polygons: they go.

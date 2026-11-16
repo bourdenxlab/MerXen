@@ -554,9 +554,12 @@ def check_segmentation_sidecar(
 
 
 def write_store_segmentation_sidecar(
-    store_path: Path | str, recorded: Mapping[str, Any] | None
+    store_path: Path | str,
+    recorded: Mapping[str, Any] | None,
+    *,
+    proseg_inputs: Mapping[str, Any] | None = None,
 ) -> Path:
-    """Record in a ProSeg store which image its prior masks came from.
+    """Record in a ProSeg store which image and inputs its cells came from.
 
     The file sits in the store root, so it follows the store when it is staged
     (symlink), copied or rewritten by the SpatialData contract upgrade.
@@ -565,19 +568,40 @@ def write_store_segmentation_sidecar(
         store_path: The ProSeg output zarr (raw or latest) the file describes.
         recorded: ``merxen_image_preprocessing`` of the source SpatialData, or
             ``None`` for a legacy store.
+        proseg_inputs: Identity of the transcript CSV, the Cellpose mask and
+            probabilities and the ProSeg settings the store was built from
+            (``merxen.segmentation.pipeline.proseg_input_identity``); left out
+            when ``None``.
 
     Returns:
         Path of the written sidecar.
     """
     path = Path(store_path) / STORE_SIDECAR_NAME
-    payload = {
+    payload: dict[str, Any] = {
         "schema": SEGMENTATION_SIDECAR_SCHEMA,
         "bead_removal": segmentation_identity(recorded),
     }
+    if proseg_inputs is not None:
+        payload["proseg_inputs"] = _json_safe(dict(proseg_inputs))
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     temporary.replace(path)
     return path
+
+
+def read_store_proseg_inputs(store_path: Path | str) -> dict[str, Any] | None:
+    """Return the ProSeg inputs a store's sidecar records, or ``None``.
+
+    ``None`` for a store without the sidecar, an unreadable one, or one written
+    before the inputs were recorded.
+    """
+    sidecar = Path(store_path) / STORE_SIDECAR_NAME
+    try:
+        payload = json.loads(sidecar.read_text())
+    except (OSError, ValueError):
+        return None
+    recorded = payload.get("proseg_inputs") if isinstance(payload, dict) else None
+    return dict(recorded) if isinstance(recorded, dict) else None
 
 
 def check_store_segmentation_sidecar(

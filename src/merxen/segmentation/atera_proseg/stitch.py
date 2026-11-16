@@ -43,7 +43,9 @@ background. Control rows are attributed to cells geometrically: their pixel's
 value in ``proseg_cell_labels``.
 
 The stitch records a fingerprint of the plan and the tile manifests; a store
-that already carries it (and every element) is left as it is. A new stitch
+that already carries it (and every element) is left as it is. The record is
+removed before the first write and written after the last, so a stitch cut
+off part-way is never reused. A new stitch
 deletes the tables derived from the previous ProSeg cells (every table of
 region ``MOSAIK_proseg`` other than ``table_MOSAIK_proseg``: the image
 quantification, clustering), so no later stage reuses them.
@@ -1263,7 +1265,11 @@ def _stitch_into(
     from spatialdata.models import Labels2DModel, ShapesModel, TableModel
     from spatialdata.transformations import Identity, Scale
 
-    from merxen.io.spatialdata_io import delete_element, write_or_replace_element
+    from merxen.io.spatialdata_io import (
+        delete_element,
+        remove_root_attr,
+        write_or_replace_element,
+    )
 
     plan = tiles.plan
     layer = tiles.layer
@@ -1347,6 +1353,10 @@ def _stitch_into(
             layer.label_key,
         )
 
+    # The store changes from here. Its record goes first: a stitch cut off
+    # part-way must not be taken for a stitch of these tiles, nor (after a
+    # killed stitch of other tiles) for one of the tiles it last recorded.
+    remove_root_attr(latest, PROVENANCE_ATTR)
     # Points: rewrite every file with the resolved assignment.
     directory = points_parquet_dir(latest, POINTS_KEY)
     _remove_leftovers(directory)

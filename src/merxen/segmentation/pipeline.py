@@ -22,6 +22,7 @@ from merxen.io.bead_removal.provenance import (
     check_segmentation_sidecar,
     check_store_segmentation_sidecar,
     read_image_preprocessing_attr,
+    read_store_proseg_inputs,
     remove_segmentation_sidecar,
     segmentation_sidecar_path,
     write_segmentation_sidecar,
@@ -37,6 +38,7 @@ from merxen.io.image_source import (
 )
 from merxen.io.spatialdata_io import (
     convert_to_latest_zarr,
+    spatialdata_write_lock,
     upgrade_spatialdata_contract,
 )
 from merxen.io.spatialdata_schema import choose_primary_points_key
@@ -1450,6 +1452,135 @@ def run_cellpose_nuclei_segmentation(
     }
 
 
+PROSEG_INPUTS_SCHEMA = 1
+_PROSEG_SETTINGS_WITHOUT_EFFECT = frozenset({"binary_path", "num_threads"})
+"""ProSeg settings left out of the input identity: they do not change the cells."""
+
+
+def _proseg_params(
+    config: SegmentationConfig, proseg_binary: str | Path | None = None
+) -> dict[str, Any]:
+    """Return the ProSeg settings of a dataset (config, overrides, binary)."""
+    params = config.proseg.model_dump()
+    params.update(config.dataset.proseg_overrides)
+    if proseg_binary is not None:
+        params["binary_path"] = Path(proseg_binary)
+    return params
+
+
+def _file_identity(path: Path) -> list[int] | None:
+    """``[size, mtime_ns]`` of a file, followed through symlinks.
+
+    Cheap, and kept by Nextflow's staging (a symlink, or a copy that keeps the
+    timestamps); a rebuilt Cellpose output gets a new one. ``None`` for a
+    missing file (the CSV is kept only for debugging and may be deleted), which
+    is never taken for a changed input.
+    """
+    try:
+        stat = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return [int(stat.st_size), int(stat.st_mtime_ns)]
+
+
+def proseg_input_identity(
+    *,
+    transcripts_csv: Path,
+    cellpose_mask_path: Path,
+    cellpose_cellprob_path: Path,
+    proseg_params: dict[str, Any],
+) -> dict[str, Any]:
+    """Identify the inputs a ProSeg store is built from.
+
+    Recorded in the store sidecar, so that a store is not reused once the
+    Cellpose step has rebuilt its CSV, mask or probabilities, or a ProSeg
+    setting that changes the cells is different.
+
+    Args:
+        transcripts_csv: The seeded transcript CSV.
+        cellpose_mask_path: The Cellpose cell mask.
+        cellpose_cellprob_path: The Cellpose cell probabilities.
+        proseg_params: ProSeg settings (:func:`_proseg_params`).
+
+    Returns:
+        ``{"schema", "files": {name: [size, mtime_ns] | None}, "proseg_params"}``.
+    """
+    settings = {
+        str(key): json.loads(json.dumps(value, default=str))
+        for key, value in sorted(proseg_params.items())
+        if key not in _PROSEG_SETTINGS_WITHOUT_EFFECT
+    }
+    return {
+        "schema": PROSEG_INPUTS_SCHEMA,
+        "files": {
+            "transcripts_csv": _file_identity(transcripts_csv),
+            "cellpose_mask": _file_identity(cellpose_mask_path),
+            "cellpose_cellprob": _file_identity(cellpose_cellprob_path),
+        },
+        "proseg_params": settings,
+    }
+
+
+def changed_proseg_inputs(
+    recorded: dict[str, Any] | None, current: dict[str, Any]
+) -> list[str]:
+    """Name the inputs that differ from those a store records.
+
+    A store without a record (built before inputs were recorded) is reused as
+    before, so it has no changed input. Only settings both records hold are
+    compared, so a setting a later MerXen version adds does not discard every
+    store.
+
+    Args:
+        recorded: :func:`merxen.io.bead_removal.provenance.read_store_proseg_inputs`.
+        current: :func:`proseg_input_identity` of this run.
+
+    Returns:
+        The changed inputs, empty when the store may be reused.
+    """
+    if not recorded:
+        return []
+    recorded_files = dict(recorded.get("files") or {})
+    changed = [
+        name
+        for name, identity in current["files"].items()
+        if identity is not None
+        and recorded_files.get(name) is not None
+        and recorded_files[name] != identity
+    ]
+    recorded_settings = dict(recorded.get("proseg_params") or {})
+    changed.extend(
+        f"ProSeg setting {key}"
+        for key, value in current["proseg_params"].items()
+        if key in recorded_settings and recorded_settings[key] != value
+    )
+    return changed
+
+
+def _discard_store_of_other_inputs(
+    dataset_name: str, store: Path, current: dict[str, Any]
+) -> bool:
+    """Delete a ProSeg store built from inputs other than this run's.
+
+    Returns:
+        True when the store was deleted.
+    """
+    changed = changed_proseg_inputs(read_store_proseg_inputs(store), current)
+    if not changed:
+        return False
+    message = (
+        f"[{dataset_name}] {store.name} was built from other ProSeg inputs "
+        f"({', '.join(changed)} changed since); discarding it and running "
+        "ProSeg again"
+    )
+    logger.warning(message)
+    log_status(message)
+    remove_path(store)
+    for leftover in leftover_temporaries(store):
+        remove_path(leftover)
+    return True
+
+
 def run_proseg_segmentation(
     config: SegmentationConfig,
     *,
@@ -1483,6 +1614,13 @@ def run_proseg_segmentation(
     started_at = time.monotonic()
     latest_marker = store_marker_path(latest_output)
     raw_marker = store_marker_path(raw_output)
+    proseg_params = _proseg_params(config, proseg_binary)
+    proseg_inputs = proseg_input_identity(
+        transcripts_csv=transcripts_csv,
+        cellpose_mask_path=cellpose_mask_path,
+        cellpose_cellprob_path=cellpose_cellprob_path,
+        proseg_params=proseg_params,
+    )
 
     def _progress(stage: str, **extra: object) -> None:
         _write_progress(
@@ -1544,12 +1682,21 @@ def run_proseg_segmentation(
     # or hybrid refinement was interrupted can look complete to every check
     # below. The raw store has its own marker, so a complete one still resumes.
     _discard_interrupted_outputs(dataset.name, raw_marker, (raw_output,), step="ProSeg")
-    _discard_interrupted_outputs(
-        dataset.name,
-        latest_marker,
-        (latest_output,),
-        step="ProSeg latest conversion or hybrid refinement",
-    )
+    # The latest store is shared with ENRICH and the later stages, which write
+    # into it under its lock; it is deleted and rebuilt under the same lock.
+    with spatialdata_write_lock(latest_output):
+        _discard_interrupted_outputs(
+            dataset.name,
+            latest_marker,
+            (latest_output,),
+            step="ProSeg latest conversion or hybrid refinement",
+        )
+        # A store built before the Cellpose step rebuilt its outputs (or with
+        # other ProSeg settings) holds cells of the old prior.
+        if not force_rerun and not latest_marker.exists():
+            _discard_store_of_other_inputs(dataset.name, latest_output, proseg_inputs)
+    if not force_rerun and not raw_marker.exists():
+        _discard_store_of_other_inputs(dataset.name, raw_output, proseg_inputs)
 
     # The ProSeg output is built from the Cellpose masks, so reusing it needs the
     # same image-identity guard as reusing the masks themselves.
@@ -1568,14 +1715,17 @@ def run_proseg_segmentation(
             raw_output, source_preprocessing, dataset_name=dataset.name
         )
         latest_output.parent.mkdir(parents=True, exist_ok=True)
-        mark_incomplete(latest_marker, step="ProSeg latest conversion")
-        convert_to_latest_zarr(
-            raw_output,
-            latest_output,
-            quality_column_alias=platform_spec(dataset.platform).quality_column_alias,
-            platform=dataset.platform,
-        )
-        clear_incomplete(latest_marker)
+        with spatialdata_write_lock(latest_output):
+            mark_incomplete(latest_marker, step="ProSeg latest conversion")
+            convert_to_latest_zarr(
+                raw_output,
+                latest_output,
+                quality_column_alias=platform_spec(
+                    dataset.platform
+                ).quality_column_alias,
+                platform=dataset.platform,
+            )
+            clear_incomplete(latest_marker)
         remove_path(raw_output)
         _ensure_hybrid()
         clear_incomplete(latest_marker)
@@ -1590,10 +1740,6 @@ def run_proseg_segmentation(
     _progress("proseg_starting")
     # Until the raw store is complete (its sidecar is written last).
     mark_incomplete(raw_marker, step="ProSeg")
-    proseg_params = config.proseg.model_dump()
-    proseg_params.update(dataset.proseg_overrides)
-    if proseg_binary is not None:
-        proseg_params["binary_path"] = Path(proseg_binary)
     transcript_columns = set(pd.read_csv(transcripts_csv, nrows=0).columns)
 
     raw_out = run_proseg_refinement(
@@ -1637,20 +1783,25 @@ def run_proseg_segmentation(
 
     # Written to the raw output first, so that an interrupted run that is resumed
     # from it keeps the record (the conversion copies it to the latest zarr).
-    write_store_segmentation_sidecar(raw_out, source_preprocessing)
+    write_store_segmentation_sidecar(
+        raw_out, source_preprocessing, proseg_inputs=proseg_inputs
+    )
     clear_incomplete(raw_marker)
     latest_output.parent.mkdir(parents=True, exist_ok=True)
     # From the delete of the old store to its sidecar; the hybrid refinement
     # sets the marker again for its own in-place writes.
-    mark_incomplete(latest_marker, step="ProSeg latest conversion")
-    latest_out = convert_to_latest_zarr(
-        raw_out,
-        latest_output,
-        quality_column_alias=platform_spec(dataset.platform).quality_column_alias,
-        platform=dataset.platform,
-    )
-    write_store_segmentation_sidecar(latest_out, source_preprocessing)
-    clear_incomplete(latest_marker)
+    with spatialdata_write_lock(latest_output):
+        mark_incomplete(latest_marker, step="ProSeg latest conversion")
+        latest_out = convert_to_latest_zarr(
+            raw_out,
+            latest_output,
+            quality_column_alias=platform_spec(dataset.platform).quality_column_alias,
+            platform=dataset.platform,
+        )
+        write_store_segmentation_sidecar(
+            latest_out, source_preprocessing, proseg_inputs=proseg_inputs
+        )
+        clear_incomplete(latest_marker)
     remove_path(raw_out)
     _ensure_hybrid()
     clear_incomplete(latest_marker)
@@ -1723,7 +1874,7 @@ def run_segmentation_pipeline(
         )
     )
 
-    if (
+    shortcut_outputs_exist = (
         not interrupted
         and persistent_latest_output.exists()
         and reusable_transcripts.exists()
@@ -1732,7 +1883,21 @@ def run_segmentation_pipeline(
         and reusable_nuclei_mask.exists()
         and (hybrid_complete or staged_transforms_path.exists())
         and not force_rerun
-    ):
+    )
+    # A store built from older Cellpose outputs than these goes back through
+    # run_proseg_segmentation, which discards it.
+    inputs_changed = shortcut_outputs_exist and bool(
+        changed_proseg_inputs(
+            read_store_proseg_inputs(persistent_latest_output),
+            proseg_input_identity(
+                transcripts_csv=reusable_transcripts,
+                cellpose_mask_path=reusable_mask,
+                cellpose_cellprob_path=reusable_cellprob,
+                proseg_params=_proseg_params(config),
+            ),
+        )
+    )
+    if shortcut_outputs_exist and not inputs_changed:
         # This shortcut reuses both masks without running either Cellpose
         # step, so it needs the same image-identity guard as they have.
         source_preprocessing = _source_image_preprocessing(config)

@@ -592,3 +592,83 @@ def test_two_tiles_owning_one_label_are_refused(
     )
     with pytest.raises(AteraProsegError, match="Two tiles own the same prior label"):
         stitch(stitch_config(built.latest, built.plan_path, tile_dirs, tmp_path / "o"))
+
+
+class Killed(BaseException):
+    """Stands in for SIGKILL: nothing below the raise runs, no handler cleans up."""
+
+
+def _kill_element_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from merxen.io import spatialdata_io
+
+    def _killed(*args: Any, **kwargs: Any) -> bool:
+        raise Killed
+
+    monkeypatch.setattr(spatialdata_io, "write_or_replace_element", _killed)
+
+
+def test_a_stitch_killed_after_the_points_is_not_reused_for_the_earlier_tiles(
+    identity: Built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tiles A, then B killed part-way, then A again: the store holds B's points
+    and A's elements, so A's recorded fingerprint must not survive B's start."""
+    built = _copy(identity, tmp_path)
+    tile_dirs = _copy_tiles(built, tmp_path)
+    first = stitch(
+        stitch_config(built.latest, built.plan_path, tile_dirs, tmp_path / "out1")
+    )
+    manifest = tile_dirs[0] / "tile_manifest.json"
+    tiles_a = manifest.read_text()
+
+    def reweigh(manifest: dict[str, Any]) -> None:
+        manifest["prior_weight"]["requested_effective"] = 100.0
+
+    _edit_manifest(tile_dirs[0], reweigh)
+    with monkeypatch.context() as patch:
+        _kill_element_writes(patch)
+        with pytest.raises(Killed):
+            stitch(
+                stitch_config(
+                    built.latest, built.plan_path, tile_dirs, tmp_path / "out2"
+                )
+            )
+    assert "merxen_atera_proseg" not in sd.read_zarr(built.latest).attrs
+    manifest.write_text(tiles_a)
+
+    again = stitch(
+        stitch_config(built.latest, built.plan_path, tile_dirs, tmp_path / "out3")
+    )
+
+    assert again["skipped"] is False
+    assert again["fingerprint"] == first["fingerprint"]
+    assert (
+        sd.read_zarr(built.latest).attrs["merxen_atera_proseg"]["fingerprint"]
+        == first["fingerprint"]
+    )
+
+
+def test_a_killed_forced_stitch_is_stitched_again(
+    identity: Built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _copy(identity, tmp_path)
+    stitch(
+        stitch_config(built.latest, built.plan_path, built.tile_dirs, tmp_path / "a")
+    )
+    with monkeypatch.context() as patch:
+        _kill_element_writes(patch)
+        with pytest.raises(Killed):
+            stitch(
+                stitch_config(
+                    built.latest,
+                    built.plan_path,
+                    built.tile_dirs,
+                    tmp_path / "b",
+                    force=True,
+                )
+            )
+
+    again = stitch(
+        stitch_config(built.latest, built.plan_path, built.tile_dirs, tmp_path / "c")
+    )
+
+    assert again["skipped"] is False

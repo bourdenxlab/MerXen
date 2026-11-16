@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import fcntl
+import json
 import logging
 import os
 import re
@@ -50,7 +51,7 @@ from merxen.io.spatialdata_schema import (
 )
 from merxen.io.transcript_io import first_existing_col
 from merxen.memory import force_release, log_status
-from merxen.path_utils import remove_path
+from merxen.path_utils import remove_path, write_text_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -139,10 +140,37 @@ def spatialdata_write_lock(zarr_path: Path | str) -> Iterator[Path]:
         fcntl.flock(handle, fcntl.LOCK_EX)
         held.add(lock_path)
         try:
+            # No other locked writer is running, so any element replacement left
+            # half done was cut off; roll it back before the caller reads.
+            recover_interrupted_element_writes(Path(zarr_path).resolve())
             yield lock_path
         finally:
             held.discard(lock_path)
             fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def remove_root_attr(zarr_path: Path | str, key: str) -> bool:
+    """Remove one root attribute of an existing store, keeping all others.
+
+    A step that records a fingerprint of what it wrote in a root attribute
+    removes it before its first write, so a run cut off part-way leaves no
+    record that a later run with the same inputs would take for done. The
+    caller holds the store's write lock.
+
+    Args:
+        zarr_path: An existing Zarr group (for example a SpatialData store).
+        key: Root attribute name.
+
+    Returns:
+        True when the attribute was there.
+    """
+    # Default use_consolidated: passing False would drop the root
+    # consolidated_metadata on write.
+    group = zarr.open_group(str(zarr_path), mode="a")
+    if key not in group.attrs:
+        return False
+    del group.attrs[key]
+    return True
 
 
 def write_spatialdata_zarr(
@@ -172,7 +200,20 @@ def write_or_replace_element(
     replacement. SpatialData's own ``write_element(..., overwrite=True)`` keeps
     that policy localized to the element writer and avoids the data-loss window
     from an explicit delete-then-write sequence.
+
+    A replacement of a stored element moves the old one aside as a hidden
+    ``.<key>.merxen-backup-*`` (named in a ``.<key>.merxen-replacing.json``
+    journal) until the new one is written. A writer killed in between leaves
+    both, and the next write of the element (or the next
+    :func:`spatialdata_write_lock` on the store) puts the old element back
+    (:func:`recover_interrupted_element_writes`).
     """
+    store_path = getattr(sdata_obj, "path", None)
+    normalized_type = _ELEMENT_TYPE_ALIASES.get(str(element_type).lower())
+    if store_path is not None and normalized_type is not None:
+        recover_interrupted_element_writes(
+            Path(store_path), element_type=normalized_type, element_key=str(key)
+        )
     container = _get_element_container(sdata_obj, element_type)
     element_key = str(key)
     exists = element_key in container
@@ -241,22 +282,190 @@ def _write_element_with_recoverable_backup(
     if not element_path.exists():
         return False
     backup_path = element_path.parent / (
-        f".{element_key}.merxen-backup-{uuid.uuid4().hex}"
+        f".{element_key}{_ELEMENT_BACKUP_INFIX}{uuid.uuid4().hex}"
+    )
+    # Written before the old element moves: only a replacement with a journal
+    # is rolled back, so a backup an older MerXen left (possibly half deleted)
+    # is never restored over a complete element.
+    journal = _replace_journal_path(element_path)
+    write_text_atomic(
+        journal,
+        json.dumps({"backup": backup_path.name, "pid": os.getpid()}) + "\n",
     )
     os.replace(element_path, backup_path)
     try:
         write_element(element_key, overwrite=False)
     except Exception:
-        if element_path.exists() or element_path.is_symlink():
-            remove_path(element_path)
+        _discard_element_path(element_path)
         os.replace(backup_path, element_path)
+        journal.unlink(missing_ok=True)
         _reconsolidate_metadata(sdata_obj, element_key, raise_errors=False)
         raise
-    remove_path(backup_path)
+    # The backup leaves its name (one rename) before the journal goes, and is
+    # deleted after: a kill at any point leaves either the journal and the
+    # complete backup, or a discard that recovery deletes.
+    discard = _discard_name(backup_path)
+    os.replace(backup_path, discard)
+    journal.unlink()
+    remove_path(discard)
     # write_element consolidated the root metadata while the hidden backup group still
     # existed; without this the root zarr.json keeps entries for the deleted backup.
     _reconsolidate_metadata(sdata_obj, element_key, raise_errors=True)
     return True
+
+
+_ELEMENT_BACKUP_INFIX = ".merxen-backup-"
+_ELEMENT_DISCARD_INFIX = ".merxen-discard-"
+_REPLACE_JOURNAL_SUFFIX = ".merxen-replacing.json"
+_ELEMENT_TYPE_DIRS = ("images", "labels", "points", "shapes", "tables")
+
+
+def _replace_journal_path(element_path: Path) -> Path:
+    """``<type>/.<key>.merxen-replacing.json``: names the backup in progress."""
+    return element_path.with_name(f".{element_path.name}{_REPLACE_JOURNAL_SUFFIX}")
+
+
+def _discard_name(path: Path) -> Path:
+    return path.with_name(f".{path.name}{_ELEMENT_DISCARD_INFIX}{uuid.uuid4().hex}")
+
+
+def _discard_element_path(path: Path) -> None:
+    """Delete an element folder in a way a kill cannot leave half done.
+
+    The folder is renamed (one atomic step) to a hidden
+    ``.<name>.merxen-discard-*`` sibling and then deleted; a deletion cut off
+    part-way leaves only the discard, which recovery deletes.
+    """
+    if not path.exists() and not path.is_symlink():
+        return
+    discard = _discard_name(path)
+    os.replace(path, discard)
+    remove_path(discard)
+
+
+def _discard_owner(name: str) -> str | None:
+    """Element key of a ``.<name>.merxen-discard-*`` folder, else ``None``.
+
+    ``<name>`` is the element itself or its backup
+    (``.<key>.merxen-backup-*``).
+    """
+    if not name.startswith("."):
+        return None
+    position = name.rfind(_ELEMENT_DISCARD_INFIX)
+    if position <= 1:
+        return None
+    inner = name[1:position]
+    if inner.startswith(".") and _ELEMENT_BACKUP_INFIX in inner:
+        return inner[1 : inner.rfind(_ELEMENT_BACKUP_INFIX)]
+    return inner
+
+
+def _restore_from_journal(type_dir: Path, key: str, journal: Path) -> bool:
+    """Put back the backup a journal names; return whether one was there."""
+    try:
+        backup_name = json.loads(journal.read_text())["backup"]
+    except (OSError, ValueError, KeyError, TypeError):
+        backup_name = None
+    is_own_backup = (
+        isinstance(backup_name, str)
+        and Path(backup_name).name == backup_name
+        and backup_name.startswith(f".{key}{_ELEMENT_BACKUP_INFIX}")
+    )
+    if not is_own_backup:
+        raise RuntimeError(
+            f"{journal} does not name a backup of {key}; check {type_dir / key} "
+            "and delete the journal before running again"
+        )
+    backup = type_dir / str(backup_name)
+    restored = backup.exists()
+    if restored:
+        _discard_element_path(type_dir / key)
+        os.replace(backup, type_dir / key)
+    journal.unlink()
+    return restored
+
+
+def recover_interrupted_element_writes(
+    zarr_path: Path | str,
+    *,
+    element_type: str | None = None,
+    element_key: str | None = None,
+) -> list[str]:
+    """Roll back element replacements that a killed writer left half done.
+
+    :func:`write_or_replace_element` replaces a stored element in steps: it
+    writes a journal (``<type>/.<key>.merxen-replacing.json``) naming the
+    backup, moves the element aside as that backup
+    (``<type>/.<key>.merxen-backup-*``), writes the new element, and then
+    removes the backup and the journal. A journal still there means the writer
+    stopped part-way, so the element beside it may be missing, partly written,
+    or complete but never confirmed. Its backup is always put back: the old
+    element is complete, and the step that was replacing it sees the old state
+    and writes again. Leftover ``.merxen-discard-*`` folders (a deletion cut
+    off part-way) are deleted. Backups without a journal (left by MerXen
+    versions before the journal) are not touched.
+
+    Call it with the store's write lock held (:func:`spatialdata_write_lock`
+    does) or for the element about to be written, so that no running writer's
+    backup is taken for a leftover.
+
+    Args:
+        zarr_path: The SpatialData store.
+        element_type: Only this element type (default: all).
+        element_key: Only this element (default: all).
+
+    Returns:
+        ``"<type>/<key>"`` of each element put back.
+
+    Raises:
+        RuntimeError: If a journal does not name a backup of its element.
+    """
+    store = Path(zarr_path)
+    if element_type is not None:
+        types: tuple[str, ...] = (_ELEMENT_TYPE_ALIASES[element_type.lower()],)
+    else:
+        types = _ELEMENT_TYPE_DIRS
+    restored: list[str] = []
+    for type_name in types:
+        type_dir = store / type_name
+        if not type_dir.is_dir():
+            continue
+        journals: list[tuple[str, Path]] = []
+        for entry in sorted(type_dir.iterdir()):
+            name = entry.name
+            owner = _discard_owner(name)
+            if owner is not None:
+                if element_key is None or owner == element_key:
+                    remove_path(entry)
+                continue
+            if name.startswith(".") and f"{_REPLACE_JOURNAL_SUFFIX}.tmp-" in name:
+                entry.unlink(missing_ok=True)  # a journal write cut off
+                continue
+            if name.startswith(".") and name.endswith(_REPLACE_JOURNAL_SUFFIX):
+                key = name[1 : -len(_REPLACE_JOURNAL_SUFFIX)]
+                if element_key is None or key == element_key:
+                    journals.append((key, entry))
+        for key, journal in journals:
+            if _restore_from_journal(type_dir, key, journal):
+                restored.append(f"{type_name}/{key}")
+    if restored:
+        message = (
+            f"A writer of {store.name} was interrupted while replacing "
+            f"{', '.join(restored)}; restored the previous version"
+        )
+        logger.warning(message)
+        log_status(message)
+        _rewrite_consolidated_metadata_at(store)
+    return restored
+
+
+def _rewrite_consolidated_metadata_at(store: Path) -> None:
+    """Refresh a store's consolidated metadata, if it keeps any, from disk."""
+    from spatialdata._io.io_zarr import _write_consolidated_metadata
+
+    group = zarr.open_group(str(store), mode="r")
+    if getattr(group.metadata, "consolidated_metadata", None):
+        _write_consolidated_metadata(store)
 
 
 def _reconsolidate_metadata(

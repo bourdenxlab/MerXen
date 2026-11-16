@@ -257,6 +257,32 @@ may already have been rewritten. A run that starts at a later stage
 it. Outputs left incomplete by a MerXen version without markers are not
 recognised: delete them by hand before resuming.
 
+ProSeg deletes and rebuilds `latest_spatialdata.zarr` under the store's write
+lock, the one ENRICH and the later stages hold while they write into it, so it
+never deletes the store under one of them. Its store records the transcript
+CSV, the Cellpose mask and probabilities (their size and modification time)
+and the ProSeg settings that change the cells. A resumed ProSeg task whose
+Cellpose step was re-run since, or whose settings changed, rebuilds the store
+instead of reusing it; `merxen segment` does not take its complete-output
+shortcut then. Stores built before this record existed are reused as before.
+
+ENRICH writes into the latest store in place and has its own marker,
+`.latest_spatialdata.zarr.enrich.merxen-incomplete` beside the store. While it
+is there the next ENRICH rebuilds the enrichment rather than skip a store
+whose elements all exist, so a run stopped after its last element but before
+its record, branch registry and alignment invalidation were written is
+completed. An element that a stage replaces (enrichment, image
+quantification, registration quality, clustering and the other write-backs)
+is moved aside as `<type>/.<element>.merxen-backup-*`, named in a
+`.<element>.merxen-replacing.json` journal, while the new one is written. A
+writer stopped in between leaves both, and the next stage that takes the
+store's lock (or writes that element) puts the previous version back; the
+stage that was replacing it then sees the old element and writes again. A
+backup without a journal, left by an earlier MerXen version, is not touched.
+The ATERA ProSeg stitch and the ATERA Cellpose layer remove their recorded
+fingerprint before their first write and write it after their last, so a
+stitch or layer build stopped part-way is never taken for a complete one.
+
 A task's hash covers its inputs, script text and environment definition, not
 the MerXen Python source. The Conda env installs MerXen in editable mode, so a
 change under `src/merxen/` leaves every hash unchanged. After a code fix,

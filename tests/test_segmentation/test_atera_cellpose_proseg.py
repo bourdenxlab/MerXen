@@ -811,3 +811,54 @@ def test_comparison_counts_independent_stock_masks_without_proseg_on_stock(
     assert read_plan(route.plan_path)["prior"]["mask_path"] == str(
         route.mask_path.resolve()
     )
+
+
+class Killed(BaseException):
+    """Stands in for SIGKILL: nothing below the raise runs, no handler cleans up."""
+
+
+def test_a_killed_forced_cellpose_layer_build_is_rebuilt_not_skipped(
+    route: Route, store: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A forced rebuild killed after its first element write leaves the old
+    record; with it the next run would skip a half-replaced layer."""
+    from merxen.enrichment.atera_cellpose_layer import build_atera_cellpose_layer
+    from merxen.io import spatialdata_io
+
+    enrich_single_latest(
+        _enrich_config(route, store, tmp_path / "enrich_out"), polygon_n_jobs=2
+    )
+    built = sd.read_zarr(store).attrs["merxen_atera_cellpose_layer"]["built_at"]
+    real_write = spatialdata_io.write_or_replace_element
+
+    def _write(sdata: object, key: str, *args: object, **kwargs: object) -> bool:
+        if key == "cellpose_cell_labels":
+            raise Killed
+        return bool(real_write(sdata, key, *args, **kwargs))
+
+    layer = {
+        "latest": store,
+        "mask_path": route.mask_path,
+        "pixel_size_um": PS,
+        "dataset_name": DATASET,
+        "n_jobs": 2,
+        "model_identity": None,
+    }
+    with monkeypatch.context() as patch:
+        patch.setattr(spatialdata_io, "write_or_replace_element", _write)
+        with pytest.raises(Killed):
+            build_atera_cellpose_layer(**layer, force=True)  # type: ignore[arg-type]
+    assert "merxen_atera_cellpose_layer" not in sd.read_zarr(store).attrs
+    writes: list[str] = []
+
+    def _count(sdata: object, key: str, *args: object, **kwargs: object) -> bool:
+        writes.append(key)
+        return bool(real_write(sdata, key, *args, **kwargs))
+
+    monkeypatch.setattr(spatialdata_io, "write_or_replace_element", _count)
+    record = build_atera_cellpose_layer(**layer)  # type: ignore[arg-type]
+
+    assert "cellpose_cell_labels" in writes
+    assert record["built_at"] >= built
+    assert record["check"]["passed"]
+    assert "merxen_atera_cellpose_layer" in sd.read_zarr(store).attrs
