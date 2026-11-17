@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
+from typing import Any
 
 import cv2
 import numpy as np
@@ -798,3 +801,918 @@ def ncc_map(template: np.ndarray, search: np.ndarray) -> np.ndarray:
     return np.asarray(
         np.nan_to_num(scores, nan=-1.0, posinf=-1.0, neginf=-1.0), dtype=np.float32
     )
+
+
+# ---------------------------------------------------------------------------
+# Peak shape and covariance
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, eq=False)
+class PeakShape:
+    """Second-moment shape of a correlation peak region.
+
+    Attributes:
+        elongation: ``sqrt(lmax / lmin)`` of the weighted second moments.
+        angle_rad: Angle of the major axis from +x towards +y.
+        cov_um2: ``(2, 2)`` weighted covariance in um^2.
+    """
+
+    elongation: float
+    angle_rad: float
+    cov_um2: np.ndarray
+
+
+def _disk_window(
+    scores: np.ndarray, centre_xy_px: tuple[float, float], radius_px: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Values and ``(x, y)`` px coordinates of ``scores`` within a disk."""
+    height, width = scores.shape
+    x0 = max(int(math.floor(centre_xy_px[0] - radius_px)), 0)
+    x1 = min(int(math.ceil(centre_xy_px[0] + radius_px)) + 1, width)
+    y0 = max(int(math.floor(centre_xy_px[1] - radius_px)), 0)
+    y1 = min(int(math.ceil(centre_xy_px[1] + radius_px)) + 1, height)
+    if x0 >= x1 or y0 >= y1:
+        empty = np.zeros(0)
+        return empty, empty, empty
+    rows, columns = np.mgrid[y0:y1, x0:x1]
+    inside = (columns - centre_xy_px[0]) ** 2 + (
+        rows - centre_xy_px[1]
+    ) ** 2 <= radius_px**2
+    return (
+        scores[y0:y1, x0:x1][inside].astype(np.float64),
+        columns[inside].astype(np.float64),
+        rows[inside].astype(np.float64),
+    )
+
+
+def _elongation_and_angle(cov: np.ndarray) -> tuple[float, float]:
+    values, vectors = np.linalg.eigh(cov)
+    major = vectors[:, 1]
+    angle = math.atan2(float(major[1]), float(major[0]))
+    ratio = max(float(values[1]), 1e-9) / max(float(values[0]), 1e-9)
+    return math.sqrt(ratio), angle
+
+
+def peak_shape(
+    scores: np.ndarray,
+    centre_xy_px: ArrayLike,
+    *,
+    pixel_size_um: float,
+    radius_um: float = 150.0,
+) -> PeakShape:
+    """Ridge detection: second moments of a score map around a centre.
+
+    Each value within ``radius_um`` of the centre is weighted by
+    ``(C - median(C))_+ ** 2``.
+
+    Args:
+        scores: 2-D correlation map.
+        centre_xy_px: Centre ``(x, y)`` in map px.
+        pixel_size_um: Pixel size of the map.
+        radius_um: Radius of the region.
+
+    Returns:
+        The elongation, major-axis angle and covariance (um^2).
+    """
+    centre_array = np.asarray(centre_xy_px, dtype=float)
+    centre = (float(centre_array[0]), float(centre_array[1]))
+    values, xs, ys = _disk_window(scores, centre, radius_um / pixel_size_um)
+    if values.size == 0:
+        return PeakShape(1.0, 0.0, np.zeros((2, 2)))
+    weights = np.clip(values - float(np.median(scores)), 0.0, None) ** 2
+    total = float(weights.sum())
+    if total <= 0.0:
+        return PeakShape(1.0, 0.0, np.zeros((2, 2)))
+    mean_x = float((weights * xs).sum() / total)
+    mean_y = float((weights * ys).sum() / total)
+    dx, dy = xs - mean_x, ys - mean_y
+    cov = (
+        np.array(
+            [
+                [(weights * dx * dx).sum(), (weights * dx * dy).sum()],
+                [(weights * dx * dy).sum(), (weights * dy * dy).sum()],
+            ]
+        )
+        / total
+        * pixel_size_um**2
+    )
+    elongation, angle = _elongation_and_angle(cov)
+    return PeakShape(elongation, angle, cov)
+
+
+def peak_covariance(
+    scores: np.ndarray,
+    peak_xy_px: ArrayLike,
+    *,
+    pixel_size_um: float,
+    drop: float = 0.05,
+    radius_um: float = 100.0,
+) -> np.ndarray:
+    """Noise covariance of a window match: the correlation peak region's spread.
+
+    Each value within ``radius_um`` of the peak is weighted by
+    ``(C - (C_peak - drop))_+``; the result is the weighted second moment of the
+    offsets from the peak.
+
+    Args:
+        scores: 2-D correlation map.
+        peak_xy_px: Peak position ``(x, y)`` in map px (may be fractional).
+        pixel_size_um: Pixel size of the map.
+        drop: How far below the peak value the region reaches.
+        radius_um: Radius of the region.
+
+    Returns:
+        ``(2, 2)`` covariance in um^2; zeros when every weight is zero or the map
+        is flat within the radius (there is no peak to measure).
+    """
+    peak_array = np.asarray(peak_xy_px, dtype=float)
+    centre = (float(peak_array[0]), float(peak_array[1]))
+    values, xs, ys = _disk_window(scores, centre, radius_um / pixel_size_um)
+    if values.size == 0 or float(values.max() - values.min()) < 1e-9:
+        return np.zeros((2, 2))
+    weights = np.clip(values - (float(values.max()) - drop), 0.0, None)
+    total = float(weights.sum())
+    if total <= 0.0:
+        return np.zeros((2, 2))
+    dx, dy = xs - centre[0], ys - centre[1]
+    return np.asarray(
+        np.array(
+            [
+                [(weights * dx * dx).sum(), (weights * dx * dy).sum()],
+                [(weights * dx * dy).sum(), (weights * dy * dy).sum()],
+            ]
+        )
+        / total
+        * pixel_size_um**2
+    )
+
+
+# ---------------------------------------------------------------------------
+# Matching machinery shared by the null, the click check and the windows
+# ---------------------------------------------------------------------------
+
+_REPRESENTATIONS = ("bp20", "orientation", "fused")
+_DEFAULT_EXCLUSION_UM = 50.0
+
+
+@dataclass(frozen=True)
+class _Geometry:
+    """Pixel geometry of a window of a given size and search."""
+
+    half: int
+    search: int
+
+    @property
+    def side(self) -> int:
+        return 2 * self.half + 1
+
+    @property
+    def margin(self) -> int:
+        return self.half + self.search
+
+
+def _geometry(window_um: float, search_um: float, pixel_size_um: float) -> _Geometry:
+    return _Geometry(
+        half=max(int(round(window_um / 2.0 / pixel_size_um)), 1),
+        search=max(int(round(search_um / pixel_size_um)), 1),
+    )
+
+
+def _box_sum_table(mask: np.ndarray) -> np.ndarray:
+    """Integral image (zero-padded) of a boolean mask."""
+    table = np.zeros((mask.shape[0] + 1, mask.shape[1] + 1), dtype=np.int64)
+    table[1:, 1:] = np.cumsum(np.cumsum(mask.astype(np.int32), axis=0), axis=1)
+    return table
+
+
+def _box_fraction(
+    table: np.ndarray, cx: np.ndarray, cy: np.ndarray, half: int
+) -> np.ndarray:
+    """Fraction of a box ``[c - half, c + half]`` that is set (boxes inside)."""
+    x0, x1 = cx - half, cx + half + 1
+    y0, y1 = cy - half, cy + half + 1
+    total = table[y1, x1] - table[y0, x1] - table[y1, x0] + table[y0, x0]
+    return np.asarray(total / float((2 * half + 1) ** 2))
+
+
+def _inside(
+    shape_yx: tuple[int, int], cx: np.ndarray, cy: np.ndarray, margin: int
+) -> np.ndarray:
+    height, width = shape_yx
+    return (
+        (cx >= margin) & (cy >= margin) & (cx + margin < width) & (cy + margin < height)
+    )
+
+
+def _correlate(
+    reference: Representation,
+    moving: Representation,
+    reference_xy: tuple[int, int],
+    moving_xy: tuple[int, int],
+    geometry: _Geometry,
+    *,
+    use_bands: bool = True,
+    use_orientation: bool = True,
+) -> dict[str, np.ndarray]:
+    """Score maps of the reference window at one centre over a warped region.
+
+    The template is the reference window centred at ``reference_xy`` (px); the
+    search region is the moving window plus the search margin, centred at
+    ``moving_xy``. The fused map is the mean of the two others.
+    """
+    half, margin = geometry.half, geometry.margin
+    template_slice = (
+        slice(reference_xy[1] - half, reference_xy[1] + half + 1),
+        slice(reference_xy[0] - half, reference_xy[0] + half + 1),
+    )
+    region_slice = (
+        slice(moving_xy[1] - margin, moving_xy[1] + margin + 1),
+        slice(moving_xy[0] - margin, moving_xy[0] + margin + 1),
+    )
+    maps: dict[str, np.ndarray] = {}
+    if use_bands:
+        maps["bp20"] = ncc_map(
+            reference.bands[(slice(None), *template_slice)],
+            moving.bands[(slice(None), *region_slice)],
+        )
+    if use_orientation:
+        maps["orientation"] = ncc_map(
+            reference.orientation[(slice(None), *template_slice)],
+            moving.orientation[(slice(None), *region_slice)],
+        )
+    if use_bands and use_orientation:
+        maps["fused"] = 0.5 * (maps["bp20"] + maps["orientation"])
+    return maps
+
+
+def _map_threads(
+    function: Callable[[Any], Any], items: Sequence[Any], workers: int | None
+) -> list[Any]:
+    """Apply ``function`` to ``items`` on threads, results in input order.
+
+    OpenCV's own threading is switched off while the pool runs (each worker then
+    uses one thread) and restored afterwards.
+    """
+    count = workers if workers is not None else (os.cpu_count() or 1)
+    if count <= 1 or len(items) <= 1:
+        return [function(item) for item in items]
+    previous = cv2.getNumThreads()
+    cv2.setNumThreads(1)
+    try:
+        with ThreadPoolExecutor(max_workers=count) as pool:
+            return list(pool.map(function, items))
+    finally:
+        cv2.setNumThreads(previous)
+
+
+def _check_same_grid(reference: Representation, moving: Representation) -> None:
+    if reference.shape_yx != moving.shape_yx or not np.allclose(
+        reference.to_level0, moving.to_level0
+    ):
+        raise ValueError(
+            "the warped moving representation must be on the reference grid"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Empirical null
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class NullModel:
+    """Peak statistics of unrelated window pairs.
+
+    Attributes:
+        representation: ``bp20``, ``orientation`` or ``fused``.
+        window_um: Window side.
+        n: Pairs whose peak was not on the border.
+        peak_p95: 95th percentile of the peak.
+        peak_p99: 99th percentile of the peak.
+        distinct_p95: 95th percentile of peak minus the second peak.
+    """
+
+    representation: str
+    window_um: float
+    n: int
+    peak_p95: float
+    peak_p99: float
+    distinct_p95: float
+
+
+def _null_models(
+    reference: Representation,
+    moving: Representation,
+    *,
+    representations: Sequence[str],
+    window_um: float,
+    search_um: float,
+    n_pairs: int,
+    min_distance_um: float,
+    seed: int,
+    exclusion_um: float = _DEFAULT_EXCLUSION_UM,
+    workers: int | None = None,
+) -> dict[str, NullModel]:
+    _check_same_grid(reference, moving)
+    pixel = reference.pixel_size_um
+    geometry = _geometry(window_um, search_um, pixel)
+    height, width = reference.shape_yx
+    step = max(int(round(200.0 / pixel)), 1)
+    xs, ys = np.meshgrid(np.arange(0, width, step), np.arange(0, height, step))
+    cx, cy = xs.ravel(), ys.ravel()
+    inside = _inside((height, width), cx, cy, geometry.margin)
+    cx, cy = cx[inside], cy[inside]
+    ref_ok = (
+        _box_fraction(_box_sum_table(reference.tissue), cx, cy, geometry.half) >= 0.5
+    )
+    mov_ok = (
+        _box_fraction(_box_sum_table(moving.tissue), cx, cy, geometry.half) >= 0.5
+    ) & (_box_fraction(_box_sum_table(moving.covered), cx, cy, geometry.margin) >= 0.9)
+    ref_points = np.stack([cx[ref_ok], cy[ref_ok]], axis=1)
+    mov_points = np.stack([cx[mov_ok], cy[mov_ok]], axis=1)
+    rng = np.random.default_rng(seed)
+    pairs: list[tuple[int, int]] = []
+    if len(ref_points) and len(mov_points):
+        minimum_px = min_distance_um / pixel
+        attempts = 0
+        while len(pairs) < n_pairs and attempts < 50 * n_pairs:
+            attempts += 1
+            i = int(rng.integers(len(ref_points)))
+            j = int(rng.integers(len(mov_points)))
+            if np.hypot(*(ref_points[i] - mov_points[j])) >= minimum_px:
+                pairs.append((i, j))
+    exclusion_px = max(int(round(exclusion_um / pixel)), 1)
+    use_orientation = any(name in ("orientation", "fused") for name in representations)
+    use_bands = any(name in ("bp20", "fused") for name in representations)
+
+    def run(pair: tuple[int, int]) -> dict[str, tuple[float, float, bool]]:
+        maps = _correlate(
+            reference,
+            moving,
+            (int(ref_points[pair[0]][0]), int(ref_points[pair[0]][1])),
+            (int(mov_points[pair[1]][0]), int(mov_points[pair[1]][1])),
+            geometry,
+            use_bands=use_bands,
+            use_orientation=use_orientation,
+        )
+        out: dict[str, tuple[float, float, bool]] = {}
+        for name in representations:
+            peak, second, _x, _y, on_border = summarise_scores(
+                maps[name], exclusion_px=exclusion_px
+            )
+            out[name] = (peak, peak - second, on_border)
+        return out
+
+    rows = _map_threads(run, pairs, workers)
+    models: dict[str, NullModel] = {}
+    for name in representations:
+        kept = [(row[name][0], row[name][1]) for row in rows if not row[name][2]]
+        if not kept:
+            logger.warning(
+                "empirical null (%s, %g um) has no usable pair; nothing will be "
+                "confident",
+                name,
+                window_um,
+            )
+            models[name] = NullModel(name, window_um, 0, 1.0, 1.0, 1.0)
+            continue
+        peaks = np.array([k[0] for k in kept])
+        distinct = np.array([k[1] for k in kept])
+        models[name] = NullModel(
+            representation=name,
+            window_um=window_um,
+            n=len(kept),
+            peak_p95=float(np.percentile(peaks, 95)),
+            peak_p99=float(np.percentile(peaks, 99)),
+            distinct_p95=float(np.percentile(distinct, 95)),
+        )
+    return models
+
+
+def empirical_null(
+    reference: Representation,
+    moving: Representation,
+    *,
+    representation: str,
+    window_um: float,
+    search_um: float,
+    n_pairs: int,
+    min_distance_um: float = 2000.0,
+    seed: int = 0,
+    exclusion_um: float = _DEFAULT_EXCLUSION_UM,
+    workers: int | None = None,
+) -> NullModel:
+    """Peak statistics of a reference window matched against a distant region.
+
+    Pairs of tissue lattice points (every 200 um, window tissue fraction at least
+    0.5) at least ``min_distance_um`` apart are drawn with ``rng(seed)``; the
+    reference window at the first is matched against the warped region at the
+    second.
+
+    Args:
+        reference: Reference representation.
+        moving: Moving representation warped onto the reference grid.
+        representation: ``bp20``, ``orientation`` or ``fused``.
+        window_um: Window side.
+        search_um: Search margin on each side.
+        n_pairs: Number of pairs to draw.
+        min_distance_um: Minimum distance between the two centres.
+        seed: Random seed.
+        exclusion_um: Half-side of the square the second peak ignores.
+        workers: Threads (None: the CPU count).
+
+    Returns:
+        The null model over the pairs whose peak is not on the border.
+    """
+    if representation not in _REPRESENTATIONS:
+        raise ValueError(f"unknown representation {representation!r}")
+    return _null_models(
+        reference,
+        moving,
+        representations=(representation,),
+        window_um=window_um,
+        search_um=search_um,
+        n_pairs=n_pairs,
+        min_distance_um=min_distance_um,
+        seed=seed,
+        exclusion_um=exclusion_um,
+        workers=workers,
+    )[representation]
+
+
+# ---------------------------------------------------------------------------
+# Click checks (verdicts of contract C7)
+# ---------------------------------------------------------------------------
+
+_JACOBIAN_STEP_UM = 5.0
+
+
+@dataclass(frozen=True)
+class ClickCheckParams:
+    """Parameters of the per-click image check."""
+
+    windows_um: tuple[float, ...] = (300.0, 600.0)
+    search_um: float = 250.0
+    confirm_um: float = 15.0
+    contradict_um: float = 50.0
+    agree_um: float = 25.0
+    ridge_elongation: float = 2.0
+    ridge_drop: float = 0.1
+    min_tissue_fraction: float = 0.5
+    min_valid_fraction: float = 0.9
+    null_pairs: int = 300
+    seed: int = 0
+
+
+@dataclass(frozen=True, eq=False)
+class ClickEstimate:
+    """One image estimate of where a click's structure is in the moving image.
+
+    Attributes:
+        representation: ``bp20``, ``orientation`` or ``fused``.
+        window_um: Window side.
+        peak: Correlation maximum.
+        distinct: Peak minus the second peak.
+        on_border: Whether the maximum is on the border of the search.
+        confident: Peak at least the null p99, distinct at least the null distinct
+            p95 and not on the border.
+        elongation: Elongation of the correlation peak region (ridge detection).
+        image_moving_xy_um: Estimated moving position (full um).
+    """
+
+    representation: str
+    window_um: float
+    peak: float
+    distinct: float
+    on_border: bool
+    confident: bool
+    elongation: float
+    image_moving_xy_um: np.ndarray
+
+
+@dataclass(frozen=True, eq=False)
+class ClickCheck:
+    """The image verdict of one click.
+
+    Attributes:
+        pair_id: Landmark pair id.
+        verdict: ``confirmed``, ``contradicted``, ``ridge``, ``inconclusive`` or
+            ``not_checked``.
+        image_moving_xy_um: Best confident fused estimate (the snap position of a
+            contradicted click without one), or None.
+        image_offset_um: Its distance from the click, or None.
+        prediction_offset_um: Its distance from the caller's prediction, or None.
+        snap_moving_xy_um: The contradiction's snap position (contradicted only).
+        ridge_direction_moving_xy: Unit ridge direction in the moving frame (ridge
+            only).
+        elongation: Elongation of the ridge (ridge only).
+        estimates: Every estimate made.
+        reason: Short reason code.
+        strength: ``strong`` or ``weak`` for a confirmed verdict, else None.
+    """
+
+    pair_id: int
+    verdict: str
+    image_moving_xy_um: np.ndarray | None
+    image_offset_um: float | None
+    prediction_offset_um: float | None
+    snap_moving_xy_um: np.ndarray | None
+    ridge_direction_moving_xy: np.ndarray | None
+    elongation: float | None
+    estimates: tuple[ClickEstimate, ...]
+    reason: str
+    strength: str | None = None
+
+
+def _not_checked(pair_id: int, reason: str) -> ClickCheck:
+    return ClickCheck(
+        pair_id=pair_id,
+        verdict="not_checked",
+        image_moving_xy_um=None,
+        image_offset_um=None,
+        prediction_offset_um=None,
+        snap_moving_xy_um=None,
+        ridge_direction_moving_xy=None,
+        elongation=None,
+        estimates=(),
+        reason=reason,
+    )
+
+
+def _jacobians(
+    pull_um: Callable[[np.ndarray], np.ndarray], points_um: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Pull at the points and its central-difference Jacobians ``(n, 2, 2)``."""
+    step = _JACOBIAN_STEP_UM
+    offsets = np.array([[0, 0], [step, 0], [-step, 0], [0, step], [0, -step]], float)
+    stacked = (points_um[:, None, :] + offsets[None]).reshape(-1, 2)
+    pulled = np.asarray(pull_um(stacked), dtype=np.float64).reshape(-1, 5, 2)
+    jacobian = np.empty((len(points_um), 2, 2))
+    jacobian[:, :, 0] = (pulled[:, 1] - pulled[:, 2]) / (2.0 * step)
+    jacobian[:, :, 1] = (pulled[:, 3] - pulled[:, 4]) / (2.0 * step)
+    return pulled[:, 0], jacobian
+
+
+def _bilinear(scores: np.ndarray, x: float, y: float) -> float:
+    return float(
+        ndimage.map_coordinates(scores, [[y], [x]], order=1, mode="nearest")[0]
+    )
+
+
+def _distance(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.hypot(*(np.asarray(a) - np.asarray(b))))
+
+
+def _assess(
+    pair_id: int,
+    estimates: Sequence[ClickEstimate],
+    m_um: np.ndarray,
+    q_um: np.ndarray,
+    params: ClickCheckParams,
+) -> ClickCheck:
+    """Apply the verdict rules to a click's estimates, short of the ridge test.
+
+    A result of ``inconclusive`` whose reason is not ``conflicting`` is the case
+    where neither condition holds, which the caller may still turn into a ridge.
+    """
+    smallest = min(params.windows_um)
+    confident_estimates = [e for e in estimates if e.confident]
+    confirming = [
+        e
+        for e in confident_estimates
+        if e.representation == "fused"
+        and _distance(e.image_moving_xy_um, m_um) <= params.confirm_um
+    ]
+    voters = [
+        e
+        for e in confident_estimates
+        if e.representation in ("bp20", "orientation")
+        and e.elongation < params.ridge_elongation
+        and _distance(e.image_moving_xy_um, m_um) > params.contradict_um
+    ]
+    best_group: list[ClickEstimate] = []
+    near_miss = ""
+    for seed in voters:
+        group = [
+            e
+            for e in voters
+            if _distance(e.image_moving_xy_um, seed.image_moving_xy_um)
+            <= params.agree_um
+        ]
+        if len(group) < 2:
+            continue
+        has_bp20 = any(e.representation == "bp20" for e in group)
+        has_small = any(e.window_um == smallest for e in group)
+        if not has_bp20:
+            near_miss = "orientation_only"
+            continue
+        if not has_small:
+            near_miss = near_miss or "large_window_only"
+            continue
+        mean = np.mean([e.image_moving_xy_um for e in group], axis=0)
+        best_mean = (
+            np.mean([e.image_moving_xy_um for e in best_group], axis=0)
+            if best_group
+            else None
+        )
+        if (
+            not best_group
+            or len(group) > len(best_group)
+            or (
+                len(group) == len(best_group)
+                and best_mean is not None
+                and _distance(mean, q_um) < _distance(best_mean, q_um)
+            )
+        ):
+            best_group = group
+    contradicted = bool(best_group)
+    confirmed = bool(confirming)
+
+    def blank(verdict: str, reason: str) -> ClickCheck:
+        return ClickCheck(
+            pair_id=pair_id,
+            verdict=verdict,
+            image_moving_xy_um=None,
+            image_offset_um=None,
+            prediction_offset_um=None,
+            snap_moving_xy_um=None,
+            ridge_direction_moving_xy=None,
+            elongation=None,
+            estimates=tuple(estimates),
+            reason=reason,
+        )
+
+    def with_image(check: ClickCheck, estimate: ClickEstimate | None) -> ClickCheck:
+        position = (
+            estimate.image_moving_xy_um
+            if estimate is not None
+            else check.snap_moving_xy_um
+        )
+        if position is None:
+            return check
+        return replace(
+            check,
+            image_moving_xy_um=position,
+            image_offset_um=_distance(position, m_um),
+            prediction_offset_um=_distance(position, q_um),
+        )
+
+    fused_confident = [e for e in confident_estimates if e.representation == "fused"]
+    if confirmed and contradicted:
+        return blank("inconclusive", "conflicting")
+    if confirmed:
+        best = max(confirming, key=lambda e: e.peak)
+        strong = any(e.window_um == smallest for e in confirming) and not any(
+            e.representation == "bp20"
+            and e.elongation < params.ridge_elongation
+            and _distance(e.image_moving_xy_um, m_um) > params.contradict_um
+            for e in confident_estimates
+        )
+        check = blank("confirmed", "strong" if strong else "weak")
+        check = replace(check, strength="strong" if strong else "weak")
+        return with_image(check, best)
+    if contradicted:
+        snap = np.mean([e.image_moving_xy_um for e in best_group], axis=0)
+        check = replace(blank("contradicted", "contradicted"), snap_moving_xy_um=snap)
+        best_fused = max(fused_confident, key=lambda e: e.peak, default=None)
+        return with_image(check, best_fused)
+    reason = near_miss or (
+        "no_confident_estimate" if not confident_estimates else "no_agreement"
+    )
+    return blank("inconclusive", reason)
+
+
+def _check_one(
+    pair_id: int,
+    reference: Representation,
+    moving: Representation,
+    *,
+    r_um: np.ndarray,
+    m_um: np.ndarray,
+    q_um: np.ndarray,
+    pulled_r: np.ndarray,
+    jacobian: np.ndarray,
+    pull_um: Callable[[np.ndarray], np.ndarray],
+    params: ClickCheckParams,
+    nulls: Mapping[tuple[str, float], NullModel],
+    tables: tuple[np.ndarray, np.ndarray],
+) -> ClickCheck:
+    pixel = reference.pixel_size_um
+    height, width = reference.shape_yx
+    r_px = reference.um_to_px(r_um)
+    if not (0 <= r_px[0] <= width - 1 and 0 <= r_px[1] <= height - 1):
+        return _not_checked(pair_id, "outside_image")
+    ix, iy = int(round(r_px[0])), int(round(r_px[1]))
+    if not reference.covered[iy, ix]:
+        return _not_checked(pair_id, "outside_coverage")
+    determinant = float(np.linalg.det(jacobian))
+    if not np.isfinite(determinant) or abs(determinant) < 1e-9:
+        return _not_checked(pair_id, "singular_jacobian")
+    rc_um = r_um + np.linalg.solve(jacobian, m_um - pulled_r)
+    rc_px = reference.um_to_px(rc_um)
+    if not (0 <= rc_px[0] <= width - 1 and 0 <= rc_px[1] <= height - 1):
+        return _not_checked(pair_id, "outside_coverage")
+    if not moving.covered[int(round(rc_px[1])), int(round(rc_px[0]))]:
+        return _not_checked(pair_id, "outside_coverage")
+
+    linear = reference.to_level0[:2, :2] * reference.level0_pixel_size_um
+    cx_array, cy_array = np.array([ix]), np.array([iy])
+    skipped: list[str] = []
+    raw: list[tuple[str, float, float, float, bool, np.ndarray, float]] = []
+    kept_maps: dict[float, dict[str, np.ndarray]] = {}
+    for window_um in sorted(params.windows_um):
+        geometry = _geometry(window_um, params.search_um, pixel)
+        if not _inside(reference.shape_yx, cx_array, cy_array, geometry.margin)[0]:
+            skipped.append("outside_image")
+            continue
+        tissue_fraction = _box_fraction(tables[0], cx_array, cy_array, geometry.half)[0]
+        if tissue_fraction < params.min_tissue_fraction:
+            skipped.append("no_tissue")
+            continue
+        valid_fraction = _box_fraction(tables[1], cx_array, cy_array, geometry.margin)[
+            0
+        ]
+        if valid_fraction < params.min_valid_fraction:
+            skipped.append("outside_coverage")
+            continue
+        maps = _correlate(reference, moving, (ix, iy), (ix, iy), geometry)
+        kept_maps[window_um] = maps
+        exclusion_px = max(int(round(_DEFAULT_EXCLUSION_UM / pixel)), 1)
+        for name in _REPRESENTATIONS:
+            peak, second, x, y, on_border = summarise_scores(
+                maps[name], exclusion_px=exclusion_px
+            )
+            shape = peak_shape(maps[name], (x, y), pixel_size_um=pixel)
+            delta = linear @ np.array([x - geometry.search, y - geometry.search])
+            raw.append(
+                (
+                    name,
+                    window_um,
+                    peak,
+                    peak - second,
+                    on_border,
+                    delta,
+                    shape.elongation,
+                )
+            )
+    if not raw:
+        reason = skipped[0] if skipped else "no_estimates"
+        return ClickCheck(
+            pair_id=pair_id,
+            verdict="inconclusive",
+            image_moving_xy_um=None,
+            image_offset_um=None,
+            prediction_offset_um=None,
+            snap_moving_xy_um=None,
+            ridge_direction_moving_xy=None,
+            elongation=None,
+            estimates=(),
+            reason=reason,
+        )
+    image_positions = np.asarray(
+        pull_um(r_um[None, :] + np.array([entry[5] for entry in raw])),
+        dtype=np.float64,
+    )
+    estimates: list[ClickEstimate] = []
+    for entry, position in zip(raw, image_positions, strict=True):
+        name, window_um, peak, distinct, on_border, _delta, elongation = entry
+        null = nulls[(name, window_um)]
+        confident = (
+            peak >= null.peak_p99 and distinct >= null.distinct_p95 and not on_border
+        )
+        estimates.append(
+            ClickEstimate(
+                representation=name,
+                window_um=window_um,
+                peak=peak,
+                distinct=distinct,
+                on_border=on_border,
+                confident=bool(confident),
+                elongation=elongation,
+                image_moving_xy_um=position,
+            )
+        )
+
+    assessed = _assess(pair_id, estimates, m_um, q_um, params)
+    if assessed.verdict != "inconclusive" or assessed.reason == "conflicting":
+        return assessed
+
+    # Ridge: the largest window's fused map is elongated through the click's own
+    # position, which correlates nearly as well as the best peak.
+    largest = max(kept_maps)
+    fused_map = kept_maps[largest]["fused"]
+    geometry = _geometry(largest, params.search_um, pixel)
+    map_x = geometry.search + (rc_px[0] - ix)
+    map_y = geometry.search + (rc_px[1] - iy)
+    if 0 <= map_x <= fused_map.shape[1] - 1 and 0 <= map_y <= fused_map.shape[0] - 1:
+        peak_value = float(fused_map.max())
+        shape = peak_shape(fused_map, (map_x, map_y), pixel_size_um=pixel)
+        null = nulls[("fused", largest)]
+        if (
+            shape.elongation >= params.ridge_elongation
+            and _bilinear(fused_map, map_x, map_y) >= peak_value - params.ridge_drop
+            and peak_value >= null.peak_p95
+        ):
+            direction = jacobian @ np.array(
+                [math.cos(shape.angle_rad), math.sin(shape.angle_rad)]
+            )
+            norm = float(np.hypot(*direction))
+            return replace(
+                assessed,
+                verdict="ridge",
+                reason="ridge",
+                ridge_direction_moving_xy=direction / norm if norm > 0 else direction,
+                elongation=float(shape.elongation),
+            )
+    return assessed
+
+
+def check_clicks(
+    reference: Representation,
+    moving_warped: Representation,
+    *,
+    pair_ids: Sequence[int],
+    reference_xy_um: ArrayLike,
+    moving_xy_um: ArrayLike,
+    predicted_moving_xy_um: ArrayLike,
+    pull_um: Callable[[np.ndarray], np.ndarray],
+    params: ClickCheckParams | None = None,
+    nulls: Mapping[tuple[str, float], NullModel] | None = None,
+    workers: int | None = None,
+) -> list[ClickCheck]:
+    """Check each landmark click against the image evidence.
+
+    For each click the reference window is matched against the moving image
+    warped by ``pull_um`` (band-pass, orientation and fused representations, at
+    each window size). The rules of the verdicts are those of contract C7: a click
+    is confirmed by a confident fused estimate close to it, contradicted by at
+    least two agreeing confident non-ridge estimates (with a band-pass estimate
+    and one at the smallest window) farther away, ridge when only an elongated
+    peak region passes through it, else inconclusive; a click outside either image
+    is not checked. A confirmation is ``strong`` (the confirming estimate is at the
+    smallest window and no confident non-ridge band-pass estimate disagrees) or
+    ``weak``.
+
+    Args:
+        reference: Reference representation.
+        moving_warped: Moving representation on the reference grid.
+        pair_ids: Landmark pair ids.
+        reference_xy_um: ``(N, 2)`` clicked reference positions (full um).
+        moving_xy_um: ``(N, 2)`` clicked moving positions (full um).
+        predicted_moving_xy_um: ``(N, 2)`` leave-one-out predictions (full um).
+        pull_um: Maps reference full um to moving full um (never assumed affine).
+        params: Check parameters.
+        nulls: Null models by ``(representation, window_um)``; missing ones are
+            built here.
+        workers: Threads for the nulls (None: the CPU count).
+
+    Returns:
+        One :class:`ClickCheck` per click, in input order.
+    """
+    params = params or ClickCheckParams()
+    _check_same_grid(reference, moving_warped)
+    ids = [int(v) for v in pair_ids]
+    reference_xy = np.asarray(reference_xy_um, dtype=np.float64).reshape(-1, 2)
+    moving_xy = np.asarray(moving_xy_um, dtype=np.float64).reshape(-1, 2)
+    predicted_xy = np.asarray(predicted_moving_xy_um, dtype=np.float64).reshape(-1, 2)
+    if not len(ids) == len(reference_xy) == len(moving_xy) == len(predicted_xy):
+        raise ValueError("pair_ids and the position arrays must have the same length")
+    if not ids:
+        return []
+    null_models: dict[tuple[str, float], NullModel] = dict(nulls or {})
+    for window_um in params.windows_um:
+        if any((name, window_um) not in null_models for name in _REPRESENTATIONS):
+            built = _null_models(
+                reference,
+                moving_warped,
+                representations=_REPRESENTATIONS,
+                window_um=window_um,
+                search_um=params.search_um,
+                n_pairs=params.null_pairs,
+                min_distance_um=2000.0,
+                seed=params.seed,
+                workers=workers,
+            )
+            for name, model in built.items():
+                null_models.setdefault((name, window_um), model)
+    pulled, jacobians = _jacobians(pull_um, reference_xy)
+    tables = (_box_sum_table(reference.tissue), _box_sum_table(moving_warped.covered))
+
+    def run(index: int) -> ClickCheck:
+        return _check_one(
+            ids[index],
+            reference,
+            moving_warped,
+            r_um=reference_xy[index],
+            m_um=moving_xy[index],
+            q_um=predicted_xy[index],
+            pulled_r=pulled[index],
+            jacobian=jacobians[index],
+            pull_um=pull_um,
+            params=params,
+            nulls=null_models,
+            tables=tables,
+        )
+
+    return list(_map_threads(run, list(range(len(ids))), workers))

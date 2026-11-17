@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import functools
 import math
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -24,6 +28,7 @@ from merxen.manual_registration.schema import (
 )
 from merxen.manual_registration.simulate import make_synthetic_pair
 
+from ._image_phantom import Phantom, make_phantom
 from ._scripts import load_script
 
 derive_script = load_script("derive_test_landmarks")
@@ -416,3 +421,546 @@ def test_coarse_role_images_read_the_registration_channel_without_roles(
         # 22 um over 1.38 um is a block of 16 level-0 pixels.
         assert coarse[key].shape_yx == (128, 128)
         assert coarse[key].pixel_size_um == pytest.approx(22.08)
+
+
+# ---------------------------------------------------------------------------
+# Peak shape and covariance
+# ---------------------------------------------------------------------------
+def _anisotropic_gaussian(
+    shape: tuple[int, int],
+    centre_xy: tuple[float, float],
+    sigma_xy: tuple[float, float],
+) -> np.ndarray:
+    rows, columns = np.mgrid[: shape[0], : shape[1]]
+    return np.exp(
+        -((columns - centre_xy[0]) ** 2) / (2 * sigma_xy[0] ** 2)
+        - (rows - centre_xy[1]) ** 2 / (2 * sigma_xy[1] ** 2)
+    )
+
+
+@pytest.mark.parametrize("angle_deg", [0.0, 35.0, 90.0])
+def test_peak_shape_finds_the_direction_of_an_elongated_ridge(
+    angle_deg: float,
+) -> None:
+    rows, columns = np.mgrid[:201, :201]
+    angle = math.radians(angle_deg)
+    along = (columns - 100) * math.cos(angle) + (rows - 100) * math.sin(angle)
+    across = -(columns - 100) * math.sin(angle) + (rows - 100) * math.cos(angle)
+    scores = np.exp(-(along**2) / (2 * 30.0**2) - across**2 / (2 * 5.0**2))
+
+    shape = ie.peak_shape(scores, (100, 100), pixel_size_um=2.76)
+
+    assert shape.elongation > 2.0
+    difference = (math.degrees(shape.angle_rad) - angle_deg + 90.0) % 180.0 - 90.0
+    assert abs(difference) < 5.0
+    assert shape.cov_um2.shape == (2, 2)
+
+
+def test_peak_shape_of_a_round_peak_is_not_elongated() -> None:
+    scores = _anisotropic_gaussian((201, 201), (100, 100), (8.0, 8.0))
+
+    assert ie.peak_shape(scores, (100, 100), pixel_size_um=2.76).elongation < 1.2
+    assert (
+        ie.peak_shape(np.zeros((50, 50)), (25, 25), pixel_size_um=2.76).elongation
+        == 1.0
+    )
+
+
+def test_peak_covariance_of_an_anisotropic_peak_has_the_expected_moments() -> None:
+    pixel = 2.76
+    sigma_x, sigma_y, drop = 40.0, 15.0, 0.05
+    scores = _anisotropic_gaussian((301, 301), (150.0, 150.0), (sigma_x, sigma_y))
+
+    cov = ie.peak_covariance(scores, (150.0, 150.0), pixel_size_um=pixel, drop=drop)
+
+    # With u = x / sigma_x and v = y / sigma_y the weights (G - 1 + drop)_+ are
+    # radially symmetric, so cov = sigma^2 * a with a = E[u^2] of the weights.
+    grid = np.linspace(-0.6, 0.6, 1201)
+    uu, vv = np.meshgrid(grid, grid)
+    weights = np.clip(np.exp(-(uu**2 + vv**2) / 2) - (1 - drop), 0, None)
+    expected = float((weights * uu**2).sum() / weights.sum())
+    assert cov[0, 0] == pytest.approx(expected * (sigma_x * pixel) ** 2, rel=0.1)
+    assert cov[1, 1] == pytest.approx(expected * (sigma_y * pixel) ** 2, rel=0.1)
+    assert abs(cov[0, 1]) < 0.05 * cov[0, 0]
+
+
+def test_peak_covariance_of_a_flat_map_is_zero() -> None:
+    assert not ie.peak_covariance(
+        np.full((101, 101), 0.3), (50, 50), pixel_size_um=2.76
+    ).any()
+    assert not ie.peak_covariance(
+        np.zeros((101, 101)), (50, 50), pixel_size_um=2.76
+    ).any()
+
+
+# ---------------------------------------------------------------------------
+# Phantom fixtures
+# ---------------------------------------------------------------------------
+
+
+@functools.cache
+def _phantom(
+    seed: int, fine_detail: bool = True, warp_wavelength_um: float = 1500.0
+) -> Phantom:
+    """A phantom, built once per process (it is never modified)."""
+    return make_phantom(
+        seed, fine_detail=fine_detail, warp_wavelength_um=warp_wavelength_um
+    )
+
+
+# A window of 600-800 um averages the warp over its extent, so its displacement
+# differs from the one at its centre by about A k^2 w^2 / 24: a 1.5 mm sinusoid
+# would bias it by tens of um whatever the matching. The window tests use 3 mm.
+_WINDOW_WAVELENGTH_UM = 3000.0
+
+
+@dataclass(frozen=True, eq=False)
+class _Pair:
+    phantom: Phantom
+    reference: ie.Representation
+    moving: ie.Representation
+
+
+def _build_pair(
+    phantom: Phantom, pull: Callable[[np.ndarray], np.ndarray] | None = None
+) -> _Pair:
+    reference = ie.compute_representation(phantom.reference)
+    warped = ie.warp_role_images(
+        phantom.moving, reference=phantom.reference, pull_um=pull or phantom.pull
+    )
+    return _Pair(phantom, reference, ie.compute_representation(warped))
+
+
+@pytest.fixture(scope="module")
+def pair() -> _Pair:
+    """The phantom warped by its exact pull (what a perfect field would give)."""
+    return _build_pair(_phantom(0))
+
+
+@pytest.fixture(scope="module")
+def other_pair() -> _Pair:
+    """An unrelated phantom, for nulls of independent images."""
+    return _build_pair(_phantom(5))
+
+
+@pytest.fixture(scope="module")
+def click_nulls(pair: _Pair) -> dict[tuple[str, float], ie.NullModel]:
+    params = ie.ClickCheckParams()
+    nulls: dict[tuple[str, float], ie.NullModel] = {}
+    for window_um in params.windows_um:
+        built = ie._null_models(
+            pair.reference,
+            pair.moving,
+            representations=("bp20", "orientation", "fused"),
+            window_um=window_um,
+            search_um=params.search_um,
+            n_pairs=150,
+            min_distance_um=2000.0,
+            seed=0,
+        )
+        nulls.update({(name, window_um): model for name, model in built.items()})
+    return nulls
+
+
+def _deep_tissue_points(pair: _Pair, count: int, seed: int) -> np.ndarray:
+    """Reference um of points far from the tissue edge."""
+    interior = ndimage.binary_erosion(pair.reference.tissue, iterations=300)
+    rows, columns = np.nonzero(interior)
+    rng = np.random.default_rng(seed)
+    chosen = rng.choice(len(rows), size=count, replace=False)
+    return pair.reference.px_to_um(np.stack([columns[chosen], rows[chosen]], axis=1))
+
+
+def test_warp_role_images_reproduces_the_reference_structure() -> None:
+    phantom = _phantom(0, fine_detail=False)
+    reference = ie.compute_representation(phantom.reference)
+    warped_images = ie.warp_role_images(
+        phantom.moving, reference=phantom.reference, pull_um=phantom.pull
+    )
+    warped = ie.compute_representation(warped_images)
+
+    assert warped_images.shape_yx == phantom.reference.shape_yx
+    assert np.array_equal(warped_images.to_level0, phantom.reference.to_level0)
+    inside = ndimage.binary_erosion(reference.tissue & warped.tissue, iterations=60)
+    for role_index in range(3):
+        a = reference.bands[role_index][inside]
+        b = warped.bands[role_index][inside]
+        assert np.corrcoef(a, b)[0, 1] > 0.9
+    # The affine prior alone leaves the sinusoid (40 um) unexplained: worse.
+    prior_images = ie.warp_role_images(
+        phantom.moving, reference=phantom.reference, pull_um=phantom.prior
+    )
+    prior = ie.compute_representation(prior_images)
+    assert np.corrcoef(reference.bands[2][inside], prior.bands[2][inside])[0, 1] < 0.9
+
+
+def test_warp_role_images_leaves_uncovered_area_empty() -> None:
+    images = ie.RoleImages(
+        images={"dapi": np.full((40, 60), 100.0, np.float32)},
+        to_level0=np.eye(3),
+        pixel_size_um=2.0,
+        level0_pixel_size_um=2.0,
+    )
+
+    def shifted(points_um: np.ndarray) -> np.ndarray:
+        return np.asarray(points_um) + np.array([50.0, 0.0])
+
+    warped = ie.warp_role_images(
+        images, reference=images, pull_um=shifted, lattice_px=7
+    )
+
+    # Reference px x maps to moving px x + 25: columns 35 and beyond are outside.
+    assert warped.images["dapi"][:, :30].min() == pytest.approx(100.0)
+    assert warped.images["dapi"][:, 36:].max() == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Empirical null
+# ---------------------------------------------------------------------------
+
+
+def test_empirical_null_of_independent_images_stays_low_and_is_deterministic(
+    pair: _Pair, other_pair: _Pair
+) -> None:
+    kwargs: dict[str, Any] = {
+        "representation": "bp20",
+        "window_um": 600.0,
+        "search_um": 250.0,
+        "n_pairs": 200,
+        "seed": 3,
+    }
+
+    first = ie.empirical_null(pair.reference, other_pair.reference, **kwargs)
+    again = ie.empirical_null(pair.reference, other_pair.reference, **kwargs)
+    different = ie.empirical_null(
+        pair.reference, other_pair.reference, **{**kwargs, "seed": 4}
+    )
+
+    assert first == again
+    assert first != different
+    assert first.n > 100
+    assert first.peak_p99 < 0.35
+    assert 0.0 < first.peak_p95 <= first.peak_p99
+    assert 0.0 < first.distinct_p95 < 0.3
+
+
+def test_empirical_null_rejects_an_unknown_representation(pair: _Pair) -> None:
+    with pytest.raises(ValueError, match="unknown representation"):
+        ie.empirical_null(
+            pair.reference,
+            pair.moving,
+            representation="nuclei",
+            window_um=600.0,
+            search_um=250.0,
+            n_pairs=5,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Click checks
+# ---------------------------------------------------------------------------
+
+
+def _check(
+    pair: _Pair,
+    nulls: dict[tuple[str, float], ie.NullModel],
+    reference_um: np.ndarray,
+    moving_um: np.ndarray,
+    *,
+    predicted_um: np.ndarray | None = None,
+    pull: Callable[[np.ndarray], np.ndarray] | None = None,
+) -> list[ie.ClickCheck]:
+    reference_um = np.atleast_2d(reference_um)
+    moving_um = np.atleast_2d(moving_um)
+    return ie.check_clicks(
+        pair.reference,
+        pair.moving,
+        pair_ids=list(range(1, len(reference_um) + 1)),
+        reference_xy_um=reference_um,
+        moving_xy_um=moving_um,
+        predicted_moving_xy_um=moving_um if predicted_um is None else predicted_um,
+        pull_um=pull or pair.phantom.pull,
+        nulls=nulls,
+    )
+
+
+def test_correct_clicks_are_confirmed_strongly_within_a_few_um(
+    pair: _Pair, click_nulls: dict[tuple[str, float], ie.NullModel]
+) -> None:
+    reference_um = _deep_tissue_points(pair, 10, seed=1)
+    truth = pair.phantom.pull(reference_um)
+
+    checks = _check(pair, click_nulls, reference_um, truth)
+
+    assert [c.verdict for c in checks] == ["confirmed"] * 10
+    assert all(c.strength == "strong" for c in checks)
+    assert all(
+        c.image_offset_um is not None and c.image_offset_um <= 5.0 for c in checks
+    )
+    assert all(
+        c.snap_moving_xy_um is None and c.ridge_direction_moving_xy is None
+        for c in checks
+    )
+
+
+def test_a_click_moved_120_um_is_contradicted_with_a_snap_at_the_truth(
+    pair: _Pair, click_nulls: dict[tuple[str, float], ie.NullModel]
+) -> None:
+    reference_um = _deep_tissue_points(pair, 6, seed=2)
+    truth = pair.phantom.pull(reference_um)
+    direction = np.array([0.8, 0.6])
+
+    checks = _check(
+        pair, click_nulls, reference_um, truth + 120.0 * direction, predicted_um=truth
+    )
+
+    assert [c.verdict for c in checks] == ["contradicted"] * 6
+    for check, true_position in zip(checks, truth, strict=True):
+        assert check.snap_moving_xy_um is not None
+        assert np.hypot(*(check.snap_moving_xy_um - true_position)) <= 10.0
+        assert check.strength is None
+
+
+def test_a_click_outside_the_image_is_not_checked(
+    pair: _Pair, click_nulls: dict[tuple[str, float], ie.NullModel]
+) -> None:
+    inside = _deep_tissue_points(pair, 1, seed=3)
+    reference_um = np.vstack([inside, [[-500.0, -500.0]]])
+
+    checks = _check(pair, click_nulls, reference_um, pair.phantom.pull(reference_um))
+
+    assert checks[0].verdict == "confirmed"
+    assert checks[1].verdict == "not_checked"
+    assert checks[1].estimates == ()
+    assert checks[1].image_offset_um is None
+
+
+def test_check_clicks_requires_matching_lengths_and_grids(pair: _Pair) -> None:
+    with pytest.raises(ValueError, match="same length"):
+        ie.check_clicks(
+            pair.reference,
+            pair.moving,
+            pair_ids=[1, 2],
+            reference_xy_um=np.zeros((1, 2)),
+            moving_xy_um=np.zeros((1, 2)),
+            predicted_moving_xy_um=np.zeros((1, 2)),
+            pull_um=pair.phantom.pull,
+        )
+    assert (
+        ie.check_clicks(
+            pair.reference,
+            pair.moving,
+            pair_ids=[],
+            reference_xy_um=np.zeros((0, 2)),
+            moving_xy_um=np.zeros((0, 2)),
+            predicted_moving_xy_um=np.zeros((0, 2)),
+            pull_um=pair.phantom.pull,
+        )
+        == []
+    )
+
+
+# A straight tube in a cleared region, and a cleared region without one.
+_TUBE_Y_UM = 2800.0
+_RIDGE_BOXES = ((2200.0, 2300.0, 3600.0, 3300.0), (1700.0, 3600.0, 3000.0, 4400.0))
+
+
+@pytest.fixture(scope="module")
+def ridge_pair() -> _Pair:
+    phantom = make_phantom(
+        3,
+        clear_boxes_um=_RIDGE_BOXES,
+        extra_tubes_um=[(1500.0, _TUBE_Y_UM, 4300.0, _TUBE_Y_UM, 20.0)],
+    )
+    return _build_pair(phantom)
+
+
+@pytest.fixture(scope="module")
+def ridge_nulls(ridge_pair: _Pair) -> dict[tuple[str, float], ie.NullModel]:
+    nulls: dict[tuple[str, float], ie.NullModel] = {}
+    for window_um in ie.ClickCheckParams().windows_um:
+        built = ie._null_models(
+            ridge_pair.reference,
+            ridge_pair.moving,
+            representations=("bp20", "orientation", "fused"),
+            window_um=window_um,
+            search_um=250.0,
+            n_pairs=150,
+            min_distance_um=2000.0,
+            seed=0,
+        )
+        nulls.update({(name, window_um): model for name, model in built.items()})
+    return nulls
+
+
+def test_a_click_moved_along_a_straight_tube_is_a_ridge(
+    ridge_pair: _Pair, ridge_nulls: dict[tuple[str, float], ie.NullModel]
+) -> None:
+    pull = ridge_pair.phantom.pull
+    on_tube = np.array([[2900.0, _TUBE_Y_UM]])
+    truth = pull(on_tube)
+    step = 5.0
+    tube_direction = (pull(on_tube + [[step, 0.0]]) - pull(on_tube - [[step, 0.0]]))[0]
+    tube_direction = tube_direction / np.hypot(*tube_direction)
+
+    (check,) = _check(
+        ridge_pair,
+        ridge_nulls,
+        on_tube,
+        truth + 80.0 * tube_direction,
+        predicted_um=truth,
+    )
+
+    assert check.verdict == "ridge"
+    assert check.ridge_direction_moving_xy is not None
+    cosine = abs(float(check.ridge_direction_moving_xy @ tube_direction))
+    assert math.degrees(math.acos(min(cosine, 1.0))) < 10.0
+    assert check.elongation is not None and check.elongation >= 2.0
+    assert check.snap_moving_xy_um is None and check.strength is None
+
+
+def test_a_correct_click_on_a_tube_is_not_contradicted(
+    ridge_pair: _Pair, ridge_nulls: dict[tuple[str, float], ie.NullModel]
+) -> None:
+    on_tube = np.array([[2900.0, _TUBE_Y_UM], [3300.0, _TUBE_Y_UM]])
+
+    checks = _check(ridge_pair, ridge_nulls, on_tube, ridge_pair.phantom.pull(on_tube))
+
+    # Ridge-shaped estimates locate the structure across the tube only: they must
+    # never vote for a contradiction of a click that is right.
+    assert all(c.verdict != "contradicted" for c in checks)
+
+
+def test_a_click_in_a_featureless_region_is_inconclusive(
+    ridge_pair: _Pair, ridge_nulls: dict[tuple[str, float], ie.NullModel]
+) -> None:
+    empty = np.array([[2350.0, 4000.0]])
+
+    (check,) = _check(ridge_pair, ridge_nulls, empty, ridge_pair.phantom.pull(empty))
+
+    assert check.verdict == "inconclusive"
+    assert check.snap_moving_xy_um is None
+
+
+# The verdict rules on hand-made estimates (amendment A2).
+
+
+def _estimate(
+    representation: str,
+    window_um: float,
+    offset_um: tuple[float, float],
+    *,
+    confident: bool = True,
+    elongation: float = 1.2,
+) -> ie.ClickEstimate:
+    return ie.ClickEstimate(
+        representation=representation,
+        window_um=window_um,
+        peak=0.9,
+        distinct=0.3,
+        on_border=False,
+        confident=confident,
+        elongation=elongation,
+        image_moving_xy_um=np.array(offset_um) + np.array([1000.0, 2000.0]),
+    )
+
+
+def _assess(*estimates: ie.ClickEstimate) -> ie.ClickCheck:
+    click = np.array([1000.0, 2000.0])
+    return ie._assess(7, estimates, click, click, ie.ClickCheckParams())
+
+
+def test_a_fused_small_window_confirmation_without_dissent_is_strong() -> None:
+    check = _assess(
+        _estimate("fused", 300.0, (5.0, 0.0)),
+        _estimate("bp20", 300.0, (4.0, 3.0)),
+        _estimate("orientation", 600.0, (200.0, 0.0), confident=False),
+    )
+
+    assert (check.verdict, check.strength) == ("confirmed", "strong")
+    assert check.image_offset_um == pytest.approx(5.0)
+
+
+def test_a_confirmation_with_a_confident_distant_band_estimate_is_weak() -> None:
+    check = _assess(
+        _estimate("fused", 300.0, (5.0, 0.0)),
+        _estimate("bp20", 300.0, (250.0, 0.0)),
+    )
+
+    assert (check.verdict, check.strength) == ("confirmed", "weak")
+    # A ridge-shaped dissenting estimate does not make it weak.
+    ridge = _assess(
+        _estimate("fused", 300.0, (5.0, 0.0)),
+        _estimate("bp20", 300.0, (250.0, 0.0), elongation=3.0),
+    )
+    assert (ridge.verdict, ridge.strength) == ("confirmed", "strong")
+    # Neither does a confirmation that comes from the large window only.
+    large = _assess(_estimate("fused", 600.0, (5.0, 0.0)))
+    assert (large.verdict, large.strength) == ("confirmed", "weak")
+
+
+def test_two_agreeing_distant_estimates_contradict_with_a_snap() -> None:
+    check = _assess(
+        _estimate("bp20", 300.0, (150.0, 100.0)),
+        _estimate("orientation", 600.0, (160.0, 90.0)),
+        _estimate("fused", 300.0, (400.0, 0.0), confident=False),
+    )
+
+    assert check.verdict == "contradicted"
+    assert check.snap_moving_xy_um == pytest.approx([1155.0, 2095.0])
+    assert check.strength is None
+
+
+def test_a_contradiction_from_large_windows_only_is_inconclusive() -> None:
+    check = _assess(
+        _estimate("bp20", 600.0, (150.0, 100.0)),
+        _estimate("orientation", 600.0, (155.0, 95.0)),
+    )
+
+    assert (check.verdict, check.reason) == ("inconclusive", "large_window_only")
+
+
+def test_a_contradiction_from_orientation_only_is_inconclusive() -> None:
+    check = _assess(
+        _estimate("orientation", 300.0, (150.0, 100.0)),
+        _estimate("orientation", 600.0, (155.0, 95.0)),
+    )
+
+    assert (check.verdict, check.reason) == ("inconclusive", "orientation_only")
+
+
+def test_ridge_shaped_estimates_never_vote_for_a_contradiction() -> None:
+    check = _assess(
+        _estimate("bp20", 300.0, (150.0, 100.0), elongation=3.0),
+        _estimate("bp20", 600.0, (155.0, 95.0), elongation=2.5),
+    )
+
+    assert check.verdict == "inconclusive"
+
+
+def test_a_click_that_is_both_confirmed_and_contradicted_is_conflicting() -> None:
+    check = _assess(
+        _estimate("fused", 300.0, (5.0, 0.0)),
+        _estimate("bp20", 300.0, (150.0, 100.0)),
+        _estimate("bp20", 600.0, (152.0, 101.0)),
+    )
+
+    assert (check.verdict, check.reason) == ("inconclusive", "conflicting")
+
+
+def test_the_largest_agreeing_group_sets_the_snap_and_ties_go_to_the_prediction() -> (
+    None
+):
+    click = np.array([1000.0, 2000.0])
+    estimates = (
+        _estimate("bp20", 300.0, (150.0, 0.0)),
+        _estimate("bp20", 600.0, (155.0, 0.0)),
+        _estimate("bp20", 300.0, (-150.0, 0.0)),
+        _estimate("bp20", 600.0, (-155.0, 0.0)),
+    )
+    near_left = click + [-150.0, 0.0]
+
+    check = ie._assess(7, estimates, click, near_left, ie.ClickCheckParams())
+
+    assert check.verdict == "contradicted"
+    assert check.snap_moving_xy_um == pytest.approx([847.5, 2000.0])
