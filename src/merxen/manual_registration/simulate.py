@@ -604,3 +604,305 @@ def inject_labelling(
         parse_labelling_attrs(payload)
         write_root_attr(store, LABELLING_ATTR, payload)
     return revision
+
+
+# --------------------------------------------------------------------------------
+# Point-observation phantom for the robust landmark field
+# --------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FieldPhantom:
+    """A synthetic displacement field with clicks, misclicks and tissue windows.
+
+    All positions are micrometres; the reference positions are the inputs of the
+    field and the moving positions its outputs (reference full-frame to moving
+    full-frame). The phantom does not import the landmark field code.
+
+    Attributes:
+        reference_xy_um: ``(N, 2)`` click positions in the reference.
+        moving_xy_um: ``(N, 2)`` observed (noisy, possibly displaced) clicks.
+        true_moving_xy_um: ``(N, 2)`` noise-free moving positions.
+        kind: Per click: ``clean``, ``ridge``, ``medium`` or ``gross``.
+        ridge_direction_xy: ``(N, 2)`` unit ridge directions, zero for other kinds.
+        window_reference_xy_um: ``(K, 2)`` window positions in the reference.
+        window_moving_xy_um: ``(K, 2)`` observed window positions.
+        window_wrong: ``(K,)`` windows displaced by 80-200 um.
+        window_peak_cov_um2: ``(K, 2, 2)`` anisotropic part of the true window noise
+            (what image evidence measures and passes as a fixed covariance).
+        grid_xy_um: ``(M, 2)`` grid nodes inside the tissue.
+        true_grid_moving_xy_um: ``(M, 2)`` the truth at the grid nodes.
+        true_field: The truth, ``(M, 2)`` reference um -> ``(M, 2)`` moving um.
+        params: The numeric generation parameters.
+    """
+
+    reference_xy_um: np.ndarray
+    moving_xy_um: np.ndarray
+    true_moving_xy_um: np.ndarray
+    kind: tuple[str, ...]
+    ridge_direction_xy: np.ndarray
+    window_reference_xy_um: np.ndarray
+    window_moving_xy_um: np.ndarray
+    window_wrong: np.ndarray
+    window_peak_cov_um2: np.ndarray
+    grid_xy_um: np.ndarray
+    true_grid_moving_xy_um: np.ndarray
+    true_field: Callable[[np.ndarray], np.ndarray]
+    params: dict[str, float]
+
+
+def _matern52_fourier_sampler(
+    rng: np.random.Generator, *, length_um: float, signal_um: float, n_features: int
+) -> Callable[[np.ndarray], np.ndarray]:
+    """Random Fourier features of a 2-output Matern 5/2 GP (independent outputs).
+
+    ``f(x) = s sqrt(2 / F) sum_k a_k cos(omega_k . x + b_k)`` with
+    ``omega_k = z_k / (l sqrt(u_k / 5))``, ``z_k ~ N(0, I_2)`` and
+    ``u_k ~ chi-square(5)``: the spectral density of the Matern 5/2 kernel.
+    """
+    if signal_um == 0.0:
+
+        def zero_field(positions: np.ndarray) -> np.ndarray:
+            return np.zeros((len(positions), 2))
+
+        return zero_field
+    z = rng.standard_normal((2, n_features, 2))
+    u = rng.chisquare(5.0, size=(2, n_features))
+    omega = z / (length_um * np.sqrt(u / 5.0))[..., None]
+    phase = rng.uniform(0.0, 2.0 * math.pi, size=(2, n_features))
+    amplitude = rng.standard_normal((2, n_features))
+    scale = signal_um * math.sqrt(2.0 / n_features)
+
+    def field_sample(positions: np.ndarray) -> np.ndarray:
+        points = np.atleast_2d(np.asarray(positions, dtype=float))
+        out = np.empty((len(points), 2))
+        for axis in range(2):
+            for start in range(0, len(points), 2048):
+                block = points[start : start + 2048]
+                angle = block @ omega[axis].T + phase[axis]
+                out[start : start + 2048, axis] = scale * (
+                    np.cos(angle) @ amplitude[axis]
+                )
+        return out
+
+    return field_sample
+
+
+def _random_unit_vectors(rng: np.random.Generator, count: int) -> np.ndarray:
+    angle = rng.uniform(0.0, 2.0 * math.pi, size=count)
+    return np.column_stack([np.cos(angle), np.sin(angle)])
+
+
+def make_field_phantom(
+    *,
+    seed: int,
+    extent_um: tuple[float, float] = (22000.0, 16000.0),
+    n_clicks: int = 66,
+    n_windows: int = 0,
+    rotation_deg: float = 2.0,
+    scale_xy: tuple[float, float] = (1.016, 1.004),
+    translation_um: tuple[float, float] = (150.0, -80.0),
+    long_length_um: float = 20000.0,
+    long_signal_um: float = 100.0,
+    short_length_um: float = 1200.0,
+    short_signal_um: float = 45.0,
+    click_noise_um: float = 40.0,
+    ridge_fraction: float = 0.5,
+    ridge_along_um: float = 60.0,
+    ridge_across_um: float = 27.0,
+    n_medium: int = 5,
+    medium_range_um: tuple[float, float] = (30.0, 150.0),
+    n_gross: int = 3,
+    gross_um: float = 1000.0,
+    window_noise_um: float = 15.0,
+    window_peak_sd_um: tuple[tuple[float, float], tuple[float, float]] = (
+        (5.0, 30.0),
+        (4.0, 9.0),
+    ),
+    window_wrong_fraction: float = 0.03,
+    min_click_spacing_um: float = 300.0,
+    grid_step_um: float = 250.0,
+    n_features: int = 2048,
+) -> FieldPhantom:
+    """Simulate a smooth displacement field observed by clicks and windows.
+
+    The truth is ``y = c + A (x - c) + translation + f_L(x) + f_S(x)`` where ``c``
+    is the extent centre, ``A = R(rotation) diag(scale_xy)`` and ``f_L``, ``f_S``
+    are random Matern 5/2 fields (``short_signal_um=0`` gives a single scale).
+    Clicks are drawn uniformly inside an elliptical tissue with a minimum spacing:
+    ``n_gross`` gross misclicks, ``n_medium`` medium misclicks, and of the rest a
+    ``ridge_fraction`` of ridge clicks (along/across SD) and clean clicks
+    (isotropic SD). Windows sit on a 400 um lattice with noise
+    ``window_noise_um^2 I + P_k`` where ``P_k`` is an anisotropic peak covariance;
+    a few are displaced by 80-200 um.
+
+    Args:
+        seed: Seed of ``numpy.random.default_rng``; everything derives from it.
+        extent_um: Image extent ``(width, height)``.
+        n_clicks: Number of clicks, misclicks included.
+        n_windows: Number of window observations.
+        rotation_deg: Rotation of the affine part.
+        scale_xy: Axis scales of the affine part.
+        translation_um: Translation of the affine part.
+        long_length_um: Length scale of the long field.
+        long_signal_um: Signal SD of the long field.
+        short_length_um: Length scale of the short field.
+        short_signal_um: Signal SD of the short field (0 disables it).
+        click_noise_um: Isotropic SD per axis of a clean click.
+        ridge_fraction: Fraction of the non-misclick clicks that are ridge clicks.
+        ridge_along_um: SD along a ridge click's ridge.
+        ridge_across_um: SD across a ridge click's ridge.
+        n_medium: Number of medium misclicks.
+        medium_range_um: Displacement range of medium misclicks.
+        n_gross: Number of gross misclicks.
+        gross_um: Displacement of gross misclicks.
+        window_noise_um: Isotropic window noise SD per axis.
+        window_peak_sd_um: ``((along_min, along_max), (across_min, across_max))`` of
+            the window peak covariance SDs.
+        window_wrong_fraction: Fraction of windows displaced by 80-200 um.
+        min_click_spacing_um: Minimum distance between clicks.
+        grid_step_um: Spacing of the evaluation grid.
+        n_features: Random Fourier features per field.
+
+    Returns:
+        The phantom.
+
+    Raises:
+        ValueError: If the counts are inconsistent or no click placement is found.
+    """
+    if n_gross + n_medium > n_clicks:
+        raise ValueError("n_gross + n_medium exceeds n_clicks")
+    rng = np.random.default_rng(seed)
+    width, height = extent_um
+    centre = np.array([width / 2.0, height / 2.0])
+    semi = np.array([0.48 * width, 0.45 * height])
+
+    def inside(points: np.ndarray) -> np.ndarray:
+        return np.asarray(np.sum(((points - centre) / semi) ** 2, axis=1) <= 1.0)
+
+    angle = math.radians(rotation_deg)
+    rotation = np.array(
+        [[math.cos(angle), -math.sin(angle)], [math.sin(angle), math.cos(angle)]]
+    )
+    affine = rotation @ np.diag(scale_xy)
+    translation = np.asarray(translation_um, dtype=float)
+    long_field = _matern52_fourier_sampler(
+        rng, length_um=long_length_um, signal_um=long_signal_um, n_features=n_features
+    )
+    short_field = _matern52_fourier_sampler(
+        rng, length_um=short_length_um, signal_um=short_signal_um, n_features=n_features
+    )
+
+    def true_field(positions: np.ndarray) -> np.ndarray:
+        points = np.atleast_2d(np.asarray(positions, dtype=float))
+        smooth = (points - centre) @ affine.T + centre + translation
+        return np.asarray(smooth + long_field(points) + short_field(points))
+
+    # Clicks: uniform in the ellipse by rejection, with a minimum spacing.
+    clicks = np.empty((0, 2))
+    attempts = 0
+    while len(clicks) < n_clicks:
+        attempts += 1
+        if attempts > 200000:
+            raise ValueError("could not place the clicks with the requested spacing")
+        candidate = centre + (rng.uniform(-1.0, 1.0, size=2) * semi)
+        if not inside(candidate[None, :])[0]:
+            continue
+        if len(clicks) and np.min(np.linalg.norm(clicks - candidate, axis=1)) < (
+            min_click_spacing_um
+        ):
+            continue
+        clicks = np.vstack([clicks, candidate])
+    n_rest = n_clicks - n_gross - n_medium
+    n_ridge = int(round(ridge_fraction * n_rest))
+    kinds = (
+        ["gross"] * n_gross
+        + ["medium"] * n_medium
+        + ["ridge"] * n_ridge
+        + ["clean"] * (n_rest - n_ridge)
+    )
+    order = rng.permutation(n_clicks)
+    kind = tuple(kinds[i] for i in order)
+    truth = true_field(clicks)
+    observed = truth.copy()
+    ridge_direction = np.zeros((n_clicks, 2))
+    for index, label in enumerate(kind):
+        if label == "gross":
+            observed[index] += gross_um * _random_unit_vectors(rng, 1)[0]
+        elif label == "ridge":
+            direction = _random_unit_vectors(rng, 1)[0]
+            across = np.array([-direction[1], direction[0]])
+            observed[index] += rng.normal(0.0, ridge_along_um) * direction
+            observed[index] += rng.normal(0.0, ridge_across_um) * across
+            ridge_direction[index] = direction
+        else:
+            observed[index] += rng.normal(0.0, click_noise_um, size=2)
+            if label == "medium":
+                size = rng.uniform(*medium_range_um)
+                observed[index] += size * _random_unit_vectors(rng, 1)[0]
+
+    # Windows: a random subset of a 400 um lattice inside the ellipse.
+    lattice_axis_x = np.arange(200.0, width, 400.0)
+    lattice_axis_y = np.arange(200.0, height, 400.0)
+    lattice = np.array([(x, y) for y in lattice_axis_y for x in lattice_axis_x])
+    lattice = lattice[inside(lattice)]
+    if n_windows > len(lattice):
+        raise ValueError(
+            f"n_windows={n_windows} exceeds the {len(lattice)} lattice sites"
+        )
+    chosen = rng.choice(len(lattice), size=n_windows, replace=False)
+    window_reference = lattice[np.sort(chosen)] if n_windows else np.empty((0, 2))
+    window_peak = np.zeros((n_windows, 2, 2))
+    window_observed = np.empty((n_windows, 2))
+    window_truth = true_field(window_reference) if n_windows else np.empty((0, 2))
+    for index in range(n_windows):
+        peak_along = rng.uniform(*window_peak_sd_um[0])
+        peak_across = rng.uniform(*window_peak_sd_um[1])
+        direction = _random_unit_vectors(rng, 1)[0]
+        basis = np.column_stack([direction, [-direction[1], direction[0]]])
+        window_peak[index] = basis @ np.diag([peak_along**2, peak_across**2]) @ basis.T
+        covariance = window_noise_um**2 * np.eye(2) + window_peak[index]
+        window_observed[index] = window_truth[index] + rng.multivariate_normal(
+            np.zeros(2), covariance
+        )
+    window_wrong = np.zeros(n_windows, dtype=bool)
+    n_wrong = int(round(window_wrong_fraction * n_windows))
+    if n_wrong:
+        window_wrong[rng.choice(n_windows, size=n_wrong, replace=False)] = True
+        for index in np.flatnonzero(window_wrong):
+            window_observed[index] += (
+                rng.uniform(80.0, 200.0) * _random_unit_vectors(rng, 1)[0]
+            )
+
+    grid_x = np.arange(grid_step_um / 2.0, width, grid_step_um)
+    grid_y = np.arange(grid_step_um / 2.0, height, grid_step_um)
+    grid = np.array([(x, y) for y in grid_y for x in grid_x])
+    grid = grid[inside(grid)]
+    params = {
+        "seed": float(seed),
+        "n_clicks": float(n_clicks),
+        "n_windows": float(n_windows),
+        "rotation_deg": float(rotation_deg),
+        "long_length_um": float(long_length_um),
+        "long_signal_um": float(long_signal_um),
+        "short_length_um": float(short_length_um),
+        "short_signal_um": float(short_signal_um),
+        "click_noise_um": float(click_noise_um),
+        "window_noise_um": float(window_noise_um),
+        "gross_um": float(gross_um),
+    }
+    return FieldPhantom(
+        reference_xy_um=clicks,
+        moving_xy_um=observed,
+        true_moving_xy_um=truth,
+        kind=kind,
+        ridge_direction_xy=ridge_direction,
+        window_reference_xy_um=window_reference,
+        window_moving_xy_um=window_observed,
+        window_wrong=window_wrong,
+        window_peak_cov_um2=window_peak,
+        grid_xy_um=grid,
+        true_grid_moving_xy_um=true_field(grid),
+        true_field=true_field,
+        params=params,
+    )

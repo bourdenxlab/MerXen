@@ -333,7 +333,10 @@ Standalone manual landmark registration of an image pair
 - `register` — `run_manual_registration`: fit, refine, warp, QC, result store.
 - `qc` — tissue-scale and nucleus-scale alignment QC.
 - `compare` — `compare_runs`: side-by-side metrics of several runs.
-- `simulate` — synthetic pairs, simulated landmarks, `inject_labelling`.
+- `simulate` — synthetic pairs, simulated landmarks, `inject_labelling`,
+  `make_field_phantom` (point-observation field phantom).
+- `landmark_field` — robust Student-t GP displacement field: `fit_landmark_field`, LOO
+  p-values, SD maps, `suggest_landmarks`, C1 JSON (`to_dict`/`from_dict`).
 
 ## `merxen.mask_image_quantification`
 
