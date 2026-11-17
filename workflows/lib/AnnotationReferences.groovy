@@ -371,7 +371,8 @@ class AnnotationReferences {
      * Return the annotation_config.json content RESOLVE reads.
      *
      * annotationConfig plus the settings no earlier task reads: the human
-     * degraded mode annotation_allow_single_method (plan §5.3). Thresholds,
+     * degraded mode annotation_allow_single_method (plan §5.3) and, when set,
+     * annotation_marker_consistency_broad_only (real_qc). Thresholds,
      * floors, gate and flag settings are Python defaults and packaged tables,
      * which resolveRulesFingerprint covers.
      *
@@ -382,6 +383,12 @@ class AnnotationReferences {
     static Map resolveConfig(Map params, Object species) {
         def config = annotationConfig(params, species)
         config.allow_single_method = isTrue(params?.get("annotation_allow_single_method"))
+        // Set only when given, so a run without it keeps RESOLVE's config (and
+        // task hash) unchanged.
+        def markerCap = params?.get("annotation_marker_consistency_broad_only")
+        if (markerCap != null && markerCap.toString().trim()) {
+            config.real_qc = [marker_consistency_broad_only: markerCap.toString() as double]
+        }
         return config
     }
 

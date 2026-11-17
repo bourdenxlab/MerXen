@@ -1488,6 +1488,11 @@ def _resolve_cases(root: Path, human: dict[str, Any]) -> dict[str, dict[str, Any
             "params": single,
             "species": "human",
         },
+        "resolve_config_marker_cap": {
+            "fn": "resolveConfig",
+            "params": {**human, "annotation_marker_consistency_broad_only": 0},
+            "species": "human",
+        },
         "resolve_spec": {
             "fn": "resolveSpec",
             "params": single,
@@ -2133,6 +2138,21 @@ def test_resolve_only_settings_never_reach_the_map_config(
         } == base
         config = AnnotationConfig.model_validate(resolve)
         assert config.allow_single_method is expected
+
+
+@pytest.mark.nextflow
+@needs_nextflow
+def test_marker_consistency_cap_reaches_resolve_only_when_set(
+    harness: dict[str, Any],
+) -> None:
+    """annotation_marker_consistency_broad_only is a RESOLVE-only real_qc setting."""
+    base = _value(harness, "resolve_config_human")
+    assert "real_qc" not in base
+    capped = _value(harness, "resolve_config_marker_cap")
+    assert capped["real_qc"] == {"marker_consistency_broad_only": 0.0}
+    assert {key: value for key, value in capped.items() if key != "real_qc"} == base
+    config = AnnotationConfig.model_validate(capped)
+    assert config.real_qc.marker_consistency_broad_only == 0.0
 
 
 @pytest.mark.nextflow
