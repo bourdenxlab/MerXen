@@ -297,10 +297,11 @@ visualization stage, reading prior outputs from `--outdir`.
 ## Manual-registration samplesheet
 
 The standalone [manual landmark registration](stages/manual-registration.md)
-workflows (`workflows/manual_registration_prepare.nf` and
-`workflows/manual_registration_register.nf`) read a **different** sheet: one row
+workflows (`workflows/manual_registration_prepare.nf`,
+`workflows/manual_registration_register.nf` and
+`workflows/manual_registration_check.nf`) read a **different** sheet: one row
 per image pair with `id`, `reference_image` and `moving_image` plus optional
-scene, channel, pixel-size, preset, settings and label columns. None of the
+scene, channel, pixel-size, preset, settings, channel-roles and label columns. None of the
 columns above apply to it. The column table, defaults and validation are in
 [Inputs and samplesheet](stages/manual-registration.md#inputs-and-samplesheet);
 the template is `workflows/samplesheet.manual_registration.example.csv`.

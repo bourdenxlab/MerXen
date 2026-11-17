@@ -9,7 +9,9 @@ grid, so its channels can be read against the reference directly.
 
 This is **not a stage of `main.nf`**. It is two standalone Nextflow workflows
 (prepare and register) with a human step between them, run from the same
-samplesheet:
+samplesheet, and a third, the landmark check, that tells the labeller how good the
+landmarks are while they are being placed (see
+[Checking landmarks labelled on another machine](#checking-landmarks-labelled-on-another-machine)):
 
 ```
  samplesheet row: id (alias), reference image, moving image, optional per-image settings, presets
@@ -31,14 +33,17 @@ samplesheet:
  [4] viewer: same button on a result store -> reference + warped moving, landmark overlays, flick to check
 ```
 
-The two workflows live in `workflows/` so they inherit `nextflow.config`, the
+The three workflows live in `workflows/` so they inherit `nextflow.config`, the
 execution profiles, the site configs and `workflows/lib/`. `main.nf`, its stage
 order and the metro map do not know about them.
 
 ## What it does
 
-**Two presets.** The register workflow runs every row once per preset. The
-presets differ in the length scale they trust:
+**Three presets.** The register workflow runs every row once per preset. The
+presets differ in the length scale they trust (`cortex_serial` is for adjacent
+cortex sections stained for AT8, MAP2 and DAPI; the landmark check works now and
+registration through its landmark field follows in the next change, so a
+`cortex_serial` register run stops with "not implemented yet" for the time being):
 
 - `same_section`: both images show the same cells (a post-Xenium IF image and
   the Xenium DAPI of the same section). Refinement and the optical flow work at
@@ -50,6 +55,15 @@ presets differ in the length scale they trust:
   12 µm per pixel with wider windows, stronger smoothing and tighter Jacobian
   limits; nucleus-level QC is computed but informative only. It inherits the
   `same_section` correlation guard.
+- `cortex_serial` (`cortex_serial_v1`): adjacent cortex sections whose nuclei do
+  not match. The similarity fit and the DAPI refinement are replaced by a smooth
+  **robust landmark field** (a Student-t Gaussian process over the landmark
+  displacements) that is checked against the AT8, MAP2 and DAPI images; the DAPI
+  affine refinement and the TV-L1 flow are off (`refine_affine=false`,
+  `nonrigid_enabled=false`). It keeps the default similarity trimming (10 µm floor,
+  `k` 3, at most 25 % trimmed), which is the viewer's live rigid fit, so the
+  check's rigid residuals match the flags the viewer shows in its rigid mode. It
+  needs the channel roles (`channel_roles` column).
 
 For a serial pair, run both: `same_section` then shows what nucleus-scale
 refinement and flow do on serial sections (its guards may reject them; status
@@ -84,9 +98,10 @@ One samplesheet for both workflows, one row per pair
 (`workflows/samplesheet.manual_registration.example.csv`):
 
 ```csv
-id,reference_image,moving_image,presets,registration_settings
-LCM1,/path/to/slide_reference.czi,/path/to/slide_moving.czi,same_section;serial_section,same_section:matrix_scale_tolerance=0.05
-HD1,/path/to/morphology_focus_dapi.ome.tif,/path/to/post_xenium_if.ome.tif,same_section,
+id,reference_image,moving_image,presets,registration_settings,channel_roles
+LCM1,/path/to/slide_reference.czi,/path/to/slide_moving.czi,same_section;serial_section,same_section:matrix_scale_tolerance=0.05,
+HD1,/path/to/morphology_focus_dapi.ome.tif,/path/to/post_xenium_if.ome.tif,same_section,,
+LCM2,/path/to/cortex_reference.czi,/path/to/cortex_moving.czi,cortex_serial,,at8=AF568;map2=AF647;dapi=DAPI
 ```
 
 | Column | Required | Default | Validation |
@@ -97,8 +112,9 @@ HD1,/path/to/morphology_focus_dapi.ome.tif,/path/to/post_xenium_if.ome.tif,same_
 | `reference_channel_names`, `moving_channel_names` | no | auto | `;`-list, non-empty, unique; count checked in Python; used verbatim |
 | `reference_registration_channel`, `moving_registration_channel` | no | `DAPI` | non-blank; resolved against the channel names in Python |
 | `reference_pixel_size_um`, `moving_pixel_size_um` | no | metadata | number > 0 |
-| `presets` | no | `--manual_registration_presets` (`same_section`) | `;`-list of `same_section`, `serial_section`, no duplicates |
+| `presets` | no | `--manual_registration_presets` (`same_section`) | `;`-list of `same_section`, `serial_section`, `cortex_serial`, no duplicates |
 | `registration_settings` | no | | `[preset:]key=value;...` (grammar below); keys are checked before any task starts |
+| `channel_roles` | for `cortex_serial` | | which channel plays each role, `[reference:\|moving:]role=channel;...` (grammar below); syntax and role names are checked before any task starts, the channel names against the prepared store in the task |
 | `run_label` | no | | `^[A-Za-z0-9][A-Za-z0-9_.-]*$`; appended to run names |
 | `prepared_store` | no | `<outdir>/<id>/prepared/<id>_prepared.zarr` | register workflow only; must exist |
 
@@ -110,6 +126,19 @@ validate every column. The register workflow still requires the source images
 to exist, although it reads only the prepared OME-TIFFs. `prepared_store` in a
 prepare run is ignored with a warning (prepare always writes the default
 location).
+
+**Channel roles.** The image evidence of the `cortex_serial` preset reads three
+stains: `at8`, `map2` and `dapi`. `channel_roles` names the channel that plays each
+role: `roles := item (";" item)*`, `item := [scope ":"] role "=" channel`, with
+`scope` `reference` or `moving` (an unscoped item applies to both images and a
+scoped one overrides it for that image), `role` one of `at8`, `map2`, `dapi`, and a
+channel name that contains no `;`, `=` or `:`. Empty items are skipped; a role
+given twice in one scope is an error; a channel must be one of that image's
+canonical channel names in the prepared store (exact, case-sensitive; the error
+lists the names). For the LCM pairs it is `at8=AF568;map2=AF647;dapi=DAPI`. **Quote
+it on a command line**: `--channel-roles 'at8=AF568;map2=AF647;dapi=DAPI'`, because
+the shell splits an unquoted value at each `;`. A row whose presets include
+`cortex_serial` needs all three roles.
 
 **CZI files.** A `.czi` is read by an **isolated runtime**: `czifile` cannot join
 the base environment (squidpy caps `imagecodecs<2026`), so MerXen re-runs
@@ -169,6 +198,23 @@ nextflow run workflows/manual_registration_register.nf -profile dwight,conda \
 # check: Load image data > .../<id>/registered/<preset>/<id>_<preset>_registered.zarr
 ```
 
+The landmark check of a cortex pair runs on the host, from the samplesheet or from
+the command line (see
+[Checking landmarks labelled on another machine](#checking-landmarks-labelled-on-another-machine)):
+
+```bash
+nextflow run workflows/manual_registration_check.nf -profile dwight,conda \
+    --samplesheet workflows/samplesheet.manual_registration.csv \
+    --outdir "$MERXEN_RESULTS_ROOT/manual_registration"
+merxen manual-registration-check --store <prepared store> \
+    --channel-roles 'at8=AF568;map2=AF647;dapi=DAPI' --out-dir <dir>
+```
+
+`workflows/manual_registration_check.nf` runs `MANUAL_REGISTRATION_CHECK` once per
+samplesheet row, with the settings of `--manual_registration_check_preset`. It checks
+the store's own labelling (a draft too), writes `<outdir>/<id>/check/` and the check
+attribute of the store.
+
 Use an `--outdir` **separate from the main pipeline's**: the Nextflow report,
 timeline and trace files under `<outdir>/nextflow/` are overwritten per launch.
 Both workflows refuse `--outdir` equal to the main pipeline's default `./results`
@@ -208,6 +254,9 @@ preflight error.
 | `manual_registration_force_prepare` | `false` | Rebuild the prepared store; a changed grid with a labelling needs it (see "Re-running prepare") |
 | `manual_registration_force_register` | `false` | Re-run registrations Python would skip |
 | `manual_registration_czi_python` | `null` | Python of the CZI runtime, or `in_process` (site config) |
+| `manual_registration_check_preset` | `"cortex_serial"` | Preset of the check workflow |
+| `manual_registration_check_write_attr` | `true` | Write the check attribute into the prepared store |
+| `manual_registration_check_suggestions` | `20` | Suggested next clicks (0 to 200) |
 
 Resources: `MANUAL_REGISTRATION_PREPARE` 8 CPUs / 16 GB (the conversion streams
 one channel band at a time and maps no file; Nextflow trace of the LCM2 pair
@@ -215,9 +264,11 @@ one channel band at a time and maps no file; Nextflow trace of the LCM2 pair
 about 3.6 cores busy),
 `MANUAL_REGISTRATION_REGISTER` 8 CPUs / 48 GB (a full 80k x 61k px Zeiss scan;
 refinement working images are capped at 32767 px per side),
-`MANUAL_REGISTRATION_COMPARE` 1 CPU / 4 GB. The Dwight profile limits the first
-two to two concurrent tasks each (`manual_registration_prepare_max_forks`,
-`manual_registration_register_max_forks`).
+`MANUAL_REGISTRATION_CHECK` 8 CPUs / 16 GB (provisional: to be measured on LCM2),
+`MANUAL_REGISTRATION_COMPARE` 1 CPU / 4 GB. The Dwight profile limits prepare,
+register and check to two concurrent tasks each
+(`manual_registration_prepare_max_forks`, `manual_registration_register_max_forks`,
+`manual_registration_check_max_forks`).
 
 **The preflight.** The prepare workflow checks the sheet and the params. The
 register workflow additionally reads the root attributes of every prepared store
@@ -239,6 +290,83 @@ register workflow additionally reads the root attributes of every prepared store
 A register task that fails drops only its own branch (`errorStrategy ignore`);
 the run still exits non-zero (`failOnIgnore`), and an id left with a single
 successful run gets no comparison.
+
+## Checking landmarks labelled on another machine
+
+The labelling is made in the viewer, often on another machine than the host that
+holds the images, and the labeller needs a verdict on every pair, and suggestions
+for the next clicks, while clicking. `merxen manual-registration-check` gives them.
+It fits the robust landmark field to the clicks, checks every click against the
+AT8, MAP2 and DAPI images, classifies every pair and suggests where to click next.
+It runs on the store's own labelling or, with `--labelling`, on a file uploaded from
+the other machine. The loop:
+
+1. **Save** in the viewer (a draft is fine).
+2. **Upload** the store's `zarr.json` (it holds the labelling) to the host.
+3. **On the host**, check it:
+   `merxen manual-registration-check --store <prepared store> --labelling <uploaded zarr.json> --channel-roles 'at8=AF568;map2=AF647;dapi=DAPI' --out-dir <dir>`
+   (the store is the host's prepared store of the same pair; examples use
+   placeholders and `$MERXEN_*` variables, never host paths).
+4. **Download** `<dataset>_cortex_serial_check.json` from `<dir>` and press
+   **Load check file…** in the viewer's Manual registration tab.
+
+The check matches while the labelling in the viewer is unchanged: it records the
+digest of the labelling and of the store it was made on, and any edit makes it
+stale. **Never copy the host's `zarr.json` back over the local one**: it would
+replace the local labelling. A labelling file that was made on another preparation
+of the store (its store content digest differs) is refused with "download the store
+again".
+
+**What the check does.**
+
+1. Fit the clicks alone (one Matérn 5/2 component; Student-t noise), with the
+   leave-one-out residual and p-value of every click.
+2. Warp the moving images by that field, check each click against the images
+   (the verdict) and find tissue windows (displacements of tissue-scale structure,
+   calibrated against an empirical null).
+3. Refit with the evidence: windows as extra observations (two components), a ridge
+   click (the image only fixes it along one direction) with an elongated noise
+   shape, and, with `field_trust_confirmed_clicks` (on for `cortex_serial`), clicks
+   the image strongly confirms kept at full weight.
+4. Classify every pair from the **lower p and weight of the two fields** (the clicks
+   alone and the final field), so the windows cannot hide a misclick the clicks
+   alone expose, and suggest the next clicks where the field is most uncertain
+   (grey matter weighs more than white matter).
+
+**Verdicts** (per click): `confirmed` (the image puts the structure where the click
+is), `contradicted` (the image puts it elsewhere; the JSON has the snap position),
+`ridge` (the image fixes it only along a line), `inconclusive` and `not_checked`.
+
+**Classes and what to do.** p\* and w\* are the lower p-value and weight of the two
+fields. A pair is *gross* when p\* < 1e-6 or w\* < 0.05, and *flagged* when
+p\* < `field_outlier_p` (0.01). The first row that matches wins.
+
+| Class | Viewer text | When | What to do |
+|---|---|---|---|
+| `disabled` | `off` | the pair is disabled | nothing |
+| `excluded` | `excluded` | enabled but outside a crop (`landmarks_outside_crop=exclude`) | nothing |
+| `check` | `check` | gross but the image confirms; flagged with a ridge, inconclusive or unchecked verdict; not flagged but the image contradicts | look at the pair |
+| `likely_misclick` | `likely misclick` | gross and not confirmed; flagged and contradicted | re-click or disable it; the JSON has the snap position |
+| `kept_confirmed` | `kept: image confirms` | flagged by the field, but the image confirms the click | leave it |
+| `ok` | | none of the above | nothing |
+
+Nothing is disabled or deleted automatically.
+
+**Outputs.** In `--out-dir`: `<dataset>_<preset>_check.json` (the check report of
+the `merxen.manual_registration.check` schema, plus a `details` block with the
+per-click image estimates, the window summary, the fitted field model, the timings
+and the warnings) and `<dataset>_<preset>_check.png` (with a PDF twin: the clicks by
+class with their leave-one-out vectors, the field's uncertainty with the windows and
+the suggestions, the residual histograms, and a table of the pairs that are not
+`ok`). On the store's own labelling the check is also written as the prepared store's
+root attribute `merxen_manual_registration_check`, under the store's write lock and
+only if the labelling and the store are still the ones the check read (otherwise the
+command exits with code 3 and writes no attribute). With `--labelling` the attribute
+is never written. Prepare does not carry the attribute over a rebuilt store: after a
+forced rebuild, run the check again. The check is the attribute's only writer;
+register never writes the prepared store.
+
+A landmarks-only check (`--no-image-check --no-windows`) needs no channel roles.
 
 ## Viewer workflow
 
@@ -433,7 +561,8 @@ pydantic (a test keeps the key sets equal). The models live in
 |---|---|---|
 | `ManualRegistrationPrepareConfig` | `manual-registration-prepare` | `dataset_name`, `reference`, `moving` (`ManualRegistrationImageInput`), `prepared_dir`, `output_dir`, `force`, `chunk_size` (4096), `tile_size` (1024), `band_height` (2048), `min_level_size` (1024), `compression` (`zlib`), `compression_level` (6), `workers`, `tmp_dir` |
 | `ManualRegistrationImageInput` | | `path`, `scene`, `channel_names`, `registration_channel` (`DAPI`), `pixel_size_um` |
-| `ManualRegistrationRunConfig` | `manual-registration-register` | `dataset_name`, `preset`, `run_label`, `prepared_store_path`, `result_dir`, `output_dir`, `global_settings`, `row_settings`, `force` |
+| `ManualRegistrationRunConfig` | `manual-registration-register` | `dataset_name`, `preset`, `run_label`, `prepared_store_path`, `result_dir`, `output_dir`, `global_settings`, `row_settings`, `channel_roles`, `force` |
+| `ManualRegistrationCheckConfig` | `manual-registration-check` | `dataset_name`, `preset` (`cortex_serial`), `prepared_store_path`, `labelling_path` (an uploaded file, or none for the store's own), `output_dir`, `task_output_dir`, `global_settings`, `row_settings`, `channel_roles`, `image_check`, `windows` (none: the settings'), `write_attr` (ignored with `labelling_path`), `n_suggestions` (20) |
 | `ManualRegistrationCompareConfig` | `manual-registration-compare` | `dataset_name`, `summary_paths` (at least 2), `output_dir`, `task_output_dir` |
 | `ViewerCacheConfig` (image-only) | `build-viewer-caches` | `dataset_name`, `latest_zarr_path`, `output_dir`, `image_only: true`, `image_keys`, `downsample`, `min_size`, `build_image_pyramid` |
 
@@ -476,6 +605,16 @@ and is the set of keys `registration_settings` can override. Defaults are the
 | `tissue_qc_pixel_size_um`, `tissue_qc_sigma_um`, `tissue_qc_highpass_sigma_um` | 10, 20, 200 | Tissue-scale QC (the pixel size is a ceiling: the level used is recorded as `tissue_qc.pixel_size_um`) |
 | `nucleus_qc`, `nucleus_qc_pixel_size_um`, `nucleus_qc_window_um` | false, 1.7, 200 | Nucleus-scale QC |
 | `tile_size`, `chunk_size`, `build_viewer_pyramid` | 4096, 4096, true | Writing the result store |
+| `field_model` | `similarity` | `similarity` or `robust_gp` (the robust landmark field; the check always uses it) |
+| `field_kernel` | `auto` | Matérn components: `auto` (one for clicks alone, two with windows), `single`, `two_scale` |
+| `field_student_t_nu` | 4.0 | Degrees of freedom of the Student-t noise (1 to 1000) |
+| `field_outlier_p` | 0.01 | A pair is flagged when its p-value falls below this |
+| `field_image_check` | true | Check each click against the images (needs channel roles) |
+| `field_window_observations` | false (true in `cortex_serial`) | Add tissue-window observations (needs channel roles) |
+| `field_window_step_um`, `field_window_search_um`, `field_window_min_spacing_um` | 200, 300, 400 | Window lattice step, search radius and minimum spacing of accepted windows |
+| `field_window_noise_floor_um` | 15 | Lower bound of the window noise (per axis) |
+| `field_trust_confirmed_clicks` | false (true in `cortex_serial`) | Keep strongly image-confirmed clicks at full weight |
+| `field_grid_um`, `field_sd_grid_um`, `materialize`, `preview_pixel_size_um` | 11, 88, `full`, 5.5 | Flow grid, uncertainty grid and result-store resolution of a field registration; they take effect with the register path of the robust field (the next change) |
 
 **Presets.** `same_section` is the defaults above. It differs from the
 `REGISTER_IMAGES` defaults in the non-rigid stage being on and in the correlation
@@ -503,6 +642,15 @@ preset bumps its version, recorded in every summary.
 | `landmark_outlier_floor_um` | 10 | 30 |
 | `nucleus_qc` | false | true |
 
+`cortex_serial` (`cortex_serial_v1`) sets `matrix_scale_tolerance` 0.05,
+`refine_affine` false, `nonrigid_enabled` false, `nucleus_qc` false, `field_model`
+`robust_gp`, `field_window_observations` true, `field_trust_confirmed_clicks` true
+and `materialize` `preview`, and keeps `same_section` for every other key. A setting
+rule (checked before any work): `materialize` other than `full` is only for
+`robust_gp` runs, and a `robust_gp` register run needs `refine_affine=false` and
+`nonrigid_enabled=false`. The older presets' provenance digests leave the `field_*`
+settings out at their defaults, so their results stay valid after the upgrade.
+
 ## Python entry points
 
 | Function | Module | Purpose |
@@ -511,13 +659,18 @@ preset bumps its version, recorded in every summary.
 | `run_manual_registration(config)` | `merxen.manual_registration.register` | One (pair, preset) run |
 | `fit_landmarks(...)` | `merxen.manual_registration.register` | Landmark fit of a prepared store's labelling (also `manual-registration-fit`); it calls `robust_similarity(...)` of `merxen.manual_registration.landmark_fit` |
 | `compare_runs(config)` | `merxen.manual_registration.compare` | Comparison CSV, JSON and figure |
+| `run_check(config, *, labelling_payload=None)` | `merxen.manual_registration.check` | The landmark check: check JSON, figure and attribute (`manual-registration-check`); `read_labelling_file`, `write_check_attr` |
+| `build_landmark_field(...)`, `classify_pairs(...)`, `check_payload(...)`, `validate_field_settings(...)` | `merxen.manual_registration.field_fit` | The robust field of a pair with image evidence, the C7 classes and the check report |
+| `fit_landmark_field(...)`, `suggest_landmarks(...)` | `merxen.manual_registration.landmark_field` | The robust Student-t field and the next-click suggestions |
+| `check_clicks(...)`, `tissue_window_observations(...)`, `resolve_channel_roles(...)` | `merxen.manual_registration.image_evidence` | The image check, tissue windows and channel roles |
 | `make_synthetic_pair`, `simulate_landmark_pairs`, `inject_labelling` | `merxen.manual_registration.simulate` | Synthetic pairs and viewer-compatible labelling for tests |
 | `run_read_czi_info`, `run_convert_czi_scene` | `merxen.io.czi` | CZI runtime bridge |
 | `write_pyramidal_ome_tiff(...)` | `merxen.io.ome_tiff_writer` | Streamed pyramidal OME-TIFF writer |
 
 CLI commands: `convert-czi`, `manual-registration-prepare`,
 `manual-registration-register`, `manual-registration-fit`,
-`manual-registration-compare` ([CLI reference](../cli.md)).
+`manual-registration-check`, `manual-registration-compare`
+([CLI reference](../cli.md)).
 
 Scripts for the real-data validation (never imported by the package):
 `scripts/manual_registration/derive_test_landmarks.py` (landmarks without a

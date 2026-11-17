@@ -14,6 +14,10 @@ users would notice). A release turns [Unreleased] into the release's section.
 
 ## [Unreleased]
 
+### Added
+
+- **Cortex serial registration: the landmark check.** The `cortex_serial` preset for adjacent cortex sections stained for AT8, MAP2 and DAPI, whose landmarks are fitted by a robust landmark field (a Student-t Gaussian process) checked against the images. The new `channel_roles` samplesheet column names the channel that plays each role (`at8=AF568;map2=AF647;dapi=DAPI`). `merxen manual-registration-check` checks the landmarks of a prepared store, or of an uploaded `zarr.json` or labelling file (`--labelling`, for a labelling made on another machine), classifies every pair, suggests the next clicks and writes a check JSON, a figure and, for the store's own labelling, the check attribute of the store; `workflows/manual_registration_check.nf` runs it per samplesheet row. The `field_*`, `materialize` and `preview_pixel_size_um` settings are new; registration through the landmark field follows in the next change, so a `cortex_serial` register run stops with a message for now. Results of the `same_section` and `serial_section` presets stay valid: their provenance digests are unchanged ([manual landmark registration](docs/stages/manual-registration.md#checking-landmarks-labelled-on-another-machine)).
+
 ## [1.0.2] - 2026-11-16
 
 ### Security
