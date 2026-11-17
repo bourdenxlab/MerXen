@@ -481,14 +481,18 @@ def _validate_weights(weights: np.ndarray, count: int) -> np.ndarray:
 
 def _resolve_components(observations: FieldObservations, options: FieldOptions) -> int:
     if options.components is None:
-        return 1 if all(name == "click" for name in observations.obs_class) else 2
+        # Confirmed clicks (C2) are clicks: clicks alone fit one component.
+        is_clicks_only = all(
+            name in _CLICK_LIKE_CLASSES for name in observations.obs_class
+        )
+        return 1 if is_clicks_only else 2
     if options.components not in (1, 2):
         raise ValueError(f"components must be None, 1 or 2, got {options.components}")
     return options.components
 
 
 def _trend_centre(observations: FieldObservations) -> np.ndarray:
-    clicks = np.array([name == "click" for name in observations.obs_class])
+    clicks = np.array([name in _CLICK_LIKE_CLASSES for name in observations.obs_class])
     positions = observations.reference_xy_um
     return np.asarray(positions[clicks if clicks.any() else slice(None)].mean(axis=0))
 
@@ -781,28 +785,37 @@ def robust_affine_weights(
     *,
     nu: float,
     noise_guess_um: Mapping[str, float],
+    noise_bounds_um: Mapping[str, tuple[float, float]] | None = None,
 ) -> np.ndarray:
     """Student-t weights from a robust affine fit (the fit's initial weights).
 
     Args:
         observations: The observations.
         nu: Student-t degrees of freedom (finite).
-        noise_guess_um: Initial noise sigma per class.
+        noise_guess_um: Initial noise sigma per class; classes absent from the
+            observations are ignored.
+        noise_bounds_um: Per-class noise bounds the guesses are clipped to
+            (default ``DEFAULT_NOISE_BOUNDS_UM``).
 
     Returns:
         ``(N,)`` weights; ``em_exempt`` observations stay at 1.
     """
-    bounds = {name: (0.0, math.inf) for name in set(observations.obs_class)}
-    for name in bounds:
+    table = DEFAULT_NOISE_BOUNDS_UM if noise_bounds_um is None else noise_bounds_um
+    bounds: dict[str, tuple[float, float]] = {}
+    guesses: dict[str, float] = {}
+    for name in sorted(set(observations.obs_class)):
         if name not in noise_guess_um:
             raise ValueError(f"no noise guess for class {name!r}")
-    bounds = {name: (1e-6, 1e6) for name in bounds}
+        if name not in table:
+            raise ValueError(f"no noise bounds for class {name!r}")
+        bounds[name] = (float(table[name][0]), float(table[name][1]))
+        guesses[name] = float(noise_guess_um[name])
     weights, _ = _robust_init(
         observations,
         _trend_centre(observations),
         nu=nu,
         noise_bounds=bounds,
-        noise_guess_um=noise_guess_um,
+        noise_guess_um=guesses,
     )
     return weights
 
@@ -831,7 +844,14 @@ class _Posterior:
             self.lengths.append(hyper.short_length_um)
             self.signals.append(hyper.short_signal_um)
         self.signal_variance = float(sum(s * s for s in self.signals))
-        options = FieldOptions(components=components)
+        # The posterior never optimises, so the noise bounds only have to cover
+        # every class present; the default table knows just click and window.
+        options = FieldOptions(
+            components=components,
+            noise_bounds_um={
+                name: (1e-6, 1e6) for name in sorted(set(observations.obs_class))
+            },
+        )
         context = _make_context(observations, centre, components, options)
         self.context = context
         sigma_by_class = np.array(

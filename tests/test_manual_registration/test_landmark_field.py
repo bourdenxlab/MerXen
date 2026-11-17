@@ -479,15 +479,15 @@ def test_fit_is_invariant_to_a_rigid_motion_of_all_inputs() -> None:
     rigid = lf.fit_landmark_field(moved)
     queries = np.random.default_rng(15).uniform(0.0, 20000.0, size=(30, 2))
     np.testing.assert_allclose(
-        rigid.mean(move(queries)), move(original.mean(queries)), atol=1e-4
+        rigid.mean(move(queries)), move(original.mean(queries)), atol=1e-6
     )
     np.testing.assert_allclose(
         rigid.loo().magnitude_reference_um,
         original.loo().magnitude_reference_um,
-        rtol=1e-5,
+        rtol=1e-6,
     )
-    np.testing.assert_allclose(rigid.loo().p_value, original.loo().p_value, rtol=1e-5)
-    np.testing.assert_allclose(rigid.weights, original.weights, rtol=1e-5)
+    np.testing.assert_allclose(rigid.loo().p_value, original.loo().p_value, rtol=1e-6)
+    np.testing.assert_allclose(rigid.weights, original.weights, rtol=1e-6)
 
 
 def test_fixed_path_is_exactly_covariant_with_a_rigid_motion() -> None:
@@ -514,6 +514,12 @@ def test_fixed_path_is_exactly_covariant_with_a_rigid_motion() -> None:
         rigid.mean(move(queries)), move(original.mean(queries)), atol=1e-6
     )
     np.testing.assert_allclose(rigid.loo().d2, original.loo().d2, rtol=1e-6)
+    np.testing.assert_allclose(
+        rigid.loo().magnitude_reference_um,
+        original.loo().magnitude_reference_um,
+        rtol=1e-6,
+    )
+    np.testing.assert_allclose(rigid.loo().p_value, original.loo().p_value, rtol=1e-6)
 
 
 # ----------------------------------------------------------- components and bounds
@@ -961,4 +967,96 @@ def test_bad_weights_raise_value_error() -> None:
     with pytest.raises(ValueError, match="weight"):
         lf.landmark_field_from_hyperparameters(
             clicks, _hyper(short_length=None, short_signal=None), np.zeros(clicks.n)
+        )
+
+
+# -------------------------------------------------------- confirmed class (C2, A3)
+CONFIRMED_BOUNDS = {**lf.DEFAULT_NOISE_BOUNDS_UM, "confirmed": (3.0, 100.0)}
+
+
+def _confirmed_observations(
+    *, with_windows: bool, n_confirmed: int = 5
+) -> lf.FieldObservations:
+    """Clicks with the first few relabelled as exempt ``confirmed`` observations."""
+    base = _mixed_observations(seed=50, n_clicks=14, n_windows=8 if with_windows else 0)
+    classes = list(base.obs_class)
+    exempt = np.zeros(base.n, dtype=bool)
+    for index in range(n_confirmed):
+        classes[index] = "confirmed"
+        exempt[index] = True
+    return replace(base, obs_class=tuple(classes), em_exempt=exempt)
+
+
+@pytest.mark.parametrize("nu", [4.0, math.inf])
+@pytest.mark.parametrize("with_windows", [False, True])
+def test_confirmed_class_fits_rebuilds_and_round_trips(
+    nu: float, with_windows: bool
+) -> None:
+    observations = _confirmed_observations(with_windows=with_windows)
+    options = lf.FieldOptions(nu=nu, noise_bounds_um=CONFIRMED_BOUNDS)
+    field = lf.fit_landmark_field(observations, options)
+    assert "confirmed" in field.hyperparameters.noise_um
+    assert field.weights[:5].tolist() == [1.0] * 5
+    queries = np.random.default_rng(51).uniform(0.0, 20000.0, size=(10, 2))
+    fixed = lf.landmark_field_from_hyperparameters(
+        observations, field.hyperparameters, field.weights, options=options
+    )
+    np.testing.assert_allclose(fixed.mean(queries), field.mean(queries), rtol=1e-9)
+    assert np.all(np.isfinite(field.loo().d2))
+    residual = field.predict_residual(
+        queries[:3], queries[:3] + 40.0, shape_cov=np.tile(np.eye(2), (3, 1, 1))
+    )
+    assert np.all(np.isfinite(residual.d2))
+    payload = json.loads(json.dumps(field.to_dict(), allow_nan=False))
+    rebuilt = lf.LandmarkField.from_dict(payload)
+    assert rebuilt.digest == field.digest
+    assert rebuilt.observations.em_exempt is not None
+    assert (
+        rebuilt.observations.em_exempt.tolist() == field.observations.em_exempt.tolist()
+    )
+    assert rebuilt.observations.obs_class == observations.obs_class
+
+
+def test_confirmed_clicks_count_as_clicks_for_the_component_resolution() -> None:
+    clicks_only = _confirmed_observations(with_windows=False)
+    options = lf.FieldOptions(noise_bounds_um=CONFIRMED_BOUNDS)
+    assert lf.fit_landmark_field(clicks_only, options).components == 1
+    with_windows = _confirmed_observations(with_windows=True)
+    assert lf.fit_landmark_field(with_windows, options).components == 2
+
+
+def test_confirmed_clicks_alone_centre_the_trend_like_clicks() -> None:
+    observations = _confirmed_observations(with_windows=True)
+    field = lf.fit_landmark_field(
+        observations, lf.FieldOptions(noise_bounds_um=CONFIRMED_BOUNDS)
+    )
+    is_click_like = [name in ("click", "confirmed") for name in observations.obs_class]
+    expected = observations.reference_xy_um[is_click_like].mean(axis=0)
+    np.testing.assert_allclose(field.centre_um, expected)
+
+
+def test_robust_affine_weights_keep_an_exempt_click_at_one() -> None:
+    observations, _ = _clean_phantom_observations(seed=52)
+    moving = observations.moving_xy_um.copy()
+    moving[[3, 17]] += np.array([300.0, 0.0])
+    exempt = np.zeros(observations.n, dtype=bool)
+    exempt[3] = True
+    shifted = lf.FieldObservations.clicks(
+        observations.reference_xy_um, moving, observations.obs_id, em_exempt=exempt
+    )
+    weights = lf.robust_affine_weights(
+        shifted, nu=4.0, noise_guess_um={"click": 30.0, "window": 15.0}
+    )
+    assert weights[3] == 1.0
+    assert weights[17] < 0.5
+
+
+def test_robust_affine_weights_reject_a_class_without_a_guess() -> None:
+    observations = _confirmed_observations(with_windows=False)
+    with pytest.raises(ValueError, match="confirmed"):
+        lf.robust_affine_weights(
+            observations,
+            nu=4.0,
+            noise_guess_um={"click": 30.0},
+            noise_bounds_um=CONFIRMED_BOUNDS,
         )
