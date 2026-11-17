@@ -28,7 +28,7 @@ from merxen.manual_registration.schema import (
 )
 from merxen.manual_registration.simulate import make_synthetic_pair
 
-from ._image_phantom import Phantom, make_phantom
+from ._image_phantom import Phantom, make_phantom, replace_with_texture
 from ._scripts import load_script
 
 derive_script = load_script("derive_test_landmarks")
@@ -964,3 +964,268 @@ def test_the_largest_agreeing_group_sets_the_snap_and_ties_go_to_the_prediction(
 
     assert check.verdict == "contradicted"
     assert check.snap_moving_xy_um == pytest.approx([847.5, 2000.0])
+
+
+# ---------------------------------------------------------------------------
+# Tissue-scale window observations
+# ---------------------------------------------------------------------------
+
+_WINDOW_PARAMS = ie.WindowParams(null_pairs=150, workers=4)
+
+
+@pytest.fixture(scope="module")
+def prior_pair() -> _Pair:
+    """The phantom warped by its affine part only (the sinusoid is left to find)."""
+    phantom = _phantom(0, warp_wavelength_um=_WINDOW_WAVELENGTH_UM)
+    return _build_pair(phantom, pull=phantom.prior)
+
+
+@pytest.fixture(scope="module")
+def observations(prior_pair: _Pair) -> ie.WindowObservations:
+    return ie.tissue_window_observations(
+        prior_pair.reference,
+        prior_pair.moving,
+        pull_um=prior_pair.phantom.prior,
+        params=_WINDOW_PARAMS,
+    )
+
+
+def test_window_observations_recover_the_warp_the_prior_misses(
+    prior_pair: _Pair, observations: ie.WindowObservations
+) -> None:
+    truth = prior_pair.phantom.pull(observations.reference_xy_um)
+    error = np.hypot(*(observations.moving_xy_um - truth).T)
+    candidates = observations.candidates
+    summary = observations.summary
+
+    assert len(error) > 20
+    assert float(np.median(error)) <= 8.0
+    assert candidates["accepted"].mean() > 0.3
+    assert summary["n_thinned"] == len(error)
+    assert summary["n_merged"] >= summary["n_thinned"]
+    assert set(summary["by_size"]) == {"600", "800"}
+    for entry in summary["by_size"].values():
+        assert entry["null_p99"] >= entry["null_p95"] > 0.0
+        assert entry["accepted"] <= entry["confident"] <= entry["candidates"]
+    assert summary["runtime_s"] > 0.0
+    assert observations.residual_um.shape == (len(error), 2)
+    assert set(observations.region) <= {"grey_matter", "white_matter", "edge"}
+    # The residuals are what the prior misses: tens of um, from the sinusoid.
+    assert np.hypot(*observations.residual_um.T).max() > 10.0
+
+
+def test_kept_windows_are_at_least_the_thinning_distance_apart(
+    observations: ie.WindowObservations,
+) -> None:
+    positions = observations.reference_xy_um
+    distances = np.hypot(
+        positions[:, None, 0] - positions[None, :, 0],
+        positions[:, None, 1] - positions[None, :, 1],
+    )
+    np.fill_diagonal(distances, np.inf)
+
+    assert distances.min() >= 400.0 - 1e-6
+    assert observations.candidates["kept"].sum() == len(positions)
+    # Larger windows win the merge: a kept 600 um window has no accepted 800 um
+    # window within the merge radius.
+    accepted = observations.candidates[observations.candidates["accepted"]]
+    large = accepted[accepted["window_um"] == 800.0][
+        ["reference_x_um", "reference_y_um"]
+    ]
+    for index in np.flatnonzero(observations.window_um == 600.0):
+        gaps = np.hypot(*(large.to_numpy() - observations.reference_xy_um[index]).T)
+        assert gaps.size == 0 or gaps.min() > 300.0
+
+
+def test_window_covariances_are_symmetric_positive_semidefinite(
+    observations: ie.WindowObservations,
+) -> None:
+    covariance = observations.peak_cov_um2
+
+    assert covariance.shape == (len(observations.reference_xy_um), 2, 2)
+    assert np.allclose(covariance, np.swapaxes(covariance, 1, 2))
+    assert np.linalg.eigvalsh(covariance).min() >= -1e-9
+    assert observations.elongation.shape == (len(covariance),)
+    assert (observations.elongation >= 1.0).all()
+    sd = observations.summary["peak_sd_um"]
+    assert 0.0 < sd["minor"]["median"] <= sd["major"]["median"] < 100.0
+
+
+def test_the_covariance_of_a_window_on_a_tube_follows_the_tube(
+    ridge_pair: _Pair,
+) -> None:
+    pixel = ridge_pair.reference.pixel_size_um
+    on_tube = ridge_pair.reference.um_to_px([[2900.0, _TUBE_Y_UM]])[0]
+    centre = (int(round(on_tube[0])), int(round(on_tube[1])))
+    geometry = ie._geometry(600.0, 300.0, pixel)
+
+    scores = ie._correlate(
+        ridge_pair.reference, ridge_pair.moving, centre, centre, geometry
+    )["bp20"]
+    cov = ie.peak_covariance(
+        scores,
+        np.unravel_index(scores.argmax(), scores.shape)[::-1],
+        pixel_size_um=pixel,
+        drop=0.05,
+        radius_um=100.0,
+    )
+
+    values, vectors = np.linalg.eigh(cov)
+    major = vectors[:, 1]
+    assert math.degrees(math.atan2(abs(major[1]), abs(major[0]))) < 10.0
+    assert values[1] > 3.0 * values[0]
+
+
+def test_windows_over_unrelated_texture_are_rejected() -> None:
+    phantom = _phantom(0, warp_wavelength_um=_WINDOW_WAVELENGTH_UM)
+    box = (2000.0, 2000.0, 4200.0, 4200.0)
+    textured = Phantom(
+        reference=phantom.reference,
+        moving=replace_with_texture(phantom.moving, box),
+        pull=phantom.pull,
+        prior=phantom.prior,
+        tubes_um=phantom.tubes_um,
+    )
+    pair = _build_pair(textured, pull=phantom.prior)
+
+    result = ie.tissue_window_observations(
+        pair.reference, pair.moving, pull_um=phantom.prior, params=_WINDOW_PARAMS
+    )
+
+    assert len(result.reference_xy_um) > 5  # the rest of the tissue still matches
+    inner = np.array([box[0] + 450, box[1] + 450, box[2] - 450, box[3] - 450])
+    inside = (
+        (result.moving_xy_um[:, 0] > inner[0])
+        & (result.moving_xy_um[:, 0] < inner[2])
+        & (result.moving_xy_um[:, 1] > inner[1])
+        & (result.moving_xy_um[:, 1] < inner[3])
+    )
+    assert not inside.any()
+
+
+def test_threaded_and_serial_window_runs_are_identical(prior_pair: _Pair) -> None:
+    kwargs: dict[str, Any] = {
+        "pull_um": prior_pair.phantom.prior,
+    }
+    small = {"sizes_um": (600.0,), "null_pairs": 30, "step_um": 400.0}
+
+    serial = ie.tissue_window_observations(
+        prior_pair.reference,
+        prior_pair.moving,
+        params=ie.WindowParams(workers=1, **small),
+        **kwargs,
+    )
+    threaded = ie.tissue_window_observations(
+        prior_pair.reference,
+        prior_pair.moving,
+        params=ie.WindowParams(workers=4, **small),
+        **kwargs,
+    )
+
+    assert serial.nulls == threaded.nulls
+    assert np.array_equal(serial.reference_xy_um, threaded.reference_xy_um)
+    assert np.array_equal(serial.moving_xy_um, threaded.moving_xy_um)
+    assert np.array_equal(serial.peak_cov_um2, threaded.peak_cov_um2)
+    assert serial.candidates.equals(threaded.candidates)
+
+
+def test_window_threads_restore_the_opencv_thread_count(prior_pair: _Pair) -> None:
+    import cv2
+
+    before = cv2.getNumThreads()
+    ie.tissue_window_observations(
+        prior_pair.reference,
+        prior_pair.moving,
+        pull_um=prior_pair.phantom.prior,
+        params=ie.WindowParams(
+            sizes_um=(600.0,), null_pairs=10, step_um=800.0, workers=3
+        ),
+    )
+
+    assert cv2.getNumThreads() == before
+
+
+# ---------------------------------------------------------------------------
+# Target weights
+# ---------------------------------------------------------------------------
+
+
+def _coarse(images: ie.RoleImages, factor: int = 8) -> ie.RoleImages:
+    """Block-average role images, with the pixel-centre affine of the blocks."""
+    out = {}
+    for role, image in images.images.items():
+        height, width = (s // factor * factor for s in image.shape)
+        out[role] = (
+            image[:height, :width]
+            .reshape(height // factor, factor, width // factor, factor)
+            .mean(axis=(1, 3))
+            .astype(np.float32)
+        )
+    centre = (factor - 1) / 2.0
+    return ie.RoleImages(
+        images=out,
+        to_level0=np.array([[factor, 0, centre], [0, factor, centre], [0, 0, 1.0]])
+        @ images.to_level0,
+        pixel_size_um=images.pixel_size_um * factor,
+        level0_pixel_size_um=images.level0_pixel_size_um,
+    )
+
+
+def test_target_weights_sit_on_shared_tissue_and_favour_grey_matter(
+    pair: _Pair,
+) -> None:
+    phantom = pair.phantom
+    reference, moving = _coarse(phantom.reference), _coarse(phantom.moving)
+
+    weights = ie.target_weight_map(reference, moving, pull_um=phantom.prior)
+
+    assert len(weights.centres_um) == len(weights.weights) == len(weights.region)
+    assert len(weights.centres_um) > 100
+    assert set(np.unique(weights.weights)) == {0.25, 1.0}
+    assert all(
+        w == (1.0 if r == "grey_matter" else 0.25)
+        for w, r in zip(weights.weights, weights.region, strict=True)
+    )
+    # Spacing: every 100 um, so at most (size / 100)^2 candidates.
+    assert len(weights.centres_um) <= (2048 * 2.76 / 100.0 + 1) ** 2
+    # Shared tissue: the points lie in the full-resolution reference tissue (up to
+    # the coarse mask's resolution) and their pull inside the moving image.
+    reference_px = np.rint(pair.reference.um_to_px(weights.centres_um)).astype(int)
+    on_tissue = pair.reference.tissue[reference_px[:, 1], reference_px[:, 0]]
+    assert on_tissue.mean() > 0.95
+    pulled = phantom.prior(weights.centres_um)
+    assert ((pulled > 0) & (pulled < 2048 * 2.76)).all()
+    # Moving-only tissue is excluded: a moving image with its tissue blanked
+    # leaves no candidates.
+    empty = ie.RoleImages(
+        images={r: np.full_like(a, 20.0) for r, a in moving.images.items()},
+        to_level0=moving.to_level0,
+        pixel_size_um=moving.pixel_size_um,
+        level0_pixel_size_um=moving.level0_pixel_size_um,
+    )
+    nothing = ie.target_weight_map(reference, empty, pull_um=phantom.prior)
+    assert len(nothing.centres_um) == 0 and nothing.region == ()
+
+
+def test_target_weights_without_roles_are_all_other(pair: _Pair) -> None:
+    phantom = pair.phantom
+    reference = _coarse(phantom.reference)
+    moving = _coarse(phantom.moving)
+
+    def only_dapi(images: ie.RoleImages) -> ie.RoleImages:
+        return ie.RoleImages(
+            images={"dapi": images.images["dapi"]},
+            to_level0=images.to_level0,
+            pixel_size_um=images.pixel_size_um,
+            level0_pixel_size_um=images.level0_pixel_size_um,
+        )
+
+    with_roles = ie.target_weight_map(reference, moving, pull_um=phantom.prior)
+    without = ie.target_weight_map(
+        only_dapi(reference), only_dapi(moving), pull_um=phantom.prior
+    )
+
+    assert set(without.region) == {"other"}
+    assert set(np.unique(without.weights)) == {0.25}
+    # The ranking of candidates is unchanged: the same centres.
+    assert np.array_equal(without.centres_um, with_roles.centres_um)

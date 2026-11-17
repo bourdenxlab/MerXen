@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -22,8 +23,10 @@ from typing import Any
 
 import cv2
 import numpy as np
+import pandas as pd
 from numpy.typing import ArrayLike
 from scipy import ndimage
+from scipy.spatial import cKDTree
 from skimage.filters import threshold_otsu
 
 from merxen.image_registration import read_working_channel
@@ -1716,3 +1719,502 @@ def check_clicks(
         )
 
     return list(_map_threads(run, list(range(len(ids))), workers))
+
+
+# ---------------------------------------------------------------------------
+# Tissue-scale window observations
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WindowParams:
+    """Parameters of the tissue-scale window observations."""
+
+    sizes_um: tuple[float, ...] = (600.0, 800.0)
+    search_um: float = 300.0
+    step_um: float = 200.0
+    min_tissue_fraction: float = 0.5
+    min_valid_fraction: float = 0.9
+    exclusion_um: float = 50.0
+    null_pairs: int = 700
+    null_min_distance_um: float = 2000.0
+    neighbour_min_um: float = 250.0
+    neighbour_max_um: float = 450.0
+    neighbour_min: int = 2
+    neighbour_tolerance_um: float = 30.0
+    merge_radius_um: float = 300.0
+    thinning_um: float = 400.0
+    peak_drop: float = 0.05
+    peak_radius_um: float = 100.0
+    edge_distance_um: float = 250.0
+    grey_matter_fraction: float = 0.5
+    workers: int | None = None
+    seed: int = 1
+
+
+@dataclass(frozen=True, eq=False)
+class WindowObservations:
+    """Calibrated, consistent and thinned window displacements.
+
+    Attributes:
+        reference_xy_um: ``(K, 2)`` window centres in the reference (full um).
+        moving_xy_um: ``(K, 2)`` matched positions in the moving image (full um).
+        peak_cov_um2: ``(K, 2, 2)`` NCC peak-region covariance in the moving frame
+            (the fixed term F of contract C2).
+        elongation: ``(K,)`` ``sqrt(lmax / lmin)`` of ``peak_cov_um2``.
+        window_um: ``(K,)`` window sides.
+        peak: ``(K,)`` correlation maxima.
+        distinct: ``(K,)`` peak minus the second peak.
+        region: ``grey_matter``, ``white_matter`` or ``edge`` per window.
+        residual_um: ``(K, 2)`` matched position minus the prior's, moving um.
+        candidates: Every candidate window (QC and JSON).
+        nulls: Null model by window side.
+        summary: Counts, null quantiles, region fractions, peak SDs and runtime.
+    """
+
+    reference_xy_um: np.ndarray
+    moving_xy_um: np.ndarray
+    peak_cov_um2: np.ndarray
+    elongation: np.ndarray
+    window_um: np.ndarray
+    peak: np.ndarray
+    distinct: np.ndarray
+    region: tuple[str, ...]
+    residual_um: np.ndarray
+    candidates: pd.DataFrame
+    nulls: dict[float, NullModel]
+    summary: dict[str, Any]
+
+
+def _clipped_box_fraction(
+    table: np.ndarray,
+    cx: np.ndarray,
+    cy: np.ndarray,
+    half: int,
+    shape_yx: tuple[int, int],
+) -> np.ndarray:
+    """Fraction of a box set, with the box clipped to the image."""
+    height, width = shape_yx
+    x0, x1 = np.clip(cx - half, 0, width), np.clip(cx + half + 1, 0, width)
+    y0, y1 = np.clip(cy - half, 0, height), np.clip(cy + half + 1, 0, height)
+    total = table[y1, x1] - table[y0, x1] - table[y1, x0] + table[y0, x0]
+    area = np.maximum((x1 - x0) * (y1 - y0), 1)
+    return np.asarray(total / area)
+
+
+def _covariance_to_moving(cov: np.ndarray, jacobian: np.ndarray) -> np.ndarray:
+    moved = jacobian @ cov @ jacobian.T
+    return np.asarray(0.5 * (moved + moved.T))
+
+
+def _elongation(cov: np.ndarray) -> float:
+    values = np.linalg.eigvalsh(cov)
+    return math.sqrt(max(float(values[1]), 1e-9) / max(float(values[0]), 1e-9))
+
+
+def tissue_window_observations(
+    reference: Representation,
+    moving_warped: Representation,
+    *,
+    pull_um: Callable[[np.ndarray], np.ndarray],
+    params: WindowParams | None = None,
+) -> WindowObservations:
+    """Window displacements calibrated against a null, consistent and thinned.
+
+    Reference windows of each size on a lattice over the tissue are matched
+    (band-pass, joint over the three channels) against the moving image warped by
+    ``pull_um``. A window is confident when its peak reaches the null's p99 and is
+    not on the search border; it is accepted when it agrees within the tolerance
+    with the median displacement of at least ``neighbour_min`` confident
+    neighbours of the same size at ``neighbour_min_um`` to ``neighbour_max_um``.
+    Larger sizes win the merge, then windows are thinned greedily by peak.
+
+    Args:
+        reference: Reference representation.
+        moving_warped: Moving representation on the reference grid.
+        pull_um: Maps reference full um to moving full um (never assumed affine).
+        params: Window parameters.
+
+    Returns:
+        The observations; the NCC peak-region covariance of each is in the moving
+        frame and carries no noise floor (the caller adds it, contract C2).
+    """
+    params = params or WindowParams()
+    started = time.perf_counter()
+    _check_same_grid(reference, moving_warped)
+    pixel = reference.pixel_size_um
+    shape_yx = reference.shape_yx
+    height, width = shape_yx
+    linear = reference.to_level0[:2, :2] * reference.level0_pixel_size_um
+    step = max(int(round(params.step_um / pixel)), 1)
+    grid_x, grid_y = np.meshgrid(np.arange(0, width, step), np.arange(0, height, step))
+    lattice_x, lattice_y = grid_x.ravel(), grid_y.ravel()
+    tissue_table = _box_sum_table(reference.tissue)
+    covered_table = _box_sum_table(moving_warped.covered)
+    exclusion_px = max(int(round(params.exclusion_um / pixel)), 1)
+
+    sizes = sorted(params.sizes_um, reverse=True)
+    records: list[dict[str, Any]] = []
+    nulls: dict[float, NullModel] = {}
+    for size in sizes:
+        geometry = _geometry(size, params.search_um, pixel)
+        usable = _inside(shape_yx, lattice_x, lattice_y, geometry.margin)
+        cx, cy = lattice_x[usable], lattice_y[usable]
+        usable = (
+            _box_fraction(tissue_table, cx, cy, geometry.half)
+            >= params.min_tissue_fraction
+        ) & (
+            _box_fraction(covered_table, cx, cy, geometry.margin)
+            >= params.min_valid_fraction
+        )
+        cx, cy = cx[usable], cy[usable]
+        nulls[size] = _null_models(
+            reference,
+            moving_warped,
+            representations=("bp20",),
+            window_um=size,
+            search_um=params.search_um,
+            n_pairs=params.null_pairs,
+            min_distance_um=params.null_min_distance_um,
+            seed=params.seed,
+            exclusion_um=params.exclusion_um,
+            workers=params.workers,
+        )["bp20"]
+
+        def run(
+            index: int,
+            cx: np.ndarray = cx,
+            cy: np.ndarray = cy,
+            geometry: _Geometry = geometry,
+        ) -> tuple[float, float, bool, np.ndarray, np.ndarray]:
+            centre = (int(cx[index]), int(cy[index]))
+            scores = _correlate(
+                reference,
+                moving_warped,
+                centre,
+                centre,
+                geometry,
+                use_orientation=False,
+            )["bp20"]
+            peak, second, x, y, on_border = summarise_scores(
+                scores, exclusion_px=exclusion_px
+            )
+            cov = peak_covariance(
+                scores,
+                (x, y),
+                pixel_size_um=pixel,
+                drop=params.peak_drop,
+                radius_um=params.peak_radius_um,
+            )
+            delta = linear @ np.array([x - geometry.search, y - geometry.search])
+            return peak, peak - second, on_border, delta, cov
+
+        results = _map_threads(run, list(range(len(cx))), params.workers)
+        for index, (peak, distinct, on_border, delta, cov) in enumerate(results):
+            records.append(
+                {
+                    "size": size,
+                    "cx": int(cx[index]),
+                    "cy": int(cy[index]),
+                    "peak": peak,
+                    "distinct": distinct,
+                    "on_border": on_border,
+                    "delta": delta,
+                    "cov": cov,
+                }
+            )
+
+    count = len(records)
+    size_array = np.array([r["size"] for r in records], dtype=np.float64)
+    centre_px = np.array([[r["cx"], r["cy"]] for r in records], dtype=np.float64)
+    centre_px = centre_px.reshape(-1, 2)
+    centre_um = reference.px_to_um(centre_px) if count else np.zeros((0, 2))
+    delta_um = np.array([r["delta"] for r in records]).reshape(-1, 2)
+    peak = np.array([r["peak"] for r in records], dtype=np.float64)
+    distinct = np.array([r["distinct"] for r in records], dtype=np.float64)
+    on_border = np.array([r["on_border"] for r in records], dtype=bool)
+    cov_reference = np.array([r["cov"] for r in records]).reshape(-1, 2, 2)
+    if count:
+        base = np.asarray(pull_um(centre_um), dtype=np.float64)
+        matched = np.asarray(pull_um(centre_um + delta_um), dtype=np.float64)
+    else:
+        base = matched = np.zeros((0, 2))
+    residual = matched - base
+    p99 = np.array([nulls[s].peak_p99 for s in size_array]) if count else np.zeros(0)
+    confident = (peak >= p99) & ~on_border
+
+    # Neighbour consistency, per size.
+    accepted = np.zeros(count, dtype=bool)
+    n_neighbours = np.zeros(count, dtype=int)
+    deviation = np.full(count, np.nan)
+    for size in sizes:
+        members = np.flatnonzero((size_array == size) & confident)
+        if len(members) == 0:
+            continue
+        tree = cKDTree(centre_um[members])
+        for local, neighbours in enumerate(
+            tree.query_ball_point(centre_um[members], r=params.neighbour_max_um)
+        ):
+            distances = np.hypot(
+                *(centre_um[members][neighbours] - centre_um[members][local]).T
+            )
+            chosen = [
+                n
+                for n, d in zip(neighbours, distances, strict=True)
+                if d >= params.neighbour_min_um
+            ]
+            index = members[local]
+            n_neighbours[index] = len(chosen)
+            if len(chosen) < params.neighbour_min:
+                continue
+            median = np.median(residual[members[chosen]], axis=0)
+            deviation[index] = float(np.hypot(*(residual[index] - median)))
+            accepted[index] = deviation[index] <= params.neighbour_tolerance_um
+
+    # Merge: larger windows win.
+    merged = np.zeros(count, dtype=bool)
+    larger_accepted: list[int] = []
+    for size in sizes:
+        members = np.flatnonzero((size_array == size) & accepted)
+        if larger_accepted:
+            tree = cKDTree(centre_um[larger_accepted])
+            nearest, _ = tree.query(centre_um[members])
+            members = members[nearest > params.merge_radius_um]
+        merged[members] = True
+        larger_accepted.extend(np.flatnonzero((size_array == size) & accepted).tolist())
+
+    # Thinning: greedy by peak.
+    kept = np.zeros(count, dtype=bool)
+    kept_positions: list[np.ndarray] = []
+    for index in np.argsort(-np.where(merged, peak, -np.inf), kind="stable"):
+        if not merged[index]:
+            break
+        if kept_positions and (
+            np.hypot(*(np.array(kept_positions) - centre_um[index]).T).min()
+            < params.thinning_um
+        ):
+            continue
+        kept[index] = True
+        kept_positions.append(centre_um[index])
+    selected = np.flatnonzero(kept)
+
+    # Noise covariance in the moving frame.
+    if len(selected):
+        _, jacobians = _jacobians(pull_um, centre_um[selected])
+        cov_moving = np.array(
+            [
+                _covariance_to_moving(cov_reference[i], jac)
+                for i, jac in zip(selected, jacobians, strict=True)
+            ]
+        )
+    else:
+        cov_moving = np.zeros((0, 2, 2))
+    elongation = np.array([_elongation(c) for c in cov_moving])
+
+    # Regions of every candidate.
+    if count:
+        distance_to_edge = (
+            cv2.distanceTransform(reference.tissue.astype(np.uint8), cv2.DIST_L2, 5)[
+                centre_px[:, 1].astype(int), centre_px[:, 0].astype(int)
+            ]
+            * pixel
+        )
+        grey_fraction = _clipped_box_fraction(
+            _box_sum_table(reference.grey_matter),
+            centre_px[:, 0].astype(int),
+            centre_px[:, 1].astype(int),
+            max(int(round(250.0 / pixel)), 1),
+            shape_yx,
+        )
+    else:
+        distance_to_edge = grey_fraction = np.zeros(0)
+    region_all = np.where(
+        distance_to_edge < params.edge_distance_um,
+        "edge",
+        np.where(
+            grey_fraction >= params.grey_matter_fraction, "grey_matter", "white_matter"
+        ),
+    )
+
+    candidates = pd.DataFrame(
+        {
+            "window_um": size_array,
+            "reference_x_um": centre_um[:, 0],
+            "reference_y_um": centre_um[:, 1],
+            "peak": peak,
+            "distinct": distinct,
+            "on_border": on_border,
+            "delta_x_um": delta_um[:, 0],
+            "delta_y_um": delta_um[:, 1],
+            "residual_x_um": residual[:, 0],
+            "residual_y_um": residual[:, 1],
+            "confident": confident,
+            "n_neighbours": n_neighbours,
+            "neighbour_deviation_um": deviation,
+            "accepted": accepted,
+            "merged": merged,
+            "kept": kept,
+            "region": region_all,
+        }
+    )
+    by_size: dict[str, dict[str, Any]] = {}
+    for size in sizes:
+        mask = size_array == size
+        by_size[f"{size:g}"] = {
+            "candidates": int(mask.sum()),
+            "confident": int((mask & confident).sum()),
+            "accepted": int((mask & accepted).sum()),
+            "accepted_fraction": (
+                float((mask & accepted).sum() / mask.sum()) if mask.any() else 0.0
+            ),
+            "null_p95": nulls[size].peak_p95,
+            "null_p99": nulls[size].peak_p99,
+        }
+    region_fraction = {
+        name: (
+            float((accepted & (region_all == name)).sum() / (region_all == name).sum())
+            if (region_all == name).any()
+            else None
+        )
+        for name in ("grey_matter", "white_matter", "edge")
+    }
+    if len(selected):
+        eigenvalues = np.array([np.linalg.eigvalsh(c) for c in cov_moving])
+        minor = np.sqrt(np.clip(eigenvalues[:, 0], 0.0, None))
+        major = np.sqrt(np.clip(eigenvalues[:, 1], 0.0, None))
+        sd: dict[str, dict[str, float | None]] = {
+            "minor": {
+                "median": float(np.median(minor)),
+                "p95": float(np.percentile(minor, 95)),
+            },
+            "major": {
+                "median": float(np.median(major)),
+                "p95": float(np.percentile(major, 95)),
+            },
+        }
+    else:
+        sd = {
+            "minor": {"median": None, "p95": None},
+            "major": {"median": None, "p95": None},
+        }
+    summary: dict[str, Any] = {
+        "algorithm": IMAGE_EVIDENCE_ALGORITHM,
+        "by_size": by_size,
+        "n_merged": int(merged.sum()),
+        "n_thinned": int(len(selected)),
+        "accepted_fraction_by_region": region_fraction,
+        "peak_sd_um": sd,
+        "runtime_s": time.perf_counter() - started,
+    }
+    logger.info(
+        "window observations: %d candidates, %d accepted, %d merged, %d thinned "
+        "in %.1f s",
+        count,
+        int(accepted.sum()),
+        summary["n_merged"],
+        summary["n_thinned"],
+        summary["runtime_s"],
+    )
+    return WindowObservations(
+        reference_xy_um=centre_um[selected],
+        moving_xy_um=matched[selected],
+        peak_cov_um2=cov_moving,
+        elongation=elongation,
+        window_um=size_array[selected],
+        peak=peak[selected],
+        distinct=distinct[selected],
+        region=tuple(str(v) for v in region_all[selected]),
+        residual_um=residual[selected],
+        candidates=candidates,
+        nulls=nulls,
+        summary=summary,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Target weights for suggestions
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, eq=False)
+class TargetWeights:
+    """Candidate positions for new landmarks and how much each is worth.
+
+    Attributes:
+        centres_um: ``(M, 2)`` reference full um.
+        weights: ``(M,)`` weights.
+        region: ``grey_matter`` or ``other`` per centre.
+    """
+
+    centres_um: np.ndarray
+    weights: np.ndarray
+    region: tuple[str, ...]
+
+
+def target_weight_map(
+    reference: RoleImages,
+    moving: RoleImages,
+    *,
+    pull_um: Callable[[np.ndarray], np.ndarray],
+    step_um: float = 100.0,
+    grey_matter_weight: float = 1.0,
+    other_weight: float = 0.25,
+) -> TargetWeights:
+    """Weight candidate landmark positions by the tissue they sit in.
+
+    Candidates lie every ``step_um`` on the shared tissue (reference tissue whose
+    pull falls in moving tissue); grey matter, found from MAP2, weighs more. With
+    no MAP2 image every candidate is ``other``.
+
+    Args:
+        reference: Coarse reference role images.
+        moving: Coarse moving role images.
+        pull_um: Maps reference full um to moving full um.
+        step_um: Candidate spacing.
+        grey_matter_weight: Weight in grey matter.
+        other_weight: Weight elsewhere.
+
+    Returns:
+        The candidates with weights and regions.
+    """
+    params = RepresentationParams()
+    _, reference_tissue, reference_grey = _masks(reference, params, min_sigma_px=1.0)
+    _, moving_tissue, _ = _masks(moving, params, min_sigma_px=1.0)
+    height, width = reference.shape_yx
+    spacing = max(step_um / reference.pixel_size_um, 1.0)
+    grid_x, grid_y = np.meshgrid(
+        np.arange(0.0, width, spacing), np.arange(0.0, height, spacing)
+    )
+    points_px = np.stack([grid_x.ravel(), grid_y.ravel()], axis=1)
+    nearest = np.rint(points_px).astype(int)
+    nearest[:, 0] = np.clip(nearest[:, 0], 0, width - 1)
+    nearest[:, 1] = np.clip(nearest[:, 1], 0, height - 1)
+    in_tissue = reference_tissue[nearest[:, 1], nearest[:, 0]]
+    points_px, nearest = points_px[in_tissue], nearest[in_tissue]
+    if len(points_px) == 0:
+        return TargetWeights(np.zeros((0, 2)), np.zeros(0), ())
+    centres_um = _grid_to_um(
+        reference.to_level0, reference.level0_pixel_size_um, points_px
+    )
+    moving_px = _um_to_grid(
+        moving.to_level0,
+        moving.level0_pixel_size_um,
+        np.asarray(pull_um(centres_um), dtype=np.float64),
+    )
+    moving_nearest = np.rint(moving_px).astype(int)
+    mov_height, mov_width = moving.shape_yx
+    inside = (
+        (moving_nearest[:, 0] >= 0)
+        & (moving_nearest[:, 0] < mov_width)
+        & (moving_nearest[:, 1] >= 0)
+        & (moving_nearest[:, 1] < mov_height)
+    )
+    shared = np.zeros(len(points_px), dtype=bool)
+    shared[inside] = moving_tissue[moving_nearest[inside, 1], moving_nearest[inside, 0]]
+    centres_um, nearest = centres_um[shared], nearest[shared]
+    is_grey = reference_grey[nearest[:, 1], nearest[:, 0]]
+    return TargetWeights(
+        centres_um=centres_um,
+        weights=np.where(is_grey, grey_matter_weight, other_weight).astype(np.float64),
+        region=tuple("grey_matter" if g else "other" for g in is_grey),
+    )
