@@ -26,6 +26,7 @@ from merxen.manual_registration.schema import (
 from merxen.manual_registration.simulate import (
     SyntheticPair,
     inject_labelling,
+    make_field_phantom,
     make_synthetic_pair,
     sample_tissue_points,
     simulate_landmark_pairs,
@@ -264,3 +265,109 @@ def test_inject_labelling_never_lowers_next_id_and_keeps_the_colour_seed(
     many = make_pairs(moving * 4, reference * 4)  # ids up to 40: above the counter
     inject_labelling(store, many)
     assert read_root_attrs(store)[LABELLING_ATTR]["landmarks"]["next_id"] == 41
+
+
+# ---------------------------------------------------------------- field phantom
+def _inside_ellipse(points: np.ndarray, extent: tuple[float, float]) -> np.ndarray:
+    centre = np.array(extent) / 2.0
+    semi = np.array([0.48 * extent[0], 0.45 * extent[1]])
+    return np.asarray(np.sum(((points - centre) / semi) ** 2, axis=1) <= 1.0 + 1e-9)
+
+
+def test_field_phantom_is_deterministic_per_seed() -> None:
+    first = make_field_phantom(seed=3, n_windows=20)
+    second = make_field_phantom(seed=3, n_windows=20)
+    other = make_field_phantom(seed=4, n_windows=20)
+    np.testing.assert_array_equal(first.moving_xy_um, second.moving_xy_um)
+    np.testing.assert_array_equal(first.window_moving_xy_um, second.window_moving_xy_um)
+    assert first.kind == second.kind
+    assert not np.array_equal(first.reference_xy_um, other.reference_xy_um)
+
+
+def test_field_phantom_kind_counts_and_ridge_directions() -> None:
+    phantom = make_field_phantom(
+        seed=5, n_clicks=66, n_gross=3, n_medium=5, ridge_fraction=0.5
+    )
+    kinds = list(phantom.kind)
+    assert kinds.count("gross") == 3 and kinds.count("medium") == 5
+    assert kinds.count("ridge") == 29 and kinds.count("clean") == 29
+    norms = np.linalg.norm(phantom.ridge_direction_xy, axis=1)
+    np.testing.assert_allclose(norms[np.array(kinds) == "ridge"], 1.0)
+    assert np.all(norms[np.array(kinds) != "ridge"] == 0.0)
+    gross = np.array(kinds) == "gross"
+    displacement = np.linalg.norm(
+        phantom.moving_xy_um - phantom.true_moving_xy_um, axis=1
+    )
+    np.testing.assert_allclose(displacement[gross], 1000.0)
+
+
+def test_field_phantom_respects_minimum_click_spacing_and_tissue() -> None:
+    phantom = make_field_phantom(seed=6, min_click_spacing_um=400.0)
+    points = phantom.reference_xy_um
+    distance = np.linalg.norm(points[:, None] - points[None], axis=2)
+    np.fill_diagonal(distance, np.inf)
+    assert distance.min() >= 400.0
+    assert _inside_ellipse(points, (22000.0, 16000.0)).all()
+    assert _inside_ellipse(phantom.grid_xy_um, (22000.0, 16000.0)).all()
+    np.testing.assert_allclose(
+        phantom.true_field(phantom.grid_xy_um), phantom.true_grid_moving_xy_um
+    )
+
+
+def test_field_phantom_random_field_variance_matches_the_kernel() -> None:
+    # Residual of the truth after removing its affine part has variance
+    # s_L^2 + s_S^2 per axis; averaged over seeds and points it is within 10 %.
+    variances = []
+    for seed in range(40):
+        phantom = make_field_phantom(
+            seed=seed,
+            n_clicks=4,
+            n_gross=0,
+            n_medium=0,
+            rotation_deg=0.0,
+            scale_xy=(1.0, 1.0),
+            translation_um=(0.0, 0.0),
+            long_length_um=2000.0,
+            long_signal_um=100.0,
+            short_length_um=500.0,
+            short_signal_um=60.0,
+            grid_step_um=2000.0,
+        )
+        residual = phantom.true_grid_moving_xy_um - phantom.grid_xy_um
+        variances.append(float(np.mean(residual**2)))
+    expected = 100.0**2 + 60.0**2
+    assert abs(np.mean(variances) / expected - 1.0) < 0.1
+
+
+def test_field_phantom_single_scale_truth_when_short_signal_is_zero() -> None:
+    single = make_field_phantom(
+        seed=7, short_signal_um=0.0, n_clicks=5, n_gross=0, n_medium=0
+    )
+    smooth = make_field_phantom(
+        seed=7,
+        short_signal_um=0.0,
+        short_length_um=50.0,
+        n_clicks=5,
+        n_gross=0,
+        n_medium=0,
+    )
+    # With no short component its length scale cannot matter.
+    np.testing.assert_allclose(
+        single.true_grid_moving_xy_um, smooth.true_grid_moving_xy_um
+    )
+
+
+def test_field_phantom_window_peak_covariances_are_valid() -> None:
+    phantom = make_field_phantom(seed=8, n_windows=60, window_wrong_fraction=0.05)
+    peak = phantom.window_peak_cov_um2
+    assert peak.shape == (60, 2, 2)
+    np.testing.assert_allclose(peak, np.swapaxes(peak, 1, 2))
+    stds = np.sqrt(np.linalg.eigvalsh(peak))
+    assert np.all(stds[:, 1] >= 5.0 - 1e-9) and np.all(stds[:, 1] <= 30.0 + 1e-9)
+    assert np.all(stds[:, 0] >= 4.0 - 1e-9) and np.all(stds[:, 0] <= 9.0 + 1e-9)
+    assert int(phantom.window_wrong.sum()) == 3
+    assert _inside_ellipse(phantom.window_reference_xy_um, (22000.0, 16000.0)).all()
+    with pytest.raises(ValueError, match="n_windows"):
+        make_field_phantom(seed=8, n_windows=5000)
+    with pytest.raises(ValueError, match="n_gross"):
+        make_field_phantom(seed=8, n_clicks=5, n_gross=4, n_medium=4)
