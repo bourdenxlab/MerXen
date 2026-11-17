@@ -12,6 +12,7 @@ are returned in full um; covariances and directions in the moving frame.
 
 from __future__ import annotations
 
+import itertools
 import logging
 import math
 import os
@@ -1302,8 +1303,9 @@ class ClickCheck:
         pair_id: Landmark pair id.
         verdict: ``confirmed``, ``contradicted``, ``ridge``, ``inconclusive`` or
             ``not_checked``.
-        image_moving_xy_um: Best confident fused estimate (the snap position of a
-            contradicted click without one), or None.
+        image_moving_xy_um: Best confident fused estimate (the best confirming one
+            for a confirmed click; the snap position of a contradicted click
+            without one), or None.
         image_offset_um: Its distance from the click, or None.
         prediction_offset_um: Its distance from the caller's prediction, or None.
         snap_moving_xy_um: The contradiction's snap position (contradicted only).
@@ -1395,40 +1397,36 @@ def _assess(
         and _distance(e.image_moving_xy_um, m_um) > params.contradict_um
     ]
     best_group: list[ClickEstimate] = []
+    best_mean: np.ndarray | None = None
     near_miss = ""
-    for seed in voters:
-        group = [
-            e
-            for e in voters
-            if _distance(e.image_moving_xy_um, seed.image_moving_xy_um)
-            <= params.agree_um
-        ]
-        if len(group) < 2:
-            continue
-        has_bp20 = any(e.representation == "bp20" for e in group)
-        has_small = any(e.window_um == smallest for e in group)
-        if not has_bp20:
-            near_miss = "orientation_only"
-            continue
-        if not has_small:
-            near_miss = near_miss or "large_window_only"
-            continue
-        mean = np.mean([e.image_moving_xy_um for e in group], axis=0)
-        best_mean = (
-            np.mean([e.image_moving_xy_um for e in best_group], axis=0)
-            if best_group
-            else None
-        )
-        if (
-            not best_group
-            or len(group) > len(best_group)
-            or (
-                len(group) == len(best_group)
-                and best_mean is not None
-                and _distance(mean, q_um) < _distance(best_mean, q_um)
-            )
-        ):
-            best_group = group
+    # Spec 5.8: the estimates must agree within agree_um of EACH OTHER, so a
+    # chain of voters that agree only through a middle one is not a group. There
+    # are at most a handful of voters (two representations by the window sizes).
+    for size in range(2, len(voters) + 1):
+        for group_tuple in itertools.combinations(voters, size):
+            group = list(group_tuple)
+            if any(
+                _distance(a.image_moving_xy_um, b.image_moving_xy_um) > params.agree_um
+                for a, b in itertools.combinations(group, 2)
+            ):
+                continue
+            if not any(e.representation == "bp20" for e in group):
+                near_miss = "orientation_only"
+                continue
+            if not any(e.window_um == smallest for e in group):
+                near_miss = near_miss or "large_window_only"
+                continue
+            mean = np.mean([e.image_moving_xy_um for e in group], axis=0)
+            if (
+                not best_group
+                or len(group) > len(best_group)
+                or (
+                    len(group) == len(best_group)
+                    and best_mean is not None
+                    and _distance(mean, q_um) < _distance(best_mean, q_um)
+                )
+            ):
+                best_group, best_mean = group, mean
     contradicted = bool(best_group)
     confirmed = bool(confirming)
 
@@ -1462,8 +1460,9 @@ def _assess(
         )
 
     fused_confident = [e for e in confident_estimates if e.representation == "fused"]
+    best_fused = max(fused_confident, key=lambda e: e.peak, default=None)
     if confirmed and contradicted:
-        return blank("inconclusive", "conflicting")
+        return with_image(blank("inconclusive", "conflicting"), best_fused)
     if confirmed:
         best = max(confirming, key=lambda e: e.peak)
         strong = any(e.window_um == smallest for e in confirming) and not any(
@@ -1478,12 +1477,11 @@ def _assess(
     if contradicted:
         snap = np.mean([e.image_moving_xy_um for e in best_group], axis=0)
         check = replace(blank("contradicted", "contradicted"), snap_moving_xy_um=snap)
-        best_fused = max(fused_confident, key=lambda e: e.peak, default=None)
         return with_image(check, best_fused)
     reason = near_miss or (
         "no_confident_estimate" if not confident_estimates else "no_agreement"
     )
-    return blank("inconclusive", reason)
+    return with_image(blank("inconclusive", reason), best_fused)
 
 
 def _check_one(
