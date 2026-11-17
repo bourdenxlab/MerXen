@@ -30,6 +30,23 @@ RESULT_ATTR: Final = "merxen_manual_registration_result"
 STORE_SCHEMA: Final = "merxen.manual_registration.store"
 LABELLING_SCHEMA: Final = "merxen.manual_registration.labelling"
 RESULT_SCHEMA: Final = "merxen.manual_registration.result"
+CHECK_ATTR: Final = "merxen_manual_registration_check"
+CHECK_SCHEMA: Final = "merxen.manual_registration.check"
+CHECK_VERDICTS: Final = (
+    "confirmed",
+    "contradicted",
+    "ridge",
+    "inconclusive",
+    "not_checked",
+)
+CHECK_CLASSES: Final = (
+    "ok",
+    "kept_confirmed",
+    "check",
+    "likely_misclick",
+    "excluded",
+    "disabled",
+)
 # Used by the viewer; recorded here so the golden file pins it.
 LAYER_METADATA_KEY: Final = "merxen_manual_registration"
 MIN_LANDMARK_PAIRS: Final = 8
@@ -472,6 +489,210 @@ class StoreAttrs(BaseModel):
         ):
             raise ValueError("a result store needs run_id, preset and prepared_store")
         return self
+
+
+CheckVerdict = Literal[
+    "confirmed", "contradicted", "ridge", "inconclusive", "not_checked"
+]
+CheckClass = Literal[
+    "ok", "kept_confirmed", "check", "likely_misclick", "excluded", "disabled"
+]
+
+
+class CheckStats(BaseModel):
+    """Median, 90th percentile and maximum of a set of residuals (micrometres)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    median: float
+    p90: float
+    max: float
+
+    @field_validator("median", "p90", "max")
+    @classmethod
+    def _finite_stat(cls: type[CheckStats], value: float) -> float:
+        return _finite(value)
+
+
+class CheckClicksOnly(BaseModel):
+    """The clicks-only field's view of a pair (contract C3)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    weight: float | None
+    loo_um: float
+    p_value: float
+
+    @field_validator("weight", "loo_um", "p_value")
+    @classmethod
+    def _finite_value(cls: type[CheckClicksOnly], value: float | None) -> float | None:
+        return _finite(value)
+
+
+class CheckPair(BaseModel):
+    """One pair of the check report (contract C3 plus the A3 trust keys)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool
+    used: bool
+    weight: float | None
+    loo_um: float
+    loo_vector_moving_um: tuple[float, float]
+    p_value: float
+    clicks_only: CheckClicksOnly | None
+    rigid_loo_um: float | None
+    rigid_outlier: bool
+    verdict: CheckVerdict
+    image_offset_um: float | None
+    snap_moving_xy_px: tuple[float, float] | None
+    pair_class: CheckClass = Field(alias="class")
+    em_exempt: bool = False
+    confirm_strength: Literal["strong", "weak"] | None = None
+
+    @field_validator(
+        "weight",
+        "loo_um",
+        "loo_vector_moving_um",
+        "p_value",
+        "rigid_loo_um",
+        "image_offset_um",
+        "snap_moving_xy_px",
+    )
+    @classmethod
+    def _finite_value(cls: type[CheckPair], value: Any) -> Any:
+        return _finite(value)
+
+
+class CheckHyperparameters(BaseModel):
+    """Fitted kernel and noise parameters of the final field."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    long_length_um: float
+    long_signal_um: float
+    short_length_um: float | None
+    short_signal_um: float | None
+    noise_um: dict[str, float]
+
+    @field_validator(
+        "long_length_um",
+        "long_signal_um",
+        "short_length_um",
+        "short_signal_um",
+        "noise_um",
+    )
+    @classmethod
+    def _finite_value(cls: type[CheckHyperparameters], value: Any) -> Any:
+        if isinstance(value, dict):
+            _finite(list(value.values()))
+            return value
+        return _finite(value)
+
+
+class CheckField(BaseModel):
+    """Summary of the final field in the check report (contract C3)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    n_clicks: int = Field(ge=0)
+    n_windows: int = Field(ge=0)
+    hyperparameters: CheckHyperparameters
+    loo_um: CheckStats
+    loo_um_clicks_only: CheckStats | None
+    rigid_loo_um: CheckStats
+    sd_um: CheckStats | None
+    outlier_p: float
+    class_counts: dict[CheckClass, int]
+    verdict_counts: dict[CheckVerdict, int]
+
+    @field_validator("outlier_p")
+    @classmethod
+    def _finite_p(cls: type[CheckField], value: float) -> float:
+        return _finite(value)
+
+
+class CheckSuggestion(BaseModel):
+    """One suggested next click of the check report."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    rank: int = Field(ge=1)
+    reference_xy_px: tuple[float, float]
+    predicted_moving_xy_px: tuple[float, float]
+    sd_um: float
+    ellipse_um: dict[str, float]
+    weight: float
+    region: Literal["grey_matter", "other"]
+
+    @field_validator(
+        "reference_xy_px", "predicted_moving_xy_px", "sd_um", "ellipse_um", "weight"
+    )
+    @classmethod
+    def _finite_value(cls: type[CheckSuggestion], value: Any) -> Any:
+        if isinstance(value, dict):
+            _finite(list(value.values()))
+            return value
+        return _finite(value)
+
+
+class CheckAttrs(BaseModel):
+    """Root attrs ``CHECK_ATTR``: the landmark check (single writer: the check CLI).
+
+    Unknown keys, such as the ``details`` block of the check JSON, are ignored.
+    """
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    # ``schema`` shadows BaseModel.schema, hence the alias.
+    schema_: Literal["merxen.manual_registration.check"] = Field(alias="schema")
+    schema_version: int
+    status: Literal["complete"]
+    written_at: str
+    written_by: WrittenBy
+    dataset_name: str = Field(pattern=DATASET_ID_PATTERN)
+    labelling_source: Literal["store", "file"]
+    labelling_content_sha256: str = Field(pattern=DIGEST_PATTERN)
+    labelling_revision: int = Field(ge=1)
+    labelling_status: Literal["draft", "finished"]
+    store_content_digest: str = Field(pattern=DIGEST_PATTERN)
+    preset: str
+    preset_version: str
+    settings_digest: str = Field(pattern=DIGEST_PATTERN)
+    channel_roles: dict[str, dict[str, str]] | None
+    algorithm: dict[str, str | None]
+    field: CheckField
+    pairs: dict[str, CheckPair]
+    suggestions: list[CheckSuggestion]
+    outputs: dict[str, str]
+
+    @field_validator("schema_version")
+    @classmethod
+    def _check_version(cls: type[CheckAttrs], value: int) -> int:
+        check_schema_version({"schema_version": value}, attr=CHECK_ATTR)
+        return value
+
+    @field_validator("pairs")
+    @classmethod
+    def _check_pair_keys(
+        cls: type[CheckAttrs], value: dict[str, CheckPair]
+    ) -> dict[str, CheckPair]:
+        # The ids are not stored in the records, so the key format is the only check.
+        bad = [key for key in value if not (key.isascii() and key.isdecimal())]
+        if bad:
+            raise ValueError(f"pair keys must be decimal ids, got {bad}")
+        return value
+
+
+def parse_check_attrs(payload: Mapping[str, Any]) -> CheckAttrs:
+    """Validate a ``CHECK_ATTR`` payload (or a check JSON; ``details`` is ignored).
+
+    Raises:
+        UnsupportedSchemaVersionError: If the payload is from a newer writer.
+        ValueError: If the payload is not valid (pydantic ``ValidationError``).
+    """
+    check_schema_version(payload, attr=CHECK_ATTR)
+    return CheckAttrs.model_validate(dict(payload))
 
 
 def parse_labelling_attrs(payload: Mapping[str, Any]) -> LabellingAttrs:

@@ -22,6 +22,7 @@ import pytest
 
 from merxen.config import ViewerCacheConfig
 from merxen.manual_registration.config import (
+    ManualRegistrationCheckConfig,
     ManualRegistrationCompareConfig,
     ManualRegistrationPrepareConfig,
     ManualRegistrationRunConfig,
@@ -58,7 +59,11 @@ class SheetHarness {
             ]
             if (!parsed.errors) {
                 r.preflight = mode == "register" ?
-                    S.registerPreflight(parsed.rows, p) : []
+                    S.registerPreflight(parsed.rows, p) :
+                    (mode == "check" ? S.checkPreflight(parsed.rows, p) : [])
+                if (mode == "check" && !r.preflight) {
+                    r.checks = S.plannedChecks(parsed.rows, p)
+                }
                 r.prepare = parsed.rows.collect { row -> S.prepareConfigJson(row, p) }
                 r.viewer = parsed.rows.collect { row ->
                     S.viewerCacheConfigJson(row, p)
@@ -76,6 +81,7 @@ class SheetHarness {
         results.min_landmark_pairs = S.MIN_LANDMARK_PAIRS
         results.min_used_pairs = S.MIN_USED_PAIRS
         results.allowed_columns = S.ALLOWED_COLUMNS
+        results.presets = S.PRESETS
         results.names = [
             run_name: S.runName("serial_section", "trial"),
             run_name_blank: S.runName("same_section", null),
@@ -567,9 +573,124 @@ def _build_cases(p: _Project) -> None:
         params={"manual_registration_settings": "landmark_min_pairs=5"},
     )
 
+    # Channel roles (contract C6) and the cortex_serial preset.
+    roles_ok = "at8=AF568;map2=AF647;dapi=DAPI"
+    roles_header = [*HEADER, "presets", "channel_roles"]
+    p.add(
+        "roles_ok",
+        roles_header,
+        [
+            ["X1", img("a.czi"), img("c.ome.tif"), "cortex_serial", roles_ok],
+            ["X2", img("a.czi"), img("c.ome.tif"), "", ""],
+            [
+                "X3",
+                img("a.czi"),
+                img("c.ome.tif"),
+                "cortex_serial",
+                " ;at8=AF568;reference:map2=A;moving:map2=B;dapi=DAPI;",
+            ],
+        ],
+    )
+    p.add(
+        "roles_missing_for_cortex",
+        roles_header,
+        [
+            ["X1", img("a.czi"), img("c.ome.tif"), "cortex_serial", ""],
+            ["X2", img("a.czi"), img("c.ome.tif"), "same_section;cortex_serial", "  "],
+            [
+                "X3",
+                img("a.czi"),
+                img("c.ome.tif"),
+                "cortex_serial",
+                "at8=AF568;dapi=DAPI",
+            ],
+            [
+                "X4",
+                img("a.czi"),
+                img("c.ome.tif"),
+                "cortex_serial",
+                "at8=AF568;map2=AF647;reference:dapi=DAPI",
+            ],
+        ],
+    )
+    p.add(
+        "roles_syntax",
+        roles_header,
+        [
+            ["X1", img("a.czi"), img("c.ome.tif"), "", "at8"],
+            ["X2", img("a.czi"), img("c.ome.tif"), "", "gfap=AF488"],
+            ["X3", img("a.czi"), img("c.ome.tif"), "", "left:at8=AF568"],
+            ["X4", img("a.czi"), img("c.ome.tif"), "", "at8="],
+            ["X5", img("a.czi"), img("c.ome.tif"), "", "at8=A:B"],
+            ["X6", img("a.czi"), img("c.ome.tif"), "", "at8=AF568;at8=AF647"],
+            ["X7", img("a.czi"), img("c.ome.tif"), "", "at8=A;reference:at8=B"],
+            [
+                "X8",
+                img("a.czi"),
+                img("c.ome.tif"),
+                "",
+                "reference:at8=A;reference:at8=B",
+            ],
+        ],
+    )
+
+    # The landmark check: a draft labelling is allowed, cortex_serial needs roles.
+    check_header = [*HEADER, "prepared_store", "channel_roles"]
+    check_rows = []
+    for ident, kwargs, roles in [
+        ("K_DRAFT", {"status": "draft"}, roles_ok),
+        ("K_FINISHED", {}, roles_ok),
+        ("K_NOROLES", {}, ""),
+        ("K_PARTIAL", {}, "at8=AF568;dapi=DAPI"),
+        ("K_NOLABEL", {"status": None}, roles_ok),
+        ("K_FEW", {"n_enabled": 5, "n_disabled": 1}, roles_ok),
+        ("K_RESULT", {"kind": "result"}, roles_ok),
+    ]:
+        store = _fake_store(stores / f"{ident}.zarr", dataset_name=ident, **kwargs)
+        check_rows.append([ident, img("a.czi"), img("c.ome.tif"), str(store), roles])
+    p.add("check_preflight", check_header, check_rows, mode="check")
+    p.add(
+        "check_no_roles_other_preset",
+        check_header,
+        [check_rows[2]],
+        mode="check",
+        params={"manual_registration_check_preset": "same_section"},
+    )
+    p.add(
+        "check_bad_params",
+        check_header,
+        [check_rows[1]],
+        mode="check",
+        params={
+            "manual_registration_check_preset": "fast",
+            "manual_registration_check_write_attr": "maybe",
+            "manual_registration_check_suggestions": "300",
+        },
+    )
+    p.add(
+        "check_configs",
+        [*HEADER, "prepared_store", "channel_roles", "registration_settings"],
+        [
+            [
+                "K_CFG",
+                img("a.czi"),
+                img("c.ome.tif"),
+                str(_fake_store(stores / "K_CFG.zarr", dataset_name="K_CFG")),
+                roles_ok,
+                "field_outlier_p=0.02",
+            ]
+        ],
+        mode="check",
+        params={
+            "manual_registration_check_write_attr": False,
+            "manual_registration_check_suggestions": 5,
+            "manual_registration_settings": "field_window_step_um=150",
+        },
+    )
+
     p.add(
         "configs",
-        [*HEADER, "run_label", "registration_settings", "presets"],
+        [*HEADER, "run_label", "registration_settings", "presets", "channel_roles"],
         [
             [
                 "X1",
@@ -578,6 +699,7 @@ def _build_cases(p: _Project) -> None:
                 "r1",
                 "nucleus_qc=false",
                 "serial_section;same_section",
+                "at8=AF568;map2=AF647;dapi=DAPI",
             ]
         ],
         params={
@@ -624,7 +746,11 @@ def _malformed(path: Path) -> Path:
 
 SETTINGS_CASES: list[tuple[str, str | None]] = [
     ("a", "item 'a': expected [preset:]key=value"),
-    ("foo:x=1", "unknown preset prefix 'foo' (allowed: same_section, serial_section)"),
+    (
+        "foo:x=1",
+        "unknown preset prefix 'foo' "
+        "(allowed: same_section, serial_section, cortex_serial)",
+    ),
     ("Bad=1", "key 'Bad' must match [a-z][a-z0-9_]*"),
     (
         "reference_channel=DAPI",
@@ -877,7 +1003,7 @@ def test_valid_pixel_size_is_parsed(results: dict[str, Any]) -> None:
 def test_bad_presets(results: dict[str, Any]) -> None:
     assert _parse(results, "presets_bad")["errors"] == [
         "row 2 (X1): presets: unknown preset 'fast' "
-        "(allowed: same_section, serial_section)",
+        "(allowed: same_section, serial_section, cortex_serial)",
         "row 3 (X2): presets: 'same_section' listed twice",
     ]
 
@@ -902,7 +1028,7 @@ def test_params_are_validated_even_when_rows_are_fine(results: dict[str, Any]) -
 
     assert (
         "--manual_registration_presets: unknown preset 'fast' "
-        "(allowed: same_section, serial_section)" in errors
+        "(allowed: same_section, serial_section, cortex_serial)" in errors
     )
     assert (
         "--manual_registration_force_prepare must be true or false (got 'maybe')"
@@ -1235,6 +1361,7 @@ def test_emitted_configs_validate_in_python(results: dict[str, Any]) -> None:
     assert str(config.result_dir).endswith("/X1/registered/serial_section_r1")
     assert config.global_settings == "serial_section:nonrigid_smoothing_sigma_um=150"
     assert config.row_settings == "nucleus_qc=false"
+    assert config.channel_roles == "at8=AF568;map2=AF647;dapi=DAPI"
     assert config.force is False and config.run_label == "r1"
     assert run["summary_path"].endswith(
         "/X1/registered/serial_section_r1/X1_serial_section_r1_manual_registration_summary.json"
@@ -1293,6 +1420,7 @@ def test_allowed_columns(results: dict[str, Any]) -> None:
         "registration_settings",
         "run_label",
         "prepared_store",
+        "channel_roles",
     ]
 
 
@@ -1305,3 +1433,137 @@ def test_names(results: dict[str, Any]) -> None:
     assert (
         names["prepared_dir_relative"] == f"{results['_project']}/rel/out/LCM1/prepared"
     )
+
+
+# --- cortex_serial, channel roles and the landmark check -------------------
+
+
+def test_presets_include_cortex_serial(results: dict[str, Any]) -> None:
+    assert results["presets"] == ["same_section", "serial_section", "cortex_serial"]
+    assert sorted(results["presets"]) == sorted(PRESETS)
+
+
+def test_valid_channel_roles_pass_and_are_normalised(results: dict[str, Any]) -> None:
+    parsed = _parse(results, "roles_ok")
+
+    assert parsed["errors"] == []
+    roles = [row["channel_roles"] for row in parsed["rows"]]
+    assert roles == [
+        "at8=AF568;map2=AF647;dapi=DAPI",
+        "",
+        ";at8=AF568;reference:map2=A;moving:map2=B;dapi=DAPI;",
+    ]
+
+
+def test_cortex_serial_rows_need_all_three_roles(results: dict[str, Any]) -> None:
+    errors = _parse(results, "roles_missing_for_cortex")["errors"]
+    example = "e.g. at8=AF568;map2=AF647;dapi=DAPI"
+
+    assert errors == [
+        "row 2 (X1): preset cortex_serial needs channel_roles (at8, map2, dapi), "
+        f"{example}",
+        "row 3 (X2): preset cortex_serial needs channel_roles (at8, map2, dapi), "
+        f"{example}",
+        "row 4 (X3): preset cortex_serial needs channel_roles for map2 "
+        f"(all of at8, map2, dapi), {example}",
+        "row 5 (X4): preset cortex_serial needs channel_roles for dapi "
+        f"(all of at8, map2, dapi), {example}",
+    ]
+
+
+def test_channel_roles_syntax_errors_are_collected_per_row(
+    results: dict[str, Any],
+) -> None:
+    errors = _parse(results, "roles_syntax")["errors"]
+
+    assert errors == [
+        "row 2 (X1): channel_roles: item 'at8': expected "
+        "[reference:|moving:]role=channel",
+        "row 3 (X2): channel_roles: item 'gfap=AF488': unknown role 'gfap' "
+        "(roles: at8, map2, dapi)",
+        "row 4 (X3): channel_roles: item 'left:at8=AF568': scope 'left' must be "
+        "reference or moving",
+        "row 5 (X4): channel_roles: item 'at8=': the channel must be a name "
+        "without ';', '=' or ':'",
+        "row 6 (X5): channel_roles: item 'at8=A:B': the channel must be a name "
+        "without ';', '=' or ':'",
+        "row 7 (X6): channel_roles: role 'at8' is given twice (unscoped)",
+        "row 9 (X8): channel_roles: role 'at8' is given twice (reference)",
+    ]
+
+
+def test_check_preflight_allows_a_draft_and_requires_roles(
+    results: dict[str, Any],
+) -> None:
+    parsed = _parse(results, "check_preflight")
+    stores = Path(results["_fs"]) / "stores"
+    example = "e.g. at8=AF568;map2=AF647;dapi=DAPI"
+
+    assert parsed["errors"] == []
+    messages = parsed["preflight"]
+    assert not [m for m in messages if m.startswith(("K_DRAFT", "K_FINISHED"))]
+    assert (
+        "K_NOROLES: preset cortex_serial needs channel_roles (at8, map2, dapi), "
+        f"{example}" in messages
+    )
+    assert (
+        "K_PARTIAL: preset cortex_serial needs channel_roles for map2 "
+        f"(all of at8, map2, dapi), {example}" in messages
+    )
+    assert any(
+        m.startswith(f"K_NOLABEL: no landmarks saved in {stores / 'K_NOLABEL.zarr'}")
+        for m in messages
+    )
+    assert (
+        f"K_FEW (preset cortex_serial): 5 enabled landmark pairs in "
+        f"{stores / 'K_FEW.zarr'}, at least 8 are needed" in messages
+    )
+    assert any("K_RESULT" in m and "is a result store" in m for m in messages)
+    assert len(messages) == 5
+
+
+def test_check_preflight_needs_no_roles_for_other_presets(
+    results: dict[str, Any],
+) -> None:
+    parsed = _parse(results, "check_no_roles_other_preset")
+
+    assert parsed["errors"] == []
+    assert parsed["preflight"] == []
+    assert parsed["checks"][0]["preset"] == "same_section"
+
+
+def test_check_preflight_validates_its_params(results: dict[str, Any]) -> None:
+    parsed = _parse(results, "check_bad_params")
+
+    assert parsed["errors"] == []
+    assert parsed["preflight"] == [
+        "--manual_registration_check_preset: unknown preset 'fast' "
+        "(allowed: same_section, serial_section, cortex_serial)"
+    ]
+
+
+def test_check_config_keys_equal_the_model_and_validate(
+    results: dict[str, Any],
+) -> None:
+    parsed = _parse(results, "check_configs")
+    fs = results["_fs"]
+
+    assert parsed["errors"] == []
+    assert parsed["preflight"] == []
+    (check,) = parsed["checks"]
+    payload = json.loads(check["config_json"])
+    assert set(payload) == set(ManualRegistrationCheckConfig.model_fields)
+    config = ManualRegistrationCheckConfig.model_validate(payload)
+    assert config.dataset_name == "K_CFG"
+    assert config.preset == "cortex_serial"
+    assert config.labelling_path is None
+    assert str(config.output_dir) == f"{fs}/out/K_CFG/check"
+    assert str(config.task_output_dir) == "check_out"
+    assert config.write_attr is False
+    assert config.n_suggestions == 5
+    assert config.channel_roles == "at8=AF568;map2=AF647;dapi=DAPI"
+    assert config.row_settings == "field_outlier_p=0.02"
+    assert config.global_settings == "field_window_step_um=150"
+    assert config.image_check is None and config.windows is None
+    assert check["check_json"] == f"{fs}/out/K_CFG/check/K_CFG_cortex_serial_check.json"
+    assert check["check_id"] == "K_CFG_cortex_serial"

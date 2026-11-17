@@ -26,8 +26,29 @@ from merxen.manual_registration.schema import (
 )
 
 MANUAL_REGISTRATION_ID_PATTERN = DATASET_ID_PATTERN
-PresetName = Literal["same_section", "serial_section"]
-PRESET_NAMES: tuple[str, ...] = ("same_section", "serial_section")
+PresetName = Literal["same_section", "serial_section", "cortex_serial"]
+PRESET_NAMES: tuple[str, ...] = ("same_section", "serial_section", "cortex_serial")
+
+
+# Settings of the robust landmark field. The provenance digest leaves out each one
+# at its default, so results of the older presets stay valid (plan D10).
+FIELD_SETTINGS_KEYS: tuple[str, ...] = (
+    "field_model",
+    "field_kernel",
+    "field_student_t_nu",
+    "field_outlier_p",
+    "field_image_check",
+    "field_window_observations",
+    "field_window_step_um",
+    "field_window_search_um",
+    "field_window_min_spacing_um",
+    "field_window_noise_floor_um",
+    "field_trust_confirmed_clicks",
+    "field_grid_um",
+    "field_sd_grid_um",
+    "materialize",
+    "preview_pixel_size_um",
+)
 
 
 class ManualRegistrationImageInput(BaseModel):
@@ -135,6 +156,15 @@ class ManualRegistrationSettings(RegistrationSettings):
     rise of the registration-channel correlation a refinement must give; the
     override grammar cannot express ``None``, so ``-2`` (below any possible gain)
     turns the check off.
+
+    The ``field_*`` settings, ``materialize`` and ``preview_pixel_size_um`` belong to
+    the robust landmark field of the ``cortex_serial`` preset. Their defaults leave
+    ``same_section`` and ``serial_section`` unchanged (and out of the provenance
+    digest). ``field_model`` and the image-evidence and window settings drive the
+    landmark check; ``field_grid_um``, ``field_sd_grid_um``, ``materialize`` and
+    ``preview_pixel_size_um`` take effect with the register path of a later change.
+    ``field_kernel`` ``auto`` fits one Matern component to clicks alone and two once
+    tissue windows are added.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -166,6 +196,21 @@ class ManualRegistrationSettings(RegistrationSettings):
     nucleus_qc: bool = False
     nucleus_qc_pixel_size_um: float = Field(default=1.7, gt=0.0)
     nucleus_qc_window_um: float = Field(default=200.0, gt=0.0)
+    field_model: Literal["similarity", "robust_gp"] = "similarity"
+    field_kernel: Literal["auto", "single", "two_scale"] = "auto"
+    field_student_t_nu: float = Field(default=4.0, ge=1.0, le=1000.0)
+    field_outlier_p: float = Field(default=0.01, gt=0.0, lt=0.5)
+    field_image_check: bool = True
+    field_window_observations: bool = False
+    field_window_step_um: float = Field(default=200.0, gt=0.0)
+    field_window_search_um: float = Field(default=300.0, gt=0.0)
+    field_window_min_spacing_um: float = Field(default=400.0, ge=0.0)
+    field_window_noise_floor_um: float = Field(default=15.0, gt=0.0)
+    field_trust_confirmed_clicks: bool = False
+    field_grid_um: float = Field(default=11.0, gt=0.0)
+    field_sd_grid_um: float = Field(default=88.0, gt=0.0)
+    materialize: Literal["none", "preview", "full"] = "full"
+    preview_pixel_size_um: float = Field(default=5.5, gt=0.0)
 
     @field_validator("crop_snap_px")
     @classmethod
@@ -198,6 +243,7 @@ class ManualRegistrationRunConfig(BaseModel):
     output_dir: Path  # task-local, e.g. "register_out"
     global_settings: str = ""  # params.manual_registration_settings
     row_settings: str = ""  # samplesheet registration_settings
+    channel_roles: str = ""  # C6 text, e.g. "at8=AF568;map2=AF647;dapi=DAPI"
     force: bool = False
 
     @property
@@ -227,3 +273,24 @@ class ManualRegistrationCompareConfig(BaseModel):
     summary_paths: list[Path] = Field(min_length=2)
     output_dir: Path  # durable: ${outdir}/<id>/registered
     task_output_dir: Path  # task-local, e.g. "compare_out"
+
+
+class ManualRegistrationCheckConfig(BaseModel):
+    """Configuration of the landmark check of one pair."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_name: str = Field(pattern=MANUAL_REGISTRATION_ID_PATTERN)
+    preset: PresetName = "cortex_serial"
+    prepared_store_path: Path
+    # An uploaded zarr.json or labelling JSON; None checks the store's own labelling.
+    labelling_path: Path | None = None
+    output_dir: Path  # durable: ${outdir}/<id>/check
+    task_output_dir: Path | None = None  # Nextflow: "check_out" (gets a JSON copy)
+    global_settings: str = ""
+    row_settings: str = ""
+    channel_roles: str = ""
+    image_check: bool | None = None  # None: the settings' field_image_check
+    windows: bool | None = None  # None: the settings' field_window_observations
+    write_attr: bool = True  # ignored (False) with labelling_path
+    n_suggestions: int = Field(default=20, ge=0, le=200)
