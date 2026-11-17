@@ -47,6 +47,7 @@ INTEGRATION_BRANCHES = (
     "feature/robust-celltype-annotation",
     "feature/atera-support",
     "feature/manual-registration",
+    "feature/cortex-serial-registration",
 )
 #: A PR carrying this label runs the full suite.
 FULL_LABEL = "full-ci"
