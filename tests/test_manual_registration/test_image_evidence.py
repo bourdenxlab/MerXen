@@ -1151,35 +1151,61 @@ def test_the_covariance_of_a_window_on_a_tube_follows_the_tube(
 
 
 def test_window_covariances_are_reported_in_the_moving_frame(
-    ridge_pair: _Pair,
+    prior_pair: _Pair, observations: ie.WindowObservations
 ) -> None:
-    phantom = ridge_pair.phantom
-    result = ie.tissue_window_observations(
-        ridge_pair.reference,
-        ridge_pair.moving,
-        pull_um=phantom.pull,
-        params=ie.WindowParams(sizes_um=(600.0,), null_pairs=150, workers=4),
-    )
-    # The tube runs along x in the reference; the phantom rotates by 35 degrees.
-    centre = np.array([[2900.0, _TUBE_Y_UM]])
+    phantom = prior_pair.phantom
+    reference, pixel = prior_pair.reference, prior_pair.reference.pixel_size_um
+    # The prior is the phantom's 35 degree rotation, so the Jacobian is far from
+    # the identity: a covariance left in the reference frame would be wrong.
     step = 5.0
-    along = (
-        phantom.pull(centre + [[step, 0.0]]) - phantom.pull(centre - [[step, 0.0]])
-    )[0]
-    along = along / np.hypot(*along)
-    assert abs(math.degrees(math.atan2(along[1], along[0]))) > 25.0
-    near_tube = (
-        (np.abs(result.reference_xy_um[:, 1] - _TUBE_Y_UM) < 200.0)
-        & (result.reference_xy_um[:, 0] > 2400.0)
-        & (result.reference_xy_um[:, 0] < 3500.0)
-        & (result.elongation > 2.0)
-    )
+    probe = observations.reference_xy_um[:1]
+    jacobian = np.stack(
+        [
+            (
+                phantom.prior(probe + [[step, 0.0]])
+                - phantom.prior(probe - [[step, 0.0]])
+            )[0],
+            (
+                phantom.prior(probe + [[0.0, step]])
+                - phantom.prior(probe - [[0.0, step]])
+            )[0],
+        ],
+        axis=1,
+    ) / (2.0 * step)
+    assert abs(math.degrees(math.atan2(jacobian[1, 0], jacobian[0, 0]))) > 25.0
 
-    assert near_tube.any()
-    for covariance in result.peak_cov_um2[near_tube]:
-        _, vectors = np.linalg.eigh(covariance)
-        cosine = min(abs(float(vectors[:, 1] @ along)), 1.0)
-        assert math.degrees(math.acos(cosine)) < 10.0
+    checked = 0
+    for index in np.argsort(-observations.elongation)[:3]:
+        centre_um = observations.reference_xy_um[index]
+        centre = tuple(int(round(v)) for v in reference.um_to_px(centre_um))
+        geometry = ie._geometry(float(observations.window_um[index]), 300.0, pixel)
+        scores = ie._correlate(
+            reference,
+            prior_pair.moving,
+            centre,
+            centre,
+            geometry,
+            use_orientation=False,
+        )["bp20"]
+        peak_x, peak_y, *_ = ie.summarise_scores(
+            scores, exclusion_px=int(round(50.0 / pixel))
+        )[2:]
+        in_reference = ie.peak_covariance(
+            scores,
+            (peak_x, peak_y),
+            pixel_size_um=pixel,
+            drop=0.05,
+            radius_um=100.0,
+        )
+        expected = jacobian @ in_reference @ jacobian.T
+
+        assert np.allclose(
+            observations.peak_cov_um2[index], expected, rtol=1e-3, atol=1e-6
+        )
+        # The two frames differ materially, so the check discriminates.
+        assert not np.allclose(in_reference, expected, rtol=0.2, atol=1e-6)
+        checked += 1
+    assert checked == 3
 
 
 def test_windows_over_unrelated_texture_are_rejected() -> None:
