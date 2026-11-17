@@ -3,9 +3,14 @@
 The reference shows random vessel-like tubes and ellipses (widths 15-25 um) inside an
 elliptical tissue outline, in three channels with different mixing weights, plus fine
 spots and noise that are independent per image. The moving image is the reference
-structure seen through a known warp (an affine part plus a sinusoid of 40 um
-amplitude and 1.5 mm wavelength) with its own fine spots and noise. Everything is
-deterministic in the seed.
+structure seen through a known warp (a 35 degree rotation about the image centre
+at scale 1.02, plus a sinusoid of 40 um amplitude and 1.5 mm wavelength) with its
+own fine spots and noise. Everything is deterministic in the seed.
+
+Both images sit on a level-0 grid of 1.38 um with a working factor of 2 (contract
+C2's frames). The reference crop starts at the full-frame origin; the moving crop
+starts at ``MOVING_ORIGIN_LEVEL0_PX`` level-0 px, so a moving full-frame um is the
+crop-local um plus ``MOVING_ORIGIN_UM`` and a wrong grid conversion is visible.
 """
 
 from __future__ import annotations
@@ -17,9 +22,14 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from merxen.manual_registration.image_evidence import RoleImages
+from merxen.manual_registration.image_evidence import RoleImages, _um_to_grid
 
 PIXEL_UM = 2.76
+LEVEL0_PIXEL_UM = 1.38
+LEVEL0_FACTOR = 2
+MOVING_ORIGIN_LEVEL0_PX = (300.0, 220.0)
+MOVING_ORIGIN_UM = np.array(MOVING_ORIGIN_LEVEL0_PX) * LEVEL0_PIXEL_UM
+ROTATION_DEG = 35.0
 SIZE_PX = 2048
 _PAD_PX = 300
 _ROLE_ORDER = ("at8", "map2", "dapi")
@@ -32,7 +42,7 @@ class Phantom:
     Attributes:
         reference: Reference role images.
         moving: Moving role images.
-        pull: Exact map of reference um to moving um.
+        pull: Exact map of reference full-frame um to moving full-frame um.
         prior: The affine part of the warp (what a coarse alignment would know).
         tubes_um: Explicit tubes ``(x0, y0, x1, y1)`` in reference um.
     """
@@ -44,8 +54,15 @@ class Phantom:
     tubes_um: tuple[tuple[float, float, float, float], ...]
 
 
-def _identity_grid() -> np.ndarray:
-    return np.eye(3)
+def _to_level0(origin_level0_px: tuple[float, float]) -> np.ndarray:
+    """Working px to level-0 px: a factor of 2 and the crop origin."""
+    return np.array(
+        [
+            [LEVEL0_FACTOR, 0.0, origin_level0_px[0]],
+            [0.0, LEVEL0_FACTOR, origin_level0_px[1]],
+            [0.0, 0.0, 1.0],
+        ]
+    )
 
 
 _Patch = tuple[int, int, int, int, np.ndarray]
@@ -261,12 +278,13 @@ def make_phantom(
     else:
         structure_m, tissue_m = structure, tissue
     # Moving px (canvas frame) -> reference canvas px, then resample the canvas.
-    angle = math.radians(3.0)
+    angle = math.radians(ROTATION_DEG)
     scale = 1.02
     linear = scale * np.array(
         [[math.cos(angle), -math.sin(angle)], [math.sin(angle), math.cos(angle)]]
     )
     offset_um = np.array([60.0, -40.0])
+    centre_um = np.full(2, 0.5 * SIZE_PX * PIXEL_UM)
     phase = (0.7, 1.9)
 
     def push(moving_um: np.ndarray) -> np.ndarray:
@@ -278,20 +296,26 @@ def make_phantom(
             ],
             axis=-1,
         )
-        return m @ linear.T + offset_um + wave
+        return (m - centre_um) @ linear.T + centre_um + offset_um + wave
 
     def pull(reference_um: np.ndarray) -> np.ndarray:
+        # Local (moving crop) um, found by fixed-point iteration, then shifted to
+        # the full frame.
         r = np.asarray(reference_um, dtype=float)
         m = r.copy()
-        for _ in range(40):
+        for _ in range(60):
             m = m - (push(m) - r)
-        return m
+        return m + MOVING_ORIGIN_UM
 
     linear_inverse = np.linalg.inv(linear)
 
     def prior(reference_um: np.ndarray) -> np.ndarray:
         r = np.asarray(reference_um, dtype=float)
-        return (r - offset_um) @ linear_inverse.T
+        return (
+            (r - offset_um - centre_um) @ linear_inverse.T
+            + centre_um
+            + MOVING_ORIGIN_UM
+        )
 
     grid = np.stack(
         np.meshgrid(np.arange(SIZE_PX), np.arange(SIZE_PX)), axis=-1
@@ -322,17 +346,17 @@ def make_phantom(
         warped * np.exp(tissue_warped[None] * detail_moving), dtype=np.float32
     )
 
-    def role_images(array: np.ndarray) -> RoleImages:
+    def role_images(array: np.ndarray, origin: tuple[float, float]) -> RoleImages:
         return RoleImages(
             images={role: array[i] for i, role in enumerate(_ROLE_ORDER)},
-            to_level0=_identity_grid(),
+            to_level0=_to_level0(origin),
             pixel_size_um=PIXEL_UM,
-            level0_pixel_size_um=PIXEL_UM,
+            level0_pixel_size_um=LEVEL0_PIXEL_UM,
         )
 
     return Phantom(
-        reference=role_images(reference_images),
-        moving=role_images(moving_images),
+        reference=role_images(reference_images, (0.0, 0.0)),
+        moving=role_images(moving_images, MOVING_ORIGIN_LEVEL0_PX),
         pull=pull,
         prior=prior,
         tubes_um=tuple((x0, y0, x1, y1) for x0, y0, x1, y1, _ in extra_tubes_um),
@@ -342,12 +366,49 @@ def make_phantom(
 def replace_with_texture(
     images: RoleImages, box_um: tuple[float, float, float, float], seed: int = 99
 ) -> RoleImages:
-    """Return a copy with a box (full um) replaced by unrelated texture."""
+    """Return a copy with a box (full-frame um of ``images``) replaced by texture."""
     other = make_phantom(seed, warp_amplitude_um=0.0).reference
-    x0, y0, x1, y1 = (int(round(v / PIXEL_UM)) for v in box_um)
+    return _replace_box(images, box_um, lambda role, window: other.images[role][window])
+
+
+def shift_patch(
+    images: RoleImages,
+    box_um: tuple[float, float, float, float],
+    shift_um: tuple[float, float],
+) -> RoleImages:
+    """Return a copy whose box shows the image content shifted by ``shift_um``.
+
+    The box (full-frame um of ``images``) is filled from the same image displaced
+    by ``shift_um``, so a window inside it matches the reference at that offset.
+    """
+    shift_px = (round(shift_um[0] / PIXEL_UM), round(shift_um[1] / PIXEL_UM))
+
+    def source(role: str, window: tuple[slice, slice]) -> np.ndarray:
+        rows, columns = window
+        return images.images[role][
+            rows.start + shift_px[1] : rows.stop + shift_px[1],
+            columns.start + shift_px[0] : columns.stop + shift_px[0],
+        ]
+
+    return _replace_box(images, box_um, source)
+
+
+def _replace_box(
+    images: RoleImages,
+    box_um: tuple[float, float, float, float],
+    source: Callable[[str, tuple[slice, slice]], np.ndarray],
+) -> RoleImages:
+    corners = _um_to_grid(
+        images.to_level0,
+        images.level0_pixel_size_um,
+        np.array([[box_um[0], box_um[1]], [box_um[2], box_um[3]]]),
+    )
+    x0, y0 = (int(round(v)) for v in corners[0])
+    x1, y1 = (int(round(v)) for v in corners[1])
+    window = (slice(y0, y1), slice(x0, x1))
     out = {role: image.copy() for role, image in images.images.items()}
     for role, image in out.items():
-        image[y0:y1, x0:x1] = other.images[role][y0:y1, x0:x1]
+        image[window] = source(role, window)
     return RoleImages(
         images=out,
         to_level0=images.to_level0,

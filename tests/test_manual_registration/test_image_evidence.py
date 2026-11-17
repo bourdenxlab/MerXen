@@ -28,7 +28,13 @@ from merxen.manual_registration.schema import (
 )
 from merxen.manual_registration.simulate import make_synthetic_pair
 
-from ._image_phantom import Phantom, make_phantom, replace_with_texture
+from ._image_phantom import (
+    MOVING_ORIGIN_UM,
+    Phantom,
+    make_phantom,
+    replace_with_texture,
+    shift_patch,
+)
 from ._scripts import load_script
 
 derive_script = load_script("derive_test_landmarks")
@@ -819,15 +825,41 @@ def test_a_click_moved_along_a_straight_tube_is_a_ridge(
     assert check.snap_moving_xy_um is None and check.strength is None
 
 
-def test_a_correct_click_on_a_tube_is_not_contradicted(
+def test_a_click_moved_across_a_straight_tube_is_not_a_ridge(
+    ridge_pair: _Pair, ridge_nulls: dict[tuple[str, float], ie.NullModel]
+) -> None:
+    pull = ridge_pair.phantom.pull
+    on_tube = np.array([[2900.0, _TUBE_Y_UM]])
+    truth = pull(on_tube)
+    step = 5.0
+    tube_direction = (pull(on_tube + [[step, 0.0]]) - pull(on_tube - [[step, 0.0]]))[0]
+    tube_direction = tube_direction / np.hypot(*tube_direction)
+    normal = np.array([-tube_direction[1], tube_direction[0]])
+
+    (check,) = _check(
+        ridge_pair,
+        ridge_nulls,
+        on_tube,
+        truth + 80.0 * normal,
+        predicted_um=truth,
+    )
+
+    # The click is off the structure: the verdict depends on where it was placed.
+    assert check.verdict in ("inconclusive", "contradicted")
+    assert check.ridge_direction_moving_xy is None
+
+
+def test_correct_clicks_on_a_tube_are_not_contradicted(
     ridge_pair: _Pair, ridge_nulls: dict[tuple[str, float], ie.NullModel]
 ) -> None:
     on_tube = np.array([[2900.0, _TUBE_Y_UM], [3300.0, _TUBE_Y_UM]])
 
     checks = _check(ridge_pair, ridge_nulls, on_tube, ridge_pair.phantom.pull(on_tube))
 
-    # Ridge-shaped estimates locate the structure across the tube only: they must
-    # never vote for a contradiction of a click that is right.
+    # An end-to-end guard on the verdict. The rule that ridge-shaped band-pass
+    # estimates never vote for a contradiction is covered on hand-made estimates
+    # (test_ridge_shaped_estimates_never_vote_for_a_contradiction): the phantom's
+    # tube gives no confident ridge-shaped band-pass estimate to exclude.
     assert all(c.verdict != "contradicted" for c in checks)
 
 
@@ -946,6 +978,48 @@ def test_a_click_that_is_both_confirmed_and_contradicted_is_conflicting() -> Non
     )
 
     assert (check.verdict, check.reason) == ("inconclusive", "conflicting")
+    # The image's own opinion survives: the confirming fused estimate.
+    assert check.image_offset_um == pytest.approx(5.0)
+    assert check.snap_moving_xy_um is None
+
+
+def test_an_inconclusive_click_keeps_the_best_confident_fused_estimate() -> None:
+    check = _assess(
+        _estimate("fused", 300.0, (30.0, 0.0)),
+        _estimate("fused", 600.0, (-35.0, 0.0), confident=False),
+    )
+
+    assert (check.verdict, check.reason) == ("inconclusive", "no_agreement")
+    assert check.image_moving_xy_um == pytest.approx([1030.0, 2000.0])
+    assert check.image_offset_um == pytest.approx(30.0)
+    assert check.prediction_offset_um == pytest.approx(30.0)
+    assert check.snap_moving_xy_um is None
+
+
+def test_an_inconclusive_click_without_a_confident_fused_estimate_has_no_position() -> (
+    None
+):
+    check = _assess(_estimate("bp20", 300.0, (150.0, 0.0)))
+
+    assert check.verdict == "inconclusive"
+    assert check.image_moving_xy_um is None and check.image_offset_um is None
+
+
+def test_a_chain_of_estimates_agreeing_through_a_middle_one_does_not_contradict() -> (
+    None
+):
+    # 172 and 150 agree, 172 and 195 agree, but 150 and 195 are 45 um apart (more
+    # than agree_um): no pairwise-agreeing set has both a band-pass estimate and
+    # one at the smallest window.
+    check = _assess(
+        _estimate("orientation", 600.0, (172.0, 0.0)),
+        _estimate("bp20", 600.0, (150.0, 0.0)),
+        _estimate("orientation", 300.0, (195.0, 0.0)),
+    )
+
+    assert check.verdict == "inconclusive"
+    assert check.reason in ("orientation_only", "large_window_only")
+    assert check.snap_moving_xy_um is None
 
 
 def test_the_largest_agreeing_group_sets_the_snap_and_ties_go_to_the_prediction() -> (
@@ -1076,6 +1150,38 @@ def test_the_covariance_of_a_window_on_a_tube_follows_the_tube(
     assert values[1] > 3.0 * values[0]
 
 
+def test_window_covariances_are_reported_in_the_moving_frame(
+    ridge_pair: _Pair,
+) -> None:
+    phantom = ridge_pair.phantom
+    result = ie.tissue_window_observations(
+        ridge_pair.reference,
+        ridge_pair.moving,
+        pull_um=phantom.pull,
+        params=ie.WindowParams(sizes_um=(600.0,), null_pairs=150, workers=4),
+    )
+    # The tube runs along x in the reference; the phantom rotates by 35 degrees.
+    centre = np.array([[2900.0, _TUBE_Y_UM]])
+    step = 5.0
+    along = (
+        phantom.pull(centre + [[step, 0.0]]) - phantom.pull(centre - [[step, 0.0]])
+    )[0]
+    along = along / np.hypot(*along)
+    assert abs(math.degrees(math.atan2(along[1], along[0]))) > 25.0
+    near_tube = (
+        (np.abs(result.reference_xy_um[:, 1] - _TUBE_Y_UM) < 200.0)
+        & (result.reference_xy_um[:, 0] > 2400.0)
+        & (result.reference_xy_um[:, 0] < 3500.0)
+        & (result.elongation > 2.0)
+    )
+
+    assert near_tube.any()
+    for covariance in result.peak_cov_um2[near_tube]:
+        _, vectors = np.linalg.eigh(covariance)
+        cosine = min(abs(float(vectors[:, 1] @ along)), 1.0)
+        assert math.degrees(math.acos(cosine)) < 10.0
+
+
 def test_windows_over_unrelated_texture_are_rejected() -> None:
     phantom = _phantom(0, warp_wavelength_um=_WINDOW_WAVELENGTH_UM)
     box = (2000.0, 2000.0, 4200.0, 4200.0)
@@ -1101,6 +1207,47 @@ def test_windows_over_unrelated_texture_are_rejected() -> None:
         & (result.moving_xy_um[:, 1] < inner[3])
     )
     assert not inside.any()
+
+
+def test_confident_windows_that_disagree_with_their_neighbours_are_not_accepted() -> (
+    None
+):
+    phantom = _phantom(0, warp_wavelength_um=_WINDOW_WAVELENGTH_UM)
+    centre = np.array([2800.0, 2800.0])
+    half = 350.0
+    moving_centre = phantom.pull(centre)
+    box = (
+        float(moving_centre[0] - half),
+        float(moving_centre[1] - half),
+        float(moving_centre[0] + half),
+        float(moving_centre[1] + half),
+    )
+    # The patch shows the same tissue 90 um away: windows inside it match the
+    # reference confidently, but at a displacement that its neighbours outside do
+    # not share.
+    shifted = Phantom(
+        reference=phantom.reference,
+        moving=shift_patch(phantom.moving, box, (90.0, 0.0)),
+        pull=phantom.pull,
+        prior=phantom.prior,
+        tubes_um=phantom.tubes_um,
+    )
+    pair = _build_pair(shifted, pull=phantom.prior)
+
+    result = ie.tissue_window_observations(
+        pair.reference, pair.moving, pull_um=phantom.prior, params=_WINDOW_PARAMS
+    )
+
+    candidates = result.candidates
+    inside = (np.abs(candidates["reference_x_um"] - centre[0]) < half) & (
+        np.abs(candidates["reference_y_um"] - centre[1]) < half
+    )
+    rejected = candidates["confident"] & ~candidates["accepted"] & inside
+    assert rejected.any()
+    assert (candidates.loc[rejected, "neighbour_deviation_um"] > 30.0).all()
+    assert not (candidates["kept"] & rejected).any()
+    truth = phantom.pull(result.reference_xy_um)
+    assert np.hypot(*(result.moving_xy_um - truth).T).max() <= 20.0
 
 
 def test_threaded_and_serial_window_runs_are_identical(prior_pair: _Pair) -> None:
@@ -1164,8 +1311,9 @@ def _coarse(images: ie.RoleImages, factor: int = 8) -> ie.RoleImages:
     centre = (factor - 1) / 2.0
     return ie.RoleImages(
         images=out,
-        to_level0=np.array([[factor, 0, centre], [0, factor, centre], [0, 0, 1.0]])
-        @ images.to_level0,
+        # Coarse px -> fine px first, then the image's own working px -> level 0.
+        to_level0=images.to_level0
+        @ np.array([[factor, 0, centre], [0, factor, centre], [0, 0, 1.0]]),
         pixel_size_um=images.pixel_size_um * factor,
         level0_pixel_size_um=images.level0_pixel_size_um,
     )
@@ -1193,8 +1341,8 @@ def test_target_weights_sit_on_shared_tissue_and_favour_grey_matter(
     reference_px = np.rint(pair.reference.um_to_px(weights.centres_um)).astype(int)
     on_tissue = pair.reference.tissue[reference_px[:, 1], reference_px[:, 0]]
     assert on_tissue.mean() > 0.95
-    pulled = phantom.prior(weights.centres_um)
-    assert ((pulled > 0) & (pulled < 2048 * 2.76)).all()
+    local = phantom.prior(weights.centres_um) - MOVING_ORIGIN_UM
+    assert ((local > 0) & (local < 2048 * 2.76)).all()
     # Moving-only tissue is excluded: a moving image with its tissue blanked
     # leaves no candidates.
     empty = ie.RoleImages(
