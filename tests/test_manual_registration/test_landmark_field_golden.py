@@ -3,6 +3,11 @@
 The viewer's numerical mirror (milestone M4) copies
 ``landmark_field_golden_v1.json`` byte-for-byte and pins the same SHA-256; after any
 regeneration the new digest must be announced to the viewer work.
+
+The digests inside the file (``digest`` leaves) hash computed floats whose last bits
+follow the CPU's BLAS kernel. The mirror therefore verifies the digest of the stored
+payload (``canonical_sha256`` of the payload without it) and compares recomputed
+numbers within tolerance; it never recomputes a digest bit for bit.
 """
 
 from __future__ import annotations
@@ -98,7 +103,9 @@ def test_rebuilt_vectors_match_the_file_within_tolerances(
     assert script.first_difference(rebuilt, golden) is None
 
 
-def test_fixed_block_reproduces_from_its_stored_inputs(golden: dict[str, Any]) -> None:
+def test_fixed_block_reproduces_from_its_stored_inputs(
+    script: ModuleType, golden: dict[str, Any]
+) -> None:
     tolerances = golden["tolerances"]
     rtol, atol = tolerances["fixed_rtol"], tolerances["fixed_atol"]
     block = golden["fixed"]
@@ -151,8 +158,20 @@ def test_fixed_block_reproduces_from_its_stored_inputs(golden: dict[str, Any]) -
         residual.residual_um, _arr(extra["residual_um"]), rtol=rtol, atol=atol
     )
     np.testing.assert_allclose(residual.d2, _arr(extra["d2"]), rtol=rtol, atol=atol)
-    assert field.digest == out["digest"]
+    # The digest hashes BLAS-computed floats, so it is not compared bit for bit
+    # across CPUs: the rebuilt payload matches the stored one within tolerance
+    # and the stored digest is checked against the stored payload.
+    stored_payload = out["payload"]
+    rebuilt_payload = field.to_dict()
+    assert rebuilt_payload["digest"] == schema.canonical_sha256(
+        {key: value for key, value in rebuilt_payload.items() if key != "digest"}
+    )
+    assert (
+        script.first_difference(json.loads(json.dumps(rebuilt_payload)), stored_payload)
+        is None
+    )
     assert out["payload"]["digest"] == out["digest"]
+    assert lf.LandmarkField.from_dict(stored_payload).digest == out["digest"]
 
 
 def test_fixed_payload_is_a_valid_c1_document(golden: dict[str, Any]) -> None:

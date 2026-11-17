@@ -291,11 +291,20 @@ def _tolerance_for(path: str) -> tuple[float, float]:
 
 
 def first_difference(actual: Any, expected: Any, path: str = "$") -> str | None:
-    """Return the path of the first leaf that differs beyond its tolerance."""
+    """Return the path of the first leaf that differs beyond its tolerance.
+
+    ``digest`` leaves are skipped: they are derived from computed floats and
+    pin the stored payload, not a bitwise recomputation.
+    """
     if isinstance(expected, dict):
         if not isinstance(actual, dict) or set(actual) != set(expected):
             return path
         for key in sorted(expected):
+            # A digest hashes computed floats, whose last bits follow the BLAS
+            # kernel of the CPU; it is checked for consistency with its own
+            # payload (test_landmark_field_golden), never recomputed bit for bit.
+            if key == "digest":
+                continue
             found = first_difference(actual[key], expected[key], f"{path}.{key}")
             if found is not None:
                 return found
