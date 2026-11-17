@@ -26,6 +26,7 @@ from merxen import privacy
 from merxen.config import ViewerCacheConfig
 from merxen.manual_registration.compare import COMPARISON_COLUMNS
 from merxen.manual_registration.config import (
+    ManualRegistrationCheckConfig,
     ManualRegistrationCompareConfig,
     ManualRegistrationImageInput,
     ManualRegistrationPrepareConfig,
@@ -38,6 +39,7 @@ MODULE_TEXT = (WORKFLOWS / "modules" / "manual_registration.nf").read_text()
 LIB_TEXT = (WORKFLOWS / "lib" / "ManualRegistrationSheet.groovy").read_text()
 PREPARE_TEXT = (WORKFLOWS / "manual_registration_prepare.nf").read_text()
 REGISTER_TEXT = (WORKFLOWS / "manual_registration_register.nf").read_text()
+CHECK_TEXT = (WORKFLOWS / "manual_registration_check.nf").read_text()
 NEXTFLOW = shutil.which("nextflow")
 needs_nextflow = pytest.mark.skipif(NEXTFLOW is None, reason="nextflow is unavailable")
 
@@ -49,6 +51,9 @@ PROCESSES = {
     ),
     "MANUAL_REGISTRATION_REGISTER": (
         "merxen manual-registration-register --config register_config.json"
+    ),
+    "MANUAL_REGISTRATION_CHECK": (
+        "merxen manual-registration-check --config check_config.json"
     ),
     "MANUAL_REGISTRATION_COMPARE": (
         "merxen manual-registration-compare --config compare_config.json"
@@ -72,7 +77,7 @@ def _groovy_map_keys(text: str, start_marker: str) -> set[str]:
 # --- text contracts (fast tier) --------------------------------------------
 
 
-def test_module_declares_three_cache_false_processes_without_publish_dir() -> None:
+def test_module_declares_four_cache_false_processes_without_publish_dir() -> None:
     bodies = {
         chunk.split(" {", 1)[0]: chunk for chunk in MODULE_TEXT.split("process ")[1:]
     }
@@ -100,7 +105,7 @@ def test_workflows_are_standalone() -> None:
 
     assert "manual_registration" not in main_text
     assert "MANUAL_REGISTRATION" not in main_text
-    for text in (PREPARE_TEXT, REGISTER_TEXT):
+    for text in (PREPARE_TEXT, REGISTER_TEXT, CHECK_TEXT):
         for expected in (
             "SiteConfigCheck.problems(",
             "ManualRegistrationSheet.parse(",
@@ -111,6 +116,12 @@ def test_workflows_are_standalone() -> None:
     assert "VIEWER_CACHE as" not in PREPARE_TEXT
     assert "ManualRegistrationSheet.registerPreflight(" in REGISTER_TEXT
     assert ".groupTuple()" in REGISTER_TEXT
+    assert "ManualRegistrationSheet.parse(" in CHECK_TEXT
+    assert '"check",' in CHECK_TEXT
+    assert "ManualRegistrationSheet.checkPreflight(" in CHECK_TEXT
+    assert "ManualRegistrationSheet.plannedChecks(" in CHECK_TEXT
+    assert "PipelineVersion.launch(" in CHECK_TEXT
+    assert "include { MANUAL_REGISTRATION_CHECK }" in CHECK_TEXT
 
 
 def test_emitted_configs_match_the_pydantic_contract() -> None:
@@ -133,6 +144,9 @@ def test_emitted_configs_match_the_pydantic_contract() -> None:
     )
     assert _groovy_map_keys(LIB_TEXT, "def compareConfig = [") == set(
         ManualRegistrationCompareConfig.model_fields
+    )
+    assert _groovy_map_keys(LIB_TEXT, "def checkConfig = [") == set(
+        ManualRegistrationCheckConfig.model_fields
     )
     viewer_keys = _groovy_map_keys(LIB_TEXT, "def viewerCacheConfig = [")
     assert viewer_keys <= set(ViewerCacheConfig.model_fields)
@@ -157,6 +171,9 @@ def test_params_resources_and_dwight_forks(
         "manual_registration_force_prepare": "false",
         "manual_registration_force_register": "false",
         "manual_registration_czi_python": "null",
+        "manual_registration_check_preset": '"cortex_serial"',
+        "manual_registration_check_write_attr": "true",
+        "manual_registration_check_suggestions": "20",
     }
     for name, value in expected.items():
         assert base[name] == value, name
@@ -172,6 +189,7 @@ def test_params_resources_and_dwight_forks(
             assert defined == {
                 "manual_registration_prepare_max_forks",
                 "manual_registration_register_max_forks",
+                "manual_registration_check_max_forks",
             }
         else:
             assert not defined, relative
@@ -180,6 +198,7 @@ def test_params_resources_and_dwight_forks(
     for process, cpus, memory in (
         ("MANUAL_REGISTRATION_PREPARE", 8, "16 GB"),
         ("MANUAL_REGISTRATION_REGISTER", 8, "48 GB"),
+        ("MANUAL_REGISTRATION_CHECK", 8, "16 GB"),
         ("MANUAL_REGISTRATION_COMPARE", 1, "4 GB"),
     ):
         block = _block(config, process)
@@ -199,6 +218,15 @@ def test_params_resources_and_dwight_forks(
             "manual_registration_register_max_forks"
         ]
         == "2"
+    )
+    assert (
+        workflow_config_params["conf/dwight.config"][
+            "manual_registration_check_max_forks"
+        ]
+        == "2"
+    )
+    assert "maxForks = params.manual_registration_check_max_forks" in _block(
+        dwight, "MANUAL_REGISTRATION_CHECK"
     )
     assert "maxForks = params.manual_registration_prepare_max_forks" in _block(
         dwight, "MANUAL_REGISTRATION_PREPARE"
@@ -236,6 +264,7 @@ def test_cli_registers_the_manual_registration_commands() -> None:
         "manual-registration-prepare",
         "manual-registration-register",
         "manual-registration-fit",
+        "manual-registration-check",
         "manual-registration-compare",
     ):
         assert name in main.commands
@@ -534,6 +563,93 @@ def test_the_main_pipelines_default_outdir_is_refused(
     assert not (launch / "results" / "SYN1").exists()
 
 
+@needs_nextflow
+@pytest.mark.nextflow
+def test_check_preflight_stops_before_any_task(tmp_path: Path) -> None:
+    _inputs(tmp_path)
+    outdir = tmp_path / "out"
+    header = ["id", "reference_image", "moving_image", "channel_roles"]
+    roles = "at8=AF568;map2=AF647;dapi=DAPI"
+    rows = [
+        ["SYN1", "../img/ref.ome.tif", "../img/mov.czi", roles],
+        ["SYN2", "../img/ref.ome.tif", "../img/mov.czi", ""],
+        ["SYN3", "../img/ref.ome.tif", "../img/mov.czi", roles],
+    ]
+    sheet = _write_sheet(tmp_path / "sheets" / "a.csv", header, rows)
+    _fake_store(outdir / "SYN2" / "prepared" / "SYN2_prepared.zarr")
+    _fake_store(outdir / "SYN3" / "prepared" / "SYN3_prepared.zarr", kind="result")
+
+    completed = _run(tmp_path, "manual_registration_check.nf", sheet, outdir)
+
+    text = _preflight_output(completed)
+    for expected in (
+        "SYN1: prepared store not found",
+        "SYN2: preset cortex_serial needs channel_roles (at8, map2, dapi)",
+        "is a result store",
+    ):
+        assert expected in text, expected
+    _no_task_ran(tmp_path, "launch", outdir)
+
+
+@needs_nextflow
+@pytest.mark.nextflow
+def test_check_stub_run_makes_one_task_per_row_and_allows_a_draft(
+    tmp_path: Path,
+) -> None:
+    _inputs(tmp_path)
+    outdir = tmp_path / "out"
+    roles = "at8=AF568;map2=AF647;dapi=DAPI"
+    for ident, status in (("SYN_A", "draft"), ("SYN_B", "finished")):
+        _fake_store(
+            outdir / ident / "prepared" / f"{ident}_prepared.zarr", status=status
+        )
+    header = ["id", "reference_image", "moving_image", "channel_roles"]
+    sheet = _write_sheet(
+        tmp_path / "sheets" / "a.csv",
+        header,
+        [
+            ["SYN_A", "../img/ref.ome.tif", "../img/mov.ome.tif", roles],
+            ["SYN_B", "../img/ref.ome.tif", "../img/mov.ome.tif", roles],
+        ],
+    )
+
+    completed = _run(
+        tmp_path,
+        "manual_registration_check.nf",
+        sheet,
+        outdir,
+        "-stub-run",
+        "--manual_registration_check_write_attr",
+        "false",
+        "--manual_registration_check_suggestions",
+        "5",
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    rows = _trace_rows(outdir)
+    checks = [row for row in rows if row["process"].endswith("CHECK")]
+    assert {row["tag"] for row in checks} == {
+        "SYN_A_cortex_serial",
+        "SYN_B_cortex_serial",
+    }
+    (syn_a,) = [row for row in checks if row["tag"] == "SYN_A_cortex_serial"]
+    script = (_task_dir(syn_a) / ".command.sh").read_text()
+    assert f'"output_dir": "{outdir.resolve()}/SYN_A/check"' in script
+    assert '"task_output_dir": "check_out"' in script
+    assert '"write_attr": false' in script and '"n_suggestions": 5' in script
+    assert f'"channel_roles": "{roles}"' in script
+    assert "[SYN_A_cortex_serial] check:" in completed.stdout + completed.stderr
+
+
+def test_the_example_sheet_has_a_cortex_row_with_channel_roles() -> None:
+    lines = (WORKFLOWS / "samplesheet.manual_registration.example.csv").read_text()
+    rows = list(csv.DictReader(lines.splitlines()))
+    (cortex,) = [row for row in rows if row["id"] == "LCM2"]
+    assert cortex["presets"] == "cortex_serial"
+    assert cortex["channel_roles"] == "at8=AF568;map2=AF647;dapi=DAPI"
+    assert cortex["reference_image"].startswith("/path/to/")
+
+
 def _trace_rows(outdir: Path) -> list[dict[str, str]]:
     text = (outdir / "nextflow" / "trace.tsv").read_text()
     return list(csv.DictReader(text.splitlines(), delimiter="\t"))
@@ -783,3 +899,54 @@ def test_tiny_end_to_end_through_both_workflows(tmp_path: Path) -> None:
     assert third.returncode == 0, third.stdout + third.stderr
     after = canonical_json(read_root_attrs(store)[LABELLING_ATTR])
     assert after == before
+
+
+@needs_nextflow
+@pytest.mark.nextflow
+@pytest.mark.integration
+def test_check_workflow_on_the_synthetic_pair_writes_the_attribute(
+    tmp_path: Path,
+) -> None:
+    from test_manual_registration.test_check import NAME, ROLES, _prepare
+
+    from merxen.manual_registration.schema import (
+        CHECK_ATTR,
+        parse_check_attrs,
+        read_root_attrs,
+    )
+
+    prepared = _prepare(tmp_path)
+    outdir = tmp_path
+    store = outdir / NAME / "prepared" / f"{NAME}_prepared.zarr"
+    assert store == prepared.store
+    sheet = _write_sheet(
+        tmp_path / "check_sheet.csv",
+        ["id", "reference_image", "moving_image", "channel_roles"],
+        [
+            [
+                NAME,
+                str(prepared.pair.reference_path),
+                str(prepared.pair.moving_path),
+                ROLES,
+            ]
+        ],
+    )
+
+    completed = _run(
+        tmp_path,
+        "manual_registration_check.nf",
+        sheet,
+        outdir,
+        "--manual_registration_settings",
+        "field_window_observations=false",
+        launch_name="launch_check",
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    check = parse_check_attrs(read_root_attrs(store)[CHECK_ATTR])
+    assert check.labelling_source == "store"
+    published = outdir / NAME / "check"
+    assert (published / f"{NAME}_cortex_serial_check.json").is_file()
+    assert (published / f"{NAME}_cortex_serial_check.png").is_file()
+    (row,) = [r for r in _trace_rows(outdir) if r["process"].endswith("CHECK")]
+    assert (_task_dir(row) / "check_out" / f"{NAME}_cortex_serial_check.json").is_file()

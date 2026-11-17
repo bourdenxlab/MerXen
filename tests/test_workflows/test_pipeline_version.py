@@ -132,6 +132,7 @@ def test_preview_writes_no_record(tmp_path: Path) -> None:
 
 ENTRY_SCRIPTS = (
     "main.nf",
+    "manual_registration_check.nf",
     "manual_registration_prepare.nf",
     "manual_registration_register.nf",
     "pciseq_resume.nf",
