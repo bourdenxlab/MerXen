@@ -59,9 +59,8 @@ A `map_first` run (frontal cortex, or the provisional hippocampal formation)
 keeps the same raw predictions in MAP's tidy files under `annotation_map_out`:
 `<sample>_mmc_seaad_mr_panel.parquet` and `<sample>_mmc_<WHB primary>.parquet`
 (`whb_frontal_supc_clus` or `whb_hippocampal_supc_clus`), five runners-up at
-every level. The same command reads them, with the RESOLVE label table for the
-acceptance status (`<stem>_resolution_status` is `ct_seaad_subclass_status` or
-`ct_supercluster_status`):
+every level. The same command reads them, with the RESOLVE label table
+(required) for the acceptance fields:
 
 ```bash
 python -m merxen.io.annotation_predictions \
@@ -75,9 +74,30 @@ python -m merxen.io.annotation_predictions \
 Here `bp` is MapMyCells' bootstrap fraction at that level, conditional on the
 parent choice; `aggregate_probability` is the product along the hierarchy, the
 value map-first RESOLVE thresholds for the SEA-AD subclass (`ct_seaad_subclass_raw`).
-The label table's own `ct_seaad_subclass_*` and `ct_supercluster_*` columns
-(accepted name, status, runner-up) are not changed. Unlike the whole-panel
-files, the tidy files may not cover every table cell (an atlas refused for the
-panel, or cells outside the mapped table): those observations keep missing
-prediction fields instead of being refused. Run it per sample and
-segmentation, and again after a later `FINALIZE` rewrites the table.
+
+Both `ct_seaad_subclass_*` and `ct_whb_supercluster_*` get the full field set
+of the whole-panel route. The acceptance fields come from the label table's
+`ct_seaad_subclass_*` and `ct_supercluster_*` columns, with two differences
+from the whole-panel route:
+
+- `name` is the label table's call at that level, and map-first keeps it for
+  cells it did not accept (the whole-panel `name` is empty there). Read it
+  with `accepted`, which is true exactly when the status is `confident`.
+  `assignment` is that name's node ID (from the tidy rows' calls and
+  runners-up). For SEA-AD this `name` is the column the map-first hierarchy
+  step already copied into the store, so it is not changed; a label table
+  whose names differ from the store's is refused as a conflict.
+- `resolution_status` is the label-table status, from the map-first
+  vocabulary: `confident`, `low_confidence`, `below_floor`, `not_resolvable`,
+  `method_disagree`, `single_method`, `implausible`, `parent_unresolved`,
+  `not_attempted_gate`, `not_applicable`, `low_counts`. Whole-panel stores
+  hold their own resolution statuses (`accepted_existing_atlas_policy`, ...).
+
+The viewer code is not in this repository; a viewer that colours accepted
+annotations by `name` alone must also read `accepted` for a map-first store.
+
+Unlike the whole-panel files, the tidy files may not cover every table cell
+(an atlas refused for the panel, or cells outside the mapped table): those
+observations keep missing prediction fields instead of being refused. Run it
+per sample and segmentation, and again after a later `FINALIZE` rewrites the
+table.

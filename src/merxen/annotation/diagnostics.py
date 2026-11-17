@@ -50,6 +50,14 @@ Rules (§8.2; thresholds from ``AnnotationPanelConfig``), first match wins:
    its ``validation_basis``;
 4. ``provisional``: everything else.
 
+A human run of a region that is supported but not validated (the
+provisional hippocampal formation, ``AnnotationConfig.unvalidated_region``)
+never reaches ``validated``: the listed families were validated on frontal
+cortex, so their verdict is kept as a note and the panel is decided as an
+unlisted one (``provisional``, or ``broad_only`` without a self-map). Every
+decision of such a run carries a ``region_unvalidated`` note, which the
+report shows as a banner.
+
 Effects (``TrustDecision``): a refused reference is not mapped (primary: the
 dataset gate is ``failed`` with ``panel_refused``; secondary: degraded mode
 ``single_method``); a broad-only panel leaves the leaf levels
@@ -120,6 +128,8 @@ logger = logging.getLogger(__name__)
 
 DIAGNOSTICS_SCHEMA_VERSION: Final = 1
 VALIDATED_PANELS_FILE: Final = "validated_panels.csv"
+# Trust note of every decision in a supported but unvalidated human region.
+REGION_UNVALIDATED: Final = "region_unvalidated"
 VALIDATED_PANEL_LEVELS_FILE: Final = "validated_panel_levels.csv"
 VALIDATED_PANEL_GENES_FILE: Final = "validated_panel_genes.csv"
 VALIDATED_PANELS_COLUMNS: Final[tuple[str, ...]] = (
@@ -2041,6 +2051,7 @@ def trust_state(
     gene_ids: Sequence[GeneIdDiagnostics] = (),
     coverage: CoverageDiagnostics | None = None,
     resolvability: ResolvabilityTrust | None = None,
+    unvalidated_region: str | None = None,
 ) -> TrustDecision:
     """Return the trust state of one (reference, panel) (plan §8.2).
 
@@ -2060,6 +2071,11 @@ def trust_state(
         resolvability: The bundle's resolvability constraint (``None`` when
             no self-map ran: a primary or secondary bundle is then
             ``broad_only`` unless its family is validated on real data).
+        unvalidated_region: A supported but unvalidated human region
+            (``AnnotationConfig.unvalidated_region``): a listed family's
+            validation does not carry over to it, so the panel is decided as
+            an unlisted one, and the decision carries a
+            ``region_unvalidated`` note.
 
     Returns:
         The decision.
@@ -2112,6 +2128,29 @@ def trust_state(
             )
         )
     records, family_reason = _family_verdict(family, species, validated)
+    if unvalidated_region is not None:
+        notes.append(
+            TrustReason(
+                code=REGION_UNVALIDATED,
+                detail=(
+                    f"anatomical region {unvalidated_region} is not validated: "
+                    "the frontal-cortex thresholds, floors and trust rules are "
+                    "reused without recalibration"
+                ),
+            )
+        )
+        if records:
+            # The family was validated on frontal cortex; that says nothing
+            # about this region, so it is decided as an unlisted panel.
+            notes.append(family_reason)
+            family_reason = TrustReason(
+                code="family_region_unvalidated",
+                detail=(
+                    f"family {records[0].family_id} is validated for frontal "
+                    f"cortex only, not for {unvalidated_region}"
+                ),
+            )
+            records = ()
     # Only real-data validation stands without a self-map: a family validated
     # by simulation emits exactly as a provisional panel, so it keeps the
     # provisional fail-safe and a gate-P promotion never changes what is
@@ -2224,6 +2263,7 @@ def trust_for_panel(
     role: ReferenceRole,
     validated: ValidatedPanelTable,
     rules: TrustRules | None = None,
+    unvalidated_region: str | None = None,
 ) -> TrustDecision:
     """Return ``trust_state`` from a panel's gathered diagnostics.
 
@@ -2233,6 +2273,8 @@ def trust_for_panel(
         role: Its role.
         validated: The validated families.
         rules: The thresholds.
+        unvalidated_region: A supported but unvalidated human region (see
+            ``trust_state``).
 
     Returns:
         The decision.
@@ -2249,6 +2291,7 @@ def trust_for_panel(
         gene_ids=diagnostics.gene_ids,
         coverage=diagnostics.coverage.get(reference_id),
         resolvability=diagnostics.resolvability.get(reference_id),
+        unvalidated_region=unvalidated_region,
     )
 
 

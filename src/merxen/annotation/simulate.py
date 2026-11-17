@@ -921,6 +921,7 @@ def simulate_reference(
         role=spec.role,
         validated=validated,
         rules=TrustRules.from_config(config),
+        unvalidated_region=config.unvalidated_region,
     )
     regime = panel_regime(trust.state, trust.validation_basis)
     decisions = decision_rows(bundle_dir)

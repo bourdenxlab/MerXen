@@ -616,8 +616,10 @@ Multiregion bundle, unrestricted because its taxonomy already holds Sub-CA1,
 CA2-4, DG and EC IT next to the neocortical subclasses of the surrounding
 cortex, runs its self-map on that set too. Gating is kept minimal: every
 supercluster is plausible and only the two sinks are flagged; the frontal
-thresholds, floors and trust rules are reused, not recalibrated, so a new
-panel family is `provisional` and its outputs carry the provisional banner.
+thresholds, floors and trust rules are reused, not recalibrated, so every
+panel is at most `provisional` there (a family validated on frontal cortex is
+not validated for the hippocampus) and the report carries a `PROVISIONAL
+region` banner.
 The outputs are those of the frontal route (label tables with `mmc_whb_*` and
 `mmc_seaad_*` columns, MAP tidy files with five runners-up per level, bundles,
 report); frontal acceptance items (cortical depth, the held-out marker panel)

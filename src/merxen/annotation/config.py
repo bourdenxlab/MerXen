@@ -1637,6 +1637,24 @@ class AnnotationConfig(_AnnotationModel):
     def _expand_known_references(cls: type[AnnotationConfig], value: Any) -> Any:
         return expand_known_references(value)
 
+    @property
+    def unvalidated_region(self: AnnotationConfig) -> str | None:
+        """Return the human region when it is supported but not validated.
+
+        Trust caps every panel of such a region at ``provisional``: the
+        validated families were validated on frontal cortex, so their
+        validation does not carry over (``diagnostics.trust_state``).
+
+        Returns:
+            The region (e.g. ``"hippocampus"``), or ``None`` for mouse and the
+            validated human regions.
+        """
+        if self.species != "human" or self.anatomical_region is None:
+            return None
+        if self.anatomical_region in VALIDATED_HUMAN_REGIONS:
+            return None
+        return self.anatomical_region
+
     @field_validator("mouse_section_regions")
     @classmethod
     def _check_section_regions(cls: type[AnnotationConfig], value: str) -> str:

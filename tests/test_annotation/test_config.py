@@ -213,6 +213,10 @@ def test_hippocampus_is_a_provisional_human_region_with_its_own_primary() -> Non
     assert "hippocampus" in SUPPORTED_HUMAN_REGIONS
     assert "hippocampus" not in VALIDATED_HUMAN_REGIONS
     assert AnnotationConfig().anatomical_region == "frontal_cortex"
+    # Trust caps the unvalidated region at provisional (diagnostics.trust_state).
+    assert config.unvalidated_region == "hippocampus"
+    assert AnnotationConfig().unvalidated_region is None
+    assert AnnotationConfig(species="mouse").unvalidated_region is None
     # A region maps on its own WHB primary only.
     with pytest.raises(ValidationError, match="another region's WHB reference"):
         AnnotationConfig(anatomical_region="hippocampus")

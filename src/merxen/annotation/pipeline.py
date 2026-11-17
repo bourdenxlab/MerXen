@@ -4225,6 +4225,7 @@ def trust_for_run(
         role=run.record.role,  # type: ignore[arg-type]
         validated=load_validated_panels(config.panel.validated_panels_path),
         rules=TrustRules.from_config(config),
+        unvalidated_region=config.unvalidated_region,
     )
 
 

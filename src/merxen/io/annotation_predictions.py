@@ -7,7 +7,8 @@ Two sources are read: the whole-panel hippocampal route's resolved Parquet
 files (``seaad_resolved.parquet`` / ``whb_resolved.parquet``), or the map_first
 route's MAP tidy outputs (``<sample>_mmc_seaad_mr_panel.parquet`` and
 ``<sample>_mmc_<WHB primary>.parquet``, five runners-up at every level) with
-the RESOLVE label table for the acceptance status.
+the RESOLVE label table for the acceptance fields (``name``, ``assignment``,
+``accepted``, ``resolution_status``).
 """
 
 from __future__ import annotations
@@ -68,13 +69,70 @@ def prediction_columns(seaad: pd.DataFrame, whb: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(frames, axis=1)
 
 
-# map_first: the RESOLVE label-table status of each prediction level.
-MAP_FIRST_STATUS_COLUMNS = {
-    "seaad": "ct_seaad_subclass_status",
-    "whb": "ct_supercluster_status",
-}
+# map_first: the RESOLVE label-table level of each prediction level; its
+# ``_name`` and ``_status`` columns give the acceptance fields.
+MAP_FIRST_LABEL_LEVELS = {"seaad": "ct_seaad_subclass", "whb": "ct_supercluster"}
+# The label-table status of an accepted call (schema.CellStatus.CONFIDENT).
+MAP_FIRST_ACCEPTED_STATUS = "confident"
 # MAP tidy column -> the prediction field it holds.
 MAP_FIRST_RENAMES = {"assignment": "raw_assignment", "name": "raw_name"}
+# The acceptance fields map_first adds next to PREDICTION_FIELDS, as the
+# whole-panel route writes them.
+MAP_FIRST_ACCEPTANCE_FIELDS = ("name", "assignment", "accepted", "resolution_status")
+
+
+def _name_to_assignment(frame: pd.DataFrame) -> dict[str, str]:
+    """Return each taxonomy name of a level's tidy rows -> its node id.
+
+    Names come from the raw call and the runners-up; a name seen with two ids
+    is left out (its id stays missing rather than guessed).
+    """
+    pairs = [frame[["raw_name", "raw_assignment"]].to_numpy()]
+    for rank in range(1, 6):
+        pairs.append(
+            frame[[f"runner_up_{rank}_name", f"runner_up_{rank}_assignment"]].to_numpy()
+        )
+    ids: dict[str, set[str]] = {}
+    for name, assignment in (row for block in pairs for row in block):
+        if pd.isna(name) or pd.isna(assignment):
+            continue
+        ids.setdefault(str(name), set()).add(str(assignment))
+    return {name: next(iter(found)) for name, found in ids.items() if len(found) == 1}
+
+
+def _acceptance_fields(
+    rows: pd.DataFrame, labels: pd.DataFrame, atlas: str
+) -> pd.DataFrame:
+    """Return the label table's acceptance fields of one level, by cell id.
+
+    ``name`` is the label table's call at that level (also for cells it did not
+    accept, as in the map_first store); ``accepted`` is ``status ==
+    confident``; ``assignment`` is the node id of ``name`` from the level's
+    tidy ``rows``; ``resolution_status`` is the label-table status
+    (``schema.CellStatus``). Every label-table cell is kept, so the name
+    matches the one the hierarchy step copied into the store.
+    """
+    stem = MAP_FIRST_LABEL_LEVELS[atlas]
+    columns = ["cell_id", f"{stem}_name", f"{stem}_status"]
+    if missing := [column for column in columns if column not in labels]:
+        raise ValueError(f"The label table lacks {missing}")
+    by_cell = labels[columns].copy()
+    by_cell["cell_id"] = by_cell["cell_id"].astype(str)
+    if not by_cell["cell_id"].is_unique:
+        raise ValueError("The label table needs unique cell IDs")
+    by_cell = by_cell.set_index("cell_id")
+    status = by_cell[f"{stem}_status"].astype("string")
+    names = by_cell[f"{stem}_name"].astype("string")
+    ids = _name_to_assignment(rows)
+    return pd.DataFrame(
+        {
+            "name": names,
+            "assignment": names.map(ids, na_action="ignore").astype("string"),
+            "accepted": status.eq(MAP_FIRST_ACCEPTED_STATUS).astype("boolean"),
+            "resolution_status": status,
+        },
+        index=by_cell.index,
+    )
 
 
 def map_first_predictions(
@@ -89,20 +147,27 @@ def map_first_predictions(
     Only the SEA-AD subclass and WHB supercluster levels are kept. Cells one
     atlas did not map (e.g. a refused SEA-AD bundle) keep missing values.
 
+    With the label table, each level also gets the acceptance fields of the
+    viewer contract (``MAP_FIRST_ACCEPTANCE_FIELDS``) from
+    ``ct_seaad_subclass_*`` and ``ct_supercluster_*``: ``name`` (the label
+    table's call at that level, which map_first keeps for cells it did not
+    accept), ``assignment`` (that node's id), ``accepted`` (status
+    ``confident``) and ``resolution_status`` (the label-table status, a
+    ``schema.CellStatus`` value).
+
     Args:
         seaad: The SEA-AD tidy frame (``<sample>_mmc_seaad_mr_panel.parquet``).
         whb: The WHB primary's tidy frame.
-        labels: The RESOLVE label table (``cell_id`` and the level statuses);
-            when given, adds ``<stem>_resolution_status`` from
-            ``ct_seaad_subclass_status`` and ``ct_supercluster_status``.
+        labels: The RESOLVE label table (``cell_id`` and the level names and
+            statuses); without it only the prediction fields are returned.
 
     Returns:
         ``ct_seaad_subclass_*`` and ``ct_whb_supercluster_*`` columns indexed
-        by cell id (the union of both atlases' cells).
+        by cell id (the union of both atlases' and the label table's cells).
 
     Raises:
         ValueError: If a field is missing, cell ids repeat, or the label
-            table lacks a status column.
+            table lacks a name or status column.
     """
     frames = []
     for atlas, level, token in PREDICTION_LEVELS:
@@ -112,21 +177,19 @@ def map_first_predictions(
             raise ValueError(
                 f"Missing MAP {atlas} prediction fields: {sorted(missing)}"
             )
-        frame = source.loc[source.level.astype(str).eq(level)].set_index("cell_id")
-        frame.index = frame.index.astype(str)
-        if not frame.index.is_unique:
+        rows = source.loc[source.level.astype(str).eq(level)].set_index("cell_id")
+        rows.index = rows.index.astype(str)
+        if not rows.index.is_unique:
             raise ValueError(f"MAP {atlas} predictions need unique cell IDs")
-        frame = frame[list(PREDICTION_FIELDS)].copy()
+        frame = rows[list(PREDICTION_FIELDS)].copy()
         # Nullable dtypes, so cells the other atlas alone covers stay missing
         # rather than turning the column into strings.
         frame["directly_assigned"] = frame["directly_assigned"].astype("boolean")
         frame["n_runners_up"] = pd.to_numeric(frame["n_runners_up"]).astype("Int64")
         if labels is not None:
-            status = MAP_FIRST_STATUS_COLUMNS[atlas]
-            if status not in labels or "cell_id" not in labels:
-                raise ValueError(f"The label table lacks cell_id or {status}")
-            by_cell = labels.set_index(labels["cell_id"].astype(str))[status]
-            frame["resolution_status"] = by_cell.reindex(frame.index).to_numpy()
+            frame = pd.concat(
+                [frame, _acceptance_fields(rows, labels, atlas)], axis=1, join="outer"
+            )
         frames.append(frame.add_prefix(f"ct_{atlas}_{token}_"))
     return pd.concat(frames, axis=1, join="outer")
 
@@ -208,7 +271,9 @@ def enrich_store(
         whb: WHB predictions (resolved Parquet, or MAP tidy Parquet).
         map_first: Read MAP tidy Parquets (``map_first_predictions``);
             observations without a prediction stay missing.
-        labels: map_first only: the RESOLVE label table (resolution status).
+        labels: map_first only, and required there: the RESOLVE label table
+            (the acceptance fields ``name``, ``assignment``, ``accepted``,
+            ``resolution_status``).
 
     Returns:
         Observations per enriched table.
@@ -220,10 +285,10 @@ def enrich_store(
     if labels is not None and not map_first:
         raise ValueError("A label table is read only with map_first predictions")
     if map_first:
+        if labels is None:
+            raise ValueError("map_first predictions need the RESOLVE label table")
         predictions = map_first_predictions(
-            pd.read_parquet(seaad),
-            pd.read_parquet(whb),
-            None if labels is None else pd.read_parquet(labels),
+            pd.read_parquet(seaad), pd.read_parquet(whb), pd.read_parquet(labels)
         )
     else:
         predictions = prediction_columns(pd.read_parquet(seaad), pd.read_parquet(whb))
@@ -287,7 +352,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--labels",
         type=Path,
-        help="map_first: <sample>_celltype_labels.parquet (resolution status)",
+        help="map_first (required): <sample>_celltype_labels.parquet",
     )
     return parser
 
@@ -301,6 +366,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--seaad-mmc and --whb-mmc go together")
     if args.labels is not None and not map_first:
         parser.error("--labels needs --seaad-mmc and --whb-mmc")
+    if map_first and args.labels is None:
+        parser.error("--seaad-mmc and --whb-mmc need --labels")
     counts = enrich_store(
         args.store,
         args.table,

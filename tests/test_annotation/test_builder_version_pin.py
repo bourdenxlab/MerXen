@@ -270,7 +270,8 @@ PIN_HISTORY = (
     "only), seaad_mr_panel's self-map on the run region's held-out set; the "
     "frontal, SEA-AD (frontal run) and mouse payloads and bundle content are "
     "unchanged (test_reference_regions pins the frontal payload digests), so "
-    "no existing bundle changes",
+    "no existing bundle changes. The ATERA whole-panel tasks still re-run "
+    "once: their code identity hashes every file under merxen/annotation",
 )
 
 

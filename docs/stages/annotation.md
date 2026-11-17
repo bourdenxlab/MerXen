@@ -1729,18 +1729,23 @@ hippocampus sections) use the frontal route with a second WHB region:
 - **Minimal gating.** Plausibility is neutral (every supercluster is
   plausible, the two sinks are flagged); trust, floors, the SEA-AD second
   vote, the dataset gate and the downgrade-only real-data QC are the generic
-  ones, with the frontal thresholds reused and no new calibration. Panel
-  families are new and `provisional`. Cortical depth and the frontal
-  acceptance items do not apply.
+  ones, with the frontal thresholds reused and no new calibration. Every
+  panel is at most `provisional` here: a family validated on frontal cortex
+  (set a) is not `validated` in the hippocampus (trust notes
+  `region_unvalidated` and its family verdict), and the report shows a
+  `PROVISIONAL region` banner. Cortical depth and the frontal acceptance
+  items do not apply.
 - **Outputs.** As the frontal route: `mmc_whb_*` / `mmc_seaad_*` columns in
   the label table, MAP tidy parquets with five runners-up per level
   (`<sample>_mmc_seaad_mr_panel.parquet`,
   `<sample>_mmc_whb_hippocampal_supc_clus.parquet`), bundles, report. The
-  viewer's bootstrap fields come from these tidy files
+  viewer's bootstrap fields come from these tidy files and the label table
   ([Exploring saved bootstrap predictions](../annotation-bootstrap-display.md)).
 - **Unchanged.** Frontal launches: the same `annotation_config.json`, source
   lists and bundle payloads (pinned by `test_reference_regions.py`), so no
-  frontal bundle rebuilds. The ATERA whole-panel route.
+  frontal bundle rebuilds. The ATERA whole-panel route's behaviour; its
+  tasks re-run once on resume because their code identity hashes every file
+  under `merxen/annotation`.
 
 ### Pre-building references (`--annotation_prepare_only`)
 

@@ -9,6 +9,7 @@ import pytest
 import zarr
 
 from merxen.io.annotation_predictions import (
+    MAP_FIRST_ACCEPTANCE_FIELDS,
     PREDICTION_FIELDS,
     enrich_observations,
     enrich_store,
@@ -176,7 +177,10 @@ def test_map_first_predictions_read_the_tidy_levels_and_label_status() -> None:
     labels = pd.DataFrame(
         {
             "cell_id": ["19", "7"],
+            "ct_seaad_subclass_name": ["type 0", None],
             "ct_seaad_subclass_status": ["confident", "parent_unresolved"],
+            # Cell 7's supercluster call is kept although not accepted.
+            "ct_supercluster_name": ["type 0", "alt type 5"],
             "ct_supercluster_status": ["confident", "low_bootstrap"],
         }
     )
@@ -193,6 +197,28 @@ def test_map_first_predictions_read_the_tidy_levels_and_label_status() -> None:
     assert predictions.loc["7", "ct_whb_supercluster_resolution_status"] == (
         "low_bootstrap"
     )
+    # The acceptance fields of the viewer contract, for both atlases.
+    for stem in ("ct_seaad_subclass", "ct_whb_supercluster"):
+        for field in MAP_FIRST_ACCEPTANCE_FIELDS:
+            assert f"{stem}_{field}" in predictions
+    assert predictions.loc["19", "ct_seaad_subclass_accepted"]
+    assert predictions.loc["19", "ct_seaad_subclass_name"] == "type 0"
+    assert predictions.loc["19", "ct_seaad_subclass_assignment"] == (
+        "CCN20260630_LEVEL_1_id0"
+    )
+    assert not predictions.loc["7", "ct_seaad_subclass_accepted"]
+    assert pd.isna(predictions.loc["7", "ct_seaad_subclass_assignment"])
+    assert predictions.loc["19", "ct_whb_supercluster_accepted"]
+    assert predictions.loc["19", "ct_whb_supercluster_assignment"] == (
+        "CCN202210140_SUPC_id0"
+    )
+    assert not predictions.loc["7", "ct_whb_supercluster_accepted"]
+    assert predictions.loc["7", "ct_whb_supercluster_name"] == "alt type 5"
+    # A runner-up name maps to its id too.
+    assert predictions.loc["7", "ct_whb_supercluster_assignment"] == "alt5"
+    assert predictions["ct_whb_supercluster_accepted"].dtype == pd.BooleanDtype()
+    # Without the label table only the prediction fields are returned.
+    assert "ct_whb_supercluster_accepted" not in map_first_predictions(seaad, whb)
     # SEA-AD did not map cell 7: its fields stay missing.
     assert pd.isna(predictions.loc["7", "ct_seaad_subclass_raw_name"])
     assert pd.isna(predictions.loc["7", "ct_seaad_subclass_directly_assigned"])
@@ -208,6 +234,8 @@ def test_map_first_predictions_read_the_tidy_levels_and_label_status() -> None:
         map_first_predictions(seaad.drop(columns="bp"), whb)
     with pytest.raises(ValueError, match="label table"):
         map_first_predictions(seaad, whb, labels.drop(columns="cell_id"))
+    with pytest.raises(ValueError, match="label table"):
+        map_first_predictions(seaad, whb, labels.drop(columns="ct_supercluster_name"))
 
 
 def test_map_first_enrichment_leaves_unmapped_observations_missing(
@@ -220,13 +248,18 @@ def test_map_first_enrichment_leaves_unmapped_observations_missing(
     labels = tmp_path / "S_celltype_labels.parquet"
     _tidy({"CCN20260630_LEVEL_1": ["19"]}).to_parquet(seaad)
     _tidy({"CCN202210140_SUPC": ["19"]}).to_parquet(whb)
-    pd.DataFrame(
+    # The store's ct_seaad_subclass_name is the label table's (the hierarchy
+    # step copies it), so the derived name agrees with it.
+    label_table = pd.DataFrame(
         {
-            "cell_id": ["19"],
-            "ct_seaad_subclass_status": ["confident"],
-            "ct_supercluster_status": ["confident"],
+            "cell_id": ["19", "empty"],
+            "ct_seaad_subclass_name": ["old", None],
+            "ct_seaad_subclass_status": ["low_confidence", "low_counts"],
+            "ct_supercluster_name": ["type 0", None],
+            "ct_supercluster_status": ["confident", "low_counts"],
         }
-    ).to_parquet(labels)
+    )
+    label_table.to_parquet(labels)
     store = _store(tmp_path)
     main(
         [
@@ -246,8 +279,20 @@ def test_map_first_enrichment_leaves_unmapped_observations_missing(
     obs = ad.io.read_elem(root["tables/one/obs"])
     assert obs.ct_seaad_subclass_name.tolist()[0] == "old"
     assert obs.loc["19", "ct_whb_supercluster_raw_name"] == "type 0"
-    assert obs.loc["19", "ct_seaad_subclass_resolution_status"] == "confident"
+    assert obs.loc["19", "ct_seaad_subclass_resolution_status"] == "low_confidence"
+    assert not obs.loc["19", "ct_seaad_subclass_accepted"]
+    assert obs.loc["19", "ct_whb_supercluster_accepted"]
+    assert obs.loc["19", "ct_whb_supercluster_name"] == "type 0"
+    assert obs.loc["19", "ct_whb_supercluster_assignment"] == "CCN202210140_SUPC_id0"
+    assert obs.loc["empty", "ct_whb_supercluster_resolution_status"] == "low_counts"
     assert pd.isna(obs.loc["empty", "ct_whb_supercluster_bp"])
+    # A label table that disagrees with the store's labels is refused.
+    stale = tmp_path / "stale_labels.parquet"
+    label_table.assign(ct_seaad_subclass_name=["new", None]).to_parquet(stale)
+    with pytest.raises(ValueError, match="conflicts: ct_seaad_subclass_name"):
+        enrich_store(store, ["two"], seaad, whb, map_first=True, labels=stale)
+    with pytest.raises(ValueError, match="label table"):
+        enrich_store(store, ["two"], seaad, whb, map_first=True)
     # The whole-panel route still requires every observation to be covered.
     resolved = tmp_path / "resolved.parquet"
     _tidy({"CCN20260630_LEVEL_1": ["19"]}).to_parquet(resolved)
@@ -264,6 +309,7 @@ def test_prediction_cli_inputs_are_one_route_or_the_other(tmp_path: Path) -> Non
         [*base, "--seaad-resolved", path, "--seaad-mmc", path, "--whb-mmc", path],
         [*base, "--seaad-mmc", path, "--whb-resolved", path],
         [*base, "--seaad-resolved", path, "--whb-resolved", path, "--labels", path],
+        [*base, "--seaad-mmc", path, "--whb-mmc", path],
     ):
         with pytest.raises(SystemExit):
             main(argv)
