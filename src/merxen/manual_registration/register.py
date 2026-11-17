@@ -29,6 +29,7 @@ import resource
 import shutil
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -478,7 +479,14 @@ def _read_prepared_store(
     dataset_name: str,
     check_fingerprints: bool,
     require_finished: bool,
+    labelling_payload: Mapping[str, Any] | None = None,
 ) -> tuple[StoreAttrs, LabellingAttrs, dict[str, Any], list[str]]:
+    """Read and validate a prepared store and a labelling (the store's own by default).
+
+    ``labelling_payload`` replaces the store's labelling attr in every check made
+    here (image pixel sizes and shapes, grid digest, content digest); the store's own
+    labelling may then be absent (an uploaded labelling file, the landmark check).
+    """
     pfx = f"[{run_id}]"
     path = Path(store_path).resolve()
     if not path.exists():
@@ -506,9 +514,11 @@ def _read_prepared_store(
     hint = (
         "open it in the viewer ▸ Manual Registration ▸ Finish labelling and run again"
     )
-    if LABELLING_ATTR not in attrs:
+    if labelling_payload is None and LABELLING_ATTR not in attrs:
         raise ValueError(f"{pfx} no landmarks in {path}; {hint}")
-    raw_labelling = attrs[LABELLING_ATTR]
+    raw_labelling = (
+        attrs[LABELLING_ATTR] if labelling_payload is None else labelling_payload
+    )
     try:
         labelling = parse_labelling_attrs(raw_labelling)
     except (UnsupportedSchemaVersionError, ValidationError) as exc:

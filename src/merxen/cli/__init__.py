@@ -58,6 +58,7 @@ from merxen.cli.run_manual_registration_prepare import (
     manual_registration_prepare_command,
 )
 from merxen.cli.run_manual_registration_register import (
+    manual_registration_check_command,
     manual_registration_compare_command,
     manual_registration_fit_command,
     manual_registration_register_command,
@@ -145,6 +146,7 @@ main.add_command(convert_czi_command)
 main.add_command(manual_registration_prepare_command)
 main.add_command(manual_registration_register_command)
 main.add_command(manual_registration_fit_command)
+main.add_command(manual_registration_check_command)
 main.add_command(manual_registration_compare_command)
 main.add_command(analysis_gene_set_command)
 main.add_command(annotation_panel_command)
