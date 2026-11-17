@@ -12,9 +12,12 @@ from merxen.annotation.config import (
     DEFAULT_CLUSTERING_MODE,
     FLIPPED_SPECIES,
     HUMAN_DEPTH_GRID,
+    HUMAN_REGION_PRIMARY_REFERENCES,
     KNOWN_REFERENCES,
     MAP_FIRST_TABLE_KEY_SUFFIX,
     MOUSE_CCF_REGIONS,
+    SUPPORTED_HUMAN_REGIONS,
+    VALIDATED_HUMAN_REGIONS,
     WIDE_DEPTH_GRID,
     AdaptiveSplitConfig,
     AnnotationConfig,
@@ -187,6 +190,35 @@ def test_only_frontal_cortex_is_validated_for_human() -> None:
     )
     with pytest.raises(ValidationError, match="human-only"):
         AnnotationConfig(species="mouse", anatomical_region="frontal_cortex")
+
+
+def _references(primary: str) -> list[dict[str, object]]:
+    return [
+        {
+            "reference_id": primary,
+            "species": "human",
+            "role": "primary",
+            "hierarchy": ["CCN202210140_SUPC", "CCN202210140_CLUS"],
+        },
+        {"reference_id": "seaad_mr_panel", "species": "human", "role": "secondary"},
+    ]
+
+
+def test_hippocampus_is_a_provisional_human_region_with_its_own_primary() -> None:
+    config = AnnotationConfig(
+        anatomical_region="hippocampus",
+        references=_references("whb_hippocampal_supc_clus"),
+    )
+    assert config.anatomical_region == "hippocampus"
+    assert "hippocampus" in SUPPORTED_HUMAN_REGIONS
+    assert "hippocampus" not in VALIDATED_HUMAN_REGIONS
+    assert AnnotationConfig().anatomical_region == "frontal_cortex"
+    # A region maps on its own WHB primary only.
+    with pytest.raises(ValidationError, match="another region's WHB reference"):
+        AnnotationConfig(anatomical_region="hippocampus")
+    with pytest.raises(ValidationError, match="another region's WHB reference"):
+        AnnotationConfig(references=_references("whb_hippocampal_supc_clus"))
+    assert set(HUMAN_REGION_PRIMARY_REFERENCES) == set(SUPPORTED_HUMAN_REGIONS)
 
 
 def test_hard_min_counts_is_coupled_to_min_counts() -> None:

@@ -1127,6 +1127,61 @@ def test_whb_builder_refuses_a_precompute_that_disagrees_with_its_manifest(
     assert list(store_root.glob(".failed-*"))
 
 
+def test_whb_hippocampal_builder_is_the_frontal_recipe_on_its_own_region(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, small_resources: Any
+) -> None:
+    """whb_hippocampal_supc_clus builds like the frontal primary (map_first)."""
+    sources = write_whb_sources(tmp_path)
+    manifest_path = sources["region_dir"] / "region_reference_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["config"]["region_labels"] = list(reference.WHB_HIPPOCAMPAL_ROI_LABELS)
+    manifest_path.write_text(json.dumps(manifest))
+    FakeCtm(whb_truncated_lookup).install(monkeypatch)
+    spec = prepare_reference_spec(
+        AnnotationReferenceSpec(
+            reference_id="whb_hippocampal_supc_clus",
+            species="human",
+            role="primary",
+            hierarchy=[SUPC, CLUS],
+            sources={
+                "region_precompute": sources["region_dir"],
+                "seaad_precomputed_stats": sources["seaad"],
+            },
+        )
+    )
+    store = ReferenceStore(tmp_path / "store", scratch_root=tmp_path / "scratch")
+    (tmp_path / "scratch").mkdir(exist_ok=True)
+    config = AnnotationConfig(
+        species="human",
+        anatomical_region="hippocampus",
+        references=[
+            {
+                "reference_id": "whb_hippocampal_supc_clus",
+                "species": "human",
+                "role": "primary",
+                "hierarchy": [SUPC, CLUS],
+            },
+            {"reference_id": "seaad_mr_panel", "species": "human", "role": "secondary"},
+        ],
+        resolvability={"enabled": False},
+    )
+    bundle = store.get_or_build(
+        spec, make_panel(GENES), builder=builder_for(spec, config), config=config
+    )
+    output = json.loads((Path(bundle.path) / BUNDLE_MANIFEST_NAME).read_text())[
+        "builder_output"
+    ]
+    assert output["reference"] == "WHB hippocampal formation region (20 ROIs)"
+    verification = output["source_precompute"]["verification"]
+    assert verification["manifest"]["agrees"] is True
+    assert output["negative_genes"]["references"] == ["seaad_mr", "whb_hippocampal"]
+    assert Path(bundle.path).parent.name == "whb_hippocampal_supc_clus"
+    # The frontal primary refuses the hippocampal region directory.
+    (tmp_path / "frontal").mkdir()
+    with pytest.raises(ReferenceBuildError, match="region labels"):
+        build_whb(tmp_path / "frontal", monkeypatch, make_panel(GENES), sources)
+
+
 def write_seaad_metadata(directory: Path) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     for key in reference.SEAAD_TAXONOMY_KEYS:

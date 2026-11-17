@@ -1209,6 +1209,46 @@ def _cases(root: Path, params: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "cpus": 8,
             "memory_gb": 64,
         },
+        # SEA-AD's held-out self-map reads the run region's WHB directory.
+        "prep_args_seaad_frontal": {
+            "fn": "prepArguments",
+            "params": {
+                **ready,
+                "annotation_whb_hippocampal_region_precompute_source": str(gene_list),
+            },
+            "bundle": {**bundle, "reference_id": "seaad_mr_panel", "role": "secondary"},
+            "panel_genes": "panel_genes/panel_genes.json",
+            "cpus": 8,
+            "memory_gb": 64,
+        },
+        "prep_args_seaad_hippocampus": {
+            "fn": "prepArguments",
+            "params": {
+                **ready,
+                "annotation_human_region": "Hippocampus",
+                "annotation_whb_hippocampal_region_precompute_source": str(gene_list),
+            },
+            "bundle": {**bundle, "reference_id": "seaad_mr_panel", "role": "secondary"},
+            "panel_genes": "panel_genes/panel_genes.json",
+            "cpus": 8,
+            "memory_gb": 64,
+        },
+        "prep_args_whb_hippocampal": {
+            "fn": "prepArguments",
+            "params": {
+                **ready,
+                "annotation_human_region": "hippocampus",
+                "annotation_whb_hippocampal_region_precompute_source": str(gene_list),
+            },
+            "bundle": {
+                **bundle,
+                "key": "human|whb_hippocampal_supc_clus|" + _hash("a"),
+                "reference_id": "whb_hippocampal_supc_clus",
+            },
+            "panel_genes": "panel_genes/panel_genes.json",
+            "cpus": 8,
+            "memory_gb": 64,
+        },
         "store_default": {"fn": "referenceStore", "params": {"outdir": "rel_results"}},
         "preflight_ready": {"fn": "prepareOnlyErrors", "params": ready},
         "preflight_no_gene_list": {
@@ -1290,7 +1330,23 @@ def _cases(root: Path, params: dict[str, Any]) -> dict[str, dict[str, Any]]:
         },
         "preflight_region": {
             "fn": "prepareOnlyErrors",
+            "params": {**ready, "annotation_human_region": "temporal_cortex"},
+        },
+        "preflight_hippocampus_frontal_references": {
+            "fn": "prepareOnlyErrors",
             "params": {**ready, "annotation_human_region": "hippocampus"},
+        },
+        "preflight_hippocampus_ready": {
+            "fn": "prepareOnlyErrors",
+            "params": {
+                **ready,
+                "annotation_human_region": "hippocampus",
+                "annotation_human_references": (
+                    "whb_hippocampal_supc_clus,seaad_mr_panel"
+                ),
+                "annotation_whb_region_precompute_source": None,
+                "annotation_whb_hippocampal_region_precompute_source": str(region),
+            },
         },
         "ordered_missing": {
             "fn": "orderedBundleRefs",
@@ -1983,6 +2039,25 @@ def test_prep_arguments(harness: dict[str, Any]) -> None:
     assert "--no-auto-download" in region
     assert "--panel-genes" not in region and "--source" not in region
 
+    def sources_of(name: str) -> list[str]:
+        args = _value(harness, name).split()
+        return [args[i + 1] for i, arg in enumerate(args) if arg == "--source"]
+
+    # A frontal launch: SEA-AD's self-map reads the frontal region directory
+    # (the --source list is unchanged); a hippocampus launch: the
+    # hippocampal one.
+    region_dir = root / "region_precompute"
+    hippocampal_dir = root / "genes.csv"
+    assert f"whb_region_dir={region_dir}" in sources_of("prep_args_seaad_frontal")
+    assert f"whb_region_dir={hippocampal_dir}" in sources_of(
+        "prep_args_seaad_hippocampus"
+    )
+    assert sources_of("prep_args_whb_hippocampal") == [
+        f"region_precompute={hippocampal_dir}",
+        f"whb_h5ad_dir={region_dir}",
+        f"whb_metadata_dir={region_dir}",
+    ]
+
 
 @pytest.mark.nextflow
 @needs_nextflow
@@ -2325,7 +2400,11 @@ def test_prepare_only_preflight(harness: dict[str, Any]) -> None:
     (readonly,) = _value(harness, "preflight_readonly_store")
     assert "is not writable" in readonly
     (region,) = _value(harness, "preflight_region")
-    assert "hippocampus" in region and "OD-C7" in region
+    assert "temporal_cortex" in region and "OD-C7" in region
+    # The provisional hippocampal formation maps on its own WHB primary.
+    wrong = " | ".join(_value(harness, "preflight_hippocampus_frontal_references"))
+    assert "must map hippocampus on whb_hippocampal_supc_clus" in wrong
+    assert _value(harness, "preflight_hippocampus_ready") == []
 
 
 @pytest.mark.nextflow

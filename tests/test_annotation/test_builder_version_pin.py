@@ -40,7 +40,7 @@ STORE_NAMES = (
 )
 PINNED_FINGERPRINTS = {
     2: "f2790c373d24f879672ee2524fa3eac885960b69771e5bc89888a9de9d89c9a8",
-    3: "c2bea81619d7f49d98bd13eb52f586c53e02a8f2347da2e352656fa072ade1af",
+    3: "af34d5b8c368094b21b4e0c901f44eda706d5c22c1b25dc9dde77e620612f0ba",
 }
 # Why a fingerprint changed without a version bump (newest last).
 PIN_HISTORY = (
@@ -264,6 +264,13 @@ PIN_HISTORY = (
     "build_hash is unchanged with the alias table (every stored bundle "
     "recomputed); the universe labels in bundle.json pass through "
     "privacy.display (unchanged with the table). No bundle content changes",
+    "3: WHB region profiles (hippocampal-formation map_first): new references "
+    "whb_hippocampal_supc_clus and whb_hippocampal_supc_clus_ho built by the "
+    "frontal builders from a region profile (20 WHB ROIs, region-precompute "
+    "only), seaad_mr_panel's self-map on the run region's held-out set; the "
+    "frontal, SEA-AD (frontal run) and mouse payloads and bundle content are "
+    "unchanged (test_reference_regions pins the frontal payload digests), so "
+    "no existing bundle changes",
 )
 
 

@@ -78,6 +78,18 @@ MAP_FIRST_TABLE_KEY_SUFFIX: Final = "mapfirst"
 # (OD-C7: frontal cortex only; a new region needs §8.9's work first).
 VALIDATED_HUMAN_REGIONS: Final[tuple[str, ...]] = ("frontal_cortex",)
 DEFAULT_HUMAN_REGION: Final = "frontal_cortex"
+# Human regions the non-ATERA map_first route accepts: the validated ones plus
+# the provisional hippocampal formation (its own WHB region primary and
+# held-out set; frontal thresholds reused, no new calibration; plausibility
+# is neutral, only the sinks are flagged). The ATERA whole-panel route
+# (hippocampal_*.py) is separate and unchanged.
+SUPPORTED_HUMAN_REGIONS: Final[tuple[str, ...]] = ("frontal_cortex", "hippocampus")
+# The WHB region primary reference of each supported human region; a config
+# whose primary is another region's is refused.
+HUMAN_REGION_PRIMARY_REFERENCES: Final[dict[str, str]] = {
+    "frontal_cortex": "whb_frontal_supc_clus",
+    "hippocampus": "whb_hippocampal_supc_clus",
+}
 # Grey-matter CCF divisions of the mouse region model, with OB split from OLF
 # (E7 ``GREYREG``); ``mouse_section_regions`` names a subset of these.
 MOUSE_CCF_REGIONS: Final[tuple[str, ...]] = (
@@ -116,6 +128,16 @@ KNOWN_REFERENCES: Final[dict[str, dict[str, Any]]] = {
         "hierarchy": ["CCN202210140_SUPC", "CCN202210140_CLUS"],
     },
     "whb_frontal_supc_clus_ho": {
+        "species": "human",
+        "role": "resolvability",
+        "hierarchy": ["CCN202210140_SUPC", "CCN202210140_CLUS"],
+    },
+    "whb_hippocampal_supc_clus": {
+        "species": "human",
+        "role": "primary",
+        "hierarchy": ["CCN202210140_SUPC", "CCN202210140_CLUS"],
+    },
+    "whb_hippocampal_supc_clus_ho": {
         "species": "human",
         "role": "resolvability",
         "hierarchy": ["CCN202210140_SUPC", "CCN202210140_CLUS"],
@@ -1671,10 +1693,11 @@ class AnnotationConfig(_AnnotationModel):
             return
         if self.anatomical_region is None:
             self.anatomical_region = defaults["anatomical_region"]
-        if self.anatomical_region not in VALIDATED_HUMAN_REGIONS:
+        if self.anatomical_region not in SUPPORTED_HUMAN_REGIONS:
             raise ValueError(
                 f"anatomical_region {self.anatomical_region!r} is not validated; "
-                f"human annotation supports {VALIDATED_HUMAN_REGIONS} only (OD-C7). "
+                f"human annotation supports {VALIDATED_HUMAN_REGIONS} only (OD-C7; "
+                f"provisional: {SUPPORTED_HUMAN_REGIONS[1:]}). "
                 "A new region needs its WHB ROI set, HO bundle, vocab "
                 "plausibility column, markers and acceptance first (plan §8.9)."
             )
@@ -1697,6 +1720,14 @@ class AnnotationConfig(_AnnotationModel):
         if len(primaries) != 1:
             raise ValueError(
                 f"exactly one primary reference is required, got {primaries}"
+            )
+        expected = HUMAN_REGION_PRIMARY_REFERENCES.get(self.anatomical_region or "")
+        region_primaries = set(HUMAN_REGION_PRIMARY_REFERENCES.values())
+        if expected is not None and primaries[0] in region_primaries - {expected}:
+            raise ValueError(
+                f"primary reference {primaries[0]!r} is another region's WHB "
+                f"reference; anatomical_region {self.anatomical_region!r} maps on "
+                f"{expected!r}"
             )
 
     def _couple_min_counts(self: AnnotationConfig) -> None:

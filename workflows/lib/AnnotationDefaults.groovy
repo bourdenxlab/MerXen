@@ -36,6 +36,17 @@ class AnnotationDefaults {
 
     // Human regions with validated references (OD-C7: frontal cortex only).
     static final List<String> VALIDATED_HUMAN_REGIONS = ["frontal_cortex"].asImmutable()
+    // Regions the non-ATERA human map_first route accepts: the validated one
+    // plus the provisional hippocampal formation (own WHB region primary,
+    // frontal thresholds reused, neutral plausibility). As
+    // merxen.annotation.config.SUPPORTED_HUMAN_REGIONS.
+    static final List<String> SUPPORTED_HUMAN_REGIONS = ["frontal_cortex", "hippocampus"].asImmutable()
+    // The WHB region primary of each supported human region (as
+    // merxen.annotation.config.HUMAN_REGION_PRIMARY_REFERENCES).
+    static final Map<String, String> HUMAN_REGION_PRIMARY_REFERENCES = [
+        frontal_cortex: "whb_frontal_supc_clus",
+        hippocampus: "whb_hippocampal_supc_clus",
+    ].asImmutable()
     static final List<String> MOUSE_SECTION_REGION_KEYWORDS = ["auto", "none"].asImmutable()
     // Grey-matter CCF divisions of the mouse region model (OB split from OLF).
     static final List<String> MOUSE_CCF_REGIONS = [
@@ -51,6 +62,8 @@ class AnnotationDefaults {
         human: [
             "whb_frontal_supc_clus",
             "whb_frontal_supc_clus_ho",
+            "whb_hippocampal_supc_clus",
+            "whb_hippocampal_supc_clus_ho",
             "seaad_mr_panel",
             "whb_whole_ctx_panel",
             "ll_whb_ctx_profiles",

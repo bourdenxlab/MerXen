@@ -102,6 +102,12 @@ REFERENCE_SOURCE_PARAMS: Final[dict[str, dict[str, str]]] = {
         "whb_metadata_dir": "annotation_whb_metadata_dir",
         "seaad_precomputed_stats": "annotation_seaad_precomputed_stats_path",
     },
+    "whb_hippocampal_supc_clus": {
+        "region_precompute": "annotation_whb_hippocampal_region_precompute_source",
+        "whb_h5ad_dir": "annotation_whb_h5ad_dir",
+        "whb_metadata_dir": "annotation_whb_metadata_dir",
+        "seaad_precomputed_stats": "annotation_seaad_precomputed_stats_path",
+    },
     "seaad_mr_panel": {
         "seaad_precomputed_stats": "annotation_seaad_precomputed_stats_path",
         "seaad_metadata_dir": "annotation_seaad_metadata_dir",

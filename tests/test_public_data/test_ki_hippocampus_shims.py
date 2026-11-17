@@ -776,14 +776,15 @@ def test_samplesheet_rows_from_env_root(
     assert {row["xenium_spatialdata_path"] for row in rows} == {""}
 
 
-def test_samplesheet_map_first_leaves_region_blank(
+def test_samplesheet_map_first_rows_are_hippocampus(
     samplesheet: ModuleType, tmp_path: Path
 ) -> None:
     options = samplesheet.RowOptions(clustering_mode="map_first", mecr_enabled=True)
 
     row = samplesheet.build_row(tmp_path, "KI_HC_S4", options)
 
-    assert row["anatomical_region"] == ""
+    assert row["clustering_squidpy_mode"] == "map_first"
+    assert row["anatomical_region"] == "hippocampus"
     assert row["mecr_enabled"] == "true"
     assert row["xenium_spatialdata_path"] == ""
 

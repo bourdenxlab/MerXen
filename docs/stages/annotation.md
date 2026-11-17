@@ -36,11 +36,13 @@ modified or deleted automatically (see [CLI reference](../cli.md#merxen-annotati
 | Reference | Role | What the builder does |
 |---|---|---|
 | `whb_frontal_supc_clus` | human primary (also the set-c sensitivity bundle, the same builder on the set-c panel) | Copies and verifies the frontal WHB region precompute (ROIs Human A44-A45, A46, A32, ACC; 653 subclusters, 125,481 cells, 59,357 genes), or rebuilds it from the WHB h5ads; truncates it to supercluster → cluster; finds panel reference and query markers (`n_per_utility` 30). |
+| `whb_hippocampal_supc_clus` | human primary of the provisional hippocampal formation | The `whb_frontal_supc_clus` builder on a WHB region reference of the 20 hippocampal-formation ROIs (Human CA1, CA1-2R, CA1C-CA3C, CA1R-CA2R-CA3R, CA1U-CA2U-CA3U, CA2-3, CA3R, CA4C-DGC, DG-CA4, DGR-CA4, DGR-CA4Rpy, DGU-CA4Upy, Rostral CA1-CA3, Rostral DG-CA4, Sub, MEC, LEC, TH-TL, A35-A36, A35r; min 10 cells per leaf) from `annotation_whb_hippocampal_region_precompute_source`. The manifest's ROI labels must be these (a frontal directory is refused, and the frontal primary refuses this one); the precompute is required (no rebuild from the WHB h5ads); no validated counts. Its raw engine columns are `mmc_whb_*`, as the frontal primary's. |
 | `seaad_mr_panel` | human secondary | Copies the SEA-AD Multiregion precompute (release 20260711, 207 supertypes × 36,601 genes; md5 `9b1d5f50a412cd69311fa1175d4836a7`, sha256 `abbd4984bc45…3f6a`) and its small taxonomy tables; panel markers. Missing pinned files are fetched into `<store>/.downloads` (or seeded from a verified local copy). |
 | `wmb_panel` | mouse primary | Samples at most `annotation_wmb_max_cells_per_cluster` (50) cells per cluster from the local WMB-10Xv3 h5ads (seed 1; the self-map test cells excluded, see below), restricted to the marker gene universe (see below); builds the marker precompute; finds panel markers with the supertype level dropped; copies the Allen `precomputed_stats_ABC_revision_230821.h5` (md5 `d13b316a1755c459d75b8e45ff92ddfc`) as the mapping precompute. |
 | `wmb_region_share` | mouse, panel-independent | Class and subclass × CCF-division shares of the ABC MERFISH-C57BL6J-638850-CCF cells (OB = MOB, AOB, olfactory nerve layer and OLF-unassigned anterior of AP 2.5 mm, split from OLF), each node's home division, per-section compositions and AP composition windows (each section with its neighbours) for every section; from revision 2 also each subclass's structure-level home (`region_structure_home.parquet`), which the default mouse region rule's OB–OLF coupling reads. |
 | `whb_whole_ctx_panel` | human, optional | Whole-WHB panel markers with the 16 cortex-implausible superclusters dropped and the lookup filtered to the pruned tree; refused above 1,000 genes. |
 | `whb_frontal_supc_clus_ho` | human, resolvability (M3b) | The frontal WHB cells restricted to the panel, without the held-out donor (`annotation_calibration_holdout_donor`, `auto` = the donor with the fewest frontal cells, H19.30.002); clusters with ≥ 5 training cells; a supercluster → cluster → subcluster precompute of the training cells truncated to supercluster → cluster, with panel markers. The held-out donor's cells (≤ 1,000 per supercluster, all cells of rare ones, ≤ `n_test_cells`) are the test set (`test_cells.h5ad`, native panel counts and truth). E2's HO recipe. Every non-neuronal supercluster is topped up to the same cap with WHB non-neuronal nuclei of E2's 14 neocortical dissections outside the frontal ROIs (user decision 2026-09-27, see the self-map below); `test_source` marks each test cell `holdout_donor` or `other_region`. |
+| `whb_hippocampal_supc_clus_ho` | human, resolvability (provisional) | The `whb_frontal_supc_clus_ho` recipe on the hippocampal-formation region directory: that region's cells, its own held-out donor (`auto` = the donor with the fewest cells in the region), the same caps and the same other-region non-neuronal top-up. Built inside the PREP of `whb_hippocampal_supc_clus` and, in a hippocampus launch, of `seaad_mr_panel`. |
 | `wmb_selfmap_testset` | mouse, resolvability (M3b) | The 11,913 self-map test cells plus up to 30 cells per supertype of the non-neuronal classes (Astro-Epen, OPC-Oligo, Vascular, Immune) that the `wmb_panel` marker build did not use (its sample is recomputed with the same rule), restricted to the panel (`test_cells.h5ad`). |
 
 Every bundle records in `bundle.json` the full sha256 of each source, the
@@ -1699,6 +1701,46 @@ re-runs every RESOLVE, a minute each, and keeps MAP cached: MAP's task
 inputs and its published-output reuse key hold none of these settings. Any
 edit under those source directories re-runs RESOLVE, and so everything that
 reads its tables.
+
+### Hippocampal-formation runs (provisional)
+
+Non-ATERA human `map_first` rows of hippocampal tissue (the public Xenium
+hippocampus sections) use the frontal route with a second WHB region:
+
+- **One region per launch.** `annotation_config.json` (region and reference
+  list) is built from the run params, not the row, so the rows run in a
+  launch of their own with `--annotation_human_region hippocampus`, and each
+  row's `anatomical_region` must be `hippocampus` (or blank, inheriting it).
+  Preflight refuses a row whose region differs from the run's, and a launch
+  whose `annotation_human_references` lacks the region's WHB primary or holds
+  another region's.
+- **Params.** `--annotation_human_references
+  whb_hippocampal_supc_clus,seaad_mr_panel` and
+  `--annotation_whb_hippocampal_region_precompute_source <dir>` (a region
+  reference directory as `prepare_region_mapmycells_reference` writes it:
+  `precompute/precomputed_stats.h5`, `region_cell_metadata.csv`,
+  `region_reference_manifest.json`), plus `annotation_whb_h5ad_dir` and
+  `annotation_whb_metadata_dir` for the held-out self-map. In such a launch
+  `seaad_mr_panel`'s `whb_region_dir` source is the hippocampal directory,
+  so its self-map runs on `whb_hippocampal_supc_clus_ho` (its `build_hash`
+  differs from the frontal one). Use reference stores of their own.
+  Keep `annotation_resolvability` on: without the self-map a provisional
+  family is capped at `broad_only`.
+- **Minimal gating.** Plausibility is neutral (every supercluster is
+  plausible, the two sinks are flagged); trust, floors, the SEA-AD second
+  vote, the dataset gate and the downgrade-only real-data QC are the generic
+  ones, with the frontal thresholds reused and no new calibration. Panel
+  families are new and `provisional`. Cortical depth and the frontal
+  acceptance items do not apply.
+- **Outputs.** As the frontal route: `mmc_whb_*` / `mmc_seaad_*` columns in
+  the label table, MAP tidy parquets with five runners-up per level
+  (`<sample>_mmc_seaad_mr_panel.parquet`,
+  `<sample>_mmc_whb_hippocampal_supc_clus.parquet`), bundles, report. The
+  viewer's bootstrap fields come from these tidy files
+  ([Exploring saved bootstrap predictions](../annotation-bootstrap-display.md)).
+- **Unchanged.** Frontal launches: the same `annotation_config.json`, source
+  lists and bundle payloads (pinned by `test_reference_regions.py`), so no
+  frontal bundle rebuilds. The ATERA whole-panel route.
 
 ### Pre-building references (`--annotation_prepare_only`)
 

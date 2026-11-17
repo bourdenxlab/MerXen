@@ -41,6 +41,7 @@ PLANNED_ANNOTATION_PARAMS = frozenset(
         "annotation_human_region",
         "annotation_mouse_section_regions",
         "annotation_whb_region_precompute_source",
+        "annotation_whb_hippocampal_region_precompute_source",
         "annotation_whb_h5ad_dir",
         "annotation_whb_metadata_dir",
         "annotation_gene_alias_table",

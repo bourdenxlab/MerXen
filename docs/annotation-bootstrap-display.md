@@ -52,3 +52,32 @@ accepted labels, expression matrices, embeddings, shapes, images and transcript
 assignments. It is repeatable with identical predictions and rolls back earlier
 observation replacements if a later replacement fails. Use a versioned export
 when an existing download package must remain immutable.
+
+## Map-first runs
+
+A `map_first` run (frontal cortex, or the provisional hippocampal formation)
+keeps the same raw predictions in MAP's tidy files under `annotation_map_out`:
+`<sample>_mmc_seaad_mr_panel.parquet` and `<sample>_mmc_<WHB primary>.parquet`
+(`whb_frontal_supc_clus` or `whb_hippocampal_supc_clus`), five runners-up at
+every level. The same command reads them, with the RESOLVE label table for the
+acceptance status (`<stem>_resolution_status` is `ct_seaad_subclass_status` or
+`ct_supercluster_status`):
+
+```bash
+python -m merxen.io.annotation_predictions \
+  --store "$MERXEN_VIEWER_STORE" \
+  --table "$MERXEN_VIEWER_TABLE" \
+  --seaad-mmc "$MERXEN_SEAAD_MMC" \
+  --whb-mmc "$MERXEN_WHB_MMC" \
+  --labels "$MERXEN_CELLTYPE_LABELS"
+```
+
+Here `bp` is MapMyCells' bootstrap fraction at that level, conditional on the
+parent choice; `aggregate_probability` is the product along the hierarchy, the
+value map-first RESOLVE thresholds for the SEA-AD subclass (`ct_seaad_subclass_raw`).
+The label table's own `ct_seaad_subclass_*` and `ct_supercluster_*` columns
+(accepted name, status, runner-up) are not changed. Unlike the whole-panel
+files, the tidy files may not cover every table cell (an atlas refused for the
+panel, or cells outside the mapped table): those observations keep missing
+prediction fields instead of being refused. Run it per sample and
+segmentation, and again after a later `FINALIZE` rewrites the table.

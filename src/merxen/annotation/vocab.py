@@ -129,6 +129,15 @@ PRIMARY_VOCAB: Final[dict[str, VocabTableId]] = {
     "mouse": "wmb_class",
 }
 REGION_COLUMN_PREFIX: Final = "region_plausible_"
+# Supported regions without a plausibility column, where every node is
+# plausible (minimal gating; sinks stay flagged through ``is_sink``): the
+# provisional human hippocampal formation, whose WHB region reference already
+# holds only the superclusters of its 20 dissections. Like the readers of a
+# bundle's vocab snapshot without the region's column (MAP provisional labels,
+# the self-map level specs, the report), which default to plausible. The
+# packaged CSVs are not given a column: their sha256 enters every human
+# bundle's build_hash.
+UNRESTRICTED_PLAUSIBILITY_REGIONS: Final[frozenset[str]] = frozenset({"hippocampus"})
 SUPERTYPE_PREFIX_COLUMN: Final = "supertype_prefix"
 # SEA-AD: the broad classes a node's probability counts toward in the broad
 # score, ";"-separated; "VLMC & Perivascular" without a supertype counts toward
@@ -474,12 +483,19 @@ class VocabTable:
             region: Region token, e.g. ``"frontal_cortex"``.
 
         Returns:
-            The table's ``region_plausible_<region>`` value.
+            The table's ``region_plausible_<region>`` value; ``True`` for a
+            region of ``UNRESTRICTED_PLAUSIBILITY_REGIONS`` without a column.
 
         Raises:
-            ValueError: If the table has no column for the region.
+            ValueError: If the table has no column for the region and the
+                region is not unrestricted.
         """
         column = f"{REGION_COLUMN_PREFIX}{region}"
+        if column not in self.frame.columns and region in (
+            UNRESTRICTED_PLAUSIBILITY_REGIONS
+        ):
+            self.row(name)
+            return True
         if column not in self.frame.columns:
             raise ValueError(
                 f"vocab table {self.table_id!r} has no plausibility column for "

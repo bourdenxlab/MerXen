@@ -145,9 +145,9 @@ from merxen.annotation.panel import (
 )
 from merxen.annotation.provenance import annotation_manifest_filename
 from merxen.annotation.reference import (
-    HO_REFERENCE_ID,
     HO_SELF_MAP_TEST_SET_REVISION,
     REGION_SHARE_REVISION,
+    WHB_HO_REFERENCE_IDS,
     lookup_sha256,
     read_lookup,
 )
@@ -227,9 +227,12 @@ RUN_SUFFIXES: Final[dict[str, str]] = {
     "setc_sensitivity": "_setc",
     "intersection_xpanel": "_xpanel",
 }
-# Short reference names of the raw engine columns (plan §4.1).
+# Short reference names of the raw engine columns (plan §4.1). Every WHB
+# region primary writes mmc_whb_* columns, so the label tables, the report
+# and the viewer read the same columns whatever the region.
 ENGINE_PREFIXES: Final[dict[str, str]] = {
     "whb_frontal_supc_clus": "whb",
+    "whb_hippocampal_supc_clus": "whb",
     "seaad_mr_panel": "seaad",
     "wmb_panel": "wmb",
     "whb_whole_ctx_panel": "whb_wholectx",
@@ -583,7 +586,7 @@ def _self_map_test_set_revision(entry: StoreEntry) -> int | None:
     )
     hashed = params.get("test_set") if isinstance(params, dict) else None
     if isinstance(hashed, dict) and hashed.get("reference_id") is not None:
-        if hashed.get("reference_id") != HO_REFERENCE_ID:
+        if hashed.get("reference_id") not in WHB_HO_REFERENCE_IDS:
             return None
         exclusion = hashed.get("self_map_exclusion") or {}
         value = exclusion.get("revision") if isinstance(exclusion, dict) else None
@@ -592,8 +595,9 @@ def _self_map_test_set_revision(entry: StoreEntry) -> int | None:
     if not isinstance(record, dict):
         return None
     test_set = record.get("test_set_bundle") or {}
-    if not isinstance(test_set, dict) or test_set.get("reference_id") != (
-        HO_REFERENCE_ID
+    if (
+        not isinstance(test_set, dict)
+        or test_set.get("reference_id") not in WHB_HO_REFERENCE_IDS
     ):
         return None
     exclusion = record.get("test_set_exclusion") or {}

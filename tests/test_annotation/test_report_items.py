@@ -504,3 +504,30 @@ def test_item_one_judges_self_thinning_on_confident_labels_only() -> None:
     assert thinning.composition == {"Fibroblasts": 1.0}
     assert thinning.argmax_composition == {"Fibroblasts": 1.0}
     assert not thinning.reliable
+
+
+def test_primary_reference_follows_the_region_primary_among_the_bundles() -> None:
+    """A hippocampal run's report reads the hippocampal WHB bundle."""
+
+    def inputs(species: str, bundles: dict[str, Path]) -> ReportInputs:
+        return ReportInputs(
+            sources=ReportSources(
+                species=species,  # type: ignore[arg-type]
+                pair_id="S",
+                segmentation="seg",
+                resolve_dir=Path("."),
+            ),
+            summary={},
+            samples={},
+            bundles=bundles,
+        )
+
+    assert ri.primary_reference(inputs("human", {})) == "whb_frontal_supc_clus"
+    frontal = {"whb_frontal_supc_clus": Path("a"), "seaad_mr_panel": Path("b")}
+    assert ri.primary_reference(inputs("human", frontal)) == "whb_frontal_supc_clus"
+    hippocampal = {"whb_hippocampal_supc_clus": Path("a"), "seaad_mr_panel": Path("b")}
+    assert (
+        ri.primary_reference(inputs("human", hippocampal))
+        == "whb_hippocampal_supc_clus"
+    )
+    assert ri.primary_reference(inputs("mouse", hippocampal)) == "wmb_panel"
