@@ -1060,3 +1060,96 @@ def test_robust_affine_weights_reject_a_class_without_a_guess() -> None:
             noise_guess_um={"click": 30.0},
             noise_bounds_um=CONFIRMED_BOUNDS,
         )
+
+
+def test_default_options_fit_confirmed_observations() -> None:
+    observations = _confirmed_observations(with_windows=True)
+    field = lf.fit_landmark_field(observations)
+    assert "confirmed" in field.hyperparameters.noise_um
+    assert "confirmed" in lf.DEFAULT_NOISE_BOUNDS_UM
+
+
+def test_suggestion_exclusion_applies_to_clicks_but_not_to_windows() -> None:
+    observations = _confirmed_observations(with_windows=True)
+    field = lf.fit_landmark_field(observations)
+    classes = np.array(observations.obs_class)
+    reference = observations.reference_xy_um
+    near_window = reference[classes == "window"][0] + 10.0
+    near_confirmed = reference[classes == "confirmed"][0] + 50.0
+    click_like = reference[classes != "window"]
+    radius = 300.0
+    # The window candidate must sit clear of every click for the test to bite.
+    assert np.linalg.norm(click_like - near_window, axis=1).min() > radius
+    candidates = np.array([near_window, near_confirmed])
+    picks = lf.suggest_landmarks(
+        field,
+        candidates,
+        np.array([1.0, 10.0]),
+        n=2,
+        min_spacing_um=0.0,
+        exclusion_radius_um=radius,
+    )
+    positions = [tuple(p.reference_xy_um) for p in picks]
+    assert positions == [tuple(near_window)]
+
+
+def test_robust_affine_weights_reject_a_non_finite_or_non_positive_nu() -> None:
+    observations, _ = _clean_phantom_observations(seed=53)
+    for nu in (math.inf, 0.0, -1.0, math.nan):
+        with pytest.raises(ValueError, match="nu"):
+            lf.robust_affine_weights(
+                observations, nu=nu, noise_guess_um={"click": 30.0}
+            )
+
+
+def _tamper_algorithm(payload: dict[str, object]) -> None:
+    payload["algorithm"] = "something_else_v9"
+
+
+def _tamper_kernel_family(payload: dict[str, object]) -> None:
+    payload["kernel"]["family"] = "matern32"  # type: ignore[index]
+
+
+def _tamper_frame(payload: dict[str, object]) -> None:
+    payload["frame"] = {"input": "moving_full_um", "output": "reference_full_um"}
+
+
+def _tamper_jitter(payload: dict[str, object]) -> None:
+    payload["jitter_um2"] = 1.0
+
+
+def _tamper_trend_scale(payload: dict[str, object]) -> None:
+    payload["trend"]["scale_um"] = 5000.0  # type: ignore[index]
+
+
+def _tamper_component_name(payload: dict[str, object]) -> None:
+    payload["kernel"]["components"][0]["name"] = "medium"  # type: ignore[index]
+
+
+def _tamper_student_t_nu(payload: dict[str, object]) -> None:
+    payload["student_t_nu"] = 1.0
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        _tamper_algorithm,
+        _tamper_kernel_family,
+        _tamper_frame,
+        _tamper_jitter,
+        _tamper_trend_scale,
+        _tamper_component_name,
+        _tamper_student_t_nu,
+    ],
+)
+def test_from_dict_rejects_changed_model_constants_despite_a_valid_digest(
+    tamper: Callable[[dict[str, object]], None],
+) -> None:
+    observations, _ = _clean_phantom_observations(seed=54)
+    payload = json.loads(json.dumps(lf.fit_landmark_field(observations).to_dict()))
+    tamper(payload)
+    payload["digest"] = lf._canonical_sha256(
+        {key: value for key, value in payload.items() if key != "digest"}
+    )
+    with pytest.raises(ValueError):
+        lf.LandmarkField.from_dict(payload)

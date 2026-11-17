@@ -8,6 +8,10 @@ The digests inside the file (``digest`` leaves) hash computed floats whose last 
 follow the CPU's BLAS kernel. The mirror therefore verifies the digest of the stored
 payload (``canonical_sha256`` of the payload without it) and compares recomputed
 numbers within tolerance; it never recomputes a digest bit for bit.
+
+The trend centre is the mean of the click-like observations (classes ``click`` and
+``confirmed``), not of ``click`` alone; no golden case holds a confirmed observation, so
+the mirror must read ``trend.centre_um`` from the payload rather than recompute it.
 """
 
 from __future__ import annotations
@@ -38,7 +42,7 @@ GOLDEN_PATH = (
     / "manual_registration"
     / "landmark_field_golden_v1.json"
 )
-GOLDEN_SHA256 = "e37b84d9af2555995095d7d6d35cb2c50e5c35b2e42db71ca21e1741f49c72fb"
+GOLDEN_SHA256 = "03eaa3815278ef8dd974753a4949fcc5152c49a94abcbc933c80648b39942ac4"
 
 
 @pytest.fixture(scope="module")

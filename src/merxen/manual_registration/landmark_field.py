@@ -46,6 +46,8 @@ JITTER_UM2 = 1e-6
 MAX_SHAPE_ANISOTROPY = 16.0
 DEFAULT_NOISE_BOUNDS_UM: dict[str, tuple[float, float]] = {
     "click": (3.0, 300.0),
+    # Confirmed clicks are clicks the image check backed (C2/A3): same bounds.
+    "confirmed": (3.0, 300.0),
     "window": (15.0, 100.0),
 }
 RIDGE_SHAPE_RATIO = 60.0 / 27.0
@@ -55,7 +57,7 @@ _CHI2_MEDIAN_SD = 1.1774100225154747  # sqrt(2 ln 2), the median of a chi(2) var
 _FAILED_OBJECTIVE = 1e15
 _ROBUST_INIT_ITERATIONS = 20
 _ROBUST_INIT_TOLERANCE = 1e-3
-_DEFAULT_NOISE_GUESS_UM = {"click": 30.0, "window": 15.0}
+_DEFAULT_NOISE_GUESS_UM = {"click": 30.0, "confirmed": 30.0, "window": 15.0}
 _CLICK_LIKE_CLASSES = ("click", "confirmed")
 
 
@@ -791,7 +793,7 @@ def robust_affine_weights(
 
     Args:
         observations: The observations.
-        nu: Student-t degrees of freedom (finite).
+        nu: Student-t degrees of freedom (finite, positive).
         noise_guess_um: Initial noise sigma per class; classes absent from the
             observations are ignored.
         noise_bounds_um: Per-class noise bounds the guesses are clipped to
@@ -800,6 +802,8 @@ def robust_affine_weights(
     Returns:
         ``(N,)`` weights; ``em_exempt`` observations stay at 1.
     """
+    if not 0.0 < nu < math.inf:
+        raise ValueError(f"nu must be positive and finite, got {nu!r}")
     table = DEFAULT_NOISE_BOUNDS_UM if noise_bounds_um is None else noise_bounds_um
     bounds: dict[str, tuple[float, float]] = {}
     guesses: dict[str, float] = {}
@@ -1265,7 +1269,9 @@ class LandmarkField:
 
         Raises:
             ValueError: On a wrong schema or version, a digest mismatch, a malformed
-                payload, or trend coefficients that differ from the stored ones.
+                payload, constants that differ from this module's (algorithm, kernel
+                family, frame, jitter, trend scale, component names, nu), or trend
+                coefficients that differ from the stored ones.
         """
         try:
             return cls._from_dict(payload)
@@ -1290,6 +1296,7 @@ class LandmarkField:
             raise ValueError(f"payload is not plain JSON: {exc}") from exc
         if payload.get("digest") != expected:
             raise ValueError("landmark field digest does not match its content")
+        _check_payload_constants(payload)
         stored = payload["observations"]
         observations = FieldObservations(
             reference_xy_um=np.array(stored["reference_xy_um"], dtype=float),
@@ -1351,6 +1358,28 @@ class LandmarkField:
         rebuilt.n_starts = int(fit["n_starts"])
         rebuilt.trend_coefficients = coefficients
         return rebuilt
+
+
+def _check_payload_constants(payload: Mapping[str, Any]) -> None:
+    """Reject a payload whose fixed model constants differ from this version's."""
+    expected_frame = {"input": "reference_full_um", "output": "moving_full_um"}
+    checks = (
+        ("algorithm", payload["algorithm"], FIELD_ALGORITHM),
+        ("kernel.family", payload["kernel"]["family"], "matern52"),
+        ("frame", payload["frame"], expected_frame),
+        ("jitter_um2", payload["jitter_um2"], JITTER_UM2),
+        ("trend.scale_um", payload["trend"]["scale_um"], TREND_SCALE_UM),
+    )
+    for label, found, wanted in checks:
+        if found != wanted:
+            raise ValueError(
+                f"unsupported {label} {found!r}; this version needs {wanted!r}"
+            )
+    names = [part["name"] for part in payload["kernel"]["components"]]
+    if names not in (["long"], ["long", "short"]):
+        raise ValueError(f"unexpected kernel component names {names!r}")
+    if payload["student_t_nu"] != payload["fit"]["options"]["nu"]:
+        raise ValueError("student_t_nu does not match fit.options.nu")
 
 
 # ---------------------------------------------------------------------------- fitting
