@@ -650,6 +650,21 @@ def _build_cases(p: _Project) -> None:
         check_rows.append([ident, img("a.czi"), img("c.ome.tif"), str(store), roles])
     p.add("check_preflight", check_header, check_rows, mode="check")
     p.add(
+        "check_partial_roles_other_preset",
+        check_header,
+        [check_rows[3]],
+        mode="check",
+        params={"manual_registration_check_preset": "same_section"},
+    )
+    p.add(
+        "partial_roles_other_presets",
+        roles_header,
+        [
+            ["X1", img("a.czi"), img("c.ome.tif"), "same_section", "dapi=DAPI"],
+            ["X2", img("a.czi"), img("c.ome.tif"), "", "at8=AF568;dapi=DAPI"],
+        ],
+    )
+    p.add(
         "check_no_roles_other_preset",
         check_header,
         [check_rows[2]],
@@ -1510,6 +1525,10 @@ def test_channel_roles_syntax_errors_are_collected_per_row(
         "row 6 (X5): channel_roles: item 'at8=A:B': the channel must be a name "
         "without ';', '=' or ':'",
         "row 7 (X6): channel_roles: role 'at8' is given twice (unscoped)",
+        # X7 is well formed but gives no map2 or dapi: the completeness check names it.
+        "row 8 (X7): channel_roles gives no channel for map2, dapi "
+        "(a non-blank text needs all of at8, map2, dapi), "
+        "e.g. at8=AF568;map2=AF647;dapi=DAPI",
         "row 9 (X8): channel_roles: role 'at8' is given twice (reference)",
     ]
 
@@ -1552,6 +1571,30 @@ def test_check_preflight_needs_roles_for_other_presets_with_image_check(
     assert parsed["errors"] == []
     assert len(parsed["preflight"]) == 1
     assert parsed["preflight"][0].startswith("K_NOROLES: the image check needs")
+
+
+def test_partial_roles_fail_for_every_preset(results: dict[str, Any]) -> None:
+    example = "e.g. at8=AF568;map2=AF647;dapi=DAPI"
+
+    assert _parse(results, "partial_roles_other_presets")["errors"] == [
+        "row 2 (X1): channel_roles gives no channel for at8, map2 "
+        f"(a non-blank text needs all of at8, map2, dapi), {example}",
+        "row 3 (X2): channel_roles gives no channel for map2 "
+        f"(a non-blank text needs all of at8, map2, dapi), {example}",
+    ]
+
+
+def test_check_preflight_rejects_partial_roles_for_other_presets(
+    results: dict[str, Any],
+) -> None:
+    parsed = _parse(results, "check_partial_roles_other_preset")
+
+    assert parsed["errors"] == []
+    assert parsed["preflight"] == [
+        "K_PARTIAL: channel_roles gives no channel for map2 "
+        "(a non-blank text needs all of at8, map2, dapi), "
+        "e.g. at8=AF568;map2=AF647;dapi=DAPI"
+    ]
 
 
 def test_check_preflight_needs_no_roles_when_images_are_off(

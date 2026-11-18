@@ -535,6 +535,21 @@ class ManualRegistrationSheet {
         return null
     }
 
+    /**
+     * The error of a non-blank but incomplete channel_roles for any preset, or null. Python resolves
+     * all three roles whenever the text is non-blank (resolve_store_roles), whatever the preset.
+     */
+    static String incompleteRolesError(String text) {
+        if (!(text ?: "").trim()) {
+            return null
+        }
+        List<String> missing = missingRoles(text)
+        if (missing) {
+            return "channel_roles gives no channel for ${missing.join(', ')} (a non-blank text needs all of at8, map2, dapi), e.g. ${CHANNEL_ROLES_EXAMPLE}".toString()
+        }
+        return null
+    }
+
     // ------------------------------------------------------------------
     // parse
     // ------------------------------------------------------------------
@@ -826,8 +841,10 @@ class ManualRegistrationSheet {
         String channelRoles = (r.channel_roles ?: "").trim()
         rowErrors.addAll(channelRolesErrors(channelRoles))
         // A check takes its preset from the params (checkPreflight), not from the row's presets.
-        if (mode != "check" && ("cortex_serial" in presets) && !channelRolesErrors(channelRoles)) {
-            String rolesError = cortexRolesError(channelRoles)
+        if (mode != "check" && !channelRolesErrors(channelRoles)) {
+            String rolesError = ("cortex_serial" in presets)
+                ? cortexRolesError(channelRoles)
+                : incompleteRolesError(channelRoles)
             if (rolesError != null) {
                 rowErrors.add(rolesError)
             }
@@ -1120,6 +1137,11 @@ class ManualRegistrationSheet {
                 errors.add(
                     "${row.id}: the image check needs channel_roles (e.g. ${CHANNEL_ROLES_EXAMPLE}) or the settings field_image_check=false;field_window_observations=false".toString()
                 )
+            } else if (!channelRolesErrors(row.channel_roles as String)) {
+                String rolesError = incompleteRolesError(row.channel_roles as String)
+                if (rolesError != null) {
+                    errors.add("${row.id}: ${rolesError}".toString())
+                }
             }
         }
         return errors
