@@ -18,11 +18,13 @@ import numpy as np
 import pandas as pd
 import pytest
 import spatialdata as sd
+from scipy.ndimage import gaussian_filter, map_coordinates
 from spatialdata.transformations import get_transformation
 
 from merxen.image_registration import pull_points_through_registration
 from merxen.io.spatialdata_io import spatialdata_write_lock
 from merxen.manual_registration import field_fit
+from merxen.manual_registration import register as register_module
 from merxen.manual_registration.compare import compare_runs
 from merxen.manual_registration.config import (
     ManualRegistrationCompareConfig,
@@ -74,7 +76,7 @@ class Prepared:
     pairs: list[LandmarkPair]
 
 
-def _prepare(root: Path) -> Prepared:
+def _prepare(root: Path, moving_channel_names: list[str] | None = None) -> Prepared:
     pair = make_synthetic_pair(
         root / "images",
         channel_names=("DAPI", "AF568", "AF647"),
@@ -89,7 +91,9 @@ def _prepare(root: Path) -> Prepared:
         ManualRegistrationPrepareConfig(
             dataset_name=NAME,
             reference=ManualRegistrationImageInput(path=pair.reference_path),
-            moving=ManualRegistrationImageInput(path=pair.moving_path),
+            moving=ManualRegistrationImageInput(
+                path=pair.moving_path, channel_names=moving_channel_names
+            ),
             prepared_dir=root / NAME / "prepared",
             output_dir=root / "prepare_out",
             workers=1,
@@ -686,3 +690,112 @@ def test_a_result_from_before_the_field_is_reused_and_compared(
     assert float(new["field_loo_median_um"]) > 0.0
     assert new["field_n_windows"] == "0"
     assert compared["comparison_png"].exists()
+
+
+# ---------------------------------------------------------------------------
+# pixels and channels
+# ---------------------------------------------------------------------------
+
+
+def test_stored_moving_image_is_the_moving_level_pulled_through_the_field(
+    preview: tuple[Path, dict[str, Path], dict[str, Any]], prepared: Prepared
+) -> None:
+    _base, outputs, _summary_ = preview
+    flow = np.load(outputs["field_flow_npz"])
+    stored = _base_array(_element(outputs["result_store"], "moving_registered"))[0]
+    reference = _base_array(_element(outputs["result_store"], "reference"))[0]
+    height, width = stored.shape
+    rows, cols = np.meshgrid(
+        np.arange(0, height, 4), np.arange(0, width, 4), indexing="ij"
+    )
+    # Preview pixel centre -> reference crop level-0 pixel (factor 2).
+    points = np.stack(
+        [cols.ravel() * PREVIEW_FACTOR + 0.5, rows.ravel() * PREVIEW_FACTOR + 0.5], 1
+    ).astype(np.float64)
+    moving = gaussian_filter(_moving_level(prepared.pair, 0), 1.5)
+
+    def sample(matrix: np.ndarray, flow_yx: np.ndarray | None) -> np.ndarray:
+        if flow_yx is None:
+            xy = points @ matrix[:2, :2].T + matrix[:2, 2]
+        else:
+            xy = pull_points_through_registration(
+                points,
+                final_matrix=matrix,
+                flow_yx=flow_yx,
+                working_to_reference=flow["working_to_reference"],
+            )
+        xy = xy + flow["moving_origin_xy"]
+        return map_coordinates(moving, [xy[:, 1], xy[:, 0]], order=1, cval=-1.0)
+
+    with_flow = sample(flow["base_matrix_crop"], flow["flow_yx"])
+    affine_only = sample(flow["base_matrix_crop"], None)
+    stored_smooth = gaussian_filter(stored.astype(np.float64), 1.5)[::4, ::4].ravel()
+    inside = (with_flow >= 0) & (affine_only >= 0) & (stored_smooth > 0)
+    assert inside.mean() > 0.3
+    # Registered pixels equal the moving level sampled at the composed pull (up to
+    # the block-mean level and interpolation: 0.88 against 0.01
+    # measured) and not the base affine alone.
+    with_flow_fit = np.corrcoef(with_flow[inside], stored_smooth[inside])[0, 1]
+    affine_fit = np.corrcoef(affine_only[inside], stored_smooth[inside])[0, 1]
+    assert with_flow_fit > 0.8
+    assert with_flow_fit > affine_fit + 0.5
+    assert reference.shape == stored.shape
+
+
+def test_preview_keeps_only_the_channels_prepare_kept(tmp_path: Path) -> None:
+    # The moving image lacks the reference's AF647 stain, so prepare keeps two
+    # channels while the reference OME-TIFF still holds three.
+    prepared_missing = _prepare(tmp_path, ["DAPI", "AF568", "AF488"])
+    config = _config(
+        prepared_missing,
+        tmp_path / "result",
+        tmp_path / "out",
+        channel_roles="at8=AF568;dapi=DAPI;reference:map2=AF647;moving:map2=AF488",
+    )
+    outputs = run_manual_registration(config)
+    element = _element(outputs["result_store"], "reference")
+    assert element.shape[0] == 2
+    assert list(element.coords["c"].values) == ["DAPI", "AF568"]
+    # The moving element keeps all of the moving image's own channels.
+    moving_element = _element(outputs["result_store"], "moving_registered")
+    assert list(moving_element.coords["c"].values) == ["DAPI", "AF568", "AF488"]
+
+
+def test_materialize_none_is_not_reused_after_an_interrupted_publish(
+    prepared: Prepared, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = "field_window_observations=false;materialize=none"
+    result = tmp_path / "result"
+    config = _config(prepared, result, tmp_path / "out", row_settings=settings)
+    first = run_manual_registration(config)
+    summary_before = first["summary_json"].read_text()
+    payload = json.loads(json.dumps(read_root_attrs(prepared.store)[LABELLING_ATTR]))
+    for pair in payload["landmarks"]["pairs"]:
+        if pair["id"] == MISCLICK_ID:
+            pair["enabled"] = False
+    payload["revision"] += 1
+
+    real_publish = register_module._publish
+
+    def publish_without_the_summary(source: Path, target: Path) -> Path:
+        if target.name.endswith("_manual_registration_summary.json"):
+            raise OSError("simulated kill before the summary")
+        return real_publish(source, target)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(register_module, "_publish", publish_without_the_summary)
+        with pytest.raises(OSError, match="simulated kill"):
+            run_manual_registration(
+                config.model_copy(update={"output_dir": tmp_path / "out_b"}),
+                labelling_payload=payload,
+            )
+    assert first["summary_json"].read_text() == summary_before
+
+    # The first run's inputs again: the CSV on disk is the interrupted run's, so
+    # the summary is no proof and the run registers again.
+    again = run_manual_registration(
+        config.model_copy(update={"output_dir": tmp_path / "out_c"})
+    )
+    assert "reused" not in json.loads(again["task_summary_json"].read_text())
+    rows = pd.read_csv(again["landmarks_csv"])
+    assert bool(rows[rows["id"] == MISCLICK_ID].iloc[0]["enabled"]) is True

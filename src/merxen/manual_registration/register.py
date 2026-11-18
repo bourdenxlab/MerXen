@@ -1010,6 +1010,43 @@ def _outputs_from_stored(
     return paths
 
 
+def _summary_only_files_are_current(outputs: dict[str, Any]) -> bool:
+    """Whether a run recorded only by its summary (``materialize=none``) is intact.
+
+    The summary is published last, so any listed durable file newer than it comes
+    from a later run that was interrupted while publishing. (A result store next
+    to the summary is refused by the caller.)
+    """
+    summary_path = Path(outputs["summary_json"])
+    try:
+        summary_mtime = summary_path.stat().st_mtime_ns
+        mtimes = [
+            Path(outputs[key]).stat().st_mtime_ns
+            for key in _DURABLE_FILE_KEYS
+            if key in outputs
+        ]
+    except OSError:
+        return False
+    if any(mtime > summary_mtime for mtime in mtimes):
+        logger.info(
+            "A durable file is newer than the summary-only result (an interrupted "
+            "publish of a later run?); registering again"
+        )
+        return False
+    return True
+
+
+_DURABLE_FILE_KEYS = (
+    "landmark_matrix_csv",
+    "final_matrix_csv",
+    "landmarks_csv",
+    "landmark_field_json",
+    "field_flow_npz",
+    "tissue_qc_png",
+    "field_qc_png",
+)
+
+
 def _reusable(stored: dict[str, Any] | None, digest: str) -> bool:
     """Whether the stored result and its durable files are this run's, complete.
 
@@ -1042,6 +1079,8 @@ def _reusable(stored: dict[str, Any] | None, digest: str) -> bool:
         key for key in ("landmark_field_json", "field_flow_npz") if key in outputs
     )
     if not all(key in outputs and Path(outputs[key]).exists() for key in needed):
+        return False
+    if "result_store" not in outputs and not _summary_only_files_are_current(outputs):
         return False
     # The core QC files are deleted before the core runs, so a run that fails in
     # the core leaves the previous result current with its listed files missing.
@@ -1282,13 +1321,19 @@ def run_manual_registration(
         roles=roles,
     )
     # A run without a result store (materialize=none) is recorded by its summary.
-    stored = _stored_result(
-        final,
-        summary_json=(
-            result_dir / f"{run_id}_manual_registration_summary.json"
-            if is_field and settings.materialize == "none"
-            else None
-        ),
+    # A store next to it is an interrupted run's (a none run leaves none): no reuse.
+    is_summary_record = is_field and settings.materialize == "none"
+    stored = (
+        None
+        if is_summary_record and final.exists()
+        else _stored_result(
+            final,
+            summary_json=(
+                result_dir / f"{run_id}_manual_registration_summary.json"
+                if is_summary_record
+                else None
+            ),
+        )
     )
     if not force and stored is not None and _reusable(stored, digest):
         task_summary = out / f"{run_id}_manual_registration_summary.json"
@@ -2031,7 +2076,9 @@ def _run_field_registration(
                 ]
                 del prepared
             else:
-                data = ref_grid.levels[reference_level].data
+                # Prepare kept only the channels both images share; the OME-TIFF
+                # level holds every canonical channel, so select the kept ones.
+                data = ref_grid.levels[reference_level].sel(c=kept_names).data
             element = Image2DModel.parse(
                 data.rechunk((1, settings.chunk_size, settings.chunk_size)),
                 dims=("c", "y", "x"),
