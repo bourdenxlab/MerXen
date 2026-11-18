@@ -911,6 +911,8 @@ def test_check_workflow_on_the_synthetic_pair_writes_the_attribute(
 
     from merxen.manual_registration.schema import (
         CHECK_ATTR,
+        RESULT_ATTR,
+        STORE_ATTR,
         parse_check_attrs,
         read_root_attrs,
     )
@@ -950,3 +952,26 @@ def test_check_workflow_on_the_synthetic_pair_writes_the_attribute(
     assert (published / f"{NAME}_cortex_serial_check.png").is_file()
     (row,) = [r for r in _trace_rows(outdir) if r["process"].endswith("CHECK")]
     assert (_task_dir(row) / "check_out" / f"{NAME}_cortex_serial_check.json").is_file()
+
+    # Then register the same pair through the landmark field (windows off for speed).
+    registered = _run(
+        tmp_path,
+        "manual_registration_register.nf",
+        sheet,
+        outdir,
+        "--manual_registration_presets",
+        "cortex_serial",
+        "--manual_registration_settings",
+        "field_window_observations=false",
+        launch_name="launch_register_cortex",
+    )
+    assert registered.returncode == 0, registered.stdout + registered.stderr
+    folder = outdir / NAME / "registered" / "cortex_serial"
+    run_id = f"{NAME}_cortex_serial"
+    result = read_root_attrs(folder / f"{run_id}_registered.zarr")
+    moving = result[STORE_ATTR]["images"]["moving"]
+    assert moving["materialization"]["mode"] == "preview"
+    assert result[RESULT_ATTR]["field"]["model"] == "robust_gp"
+    for name in ("landmark_field.json", "field_flow.npz", "field_qc.png"):
+        assert (folder / f"{run_id}_{name}").is_file()
+    assert "result directory" in registered.stdout + registered.stderr
