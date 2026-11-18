@@ -92,6 +92,15 @@ A paired row with `pair_id=EXAMPLE01` fans out to **two**
 
 ## Caching behaviour
 
+For raw-TIFF MERSCOPE exports, supplied `detected_transcripts.parquet` or
+`detected_transcripts.csv` files must produce a transcript points layer. If the
+preferred reader omits it, MerXen uses its local transcript reader, preferring
+Parquet when both formats are present. Points already imported by the preferred
+reader are kept. Still-missing imports stop the build before image projection;
+unreadable required transcripts fail the build instead of being skipped.
+This check applies to newly built stores; existing
+incomplete cached stores still need to be rebuilt or repaired before reuse.
+
 | Samplesheet state | `force_spatialdata_build` | Result |
 |-------------------|----------------------------|--------|
 | Only `<platform>_dir` set, no cache exists | any | Build from raw. |

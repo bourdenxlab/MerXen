@@ -14,6 +14,10 @@ users would notice). A release turns [Unreleased] into the release's section.
 
 ## [Unreleased]
 
+### Fixed
+
+- **MERSCOPE transcript import.** Raw-folder builds now import supplied Parquet or CSV transcripts with the local reader if the preferred reader returns a store without points. Existing imported points are preserved. Still-missing imports fail before image projection, and unreadable required transcripts fail the build instead of being skipped, preventing an incomplete image-only store from reaching segmentation.
+
 ## [1.1.0] - 2026-11-18
 
 ### Highlights
