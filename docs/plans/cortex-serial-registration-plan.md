@@ -25,7 +25,7 @@ gets an alias once the user adds it to `.aliases.tsv`. Locations are `.env` vari
 | D4 | The deformation model is a robust Student-t Gaussian process (GP) on landmarks and image evidence. The DAPI affine refinement and the TV-L1 flow are off for cortex pairs. |
 | D5 | The landmark labelling schema stays at version 1. A check result is written as a JSON file and, for the store's own labelling, as a new root attribute of the prepared store. Only MerXen writes either. Both are keyed by pair id and tied to the labelling's content digest and the store's content digest. The viewer shows a check from the attribute or from a JSON file the user loads, and only while both digests match. |
 | D6 | No numerical code is mirrored in the viewer before M4. The viewer shows what MerXen computed. |
-| D7 | For cortex pairs, register writes a 5.5 µm preview of the warped images by default (`materialize = preview`). Full resolution is written only on request. |
+| D7 | For cortex pairs, register writes the level-0 grid of the warped images (`materialize = full`), as the other presets do; a 5.5 µm preview (`materialize = preview`) is a setting for a quick look. Amended 2026-11-18: M1 first shipped the preview as the default, which is too coarse to match single cells (preset `cortex_serial_v2`). |
 | D8 | The technician says the LCM1 and LCM2 sections were directly adjacent; M0 contradicts this. The user is preparing a new pair recorded as directly adjacent. M0b repeats the M0 tests on it after M1 and decides whether M2 (identity) is built. |
 | D9 | The landmarks are labelled on another machine than the one that runs MerXen. The check therefore also runs on an uploaded labelling file and returns a JSON file that the viewer loads, so the user never copies a store's root attributes back and forth. |
 | D10 | M1 leaves existing `same_section` and `serial_section` results valid: settings that M1 adds are left out of the provenance digest while they hold their defaults, so those runs are not re-registered. |
@@ -122,9 +122,9 @@ planning prototype of 2026-11-17.
     it matches the labelling in the viewer
 [6] manual_registration_register.nf, preset cortex_serial (on the host, after import)
       similarity guards -> the same robust field -> pull flow on an 11 µm grid
-      -> 5.5 µm preview store (or none, or full) -> QC per channel role
+      -> level-0 store (or a 5.5 µm preview, or none) -> QC per channel role
       -> field JSON, flow, summary
-[7] viewer: the preview result store, with the landmarks pushed through the field
+[7] viewer: the result store, with the landmarks pushed through the field
 ```
 
 The field enters register as a pull flow, in the format of the existing TV-L1 flow

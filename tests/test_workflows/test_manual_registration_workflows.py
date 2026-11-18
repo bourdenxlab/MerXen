@@ -970,7 +970,7 @@ def test_check_workflow_on_the_synthetic_pair_writes_the_attribute(
     run_id = f"{NAME}_cortex_serial"
     result = read_root_attrs(folder / f"{run_id}_registered.zarr")
     moving = result[STORE_ATTR]["images"]["moving"]
-    assert moving["materialization"]["mode"] == "preview"
+    assert moving["materialization"]["mode"] == "full"
     assert result[RESULT_ATTR]["field"]["model"] == "robust_gp"
     for name in ("landmark_field.json", "field_flow.npz", "field_qc.png"):
         assert (folder / f"{run_id}_{name}").is_file()

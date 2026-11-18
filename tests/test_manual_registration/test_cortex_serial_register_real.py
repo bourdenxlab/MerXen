@@ -110,7 +110,8 @@ def _register(
         result_dir=base / "result",
         output_dir=base / "out",
         channel_roles=ROLES,
-        row_settings=row_settings,
+        # The time, memory and store limits are for preview stores.
+        row_settings=";".join(s for s in (row_settings, "materialize=preview") if s),
         force=True,
     )
     started = time.perf_counter()
