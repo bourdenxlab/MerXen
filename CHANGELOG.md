@@ -14,6 +14,14 @@ users would notice). A release turns [Unreleased] into the release's section.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-18
+
+### Highlights
+
+- Map-first cell typing now covers the **hippocampal formation** on non-Atera human panels (provisional): set `anatomical_region = hippocampus` and map against a WHB reference of the 20 hippocampal-formation dissections plus SEA-AD, with the same label tables, reports and viewer bootstrap fields as frontal cortex.
+- The viewer's bootstrap fields (raw calls, probabilities, five runners-up, acceptance) can now be written for map-first runs.
+- Resuming an existing frontal, mouse or Atera annotation run after upgrading re-runs its later annotation steps once, with the same outputs (Atera: its whole hippocampal annotation, including the mapping). Bundles are not rebuilt.
+
 ### Added
 
 - **Marker-consistency cap setting.** `annotation_marker_consistency_broad_only` sets the human marker-referee threshold below which the dataset gate is capped at `broad_only` (default 0.70; `0` keeps only the warning). Useful on panels where only a few marker groups can be scored. Only RESOLVE reads it; unset, nothing changes ([configuration](docs/configuration.md)).
@@ -271,7 +279,8 @@ was set, mostly the reference-based cell-type annotation.
 - The protocol and the user's decisions are in `docs/acceptance/annotation-v1-preregistration.md` §18–§20.
 - The mouse acceptance (gate M) is scored on MS1 and MS2 under the protocol of pre-registration §25, with the user's review decisions in §25.4. The re-score with the section-time exception gives 67 PASS and 7 FAIL (excepted), with no open problem; the user's review of the two original_seg reports (U9) is pending.
 
-[Unreleased]: https://github.com/bourdenxlab/MerXen/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/bourdenxlab/MerXen/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/bourdenxlab/MerXen/compare/v1.0.2...v1.1.0
 [1.0.2]: https://github.com/bourdenxlab/MerXen/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/bourdenxlab/MerXen/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/bourdenxlab/MerXen/releases/tag/v1.0.0
