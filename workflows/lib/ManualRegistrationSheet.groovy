@@ -413,6 +413,35 @@ class ManualRegistrationSheet {
         return result
     }
 
+    /** Boolean setting `key` in force for one run (same precedence as effectiveInt). */
+    static boolean effectiveFlag(Map row, String preset, Map params, String key, boolean defaultValue) {
+        boolean result = defaultValue
+        List<String> sources = [
+            (params?.manual_registration_settings ?: "").toString(),
+            (row?.registration_settings ?: "").toString(),
+        ]
+        for (String text : sources) {
+            List<Map> items = settingsItems(text)
+            for (boolean prefixed : [false, true]) {
+                for (Map item : items) {
+                    if (item.malformed || item.key != key) {
+                        continue
+                    }
+                    boolean isPrefixed = item.preset != null
+                    if (isPrefixed != prefixed || (isPrefixed && item.preset != preset)) {
+                        continue
+                    }
+                    try {
+                        result = flag(item.value)
+                    } catch (IllegalArgumentException ignored) {
+                        // a malformed value is reported by the settings check
+                    }
+                }
+            }
+        }
+        return result
+    }
+
     /** landmark_min_pairs in force for one run (default 8). */
     static Integer effectiveMinPairs(Map row, String preset, Map params) {
         return effectiveInt(row, preset, params, "landmark_min_pairs", MIN_LANDMARK_PAIRS)
@@ -1080,11 +1109,17 @@ class ManualRegistrationSheet {
         }
         for (Map row : rows) {
             errors.addAll(storeErrors(row, params, [preset], true))
+            boolean needsImages = effectiveFlag(row, preset, params, "field_image_check", true) ||
+                effectiveFlag(row, preset, params, "field_window_observations", preset == "cortex_serial")
             if (preset == "cortex_serial") {
                 String rolesError = cortexRolesError(row.channel_roles as String)
                 if (rolesError != null && !channelRolesErrors(row.channel_roles as String)) {
                     errors.add("${row.id}: ${rolesError}".toString())
                 }
+            } else if (needsImages && !((row.channel_roles ?: "") as String).trim()) {
+                errors.add(
+                    "${row.id}: the image check needs channel_roles (e.g. ${CHANNEL_ROLES_EXAMPLE}) or the settings field_image_check=false;field_window_observations=false".toString()
+                )
             }
         }
         return errors

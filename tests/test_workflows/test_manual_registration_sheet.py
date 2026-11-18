@@ -657,6 +657,28 @@ def _build_cases(p: _Project) -> None:
         params={"manual_registration_check_preset": "same_section"},
     )
     p.add(
+        "check_no_roles_images_off",
+        check_header,
+        [check_rows[2]],
+        mode="check",
+        params={
+            "manual_registration_check_preset": "same_section",
+            "manual_registration_settings": (
+                "field_image_check=false;field_window_observations=false"
+            ),
+        },
+    )
+    p.add(
+        "check_bad_write_attr_and_suggestions",
+        check_header,
+        [check_rows[1]],
+        mode="check",
+        params={
+            "manual_registration_check_write_attr": "maybe",
+            "manual_registration_check_suggestions": "300",
+        },
+    )
+    p.add(
         "check_bad_params",
         check_header,
         [check_rows[1]],
@@ -1522,14 +1544,37 @@ def test_check_preflight_allows_a_draft_and_requires_roles(
     assert len(messages) == 5
 
 
-def test_check_preflight_needs_no_roles_for_other_presets(
+def test_check_preflight_needs_roles_for_other_presets_with_image_check(
     results: dict[str, Any],
 ) -> None:
     parsed = _parse(results, "check_no_roles_other_preset")
 
     assert parsed["errors"] == []
+    assert len(parsed["preflight"]) == 1
+    assert parsed["preflight"][0].startswith("K_NOROLES: the image check needs")
+
+
+def test_check_preflight_needs_no_roles_when_images_are_off(
+    results: dict[str, Any],
+) -> None:
+    parsed = _parse(results, "check_no_roles_images_off")
+
+    assert parsed["errors"] == []
     assert parsed["preflight"] == []
     assert parsed["checks"][0]["preset"] == "same_section"
+
+
+def test_check_preflight_rejects_bad_write_attr_and_suggestions(
+    results: dict[str, Any],
+) -> None:
+    parsed = _parse(results, "check_bad_write_attr_and_suggestions")
+
+    assert parsed["errors"] == []
+    assert parsed["preflight"] == [
+        "--manual_registration_check_write_attr must be true or false (got 'maybe')",
+        "--manual_registration_check_suggestions must be an integer from 0 to 200 "
+        "(got '300')",
+    ]
 
 
 def test_check_preflight_validates_its_params(results: dict[str, Any]) -> None:
