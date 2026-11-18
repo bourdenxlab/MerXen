@@ -1121,11 +1121,14 @@ def test_reuse_of_a_field_result_needs_its_model_and_flow_files(
     ):
         path = tmp_path / name
         path.write_text("x")
+        # Durable files of a summary-only result must not be newer than its summary.
+        os.utime(path, (1_000_000_000, 1_000_000_000))
         stored["outputs"][key] = str(path)
     assert _reusable(stored, DIGEST_NEW) is True
     (tmp_path / "flow.npz").unlink()
     assert _reusable(stored, DIGEST_NEW) is False
     (tmp_path / "flow.npz").write_text("x")
+    os.utime(tmp_path / "flow.npz", (1_000_000_000, 1_000_000_000))
     (tmp_path / "model.json").unlink()
     assert _reusable(stored, DIGEST_NEW) is False
 
