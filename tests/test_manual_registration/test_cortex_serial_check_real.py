@@ -276,7 +276,11 @@ def test_lcm2_trusting_confirmed_clicks_helps_the_strong_ones(
     for label, run in (("on", lcm2), ("off", off)):
         report = run.report
         observations = report.field.observations
-        row_of = {int(i): row for row, i in enumerate(observations.obs_id)}
+        row_of = {
+            int(i): row
+            for row, i in enumerate(observations.obs_id)
+            if observations.obs_class[row] != "window"
+        }
         in_sample = _reference_residual_um(
             report.field, observations.reference_xy_um, observations.moving_xy_um
         )

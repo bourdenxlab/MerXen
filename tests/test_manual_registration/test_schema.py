@@ -48,9 +48,9 @@ CHECK_EXAMPLE_PATH = GOLDEN_PATH.with_name("check_example_v1.json")
 # The C3 example with the A3 per-pair keys (em_exempt, confirm_strength). The
 # viewer repository pins the same bytes.
 CHECK_EXAMPLE_SHA256 = (
-    "4b84652f3a161fae5fb0e288cd02caa52e3ad194f3d7a482a22c127df301f0df"
+    "26c72d59004770673f3e091273f52c962966106ba29b249c1bae49d3ad0ae0f3"
 )
-CHECK_EXAMPLE_BYTES = 3748
+CHECK_EXAMPLE_BYTES = 3747
 LABELLING_DIGEST = (
     "sha256:f6b16674a10854ab06ff385a6a349ce325d874abf0e6c9d78e0a3b7683e328ad"
 )

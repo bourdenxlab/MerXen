@@ -23,7 +23,7 @@ from merxen.cli.run_manual_registration_register import (
 )
 from merxen.io.ome_tiff import open_ome_tiff_level, read_ome_tiff_info
 from merxen.manual_registration import check as check_module
-from merxen.manual_registration import field_fit
+from merxen.manual_registration import field_fit, register
 from merxen.manual_registration.check import (
     StaleLabellingError,
     read_labelling_file,
@@ -458,6 +458,24 @@ def test_a_landmarks_only_check_needs_no_roles(store: Path, tmp_path: Path) -> N
     assert check.algorithm["image_evidence"] is None
     assert set(p.verdict for p in check.pairs.values()) == {"not_checked"}
     assert check.field.loo_um_clicks_only is None
+
+
+def test_a_landmarks_only_check_still_checks_the_ome_tiff_fingerprints(
+    store: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The suggestions and the sd_um summary read the OME-TIFFs even without the
+    # image check, so a changed image is refused there as well.
+    monkeypatch.setattr(register, "file_fingerprint", lambda _path: "changed")
+    with pytest.raises(ValueError, match="fingerprint mismatch"):
+        run_check(
+            _config(
+                store,
+                tmp_path / "out",
+                channel_roles="",
+                image_check=False,
+                windows=False,
+            )
+        )
 
 
 def test_the_image_check_without_roles_is_refused(store: Path, tmp_path: Path) -> None:

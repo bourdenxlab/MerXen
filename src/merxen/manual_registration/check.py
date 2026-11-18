@@ -286,7 +286,9 @@ def execute_check(
             labelling_payload=payload_in,
         )
 
-    store, labelling, raw_labelling, warnings = read(False)
+    # The suggestions and the sd_um summary always load the OME-TIFFs, so the
+    # fingerprints are always checked.
+    store, labelling, raw_labelling, warnings = read(True)
     if (
         file_store_attr is not None
         and file_store_attr.get("content_digest") != store.content_digest
@@ -322,8 +324,6 @@ def execute_check(
     validate_field_settings(
         settings, preset=config.preset, roles=roles, run_id=run_id, purpose="check"
     )
-    if image_check or windows:
-        store, labelling, raw_labelling, warnings = read(True)
     labelling_sha = labelling_content_sha256(raw_labelling)
     crops = _snapped_crops(
         labelling,

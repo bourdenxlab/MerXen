@@ -491,6 +491,9 @@ def build_landmark_field(
                     window_set.reference_xy_um,
                     window_set.moving_xy_um,
                     window_set.peak_cov_um2,
+                    # Window ids continue after the largest pair id so that the
+                    # C1 observation ids stay unique across classes.
+                    first_id=int(ids.max()) + 1,
                 )
             )
         started = time.perf_counter()

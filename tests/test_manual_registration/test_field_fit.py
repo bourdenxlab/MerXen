@@ -605,6 +605,8 @@ def test_windows_enter_as_window_observations(
         observations.fixed_cov_um2[count:], phantom.window_peak_cov_um2[:30]
     )
     assert not observations.fixed_cov_um2[:count].any()
+    # C1 ids stay unique across clicks and windows.
+    assert len(set(observations.obs_id.tolist())) == observations.n
     assert report.field.hyperparameters.noise_um["window"] >= 15.0
     assert set(report.verdict) == {"not_checked"}
     assert fake_images.pull_probe.shape == (1, 2)
