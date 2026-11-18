@@ -145,6 +145,10 @@ ALGORITHM_BLOCK = {
     "refinement": REGISTRATION_ALGORITHM,
     "nonrigid": NONRIGID_REGISTRATION_ALGORITHM,
 }
+# The result store of a robust-field run. v2 builds the viewer pyramids from the
+# stored elements; v1 built the moving one from an all-zero placeholder, so a v1
+# store is registered again instead of reused.
+FIELD_STORE_ALGORITHM = "field_store_v2"
 LANDMARK_CSV_COLUMNS = [
     "id",
     "colour",
@@ -670,6 +674,7 @@ def _provenance_digest(
     if settings.field_model == "robust_gp":
         payload["algorithm"]["landmark_field"] = FIELD_ALGORITHM
         payload["algorithm"]["image_evidence"] = IMAGE_EVIDENCE_ALGORITHM
+        payload["algorithm"]["field_store"] = FIELD_STORE_ALGORITHM
         payload["channel_roles"] = None if roles is None else roles.to_dict()
     return canonical_sha256(payload)
 

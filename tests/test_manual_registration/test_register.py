@@ -681,7 +681,9 @@ def test_provenance_settings_drop_only_field_keys_at_their_defaults() -> None:
     assert "field_kernel" not in changed
 
 
-def test_provenance_digest_of_a_field_run_sees_the_roles_and_settings() -> None:
+def test_provenance_digest_of_a_field_run_sees_the_roles_and_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from merxen.manual_registration.image_evidence import ChannelRoles
 
     sha = labelling_content_sha256(labelling_dict(a2_pairs(), A2_COARSE))
@@ -708,6 +710,11 @@ def test_provenance_digest_of_a_field_run_sees_the_roles_and_settings() -> None:
     assert digest(one) != digest(None)
     other = _settings("cortex_serial", "field_outlier_p=0.02")
     assert digest(one, other) != digest(one)
+    # A field store written by an older layout (v1: empty moving pyramid) is not
+    # reused, whatever the preset.
+    current = digest(one)
+    monkeypatch.setattr(register_module, "FIELD_STORE_ALGORITHM", "field_store_v1")
+    assert digest(one) != current
 
 
 def _run_config(tmp_path: Path, **overrides: Any) -> ManualRegistrationRunConfig:

@@ -123,8 +123,8 @@ reported, as the `landmark` stage and the `fit` block), then:
    write the field figure, the model and flow files and the summary.
 
 The preview store is a quick look at the registration, too coarse to match single
-cells (5.5 µm pixels); `full` is the level-0 grid that cell matching and analysis need (the milestone's validation table records the
-time and memory of each).
+cells (5.5 µm pixels); `full` is the level-0 grid that cell matching and analysis
+need (the milestone's validation table records the time and memory of each).
 
 ## Inputs and samplesheet
 
@@ -750,8 +750,9 @@ preset bumps its version, recorded in every summary.
 `refine_affine` false, `nonrigid_enabled` false, `nucleus_qc` false, `field_model`
 `robust_gp`, `field_window_observations` true and `field_trust_confirmed_clicks`
 true, and keeps `same_section` for every other key (`cortex_serial_v1` also set
-`materialize` `preview`). A setting
-rule (checked before any work): `materialize` other than `full` is only for
+`materialize` `preview`).
+
+A setting rule (checked before any work): `materialize` other than `full` is only for
 `robust_gp` runs, and a `robust_gp` register run needs `refine_affine=false` and
 `nonrigid_enabled=false`. The older presets' provenance digests leave the `field_*`
 settings out at their defaults, so their results stay valid after the upgrade.
