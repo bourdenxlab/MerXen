@@ -92,8 +92,10 @@ and reason are reported), and the comparison table puts the runs side by side.
 6. Write the result store, the matrices, the landmark table, the summary and the
    QC figure.
 
-**Registration through the landmark field** (`cortex_serial`, or any run with
-`field_model=robust_gp`). Steps 1 to 3 are the same (the similarity fit is still
+### Registration through the landmark field
+
+This path serves `cortex_serial`, or any run with
+`field_model=robust_gp`. Steps 1 to 3 are the same (the similarity fit is still
 reported, as the `landmark` stage and the `fit` block), then:
 
 1. Fit the robust field to the enabled landmarks with the image check and, when
