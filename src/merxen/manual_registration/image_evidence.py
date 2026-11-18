@@ -138,7 +138,9 @@ def summarise_scores(
 # Channel roles (contract C6)
 # ---------------------------------------------------------------------------
 
-IMAGE_EVIDENCE_ALGORITHM = "image_evidence_bp20_v1"
+# v2: the click check's gates became 0.2 / 0.6 (v1: 0.5 / 0.9), which changes verdicts;
+# the version is part of the register provenance digest, so v1 results are not reused.
+IMAGE_EVIDENCE_ALGORITHM = "image_evidence_bp20_v2"
 ROLES: tuple[str, ...] = ("at8", "map2", "dapi")
 WORKING_PIXEL_SIZE_UM = 2.76
 _SCOPES: tuple[str, ...] = ("reference", "moving")
@@ -1277,9 +1279,10 @@ class ClickCheckParams:
     ridge_elongation: float = 2.0
     ridge_drop: float = 0.1
     # Looser than the tissue windows (0.5 / 0.9): edge and pia clicks carry most of
-    # the signal shared by serial sections. The band-passed representations are 0
-    # outside tissue, so a mostly-background template correlates through its edge;
-    # the null of these checks is drawn with the same gates and calibrates that.
+    # the signal shared by serial sections. bp20 is not zeroed off tissue (only the
+    # orientation map is), so the background part of a mostly-background template
+    # carries section-independent texture; the null of these checks is drawn with
+    # the same gates and calibrates that contribution statistically.
     min_tissue_fraction: float = 0.2
     min_valid_fraction: float = 0.6
     null_pairs: int = 300

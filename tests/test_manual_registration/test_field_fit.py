@@ -877,7 +877,7 @@ def test_check_payload_with_a_second_pass_and_details(
     payload = _payload(report, store, labelling, settings)
     canonical_json(payload)
     check = parse_check_attrs(payload)
-    assert check.algorithm["image_evidence"] == "image_evidence_bp20_v1"
+    assert check.algorithm["image_evidence"] == "image_evidence_bp20_v2"
     assert check.field.n_windows == 25
     assert check.field.loo_um_clicks_only is not None
     assert check.field.hyperparameters.short_length_um is not None
