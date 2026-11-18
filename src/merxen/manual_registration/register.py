@@ -29,8 +29,10 @@ import resource
 import shutil
 import time
 import uuid
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections import Counter
+from collections.abc import Callable, Mapping
+from contextlib import nullcontext
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -42,13 +44,18 @@ from pydantic import ValidationError
 from spatialdata.models import Image2DModel
 
 import merxen
+from merxen.alignment.image_warp import materialize_warped_image
 from merxen.image_registration import (
     NONRIGID_REGISTRATION_ALGORITHM,
     REGISTRATION_ALGORITHM,
+    MovingImage,
+    ReferenceGrid,
     RegistrationOutcome,
     RegistrationTuning,
+    WorkingImage,
     check_matrix_scale,
     measure_registration_overlay,
+    pull_points_through_registration,
     push_points_through_registration,
     read_working_channel,
     register_onto_reference,
@@ -107,6 +114,7 @@ from merxen.manual_registration.schema import (
     CropRect,
     LabellingAttrs,
     LandmarkPair,
+    Materialization,
     StoreAttrs,
     UnsupportedSchemaVersionError,
     canonical_sha256,
@@ -121,6 +129,8 @@ from merxen.manual_registration.sources import (
     crop_offset_affine,
     cropped_moving_image,
     cropped_reference_grid,
+    kept_level_factors,
+    level_for_factor,
 )
 from merxen.memory import log_status
 from merxen.viewer_cache.build import ViewerCacheParams, build_image_pyramids_in_store
@@ -158,6 +168,10 @@ LANDMARK_CSV_COLUMNS = [
     "residual_final_um",
     "final_includes_flow",
     "push_converged",
+    "field_weight",
+    "field_p_value",
+    "field_verdict",
+    "field_class",
 ]
 _STAGES = ("landmark", "affine", "final")
 
@@ -781,6 +795,7 @@ def _landmark_records(
                 },
                 "final_includes_flow": bool(includes_flow[i]),
                 "push_converged": bool(converged[i]),
+                "field": None,
             }
         )
     return records
@@ -844,6 +859,11 @@ def _landmarks_dataframe(records: list[dict[str, Any]]) -> pd.DataFrame:
                 "residual_final_um": r["residual_um"]["final"],
                 "final_includes_flow": r["final_includes_flow"],
                 "push_converged": r["push_converged"],
+                # Empty for similarity runs (and results written before M1).
+                "field_weight": (r.get("field") or {}).get("weight"),
+                "field_p_value": (r.get("field") or {}).get("p_value"),
+                "field_verdict": (r.get("field") or {}).get("verdict"),
+                "field_class": (r.get("field") or {}).get("class"),
             }
         )
     return pd.DataFrame(rows, columns=LANDMARK_CSV_COLUMNS)
@@ -861,11 +881,18 @@ def _result_store_attr(
     crop_reference: CropRect,
     crop_moving: CropRect,
     kept_reference_names: list[str],
+    materialization: Materialization | None = None,
+    element_shape_yx: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
-    """Build and validate the ``STORE_ATTR`` payload of a result store."""
+    """Build and validate the ``STORE_ATTR`` payload of a result store.
+
+    ``materialization`` and ``element_shape_yx`` (the elements' own shape) are given
+    by robust-field runs (contract C4); without them the elements are the full
+    resolution crop, as before.
+    """
     ref = store.images["reference"]
     mov = store.images["moving"]
-    payload = {
+    payload: dict[str, Any] = {
         "schema": STORE_SCHEMA,
         "schema_version": SCHEMA_VERSION,
         "kind": "result",
@@ -914,6 +941,12 @@ def _result_store_attr(
             },
         },
     }
+    if materialization is not None:
+        assert element_shape_yx is not None
+        record = materialization.model_dump(mode="json")
+        for role in ("reference", "moving"):
+            payload["images"][role]["materialization"] = dict(record)
+            payload["images"][role]["shape_yx"] = list(element_shape_yx)
     plain: dict[str, Any] = _plain_json(payload)
     parse_store_attrs(plain)
     return plain
@@ -929,8 +962,22 @@ def _superseded_path(final: Path) -> Path:
     return candidate
 
 
-def _stored_result(final: Path) -> dict[str, Any] | None:
-    """Read the ``RESULT_ATTR`` of an existing result store (``None`` if unreadable)."""
+def _stored_result(
+    final: Path, *, summary_json: Path | None = None
+) -> dict[str, Any] | None:
+    """Read the ``RESULT_ATTR`` of an existing result store (``None`` if unreadable).
+
+    With ``summary_json`` (a run that writes no result store, ``materialize=none``)
+    the durable summary is the record instead.
+    """
+    if summary_json is not None:
+        try:
+            document = json.loads(summary_json.read_text(encoding="utf-8"))
+        except (FileNotFoundError, ValueError, OSError):
+            return None
+        if not isinstance(document, dict) or document.get("schema") != RESULT_SCHEMA:
+            return None
+        return dict(document)
     if not final.exists():
         return None
     try:
@@ -953,6 +1000,9 @@ def _outputs_from_stored(
             "landmarks_csv",
             "summary_json",
             "tissue_qc_png",
+            "landmark_field_json",
+            "field_flow_npz",
+            "field_qc_png",
         )
         if key in outputs
     }
@@ -981,11 +1031,15 @@ def _reusable(stored: dict[str, Any] | None, digest: str) -> bool:
     if stored.get("status") != "complete" or stored.get("provenance_digest") != digest:
         return False
     outputs = dict(stored.get("outputs", {}))
-    needed = (
+    needed: tuple[str, ...] = (
         "landmark_matrix_csv",
         "final_matrix_csv",
         "landmarks_csv",
         "summary_json",
+    )
+    # A robust-field run also lists its model and flow files.
+    needed += tuple(
+        key for key in ("landmark_field_json", "field_flow_npz") if key in outputs
     )
     if not all(key in outputs and Path(outputs[key]).exists() for key in needed):
         return False
@@ -1109,7 +1163,10 @@ def _remove_stale_siblings(result_dir: Path, run_id: str) -> None:
 
 
 def run_manual_registration(
-    config: ManualRegistrationRunConfig, *, force_rerun: bool = False
+    config: ManualRegistrationRunConfig,
+    *,
+    force_rerun: bool = False,
+    labelling_payload: Mapping[str, Any] | None = None,
 ) -> dict[str, Path]:
     """Register the moving image onto the reference from the saved landmarks.
 
@@ -1123,11 +1180,15 @@ def run_manual_registration(
         config: The run configuration.
         force_rerun: Re-register even when an identical result exists (also
             ``config.force``).
+        labelling_payload: A raw finished labelling to register instead of the
+            store's own (validation only; the CLI and Nextflow never set it).
 
     Returns:
-        ``result_store``, ``landmark_matrix_csv``, ``final_matrix_csv``,
-        ``landmarks_csv``, ``summary_json`` and ``tissue_qc_png`` (durable
-        paths) and ``task_summary_json`` (copy in ``config.output_dir``).
+        ``result_store`` (absent with ``materialize=none``), ``landmark_matrix_csv``,
+        ``final_matrix_csv``, ``landmarks_csv``, ``summary_json`` and
+        ``tissue_qc_png`` (durable paths; robust-field runs add
+        ``landmark_field_json``, ``field_flow_npz`` and ``field_qc_png``) and
+        ``task_summary_json`` (copy in ``config.output_dir``).
 
     Raises:
         FileNotFoundError: If the prepared store or an OME-TIFF is missing.
@@ -1150,6 +1211,7 @@ def run_manual_registration(
         dataset_name=config.dataset_name,
         check_fingerprints=True,
         require_finished=True,
+        labelling_payload=labelling_payload,
     )
     result_dir.mkdir(parents=True, exist_ok=True)
     out.mkdir(parents=True, exist_ok=True)
@@ -1176,13 +1238,7 @@ def run_manual_registration(
     validate_field_settings(
         settings, preset=config.preset, roles=roles, run_id=run_id, purpose="register"
     )
-    if settings.field_model == "robust_gp":
-        # Removed by the register path of the robust field (a later change).
-        raise ValueError(
-            f"{pfx} registration through the robust landmark field is not "
-            "implemented yet; run merxen manual-registration-check for the "
-            "landmark check"
-        )
+    is_field = settings.field_model == "robust_gp"
     tuning = registration_tuning(settings)
 
     # Step 3: fit and crops.
@@ -1225,7 +1281,15 @@ def run_manual_registration(
         store=store,
         roles=roles,
     )
-    stored = _stored_result(final)
+    # A run without a result store (materialize=none) is recorded by its summary.
+    stored = _stored_result(
+        final,
+        summary_json=(
+            result_dir / f"{run_id}_manual_registration_summary.json"
+            if is_field and settings.materialize == "none"
+            else None
+        ),
+    )
     if not force and stored is not None and _reusable(stored, digest):
         task_summary = out / f"{run_id}_manual_registration_summary.json"
         task_summary.write_text(
@@ -1234,6 +1298,31 @@ def run_manual_registration(
         )
         log_status(f"{pfx} already registered; skipping")
         return _outputs_from_stored(stored, run_id, out)
+
+    if is_field:
+        return _run_field_registration(
+            config=config,
+            store=store,
+            labelling=labelling,
+            raw_labelling=raw_labelling,
+            labelling_sha=labelling_sha,
+            settings=settings,
+            tuning=tuning,
+            roles=roles,
+            report=report,
+            crops=crops,
+            digest=digest,
+            matrix_coarse_full=matrix_coarse_full,
+            matrix_coarse_crop=matrix_coarse_crop,
+            matrix_landmark_full=matrix_landmark_full,
+            matrix_landmark_crop=matrix_landmark_crop,
+            run_warnings=run_warnings,
+            started=started,
+            store_path=store_path,
+            result_dir=result_dir,
+            final=final,
+            out=out,
+        )
 
     # Step 5: temporary result store holding the cropped reference.
     _remove_stale_siblings(result_dir, run_id)
@@ -1327,6 +1416,88 @@ def run_manual_registration(
     }
     outputs["task_summary_json"] = out / f"{run_id}_manual_registration_summary.json"
     return outputs
+
+
+def _working_pair(
+    ref_grid: ReferenceGrid,
+    mov_img: MovingImage,
+    *,
+    reference_index: int,
+    moving_index: int,
+    settings: ManualRegistrationSettings,
+    pixel_size_um: tuple[float, float],
+) -> tuple[WorkingImage, WorkingImage]:
+    """Read one channel of each cropped image at the tissue QC working size."""
+    pixel_ref, pixel_mov = pixel_size_um
+    ref_work = read_working_channel(
+        open_level=lambda k: ref_grid.levels[k],
+        level_shapes_yx=ref_grid.level_shapes_yx,
+        channel_index=reference_index,
+        target_factor=settings.tissue_qc_pixel_size_um / pixel_ref,
+        level_factors_xy=ref_grid.level_factors_xy,
+    )
+    mov_work = read_working_channel(
+        open_level=mov_img.open_level,
+        level_shapes_yx=mov_img.level_shapes_yx,
+        channel_index=moving_index,
+        target_factor=settings.tissue_qc_pixel_size_um / pixel_mov,
+        level_factors_xy=mov_img.level_factors_xy,
+    )
+    return ref_work, mov_work
+
+
+def _nucleus_qc(
+    settings: ManualRegistrationSettings,
+    tuning: RegistrationTuning,
+    *,
+    ref_grid: ReferenceGrid,
+    mov_img: MovingImage,
+    registration_channel: str,
+    matrix_affine_crop: np.ndarray,
+    warnings: list[str],
+    run_id: str,
+) -> dict[str, Any]:
+    """Nucleus-scale QC of the affine (informative); a failure adds a warning."""
+    nucleus_qc: dict[str, Any]
+    if settings.nucleus_qc:
+        try:
+            stats = measure_registration_overlay(
+                reference=ref_grid,
+                moving=mov_img,
+                registration_channel=registration_channel,
+                matrix=matrix_affine_crop,
+                settings=settings.model_copy(
+                    update={
+                        "registration_pixel_size_um": settings.nucleus_qc_pixel_size_um,
+                        "refinement_window_um": settings.nucleus_qc_window_um,
+                    }
+                ),
+                tuning=tuning,
+            )
+            nucleus_qc = {
+                "status": "measured",
+                "informative_only": True,
+                "pixel_size_um": stats.get("working_pixel_size_um"),
+                "window_um": settings.nucleus_qc_window_um,
+                "n_windows": stats.get("n_windows"),
+                "median_um": stats.get("median_um"),
+                "p90_um": stats.get("p90_um"),
+                "pearson_log_registration_channel": stats.get(
+                    "pearson_log_registration_channel"
+                ),
+            }
+        except (ValueError, MemoryError) as exc:
+            nucleus_qc = {
+                "status": "failed",
+                "informative_only": True,
+                "reason": str(exc),
+            }
+            warnings.append(f"nucleus-scale QC failed (informative only): {exc}")
+            logger.warning("%s nucleus QC failed: %s", run_id, exc)
+    else:
+        nucleus_qc = {"status": "disabled"}
+
+    return nucleus_qc
 
 
 def _register_into_store(
@@ -1433,19 +1604,13 @@ def _register_into_store(
     summary_residuals = _residual_summary(records)
 
     # Step 8: QC.
-    ref_work = read_working_channel(
-        open_level=lambda k: ref_grid.levels[k],
-        level_shapes_yx=ref_grid.level_shapes_yx,
-        channel_index=ref_canonical.index(ref.registration_channel),
-        target_factor=settings.tissue_qc_pixel_size_um / pixel_ref,
-        level_factors_xy=ref_grid.level_factors_xy,
-    )
-    mov_work = read_working_channel(
-        open_level=mov_img.open_level,
-        level_shapes_yx=mov_img.level_shapes_yx,
-        channel_index=mov_canonical.index(mov.registration_channel),
-        target_factor=settings.tissue_qc_pixel_size_um / pixel_mov,
-        level_factors_xy=mov_img.level_factors_xy,
+    ref_work, mov_work = _working_pair(
+        ref_grid,
+        mov_img,
+        reference_index=ref_canonical.index(ref.registration_channel),
+        moving_index=mov_canonical.index(mov.registration_channel),
+        settings=settings,
+        pixel_size_um=(pixel_ref, pixel_mov),
     )
     working_px = pixel_ref * float(np.mean(np.diag(ref_work.to_level0)[:2]))
     pulls = {
@@ -1467,44 +1632,16 @@ def _register_into_store(
         ref_work, mov_work, pulls, tissue_png, title=f"{run_id}: tissue alignment"
     )
 
-    nucleus_qc: dict[str, Any]
-    if settings.nucleus_qc:
-        try:
-            stats = measure_registration_overlay(
-                reference=ref_grid,
-                moving=mov_img,
-                registration_channel=mov.registration_channel,
-                matrix=matrix_affine_crop,
-                settings=settings.model_copy(
-                    update={
-                        "registration_pixel_size_um": settings.nucleus_qc_pixel_size_um,
-                        "refinement_window_um": settings.nucleus_qc_window_um,
-                    }
-                ),
-                tuning=tuning,
-            )
-            nucleus_qc = {
-                "status": "measured",
-                "informative_only": True,
-                "pixel_size_um": stats.get("working_pixel_size_um"),
-                "window_um": settings.nucleus_qc_window_um,
-                "n_windows": stats.get("n_windows"),
-                "median_um": stats.get("median_um"),
-                "p90_um": stats.get("p90_um"),
-                "pearson_log_registration_channel": stats.get(
-                    "pearson_log_registration_channel"
-                ),
-            }
-        except (ValueError, MemoryError) as exc:
-            nucleus_qc = {
-                "status": "failed",
-                "informative_only": True,
-                "reason": str(exc),
-            }
-            warnings.append(f"nucleus-scale QC failed (informative only): {exc}")
-            logger.warning("%s nucleus QC failed: %s", run_id, exc)
-    else:
-        nucleus_qc = {"status": "disabled"}
+    nucleus_qc = _nucleus_qc(
+        settings,
+        tuning,
+        ref_grid=ref_grid,
+        mov_img=mov_img,
+        registration_channel=mov.registration_channel,
+        matrix_affine_crop=matrix_affine_crop,
+        warnings=warnings,
+        run_id=run_id,
+    )
 
     # Step 9: payload, CSVs, attrs.
     refinement = outcome.refinement
@@ -1585,6 +1722,7 @@ def _register_into_store(
             "mask_fraction": tissue.mask_fraction,
         },
         "nucleus_qc": nucleus_qc,
+        "field": None,
         "landmarks": records,
         "residual_summary_um": summary_residuals,
         "warnings": warnings,
@@ -1635,3 +1773,676 @@ def _register_into_store(
     write_spatialdata_metadata(sdata, write_attrs=True)
     del sdata
     return payload, files
+
+
+# ---------------------------------------------------------------------------
+# Registration through the robust landmark field (preset cortex_serial)
+# ---------------------------------------------------------------------------
+
+_FIELD_FLOW_SUFFIX = "field_flow.npz"
+
+
+def _by_role_tissue_qc(
+    roles: ChannelRoles | None,
+    *,
+    ref_grid: ReferenceGrid,
+    mov_img: MovingImage,
+    ref_canonical: list[str],
+    mov_canonical: list[str],
+    pulls: Mapping[str, Callable[[np.ndarray], np.ndarray]],
+    settings: ManualRegistrationSettings,
+    pixel_size_um: tuple[float, float],
+) -> dict[str, Any]:
+    """Tissue QC of every channel role (``tissue_qc.by_role``, contract C5)."""
+    by_role: dict[str, Any] = {}
+    if roles is None:
+        return by_role
+    pixel_ref = pixel_size_um[0]
+    for role in sorted(roles.reference):
+        if role not in roles.moving:
+            continue
+        reference_channel, moving_channel = roles.reference[role], roles.moving[role]
+        ref_work, mov_work = _working_pair(
+            ref_grid,
+            mov_img,
+            reference_index=ref_canonical.index(reference_channel),
+            moving_index=mov_canonical.index(moving_channel),
+            settings=settings,
+            pixel_size_um=pixel_size_um,
+        )
+        working_px = pixel_ref * float(np.mean(np.diag(ref_work.to_level0)[:2]))
+        result = tissue_alignment_qc(
+            ref_work,
+            mov_work,
+            pulls,
+            working_pixel_size_um=working_px,
+            sigma_um=settings.tissue_qc_sigma_um,
+            highpass_sigma_um=settings.tissue_qc_highpass_sigma_um,
+        )
+        by_role[role] = {
+            "channel": reference_channel,
+            "moving_channel": moving_channel,
+            "pearson": result.pearson,
+            "mask_fraction": result.mask_fraction,
+        }
+    return by_role
+
+
+def _field_pair_records(
+    field_report: Any, records: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Add the ``field`` sub-dict (contract C5) to every landmark record."""
+    for i, record in enumerate(records):
+        weight = float(field_report.weight[i])
+        clicks_only: dict[str, Any] | None = None
+        if field_report.has_second_pass:
+            weight_pass1 = float(field_report.clicks_only_weight[i])
+            clicks_only = {
+                "weight": weight_pass1 if np.isfinite(weight_pass1) else None,
+                "loo_um": float(field_report.clicks_only_loo_reference_um[i]),
+                "p_value": float(field_report.clicks_only_p_value[i]),
+            }
+        record["field"] = {
+            "weight": weight if np.isfinite(weight) else None,
+            "p_value": float(field_report.p_value[i]),
+            "clicks_only": clicks_only,
+            "verdict": field_report.verdict[i],
+            "class": field_report.pair_class[i],
+            "loo_vector_moving_um": [
+                float(v) for v in field_report.loo_vector_moving_um[i]
+            ],
+        }
+    return records
+
+
+def _run_field_registration(
+    *,
+    config: ManualRegistrationRunConfig,
+    store: StoreAttrs,
+    labelling: LabellingAttrs,
+    raw_labelling: dict[str, Any],
+    labelling_sha: str,
+    settings: ManualRegistrationSettings,
+    tuning: RegistrationTuning,
+    roles: ChannelRoles | None,
+    report: LandmarkFitReport,
+    crops: dict[str, CropRect],
+    digest: str,
+    matrix_coarse_full: np.ndarray,
+    matrix_coarse_crop: np.ndarray,
+    matrix_landmark_full: np.ndarray,
+    matrix_landmark_crop: np.ndarray,
+    run_warnings: list[str],
+    started: float,
+    store_path: Path,
+    result_dir: Path,
+    final: Path,
+    out: Path,
+) -> dict[str, Path]:
+    """Register through the robust landmark field (contracts C2, C4, C5).
+
+    Fits the field, takes its least-squares affine as the base matrix, samples the
+    field as a pull flow on a coarse grid of the reference crop and resamples the
+    moving image through it (``materialize`` full or preview; none writes no
+    store). Then the landmark records, the tissue QC per channel role, the field
+    files, the figures and the summary are written, and the result is published
+    like the similarity path does.
+    """
+    # Imported here: field_fit and field_report import this module.
+    from merxen.manual_registration.field_fit import (
+        best_affine,
+        build_landmark_field,
+        candidate_sd_summary,
+        field_flow,
+        field_sd_grid,
+        field_summary,
+        tissue_mask_function,
+    )
+    from merxen.manual_registration.field_report import write_field_figure
+
+    run_id = config.run_id
+    pfx = f"[{run_id}]"
+    ref = store.images["reference"]
+    mov = store.images["moving"]
+    pixel_ref, pixel_mov = ref.pixel_size_um, mov.pixel_size_um
+    crop_r, crop_m = crops["reference"], crops["moving"]
+    origin_r = (crop_r.x0, crop_r.y0)
+    origin_m = (crop_m.x0, crop_m.y0)
+    assert ref.ome_tiff is not None and mov.ome_tiff is not None
+    ref_canonical = list(ref.canonical_channel_names or ref.channel_names)
+    mov_canonical = list(mov.canonical_channel_names or mov.channel_names)
+    mode = settings.materialize
+
+    # Step 6: the field, its base affine and the pull flow.
+    field_report, context = build_landmark_field(
+        similarity=report,
+        store=store,
+        settings=settings,
+        roles=roles,
+        crops=crops,
+        image_check=settings.field_image_check,
+        windows=settings.field_window_observations,
+        run_id=run_id,
+    )
+    field = field_report.field
+    tissue_mask = None if context is None else tissue_mask_function(context.reference)
+    matrix_base_full = best_affine(
+        field,
+        crop_reference=crop_r,
+        reference_pixel_size_um=pixel_ref,
+        moving_pixel_size_um=pixel_mov,
+        mask_xy_um=tissue_mask,
+    )
+    del context, tissue_mask
+    matrix_base_crop = crop_matrix(
+        matrix_base_full, reference_origin_xy=origin_r, moving_origin_xy=origin_m
+    )
+    flow = field_flow(
+        field,
+        crop_reference=crop_r,
+        crop_moving=crop_m,
+        reference_pixel_size_um=pixel_ref,
+        moving_pixel_size_um=pixel_mov,
+        base_matrix_crop=matrix_base_crop,
+        grid_um=settings.field_grid_um,
+    )
+    sd_summary, overview = candidate_sd_summary(
+        field, store=store, roles=roles, crops=crops
+    )
+    sd_grid, sd_matrix = field_sd_grid(
+        field,
+        crop_reference=crop_r,
+        reference_pixel_size_um=pixel_ref,
+        grid_um=settings.field_sd_grid_um,
+    )
+    logger.info(
+        "%s field flow: grid factor %d, %d x %d nodes, largest displacement %.1f um",
+        pfx,
+        flow.factor,
+        flow.flow_yx.shape[1],
+        flow.flow_yx.shape[2],
+        flow.max_displacement_um,
+    )
+
+    def pull(reference_crop_xy: np.ndarray) -> np.ndarray:
+        return pull_points_through_registration(
+            reference_crop_xy,
+            final_matrix=matrix_base_crop,
+            flow_yx=flow.flow_yx,
+            working_to_reference=flow.working_to_reference,
+        )
+
+    ref_info = read_ome_tiff_info(ref.ome_tiff.path)
+    mov_info = read_ome_tiff_info(mov.ome_tiff.path)
+    ref_grid = cropped_reference_grid(
+        ref_info,
+        channel_names=ref_canonical,
+        crop=crop_r,
+        pixel_size_um=pixel_ref,
+        exact_factors=ref.ome_tiff.exact_level_factors,
+    )
+    mov_img = cropped_moving_image(
+        mov_info,
+        channel_names=mov_canonical,
+        crop=crop_m,
+        pixel_size_um=pixel_mov,
+        exact_factors=mov.ome_tiff.exact_level_factors,
+    )
+
+    # Which pyramid levels the result store holds (contract C4).
+    reference_level = moving_level = 0
+    factor_p = factor_m = 1
+    if mode == "preview":
+        reference_factors = [factor for _, factor in kept_level_factors(ref_info)]
+        reference_level = level_for_factor(
+            reference_factors, settings.preview_pixel_size_um / pixel_ref
+        )
+        factor_p = reference_factors[reference_level]
+        moving_factors = [factor for _, factor in kept_level_factors(mov_info)]
+        moving_level = level_for_factor(
+            moving_factors, factor_p * pixel_ref / pixel_mov
+        )
+        factor_m = moving_factors[moving_level]
+    materialization = (
+        None
+        if mode == "none"
+        else Materialization(
+            mode=mode, level_factor=factor_p, pixel_size_um=factor_p * pixel_ref
+        )
+    )
+    element_shape = (crop_r.height(), crop_r.width())
+    if mode == "preview":
+        level = ref_grid.levels[reference_level]
+        element_shape = (int(level.sizes["y"]), int(level.sizes["x"]))
+    transform = crop_offset_affine(crop_r, pixel_ref, factor_p)
+
+    tmp: Path | None = None
+    if mode != "none":
+        _remove_stale_siblings(result_dir, run_id)
+        tmp = result_dir / f".{run_id}_registered.zarr.partial-{uuid.uuid4().hex}"
+    sdata: Any = None
+    try:
+        if tmp is not None:
+            kept_names = list(ref.channel_names)
+            if mode == "full":
+                prepared = sd.read_zarr(store_path, selection=("images",))
+                data = prepared.images["reference"].data[
+                    :, crop_r.y0 : crop_r.y1, crop_r.x0 : crop_r.x1
+                ]
+                del prepared
+            else:
+                data = ref_grid.levels[reference_level].data
+            element = Image2DModel.parse(
+                data.rechunk((1, settings.chunk_size, settings.chunk_size)),
+                dims=("c", "y", "x"),
+                c_coords=kept_names,
+                transformations={"global": transform},
+            )
+            sdata_tmp = sd.SpatialData(images={"reference": element})
+            sdata_tmp.attrs[STORE_ATTR] = _result_store_attr(
+                store=store,
+                config=config,
+                store_path=store_path,
+                crop_reference=crop_r,
+                crop_moving=crop_m,
+                kept_reference_names=kept_names,
+                materialization=materialization,
+                element_shape_yx=element_shape,
+            )
+            stamp_merxen_schema(sdata_tmp)
+            sdata_tmp.write(tmp)
+            del sdata_tmp, element, data
+
+        with spatialdata_write_lock(tmp) if tmp is not None else nullcontext():
+            if tmp is not None:
+                sdata = sd.read_zarr(tmp, selection=("images",))
+                warp_started = time.perf_counter()
+                pull_for_warp: Callable[[np.ndarray], np.ndarray] = pull
+                source_image: Any = mov_img.level0
+                if mode == "preview":
+                    source_image = mov_img.open_level(moving_level)
+
+                    def preview_pull(preview_xy: np.ndarray) -> np.ndarray:
+                        # Pixel-centre convention: preview px -> reference crop
+                        # level-0 px -> moving crop level-0 px -> moving level px.
+                        crop_xy = np.asarray(preview_xy) * factor_p + (factor_p - 1) / 2
+                        return np.asarray(
+                            (pull(crop_xy) - (factor_m - 1) / 2) / factor_m
+                        )
+
+                    pull_for_warp = preview_pull
+
+                materialize_warped_image(
+                    sdata_obj=sdata,
+                    zarr_path=tmp,
+                    source_image=source_image,
+                    output_key="moving_registered",
+                    output_shape_rc=element_shape,
+                    fixed_to_source_image_xy=pull_for_warp,
+                    transform=transform,
+                    coordinate_system="global",
+                    tile_size=settings.tile_size,
+                    chunk_size=settings.chunk_size,
+                    interpolation="bilinear",
+                    fill_value=0.0,
+                )
+                build_image_pyramids_in_store(
+                    sdata,
+                    tmp,
+                    image_keys=["reference", "moving_registered"],
+                    params=ViewerCacheParams(force=True),
+                )
+                logger.info(
+                    "%s %s materialization took %.1f s",
+                    pfx,
+                    mode,
+                    time.perf_counter() - warp_started,
+                )
+
+            # Step 7: landmark stage positions through the field.
+            fit_report = replace(
+                report,
+                used=np.asarray(field_report.observed, dtype=bool),
+                outlier=np.array(
+                    [name == "likely_misclick" for name in field_report.pair_class],
+                    dtype=bool,
+                ),
+                loo_um=np.asarray(field_report.loo_reference_um, dtype=float),
+            )
+            records = _field_pair_records(
+                field_report,
+                _landmark_records(
+                    fit_report,
+                    reference_pixel_size_um=pixel_ref,
+                    reference_origin_xy=origin_r,
+                    moving_origin_xy=origin_m,
+                    landmark_full=matrix_landmark_full,
+                    final_affine_crop=matrix_base_crop,
+                    flow_yx=flow.flow_yx,
+                    flow_working_to_reference=flow.working_to_reference,
+                ),
+            )
+            warnings = [*run_warnings, *field_report.warnings]
+            not_converged = [str(r["id"]) for r in records if not r["push_converged"]]
+            if not_converged:
+                warnings.append(
+                    "push through the flow did not converge for pair(s): "
+                    + ", ".join(not_converged)
+                )
+            for name in ("likely_misclick", "check"):
+                listed = [
+                    str(pair.id)
+                    for pair, pair_class in zip(
+                        report.pairs, field_report.pair_class, strict=True
+                    )
+                    if pair_class == name
+                ]
+                if listed:
+                    label = "likely misclick" if name == "likely_misclick" else name
+                    warnings.append(
+                        f"landmark pair(s) classed '{label}' (kept in the "
+                        f"field unless disabled): {', '.join(listed)}"
+                    )
+            summary_residuals = _residual_summary(records)
+
+            # Step 8: QC on the registration channel and on every role.
+            ref_work, mov_work = _working_pair(
+                ref_grid,
+                mov_img,
+                reference_index=ref_canonical.index(ref.registration_channel),
+                moving_index=mov_canonical.index(mov.registration_channel),
+                settings=settings,
+                pixel_size_um=(pixel_ref, pixel_mov),
+            )
+            working_px = pixel_ref * float(np.mean(np.diag(ref_work.to_level0)[:2]))
+            pulls = {
+                "coarse": affine_pull(matrix_coarse_crop),
+                "landmark": affine_pull(matrix_landmark_crop),
+                "affine": affine_pull(matrix_base_crop),
+                "final": pull,
+            }
+            tissue = tissue_alignment_qc(
+                ref_work,
+                mov_work,
+                pulls,
+                working_pixel_size_um=working_px,
+                sigma_um=settings.tissue_qc_sigma_um,
+                highpass_sigma_um=settings.tissue_qc_highpass_sigma_um,
+            )
+            tissue_png = out / f"{run_id}_tissue_qc.png"
+            write_tissue_qc_figure(
+                ref_work,
+                mov_work,
+                pulls,
+                tissue_png,
+                title=f"{run_id}: tissue alignment",
+            )
+            by_role = _by_role_tissue_qc(
+                roles,
+                ref_grid=ref_grid,
+                mov_img=mov_img,
+                ref_canonical=ref_canonical,
+                mov_canonical=mov_canonical,
+                pulls=pulls,
+                settings=settings,
+                pixel_size_um=(pixel_ref, pixel_mov),
+            )
+            nucleus_qc = _nucleus_qc(
+                settings,
+                tuning,
+                ref_grid=ref_grid,
+                mov_img=mov_img,
+                registration_channel=mov.registration_channel,
+                matrix_affine_crop=matrix_base_crop,
+                warnings=warnings,
+                run_id=run_id,
+            )
+
+            # Step 9: payload, files and attrs.
+            summary = field_summary(
+                field_report, outlier_p=settings.field_outlier_p, sd_summary=sd_summary
+            )
+            field_png = out / f"{run_id}_field_qc.png"
+            write_field_figure(
+                field_png,
+                report=field_report,
+                store=store,
+                crops=crops,
+                suggestions=[],
+                kind="register",
+                overview=overview,
+                base_matrix_full=matrix_base_full,
+                role_pearson={
+                    role: block["pearson"] for role, block in by_role.items()
+                },
+            )
+            model_json = out / f"{run_id}_landmark_field.json"
+            model_json.write_text(
+                json.dumps(field.to_dict(), indent=2, allow_nan=False) + "\n",
+                encoding="utf-8",
+            )
+            flow_npz = out / f"{run_id}_{_FIELD_FLOW_SUFFIX}"
+            np.savez_compressed(
+                flow_npz,
+                flow_yx=flow.flow_yx,
+                working_to_reference=flow.working_to_reference,
+                base_matrix_crop=matrix_base_crop,
+                base_matrix_full=matrix_base_full,
+                reference_origin_xy=np.asarray(origin_r, dtype=np.int64),
+                moving_origin_xy=np.asarray(origin_m, dtype=np.int64),
+                sd_um=sd_grid,
+                sd_working_to_reference=sd_matrix,
+                algorithm=np.asarray(FIELD_ALGORITHM),
+                model_digest=np.asarray(field.digest),
+            )
+            image_evidence = bool(field_report.checks) or (
+                field_report.windows is not None
+            )
+            durable = {
+                "landmark_matrix_csv": result_dir / f"{run_id}_landmark_matrix.csv",
+                "final_matrix_csv": result_dir / f"{run_id}_final_matrix.csv",
+                "landmarks_csv": result_dir / f"{run_id}_landmarks.csv",
+                "summary_json": (
+                    result_dir / f"{run_id}_manual_registration_summary.json"
+                ),
+                "tissue_qc_png": result_dir / tissue_png.name,
+                "landmark_field_json": result_dir / model_json.name,
+                "field_flow_npz": result_dir / flow_npz.name,
+                "field_qc_png": result_dir / field_png.name,
+            }
+            outputs: dict[str, Any] = {key: str(path) for key, path in durable.items()}
+            if mode != "none":
+                outputs["result_store"] = str(final)
+            outputs["core_qc"] = {}
+            payload: dict[str, Any] = {
+                "schema": RESULT_SCHEMA,
+                "schema_version": SCHEMA_VERSION,
+                "status": "complete",
+                "run_id": run_id,
+                "dataset_name": config.dataset_name,
+                "preset": config.preset,
+                "preset_version": PRESET_VERSIONS[config.preset],
+                "run_label": config.run_label,
+                "algorithm": {
+                    **ALGORITHM_BLOCK,
+                    "landmark_field": FIELD_ALGORITHM,
+                    "image_evidence": (
+                        IMAGE_EVIDENCE_ALGORITHM if image_evidence else None
+                    ),
+                },
+                "settings": settings.model_dump(mode="json"),
+                "pixel_size_um": {"reference": pixel_ref, "moving": pixel_mov},
+                "crops": {
+                    role: {
+                        "requested": (
+                            None
+                            if getattr(labelling.crops, role) is None
+                            else getattr(labelling.crops, role).model_dump()
+                        ),
+                        "effective": crops[role].model_dump(),
+                    }
+                    for role in ("reference", "moving")
+                },
+                "matrices": {
+                    "coarse_full": _matrix_list(matrix_coarse_full),
+                    "landmark_full": _matrix_list(matrix_landmark_full),
+                    "landmark_crop": _matrix_list(matrix_landmark_crop),
+                    "final_affine_crop": _matrix_list(matrix_base_crop),
+                    "final_affine_full": _matrix_list(matrix_base_full),
+                    "field_base_full": _matrix_list(matrix_base_full),
+                    "field_base_crop": _matrix_list(matrix_base_crop),
+                },
+                "fit": fit_summary(
+                    report, store=store, settings=settings, labelling=labelling
+                ),
+                "refinement": {"status": "disabled", "reason": "cortex field run"},
+                "refinement_qc": {"status": "disabled"},
+                "nonrigid": {
+                    "enabled": False,
+                    "algorithm": NONRIGID_REGISTRATION_ALGORITHM,
+                    "status": "disabled",
+                    "reason": "cortex field run",
+                },
+                "tissue_qc": {
+                    "pixel_size_um": working_px,
+                    "sigma_um": settings.tissue_qc_sigma_um,
+                    "highpass_sigma_um": settings.tissue_qc_highpass_sigma_um,
+                    "pearson": tissue.pearson,
+                    "mask_fraction": tissue.mask_fraction,
+                    "by_role": by_role,
+                },
+                "nucleus_qc": nucleus_qc,
+                "field": {
+                    "model": "robust_gp",
+                    "algorithm": FIELD_ALGORITHM,
+                    "image_evidence_algorithm": (
+                        IMAGE_EVIDENCE_ALGORITHM if image_evidence else None
+                    ),
+                    "channel_roles": None if roles is None else roles.to_dict(),
+                    **summary,
+                    "n_observations": dict(Counter(field.observations.obs_class)),
+                    "windows": (
+                        None
+                        if field_report.windows is None
+                        else field_report.windows.summary
+                    ),
+                    "base_matrix_full": _matrix_list(matrix_base_full),
+                    "base_matrix_crop": _matrix_list(matrix_base_crop),
+                    "flow": {
+                        "grid_factor": flow.factor,
+                        "shape_yx": list(flow.flow_yx.shape[1:]),
+                        "working_to_reference": _matrix_list(flow.working_to_reference),
+                        "max_displacement_um": flow.max_displacement_um,
+                    },
+                    "materialize": {
+                        "mode": mode,
+                        "level_factor": None if mode == "none" else factor_p,
+                        "pixel_size_um": (
+                            None if mode == "none" else factor_p * pixel_ref
+                        ),
+                    },
+                    "model_json": model_json.name,
+                    "model_digest": field.digest,
+                    "flow_npz": flow_npz.name,
+                    "qc_png": field_png.name,
+                },
+                "landmarks": records,
+                "residual_summary_um": summary_residuals,
+                "warnings": warnings,
+                "labelling": {
+                    "revision": labelling.revision,
+                    "content_sha256": labelling_sha,
+                    "snapshot": raw_labelling,
+                },
+                "prepared_store": {
+                    "path": str(store_path),
+                    "content_digest": store.content_digest,
+                    "grid_digest": store.grid_digest,
+                },
+                "provenance_digest": digest,
+                "resources": {},
+                "outputs": outputs,
+            }
+
+            files: list[Path] = []
+            matrix_landmark_csv = write_alignment_matrix(
+                out / durable["landmark_matrix_csv"].name, matrix_landmark_full
+            )
+            matrix_final_csv = write_alignment_matrix(
+                out / durable["final_matrix_csv"].name, matrix_base_full
+            )
+            landmarks_csv = out / durable["landmarks_csv"].name
+            _landmarks_dataframe(records).to_csv(
+                landmarks_csv, index=False, float_format="%.6g"
+            )
+            files += [
+                matrix_landmark_csv,
+                matrix_final_csv,
+                landmarks_csv,
+                model_json,
+                flow_npz,
+            ]
+            for figure in (tissue_png, field_png):
+                files.append(figure)
+                if figure.with_suffix(".pdf").exists():
+                    files.append(figure.with_suffix(".pdf"))
+            payload["resources"] = {
+                "wall_time_s": time.perf_counter() - started,
+                "peak_rss_gb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                / 1024**2,
+            }
+            payload = _plain_json(payload)
+            summary_path = out / durable["summary_json"].name
+            summary_path.write_text(
+                json.dumps(payload, indent=2) + "\n", encoding="utf-8"
+            )
+            files.append(summary_path)
+            if sdata is not None:
+                sdata.attrs[RESULT_ATTR] = payload
+                write_spatialdata_metadata(sdata, write_attrs=True)
+                del sdata
+    except BaseException:
+        if tmp is not None and tmp.exists():
+            logger.error(
+                "%s registration failed; the unfinished result store %s is left "
+                "for the next run to remove",
+                pfx,
+                tmp,
+            )
+        raise
+
+    # Step 10: swap the store into place (or remove an old one), then publish.
+    superseded: Path | None = None
+    if tmp is not None:
+        tmp_lock = spatialdata_write_lock_path(tmp)
+        with spatialdata_write_lock(final):
+            if final.exists():
+                superseded = _superseded_path(final)
+                os.rename(final, superseded)
+            try:
+                os.rename(tmp, final)
+            except BaseException:
+                if superseded is not None:
+                    os.rename(superseded, final)
+                raise
+            _remove_superseded_siblings(final, keep=superseded)
+        tmp_lock.unlink(missing_ok=True)
+    else:
+        # No result store this time: an older one is not this run's result.
+        with spatialdata_write_lock(final):
+            if final.exists():
+                superseded = _superseded_path(final)
+                os.rename(final, superseded)
+            _remove_superseded_siblings(final, keep=superseded)
+    if superseded is not None:
+        shutil.rmtree(superseded, ignore_errors=True)
+    for path in files:
+        _publish(path, result_dir / path.name)
+    log_status(f"{pfx} manual registration complete")
+    result = {
+        key: Path(value)
+        for key, value in payload["outputs"].items()
+        if key != "core_qc"
+    }
+    result["task_summary_json"] = out / f"{run_id}_manual_registration_summary.json"
+    return result

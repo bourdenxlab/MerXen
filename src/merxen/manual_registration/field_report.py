@@ -1,7 +1,8 @@
-"""Figure of the landmark check: where the clicks sit, how sure the field is, residuals.
+"""Figure of the landmark check and of a register run of the robust field.
 
-The figure of a register run (the non-affine displacement panel) is added with the
-register path of the robust field.
+The check figure shows where the clicks sit, how sure the field is and the
+residuals. The register figure adds the non-affine displacement of the field and
+the tissue correlation of each channel role at each registration stage.
 """
 
 from __future__ import annotations
@@ -100,6 +101,79 @@ def _draw_clicks(axis: Axes, report: FieldFitReport, store: StoreAttrs) -> None:
     axis.legend(fontsize=6, loc="lower left")
 
 
+def _draw_non_affine(
+    axis: Axes,
+    report: FieldFitReport,
+    store: StoreAttrs,
+    *,
+    crop_um: tuple[float, float, float, float],
+    base_matrix_full: np.ndarray,
+) -> None:
+    """Magnitude of the field mean minus the base affine over the reference crop."""
+    x0, x1, y0, y1 = crop_um
+    step = SD_GRID_STEP_UM
+    shape = (
+        max(int(np.ceil((y1 - y0) / step)), 1),
+        max(int(np.ceil((x1 - x0) / step)), 1),
+    )
+    grid = evaluate_on_grid(
+        report.field, origin_um=(x0, y0), step_um=step, shape_yx=shape, with_sd=False
+    )
+    pixel_ref = store.images["reference"].pixel_size_um
+    pixel_mov = store.images["moving"].pixel_size_um
+    rows, columns = np.indices(shape, dtype=float)
+    reference_px = np.column_stack(
+        [x0 + step * columns.ravel(), y0 + step * rows.ravel()]
+    )
+    reference_px = reference_px / pixel_ref
+    inverse = np.linalg.inv(base_matrix_full)
+    affine_um = (reference_px @ inverse[:2, :2].T + inverse[:2, 2]) * pixel_mov
+    difference = grid.mean_um.reshape(-1, 2) - affine_um
+    magnitude = np.linalg.norm(difference, axis=1).reshape(shape)
+    shown = axis.imshow(
+        magnitude,
+        extent=(
+            x0 - step / 2,
+            x0 + step * (shape[1] - 0.5),
+            y0 + step * (shape[0] - 0.5),
+            y0 - step / 2,
+        ),
+        cmap="magma",
+        interpolation="nearest",
+    )
+    plt.colorbar(shown, ax=axis, shrink=0.7, label="non-affine displacement (um)")
+    axis.set_xlim(x0, x1)
+    axis.set_ylim(y1, y0)
+    axis.set_aspect("equal")
+    axis.set_title("Field minus its base affine (moving um)")
+
+
+def _draw_role_pearson(
+    axis: Axes, role_pearson: Mapping[str, Mapping[str, float]] | None
+) -> None:
+    """Grouped bars of the tissue Pearson per role and stage."""
+    stages = ("coarse", "landmark", "affine", "final")
+    if not role_pearson:
+        axis.set_axis_off()
+        axis.set_title("Tissue correlation per role: no roles")
+        return
+    names = list(role_pearson)
+    width = 0.8 / len(stages)
+    for position, stage in enumerate(stages):
+        values = [float(role_pearson[name].get(stage, np.nan)) for name in names]
+        axis.bar(
+            np.arange(len(names)) + width * (position - (len(stages) - 1) / 2),
+            np.nan_to_num(values),
+            width=width,
+            label=stage,
+        )
+    axis.set_xticks(np.arange(len(names)))
+    axis.set_xticklabels(names)
+    axis.set_ylabel("tissue Pearson r")
+    axis.legend(fontsize=7)
+    axis.set_title("Tissue correlation per channel role")
+
+
 def write_field_figure(
     path: Path,
     *,
@@ -107,16 +181,21 @@ def write_field_figure(
     store: StoreAttrs,
     crops: Mapping[str, CropRect],
     suggestions: Sequence[SuggestionRecord],
-    kind: Literal["check"] = "check",
+    kind: Literal["check", "register"] = "check",
     overview: RoleImages | None = None,
+    base_matrix_full: np.ndarray | None = None,
+    role_pearson: Mapping[str, Mapping[str, float]] | None = None,
 ) -> Path:
-    """Write the landmark-check figure (PNG, plus a PDF twin) and return the PNG path.
+    """Write the check or register figure (PNG, plus a PDF twin); return the PNG path.
 
     Panels: the reference tissue with every click coloured by class and its
     leave-one-out vector (x5; disabled pairs grey); the posterior SD per axis on a
     200 um grid over the reference crop, with the accepted windows as dots and the
     numbered suggestions; histograms of the robust (final and clicks-only) and rigid
-    leave-one-out residuals; and a table of the pairs that are not ``ok``.
+    leave-one-out residuals; and a table of the pairs that are not ``ok``. The
+    ``register`` kind adds a third column: the non-affine displacement (the field
+    mean minus the base affine, in moving um over the reference crop) and the tissue
+    Pearson correlation of each role at each stage.
 
     Args:
         path: Output PNG path.
@@ -124,23 +203,30 @@ def write_field_figure(
         store: Attrs of the prepared store.
         crops: Effective crops by ``reference`` and ``moving``.
         suggestions: The suggested next clicks.
-        kind: ``check`` (the only kind so far).
+        kind: ``check`` or ``register``.
         overview: Coarse reference role images for the tissue thumbnail, or None.
+        base_matrix_full: ``register``: the moving to reference base affine (full px).
+        role_pearson: ``register``: role to ``{stage: Pearson}`` of the tissue QC.
 
     Returns:
         The PNG path.
 
     Raises:
-        ValueError: For a kind other than ``check``.
+        ValueError: For another kind, or a ``register`` figure without the base
+            affine.
     """
-    if kind != "check":
+    if kind not in ("check", "register"):
         raise ValueError(f"unknown figure kind {kind!r}")
+    is_register = kind == "register"
+    if is_register and base_matrix_full is None:
+        raise ValueError("the register figure needs base_matrix_full")
     path = prepare_plot_output(path)
     pixel = store.images["reference"].pixel_size_um
     crop = crops["reference"]
     x0, x1 = crop.x0 * pixel, crop.x1 * pixel
     y0, y1 = crop.y0 * pixel, crop.y1 * pixel
-    figure, axes = plt.subplots(2, 2, figsize=(16, 14))
+    columns = 3 if is_register else 2
+    figure, axes = plt.subplots(2, columns, figsize=(8 * columns, 14))
     tissue, thumb_axis, sd_axis = axes[0, 0], axes[0, 0], axes[0, 1]
     histogram_axis, table_axis = axes[1, 0], axes[1, 1]
 
@@ -262,7 +348,24 @@ def write_field_figure(
     else:
         title = "Every pair is ok"
     table_axis.set_title(title)
-    figure.suptitle(f"{store.dataset_name}: landmark check")
+    if is_register:
+        assert base_matrix_full is not None
+        _draw_non_affine(
+            axes[0, 2],
+            report,
+            store,
+            crop_um=(x0, x1, y0, y1),
+            base_matrix_full=base_matrix_full,
+        )
+        _draw_role_pearson(axes[1, 2], role_pearson)
+    figure.suptitle(
+        f"{store.dataset_name}: "
+        + (
+            "registration through the landmark field"
+            if is_register
+            else "landmark check"
+        )
+    )
     figure.tight_layout()
     save_figure(figure, path, dpi=110)
     plt.close(figure)

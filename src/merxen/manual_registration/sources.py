@@ -32,6 +32,66 @@ CROP_LEVEL_FACTOR_LIMIT = CROP_SNAP_PX
 _FACTOR_TOLERANCE = 0.01
 
 
+def kept_level_factors(info: OmeTiffInfo) -> list[tuple[int, int]]:
+    """Return ``(file level index, integer factor)`` of the levels the crops keep.
+
+    A level is kept when its factor is an integer (within 1 %) that divides 64 and
+    no earlier level has the same factor; level 0 is always kept.
+
+    Args:
+        info: Metadata of the OME-TIFF.
+
+    Returns:
+        The kept levels in file order, finest first.
+    """
+    height0, width0 = info.level_shapes_cyx[0][1:]
+    kept: list[tuple[int, int]] = []
+    for index, (_, height, width) in enumerate(info.level_shapes_cyx):
+        factor_x, factor_y = width0 / width, height0 / height
+        factor = round(factor_x)
+        if (
+            factor < 1
+            or abs(factor_x - factor) / factor >= _FACTOR_TOLERANCE
+            or abs(factor_y - factor) / factor >= _FACTOR_TOLERANCE
+        ):
+            logger.debug("Skipping level %d of %s: odd factor", index, info.path)
+            continue
+        if CROP_LEVEL_FACTOR_LIMIT % factor != 0:
+            logger.debug(
+                "Skipping level %d of %s: factor %d does not divide %d",
+                index,
+                info.path,
+                factor,
+                CROP_LEVEL_FACTOR_LIMIT,
+            )
+            continue
+        if any(factor == existing for _, existing in kept):
+            continue
+        kept.append((index, factor))
+    return kept
+
+
+def level_for_factor(factors: Sequence[float], wanted_factor: float) -> int:
+    """Return the index of the coarsest level not coarser than a wanted factor.
+
+    Args:
+        factors: Level factors of the kept levels, finest first.
+        wanted_factor: The wanted level-0 pixels per pixel.
+
+    Returns:
+        The index of the largest factor that is at most ``1.01 * wanted_factor``;
+        0 when even the finest level is coarser.
+    """
+    chosen = 0
+    for index, factor in enumerate(factors):
+        if (
+            factor <= wanted_factor * (1.0 + _FACTOR_TOLERANCE)
+            and factor >= factors[chosen]
+        ):
+            chosen = index
+    return chosen
+
+
 def pyramid_levels(
     info: OmeTiffInfo,
     *,
@@ -62,29 +122,9 @@ def pyramid_levels(
     Raises:
         ValueError: If the crop origin is not a multiple of a kept level's factor.
     """
-    height0, width0 = info.level_shapes_cyx[0][1:]
     kept: list[tuple[int, xr.DataArray]] = []
-    for index, (_, height, width) in enumerate(info.level_shapes_cyx):
-        factor_x, factor_y = width0 / width, height0 / height
-        factor = round(factor_x)
-        if (
-            factor < 1
-            or abs(factor_x - factor) / factor >= _FACTOR_TOLERANCE
-            or abs(factor_y - factor) / factor >= _FACTOR_TOLERANCE
-        ):
-            logger.debug("Skipping level %d of %s: odd factor", index, info.path)
-            continue
-        if CROP_LEVEL_FACTOR_LIMIT % factor != 0:
-            logger.debug(
-                "Skipping level %d of %s: factor %d does not divide %d",
-                index,
-                info.path,
-                factor,
-                CROP_LEVEL_FACTOR_LIMIT,
-            )
-            continue
-        if any(factor == existing for existing, _ in kept):
-            continue
+    for index, factor in kept_level_factors(info):
+        height, width = info.level_shapes_cyx[index][1:]
         if crop.x0 % factor != 0 or crop.y0 % factor != 0:
             raise ValueError(
                 f"crop {crop.as_tuple()} is not snapped: its origin is not a "
@@ -104,24 +144,29 @@ def pyramid_levels(
     return levels, shapes, factors
 
 
-def crop_offset_affine(crop: CropRect, pixel_size_um: float) -> Affine:
+def crop_offset_affine(
+    crop: CropRect, pixel_size_um: float, level_factor: int = 1
+) -> Affine:
     """Return the placement of a cropped image in the full image's micrometre frame.
 
-    ``[[p, 0, p * x0], [0, p, p * y0], [0, 0, 1]]`` from cropped level-0 pixels
-    to micrometres of the full image.
+    ``[[f p, 0, p * x0], [0, f p, p * y0], [0, 0, 1]]`` from cropped pixels of a
+    level with factor ``f`` to micrometres of the full image (the corner convention
+    of SpatialData, contract C4); for ``f = 1`` the cropped level-0 pixels.
 
     Args:
         crop: The effective crop in level-0 pixels of the full image.
         pixel_size_um: Level-0 pixel size of the image in micrometres.
+        level_factor: Level-0 pixels per pixel of the placed level.
 
     Returns:
         The ``("x", "y")`` to ``("x", "y")`` affine of the cropped image's
         ``global`` coordinate system.
     """
     p = float(pixel_size_um)
+    scale = p * float(level_factor)
     return Affine(
         np.array(
-            [[p, 0.0, p * crop.x0], [0.0, p, p * crop.y0], [0.0, 0.0, 1.0]],
+            [[scale, 0.0, p * crop.x0], [0.0, scale, p * crop.y0], [0.0, 0.0, 1.0]],
             dtype=float,
         ),
         input_axes=("x", "y"),

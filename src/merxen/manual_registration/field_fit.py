@@ -1163,7 +1163,7 @@ def candidate_sd_summary(
     store: StoreAttrs,
     roles: ChannelRoles | None,
     crops: Mapping[str, CropRect],
-) -> dict[str, float] | None:
+) -> tuple[dict[str, float] | None, RoleImages]:
     """Median, p90 and max of the field SD over the suggestion candidate centres.
 
     The centres are the shared tissue of the coarse images on a 100 um lattice
@@ -1176,7 +1176,8 @@ def candidate_sd_summary(
         crops: Effective crops by ``reference`` and ``moving``.
 
     Returns:
-        The statistics, or None when there are no candidates.
+        ``(statistics, coarse reference images)``; the statistics are None when
+        there are no candidates.
     """
     coarse = coarse_role_images(
         store, roles, crops=crops, pixel_size_um=COARSE_PIXEL_SIZE_UM
@@ -1186,10 +1187,11 @@ def candidate_sd_summary(
     )
     centres = np.asarray(targets.centres_um, dtype=float)
     if not len(centres):
-        return None
+        return None, coarse["reference"]
     sd = field.sd_um(centres)
-    return {
+    summary = {
         "median": float(np.median(sd)),
         "p90": float(np.percentile(sd, 90)),
         "max": float(np.max(sd)),
     }
+    return summary, coarse["reference"]

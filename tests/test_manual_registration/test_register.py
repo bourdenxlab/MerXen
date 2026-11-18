@@ -27,17 +27,23 @@ from merxen.manual_registration.register import (
     LandmarkFitReport,
     _core_qc_listing,
     _landmark_records,
+    _landmarks_dataframe,
+    _outputs_from_stored,
     _plain_json,
     _provenance_digest,
     _publish,
     _remove_core_qc_files,
     _remove_superseded_siblings,
     _residual_summary,
+    _result_store_attr,
     _reusable,
     _validate_prepared_store,
     fit_landmarks,
     fit_summary,
     run_manual_registration,
+)
+from merxen.manual_registration.register import (
+    _stored_result as read_stored_result,
 )
 from merxen.manual_registration.schema import (
     LABELLING_ATTR,
@@ -45,6 +51,7 @@ from merxen.manual_registration.schema import (
     CoarseTransform,
     CropRect,
     LabellingAttrs,
+    Materialization,
     StoreAttrs,
     UnsupportedSchemaVersionError,
     labelling_content_sha256,
@@ -726,22 +733,6 @@ def read_store_stub(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(register_module, "_read_prepared_store", stub)
 
 
-FIELD_OFF = "refine_affine=false;nonrigid_enabled=false;field_image_check=false"
-
-
-def test_register_refuses_a_robust_field_run_until_the_field_path_exists(
-    tmp_path: Path, read_store_stub: None
-) -> None:
-    config = _run_config(
-        tmp_path, row_settings=f"field_model=robust_gp;materialize=preview;{FIELD_OFF}"
-    )
-    with pytest.raises(ValueError, match="not implemented yet") as excinfo:
-        run_manual_registration(config)
-    assert "[SYN1_same_section]" in str(excinfo.value)
-    assert "manual-registration-check" in str(excinfo.value)
-    assert not any((tmp_path / "result").iterdir())
-
-
 @pytest.mark.parametrize(
     ("row_settings", "message"),
     [
@@ -1007,3 +998,150 @@ def test_leftover_superseded_stores_are_removed(tmp_path: Path) -> None:
     assert kept.exists() and other_run.exists() and final.exists()
     _remove_superseded_siblings(final)
     assert not kept.exists() and other_run.exists()
+
+
+# --------------------------------------------------------------------------
+# field-run additions: store attr, records, reuse without a store
+# --------------------------------------------------------------------------
+
+
+def _result_attr(**kwargs: Any) -> dict[str, Any]:
+    return _result_store_attr(
+        store=_store(),
+        config=_run_config(Path("/unused")),
+        store_path=Path("/unused/store.zarr"),
+        crop_reference=CropRect(x0=64, y0=128, x1=1088, y1=1152),
+        crop_moving=CropRect(x0=0, y0=0, x1=512, y1=512),
+        kept_reference_names=["DAPI"],
+        **kwargs,
+    )
+
+
+def test_result_store_attr_without_materialization_is_unchanged() -> None:
+    attr = _result_attr()
+    assert "materialization" not in attr["images"]["reference"]
+    assert attr["images"]["moving"]["shape_yx"] == [1024, 1024]
+
+
+def test_result_store_attr_records_the_materialization_and_element_shape() -> None:
+    record = Materialization(mode="preview", level_factor=16, pixel_size_um=5.52)
+    attr = _result_attr(materialization=record, element_shape_yx=(64, 64))
+    for role in ("reference", "moving"):
+        image = attr["images"][role]
+        assert image["materialization"] == {
+            "mode": "preview",
+            "level_factor": 16,
+            "pixel_size_um": 5.52,
+        }
+        assert image["shape_yx"] == [64, 64]
+    # The record keeps the reference level-0 pixel size and the crop (contract C4).
+    assert attr["images"]["reference"]["pixel_size_um"] == A2_PIXEL_SIZE
+    assert attr["images"]["reference"]["crop"]["x0"] == 64
+    parsed = parse_store_attrs(attr)
+    assert parsed.images["moving"].materialization == record
+
+
+def test_similarity_records_have_no_field_and_the_csv_columns_stay_empty() -> None:
+    pairs = make_pairs([(100.0, 100.0)], [(10.0, 10.0)])
+    records = _landmark_records(
+        _report_for(pairs),
+        reference_pixel_size_um=0.5,
+        reference_origin_xy=(0, 0),
+        moving_origin_xy=(0, 0),
+        landmark_full=np.eye(3),
+        final_affine_crop=np.eye(3),
+        flow_yx=None,
+        flow_working_to_reference=None,
+    )
+    assert records[0]["field"] is None
+    frame = _landmarks_dataframe(records)
+    assert list(frame.columns[-4:]) == [
+        "field_weight",
+        "field_p_value",
+        "field_verdict",
+        "field_class",
+    ]
+    assert frame.iloc[0, -4:].isna().all()
+    # A record written before M1 has no field key at all.
+    del records[0]["field"]
+    assert _landmarks_dataframe(records).iloc[0, -4:].isna().all()
+
+
+def test_landmarks_csv_columns_carry_the_field_values() -> None:
+    pairs = make_pairs([(100.0, 100.0)], [(10.0, 10.0)])
+    records = _landmark_records(
+        _report_for(pairs),
+        reference_pixel_size_um=0.5,
+        reference_origin_xy=(0, 0),
+        moving_origin_xy=(0, 0),
+        landmark_full=np.eye(3),
+        final_affine_crop=np.eye(3),
+        flow_yx=None,
+        flow_working_to_reference=None,
+    )
+    records[0]["field"] = {
+        "weight": None,
+        "p_value": 0.25,
+        "clicks_only": None,
+        "verdict": "confirmed",
+        "class": "ok",
+        "loo_vector_moving_um": [1.0, 2.0],
+    }
+    row = _landmarks_dataframe(records).iloc[0]
+    assert row["field_p_value"] == 0.25
+    assert (row["field_verdict"], row["field_class"]) == ("confirmed", "ok")
+    assert row["field_weight"] is None or np.isnan(row["field_weight"])
+
+
+def test_a_run_without_a_store_is_read_from_its_durable_summary(
+    tmp_path: Path,
+) -> None:
+    summary = tmp_path / "summary.json"
+    assert read_stored_result(tmp_path / "missing.zarr", summary_json=summary) is None
+    summary.write_text("not json")
+    assert read_stored_result(tmp_path / "missing.zarr", summary_json=summary) is None
+    summary.write_text(json.dumps({"schema": "other"}))
+    assert read_stored_result(tmp_path / "missing.zarr", summary_json=summary) is None
+    summary.write_text(
+        json.dumps(
+            {"schema": "merxen.manual_registration.result", "status": "complete"}
+        )
+    )
+    stored = read_stored_result(tmp_path / "missing.zarr", summary_json=summary)
+    assert stored is not None and stored["status"] == "complete"
+
+
+def test_reuse_of_a_field_result_needs_its_model_and_flow_files(
+    tmp_path: Path,
+) -> None:
+    stored = _stored_result(tmp_path)
+    for key, name in (
+        ("landmark_field_json", "model.json"),
+        ("field_flow_npz", "flow.npz"),
+    ):
+        path = tmp_path / name
+        path.write_text("x")
+        stored["outputs"][key] = str(path)
+    assert _reusable(stored, DIGEST_NEW) is True
+    (tmp_path / "flow.npz").unlink()
+    assert _reusable(stored, DIGEST_NEW) is False
+    (tmp_path / "flow.npz").write_text("x")
+    (tmp_path / "model.json").unlink()
+    assert _reusable(stored, DIGEST_NEW) is False
+
+
+def test_outputs_from_stored_lists_the_field_files_and_no_store_for_none(
+    tmp_path: Path,
+) -> None:
+    stored = _stored_result(tmp_path)
+    stored["outputs"]["landmark_field_json"] = str(tmp_path / "model.json")
+    stored["outputs"]["field_flow_npz"] = str(tmp_path / "flow.npz")
+    stored["outputs"]["field_qc_png"] = str(tmp_path / "qc.png")
+    paths = _outputs_from_stored(stored, RUN_ID, tmp_path / "out")
+    assert "result_store" not in paths
+    assert paths["landmark_field_json"] == tmp_path / "model.json"
+    assert paths["field_flow_npz"] == tmp_path / "flow.npz"
+    assert paths["field_qc_png"] == tmp_path / "qc.png"
+    assert (
+        paths["task_summary_json"].name == f"{RUN_ID}_manual_registration_summary.json"
+    )

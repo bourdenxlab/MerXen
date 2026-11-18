@@ -35,7 +35,7 @@ LANDMARKS_CSV_HEADER = (
     "reference_y_px,moving_x_px,moving_y_px,landmark_x_px,landmark_y_px,"
     "affine_x_px,affine_y_px,final_x_px,final_y_px,residual_landmark_um,"
     "residual_loo_um,residual_affine_um,residual_final_um,final_includes_flow,"
-    "push_converged"
+    "push_converged,field_weight,field_p_value,field_verdict,field_class"
 )
 COMPARISON_CSV_HEADER = (
     "run_id,preset,run_label,fit_n_enabled,fit_n_used,fit_rms_um,"

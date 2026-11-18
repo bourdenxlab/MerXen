@@ -15,6 +15,8 @@ from merxen.manual_registration.sources import (
     crop_offset_affine,
     cropped_moving_image,
     cropped_reference_grid,
+    kept_level_factors,
+    level_for_factor,
     pyramid_levels,
 )
 
@@ -166,6 +168,42 @@ def test_cropped_reference_grid(pyramid: tuple[OmeTiffInfo, np.ndarray]) -> None
     )
     assert grid.coordinate_system == "global"
     assert grid.level_factors_xy == ((1.0, 1.0), (2.0, 2.0), (4.0, 4.0), (8.0, 8.0))
+
+
+def test_crop_offset_affine_of_a_coarser_level_uses_the_corner_convention() -> None:
+    affine = crop_offset_affine(
+        CropRect(x0=64, y0=128, x1=2048, y1=2048), 2.0, level_factor=16
+    )
+    np.testing.assert_allclose(
+        affine.to_affine_matrix(("x", "y"), ("x", "y")),
+        [[32, 0, 128], [0, 32, 256], [0, 0, 1]],
+    )
+
+
+def test_kept_level_factors_match_the_levels_of_pyramid_levels(
+    pyramid: tuple[OmeTiffInfo, np.ndarray],
+) -> None:
+    info, _ = pyramid
+    kept = kept_level_factors(info)
+    assert [factor for _, factor in kept] == [1, 2, 4, 8]
+    levels, _shapes, factors = pyramid_levels(
+        info,
+        channel_names=NAMES,
+        crop=CropRect(x0=0, y0=0, x1=1500, y1=1280),
+        exact_factors=True,
+    )
+    assert len(levels) == len(kept)
+    assert factors == tuple((float(f), float(f)) for _, f in kept)
+
+
+@pytest.mark.parametrize(
+    ("wanted", "expected"),
+    [(0.5, 0), (1.0, 0), (2.775, 1), (16.0, 4), (3.9, 1), (4.0, 2), (1000.0, 4)],
+)
+def test_level_for_factor_takes_the_coarsest_level_not_coarser(
+    wanted: float, expected: int
+) -> None:
+    assert level_for_factor([1, 2, 4, 8, 16], wanted) == expected
 
 
 def test_crop_offset_affine_matches_the_documented_matrix() -> None:
