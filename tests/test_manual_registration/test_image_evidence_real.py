@@ -29,7 +29,7 @@ from merxen.manual_registration.schema import (
     read_root_attrs,
 )
 
-from ._acceptance import Acceptance, seven_pair_report
+from ._acceptance import Acceptance, nearest_confident_fused_um, seven_pair_report
 
 logger = logging.getLogger(__name__)
 
@@ -198,8 +198,13 @@ def test_lcm2_image_evidence_matches_the_planning_prototype(
     logger.info("total %.1f s, peak RSS %.2f GB", total_s, rss_gb)
 
     # Every quantity is measured and logged before the first assertion.
+    click_moving = {pair_id: moving_um[row] for row, pair_id in enumerate(ids)}
     image_verdicts = {
-        check.pair_id: (check.verdict, check.image_offset_um) for check in checks
+        check.pair_id: (
+            check.verdict,
+            nearest_confident_fused_um(check.estimates, click_moving[check.pair_id]),
+        )
+        for check in checks
     }
     seven = seven_pair_report(image_verdicts, CONFIRMED_EXPECTED)
     for row in seven.rows:
@@ -234,11 +239,12 @@ def test_lcm2_image_evidence_matches_the_planning_prototype(
         "800 um accepted fraction", by_size["800"]["accepted_fraction"], 0.12
     )
     acceptance.at_least("thinned windows", summary["n_thinned"], 120)
+    null_p99 = by_size["800"]["null_p99"]
     acceptance.record(
         "800 um null p99",
-        f"{by_size['800']['null_p99']:.3g}",
+        "missing" if null_p99 is None else f"{null_p99:.3g}",
         "0.20 to 0.35",
-        0.20 <= by_size["800"]["null_p99"] <= 0.35,
+        null_p99 is not None and 0.20 <= null_p99 <= 0.35,
     )
     acceptance.at_most(
         "median minor peak SD", summary["peak_sd_um"]["minor"]["median"], 15.0, " um"

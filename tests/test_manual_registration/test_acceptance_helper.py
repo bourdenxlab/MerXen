@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
-from ._acceptance import Acceptance, seven_pair_report
+from ._acceptance import Acceptance, nearest_confident_fused_um, seven_pair_report
 
 
 def test_acceptance_logs_every_item_and_raises_once_with_all_failures(
@@ -64,3 +66,32 @@ def test_seven_pair_report_tolerates_a_pair_missing_from_the_check() -> None:
 
     assert (report.n_contradicted, report.n_near) == (0, 1)
     assert report.rows[1] == "pair 99: not in the check"
+
+
+def test_acceptance_records_a_missing_measurement_as_a_failure() -> None:
+    acceptance = Acceptance(logging.getLogger("acceptance-test"), "demo")
+
+    assert acceptance.at_most("peak SD", None, 15.0, " um") is False
+    assert acceptance.at_least("windows", None, 1) is False
+    assert acceptance.at_most("time", 1.0, 2.0) is True
+    with pytest.raises(AssertionError, match="2 of 3 acceptance items failed"):
+        acceptance.finish()
+
+
+def test_nearest_confident_fused_um_ignores_the_best_peak_and_other_estimates() -> None:
+    def estimate(representation: str, confident: bool, x: float) -> SimpleNamespace:
+        return SimpleNamespace(
+            representation=representation,
+            confident=confident,
+            image_moving_xy_um=np.array([x, 0.0]),
+        )
+
+    estimates = [
+        estimate("fused", True, 32.0),  # the higher peak, farther away
+        estimate("fused", True, 18.0),
+        estimate("fused", False, 3.0),
+        estimate("bp20", True, 1.0),
+    ]
+
+    assert nearest_confident_fused_um(estimates, (0.0, 0.0)) == pytest.approx(18.0)
+    assert nearest_confident_fused_um(estimates[2:], (0.0, 0.0)) is None

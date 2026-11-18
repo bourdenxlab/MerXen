@@ -730,7 +730,10 @@ def test_a_click_moved_120_um_is_contradicted_with_a_snap_at_the_truth(
 
 
 def _edge_points(pair: _Pair, count: int, seed: int) -> np.ndarray:
-    """Reference um of points whose 300 um window is 28-34 % tissue."""
+    """Reference um of points just outside the tissue (about 40-160 um from it).
+
+    Their 300 um window is 28-34 % tissue.
+    """
     tissue = pair.reference.tissue
     pixel = pair.reference.pixel_size_um
     geometry = ie._geometry(300.0, ie.ClickCheckParams().search_um, pixel)
@@ -755,6 +758,34 @@ def _edge_points(pair: _Pair, count: int, seed: int) -> np.ndarray:
     return pair.reference.px_to_um(np.stack([columns[picked], rows[picked]], axis=1))
 
 
+def test_check_clicks_draws_its_null_with_the_click_gates(
+    pair: _Pair, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gates: list[tuple[float, float]] = []
+    real_null_models = ie._null_models
+
+    def spy(*args: Any, **kwargs: Any) -> dict[str, ie.NullModel]:
+        gates.append((kwargs["min_tissue_fraction"], kwargs["min_valid_fraction"]))
+        return real_null_models(*args, **kwargs)
+
+    monkeypatch.setattr(ie, "_null_models", spy)
+    reference_um = _deep_tissue_points(pair, 1, seed=3)
+
+    ie.check_clicks(
+        pair.reference,
+        pair.moving,
+        pair_ids=[1],
+        reference_xy_um=reference_um,
+        moving_xy_um=pair.phantom.pull(reference_um),
+        predicted_moving_xy_um=pair.phantom.pull(reference_um),
+        pull_um=pair.phantom.pull,
+        params=ie.ClickCheckParams(null_pairs=20),
+    )
+
+    assert gates
+    assert set(gates) == {(0.2, 0.6)}
+
+
 def test_the_click_check_defaults_are_looser_than_the_window_gates() -> None:
     clicks, windows = ie.ClickCheckParams(), ie.WindowParams()
 
@@ -773,6 +804,17 @@ def test_a_click_at_a_tissue_edge_gets_a_verdict_not_no_tissue(
     # The 300 um window is about 30 % tissue: below the old gate of 0.5.
     assert all(c.reason != "no_tissue" for c in checks)
     assert all(len(c.estimates) > 0 for c in checks)
+    # The match must mean something: truthful edge clicks are confirmed, and the
+    # same clicks displaced by 80 um are not.
+    assert [c.verdict for c in checks] == ["confirmed"] * 4
+    displaced = _check(
+        pair,
+        click_nulls,
+        reference_um,
+        truth + 80.0 * np.array([0.8, 0.6]),
+        predicted_um=truth,
+    )
+    assert all(c.verdict != "confirmed" for c in displaced)
     old_gate = ie.ClickCheckParams(min_tissue_fraction=0.5, min_valid_fraction=0.9)
     skipped = ie.check_clicks(
         pair.reference,

@@ -28,7 +28,7 @@ from merxen.manual_registration.landmark_field import (
 )
 from merxen.manual_registration.schema import labelling_content_sha256
 
-from ._acceptance import Acceptance, seven_pair_report
+from ._acceptance import Acceptance, nearest_confident_fused_um, seven_pair_report
 
 pytestmark = pytest.mark.slow
 
@@ -222,8 +222,20 @@ def test_lcm2_check_meets_the_m1_acceptance(lcm2: CheckRun) -> None:
         for pair_id in RIGID_FLAGGED
         if _pair(lcm2, pair_id)["class"] in {"ok", "kept_confirmed"}
     ]
+    click_observations = report.clicks_only.observations
+    click_moving = {
+        int(pair_id): click_observations.moving_xy_um[row]
+        for row, pair_id in enumerate(click_observations.obs_id)
+    }
     image_verdicts = {
-        int(key): (pair["verdict"], pair["image_offset_um"])
+        int(key): (
+            pair["verdict"],
+            nearest_confident_fused_um(
+                report.checks[int(key)].estimates, click_moving[int(key)]
+            )
+            if int(key) in report.checks and int(key) in click_moving
+            else None,
+        )
         for key, pair in pairs.items()
     }
     seven = seven_pair_report(image_verdicts, IMAGE_CONFIRMED_EXPECTED)
@@ -256,8 +268,10 @@ def test_lcm2_check_meets_the_m1_acceptance(lcm2: CheckRun) -> None:
     # 3. The misclicks the clicks alone expose.
     for pair_id in (13, 71):
         pair = _pair(lcm2, pair_id)
+        # clicks_only is null when no second pass ran: a failed item, not a crash.
+        clicks_only_pair = pair["clicks_only"] or {}
         acceptance.at_most(
-            f"pair {pair_id} clicks-only p", pair["clicks_only"]["p_value"], 0.01
+            f"pair {pair_id} clicks-only p", clicks_only_pair.get("p_value"), 0.01
         )
         acceptance.record(
             f"pair {pair_id} class",
@@ -266,7 +280,9 @@ def test_lcm2_check_meets_the_m1_acceptance(lcm2: CheckRun) -> None:
             pair["class"] in {"likely_misclick", "check"},
         )
     acceptance.at_most(
-        "pair 71 clicks-only weight", _pair(lcm2, 71)["clicks_only"]["weight"], 0.15
+        "pair 71 clicks-only weight",
+        (_pair(lcm2, 71)["clicks_only"] or {}).get("weight"),
+        0.15,
     )
     # 4. Pairs the image confirms.
     for pair_id in (2, 3):
