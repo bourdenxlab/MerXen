@@ -35,6 +35,7 @@ from merxen.manual_registration.field_fit import (
 from merxen.manual_registration.image_evidence import (
     ChannelRoles,
     ClickCheck,
+    ClickProfile,
     WindowObservations,
 )
 from merxen.manual_registration.landmark_field import Suggestion
@@ -509,12 +510,29 @@ def test_image_evidence_without_roles_is_refused(phantom: FieldPhantom) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _profile(
+    axis: tuple[float, float] = (1.0, 0.0), *, elongated: bool = True
+) -> ClickProfile:
+    unit = np.array(axis, dtype=float) / np.hypot(*axis)
+    return ClickProfile(
+        elongated=elongated,
+        elongation=4.0 if elongated else 1.2,
+        length_um=180.0,
+        width_um=40.0,
+        area_um2=5000.0,
+        axis_reference_xy=unit,
+        axis_moving_xy=unit,
+        masked=elongated,
+    )
+
+
 def _click_check(
     pair_id: int,
     verdict: str,
     *,
     strength: str | None = None,
     direction: tuple[float, float] | None = None,
+    profile: ClickProfile | None = None,
 ) -> ClickCheck:
     return ClickCheck(
         pair_id=pair_id,
@@ -532,6 +550,7 @@ def _click_check(
         estimates=(),
         reason="fake",
         strength=strength,
+        profile=profile,
     )
 
 
@@ -578,9 +597,12 @@ def fake_images(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         return state.windows
 
     monkeypatch.setattr(field_fit, "load_role_images", load)
-    monkeypatch.setattr(
-        field_fit, "compute_representation", lambda _i: SimpleNamespace()
-    )
+
+    def represent(_images: Any, params: Any = None) -> SimpleNamespace:
+        state.representation_params = params
+        return SimpleNamespace()
+
+    monkeypatch.setattr(field_fit, "compute_representation", represent)
     monkeypatch.setattr(field_fit, "warp_role_images", warp)
     monkeypatch.setattr(field_fit, "check_clicks", check)
     monkeypatch.setattr(field_fit, "tissue_window_observations", windows)
@@ -660,6 +682,64 @@ def test_ridge_clicks_get_the_ridge_shape(
     np.testing.assert_allclose(shapes[0], np.eye(2))
     assert report.verdict[2] == report.verdict[3] == "ridge"
     assert report.field.components == 1
+
+
+def test_vessel_profile_clicks_get_along_axis_noise_and_are_never_exempt(
+    phantom: FieldPhantom, fake_images: SimpleNamespace
+) -> None:
+    fake_images.checks = {
+        1: _click_check(1, "confirmed", strength="strong", profile=_profile((1, 0))),
+        2: _click_check(2, "confirmed", strength="strong"),
+        3: _click_check(3, "inconclusive", profile=_profile((0.0, 2.0))),
+        4: _click_check(
+            4, "confirmed", strength="strong", profile=_profile(elongated=False)
+        ),
+        5: _click_check(5, "ridge", direction=(1.0, 0.0), profile=_profile((1, 0))),
+    }
+    report, *_ = _build(phantom, image_check=True, windows=False)
+    assert fake_images.representation_params.vessel_mask is True
+    assert report.has_second_pass is True
+    obs = report.field.observations
+    sd2 = 45.0**2
+    np.testing.assert_allclose(obs.fixed_cov_um2[0], np.diag([sd2, 0.0]))
+    np.testing.assert_allclose(obs.fixed_cov_um2[2], np.diag([0.0, sd2]), atol=1e-9)
+    np.testing.assert_allclose(obs.fixed_cov_um2[4], np.diag([sd2, 0.0]))
+    assert not obs.fixed_cov_um2[[1, 3, 5]].any()
+    # A vessel-end confirmation is never exempt; a compact profile's still is.
+    assert list(report.em_exempt[:5]) == [False, True, False, True, False]
+    assert list(report.vessel_profile[:6]) == [True, False, True, False, True, False]
+    # The ridge shape and the vessel axis noise combine.
+    ratio = 60.0 / 27.0
+    np.testing.assert_allclose(obs.shape_cov[4], np.diag([ratio, 1.0 / ratio]))
+    np.testing.assert_allclose(obs.shape_cov[0], np.eye(2))
+
+
+def test_the_along_axis_sd_setting_scales_the_vessel_noise_and_zero_turns_it_off(
+    phantom: FieldPhantom, fake_images: SimpleNamespace
+) -> None:
+    fake_images.checks = {
+        1: _click_check(1, "confirmed", strength="strong", profile=_profile((1, 0))),
+    }
+    report, *_ = _build(
+        phantom,
+        image_check=True,
+        windows=False,
+        row_settings="field_vessel_click_along_sd_um=30",
+    )
+    np.testing.assert_allclose(
+        report.field.observations.fixed_cov_um2[0], np.diag([900.0, 0.0])
+    )
+    off, *_ = _build(
+        phantom,
+        image_check=True,
+        windows=False,
+        row_settings="field_vessel_click_along_sd_um=0;field_vessel_mask=false",
+    )
+    assert fake_images.representation_params.vessel_mask is False
+    # Nothing changes the clicks: pass 2 is pass 1, and the click stays unexempt.
+    assert off.has_second_pass is False
+    assert not off.em_exempt.any()
+    assert off.vessel_profile[0]
 
 
 def test_inconclusive_verdicts_alone_leave_pass_two_equal_to_pass_one(
@@ -809,7 +889,7 @@ def test_check_payload_without_a_second_pass(phantom: FieldPhantom) -> None:
     check = parse_check_attrs(payload)
     assert check.field.loo_um_clicks_only is None
     assert check.algorithm == {
-        "landmark_field": "robust_gp_matern52_v1",
+        "landmark_field": "robust_gp_matern52_v2",
         "image_evidence": None,
     }
     assert all(pair.clicks_only is None for pair in check.pairs.values())
@@ -869,6 +949,7 @@ def test_check_payload_with_a_second_pass_and_details(
     fake_images.checks = {
         1: _click_check(1, "confirmed", strength="strong"),
         2: _click_check(2, "confirmed", strength="weak"),
+        3: _click_check(3, "inconclusive", profile=_profile((0.6, 0.8))),
         gross[0] + 1: _click_check(gross[0] + 1, "contradicted"),
     }
     report, _, store, labelling, settings = _build(
@@ -877,7 +958,7 @@ def test_check_payload_with_a_second_pass_and_details(
     payload = _payload(report, store, labelling, settings)
     canonical_json(payload)
     check = parse_check_attrs(payload)
-    assert check.algorithm["image_evidence"] == "image_evidence_bp20_v2"
+    assert check.algorithm["image_evidence"] == "image_evidence_bp20_v3"
     assert check.field.n_windows == 25
     assert check.field.loo_um_clicks_only is not None
     assert check.field.hyperparameters.short_length_um is not None
@@ -892,6 +973,9 @@ def test_check_payload_with_a_second_pass_and_details(
     snap = check.pairs[str(gross[0] + 1)].snap_moving_xy_px
     assert snap == (2500.0, 2000.0)
     assert check.pairs["1"].image_offset_um == 4.0
+    assert check.pairs["3"].vessel_profile is True
+    assert payload["pairs"]["3"]["vessel_profile"] is True
+    assert check.pairs["1"].vessel_profile is False
     details = details_payload(report)
     assert set(details) == {
         "click_estimates",
@@ -906,6 +990,10 @@ def test_check_payload_with_a_second_pass_and_details(
         details["field_model"]["schema"] == "merxen.manual_registration.landmark_field"
     )
     assert details["click_estimates"]["1"]["reason"] == "fake"
+    assert details["click_estimates"]["1"]["profile"] is None
+    profile = details["click_estimates"]["3"]["profile"]
+    assert profile["elongated"] is True and profile["masked"] is True
+    assert profile["axis_moving_xy"] == pytest.approx([0.6, 0.8])
     canonical_json(details)
 
 

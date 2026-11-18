@@ -551,7 +551,7 @@ class CheckClicksOnly(BaseModel):
 
 
 class CheckPair(BaseModel):
-    """One pair of the check report (contract C3 plus the A3 trust keys)."""
+    """One pair of the check report (contract C3, A3 trust keys, the vessel flag)."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -570,6 +570,7 @@ class CheckPair(BaseModel):
     pair_class: CheckClass = Field(alias="class")
     em_exempt: bool = False
     confirm_strength: Literal["strong", "weak"] | None = None
+    vessel_profile: bool = False
 
     @field_validator(
         "weight",

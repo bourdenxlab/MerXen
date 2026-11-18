@@ -295,8 +295,8 @@ def test_preview_registration_recovers_the_warp_the_similarity_cannot(
         summary["matrices"]["field_base_full"]
         == summary["matrices"]["final_affine_full"]
     )
-    assert summary["algorithm"]["landmark_field"] == "robust_gp_matern52_v1"
-    assert summary["algorithm"]["image_evidence"] == "image_evidence_bp20_v2"
+    assert summary["algorithm"]["landmark_field"] == "robust_gp_matern52_v2"
+    assert summary["algorithm"]["image_evidence"] == "image_evidence_bp20_v3"
     assert summary["fit"]["model"] == "similarity"
 
 
@@ -595,7 +595,7 @@ def test_windows_enter_the_registered_field(
     assert block["windows"] is not None
     assert block["n_windows"] == block["n_observations"].get("window", 0)
     assert block["loo_um_clicks_only"] is not None or block["n_windows"] == 0
-    assert summary["algorithm"]["image_evidence"] == "image_evidence_bp20_v2"
+    assert summary["algorithm"]["image_evidence"] == "image_evidence_bp20_v3"
     assert (
         summary["tissue_qc"]["pearson"]["final"]
         > summary["tissue_qc"]["pearson"]["affine"]

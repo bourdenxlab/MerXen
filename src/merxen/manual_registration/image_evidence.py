@@ -140,7 +140,9 @@ def summarise_scores(
 
 # v2: the click check's gates became 0.2 / 0.6 (v1: 0.5 / 0.9), which changes verdicts;
 # the version is part of the register provenance digest, so v1 results are not reused.
-IMAGE_EVIDENCE_ALGORITHM = "image_evidence_bp20_v2"
+# v3: elongated vessel profiles are masked (normalised convolution and masked NCC)
+# and every click check carries the vessel profile under the click.
+IMAGE_EVIDENCE_ALGORITHM = "image_evidence_bp20_v3"
 ROLES: tuple[str, ...] = ("at8", "map2", "dapi")
 WORKING_PIXEL_SIZE_UM = 2.76
 _SCOPES: tuple[str, ...] = ("reference", "moving")
@@ -538,8 +540,77 @@ _MAX_OTSU_SAMPLE = 1_000_000
 
 
 @dataclass(frozen=True)
+class VesselMaskParams:
+    """Parameters of the vessel mask and of the vessel profile under a click.
+
+    Non-neuropil pixels are MAP2-poor (below the glass level plus ``map2_fraction``
+    of the way to the local neuropil level), MAP2-reduced (``map2_reduced_fraction``)
+    and AT8-dark (a lumen lacks the neuropil staining of both channels), or bright
+    in both AT8 and DAPI (erythrocytes and vessel walls autofluoresce; tangles are
+    AT8-bright but not DAPI-bright). Their connected components (holes of the
+    tissue mask included) are vessel profiles when their area lies in
+    ``[min_area_um2, max_area_um2]`` (larger ones are tissue gaps and tears), their
+    elongation is at least ``min_elongation`` and their length at least
+    ``min_length_um``; components that run along the tissue edge for more than half
+    their length are pial strips, not vessels. Length and width are
+    ``4 sqrt(lambda)`` of the pixel second moments.
+
+    Attributes:
+        smooth_sigma_um: Gaussian sigma applied to the log channels first.
+        neuropil_sigma_um: Sigma of the local MAP2 (neuropil) level.
+        map2_fraction: Fraction of the way from glass to neuropil below which a
+            pixel is MAP2-poor.
+        map2_reduced_fraction: The same fraction for the MAP2-reduced, AT8-dark
+            rule.
+        background_sigma_um: Sigma of the local background of the AT8 and DAPI
+            z-scores.
+        at8_dark_z: Robust AT8 z-score below which a pixel is AT8-dark.
+        at8_z: Robust AT8 z-score of the autofluorescence rule.
+        dapi_z: Robust DAPI z-score of the autofluorescence rule.
+        opening_um: Radius of the opening that cuts thin bridges between dark
+            spots first.
+        closing_um: Radius of the closing that bridges nuclei inside lumens.
+        fill_holes_max_um2: Holes of a component up to this area are filled.
+        min_area_um2: Smallest component area.
+        max_area_um2: Largest component area (larger: a gap, never a vessel).
+        min_elongation: Smallest ``sqrt(lmax / lmin)`` of an elongated profile.
+        min_length_um: Smallest length of an elongated profile.
+        dilation_um: Dilation of the masked profiles (walls, perivascular space).
+        click_search_um: A click sits on a profile when the profile comes this
+            close to it.
+        click_clip_um: Radius around the click within which the profile's local
+            axis is measured.
+    """
+
+    smooth_sigma_um: float = 3.0
+    neuropil_sigma_um: float = 50.0
+    map2_fraction: float = 0.5
+    map2_reduced_fraction: float = 0.8
+    background_sigma_um: float = 50.0
+    at8_dark_z: float = -2.0
+    at8_z: float = 2.0
+    dapi_z: float = 1.0
+    opening_um: float = 2.76
+    closing_um: float = 3.0
+    fill_holes_max_um2: float = 2500.0
+    min_area_um2: float = 150.0
+    max_area_um2: float = 30000.0
+    min_elongation: float = 2.0
+    min_length_um: float = 40.0
+    dilation_um: float = 10.0
+    click_search_um: float = 15.0
+    click_clip_um: float = 200.0
+
+
+@dataclass(frozen=True)
 class RepresentationParams:
-    """Parameters of the band-pass and orientation representations."""
+    """Parameters of the band-pass and orientation representations.
+
+    With ``vessel_mask`` the elongated vessel profiles (see
+    :class:`VesselMaskParams`) are excluded: they never feed the band-pass and
+    orientation filters (normalised convolution) and the correlations ignore them
+    (masked NCC). The profiles are detected either way, for the click check.
+    """
 
     dog_sigmas_um: tuple[float, float] = (20.0, 60.0)
     tissue_sigma_um: float = 10.0
@@ -552,6 +623,8 @@ class RepresentationParams:
     soma_tophat_sigma_um: float = 50.0
     soma_quantile: float = 0.995
     soma_dilation_um: float = 5.0
+    vessel_mask: bool = True
+    vessel: VesselMaskParams = VesselMaskParams()
 
 
 @dataclass(frozen=True, eq=False)
@@ -568,6 +641,11 @@ class Representation:
         pixel_size_um: Working pixel size.
         to_level0: 3x3 working px to full-frame level-0 px.
         level0_pixel_size_um: Level-0 pixel size.
+        structure: Non-neuropil pixels (vessel candidates), or None.
+        vessel: The masked vessel profiles (dilated), or None.
+        valid: Pixels that feed the filters and the correlations; None means all
+            (no vessel mask).
+        vessel_params: Parameters the vessel profiles were found with.
     """
 
     bands: np.ndarray
@@ -578,6 +656,10 @@ class Representation:
     pixel_size_um: float
     to_level0: np.ndarray
     level0_pixel_size_um: float
+    structure: np.ndarray | None = None
+    vessel: np.ndarray | None = None
+    valid: np.ndarray | None = None
+    vessel_params: VesselMaskParams | None = None
 
     def um_to_px(self, xy_um: ArrayLike) -> np.ndarray:
         """Map full-frame um to working px ``(x, y)`` (fractional)."""
@@ -691,12 +773,27 @@ def _glass_level(
     return 0.0
 
 
+def _normalised_blur(
+    weighted: np.ndarray, weight: np.ndarray, sigma_px: float
+) -> np.ndarray:
+    """Normalised convolution: the blur of ``image * weight`` over that of ``weight``.
+
+    Pixels of zero weight never feed the result; where no weighted pixel is near,
+    the value is meaningless (the caller masks it).
+    """
+    return np.asarray(
+        _blur(weighted, sigma_px) / np.maximum(_blur(weight, sigma_px), 1e-6),
+        dtype=np.float32,
+    )
+
+
 def _band(
     images: RoleImages,
     role: str,
     params: RepresentationParams,
     covered: np.ndarray,
     tissue: np.ndarray,
+    valid: np.ndarray | None = None,
 ) -> np.ndarray:
     pixel = images.pixel_size_um
     log_image = np.log1p(np.clip(images.images[role], 0.0, None)).astype(np.float32)
@@ -710,7 +807,16 @@ def _band(
             soma = cv2.dilate(soma.astype(np.uint8), _disk_kernel(radius)) > 0
         log_image[soma] = background[soma]
     low, high = params.dog_sigmas_um
-    band = _blur(log_image, low / pixel) - _blur(log_image, high / pixel)
+    if valid is None:
+        band = _blur(log_image, low / pixel) - _blur(log_image, high / pixel)
+    else:
+        weight = valid.astype(np.float32)
+        weighted = log_image * weight
+        band = _normalised_blur(weighted, weight, low / pixel) - _normalised_blur(
+            weighted, weight, high / pixel
+        )
+        band[~valid] = 0.0
+        tissue = tissue & valid
     reference_region = tissue if tissue.any() else covered
     if reference_region.any():
         values = band[reference_region]
@@ -725,14 +831,28 @@ def _orientation(
     tissue: np.ndarray,
     params: RepresentationParams,
     pixel_size_um: float,
+    valid: np.ndarray | None = None,
 ) -> np.ndarray:
     log_image = np.log1p(np.clip(map2, 0.0, None)).astype(np.float32)
-    smooth = _blur(log_image, params.orientation_gradient_sigma_um / pixel_size_um)
-    grad_y, grad_x = np.gradient(smooth)
+    gradient_sigma = params.orientation_gradient_sigma_um / pixel_size_um
     sigma = params.orientation_integration_sigma_um / pixel_size_um
-    jxx = _blur(grad_x * grad_x, sigma)
-    jyy = _blur(grad_y * grad_y, sigma)
-    jxy = _blur(grad_x * grad_y, sigma)
+    if valid is None:
+        smooth = _blur(log_image, gradient_sigma)
+        grad_y, grad_x = np.gradient(smooth)
+        jxx = _blur(grad_x * grad_x, sigma)
+        jyy = _blur(grad_y * grad_y, sigma)
+        jxy = _blur(grad_x * grad_y, sigma)
+    else:
+        # Masked pixels are filled from their neighbours before the gradient and
+        # carry no weight in the structure tensor, so a vessel's outline never
+        # sets the orientation of the tissue around it.
+        weight = valid.astype(np.float32)
+        smooth = _normalised_blur(log_image * weight, weight, gradient_sigma)
+        grad_y, grad_x = np.gradient(smooth)
+        jxx = _normalised_blur(grad_x * grad_x * weight, weight, sigma)
+        jyy = _normalised_blur(grad_y * grad_y * weight, weight, sigma)
+        jxy = _normalised_blur(grad_x * grad_y * weight, weight, sigma)
+        tissue = tissue & valid
     trace = jxx + jyy
     # The floor keeps flat tissue from turning noise into a confident orientation.
     floor = 1e-3 * float(trace[tissue].mean()) if tissue.any() else 1e-12
@@ -742,10 +862,153 @@ def _orientation(
     return np.asarray(vector, dtype=np.float32)
 
 
+# ---------------------------------------------------------------------------
+# Vessel profiles
+# ---------------------------------------------------------------------------
+
+
+def _component_covariances(labels: np.ndarray, count: int) -> np.ndarray:
+    """Pixel covariance ``(count + 1, 2, 2)`` of every label (px^2; 0 unused)."""
+    rows, columns = np.nonzero(labels)
+    label = labels[rows, columns]
+    xs, ys = columns.astype(np.float64), rows.astype(np.float64)
+    n = np.maximum(np.bincount(label, minlength=count + 1).astype(np.float64), 1.0)
+    mean_x = np.bincount(label, xs, count + 1) / n
+    mean_y = np.bincount(label, ys, count + 1) / n
+    # 1/12 px^2 is the variance of one uniform pixel: it keeps a one-pixel-wide
+    # component's elongation finite.
+    cov = np.empty((count + 1, 2, 2))
+    cov[:, 0, 0] = np.bincount(label, xs * xs, count + 1) / n - mean_x**2 + 1 / 12
+    cov[:, 1, 1] = np.bincount(label, ys * ys, count + 1) / n - mean_y**2 + 1 / 12
+    cov[:, 0, 1] = np.bincount(label, xs * ys, count + 1) / n - mean_x * mean_y
+    cov[:, 1, 0] = cov[:, 0, 1]
+    return cov
+
+
+def _small_holes(mask: np.ndarray, max_area_px: float) -> np.ndarray:
+    """Background components of ``mask`` that miss the border and are small."""
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        (~mask).astype(np.uint8), connectivity=4
+    )
+    height, width = mask.shape
+    x0, y0 = stats[:, cv2.CC_STAT_LEFT], stats[:, cv2.CC_STAT_TOP]
+    x1 = x0 + stats[:, cv2.CC_STAT_WIDTH]
+    y1 = y0 + stats[:, cv2.CC_STAT_HEIGHT]
+    enclosed = (x0 > 0) & (y0 > 0) & (x1 < width) & (y1 < height)
+    keep = enclosed & (stats[:, cv2.CC_STAT_AREA] <= max_area_px)
+    keep[0] = False  # label 0 is ``mask`` itself
+    holes = keep[labels]
+    return np.asarray(holes)
+
+
+def _robust_z(values: np.ndarray, region: np.ndarray) -> np.ndarray:
+    sample = values[region]
+    median = float(np.median(sample))
+    scale = 1.4826 * float(np.median(np.abs(sample - median)))
+    return np.asarray((values - median) / max(scale, 1e-6), dtype=np.float32)
+
+
+def _vessel_masks(
+    images: RoleImages,
+    covered: np.ndarray,
+    tissue: np.ndarray,
+    params: VesselMaskParams,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Non-neuropil structure and the dilated elongated vessel profiles.
+
+    Returns:
+        ``(structure, vessel)`` boolean masks on the grid of ``images``.
+    """
+    empty = np.zeros_like(tissue)
+    if not tissue.any():
+        return empty, empty.copy()
+    pixel = images.pixel_size_um
+    area_px = pixel * pixel
+    # The tissue mask (DAPI) leaves large lumens out as holes; they belong to the
+    # vessels around them.
+    domain = (tissue | _small_holes(tissue, params.max_area_um2 / area_px)) & covered
+    weight = tissue.astype(np.float32)
+    smooth = {
+        role: _blur(
+            np.log1p(np.clip(images.images[role], 0.0, None)).astype(np.float32),
+            params.smooth_sigma_um / pixel,
+        )
+        for role in ROLES
+    }
+    map2 = smooth["map2"]
+    neuropil = _normalised_blur(map2 * weight, weight, params.neuropil_sigma_um / pixel)
+    glass = _glass_level(map2, covered, tissue)
+    level = (map2 - glass) / np.maximum(neuropil - glass, 1e-6)
+    z_score = {
+        role: _robust_z(
+            smooth[role]
+            - _normalised_blur(
+                smooth[role] * weight, weight, params.background_sigma_um / pixel
+            ),
+            tissue,
+        )
+        for role in ("at8", "dapi")
+    }
+    poor = (level < params.map2_fraction) | (
+        (level < params.map2_reduced_fraction) & (z_score["at8"] < params.at8_dark_z)
+    )
+    bright = (z_score["at8"] > params.at8_z) & (z_score["dapi"] > params.dapi_z)
+    structure = (poor | bright) & domain
+    for operation, radius_um in (
+        (cv2.MORPH_OPEN, params.opening_um),
+        (cv2.MORPH_CLOSE, params.closing_um),
+    ):
+        radius = int(round(radius_um / pixel))
+        if radius > 0:
+            structure = (
+                cv2.morphologyEx(
+                    structure.astype(np.uint8), operation, _disk_kernel(radius)
+                )
+                > 0
+            )
+    structure = (
+        structure | _small_holes(structure, params.fill_holes_max_um2 / area_px)
+    ) & domain
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        structure.astype(np.uint8), connectivity=8
+    )
+    if count <= 1:
+        return structure, empty
+    values = np.clip(
+        np.linalg.eigvalsh(_component_covariances(labels, count - 1)), 0.0, None
+    )
+    area = stats[:, cv2.CC_STAT_AREA].astype(np.float64) * area_px
+    length = 4.0 * np.sqrt(values[:, 1]) * pixel
+    elongation = np.sqrt(values[:, 1] / np.maximum(values[:, 0], 1e-9))
+    # A strip along the tissue edge (pia, a torn border) is no vessel: it touches
+    # the outside over much of its length.
+    outside = (
+        cv2.dilate((~domain).astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    ) & structure
+    rim_um = np.bincount(labels[outside], minlength=count).astype(np.float64) * pixel
+    selected = (
+        (area >= params.min_area_um2)
+        & (area <= params.max_area_um2)
+        & (elongation >= params.min_elongation)
+        & (length >= params.min_length_um)
+        & (rim_um <= 0.5 * length)
+    )
+    selected[0] = False
+    vessel = selected[labels]
+    radius = int(round(params.dilation_um / pixel))
+    if radius > 0 and vessel.any():
+        vessel = cv2.dilate(vessel.astype(np.uint8), _disk_kernel(radius)) > 0
+    return structure, np.asarray(vessel & covered)
+
+
 def compute_representation(
     images: RoleImages, params: RepresentationParams | None = None
 ) -> Representation:
     """Compute the band-pass bands, MAP2 orientation and masks of an image.
+
+    The elongated vessel profiles are always found; with ``params.vessel_mask``
+    (the default) they are excluded from the bands, the orientation and every
+    correlation made with the representation.
 
     Args:
         images: Role images (all of ``ROLES``).
@@ -762,11 +1025,15 @@ def compute_representation(
     if missing:
         raise ValueError(f"role images lack {missing}")
     covered, tissue, grey_matter = _masks(images, params, min_sigma_px=0.0)
+    structure, vessel = _vessel_masks(images, covered, tissue, params.vessel)
+    # Without a masked pixel the masked filters equal the plain ones; the plain
+    # path is faster and leaves vessel-free results bit-identical.
+    valid = ~vessel if params.vessel_mask and vessel.any() else None
     bands = np.stack(
-        [_band(images, role, params, covered, tissue) for role in ROLES]
+        [_band(images, role, params, covered, tissue, valid) for role in ROLES]
     ).astype(np.float32)
     orientation = _orientation(
-        images.images["map2"], tissue, params, images.pixel_size_um
+        images.images["map2"], tissue, params, images.pixel_size_um, valid
     )
     return Representation(
         bands=bands,
@@ -777,6 +1044,10 @@ def compute_representation(
         pixel_size_um=images.pixel_size_um,
         to_level0=images.to_level0,
         level0_pixel_size_um=images.level0_pixel_size_um,
+        structure=structure,
+        vessel=vessel,
+        valid=valid,
+        vessel_params=params.vessel,
     )
 
 
@@ -807,6 +1078,103 @@ def ncc_map(template: np.ndarray, search: np.ndarray) -> np.ndarray:
     return np.asarray(
         np.nan_to_num(scores, nan=-1.0, posinf=-1.0, neginf=-1.0), dtype=np.float32
     )
+
+
+# A masked correlation needs at least this fraction of the template's valid pixels to
+# overlap valid search pixels at a shift, and a template at least this valid.
+_MASKED_MIN_OVERLAP = 0.5
+_MASKED_MIN_TEMPLATE_VALID = 0.25
+
+
+def _ccorr(image: np.ndarray, template: np.ndarray) -> np.ndarray:
+    """Plain cross-correlation sums (channels summed), float64."""
+    return np.asarray(
+        cv2.matchTemplate(
+            np.ascontiguousarray(image, dtype=np.float32),
+            np.ascontiguousarray(template, dtype=np.float32),
+            cv2.TM_CCORR,
+        ),
+        dtype=np.float64,
+    )
+
+
+def masked_ncc_map(
+    template: np.ndarray,
+    template_valid: np.ndarray,
+    search: np.ndarray,
+    search_valid: np.ndarray,
+    *,
+    min_overlap: float = _MASKED_MIN_OVERLAP,
+    min_template_valid: float = _MASKED_MIN_TEMPLATE_VALID,
+) -> np.ndarray:
+    """Masked normalised cross-correlation (Padfield 2012), joint over the channels.
+
+    At each shift only the pixels valid in both the template and the search
+    image count: the means, the variances and the products are taken over that
+    overlap, per channel, and summed over the channels as :func:`ncc_map` does.
+    With every pixel valid the result equals :func:`ncc_map`.
+
+    Args:
+        template: ``(C, h, w)``.
+        template_valid: ``(h, w)`` boolean.
+        search: ``(C, H, W)``.
+        search_valid: ``(H, W)`` boolean.
+        min_overlap: A shift whose overlap is below this fraction of the
+            template's valid pixels scores -1.
+        min_template_valid: A template valid on less than this fraction of its
+            area scores -1 everywhere.
+
+    Returns:
+        float32 ``(H - h + 1, W - w + 1)`` in ``[-1, 1]``.
+    """
+    if template.ndim != 3 or search.ndim != 3 or template.shape[0] != search.shape[0]:
+        raise ValueError("template and search must be (C, h, w) and (C, H, W)")
+    if template_valid.shape != template.shape[1:] or (
+        search_valid.shape != search.shape[1:]
+    ):
+        raise ValueError("the valid masks must match the images")
+    if template_valid.all() and search_valid.all():
+        return ncc_map(template, search)
+    out_shape = (
+        search.shape[1] - template.shape[1] + 1,
+        search.shape[2] - template.shape[2] + 1,
+    )
+    template_count = float(template_valid.sum())
+    if template_count < min_template_valid * template_valid.size:
+        return np.full(out_shape, -1.0, dtype=np.float32)
+    template_mask = template_valid.astype(np.float32)
+    search_mask = search_valid.astype(np.float32)
+    masked_template = template.astype(np.float32) * template_mask
+    masked_search = search.astype(np.float32) * search_mask
+    overlap = _ccorr(search_mask, template_mask)
+    template_sums = [_ccorr(search_mask, channel) for channel in masked_template]
+    search_sums = [_ccorr(channel, template_mask) for channel in masked_search]
+    template_squares = _ccorr(search_mask, (masked_template**2).sum(axis=0))
+    search_squares = _ccorr((masked_search**2).sum(axis=0), template_mask)
+    products = _ccorr(
+        np.moveaxis(masked_search, 0, -1), np.moveaxis(masked_template, 0, -1)
+    )
+    safe = np.maximum(overlap, 1.0)
+    numerator = (
+        products
+        - sum(t * f for t, f in zip(template_sums, search_sums, strict=True)) / safe
+    )
+    template_var = template_squares - sum(t * t for t in template_sums) / safe
+    search_var = search_squares - sum(f * f for f in search_sums) / safe
+    # The sums come from float32 correlations: a variance within their rounding of
+    # zero is a flat overlap, not a signal.
+    template_floor = 1e-6 * max(float(np.abs(template_squares).max()), 1e-12)
+    search_floor = 1e-6 * max(float(np.abs(search_squares).max()), 1e-12)
+    usable = (
+        (overlap >= min_overlap * template_count)
+        & (template_var > template_floor)
+        & (search_var > search_floor)
+    )
+    denominator = np.sqrt(
+        np.clip(template_var, 1e-30, None) * np.clip(search_var, 1e-30, None)
+    )
+    scores = np.where(usable, numerator / denominator, -1.0)
+    return np.asarray(np.clip(scores, -1.0, 1.0), dtype=np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -1025,7 +1393,9 @@ def _correlate(
 
     The template is the reference window centred at ``reference_xy`` (px); the
     search region is the moving window plus the search margin, centred at
-    ``moving_xy``. The fused map is the mean of the two others.
+    ``moving_xy``. The fused map is the mean of the two others. When either
+    representation masks vessels the correlation is the masked NCC over the
+    pixels valid in both.
     """
     half, margin = geometry.half, geometry.margin
     template_slice = (
@@ -1036,14 +1406,33 @@ def _correlate(
         slice(moving_xy[1] - margin, moving_xy[1] + margin + 1),
         slice(moving_xy[0] - margin, moving_xy[0] + margin + 1),
     )
+    masked = reference.valid is not None or moving.valid is not None
+    template_valid = region_valid = None
+    if masked:
+        template_valid = (
+            np.ones_like(reference.tissue[template_slice])
+            if reference.valid is None
+            else reference.valid[template_slice]
+        )
+        region_valid = (
+            np.ones_like(moving.tissue[region_slice])
+            if moving.valid is None
+            else moving.valid[region_slice]
+        )
+
+    def correlate(template: np.ndarray, search: np.ndarray) -> np.ndarray:
+        if template_valid is None or region_valid is None:
+            return ncc_map(template, search)
+        return masked_ncc_map(template, template_valid, search, region_valid)
+
     maps: dict[str, np.ndarray] = {}
     if use_bands:
-        maps["bp20"] = ncc_map(
+        maps["bp20"] = correlate(
             reference.bands[(slice(None), *template_slice)],
             moving.bands[(slice(None), *region_slice)],
         )
     if use_orientation:
-        maps["orientation"] = ncc_map(
+        maps["orientation"] = correlate(
             reference.orientation[(slice(None), *template_slice)],
             moving.orientation[(slice(None), *region_slice)],
         )
@@ -1316,6 +1705,39 @@ class ClickEstimate:
 
 
 @dataclass(frozen=True, eq=False)
+class ClickProfile:
+    """The vessel profile a click sits on.
+
+    An obliquely cut vessel shows as an elongated profile that translates along
+    its own axis between serial sections, so a click on it (typically on its end)
+    is precise across the axis and not along it.
+
+    Attributes:
+        elongated: The profile is a masked vessel profile and, within
+            ``click_clip_um`` of the click, elongated (``min_elongation``) and long
+            (``min_length_um``) with an area in the vessel range.
+        elongation: ``sqrt(lmax / lmin)`` of the profile within the clip radius.
+        length_um: Its length (``4 sqrt(lmax)``).
+        width_um: Its width (``4 sqrt(lmin)``).
+        area_um2: Area of the whole profile (within the search box).
+        axis_reference_xy: Unit major axis in the reference frame.
+        axis_moving_xy: Unit major axis in the moving frame (through the pull's
+            Jacobian at the click).
+        masked: A masked vessel pixel lies within ``click_search_um`` of the
+            click.
+    """
+
+    elongated: bool
+    elongation: float
+    length_um: float
+    width_um: float
+    area_um2: float
+    axis_reference_xy: np.ndarray
+    axis_moving_xy: np.ndarray
+    masked: bool
+
+
+@dataclass(frozen=True, eq=False)
 class ClickCheck:
     """The image verdict of one click.
 
@@ -1335,6 +1757,7 @@ class ClickCheck:
         estimates: Every estimate made.
         reason: Short reason code.
         strength: ``strong`` or ``weak`` for a confirmed verdict, else None.
+        profile: The vessel profile under the click, or None when there is none.
     """
 
     pair_id: int
@@ -1348,6 +1771,12 @@ class ClickCheck:
     estimates: tuple[ClickEstimate, ...]
     reason: str
     strength: str | None = None
+    profile: ClickProfile | None = None
+
+    @property
+    def on_elongated_profile(self) -> bool:
+        """Whether the click sits on an elongated vessel profile."""
+        return self.profile is not None and self.profile.elongated
 
 
 def _not_checked(pair_id: int, reason: str) -> ClickCheck:
@@ -1362,6 +1791,89 @@ def _not_checked(pair_id: int, reason: str) -> ClickCheck:
         elongation=None,
         estimates=(),
         reason=reason,
+    )
+
+
+def _unit(vector: np.ndarray) -> np.ndarray:
+    norm = float(np.hypot(vector[0], vector[1]))
+    return np.asarray(vector / norm if norm > 0.0 else vector, dtype=np.float64)
+
+
+def click_profile(
+    reference: Representation, r_um: ArrayLike, jacobian: np.ndarray
+) -> ClickProfile | None:
+    """The vessel profile under a reference click, if any.
+
+    The non-neuropil component with the most pixels within ``click_search_um``
+    of the click is the profile; its local axis comes from the second moments of
+    its pixels within ``click_clip_um``.
+
+    Args:
+        reference: Reference representation (with its vessel structure).
+        r_um: Reference click (full um).
+        jacobian: ``(2, 2)`` Jacobian of the pull at the click (moving um per
+            reference um).
+
+    Returns:
+        The profile, or None without a structure mask, outside the image or with
+        no component near the click.
+    """
+    params = reference.vessel_params
+    structure = reference.structure
+    if params is None or structure is None:
+        return None
+    pixel = reference.pixel_size_um
+    height, width = reference.shape_yx
+    x, y = (float(v) for v in reference.um_to_px(np.asarray(r_um, dtype=float)))
+    if not (0 <= x <= width - 1 and 0 <= y <= height - 1):
+        return None
+    half = int(math.ceil((params.click_clip_um + params.click_search_um) / pixel)) + 1
+    ix, iy = int(round(x)), int(round(y))
+    x0, x1 = max(ix - half, 0), min(ix + half + 1, width)
+    y0, y1 = max(iy - half, 0), min(iy + half + 1, height)
+    local = structure[y0:y1, x0:x1]
+    if not local.any():
+        return None
+    _, labels = cv2.connectedComponents(local.astype(np.uint8), connectivity=8)
+    rows, columns = np.mgrid[y0:y1, x0:x1]
+    distance_um = np.hypot(columns - x, rows - y) * pixel
+    near = (distance_um <= params.click_search_um) & (labels > 0)
+    if not near.any():
+        return None
+    ids, counts = np.unique(labels[near], return_counts=True)
+    component = labels == int(ids[np.argmax(counts)])
+    area_um2 = float(component.sum()) * pixel * pixel
+    clipped = component & (distance_um <= params.click_clip_um)
+    points = np.stack([columns[clipped], rows[clipped]], axis=1).astype(np.float64)
+    centred = points - points.mean(axis=0)
+    cov = centred.T @ centred / len(points) + np.eye(2) / 12.0
+    values, vectors = np.linalg.eigh(cov)
+    values = np.clip(values, 0.0, None)
+    elongation = math.sqrt(values[1] / max(values[0], 1e-9))
+    length_um = 4.0 * math.sqrt(values[1]) * pixel
+    linear = reference.to_level0[:2, :2] * reference.level0_pixel_size_um
+    axis_reference = _unit(linear @ vectors[:, 1])
+    axis_moving = _unit(np.asarray(jacobian, dtype=np.float64) @ axis_reference)
+    vessel = reference.vessel
+    masked = bool(
+        vessel is not None
+        and (vessel[y0:y1, x0:x1] & (distance_um <= params.click_search_um)).any()
+    )
+    elongated = (
+        masked
+        and elongation >= params.min_elongation
+        and length_um >= params.min_length_um
+        and params.min_area_um2 <= area_um2 <= params.max_area_um2
+    )
+    return ClickProfile(
+        elongated=bool(elongated),
+        elongation=float(elongation),
+        length_um=float(length_um),
+        width_um=float(4.0 * math.sqrt(values[0]) * pixel),
+        area_um2=area_um2,
+        axis_reference_xy=axis_reference,
+        axis_moving_xy=axis_moving,
+        masked=masked,
     )
 
 
@@ -1673,7 +2185,9 @@ def check_clicks(
     peak region passes through it, else inconclusive; a click outside either image
     is not checked. A confirmation is ``strong`` (the confirming estimate is at the
     smallest window and no confident non-ridge band-pass estimate disagrees) or
-    ``weak``.
+    ``weak``. Every check also carries the vessel profile under the click
+    (:func:`click_profile`); with the vessel mask on, the vessel itself never
+    feeds an estimate, so it cannot confirm a click on it.
 
     Args:
         reference: Reference representation.
@@ -1723,7 +2237,7 @@ def check_clicks(
     tables = (_box_sum_table(reference.tissue), _box_sum_table(moving_warped.covered))
 
     def run(index: int) -> ClickCheck:
-        return _check_one(
+        check = _check_one(
             ids[index],
             reference,
             moving_warped,
@@ -1737,6 +2251,8 @@ def check_clicks(
             nulls=null_models,
             tables=tables,
         )
+        profile = click_profile(reference, reference_xy[index], jacobians[index])
+        return replace(check, profile=profile)
 
     return list(_map_threads(run, list(range(len(ids))), workers))
 

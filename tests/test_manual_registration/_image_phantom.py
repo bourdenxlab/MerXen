@@ -7,6 +7,11 @@ structure seen through a known warp (a 35 degree rotation about the image centre
 at scale 1.02, plus a sinusoid of 40 um amplitude and 1.5 mm wavelength) with its
 own fine spots and noise. Everything is deterministic in the seed.
 
+Vessel profiles (MAP2- and AT8-dark lumens) can be drawn into one image only, so a
+profile can sit elsewhere in the moving image than the warp puts it: an obliquely
+cut vessel whose profile translates along its axis while the tissue around it
+follows the warp.
+
 Both images sit on a level-0 grid of 1.38 um with a working factor of 2 (contract
 C2's frames). The reference crop starts at the full-frame origin; the moving crop
 starts at ``MOVING_ORIGIN_LEVEL0_PX`` level-0 px, so a moving full-frame um is the
@@ -33,6 +38,8 @@ ROTATION_DEG = 35.0
 SIZE_PX = 2048
 _PAD_PX = 300
 _ROLE_ORDER = ("at8", "map2", "dapi")
+# Log-intensity offsets of a vessel lumen (at8, map2, dapi): no neuropil staining.
+VESSEL_WEIGHTS = np.array([-1.2, -2.0, -0.3], dtype=np.float32)
 
 
 @dataclass(frozen=True, eq=False)
@@ -116,6 +123,7 @@ def _structure(
     extra_tubes_um: Sequence[tuple[float, float, float, float, float]],
     clear_boxes_um: Sequence[tuple[float, float, float, float]],
     tissue_scale: float,
+    texture_scale: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Per-role structure canvases (log units) and the tissue map, canvas frame.
 
@@ -174,7 +182,9 @@ def _structure(
     texture = rng.standard_normal((3, size, size)).astype(np.float32)
     for index in range(3):
         blurred = cv2.GaussianBlur(texture[index], (0, 0), 7.0)
-        texture[index] = blurred / blurred.std() * (0.3 if index == 2 else 0.6)
+        texture[index] = (
+            blurred / blurred.std() * (0.3 if index == 2 else 0.6) * texture_scale
+        )
     for x0, y0, x1, y1 in clear_boxes_um:
         texture[
             :,
@@ -192,6 +202,23 @@ def _structure(
     radius = np.sqrt(u * u + v * v)
     tissue = 1.0 / (1.0 + np.exp(np.clip((radius - 1.0) / 0.03, -50.0, 50.0)))
     return canvas, tissue.astype(np.float32)
+
+
+def _with_vessels(
+    structure: np.ndarray,
+    vessels_um: Sequence[tuple[float, float, float, float, float]],
+) -> np.ndarray:
+    """A copy of the structure canvases with vessel lumens ``(x0, y0, x1, y1, w)``."""
+    out = structure.copy()
+    size = out.shape[1]
+    for x0, y0, x1, y1, width_um in vessels_um:
+        start = np.array([x0 / PIXEL_UM + _PAD_PX, y0 / PIXEL_UM + _PAD_PX])
+        end = np.array([x1 / PIXEL_UM + _PAD_PX, y1 / PIXEL_UM + _PAD_PX])
+        patch = _segment_patch(size, start, end, width_um / 2.355 / PIXEL_UM)
+        if patch is not None:
+            r0, r1, c0, c1, values = patch
+            out[:, r0:r1, c0:c1] += VESSEL_WEIGHTS[:, None, None] * values[None]
+    return out
 
 
 def _fine_detail(rng: np.random.Generator, size: int) -> np.ndarray:
@@ -237,6 +264,9 @@ def make_phantom(
     moving_structure_seed: int | None = None,
     tissue_scale: float = 1.0,
     fine_detail: bool = True,
+    reference_vessels_um: Sequence[tuple[float, float, float, float, float]] = (),
+    moving_vessels_um: Sequence[tuple[float, float, float, float, float]] = (),
+    texture_scale: float = 1.0,
 ) -> Phantom:
     """Render a phantom pair.
 
@@ -255,18 +285,31 @@ def make_phantom(
         tissue_scale: Scale of the tissue outline.
         fine_detail: Whether the independent fine spots and noise are drawn (off:
             the moving image is exactly the warped reference).
+        reference_vessels_um: Vessel lumens ``(x0, y0, x1, y1, width_um)`` in
+            reference um drawn into the reference image only.
+        moving_vessels_um: Vessel lumens in reference um drawn into the moving
+            image only (before the warp, so they travel with it).
+        texture_scale: Scale of the shared fine texture (1: the default).
 
     Returns:
         The phantom with its exact pull and its affine prior.
     """
     rng = np.random.default_rng(seed)
     structure, tissue = _structure(
-        rng, n_tubes, n_ellipses, extra_tubes_um, clear_boxes_um, tissue_scale
+        rng,
+        n_tubes,
+        n_ellipses,
+        extra_tubes_um,
+        clear_boxes_um,
+        tissue_scale,
+        texture_scale,
     )
     size = SIZE_PX + 2 * _PAD_PX
     zeros = np.zeros((3, size, size), dtype=np.float32)
     reference_full = _render(
-        structure, tissue, _fine_detail(rng, size) if fine_detail else zeros
+        _with_vessels(structure, reference_vessels_um),
+        tissue,
+        _fine_detail(rng, size) if fine_detail else zeros,
     )
     reference_images = reference_full[:, _PAD_PX:-_PAD_PX, _PAD_PX:-_PAD_PX]
 
@@ -277,6 +320,7 @@ def make_phantom(
         )
     else:
         structure_m, tissue_m = structure, tissue
+    structure_m = _with_vessels(structure_m, moving_vessels_um)
     # Moving px (canvas frame) -> reference canvas px, then resample the canvas.
     angle = math.radians(ROTATION_DEG)
     scale = 1.02

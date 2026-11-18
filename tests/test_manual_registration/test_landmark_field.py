@@ -868,6 +868,119 @@ def test_ridge_and_normalise_shapes_have_unit_determinant() -> None:
         lf.normalise_shape(np.zeros((2, 2)))
 
 
+def test_axis_covariance_adds_noise_along_the_axis_only() -> None:
+    covariance = lf.axis_covariance([3.0, 4.0], 45.0)
+    along, across = np.array([0.6, 0.8]), np.array([-0.8, 0.6])
+    assert along @ covariance @ along == pytest.approx(45.0**2)
+    assert across @ covariance @ across == pytest.approx(0.0, abs=1e-9)
+    np.testing.assert_allclose(covariance, covariance.T)
+    np.testing.assert_array_equal(lf.axis_covariance([1.0, 0.0], 0.0), np.zeros((2, 2)))
+    for direction, sd in (
+        ([0.0, 0.0], 1.0),
+        ([1.0, math.nan], 1.0),
+        ([1.0, 0.0], -1.0),
+    ):
+        with pytest.raises(ValueError):
+            lf.axis_covariance(direction, sd)
+
+
+def _vessel_end_fit(
+    offset_um: np.ndarray, *, axis_sd_um: float, exempt: bool
+) -> tuple[lf.LandmarkField, int]:
+    """Fit clean phantom clicks with one click displaced by ``offset_um``.
+
+    The displaced click is the one the clean fit predicts best; it becomes a
+    vessel-end click on a vessel along +x. With ``axis_sd_um`` it carries the
+    along-axis covariance; ``exempt`` keeps its weight at 1, as a strong image
+    confirmation did before the vessel mask.
+    """
+    observations, _ = _clean_phantom_observations(seed=12, n_clicks=40)
+    clean = lf.fit_landmark_field(observations).loo().residual_um
+    index = int(np.argmin(np.hypot(clean[:, 0], clean[:, 1])))
+    moving = observations.moving_xy_um.copy()
+    moving[index] += offset_um
+    fixed = np.zeros((observations.n, 2, 2))
+    if axis_sd_um > 0.0:
+        fixed[index] = lf.axis_covariance([1.0, 0.0], axis_sd_um)
+    flags = np.zeros(observations.n, dtype=bool)
+    flags[index] = exempt
+    shifted = lf.FieldObservations(
+        reference_xy_um=observations.reference_xy_um,
+        moving_xy_um=moving,
+        shape_cov=lf.isotropic_shapes(observations.n),
+        fixed_cov_um2=fixed,
+        obs_class=observations.obs_class,
+        obs_id=observations.obs_id,
+        em_exempt=flags,
+    )
+    return lf.fit_landmark_field(shifted), index
+
+
+def _bend(
+    field: lf.LandmarkField, baseline: lf.LandmarkField, index: int
+) -> np.ndarray:
+    point = baseline.observations.reference_xy_um[index : index + 1]
+    return np.asarray((field.mean(point) - baseline.mean(point))[0])
+
+
+def test_a_vessel_end_click_bends_the_field_little_along_its_axis() -> None:
+    along = np.array([80.0, 0.0])
+    baseline, index = _vessel_end_fit(np.zeros(2), axis_sd_um=0.0, exempt=False)
+    exempt, _ = _vessel_end_fit(along, axis_sd_um=0.0, exempt=True)
+    axis, _ = _vessel_end_fit(along, axis_sd_um=45.0, exempt=False)
+
+    # An exempt isotropic click drags the field along the vessel; with the axis
+    # noise the field barely moves (the tissue around a vessel end follows it).
+    assert _bend(exempt, baseline, index)[0] > 10.0
+    assert (
+        abs(_bend(axis, baseline, index)[0]) < 0.25 * _bend(exempt, baseline, index)[0]
+    )
+    assert axis.weights[index] < 1.0
+    # The along-axis residual is what the axis noise expects, so it is not flagged.
+    assert axis.loo().p_value[index] > 0.1
+
+
+def test_the_axis_noise_keeps_a_click_precise_across_its_axis() -> None:
+    across = np.array([0.0, 80.0])
+    baseline, index = _vessel_end_fit(np.zeros(2), axis_sd_um=0.0, exempt=False)
+    isotropic, _ = _vessel_end_fit(across, axis_sd_um=0.0, exempt=False)
+    axis, _ = _vessel_end_fit(across, axis_sd_um=45.0, exempt=False)
+    along, _ = _vessel_end_fit(np.array([80.0, 0.0]), axis_sd_um=45.0, exempt=False)
+
+    # Across the vessel the click counts as any click does: the field follows it
+    # as far, and the same offset is as surprising.
+    bend_axis = _bend(axis, baseline, index)[1]
+    assert bend_axis > 5.0
+    assert bend_axis == pytest.approx(_bend(isotropic, baseline, index)[1], abs=1.0)
+    p_across = float(axis.loo().p_value[index])
+    assert p_across == pytest.approx(float(isotropic.loo().p_value[index]), rel=0.5)
+    assert float(along.loo().p_value[index]) > 5.0 * p_across
+    assert axis.loo().covariance_um2[index][1, 1] == pytest.approx(
+        isotropic.loo().covariance_um2[index][1, 1], rel=0.2
+    )
+
+
+def test_a_v1_payload_is_still_readable() -> None:
+    observations, _ = _clean_phantom_observations(seed=33)
+    field = lf.fit_landmark_field(observations)
+    payload = json.loads(json.dumps(field.to_dict()))
+    assert payload["algorithm"] == lf.FIELD_ALGORITHM == "robust_gp_matern52_v2"
+    for algorithm, readable in (("robust_gp_matern52_v1", True), ("other", False)):
+        old = {**payload, "algorithm": algorithm}
+        old["digest"] = lf._canonical_sha256(
+            {key: value for key, value in old.items() if key != "digest"}
+        )
+        if readable:
+            rebuilt = lf.LandmarkField.from_dict(old)
+            np.testing.assert_allclose(
+                rebuilt.mean(observations.reference_xy_um),
+                field.mean(observations.reference_xy_um),
+            )
+        else:
+            with pytest.raises(ValueError, match="unsupported algorithm"):
+                lf.LandmarkField.from_dict(old)
+
+
 def test_concat_and_subset_carry_every_field() -> None:
     observations = _mixed_observations(seed=36, n_clicks=6, n_windows=4)
     exempt = np.zeros(observations.n, dtype=bool)

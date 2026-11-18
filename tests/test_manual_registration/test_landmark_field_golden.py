@@ -42,7 +42,7 @@ GOLDEN_PATH = (
     / "manual_registration"
     / "landmark_field_golden_v1.json"
 )
-GOLDEN_SHA256 = "03eaa3815278ef8dd974753a4949fcc5152c49a94abcbc933c80648b39942ac4"
+GOLDEN_SHA256 = "c5c0cab9f145fb7293120dd42df816347485ceb5060e3dc7b0fa020bd255afe4"
 
 
 @pytest.fixture(scope="module")
