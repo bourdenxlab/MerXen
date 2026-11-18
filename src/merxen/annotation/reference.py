@@ -34,6 +34,10 @@ Builders (registered with the store on import):
   cortex-implausible superclusters dropped and the lookup filtered to the
   pruned tree (``research/insilico/06_wb_panel_markers.py``,
   ``exp/E1/06_filter_ctx_lookup.py``); refused above 1,000 genes.
+* ``whb_hippocampal_supc_clus`` and ``whb_hippocampal_supc_clus_ho`` (human,
+  provisional): the two frontal builders on the hippocampal-formation WHB
+  region profile (``WHB_REGION_PROFILES``; 20 ROIs, region precompute
+  required). SEA-AD's self-map uses the held-out set of the config's region.
 * ``whb_frontal_supc_clus_ho`` (human, resolvability; M3b): the frontal WHB
   reference without the held-out donor (``auto``: the donor with the fewest
   frontal cells, H19.30.002), panel-restricted, with its panel markers, and
@@ -304,6 +308,154 @@ WHB_WHOLE_CORTEX_REGION: Final = "frontal_cortex"
 # Resolvability test sets (plan §3.2 builders, §8.3; M3b).
 HO_REFERENCE_ID: Final = "whb_frontal_supc_clus_ho"
 WMB_TESTSET_REFERENCE_ID: Final = "wmb_selfmap_testset"
+
+# The hippocampal-formation WHB region (provisional; frontal thresholds reused,
+# no validated counts): the 20 WHB dissections of the hippocampus proper,
+# dentate gyrus, subiculum, entorhinal and parahippocampal cortex, as the
+# public WHB ``region_of_interest_label`` values. None of them is an
+# other-region top-up dissection (HO_OTHER_REGION_ROI_LABELS).
+WHB_HIPPOCAMPAL_ROI_LABELS: Final[tuple[str, ...]] = (
+    "Human CA1",
+    "Human CA1-2R",
+    "Human CA1C-CA3C",
+    "Human CA1R-CA2R-CA3R",
+    "Human CA1U-CA2U-CA3U",
+    "Human CA2-3",
+    "Human CA3R",
+    "Human CA4C-DGC",
+    "Human DG-CA4",
+    "Human DGR-CA4",
+    "Human DGR-CA4Rpy",
+    "Human DGU-CA4Upy",
+    "Human Rostral CA1-CA3",
+    "Human Rostral DG-CA4",
+    "Human Sub",
+    "Human MEC",
+    "Human LEC",
+    "Human TH-TL",
+    "Human A35-A36",
+    "Human A35r",
+)
+
+
+@dataclass(frozen=True)
+class WhbRegionProfile:
+    """One human WHB region reference: its ids, dissections and bundle text.
+
+    The frontal profile holds exactly the constants the frontal builders
+    always used, so no frontal build_hash payload changes; another region
+    reuses the same builders (``build_whb_frontal``, ``build_whb_frontal_ho``)
+    with its own ROI set and reference ids.
+
+    Attributes:
+        region: Anatomical region token (``AnnotationConfig.anatomical_region``).
+        primary_id: The WHB primary reference of the region.
+        ho_id: Its held-out resolvability test set.
+        roi_labels: WHB ``region_of_interest_label`` values of the region.
+        min_cells_per_leaf: Leaf filter of the region precompute.
+        validated: Counts of the validated precompute, or ``None``.
+        label: Reference label of the negative-gene detection.
+        description: ``bundle.json`` text of the primary bundle.
+        ho_description: ``bundle.json`` text of the held-out bundle.
+        can_rebuild: Whether the precompute can be rebuilt from the WHB h5ads
+            (else ``region_precompute`` is required).
+    """
+
+    region: str
+    primary_id: str
+    ho_id: str
+    roi_labels: tuple[str, ...]
+    min_cells_per_leaf: int
+    validated: Mapping[str, int] | None
+    label: str
+    description: str
+    ho_description: str
+    can_rebuild: bool
+
+
+WHB_REGION_PROFILES: Final[dict[str, WhbRegionProfile]] = {
+    "frontal_cortex": WhbRegionProfile(
+        region="frontal_cortex",
+        primary_id="whb_frontal_supc_clus",
+        ho_id=HO_REFERENCE_ID,
+        roi_labels=WHB_FRONTAL_ROI_LABELS,
+        min_cells_per_leaf=WHB_FRONTAL_MIN_CELLS_PER_LEAF,
+        validated=WHB_FRONTAL_VALIDATED,
+        label="whb_frontal",
+        description="WHB frontal region (A44-A45, A46, A32, ACC)",
+        ho_description=("WHB frontal region without the held-out donor (E2 HO recipe)"),
+        can_rebuild=True,
+    ),
+    "hippocampus": WhbRegionProfile(
+        region="hippocampus",
+        primary_id="whb_hippocampal_supc_clus",
+        ho_id="whb_hippocampal_supc_clus_ho",
+        roi_labels=WHB_HIPPOCAMPAL_ROI_LABELS,
+        min_cells_per_leaf=10,
+        validated=None,
+        label="whb_hippocampal",
+        description="WHB hippocampal formation region (20 ROIs)",
+        ho_description=(
+            "WHB hippocampal formation region without the held-out donor (E2 HO recipe)"
+        ),
+        can_rebuild=False,
+    ),
+}
+WHB_PRIMARY_IDS: Final[frozenset[str]] = frozenset(
+    profile.primary_id for profile in WHB_REGION_PROFILES.values()
+)
+WHB_HO_REFERENCE_IDS: Final[frozenset[str]] = frozenset(
+    profile.ho_id for profile in WHB_REGION_PROFILES.values()
+)
+
+
+def whb_profile(
+    *, region: str | None = None, reference_id: str | None = None
+) -> WhbRegionProfile:
+    """Return the WHB region profile of a region or a WHB reference id.
+
+    Args:
+        region: Anatomical region token.
+        reference_id: A WHB region primary or held-out reference id.
+
+    Returns:
+        The profile.
+
+    Raises:
+        ReferenceBuildError: If no profile matches.
+    """
+    for profile in WHB_REGION_PROFILES.values():
+        if region is not None and profile.region == region:
+            return profile
+        if reference_id is not None and reference_id in (
+            profile.primary_id,
+            profile.ho_id,
+        ):
+            return profile
+    raise ReferenceBuildError(
+        f"no WHB region profile for region={region!r} reference_id={reference_id!r}; "
+        f"known regions: {sorted(WHB_REGION_PROFILES)}"
+    )
+
+
+def config_whb_profile(config: AnnotationConfig) -> WhbRegionProfile:
+    """Return the WHB region profile of a human config's anatomical region."""
+    return whb_profile(region=config.anatomical_region or WHB_WHOLE_CORTEX_REGION)
+
+
+def ho_reference_id(config: AnnotationConfig) -> str:
+    """Return the held-out test set of a human config's region.
+
+    Args:
+        config: A human annotation config.
+
+    Returns:
+        ``whb_frontal_supc_clus_ho`` for frontal cortex,
+        ``whb_hippocampal_supc_clus_ho`` for the hippocampal formation.
+    """
+    return config_whb_profile(config).ho_id
+
+
 # E2 make_ho_ref.py: clusters with at least 5 training-donor cells.
 HO_MIN_TRAINING_CELLS_PER_CLUSTER: Final = 5
 # §8.3 step 1: <= 1,000 test cells per supercluster, all cells of rare ones.
@@ -2727,7 +2879,7 @@ def prepare_reference_spec(
     options = options or SourceOptions()
     sources = {name: Path(path) for name, path in spec.sources.items()}
     reference_id = spec.reference_id
-    if reference_id == "whb_frontal_supc_clus":
+    if reference_id in WHB_PRIMARY_IDS:
         region = sources.get(SOURCE_REGION_PRECOMPUTE)
         if region is not None and region.is_dir():
             sources[SOURCE_REGION_PRECOMPUTE] = _find_one(
@@ -2750,6 +2902,12 @@ def prepare_reference_spec(
                 for name in (SOURCE_WHB_METADATA_DIR, SOURCE_WHB_H5AD_DIR):
                     sources.pop(name, None)
         else:
+            if not whb_profile(reference_id=reference_id).can_rebuild:
+                raise ReferenceBuildError(
+                    f"{reference_id} needs {SOURCE_REGION_PRECOMPUTE!r} (a WHB "
+                    "region reference directory); only the frontal precompute "
+                    "can be rebuilt from the WHB h5ads"
+                )
             _expand_directory(sources, SOURCE_WHB_METADATA_DIR, _WHB_METADATA_PATTERNS)
             _expand_directory(sources, SOURCE_WHB_H5AD_DIR, _WHB_H5AD_PATTERNS)
             _require(
@@ -2777,7 +2935,7 @@ def prepare_reference_spec(
                 SOURCE_WHB_REGION_CELL_METADATA,
             ):
                 sources.pop(name, None)
-    elif reference_id == HO_REFERENCE_ID:
+    elif reference_id in WHB_HO_REFERENCE_IDS:
         region_dir = sources.pop(SOURCE_WHB_REGION_DIR, None) or sources.pop(
             SOURCE_REGION_PRECOMPUTE, None
         )
@@ -3365,14 +3523,17 @@ def verify_whb_region_precompute(
     *,
     manifest_path: Path | None = None,
     hierarchy: Sequence[str] = WHB_FRONTAL_HIERARCHY,
+    profile: WhbRegionProfile | None = None,
 ) -> dict[str, Any]:
     """Check a WHB region precompute before a bundle uses it.
 
     Args:
         path: The precompute (the bundle's copy).
         manifest_path: The legacy ``region_reference_manifest.json``, if any;
-            its region labels, leaf filter and counts must agree.
+            its region labels, leaf filter and counts must agree with the
+            region profile.
         hierarchy: Levels the bundle maps (must be in the precompute).
+        profile: The WHB region profile (default: frontal cortex).
 
     Returns:
         Counts and checks; ``matches_validated_frontal`` tells whether the
@@ -3385,6 +3546,7 @@ def verify_whb_region_precompute(
     """
     import h5py
 
+    profile = profile or WHB_REGION_PROFILES[WHB_WHOLE_CORTEX_REGION]
     with h5py.File(path, "r") as handle:
         missing = [
             name
@@ -3427,9 +3589,12 @@ def verify_whb_region_precompute(
         config = manifest.get("config", {})
         summary = manifest.get("filtering_summary", {})
         problems = []
-        if sorted(config.get("region_labels", [])) != sorted(WHB_FRONTAL_ROI_LABELS):
-            problems.append(f"region labels {config.get('region_labels')}")
-        if config.get("region_min_cells_per_leaf") != WHB_FRONTAL_MIN_CELLS_PER_LEAF:
+        if sorted(config.get("region_labels", [])) != sorted(profile.roi_labels):
+            problems.append(
+                f"region labels {config.get('region_labels')} (the "
+                f"{profile.region} profile has {list(profile.roi_labels)})"
+            )
+        if config.get("region_min_cells_per_leaf") != profile.min_cells_per_leaf:
             problems.append(
                 f"min_cells_per_leaf {config.get('region_min_cells_per_leaf')}"
             )
@@ -3455,7 +3620,7 @@ def verify_whb_region_precompute(
     result["matches_validated_frontal"] = all(
         result[key] == value for key, value in WHB_FRONTAL_VALIDATED.items()
     )
-    if not result["matches_validated_frontal"]:
+    if profile.validated is not None and not result["matches_validated_frontal"]:
         logger.warning(
             "WHB region precompute %s differs from the validated frontal build "
             "(%s leaves, %s cells, %s genes; validated %s)",
@@ -3489,13 +3654,19 @@ def rebuild_whb_region_precompute(
     """
     from merxen.analysis.mapmycells import _write_region_cell_metadata
 
+    profile = whb_profile(reference_id=context.spec.reference_id)
+    if not profile.can_rebuild:
+        raise ReferenceBuildError(
+            f"{context.spec.reference_id}: the {profile.region} region precompute "
+            f"cannot be rebuilt; pass {SOURCE_REGION_PRECOMPUTE!r}"
+        )
     region_metadata = context.scratch_dir / "region_cell_metadata.csv"
     with timer.step("region_cell_metadata"):
         summary = _write_region_cell_metadata(
             cell_metadata_path=_source_path(context, SOURCE_WHB_CELL_METADATA),
             output_path=region_metadata,
-            region_labels=list(WHB_FRONTAL_ROI_LABELS),
-            min_cells_per_leaf=WHB_FRONTAL_MIN_CELLS_PER_LEAF,
+            region_labels=list(profile.roi_labels),
+            min_cells_per_leaf=profile.min_cells_per_leaf,
             roi_map_path=_source_path(context, SOURCE_WHB_ROI_MAP),
             region_column="region_of_interest_label",
         )
@@ -3551,12 +3722,11 @@ def build_whb_frontal(context: BuildContext) -> dict[str, Any]:
     spec = context.spec
     panel = _panel_of(context)
     config = _config_of(context)
-    _check_self_map_sources(context, HO_REFERENCE_ID, HO_SOURCES)
+    profile = whb_profile(reference_id=spec.reference_id)
+    _check_self_map_sources(context, profile.ho_id, HO_SOURCES)
     timer = _StepTimer(context.work_dir / CTM_LOG_DIR)
     source_path = context.work_dir / SOURCE_PRECOMPUTE_FILE
-    output: dict[str, Any] = {
-        "reference": "WHB frontal region (A44-A45, A46, A32, ACC)"
-    }
+    output: dict[str, Any] = {"reference": profile.description}
     if SOURCE_REGION_PRECOMPUTE in context.sources:
         with timer.step("copy_region_precompute"):
             copied = context.copy_source(
@@ -3568,6 +3738,7 @@ def build_whb_frontal(context: BuildContext) -> dict[str, Any]:
             manifest_path=None
             if manifest_record is None
             else Path(manifest_record.path),
+            profile=profile,
         )
         output["source_precompute"] = {
             "mode": "copied",
@@ -3583,7 +3754,7 @@ def build_whb_frontal(context: BuildContext) -> dict[str, Any]:
             "file": SOURCE_PRECOMPUTE_FILE,
             "sha256": file_sha256(source_path),
             "filtering_summary": summary,
-            "verification": verify_whb_region_precompute(source_path),
+            "verification": verify_whb_region_precompute(source_path, profile=profile),
         }
     hierarchy = list(spec.hierarchy or WHB_FRONTAL_HIERARCHY)
     mapping_path = context.work_dir / MAPPING_PRECOMPUTE_FILE
@@ -3629,7 +3800,7 @@ def build_whb_frontal(context: BuildContext) -> dict[str, Any]:
                         seaad_stats, leaf_broad_classes(seaad_stats, SEAAD_TAXONOMY_ID)
                     )
                 },
-                reference_label="whb_frontal",
+                reference_label=profile.label,
                 write_negatives=True,
             )
         )
@@ -3658,7 +3829,7 @@ def build_whb_frontal(context: BuildContext) -> dict[str, Any]:
         output.update(
             _run_self_map(
                 context,
-                test_reference_id=HO_REFERENCE_ID,
+                test_reference_id=profile.ho_id,
                 test_sources=HO_SOURCES,
                 engine=None,
                 specs_for=lambda engine: _whb_specs(engine, config),
@@ -3692,7 +3863,7 @@ def build_seaad_mr(context: BuildContext) -> dict[str, Any]:
     spec = context.spec
     panel = _panel_of(context)
     config = _config_of(context)
-    _check_self_map_sources(context, HO_REFERENCE_ID, HO_SOURCES)
+    _check_self_map_sources(context, ho_reference_id(config), HO_SOURCES)
     timer = _StepTimer(context.work_dir / CTM_LOG_DIR)
     output: dict[str, Any] = {"reference": "SEA-AD Multiregion (CCN20260630)"}
     with timer.step("copy_precompute"):
@@ -3768,7 +3939,7 @@ def build_seaad_mr(context: BuildContext) -> dict[str, Any]:
         output.update(
             _run_self_map(
                 context,
-                test_reference_id=HO_REFERENCE_ID,
+                test_reference_id=ho_reference_id(config),
                 test_sources=HO_SOURCES,
                 engine=_work_bundle(
                     context,
@@ -4916,17 +5087,25 @@ def _ho_region_metadata(context: BuildContext) -> pd.DataFrame:
     return ho_region_metadata(
         {name: Path(record.path) for name, record in context.sources.items()},
         context.scratch_dir,
+        profile=whb_profile(reference_id=context.spec.reference_id),
     )
 
 
-def ho_region_metadata(sources: Mapping[str, Path], scratch_dir: Path) -> pd.DataFrame:
-    """Return the frontal WHB cells (donor, cluster alias) of the held-out test set.
+def ho_region_metadata(
+    sources: Mapping[str, Path],
+    scratch_dir: Path,
+    *,
+    profile: WhbRegionProfile | None = None,
+) -> pd.DataFrame:
+    """Return the region WHB cells (donor, cluster alias) of the held-out test set.
 
     Args:
         sources: The held-out test set's source paths by name: the region
             cell metadata, or the WHB cell metadata and its ROI map.
         scratch_dir: Where the region cell metadata is written when it is
             derived from the WHB cell metadata.
+        profile: The WHB region profile (default: frontal cortex), whose ROI
+            labels select the cells when they are derived.
 
     Returns:
         ``cell_label``, ``feature_matrix_label``, ``donor_label``,
@@ -4935,6 +5114,7 @@ def ho_region_metadata(sources: Mapping[str, Path], scratch_dir: Path) -> pd.Dat
     Raises:
         ReferenceBuildError: If neither source is given.
     """
+    profile = profile or WHB_REGION_PROFILES[WHB_WHOLE_CORTEX_REGION]
     columns = ["cell_label", "feature_matrix_label", "donor_label", "cluster_alias"]
     if SOURCE_WHB_REGION_CELL_METADATA in sources:
         path = Path(sources[SOURCE_WHB_REGION_CELL_METADATA])
@@ -4946,14 +5126,14 @@ def ho_region_metadata(sources: Mapping[str, Path], scratch_dir: Path) -> pd.Dat
         _write_region_cell_metadata(
             cell_metadata_path=Path(sources[SOURCE_WHB_CELL_METADATA]),
             output_path=path,
-            region_labels=list(WHB_FRONTAL_ROI_LABELS),
-            min_cells_per_leaf=WHB_FRONTAL_MIN_CELLS_PER_LEAF,
+            region_labels=list(profile.roi_labels),
+            min_cells_per_leaf=profile.min_cells_per_leaf,
             roi_map_path=Path(sources[SOURCE_WHB_ROI_MAP]),
             region_column="region_of_interest_label",
         )
         return pd.read_csv(path, usecols=columns + ["region_of_interest_label"])
     raise ReferenceBuildError(
-        f"{HO_REFERENCE_ID} needs {SOURCE_WHB_REGION_CELL_METADATA!r} (the region "
+        f"{profile.ho_id} needs {SOURCE_WHB_REGION_CELL_METADATA!r} (the region "
         f"reference directory's {REGION_CELL_METADATA_FILE}) or "
         f"{SOURCE_WHB_CELL_METADATA!r} + {SOURCE_WHB_ROI_MAP!r}"
     )
@@ -5738,9 +5918,8 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
     config = _config_of(context)
     excluded = _gate_p_excluded_test_cells(context)
     timer = _StepTimer(context.work_dir / CTM_LOG_DIR)
-    output: dict[str, Any] = {
-        "reference": "WHB frontal region without the held-out donor (E2 HO recipe)"
-    }
+    profile = whb_profile(reference_id=spec.reference_id)
+    output: dict[str, Any] = {"reference": profile.ho_description}
     with timer.step("region_cells"):
         metadata = _ho_region_metadata(context)
         frontal_cells = set(metadata["cell_label"].astype(str))
@@ -5765,7 +5944,7 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
         listed = pool["cell_label"].astype(str).isin(excluded).to_numpy(bool)
         if bool(listed.any()):
             raise ReferenceBuildError(
-                f"{HO_REFERENCE_ID}: {int(listed.sum())} frontal cells of the "
+                f"{spec.reference_id}: {int(listed.sum())} frontal cells of the "
                 f"held-out donor {donor!r} are in "
                 f"{SOURCE_GATE_P_EXCLUDED_TEST_CELLS!r}: a leave-one-donor-out "
                 "set holds out another donor than the "
@@ -5798,7 +5977,7 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
     logger.info(
         "%s: %d of %d held-out donor cells left out (truth superclusters no call "
         "can name: %s)",
-        HO_REFERENCE_ID,
+        spec.reference_id,
         int(is_excluded.sum()),
         n_pool_before,
         ", ".join(
@@ -5842,7 +6021,7 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
         )
     logger.info(
         "%s: %d held-out donor test cells + %d other-region non-neuronal cells (%s)",
-        HO_REFERENCE_ID,
+        spec.reference_id,
         len(test_rows),
         len(other_rows),
         ", ".join(f"{k}: {v}" for k, v in other_record["per_broad_class"].items()),
@@ -5884,14 +6063,14 @@ def build_whb_frontal_ho(context: BuildContext) -> dict[str, Any]:
             )
         logger.info(
             "%s: class top-up added %d test cells",
-            HO_REFERENCE_ID,
+            spec.reference_id,
             top_up_record["n_cells"],
         )
     if excluded is not None and loo_record is not None:
         shared = sorted(set(test_rows["cell_label"].astype(str)) & excluded)
         if shared:  # pragma: no cover - guarded by the filters above
             raise ReferenceBuildError(
-                f"{HO_REFERENCE_ID}: the leave-one-donor-out test set holds "
+                f"{spec.reference_id}: the leave-one-donor-out test set holds "
                 f"{len(shared)} excluded cells, e.g. {shared[:5]}"
             )
         loo_record["disjoint_from_excluded"] = True
@@ -6845,7 +7024,7 @@ def _test_set_source_paths(
         ReferenceBuildError: If a test-set source is missing.
     """
     available = {name: Path(sources[name]) for name in names if name in sources}
-    if reference_id == HO_REFERENCE_ID:
+    if reference_id in WHB_HO_REFERENCE_IDS:
         has_metadata = SOURCE_WHB_REGION_CELL_METADATA in available or (
             SOURCE_WHB_CELL_METADATA in sources and SOURCE_WHB_ROI_MAP in sources
         )
@@ -6906,7 +7085,9 @@ def _spec_of_test_set(
 ) -> AnnotationReferenceSpec:
     """The test set's spec from its primary's spec and sources (``_test_set_spec``)."""
     template_id = (
-        "whb_frontal_supc_clus" if reference_id == HO_REFERENCE_ID else "wmb_panel"
+        whb_profile(reference_id=reference_id).primary_id
+        if reference_id in WHB_HO_REFERENCE_IDS
+        else "wmb_panel"
     )
     template = next(
         (item for item in config.references if item.reference_id == template_id),
@@ -6942,12 +7123,13 @@ def held_out_test_set_spec(
     source.
 
     Args:
-        primary: The prepared ``whb_frontal_supc_clus`` spec (sources are
-            files, ``prepare_reference_spec``).
+        primary: The prepared WHB region primary spec (sources are files,
+            ``prepare_reference_spec``).
         config: The annotation config.
 
     Returns:
-        The ``whb_frontal_supc_clus_ho`` spec.
+        The region's held-out spec (``whb_frontal_supc_clus_ho`` for
+        frontal cortex).
 
     Raises:
         ReferenceBuildError: If a held-out source is missing.
@@ -6955,10 +7137,10 @@ def held_out_test_set_spec(
     sources = _test_set_source_paths(
         {name: Path(path) for name, path in primary.sources.items()},
         owner=primary.reference_id,
-        reference_id=HO_REFERENCE_ID,
+        reference_id=ho_reference_id(config),
         names=HO_SOURCES,
     )
-    return _spec_of_test_set(primary, config, sources, HO_REFERENCE_ID)
+    return _spec_of_test_set(primary, config, sources, ho_reference_id(config))
 
 
 def _work_bundle(
@@ -7105,8 +7287,8 @@ def level_specs_for(
     """Return the self-map level specs of a primary or secondary reference.
 
     Args:
-        reference_id: ``whb_frontal_supc_clus``, ``seaad_mr_panel`` or
-            ``wmb_panel``.
+        reference_id: A WHB region primary (``whb_frontal_supc_clus``,
+            ``whb_hippocampal_supc_clus``), ``seaad_mr_panel`` or ``wmb_panel``.
         engine: The ``MmcBundle`` mapped onto.
         config: The annotation config.
 
@@ -7118,7 +7300,7 @@ def level_specs_for(
     """
     from merxen.annotation import resolvability as res
 
-    if reference_id == "whb_frontal_supc_clus":
+    if reference_id in WHB_PRIMARY_IDS:
         return _whb_specs(engine, config)
     if reference_id == "seaad_mr_panel":
         return res.seaad_level_specs(config.thresholds)
@@ -7129,7 +7311,7 @@ def level_specs_for(
 
 def cells_rules_for(reference_id: str, config: AnnotationConfig) -> list[Any]:
     """Return the production rules the self-map applies to its cells table."""
-    return _whb_cells_rules(config) if reference_id == "whb_frontal_supc_clus" else []
+    return _whb_cells_rules(config) if reference_id in WHB_PRIMARY_IDS else []
 
 
 def _resolvability_enabled(context: BuildContext) -> bool:
@@ -7205,7 +7387,7 @@ def self_map_test_cells(
     """
     from merxen.annotation import resolvability as res
 
-    if test_reference_id != HO_REFERENCE_ID:
+    if test_reference_id not in WHB_HO_REFERENCE_IDS:
         return test, None
     obs = test.obs
     labels = ho_self_map_excluded_labels()
@@ -7242,7 +7424,7 @@ def self_map_test_cells(
     logger.info(
         "%s: %d of %d held-out test cells left out of the self-map (other-region "
         "cells of %s; revision %d)",
-        HO_REFERENCE_ID,
+        test_reference_id,
         int(dropped.sum()),
         len(obs),
         ", ".join(HO_SELF_MAP_EXCLUDED_SUPERCLUSTERS),
@@ -7513,6 +7695,7 @@ V7_MEMBER_TABLE_REFERENCE: Final[dict[str, str]] = {
 # Test-set references and the primary references whose self-map they serve.
 V7_TEST_SET_OF: Final[dict[str, str]] = {
     "whb_frontal_supc_clus": HO_REFERENCE_ID,
+    "whb_hippocampal_supc_clus": WHB_REGION_PROFILES["hippocampus"].ho_id,
     "seaad_mr_panel": HO_REFERENCE_ID,
     "wmb_panel": WMB_TESTSET_REFERENCE_ID,
 }
@@ -7812,7 +7995,7 @@ def _resolvability_params(
     if not config.resolvability.enabled or spec.role not in ("primary", "secondary"):
         return {"enabled": False}
     test_params: dict[str, Any]
-    if test_reference_id == HO_REFERENCE_ID:
+    if test_reference_id in WHB_HO_REFERENCE_IDS:
         test_params = {
             **_ho_params(spec, config),
             "self_map_exclusion": ho_self_map_exclusion_params(),
@@ -7839,6 +8022,15 @@ def _resolvability_params(
     }
 
 
+def _test_set_profile(
+    spec: AnnotationReferenceSpec, config: AnnotationConfig
+) -> WhbRegionProfile:
+    """The WHB region of a held-out test set: its own, else the config's."""
+    if spec.reference_id in WHB_PRIMARY_IDS | WHB_HO_REFERENCE_IDS:
+        return whb_profile(reference_id=spec.reference_id)
+    return config_whb_profile(config)
+
+
 def _ho_params(
     spec: AnnotationReferenceSpec, config: AnnotationConfig
 ) -> dict[str, Any]:
@@ -7849,8 +8041,8 @@ def _ho_params(
         "max_test_cells_per_supercluster": HO_MAX_TEST_CELLS_PER_SUPERCLUSTER,
         "min_training_cells_per_cluster": HO_MIN_TRAINING_CELLS_PER_CLUSTER,
         "source_hierarchy": list(WHB_SOURCE_HIERARCHY),
-        "roi_labels": list(WHB_FRONTAL_ROI_LABELS),
-        "min_cells_per_leaf": WHB_FRONTAL_MIN_CELLS_PER_LEAF,
+        "roi_labels": list(_test_set_profile(spec, config).roi_labels),
+        "min_cells_per_leaf": _test_set_profile(spec, config).min_cells_per_leaf,
         "seed": TEST_SET_SEED,
         "vocab_assets": vocab_asset_sha256(WHB_TAXONOMY_ID),
         "truth_exclusion": {
@@ -7914,15 +8106,16 @@ def _panel_marker_params(config: AnnotationConfig) -> dict[str, Any]:
 def _whb_params(
     spec: AnnotationReferenceSpec, config: AnnotationConfig
 ) -> dict[str, Any]:
+    profile = whb_profile(reference_id=spec.reference_id)
     return {
         **_panel_marker_params(config),
         "source_hierarchy": list(WHB_SOURCE_HIERARCHY),
-        "roi_labels": list(WHB_FRONTAL_ROI_LABELS),
-        "min_cells_per_leaf": WHB_FRONTAL_MIN_CELLS_PER_LEAF,
+        "roi_labels": list(profile.roi_labels),
+        "min_cells_per_leaf": profile.min_cells_per_leaf,
         "negative_gene_max_fraction": config.flags.negative_gene_max_fraction,
-        "negative_gene_references": ["whb_frontal", "seaad_mr"],
+        "negative_gene_references": [profile.label, "seaad_mr"],
         **_state_and_vocab_params("human", (WHB_TAXONOMY_ID, SEAAD_TAXONOMY_ID)),
-        "resolvability": _resolvability_params(spec, config, HO_REFERENCE_ID),
+        "resolvability": _resolvability_params(spec, config, profile.ho_id),
     }
 
 
@@ -7935,7 +8128,7 @@ def _seaad_params(
         "pinned_md5": SEAAD_STATS_PIN.md5,
         "profile_method": "B_condLN",
         "vocab_assets": vocab_asset_sha256(SEAAD_TAXONOMY_ID),
-        "resolvability": _resolvability_params(spec, config, HO_REFERENCE_ID),
+        "resolvability": _resolvability_params(spec, config, ho_reference_id(config)),
     }
 
 
@@ -8070,7 +8263,11 @@ class _BuilderRecipe:
 
 
 def _ho_primary_v7(spec: AnnotationReferenceSpec, config: AnnotationConfig) -> Any:
-    return _v7_primary_params(spec, config, HO_REFERENCE_ID)
+    if spec.reference_id in WHB_PRIMARY_IDS:
+        return _v7_primary_params(
+            spec, config, whb_profile(reference_id=spec.reference_id).ho_id
+        )
+    return _v7_primary_params(spec, config, ho_reference_id(config))
 
 
 def _wmb_primary_v7(spec: AnnotationReferenceSpec, config: AnnotationConfig) -> Any:
@@ -8080,6 +8277,13 @@ def _wmb_primary_v7(spec: AnnotationReferenceSpec, config: AnnotationConfig) -> 
 BUILDER_RECIPES: Final[dict[str, _BuilderRecipe]] = {
     "whb_frontal_supc_clus": _BuilderRecipe(
         "whb_frontal_supc_clus",
+        build_whb_frontal,
+        WHB_TAXONOMY_ID,
+        _whb_params,
+        panel_params=_ho_primary_v7,
+    ),
+    "whb_hippocampal_supc_clus": _BuilderRecipe(
+        "whb_hippocampal_supc_clus",
         build_whb_frontal,
         WHB_TAXONOMY_ID,
         _whb_params,
@@ -8120,6 +8324,13 @@ BUILDER_RECIPES: Final[dict[str, _BuilderRecipe]] = {
     ),
     HO_REFERENCE_ID: _BuilderRecipe(
         HO_REFERENCE_ID,
+        build_whb_frontal_ho,
+        WHB_TAXONOMY_ID,
+        _ho_params,
+        panel_params=_v7_test_set_params,
+    ),
+    "whb_hippocampal_supc_clus_ho": _BuilderRecipe(
+        "whb_hippocampal_supc_clus_ho",
         build_whb_frontal_ho,
         WHB_TAXONOMY_ID,
         _ho_params,

@@ -174,12 +174,12 @@ failed a check (it is null only for `low_counts`, `not_applicable` and
 
 | | Human | Mouse |
 |---|---|---|
-| Primary reference | Whole Human Brain (WHB), frontal cortex subset, supercluster → cluster (`whb_frontal_supc_clus`) | Whole Mouse Brain (WMB), class → subclass → cluster, supertype dropped (`wmb_panel`) |
+| Primary reference | Whole Human Brain (WHB), frontal cortex subset, supercluster → cluster (`whb_frontal_supc_clus`); provisional hippocampal formation subset (`whb_hippocampal_supc_clus`, §2.3) | Whole Mouse Brain (WMB), class → subclass → cluster, supertype dropped (`wmb_panel`) |
 | Second reference | SEA-AD Multiregion (`seaad_mr_panel`): a second vote at the 7 broad classes, and a secondary subclass name | None (one method). A panel-independent MERFISH region-share bundle (`wmb_region_share`) drives region pruning |
 | Chain of levels (`ct_final_level`) | lineage → broad → NT → **supercluster** (leaf) | broad → class → NT → **subclass** (leaf) |
 | Levels outside the chain | SEA-AD subclass (secondary name, always written); WHB cluster (report-only, opt-in) | Supertype (report-only, opt-in) |
 | Default thresholds | 0.73 (lineage, broad, NT), 0.69 (supercluster) | 0.90 (broad, class, NT), 0.80 (subclass) |
-| Region handling | A fixed list of superclusters implausible in frontal cortex; only `frontal_cortex` is supported | Divisions present in the section are inferred from confident neurons; implausible nodes are dropped and those cells re-mapped |
+| Region handling | A fixed list of superclusters implausible in frontal cortex; `frontal_cortex` is validated, `hippocampus` is provisional (only the sinks are implausible) | Divisions present in the section are inferred from confident neurons; implausible nodes are dropped and those cells re-mapped |
 | Dataset gate | Label-based: share of cells ≥ 30 counts, confident broad coverage | Label-free signals G1–G5 (registration, marker referee, implausibility, composition, spill-over) |
 | Real-data QC | Yes (downgrade-only) | Yes, warn-only: records outcomes, changes nothing (M13b) |
 | Default mode | `map_first` (since M8) | `map_first` (since M9); sections estimated at AP < 6.0 mm carry the MO11 banner |
@@ -597,8 +597,34 @@ region-implausible superclusters (hippocampal CA1-3, CA4 and dentate gyrus,
 amygdala excitatory, medium spiny and eccentric medium spiny neurons,
 mammillary body, thalamic excitatory, midbrain-derived inhibitory, upper and
 lower rhombic lip, cerebellar inhibitory, ependymal, Bergmann glia, choroid
-plexus) are **implausible**. Only `frontal_cortex` has this column, and the
-pipeline refuses any other human region.
+plexus) are **implausible**. Only `frontal_cortex` has this column. The one
+other human region the pipeline accepts is the provisional hippocampal
+formation (below); it refuses any other.
+
+**Hippocampal formation (provisional).** Non-ATERA human `map_first` rows
+with `anatomical_region = hippocampus` (for example the public Xenium
+hippocampus sections) map on `whb_hippocampal_supc_clus`: the same builder
+and recipe as the frontal primary, on a WHB region reference of the 20
+hippocampal-formation dissections (Human CA1, CA1-2R, CA1C-CA3C,
+CA1R-CA2R-CA3R, CA1U-CA2U-CA3U, CA2-3, CA3R, CA4C-DGC, DG-CA4, DGR-CA4,
+DGR-CA4Rpy, DGU-CA4Upy, Rostral CA1-CA3, Rostral DG-CA4, Sub, MEC, LEC, TH-TL,
+A35-A36, A35r; at least 10 cells per leaf), given by
+`annotation_whb_hippocampal_region_precompute_source`. Its held-out test set
+is `whb_hippocampal_supc_clus_ho` (same recipe, the region's own held-out
+donor; the other-region non-neuronal top-up is unchanged), and the SEA-AD
+Multiregion bundle, unrestricted because its taxonomy already holds Sub-CA1,
+CA2-4, DG and EC IT next to the neocortical subclasses of the surrounding
+cortex, runs its self-map on that set too. Gating is kept minimal: every
+supercluster is plausible and only the two sinks are flagged; the frontal
+thresholds, floors and trust rules are reused, not recalibrated, so every
+panel is at most `provisional` there (a family validated on frontal cortex is
+not validated for the hippocampus) and the report carries a `PROVISIONAL
+region` banner.
+The outputs are those of the frontal route (label tables with `mmc_whb_*` and
+`mmc_seaad_*` columns, MAP tidy files with five runners-up per level, bundles,
+report); frontal acceptance items (cortical depth, the held-out marker panel)
+are not applicable. The ATERA whole-panel hippocampal route is separate and
+unchanged.
 
 **SEA-AD second vote** (`consensus._second_votes`; mode `whb_sea`). SEA-AD's
 7-class label is the broad class of its assigned subclass ("VLMC &

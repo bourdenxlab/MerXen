@@ -17,11 +17,15 @@ row allows:
 - ``spatial_gene_analysis_transcript_analysis_enabled=false``: otherwise a
   Xenium row needs pial and tissue-edge GeoJSON files.
 - ``mecr_enabled=false`` as in the AT-11 Atera run (``--mecr`` turns it on).
-- Annotation: human ``map_first`` accepts only ``frontal_cortex`` on Xenium
-  rows (the hippocampal profile is Atera-only), so the default is
-  ``clustering_squidpy_mode=legacy`` with ``anatomical_region=hippocampus``
-  recorded; ``--annotation map_first_frontal`` leaves the region blank (the
-  run's frontal-cortex default) and runs map-first anyway.
+- Annotation: ``anatomical_region=hippocampus`` on every row (the sections
+  hold the dentate gyrus, much of the rest of the hippocampus and surrounding
+  cortex). The default is ``clustering_squidpy_mode=legacy``;
+  ``--annotation map_first`` selects the provisional hippocampal map_first
+  region (the whole-panel hippocampal profile is Atera-only), launched on its
+  own with ``--annotation_human_region hippocampus
+  --annotation_human_references whb_hippocampal_supc_clus,seaad_mr_panel
+  --annotation_whb_hippocampal_region_precompute_source <dir>`` (one region
+  per launch; docs/stages/annotation.md).
 - ``xenium_min_qv=20`` and ``xenium_voxel_layers=2`` (the defaults, written
   out).
 - ``xenium_spatialdata_path`` is left blank: the source zarr is published
@@ -80,7 +84,7 @@ COLUMNS: Final = (
     "xenium_min_qv",
     "xenium_voxel_layers",
 )
-ANNOTATION_MODES: Final = ("legacy", "map_first_frontal")
+ANNOTATION_MODES: Final = ("legacy", "map_first")
 #: spatialdata-io 0.6 names the single channel of an XOA 2/3
 #: ``morphology_focus/`` folder ``DAPI`` whatever its OME-XML says, so this is
 #: the only channel name the built zarr can carry.
@@ -174,7 +178,7 @@ def build_rows(
     Args:
         sections: The sections.
         root: The dataset directory (absolute paths are derived from it).
-        annotation: ``legacy`` or ``map_first_frontal`` (see module doc).
+        annotation: ``legacy`` or ``map_first`` (see module doc).
         mecr_enabled: Value of ``mecr_enabled``.
         cache_source_zarr: Fill ``xenium_spatialdata_path`` (see module doc).
 
@@ -199,7 +203,7 @@ def build_rows(
                 "mecr_enabled": "true" if mecr_enabled else "false",
                 "spatial_gene_analysis_transcript_analysis_enabled": "false",
                 "clustering_squidpy_mode": "legacy" if is_legacy else "map_first",
-                "anatomical_region": "hippocampus" if is_legacy else "",
+                "anatomical_region": "hippocampus",
                 "xenium_dir": str(root / "xenium" / section.pair_id),
                 "xenium_spatialdata_path": (
                     str(root / "spatialdata" / f"{section.pair_id}_xenium_source.zarr")
@@ -303,10 +307,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(render_csv(rows), encoding="utf-8")
     logger.info("Wrote %d rows to %s", len(rows), args.output)
-    if args.annotation == "map_first_frontal":
-        logger.warning(
-            "map_first on these rows uses the frontal-cortex references on "
-            "hippocampal tissue; expect frontal-cortex plausibility flags."
+    if args.annotation == "map_first":
+        logger.info(
+            "map_first rows: launch them with --annotation_human_region "
+            "hippocampus, --annotation_human_references "
+            "whb_hippocampal_supc_clus,seaad_mr_panel and "
+            "--annotation_whb_hippocampal_region_precompute_source "
+            "(one region per launch)."
         )
     if args.cache_source_zarr:
         logger.warning(

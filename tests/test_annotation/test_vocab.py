@@ -226,6 +226,20 @@ def test_region_plausibility_refuses_unvalidated_regions() -> None:
     assert load_vocab("whb_supercluster").regions == ("frontal_cortex",)
 
 
+def test_hippocampus_plausibility_is_neutral_without_a_column() -> None:
+    """Every WHB node is plausible in the hippocampal formation; sinks stay sinks."""
+    for name in ("Hippocampal CA4", "Hippocampal dentate gyrus", "Splatter"):
+        assert is_region_plausible(name, "hippocampus")
+    assert not is_region_plausible("Hippocampal CA4", "frontal_cortex")
+    assert is_sink("Splatter")
+    with pytest.raises(KeyError):
+        is_region_plausible("Not a supercluster", "hippocampus")
+    with pytest.raises(ValueError, match="OD-C7"):
+        is_region_plausible("Astrocyte", "striatum")
+    # No column was added to the packaged tables (their sha256 is hashed).
+    assert load_vocab("whb_supercluster").regions == ("frontal_cortex",)
+
+
 def test_seaad_sinks_and_plausibility() -> None:
     seaad = load_vocab("seaad_mr_subclass")
     assert {name for name in seaad.names if seaad.is_sink(name)} == {"Ependymal"}

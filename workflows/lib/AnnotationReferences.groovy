@@ -160,6 +160,14 @@ class AnnotationReferences {
             whb_metadata_dir: "annotation_whb_metadata_dir",
             seaad_precomputed_stats: "annotation_seaad_precomputed_stats_path",
         ].asImmutable(),
+        // The provisional hippocampal-formation primary: its own WHB region
+        // directory (20 ROIs); the precompute is required (no rebuild).
+        whb_hippocampal_supc_clus: [
+            region_precompute: "annotation_whb_hippocampal_region_precompute_source",
+            whb_h5ad_dir: "annotation_whb_h5ad_dir",
+            whb_metadata_dir: "annotation_whb_metadata_dir",
+            seaad_precomputed_stats: "annotation_seaad_precomputed_stats_path",
+        ].asImmutable(),
         seaad_mr_panel: [
             seaad_precomputed_stats: "annotation_seaad_precomputed_stats_path",
             seaad_metadata_dir: "annotation_seaad_metadata_dir",
@@ -188,6 +196,25 @@ class AnnotationReferences {
         ].asImmutable(),
     ].asImmutable()
 
+    // Source params that change with the run's annotation_human_region:
+    // a hippocampus launch maps SEA-AD's self-map on the hippocampal
+    // held-out cells, so seaad_mr_panel reads the hippocampal region
+    // directory. A frontal launch keeps SOURCE_PARAMS unchanged.
+    static final Map<String, Map<String, Map<String, String>>> REGION_SOURCE_PARAM_OVERRIDES = [
+        hippocampus: [
+            seaad_mr_panel: [
+                whb_region_dir: "annotation_whb_hippocampal_region_precompute_source",
+            ].asImmutable(),
+        ].asImmutable(),
+    ].asImmutable()
+
+    // The WHB region directory param of each human region (the held-out
+    // self-map's region_cell_metadata.csv).
+    static final Map<String, String> REGION_DIR_PARAMS = [
+        frontal_cortex: "annotation_whb_region_precompute_source",
+        hippocampus: "annotation_whb_hippocampal_region_precompute_source",
+    ].asImmutable()
+
     // Source params that must be set for a reference to build, as
     // alternatives (one alternative fully set suffices). Files with a pinned
     // download (SEA-AD, the MERFISH CCF metadata) are not required: an unset
@@ -197,6 +224,9 @@ class AnnotationReferences {
         whb_frontal_supc_clus: [
             ["annotation_whb_region_precompute_source"],
             ["annotation_whb_h5ad_dir", "annotation_whb_metadata_dir"],
+        ],
+        whb_hippocampal_supc_clus: [
+            ["annotation_whb_hippocampal_region_precompute_source"],
         ],
         wmb_panel: [
             [
@@ -341,7 +371,8 @@ class AnnotationReferences {
      * Return the annotation_config.json content RESOLVE reads.
      *
      * annotationConfig plus the settings no earlier task reads: the human
-     * degraded mode annotation_allow_single_method (plan §5.3). Thresholds,
+     * degraded mode annotation_allow_single_method (plan §5.3) and, when set,
+     * annotation_marker_consistency_broad_only (real_qc). Thresholds,
      * floors, gate and flag settings are Python defaults and packaged tables,
      * which resolveRulesFingerprint covers.
      *
@@ -352,6 +383,12 @@ class AnnotationReferences {
     static Map resolveConfig(Map params, Object species) {
         def config = annotationConfig(params, species)
         config.allow_single_method = isTrue(params?.get("annotation_allow_single_method"))
+        // Set only when given, so a run without it keeps RESOLVE's config (and
+        // task hash) unchanged.
+        def markerCap = params?.get("annotation_marker_consistency_broad_only")
+        if (markerCap != null && markerCap.toString().trim()) {
+            config.real_qc = [marker_consistency_broad_only: markerCap.toString() as double]
+        }
         return config
     }
 
@@ -487,13 +524,37 @@ class AnnotationReferences {
      */
     static Map<String, String> referenceSources(Map params, Object referenceId) {
         def sources = [:] as TreeMap
-        (SOURCE_PARAMS[referenceId?.toString()] ?: [:]).each { name, paramName ->
+        sourceParams(params, referenceId).each { name, paramName ->
             def path = pathText(params?.get(paramName))
             if (path) {
                 sources[name] = absolute(path)
             }
         }
         return sources
+    }
+
+    /**
+     * Return the builder source -> param map of a reference in this run:
+     * SOURCE_PARAMS with the run region's REGION_SOURCE_PARAM_OVERRIDES.
+     *
+     * @param params Pipeline params (annotation_human_region).
+     * @param referenceId Reference id.
+     * @return Source name to param name.
+     */
+    static Map<String, String> sourceParams(Map params, Object referenceId) {
+        def base = SOURCE_PARAMS[referenceId?.toString()] ?: [:]
+        def overrides = REGION_SOURCE_PARAM_OVERRIDES[humanRegion(params)] ?: [:]
+        def extra = overrides[referenceId?.toString()] ?: [:]
+        return extra ? (base + extra) : base
+    }
+
+    /**
+     * Return the run's human region token (annotation_human_region; the
+     * default region when unset), as annotation_config.json resolves it.
+     */
+    static String humanRegion(Map params) {
+        return regionToken(params?.get("annotation_human_region")) ?:
+            AnnotationDefaults.VALIDATED_HUMAN_REGIONS[0]
     }
 
     /** Return cell_type_mapper's --max_gb for a PREP memory reserve. */

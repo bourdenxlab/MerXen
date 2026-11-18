@@ -195,6 +195,31 @@ def test_a_validated_panel_with_a_full_gate_has_no_banner() -> None:
     )
 
 
+def test_an_unvalidated_region_gets_its_own_banner() -> None:
+    trust = {
+        "state": "provisional",
+        "reasons": [{"code": "family_not_validated", "detail": "unlisted"}],
+        "notes": [
+            {
+                "code": "region_unvalidated",
+                "detail": "anatomical region hippocampus is not validated",
+            }
+        ],
+    }
+    banners = rp.trust_banners("S", trust, {"level": "full"})
+    assert [banner.code for banner in banners] == [
+        "panel_provisional",
+        "region_provisional",
+    ]
+    assert banners[1].text.startswith(
+        "PROVISIONAL region: anatomical region hippocampus is not validated"
+    )
+    frontal = {**trust, "notes": []}
+    assert [b.code for b in rp.trust_banners("S", frontal, {"level": "full"})] == [
+        "panel_provisional"
+    ]
+
+
 def test_gate_banners_come_after_errors_first() -> None:
     banners = rp.trust_banners(
         "S",

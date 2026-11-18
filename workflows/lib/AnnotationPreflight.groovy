@@ -33,6 +33,7 @@ class AnnotationPreflight {
         ],
         human: [
             "annotation_whb_region_precompute_source",
+            "annotation_whb_hippocampal_region_precompute_source",
             "annotation_whb_h5ad_dir",
             "annotation_whb_metadata_dir",
             "annotation_seaad_precomputed_stats_path",
@@ -92,12 +93,14 @@ class AnnotationPreflight {
         appendReferenceChecks(errors, species, params, label)
         if (species == "human") {
             def region = settings.get("annotation_anatomical_region")
-            if (!(region in AnnotationDefaults.VALIDATED_HUMAN_REGIONS)) {
+            if (!(region in AnnotationDefaults.SUPPORTED_HUMAN_REGIONS)) {
                 errors << (
                     "Human anatomical_region '${region}' for ${label} has no validated " +
                     "references; only ${AnnotationDefaults.VALIDATED_HUMAN_REGIONS.join(', ')} " +
                     "is supported (OD-C7; a new region needs the work in plan §8.9)"
                 ).toString()
+            } else {
+                appendRegionReferenceChecks(errors, region?.toString(), params, label)
             }
         } else {
             appendSectionRegionChecks(errors, settings.get("annotation_mouse_section_regions"), label)
@@ -150,7 +153,7 @@ class AnnotationPreflight {
         appendReferenceChecks(errors, species, params, label)
         appendReferenceSourceChecks(errors, species, params, label)
         def sourceParams = AnnotationReferences.referenceIds(params, species).collectMany { referenceId ->
-            (AnnotationReferences.SOURCE_PARAMS[referenceId] ?: [:]).values() as List
+            AnnotationReferences.sourceParams(params, referenceId).values() as List
         }.unique()
         (sourceParams + OPTIONAL_PATH_PARAMS.both).unique().each { paramName ->
             appendOptionalPathCheck(errors, params?.get(paramName), paramName, label)
@@ -158,12 +161,14 @@ class AnnotationPreflight {
         if (species == "human") {
             def region = params?.get("annotation_human_region")
             def token = region == null ? null : region.toString().trim().toLowerCase().replaceAll(/[\s\-]+/, "_")
-            if (!(token in AnnotationDefaults.VALIDATED_HUMAN_REGIONS)) {
+            if (!(token in AnnotationDefaults.SUPPORTED_HUMAN_REGIONS)) {
                 errors << (
                     "Human annotation_human_region '${region}' for ${label} has no validated " +
                     "references; only ${AnnotationDefaults.VALIDATED_HUMAN_REGIONS.join(', ')} " +
                     "is supported (OD-C7)"
                 ).toString()
+            } else {
+                appendRegionReferenceChecks(errors, token, params, label)
             }
         }
         appendSelfmapTestCellCheck(errors, species, params, label)
@@ -218,7 +223,9 @@ class AnnotationPreflight {
     // Params the human held-out test set (whb_frontal_supc_clus_ho) reads:
     // the region directory (region_cell_metadata.csv), the raw WHB h5ads and
     // the WHB metadata directory (the taxonomy tables and the WHB cell
-    // metadata, which holds the other-region non-neuronal test cells).
+    // metadata, which holds the other-region non-neuronal test cells). The
+    // region directory param follows the run's region
+    // (AnnotationReferences.REGION_DIR_PARAMS; humanSelfmapSourceParams).
     static final List<String> HUMAN_SELFMAP_SOURCE_PARAMS = [
         "annotation_whb_region_precompute_source",
         "annotation_whb_h5ad_dir",
@@ -228,8 +235,51 @@ class AnnotationPreflight {
     // Human references whose PREP runs the WHB held-out self-map.
     static final List<String> HUMAN_SELFMAP_REFERENCES = [
         "whb_frontal_supc_clus",
+        "whb_hippocampal_supc_clus",
         "seaad_mr_panel",
     ].asImmutable()
+
+    /** The held-out self-map source params of the run's human region. */
+    static List<String> humanSelfmapSourceParams(Map params) {
+        def regionDir = AnnotationReferences.REGION_DIR_PARAMS[AnnotationReferences.humanRegion(params)]
+        return HUMAN_SELFMAP_SOURCE_PARAMS.collect { paramName ->
+            paramName == "annotation_whb_region_precompute_source" && regionDir ? regionDir : paramName
+        }
+    }
+
+    /**
+     * A human map_first row maps with the run-level annotation_config.json
+     * (its region and references come from the run params, never the row):
+     * the row's region must be the run's, and the references must hold that
+     * region's WHB primary and no other region's.
+     */
+    private static void appendRegionReferenceChecks(List errors, String region, Map params, String label) {
+        def runRegion = AnnotationReferences.humanRegion(params)
+        if (region != runRegion) {
+            errors << (
+                "Human anatomical_region '${region}' for ${label} differs from the run's " +
+                "annotation_human_region '${runRegion}': annotation_config.json is run-level; " +
+                "launch these rows with --annotation_human_region ${region}, one region per launch"
+            ).toString()
+            return
+        }
+        def expected = AnnotationDefaults.HUMAN_REGION_PRIMARY_REFERENCES[region]
+        def references = AnnotationReferences.referenceIds(params, "human")
+        def others = AnnotationDefaults.HUMAN_REGION_PRIMARY_REFERENCES.values().findAll { referenceId ->
+            referenceId != expected && referenceId in references
+        }
+        if (expected && (!(expected in references) || others)) {
+            def wanted = [expected] + references.findAll { referenceId ->
+                referenceId != expected && !(referenceId in others)
+            }
+            errors << (
+                "annotation_human_references (${references.join(',')}) for ${label} must map " +
+                "${region} on ${expected}" +
+                (others ? " and not on ${others.join(', ')}" : "") +
+                "; pass --annotation_human_references ${wanted.join(',')}"
+            ).toString()
+        }
+    }
 
     /**
      * Require the self-map sources while resolvability is on. Mouse: the
@@ -246,7 +296,7 @@ class AnnotationPreflight {
             def selfMapped = AnnotationReferences.referenceIds(params, species).findAll { referenceId ->
                 referenceId in HUMAN_SELFMAP_REFERENCES
             }
-            def missing = HUMAN_SELFMAP_SOURCE_PARAMS.findAll { paramName ->
+            def missing = humanSelfmapSourceParams(params).findAll { paramName ->
                 !AnnotationReferences.pathText(params?.get(paramName))
             }
             if (selfMapped && missing) {

@@ -15,10 +15,13 @@ Choices made for every row, with their reasons:
   names it ``DAPI``.
 - ``spatial_gene_analysis_transcript_analysis_enabled=false``: it would need
   pial and tissue-edge GeoJSON, which do not exist for these sections.
-- ``clustering_squidpy_mode=legacy`` (default): human ``map_first`` on a Xenium
-  row has validated references for ``frontal_cortex`` only; the hippocampal
-  profile is Atera-only. ``--clustering-mode map_first`` leaves
-  ``anatomical_region`` blank instead (frontal-cortex references).
+- ``anatomical_region=hippocampus``. ``clustering_squidpy_mode=legacy``
+  (default), or ``--clustering-mode map_first``: the provisional hippocampal
+  map_first region (the whole-panel hippocampal profile is Atera-only). Launch
+  such rows on their own with ``--annotation_human_region hippocampus
+  --annotation_human_references whb_hippocampal_supc_clus,seaad_mr_panel
+  --annotation_whb_hippocampal_region_precompute_source <dir>`` (one region
+  per launch; docs/stages/annotation.md).
 - ``mecr_enabled=false`` (default) as in the AT-11 Atera run.
 - ``xenium_spatialdata_path`` is left blank: the source zarr is published
   under the run's outdir. ``--cache-source-zarr`` fills it with
@@ -170,7 +173,6 @@ def build_row(public_root: Path, section: str, options: RowOptions) -> dict[str,
     Returns:
         Column -> value.
     """
-    is_legacy = options.clustering_mode == "legacy"
     return {
         "pair_id": prepare.pair_id_for(section),
         "analysis_mode": "xenium",
@@ -192,8 +194,8 @@ def build_row(public_root: Path, section: str, options: RowOptions) -> dict[str,
         "mecr_enabled": "true" if options.mecr_enabled else "false",
         "spatial_gene_analysis_transcript_analysis_enabled": "false",
         "clustering_squidpy_mode": options.clustering_mode,
-        # Read only by map_first; legacy ignores it, so it records the tissue.
-        "anatomical_region": "hippocampus" if is_legacy else "",
+        # map_first maps on the hippocampal WHB region; legacy ignores it.
+        "anatomical_region": "hippocampus",
     }
 
 

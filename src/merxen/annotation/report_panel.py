@@ -62,6 +62,13 @@ BANNER_TEXT: Final[dict[str, str]] = {
         "listed separately in pooled statistics."
     ),
 }
+# The trust note of a supported but unvalidated human region
+# (``diagnostics.REGION_UNVALIDATED``); its detail names the region.
+REGION_NOTE_CODE: Final = "region_unvalidated"
+REGION_BANNER_TEXT: Final = (
+    "PROVISIONAL region: {detail}; no panel is validated for this region, so "
+    "every label is provisional."
+)
 GATE_BANNER_TEXT: Final[dict[str, str]] = {
     "failed": "Dataset gate FAILED: every cell is exclude_hard ({reasons}).",
     "broad_only": (
@@ -214,6 +221,20 @@ def trust_banners(
                 "Panel trust state not recorded.",
             )
         )
+    for item in [
+        *((trust or {}).get("notes") or ()),
+        *((trust or {}).get("reasons") or ()),
+    ]:
+        if isinstance(item, Mapping) and item.get("code") == REGION_NOTE_CODE:
+            banners.append(
+                Banner(
+                    "warning",
+                    sample_id,
+                    "region_provisional",
+                    REGION_BANNER_TEXT.format(detail=item.get("detail") or ""),
+                )
+            )
+            break
     level = str((gate or {}).get("level") or "")
     reasons = [
         str(item)

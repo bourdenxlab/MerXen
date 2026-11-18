@@ -1012,6 +1012,7 @@ def decide(
     resolvability: str | None = "none",
     rules: TrustRules | None = None,
     coverage: bool = True,
+    unvalidated_region: str | None = None,
 ) -> TrustDecision:
     family = family_of(table, gene_ids)
     constraint = (
@@ -1048,6 +1049,7 @@ def decide(
             else None
         ),
         resolvability=constraint,
+        unvalidated_region=unvalidated_region,
     )
 
 
@@ -1307,6 +1309,43 @@ def test_a_real_data_family_without_a_self_map_stays_validated_with_the_h18_note
             assert decision.level_status_override(level) is None
         assert decision.gate_level_cap is None
         assert not decision.banner and not decision.gate_warning
+
+
+def test_a_set_a_panel_in_the_hippocampus_is_provisional_not_validated() -> None:
+    """Set a is validated on frontal cortex; that does not carry to another region."""
+    table = load_validated_panels()
+    gene_ids = list(table.genes["human_set_a_297"].ensembl_ids)
+    frontal = decide(table, gene_ids)
+    assert (frontal.state, frontal.validation_basis) == ("validated", "real_data")
+    assert frontal.family_id == "human_set_a" and not frontal.banner
+    assert "region_unvalidated" not in [note.code for note in frontal.notes]
+
+    hippocampus = decide(table, gene_ids, unvalidated_region="hippocampus")
+    assert hippocampus.family_id == "human_set_a"
+    assert (hippocampus.state, hippocampus.validation_basis) == ("provisional", None)
+    assert hippocampus.reason_codes == ["family_region_unvalidated"]
+    assert [note.code for note in hippocampus.notes] == [
+        "region_unvalidated",
+        "family_validated",
+    ]
+    assert "hippocampus" in hippocampus.notes[0].detail
+    assert hippocampus.validated_max_level is None
+    assert hippocampus.banner and hippocampus.gate_warning
+    for level in ("lineage", "broad", "nt", "supercluster", "seaad_subclass"):
+        assert hippocampus.emission_regime(level) == "provisional"
+    # Without a self-map it keeps the provisional fail-safe, as an unlisted panel.
+    no_self_map = decide(
+        table, gene_ids, resolvability=None, unvalidated_region="hippocampus"
+    )
+    assert no_self_map.state == "broad_only"
+    assert no_self_map.reason_codes == ["resolvability_not_run"]
+    # An unlisted family gets the region note alongside its own verdict.
+    unlisted = decide(
+        ValidatedPanelTable(records=()), gene_ids, unvalidated_region="hippocampus"
+    )
+    assert unlisted.state == "provisional"
+    assert unlisted.reason_codes == ["family_not_validated"]
+    assert [note.code for note in unlisted.notes] == ["region_unvalidated"]
 
 
 def test_a_simulation_family_without_a_self_map_stays_broad_only(

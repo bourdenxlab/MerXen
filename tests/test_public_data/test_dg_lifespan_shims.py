@@ -808,7 +808,7 @@ def test_samplesheet_rows_from_listing_and_prepared_folders(
                 "--output",
                 str(output),
                 "--annotation",
-                "map_first_frontal",
+                "map_first",
                 "--sections",
                 "PUBXDG_ADULT",
             ]
@@ -819,7 +819,7 @@ def test_samplesheet_rows_from_listing_and_prepared_folders(
         (row,) = list(csv.DictReader(handle))
     assert (row["clustering_squidpy_mode"], row["anatomical_region"]) == (
         "map_first",
-        "",
+        "hippocampus",
     )
 
 

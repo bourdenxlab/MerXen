@@ -148,6 +148,7 @@ class Setup:
     use_likelihood_vote: bool = False
     n_segmented: int | None = None
     fine_seed_stability: dict[str, float] | None = None
+    region: str = "frontal_cortex"
 
     def settings(self) -> cs.HumanResolveSettings:
         emission = th.EmissionPlan(
@@ -179,6 +180,7 @@ class Setup:
             allow_fine_levels=self.thresholds.allow_fine_levels,
             use_likelihood_vote=self.use_likelihood_vote,
             n_segmented=self.n_segmented,
+            region=self.region,
         )
 
 
@@ -574,6 +576,26 @@ def test_implausible_nodes_keep_their_lineage_only_with_sea_agreement() -> None:
     # Rescued below 60 counts too (SEA-AD agrees at lineage).
     assert statuses(result, 4)["lineage"] == "confident"
     assert result.summary()["flag_counts"][Columns.FLAG_IMPLAUSIBLE] == 5
+
+
+def test_hippocampus_flags_only_the_sinks_implausible() -> None:
+    """The provisional hippocampal formation has neutral plausibility."""
+    cells = [
+        Cell("Hippocampal CA1-3", counts=200),
+        Cell("Hippocampal CA1-3", counts=200, sea_broad="Neurons", sea_raw=0.9),
+        Cell("Splatter", counts=200),
+    ]
+    result = resolve(cells, Setup(region="hippocampus"))
+    for index in (0, 1):
+        assert "implausible" not in set(statuses(result, index).values())
+        assert not result.flags[Columns.FLAG_IMPLAUSIBLE][index]
+        assert not result.flags[Columns.EXCLUDE_HARD][index]
+    assert statuses(result, 1)["broad"] == "confident"
+    assert statuses(result, 2)["broad"] == "implausible"
+    assert result.flags[Columns.FLAG_IMPLAUSIBLE][2]
+    # The same cells under frontal cortex: the CA1-3 calls are implausible.
+    frontal = resolve(cells)
+    assert statuses(frontal, 0)["broad"] == "implausible"
 
 
 def test_nt_is_not_applicable_to_non_neurons_and_gates_neuron_leaves() -> None:

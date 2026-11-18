@@ -20,6 +20,7 @@ from typing import Any, Final
 import numpy as np
 import pandas as pd
 
+from merxen.annotation.config import HUMAN_REGION_PRIMARY_REFERENCES
 from merxen.annotation.report_figures import (
     box_summary,
     grouped_bars,
@@ -194,7 +195,18 @@ def shared_mask_of(inputs: ReportInputs, sample: SampleData) -> np.ndarray | Non
 
 
 def primary_reference(inputs: ReportInputs) -> str:
-    """Return the species' primary reference id."""
+    """Return the species' primary reference id.
+
+    Human runs of another WHB region (the hippocampal formation) map on that
+    region's primary: the first region primary among the run's bundles wins,
+    else the frontal default.
+    """
+    if inputs.species == "human":
+        for reference_id in HUMAN_REGION_PRIMARY_REFERENCES.values():
+            if reference_id != PRIMARY_REFERENCE["human"] and (
+                reference_id in inputs.bundles
+            ):
+                return reference_id
     return PRIMARY_REFERENCE[inputs.species]
 
 

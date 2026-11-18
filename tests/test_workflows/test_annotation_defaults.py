@@ -28,11 +28,13 @@ from merxen.annotation.config import (
     DEFAULT_HUMAN_REGION,
     DEFAULT_REFERENCE_IDS,
     FLIPPED_SPECIES,
+    HUMAN_REGION_PRIMARY_REFERENCES,
     KNOWN_REFERENCES,
     MAP_FIRST_TABLE_KEY_SUFFIX,
     MAP_FIRST_UNASSIGNED_STATE_POLICY,
     MOUSE_CCF_REGIONS,
     MOUSE_SECTION_REGION_KEYWORDS,
+    SUPPORTED_HUMAN_REGIONS,
     VALIDATED_HUMAN_REGIONS,
     AnnotationConfig,
     AnnotationReferenceSpec,
@@ -170,6 +172,19 @@ def test_groovy_constants_match_python() -> None:
     assert (
         tuple(_groovy_strings(_groovy_constant(source, "VALIDATED_HUMAN_REGIONS")))
         == VALIDATED_HUMAN_REGIONS
+    )
+    assert (
+        tuple(_groovy_strings(_groovy_constant(source, "SUPPORTED_HUMAN_REGIONS")))
+        == SUPPORTED_HUMAN_REGIONS
+    )
+    assert (
+        dict(
+            re.findall(
+                r'(\w+): "(\w+)"',
+                _groovy_constant(source, "HUMAN_REGION_PRIMARY_REFERENCES"),
+            )
+        )
+        == HUMAN_REGION_PRIMARY_REFERENCES
     )
     assert (
         tuple(
@@ -770,6 +785,7 @@ def _build_cases(tmp_path: Path, defaults: dict[str, Any]) -> dict[str, dict[str
         "params": defaults,
     }
     _add_m5_cases(cases, tmp_path, defaults)
+    _add_hippocampus_cases(cases, human_settings, defaults, existing)
     readonly = tmp_path / "readonly"
     readonly.mkdir()
     readonly.chmod(0o555)
@@ -798,6 +814,70 @@ SAMPLES_JSON = json.dumps(
         {"sample_id": "P1_XENIUM", "platform": "XENIUM", "segmentation": "reseg"},
     ]
 )
+
+
+def _add_hippocampus_cases(
+    cases: dict[str, dict[str, Any]],
+    human_settings: dict[str, Any],
+    defaults: dict[str, Any],
+    existing: Path,
+) -> None:
+    """Xenium hippocampus rows on the map_first route (not ATERA)."""
+    hippocampus_row = {
+        **human_settings,
+        "annotation_anatomical_region": "hippocampus",
+        "active_platforms": ["XENIUM"],
+    }
+    ready = {
+        **defaults,
+        "annotation_human_region": "hippocampus",
+        "annotation_human_references": "whb_hippocampal_supc_clus,seaad_mr_panel",
+        "annotation_whb_hippocampal_region_precompute_source": str(existing),
+        "annotation_whb_h5ad_dir": str(existing),
+        "annotation_whb_metadata_dir": str(existing),
+    }
+    cases["preflight|hippocampus|ready"] = {
+        "fn": "preflight",
+        "settings": hippocampus_row,
+        "params": ready,
+    }
+    cases["preflight|hippocampus|frontal-launch"] = {
+        "fn": "preflight",
+        "settings": hippocampus_row,
+        "params": {
+            **ready,
+            "annotation_human_region": "frontal_cortex",
+            "annotation_human_references": "whb_frontal_supc_clus,seaad_mr_panel",
+        },
+    }
+    cases["preflight|hippocampus|frontal-references"] = {
+        "fn": "preflight",
+        "settings": hippocampus_row,
+        "params": {
+            **ready,
+            "annotation_human_references": "whb_frontal_supc_clus,seaad_mr_panel",
+        },
+    }
+    cases["preflight|hippocampus|frontal-row"] = {
+        "fn": "preflight",
+        "settings": human_settings,
+        "params": ready,
+    }
+    cases["preflight|hippocampus|no-region-dir"] = {
+        "fn": "preflight",
+        "settings": hippocampus_row,
+        "params": {
+            **ready,
+            "annotation_whb_hippocampal_region_precompute_source": None,
+            # The frontal region directory is not the hippocampal one.
+            "annotation_whb_region_precompute_source": str(existing),
+        },
+    }
+    cases["preflight|hippocampus|atera"] = {
+        "fn": "preflight",
+        "settings": {**hippocampus_row, "active_platforms": ["ATERA"]},
+        "params": {**ready, "annotation_hippocampal_resources": str(existing)},
+    }
 
 
 def _add_m5_cases(
@@ -1601,6 +1681,31 @@ def test_groovy_preflight(groovy_results: dict[str, dict[str, Any]]) -> None:
     ):
         assert expected in invalid
     assert "not available yet" not in invalid
+    # Xenium hippocampus rows take the map_first route with the hippocampal
+    # WHB primary, one region per launch (annotation_config.json is run-level).
+    assert _value(groovy_results, "preflight|hippocampus|ready") == []
+    launch = "\n".join(_value(groovy_results, "preflight|hippocampus|frontal-launch"))
+    assert "differs from the run's annotation_human_region 'frontal_cortex'" in launch
+    assert "--annotation_human_region hippocampus" in launch
+    references = "\n".join(
+        _value(groovy_results, "preflight|hippocampus|frontal-references")
+    )
+    assert "must map hippocampus on whb_hippocampal_supc_clus" in references
+    assert "not on whb_frontal_supc_clus" in references
+    assert (
+        "--annotation_human_references whb_hippocampal_supc_clus,seaad_mr_panel"
+        in references
+    )
+    (frontal_row,) = _value(groovy_results, "preflight|hippocampus|frontal-row")
+    assert "anatomical_region 'frontal_cortex'" in frontal_row
+    no_dir = "\n".join(_value(groovy_results, "preflight|hippocampus|no-region-dir"))
+    assert (
+        "whb_hippocampal_supc_clus needs "
+        "annotation_whb_hippocampal_region_precompute_source"
+    ) in no_dir
+    assert "need annotation_whb_hippocampal_region_precompute_source" in no_dir
+    # The ATERA whole-panel route is unchanged.
+    assert _value(groovy_results, "preflight|hippocampus|atera") == []
     empty_suffix = _value(groovy_results, "preflight|map_first|empty-suffix")
     assert len(empty_suffix) == 1
     assert "overwrite the legacy one" in empty_suffix[0]

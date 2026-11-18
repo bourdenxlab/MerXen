@@ -1566,6 +1566,90 @@ def test_self_map_test_set_revision_is_read_from_the_hashed_params(
     assert not [r for r in caplog.records if "self-map test set" in r.getMessage()]
 
 
+def test_hippocampal_bundles_keep_the_whb_columns_and_test_set_revision(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    """whb_hippocampal_supc_clus writes mmc_whb_* and has a held-out revision."""
+    from types import SimpleNamespace
+
+    from merxen.annotation.pipeline import (
+        ENGINE_PREFIXES,
+        _self_map_test_set_revision,
+    )
+    from merxen.annotation.reference import (
+        HO_SELF_MAP_TEST_SET_REVISION,
+        ho_self_map_exclusion_params,
+    )
+
+    assert ENGINE_PREFIXES["whb_hippocampal_supc_clus"] == "whb"
+    panel = _panel(GENE_IDS)
+    path = fake_mmc.bundle(
+        "whb_hippocampal_supc_clus",
+        build_hash="e" * 64,
+        role="primary",
+        species="human",
+        panel_hash=panel.panel_hash,
+        n_genes=panel.n_genes,
+        levels=WHB_LEVELS,
+        nodes=WHB_NODES,
+    )
+    manifest = json.loads((path / "bundle.json").read_text())
+    manifest.setdefault("build_hash_payload", {}).setdefault("builder_params", {})[
+        "resolvability"
+    ] = {
+        "enabled": True,
+        "test_set": {
+            "reference_id": "whb_hippocampal_supc_clus_ho",
+            "self_map_exclusion": ho_self_map_exclusion_params(),
+        },
+    }
+    (path / "bundle.json").write_text(json.dumps(manifest))
+    revision = _self_map_test_set_revision(SimpleNamespace(path=path))
+    assert revision == HO_SELF_MAP_TEST_SET_REVISION
+
+
+def test_resolve_trust_carries_the_run_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RESOLVE's trust decision is told about an unvalidated human region."""
+    from types import SimpleNamespace
+
+    from merxen.annotation import diagnostics
+    from merxen.annotation.pipeline import trust_for_run
+
+    seen: list[str | None] = []
+    monkeypatch.setattr(diagnostics, "panel_diagnostics", lambda *a, **k: None)
+    monkeypatch.setattr(diagnostics, "load_validated_panels", lambda *a, **k: None)
+    monkeypatch.setattr(
+        diagnostics,
+        "trust_for_panel",
+        lambda *a, unvalidated_region=None, **k: seen.append(unvalidated_region),
+    )
+    run = SimpleNamespace(
+        run_id="r",
+        record=SimpleNamespace(
+            reference_id="whb_hippocampal_supc_clus", role="primary", panel_hash="p"
+        ),
+        bundle=SimpleNamespace(manifest={}),
+    )
+    hippocampus = AnnotationConfig(
+        anatomical_region="hippocampus",
+        references=[
+            {
+                "reference_id": "whb_hippocampal_supc_clus",
+                "species": "human",
+                "role": "primary",
+                "hierarchy": ["CCN202210140_SUPC", "CCN202210140_CLUS"],
+            },
+            {"reference_id": "seaad_mr_panel", "species": "human", "role": "secondary"},
+        ],
+    )
+    panel = _panel(GENE_IDS)
+    trust_for_run(run, panel, hippocampus)  # type: ignore[arg-type]
+    trust_for_run(run, panel, AnnotationConfig())  # type: ignore[arg-type]
+    assert seen == ["hippocampus", None]
+
+
 def test_self_map_test_set_revision_applies_only_to_the_human_held_out_set(
     tmp_path: Path, fake_mmc: FakeMmc, caplog: pytest.LogCaptureFixture
 ) -> None:
