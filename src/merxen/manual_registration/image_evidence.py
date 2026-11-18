@@ -928,31 +928,32 @@ def _vessel_masks(
     # vessels around them.
     domain = (tissue | _small_holes(tissue, params.max_area_um2 / area_px)) & covered
     weight = tissue.astype(np.float32)
-    smooth = {
-        role: _blur(
-            np.log1p(np.clip(images.images[role], 0.0, None)).astype(np.float32),
-            params.smooth_sigma_um / pixel,
+
+    def smooth(role: str) -> np.ndarray:
+        log_image = np.log1p(np.clip(images.images[role], 0.0, None))
+        return _blur(log_image.astype(np.float32), params.smooth_sigma_um / pixel)
+
+    def z_score(role: str) -> np.ndarray:
+        image = smooth(role)
+        background = _normalised_blur(
+            image * weight, weight, params.background_sigma_um / pixel
         )
-        for role in ROLES
-    }
-    map2 = smooth["map2"]
+        return _robust_z(image - background, tissue)
+
+    # One full-size float image at a time: these grids are ~200 MB each.
+    map2 = smooth("map2")
     neuropil = _normalised_blur(map2 * weight, weight, params.neuropil_sigma_um / pixel)
     glass = _glass_level(map2, covered, tissue)
     level = (map2 - glass) / np.maximum(neuropil - glass, 1e-6)
-    z_score = {
-        role: _robust_z(
-            smooth[role]
-            - _normalised_blur(
-                smooth[role] * weight, weight, params.background_sigma_um / pixel
-            ),
-            tissue,
-        )
-        for role in ("at8", "dapi")
-    }
+    del map2, neuropil
+    at8_z = z_score("at8")
     poor = (level < params.map2_fraction) | (
-        (level < params.map2_reduced_fraction) & (z_score["at8"] < params.at8_dark_z)
+        (level < params.map2_reduced_fraction) & (at8_z < params.at8_dark_z)
     )
-    bright = (z_score["at8"] > params.at8_z) & (z_score["dapi"] > params.dapi_z)
+    del level
+    bright = at8_z > params.at8_z
+    del at8_z
+    bright &= z_score("dapi") > params.dapi_z
     structure = (poor | bright) & domain
     for operation, radius_um in (
         (cv2.MORPH_OPEN, params.opening_um),
@@ -1723,8 +1724,8 @@ class ClickProfile:
         axis_reference_xy: Unit major axis in the reference frame.
         axis_moving_xy: Unit major axis in the moving frame (through the pull's
             Jacobian at the click).
-        masked: A masked vessel pixel lies within ``click_search_um`` of the
-            click.
+        masked: At least half of the profile within ``click_clip_um`` lies in
+            the vessel mask.
     """
 
     elongated: bool
@@ -1844,21 +1845,17 @@ def click_profile(
     component = labels == int(ids[np.argmax(counts)])
     area_um2 = float(component.sum()) * pixel * pixel
     clipped = component & (distance_um <= params.click_clip_um)
-    points = np.stack([columns[clipped], rows[clipped]], axis=1).astype(np.float64)
-    centred = points - points.mean(axis=0)
-    cov = centred.T @ centred / len(points) + np.eye(2) / 12.0
-    values, vectors = np.linalg.eigh(cov)
-    values = np.clip(values, 0.0, None)
-    elongation = math.sqrt(values[1] / max(values[0], 1e-9))
+    cov = _component_covariances(clipped.astype(np.int32), 1)[1]
+    values = np.clip(np.linalg.eigvalsh(cov), 0.0, None)
+    elongation, angle = _elongation_and_angle(cov)
     length_um = 4.0 * math.sqrt(values[1]) * pixel
     linear = reference.to_level0[:2, :2] * reference.level0_pixel_size_um
-    axis_reference = _unit(linear @ vectors[:, 1])
+    axis_reference = _unit(linear @ np.array([math.cos(angle), math.sin(angle)]))
     axis_moving = _unit(np.asarray(jacobian, dtype=np.float64) @ axis_reference)
+    # The profile itself must be a masked one: a nearby masked vessel does not make
+    # an unmasked strip or gap under the click a vessel.
     vessel = reference.vessel
-    masked = bool(
-        vessel is not None
-        and (vessel[y0:y1, x0:x1] & (distance_um <= params.click_search_um)).any()
-    )
+    masked = bool(vessel is not None and vessel[y0:y1, x0:x1][clipped].mean() >= 0.5)
     elongated = (
         masked
         and elongation >= params.min_elongation
