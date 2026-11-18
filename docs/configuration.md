@@ -264,16 +264,21 @@ registered image follows `viewer_cache_build_image_pyramid`.
 ### Manual registration
 
 Parameters of the standalone [manual landmark registration](stages/manual-registration.md)
-workflows (`manual_registration_prepare.nf`, `manual_registration_register.nf`);
+workflows (`manual_registration_prepare.nf`, `manual_registration_register.nf`,
+`manual_registration_check.nf`);
 `main.nf` ignores them.
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `manual_registration_presets` | `"same_section"` | Presets of rows with a blank `presets` column (`;`-separated: `same_section`, `serial_section`). |
+| `manual_registration_presets` | `"same_section"` | Presets of rows with a blank `presets` column (`;`-separated: `same_section`, `serial_section`, `cortex_serial`). |
 | `manual_registration_settings` | `""` | Settings overrides for every row, `key=value;preset:key=value`; the samplesheet's `registration_settings` column wins. |
 | `manual_registration_force_prepare` | `false` | Rebuild the prepared store that Python would otherwise keep. The old store is kept as `<id>_prepared.zarr.superseded-<UTC>`; its landmarks are carried over only when both images keep their shape and pixel size, otherwise label the new store again (copy the superseded one first if needed). |
 | `manual_registration_force_register` | `false` | Re-run registrations that Python would otherwise skip. |
 | `manual_registration_czi_python` | `null` | Python of the isolated CZI runtime (`envs/environment.czi.yml`), or `in_process`. A host location: set it in the gitignored `workflows/conf/site.config`. Required for `.czi` rows; the prepare task exports it as `MERXEN_CZI_PYTHON`. |
+| `manual_registration_check_preset` | `"cortex_serial"` | Preset whose settings the landmark check (`manual_registration_check.nf`) applies. |
+| `manual_registration_check_write_attr` | `true` | Write the check into the prepared store as its root attribute (`merxen_manual_registration_check`), besides the JSON and figure. |
+| `manual_registration_check_suggestions` | `20` | Number of next clicks to suggest (integer 0-200). |
+| `manual_registration_check_max_forks` | Dwight: `2` | Maximum concurrent check processes. |
 | `manual_registration_prepare_max_forks` | Dwight: `2` | Maximum concurrent prepare processes. |
 | `manual_registration_register_max_forks` | Dwight: `2` | Maximum concurrent register processes. |
 
@@ -1134,6 +1139,7 @@ for every task. Portable per-process CPU/memory requests remain in
 | `GASTON_IMPORT` | 4 | 48 GB | 1 |
 | `MANUAL_REGISTRATION_PREPARE` | 8 | 16 GB | `manual_registration_prepare_max_forks` = 2 |
 | `MANUAL_REGISTRATION_REGISTER` | 8 | 48 GB | `manual_registration_register_max_forks` = 2 |
+| `MANUAL_REGISTRATION_CHECK` | 8 | 16 GB | `manual_registration_check_max_forks` = 2 |
 | `MANUAL_REGISTRATION_COMPARE` | 1 | 4 GB | unbounded |
 
 On Dwight, `CELLPOSE_SEGMENT`, `ALIGN` when `alignment_device != "cpu"`, and

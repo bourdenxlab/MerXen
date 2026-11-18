@@ -101,7 +101,7 @@ Each stage is one Nextflow module and one `merxen` subcommand, sharing a Pydanti
 (`workflows/prepare_hitl_viewer.nf`) adds viewing-only transcript density and
 portable crop setup to existing review stores while retaining masks and annotations.
 
-Two further workflows are **not** stages of `main.nf`: [manual landmark registration](docs/stages/manual-registration.md) prepares an image pair (including Zeiss CZI scans), lets you place landmarks in the napari viewer, and registers the pair with a landmark fit, guarded DAPI refinement and optional optical flow (`workflows/manual_registration_prepare.nf` and `workflows/manual_registration_register.nf`, one samplesheet).
+Three further workflows are **not** stages of `main.nf`: [manual landmark registration](docs/stages/manual-registration.md) prepares an image pair (including Zeiss CZI scans), lets you place landmarks in the napari viewer, and registers the pair with a landmark fit, guarded DAPI refinement and optional optical flow (`workflows/manual_registration_prepare.nf` and `workflows/manual_registration_register.nf`, one samplesheet; `workflows/manual_registration_check.nf` checks a labelling before registration).
 
 Downstream analysis runs for all four segmentation branches by default (`--analysis_segmentation all`): ProSeg-resegmented cells, original instrument segmentations, the Cellpose mask, and the ProSeg hybrid. Use `both` explicitly to restrict analysis to `reseg` and `original_seg`.
 

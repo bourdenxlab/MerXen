@@ -504,7 +504,7 @@ CSV/extended JSON outputs.
 
 ## Standalone workflows: manual landmark registration
 
-Two scripts next to `main.nf` register an image pair by hand-placed landmarks
+Three scripts next to `main.nf` (prepare, register and a landmark check) register an image pair by hand-placed landmarks
 (for example a Zeiss CZI slide scan against a Xenium DAPI image). They are not
 stages of `main.nf`: they read their own samplesheet and run in two steps with a
 human step (the napari viewer) between them.
