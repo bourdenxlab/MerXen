@@ -47,7 +47,9 @@ NO_WINDOWS = "field_window_observations=false"
 # (wall minutes, peak GB) limits of the three settings. The peaks are the measured
 # values of one process per setting (2.5, 7.1 and 7.9 GB, after the unneeded imports
 # of PyTorch, Cellpose and VALIS were removed) plus 25 % headroom; the plan's first
-# targets (2.5, 8 and 10 GB) were estimates.
+# targets (2.5, 8 and 10 GB) were estimates. These runs are in-process (Python API):
+# the `merxen` command line, hence Nextflow, still imports PyTorch and Cellpose and
+# peaks about 0.6 GB higher, so the limits do not cover Nextflow runs.
 LIMITS = {
     "landmarks_only": (6.0, 3.2),
     "no_windows": (12.0, 8.9),
