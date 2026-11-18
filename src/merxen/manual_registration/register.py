@@ -2062,8 +2062,9 @@ def _run_field_registration(
     transform = crop_offset_affine(crop_r, pixel_ref, factor_p)
 
     tmp: Path | None = None
+    # Every field run clears an interrupted run's partial store, a none run too.
+    _remove_stale_siblings(result_dir, run_id)
     if mode != "none":
-        _remove_stale_siblings(result_dir, run_id)
         tmp = result_dir / f".{run_id}_registered.zarr.partial-{uuid.uuid4().hex}"
     sdata: Any = None
     try:

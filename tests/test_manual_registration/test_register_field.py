@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -456,6 +457,46 @@ def test_materialize_none_supersedes_and_removes_an_older_store(
     )
     assert not store.exists()
     assert not any(path.is_dir() for path in result.iterdir())
+
+
+def test_materialize_none_removes_a_stale_partial_store(
+    prepared: Prepared, tmp_path: Path
+) -> None:
+    result = tmp_path / "result"
+    result.mkdir()
+    partial = result / f".{NAME}_cortex_serial_registered.zarr.partial-abc123"
+    partial.mkdir()
+    (partial / "chunk").write_text("x")
+    run_manual_registration(
+        _config(
+            prepared,
+            result,
+            tmp_path / "out",
+            row_settings="field_window_observations=false;materialize=none",
+        )
+    )
+    assert not partial.exists()
+
+
+def test_materialize_none_is_not_reused_while_a_result_store_sits_there(
+    prepared: Prepared, tmp_path: Path
+) -> None:
+    result = tmp_path / "result"
+    none_settings = "field_window_observations=false;materialize=none"
+    config = _config(prepared, result, tmp_path / "out", row_settings=none_settings)
+    run_manual_registration(config)
+    # An interrupted preview run's store swapped into place before its publish.
+    preview_outputs = run_manual_registration(
+        _config(prepared, tmp_path / "other", tmp_path / "out_p")
+    )
+    final = preview_outputs["result_store"]
+    planted = result / final.name
+    shutil.copytree(final, planted)
+    outputs = run_manual_registration(
+        _config(prepared, result, tmp_path / "out2", row_settings=none_settings)
+    )
+    assert "reused" not in _summary(outputs)
+    assert not planted.exists()
 
 
 def test_full_materialization_agrees_with_the_preview(
