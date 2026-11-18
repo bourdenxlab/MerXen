@@ -368,6 +368,11 @@ again".
 **Verdicts** (per click): `confirmed` (the image puts the structure where the click
 is), `contradicted` (the image puts it elsewhere; the JSON has the snap position),
 `ridge` (the image fixes it only along a line), `inconclusive` and `not_checked`.
+A click is matched only where its 300 and 600 µm windows are at least 20 % tissue and
+60 % covered by the other section (the tissue windows need 50 % and 90 %): clicks on
+a tissue edge or near the pia carry most of the signal two serial sections share, and
+the empirical null of the click check is drawn with the same gates. A click with no
+usable window stays `inconclusive` (reason `no_tissue` or `outside_coverage`).
 
 **Classes and what to do.** p\* and w\* are the lower p-value and weight of the two
 fields. A pair is *gross* when p\* < 1e-6 or w\* < 0.05, and *flagged* when

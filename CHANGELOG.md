@@ -23,6 +23,10 @@ users would notice). A release turns [Unreleased] into the release's section.
 
 - **Registration outputs: new columns.** The landmarks CSV has four new columns (`field_weight`, `field_p_value`, `field_verdict`, `field_class`) and the comparison CSV seven (`field_model`, `field_loo_median_um`, `field_loo_p90_um`, `field_n_check`, `field_n_likely_misclick`, `field_n_windows`, `materialize_mode`); they are empty for `same_section` and `serial_section` runs. Existing results are reused and keep the files they were written with: provenance digests of the older presets are unchanged, and the comparison reads a result without a `field` block as a full similarity run.
 
+### Fixed
+
+- **Cortex serial registration: the click check no longer skips clicks at tissue edges.** The per-click image check required half of its window to be tissue (and 90 % covered by the other section), the gates of the tissue windows, so clicks on the tissue edge or near the pia were skipped as `no_tissue` although edges carry most of the signal two serial sections share. The click gates are now 20 % tissue and 60 % coverage, and the empirical null of the click check is drawn with the same gates; the tissue windows keep 50 % and 90 %. Edge clicks now get a verdict, so the class counts of a `cortex_serial` check can differ from those of the first M1 builds.
+
 ## [1.0.2] - 2026-11-16
 
 ### Security
