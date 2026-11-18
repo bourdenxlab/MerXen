@@ -49,7 +49,7 @@ SERIAL_V1 = {
 }
 
 
-CORTEX_SERIAL_V1 = {
+CORTEX_SERIAL_V2 = {
     "matrix_scale_tolerance": 0.05,
     "refine_affine": False,
     "nonrigid_enabled": False,
@@ -57,7 +57,6 @@ CORTEX_SERIAL_V1 = {
     "field_model": "robust_gp",
     "field_window_observations": True,
     "field_trust_confirmed_clicks": True,
-    "materialize": "preview",
 }
 
 
@@ -73,9 +72,9 @@ def test_preset_tables_are_pinned() -> None:
     assert PRESET_VERSIONS == {
         "same_section": "same_section_v2",
         "serial_section": "serial_section_v2",
-        "cortex_serial": "cortex_serial_v1",
+        "cortex_serial": "cortex_serial_v2",
     }
-    assert PRESETS["cortex_serial"] == CORTEX_SERIAL_V1
+    assert PRESETS["cortex_serial"] == CORTEX_SERIAL_V2
     fields = set(ManualRegistrationSettings.model_fields)
     assert set(PRESETS["serial_section"]) <= fields
     assert PRESETS["serial_section"] == SERIAL_V1
@@ -88,7 +87,9 @@ def test_cortex_serial_resolves_to_the_field_settings() -> None:
     assert settings.field_model == "robust_gp"
     assert settings.field_window_observations is True
     assert settings.field_trust_confirmed_clicks is True
-    assert settings.materialize == "preview"
+    # The level-0 grid: a preview store is too coarse to find one cell.
+    assert settings.materialize == "full"
+    assert settings.preview_pixel_size_um == 5.5
     assert settings.refine_affine is False
     assert settings.nonrigid_enabled is False
     assert settings.nucleus_qc is False

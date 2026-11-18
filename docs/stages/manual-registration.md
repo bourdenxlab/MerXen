@@ -55,7 +55,7 @@ field, see "Registration through the landmark field" below):
   12 µm per pixel with wider windows, stronger smoothing and tighter Jacobian
   limits; nucleus-level QC is computed but informative only. It inherits the
   `same_section` correlation guard.
-- `cortex_serial` (`cortex_serial_v1`): adjacent cortex sections whose nuclei do
+- `cortex_serial` (`cortex_serial_v2`): adjacent cortex sections whose nuclei do
   not match. The similarity fit and the DAPI refinement are replaced by a smooth
   **robust landmark field** (a Student-t Gaussian process over the landmark
   displacements) that is checked against the AT8, MAP2 and DAPI images; the DAPI
@@ -112,16 +112,18 @@ reported, as the `landmark` stage and the `fit` block), then:
    affine. The flow is the format the registration core's pull and push functions
    read, so the landmarks are pushed through it exactly like the TV-L1 flow.
 4. Resample the moving image through the flow. `materialize` decides what is
-   written: `preview` (the default for `cortex_serial`) the reference and the
-   registered moving image at the coarsest pyramid level not coarser than
-   `preview_pixel_size_um` (1 % tolerance; 5.5 µm: level factor 16 on a 0.345 µm scan), `full` the
-   level-0 grid as for the other presets, `none` no result store at all (the summary
-   JSON is the record, and an older result store of the run is removed).
+   written: `full` (the default, `cortex_serial` included) the level-0 grid as for
+   the other presets, `preview` the reference and the registered moving image at
+   the coarsest pyramid level not coarser than `preview_pixel_size_um` (1 %
+   tolerance; 5.5 µm: level factor 16 on a 0.345 µm scan), `none` no result store
+   at all (the summary JSON is the record, and an older result store of the run is
+   removed). The viewer pyramids of both elements are built from the stored
+   elements once the moving image is written.
 5. Compute the tissue QC on the registration channel and on each channel role,
    write the field figure, the model and flow files and the summary.
 
-The preview store is for checking the registration and for the viewer; `full` is
-the level-0 grid that analysis needs (the milestone's validation table records the
+The preview store is a quick look at the registration, too coarse to match single
+cells (5.5 µm pixels); `full` is the level-0 grid that cell matching and analysis need (the milestone's validation table records the
 time and memory of each).
 
 ## Inputs and samplesheet
@@ -715,7 +717,7 @@ and is the set of keys `registration_settings` can override. Defaults are the
 | `field_trust_confirmed_clicks` | false (true in `cortex_serial`) | Keep strongly image-confirmed clicks at full weight |
 | `field_grid_um` | 11 | Node spacing of the pull flow of a field registration, in µm (rounded to whole reference pixels: 32 at 0.345 µm) |
 | `field_sd_grid_um` | 88 | Node spacing of the uncertainty grid in the flow file |
-| `materialize` | `full` (`preview` in `cortex_serial`) | What a field registration writes: `full` (level-0 grid), `preview` (a coarse pyramid level) or `none` (no result store) |
+| `materialize` | `full` | What a field registration writes: `full` (level-0 grid), `preview` (a coarse pyramid level) or `none` (no result store) |
 | `preview_pixel_size_um` | 5.5 | Target pixel size of a preview store; the coarsest kept pyramid level not coarser than this, 1 % tolerance (16 x 0.345 µm on a 0.345 µm scan) |
 
 **Presets.** `same_section` is the defaults above. It differs from the
@@ -744,10 +746,11 @@ preset bumps its version, recorded in every summary.
 | `landmark_outlier_floor_um` | 10 | 30 |
 | `nucleus_qc` | false | true |
 
-`cortex_serial` (`cortex_serial_v1`) sets `matrix_scale_tolerance` 0.05,
+`cortex_serial` (`cortex_serial_v2`) sets `matrix_scale_tolerance` 0.05,
 `refine_affine` false, `nonrigid_enabled` false, `nucleus_qc` false, `field_model`
-`robust_gp`, `field_window_observations` true, `field_trust_confirmed_clicks` true
-and `materialize` `preview`, and keeps `same_section` for every other key. A setting
+`robust_gp`, `field_window_observations` true and `field_trust_confirmed_clicks`
+true, and keeps `same_section` for every other key (`cortex_serial_v1` also set
+`materialize` `preview`). A setting
 rule (checked before any work): `materialize` other than `full` is only for
 `robust_gp` runs, and a `robust_gp` register run needs `refine_affine=false` and
 `nonrigid_enabled=false`. The older presets' provenance digests leave the `field_*`

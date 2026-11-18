@@ -65,6 +65,7 @@ PRESETS: dict[str, dict[str, Any]] = {
     # Adjacent cortex sections: the robust landmark field replaces the similarity
     # plus refinement chain (plan D4), so the DAPI refinement and TV-L1 are off. The
     # default similarity trimming is kept: it is the viewer's live rigid fit.
+    # v2 writes the level-0 grid (materialize full); v1 wrote a 5.5 um preview.
     "cortex_serial": {
         "matrix_scale_tolerance": 0.05,
         "refine_affine": False,
@@ -73,13 +74,12 @@ PRESETS: dict[str, dict[str, Any]] = {
         "field_model": "robust_gp",
         "field_window_observations": True,
         "field_trust_confirmed_clicks": True,
-        "materialize": "preview",
     },
 }
 PRESET_VERSIONS: dict[str, str] = {
     "same_section": "same_section_v2",
     "serial_section": "serial_section_v2",
-    "cortex_serial": "cortex_serial_v1",
+    "cortex_serial": "cortex_serial_v2",
 }
 # Fixed by the samplesheet and the prepared store, never by a settings override.
 FORBIDDEN_OVERRIDES: frozenset[str] = frozenset(
