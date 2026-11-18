@@ -64,6 +64,13 @@ COMPARISON_COLUMNS: tuple[str, ...] = (
     "nucleus_qc_pearson",
     "wall_time_s",
     "peak_rss_gb",
+    "field_model",
+    "field_loo_median_um",
+    "field_loo_p90_um",
+    "field_n_check",
+    "field_n_likely_misclick",
+    "field_n_windows",
+    "materialize_mode",
 )
 _PANELS_PER_ROW = 4
 
@@ -78,7 +85,12 @@ def _get(summary: Mapping[str, Any], *path: str) -> Any:
 
 
 def comparison_row(summary: Mapping[str, Any]) -> dict[str, Any]:
-    """Pick the comparison metrics out of one run's summary (missing: ``None``)."""
+    """Pick the comparison metrics out of one run's summary (missing: ``None``).
+
+    The ``field_*`` columns are empty for similarity runs and for results written
+    before the robust field existed (no ``field`` key); ``materialize_mode`` is
+    ``full`` for those, the stores they wrote being full resolution.
+    """
     row: dict[str, Any] = {
         "run_id": summary.get("run_id"),
         "preset": summary.get("preset"),
@@ -104,6 +116,15 @@ def comparison_row(summary: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "wall_time_s": _get(summary, "resources", "wall_time_s"),
         "peak_rss_gb": _get(summary, "resources", "peak_rss_gb"),
+        "field_model": _get(summary, "field", "model"),
+        "field_loo_median_um": _get(summary, "field", "loo_um", "median"),
+        "field_loo_p90_um": _get(summary, "field", "loo_um", "p90"),
+        "field_n_check": _get(summary, "field", "class_counts", "check"),
+        "field_n_likely_misclick": _get(
+            summary, "field", "class_counts", "likely_misclick"
+        ),
+        "field_n_windows": _get(summary, "field", "n_windows"),
+        "materialize_mode": _get(summary, "field", "materialize", "mode") or "full",
     }
     for stage in ("coarse", "landmark", "affine", "final"):
         row[f"tissue_pearson_{stage}"] = _get(summary, "tissue_qc", "pearson", stage)

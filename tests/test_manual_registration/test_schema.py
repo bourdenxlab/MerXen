@@ -23,6 +23,7 @@ from merxen.manual_registration.schema import (
     CoarseTransform,
     CropRect,
     LandmarkPair,
+    Materialization,
     UnsupportedSchemaVersionError,
     canonical_json,
     canonical_sha256,
@@ -222,6 +223,47 @@ def test_parse_store_attrs_accepts_both_examples(
         "merxen.manual_registration.store"
     )
     assert parse_store_attrs(result).prepared_store is not None
+
+
+def test_materialization_validates_and_ignores_unknown_keys() -> None:
+    record = Materialization.model_validate(
+        {"mode": "preview", "level_factor": 16, "pixel_size_um": 5.52, "extra": 1}
+    )
+    assert (record.mode, record.level_factor, record.pixel_size_um) == (
+        "preview",
+        16,
+        5.52,
+    )
+    with pytest.raises(ValidationError):
+        record.mode = "full"  # type: ignore[misc]
+    for bad in (
+        {"mode": "none", "level_factor": 1, "pixel_size_um": 1.0},
+        {"mode": "full", "level_factor": 0, "pixel_size_um": 1.0},
+        {"mode": "full", "level_factor": 1, "pixel_size_um": 0.0},
+        {"mode": "full", "level_factor": 1, "pixel_size_um": float("inf")},
+    ):
+        with pytest.raises(ValidationError):
+            Materialization.model_validate(bad)
+
+
+def test_store_image_record_with_and_without_materialization(
+    result: dict[str, Any],
+) -> None:
+    assert parse_store_attrs(result).images["reference"].materialization is None
+    marked = copy.deepcopy(result)
+    marked["images"]["moving"]["materialization"] = {
+        "mode": "preview",
+        "level_factor": 16,
+        "pixel_size_um": 5.52,
+    }
+    parsed = parse_store_attrs(marked)
+    assert parsed.images["reference"].materialization is None
+    moving = parsed.images["moving"].materialization
+    assert moving is not None and moving.level_factor == 16
+    broken = copy.deepcopy(marked)
+    broken["images"]["moving"]["materialization"]["level_factor"] = 0
+    with pytest.raises(ValidationError):
+        parse_store_attrs(broken)
 
 
 def test_parse_store_attrs_rejects_inconsistent_payloads(

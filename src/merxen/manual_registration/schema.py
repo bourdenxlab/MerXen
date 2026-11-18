@@ -373,6 +373,26 @@ class CziRecord(BaseModel):
     compression: str | None = None
 
 
+class Materialization(BaseModel):
+    """How a result store's image element was resampled (contract C4).
+
+    ``level_factor`` is the number of reference level-0 pixels per element pixel;
+    ``pixel_size_um`` (informative) is ``level_factor`` times the reference level-0
+    pixel size. A record without this block is a full-resolution element.
+    """
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    mode: Literal["full", "preview"]
+    level_factor: int = Field(ge=1)
+    pixel_size_um: float = Field(gt=0.0)
+
+    @field_validator("pixel_size_um")
+    @classmethod
+    def _finite_pixel_size(cls: type[Materialization], value: float) -> float:
+        return _finite(value)
+
+
 class StoreImageRecord(BaseModel):
     """One image of a manual-registration store (prepared or result variant)."""
 
@@ -399,6 +419,7 @@ class StoreImageRecord(BaseModel):
     source_shape_yx: tuple[int, int] | None = None
     source_pixel_size_um: float | None = None
     source_crop: CropRect | None = None
+    materialization: Materialization | None = None
 
     @field_validator("pixel_size_um", "source_pixel_size_um")
     @classmethod

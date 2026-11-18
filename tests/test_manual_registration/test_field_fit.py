@@ -9,17 +9,26 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from merxen.image_registration import (
+    pull_points_through_registration,
+    push_points_through_registration,
+)
 from merxen.manual_registration import field_fit
+from merxen.manual_registration import landmark_field as landmark_field_module
 from merxen.manual_registration.field_fit import (
     GROSS_P,
     GROSS_WEIGHT,
     SuggestionRecord,
+    best_affine,
     build_landmark_field,
     check_payload,
     classify_pairs,
     details_payload,
+    field_flow,
     field_options,
+    field_sd_grid,
     resolve_store_roles,
+    tissue_mask_function,
     validate_field_settings,
     window_params,
 )
@@ -898,3 +907,267 @@ def test_check_payload_with_a_second_pass_and_details(
     )
     assert details["click_estimates"]["1"]["reason"] == "fake"
     canonical_json(details)
+
+
+# ---------------------------------------------------------------------------
+# The field as a pull flow
+# ---------------------------------------------------------------------------
+
+FLOW_P_REF = 5.5
+FLOW_P_MOV = 5.0
+FLOW_CROP_REF = CropRect(x0=128, y0=64, x1=128 + 1920, y1=64 + 1408)
+FLOW_CROP_MOV = CropRect(x0=256, y0=192, x1=256 + 2048, y1=192 + 1536)
+FLOW_GRID_UM = 33.0
+
+
+@pytest.fixture(scope="module")
+def smooth_field() -> landmark_field_module.LandmarkField:
+    phantom = make_field_phantom(
+        seed=4,
+        short_signal_um=0.0,
+        ridge_fraction=0.0,
+        n_medium=0,
+        n_gross=0,
+        click_noise_um=10.0,
+    )
+    return landmark_field_module.fit_landmark_field(
+        landmark_field_module.FieldObservations.clicks(
+            phantom.reference_xy_um,
+            phantom.moving_xy_um,
+            np.arange(1, len(phantom.reference_xy_um) + 1),
+        )
+    )
+
+
+def _flow_inputs(field: Any) -> dict[str, Any]:
+    base = best_affine(
+        field,
+        crop_reference=FLOW_CROP_REF,
+        reference_pixel_size_um=FLOW_P_REF,
+        moving_pixel_size_um=FLOW_P_MOV,
+    )
+    origin_r = (FLOW_CROP_REF.x0, FLOW_CROP_REF.y0)
+    origin_m = (FLOW_CROP_MOV.x0, FLOW_CROP_MOV.y0)
+    from merxen.manual_registration.geometry import crop_matrix
+
+    return {
+        "base_crop": crop_matrix(
+            base, reference_origin_xy=origin_r, moving_origin_xy=origin_m
+        ),
+        "origin_r": np.array(origin_r, dtype=float),
+        "origin_m": np.array(origin_m, dtype=float),
+    }
+
+
+def _true_moving_crop(field: Any, reference_crop_xy: np.ndarray, inputs: Any) -> Any:
+    reference_um = FLOW_P_REF * (reference_crop_xy + inputs["origin_r"])
+    return field.mean(reference_um) / FLOW_P_MOV - inputs["origin_m"]
+
+
+@pytest.fixture(scope="module")
+def flow_case(smooth_field: Any) -> tuple[Any, dict[str, Any]]:
+    inputs = _flow_inputs(smooth_field)
+    flow = field_flow(
+        smooth_field,
+        crop_reference=FLOW_CROP_REF,
+        crop_moving=FLOW_CROP_MOV,
+        reference_pixel_size_um=FLOW_P_REF,
+        moving_pixel_size_um=FLOW_P_MOV,
+        base_matrix_crop=inputs["base_crop"],
+        grid_um=FLOW_GRID_UM,
+    )
+    return flow, inputs
+
+
+def test_field_flow_grid_follows_the_contract(
+    flow_case: tuple[Any, dict[str, Any]],
+) -> None:
+    flow, _inputs = flow_case
+    factor = 6  # round(33 / 5.5)
+    assert flow.factor == factor
+    assert flow.flow_yx.dtype == np.float32
+    assert flow.flow_yx.shape == (2, 1408 // factor + 1 + 2, 1920 // factor + 2)
+    shift = (factor - 1) / 2 - factor
+    np.testing.assert_allclose(
+        flow.working_to_reference,
+        [[factor, 0, shift], [0, factor, shift], [0, 0, 1]],
+    )
+    assert flow.max_displacement_um > 0.0
+    default = field_flow(
+        _SmoothStub(),  # type: ignore[arg-type]
+        crop_reference=FLOW_CROP_REF,
+        crop_moving=FLOW_CROP_MOV,
+        reference_pixel_size_um=0.345,
+        moving_pixel_size_um=0.345,
+        base_matrix_crop=np.eye(3),
+        grid_um=11.04,
+    )
+    assert default.factor == 32
+
+
+class _SmoothStub:
+    """A field stub for the grid size rule: the identity in um."""
+
+    @staticmethod
+    def mean(positions: np.ndarray) -> np.ndarray:
+        return np.asarray(positions, dtype=float)
+
+
+def test_field_flow_pull_at_the_nodes_equals_the_field(
+    flow_case: tuple[Any, dict[str, Any]], smooth_field: Any
+) -> None:
+    flow, inputs = flow_case
+    height, width = flow.flow_yx.shape[1:]
+    rows, columns = np.indices((height, width), dtype=float)
+    nodes = np.column_stack([columns.ravel(), rows.ravel()])
+    reference_crop = (
+        nodes @ flow.working_to_reference[:2, :2].T + flow.working_to_reference[:2, 2]
+    )
+    pulled = pull_points_through_registration(
+        reference_crop,
+        final_matrix=inputs["base_crop"],
+        flow_yx=flow.flow_yx,
+        working_to_reference=flow.working_to_reference,
+    )
+    expected = _true_moving_crop(smooth_field, reference_crop, inputs)
+    # float32 flow: the error is the float32 rounding of the displacement.
+    assert np.abs(pulled - expected).max() < 1e-6
+
+
+def test_field_flow_pull_between_nodes_stays_close_to_the_field(
+    flow_case: tuple[Any, dict[str, Any]], smooth_field: Any
+) -> None:
+    flow, inputs = flow_case
+    rng = np.random.default_rng(0)
+    points = rng.uniform([0, 0], [1919, 1407], size=(4000, 2))
+    pulled = pull_points_through_registration(
+        points,
+        final_matrix=inputs["base_crop"],
+        flow_yx=flow.flow_yx,
+        working_to_reference=flow.working_to_reference,
+    )
+    expected = _true_moving_crop(smooth_field, points, inputs)
+    assert np.abs(pulled - expected).max() < 0.05
+
+
+def test_field_flow_borders_go_through_the_flow_not_the_bare_affine(
+    flow_case: tuple[Any, dict[str, Any]], smooth_field: Any
+) -> None:
+    flow, inputs = flow_case
+    height, width = 1408, 1920
+    xs = np.arange(width, dtype=float)
+    ys = np.arange(height, dtype=float)
+    border = np.vstack(
+        [
+            np.column_stack([xs, np.zeros(width)]),
+            np.column_stack([xs, np.full(width, height - 1.0)]),
+            np.column_stack([np.zeros(height), ys]),
+            np.column_stack([np.full(height, width - 1.0), ys]),
+        ]
+    )
+    pulled = pull_points_through_registration(
+        border,
+        final_matrix=inputs["base_crop"],
+        flow_yx=flow.flow_yx,
+        working_to_reference=flow.working_to_reference,
+    )
+    bare = pull_points_through_registration(border, final_matrix=inputs["base_crop"])
+    expected = _true_moving_crop(smooth_field, border, inputs)
+    assert np.abs(pulled - expected).max() < 0.05
+    # The flow matters here: the bare affine misses the field by far more.
+    assert np.abs(bare - expected).max() > 0.2
+
+
+def test_field_flow_push_returns_the_reference_also_near_the_edge(
+    flow_case: tuple[Any, dict[str, Any]], smooth_field: Any
+) -> None:
+    flow, inputs = flow_case
+    reference_crop = np.array(
+        [[900.0, 700.0], [3.0, 2.0], [1916.0, 1405.0], [4.0, 1400.0], [1000.0, 4.0]]
+    )
+    moving_crop = _true_moving_crop(smooth_field, reference_crop, inputs)
+    pushed, converged = push_points_through_registration(
+        moving_crop,
+        final_matrix=inputs["base_crop"],
+        flow_yx=flow.flow_yx,
+        working_to_reference=flow.working_to_reference,
+    )
+    assert converged.all()
+    assert np.abs(pushed - reference_crop).max() < 0.05
+
+
+def test_best_affine_of_an_affine_field_is_that_affine() -> None:
+    linear = np.array([[1.02, 0.03], [-0.04, 0.97]])
+    offset = np.array([120.0, -75.0])
+
+    class AffineField:
+        @staticmethod
+        def mean(positions: np.ndarray) -> np.ndarray:
+            return np.asarray(positions) @ linear.T + offset
+
+    matrix = best_affine(
+        AffineField(),
+        crop_reference=FLOW_CROP_REF,
+        reference_pixel_size_um=FLOW_P_REF,
+        moving_pixel_size_um=FLOW_P_MOV,
+    )
+    # moving px -> reference px; compare through its action on moving points.
+    reference_px = np.array([[500.0, 400.0], [1500.0, 1100.0], [300.0, 1300.0]])
+    moving_px = ((reference_px * FLOW_P_REF) @ linear.T + offset) / FLOW_P_MOV
+    mapped = moving_px @ matrix[:2, :2].T + matrix[:2, 2]
+    np.testing.assert_allclose(mapped, reference_px, atol=1e-6)
+
+
+def test_best_affine_uses_only_the_tissue_mask_when_given() -> None:
+    class SplitField:
+        """An affine map on the left half of the crop and a shifted one on the right."""
+
+        @staticmethod
+        def mean(positions: np.ndarray) -> np.ndarray:
+            shifted = np.asarray(positions, dtype=float).copy()
+            shifted[positions[:, 0] > 5000.0, 1] += 200.0
+            return shifted
+
+    def left_half(xy_um: np.ndarray) -> np.ndarray:
+        return np.asarray(xy_um)[:, 0] <= 5000.0
+
+    kwargs: dict[str, Any] = {
+        "crop_reference": FLOW_CROP_REF,
+        "reference_pixel_size_um": 5.0,
+        "moving_pixel_size_um": 5.0,
+    }
+    masked = best_affine(SplitField(), mask_xy_um=left_half, **kwargs)
+    np.testing.assert_allclose(masked, np.eye(3), atol=1e-9)
+    unmasked = best_affine(SplitField(), **kwargs)
+    assert abs(unmasked[1, 2]) > 1.0
+    # A mask with almost no tissue falls back to the whole crop.
+    nothing = best_affine(SplitField(), mask_xy_um=lambda xy: xy[:, 0] < -1, **kwargs)
+    np.testing.assert_allclose(nothing, unmasked)
+
+
+def test_field_sd_grid_shape_and_matrix(smooth_field: Any) -> None:
+    sd, matrix = field_sd_grid(
+        smooth_field,
+        crop_reference=FLOW_CROP_REF,
+        reference_pixel_size_um=FLOW_P_REF,
+        grid_um=88.0,
+    )
+    factor = 16  # round(88 / 5.5)
+    assert sd.dtype == np.float32
+    assert sd.shape == (-(-1408 // factor) + 2, -(-1920 // factor) + 2)
+    assert matrix[0, 0] == factor and matrix[0, 2] == (factor - 1) / 2 - factor
+    assert np.isfinite(sd).all() and (sd > 0).all()
+
+
+def test_tissue_mask_function_looks_up_the_nearest_working_pixel() -> None:
+    tissue = np.zeros((10, 20), dtype=bool)
+    tissue[2:6, 4:9] = True
+    representation = SimpleNamespace(
+        tissue=tissue,
+        um_to_px=lambda xy: np.asarray(xy, dtype=float) / 10.0 - 1.0,
+    )
+    inside = tissue_mask_function(representation)  # type: ignore[arg-type]
+    points_um = np.array(
+        [[60.0, 40.0], [10.0, 10.0], [5000.0, 40.0], [-500.0, 40.0], [100.0, 90.0]]
+    )
+    np.testing.assert_array_equal(inside(points_um), [True, False, False, False, False])

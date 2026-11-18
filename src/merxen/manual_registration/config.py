@@ -162,7 +162,8 @@ class ManualRegistrationSettings(RegistrationSettings):
     ``same_section`` and ``serial_section`` unchanged (and out of the provenance
     digest). ``field_model`` and the image-evidence and window settings drive the
     landmark check; ``field_grid_um``, ``field_sd_grid_um``, ``materialize`` and
-    ``preview_pixel_size_um`` take effect with the register path of a later change.
+    ``preview_pixel_size_um`` drive the register path of robust-field runs (the flow
+    grid, the uncertainty grid and the resolution of the result store).
     ``field_kernel`` ``auto`` fits one Matern component to clicks alone and two once
     tissue windows are added.
     """

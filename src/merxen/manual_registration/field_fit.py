@@ -2,7 +2,8 @@
 
 The field itself lives in ``landmark_field`` and the image evidence in
 ``image_evidence``; this module joins them with the saved landmarks. It is used by
-``merxen manual-registration-check`` and, later, by the register path.
+``merxen manual-registration-check`` and by the register path, which also turns the
+field into a pull flow (``field_flow``) and a base affine (``best_affine``).
 
 Frames (contract C2): reference and moving positions are full-frame micrometres
 (level-0 pixels times the pixel size); the field maps reference to moving. Per-pair
@@ -13,6 +14,7 @@ are in moving micrometres.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -32,9 +34,11 @@ from merxen.manual_registration.image_evidence import (
     WindowObservations,
     WindowParams,
     check_clicks,
+    coarse_role_images,
     compute_representation,
     load_role_images,
     resolve_channel_roles,
+    target_weight_map,
     tissue_window_observations,
     warp_role_images,
 )
@@ -74,6 +78,7 @@ MIN_CONFIRMED_FOR_CLASS = 5
 _SIMILARITY_OUTLIER_WARNING = re.compile(r"flagged as outlier and (excluded|kept):")
 
 ROLES_EXAMPLE = "at8=AF568;map2=AF647;dapi=DAPI"
+COARSE_PIXEL_SIZE_UM = 22.0
 
 
 def resolve_store_roles(text: str, store: StoreAttrs) -> ChannelRoles | None:
@@ -689,6 +694,45 @@ def _hyperparameters(field: LandmarkField) -> dict[str, Any]:
     }
 
 
+def field_summary(
+    report: FieldFitReport,
+    *,
+    outlier_p: float,
+    sd_summary: Mapping[str, float] | None,
+) -> dict[str, Any]:
+    """Return the ``field`` block shared by the check payload and the result attrs.
+
+    Args:
+        report: The field fit.
+        outlier_p: The flagging threshold (``field_outlier_p``).
+        sd_summary: Median, p90 and max of the field SD over the candidate centres,
+            or None when there are none.
+
+    Returns:
+        ``n_clicks``, ``n_windows``, ``hyperparameters``, the leave-one-out
+        statistics (final, clicks-only or None, rigid), ``sd_um``, ``outlier_p`` and
+        the class and verdict counts (every class and verdict, zeros included).
+    """
+    similarity = report.similarity
+    fit_index = np.asarray(similarity.fit_index, dtype=int)
+    return {
+        "n_clicks": int(len(fit_index)),
+        "n_windows": int(report.n_windows),
+        "hyperparameters": _hyperparameters(report.field),
+        "loo_um": _stats(report.loo_reference_um[fit_index]),
+        "loo_um_clicks_only": (
+            _stats(report.clicks_only_loo_reference_um[fit_index])
+            if report.has_second_pass
+            else None
+        ),
+        "rigid_loo_um": _stats(similarity.loo_um[fit_index]),
+        "sd_um": None if sd_summary is None else dict(sd_summary),
+        "outlier_p": float(outlier_p),
+        "class_counts": {name: report.pair_class.count(name) for name in CHECK_CLASSES},
+        "verdict_counts": {name: report.verdict.count(name) for name in CHECK_VERDICTS},
+    }
+
+
 def check_payload(
     report: FieldFitReport,
     *,
@@ -729,9 +773,6 @@ def check_payload(
     pixel_mov = store.images["moving"].pixel_size_um
     similarity = report.similarity
     pairs = similarity.pairs
-    fit_index = np.asarray(similarity.fit_index, dtype=int)
-    n_clicks = len(fit_index)
-    final_loo = report.loo_reference_um[fit_index]
     pair_records: dict[str, Any] = {}
     for i, pair in enumerate(pairs):
         rigid = float(similarity.loo_um[i])
@@ -766,8 +807,6 @@ def check_payload(
             "em_exempt": bool(report.em_exempt[i]),
             "confirm_strength": report.confirm_strength[i],
         }
-    class_counts = {name: report.pair_class.count(name) for name in CHECK_CLASSES}
-    verdict_counts = {name: report.verdict.count(name) for name in CHECK_VERDICTS}
     image_evidence = bool(report.checks) or report.windows is not None
     payload: dict[str, Any] = {
         "schema": CHECK_SCHEMA,
@@ -789,22 +828,9 @@ def check_payload(
             "landmark_field": FIELD_ALGORITHM,
             "image_evidence": IMAGE_EVIDENCE_ALGORITHM if image_evidence else None,
         },
-        "field": {
-            "n_clicks": int(n_clicks),
-            "n_windows": int(report.n_windows),
-            "hyperparameters": _hyperparameters(report.field),
-            "loo_um": _stats(final_loo),
-            "loo_um_clicks_only": (
-                _stats(report.clicks_only_loo_reference_um[fit_index])
-                if report.has_second_pass
-                else None
-            ),
-            "rigid_loo_um": _stats(similarity.loo_um[fit_index]),
-            "sd_um": None if sd_summary is None else dict(sd_summary),
-            "outlier_p": float(settings.field_outlier_p),
-            "class_counts": class_counts,
-            "verdict_counts": verdict_counts,
-        },
+        "field": field_summary(
+            report, outlier_p=settings.field_outlier_p, sd_summary=sd_summary
+        ),
         "pairs": pair_records,
         "suggestions": [
             {
@@ -891,3 +917,281 @@ def details_payload(report: FieldFitReport) -> dict[str, Any]:
         "timings_s": dict(report.timings_s),
         "warnings": list(report.warnings),
     }
+
+
+# ---------------------------------------------------------------------------
+# The field as a pull flow (contracts C2, C5)
+# ---------------------------------------------------------------------------
+
+_AFFINE_LATTICE = 64
+_MIN_AFFINE_POINTS = 16
+
+
+@dataclass(frozen=True)
+class FieldFlow:
+    """The field as a pull flow on a coarse working grid of the reference crop.
+
+    Attributes:
+        flow_yx: float32 ``(2, h, w)`` pull displacement in working px (row, column).
+        working_to_reference: ``(3, 3)`` working px to reference crop level-0 px.
+        factor: Reference crop level-0 px per working px.
+        max_displacement_um: Largest node displacement, in reference um.
+    """
+
+    flow_yx: np.ndarray
+    working_to_reference: np.ndarray
+    factor: int
+    max_displacement_um: float
+
+
+def _scale_matrix(pixel_size_um: float) -> np.ndarray:
+    return np.diag([pixel_size_um, pixel_size_um, 1.0])
+
+
+def best_affine(
+    field: LandmarkField,
+    *,
+    crop_reference: CropRect,
+    reference_pixel_size_um: float,
+    moving_pixel_size_um: float,
+    mask_xy_um: Callable[[np.ndarray], np.ndarray] | None = None,
+) -> np.ndarray:
+    """Fit the least-squares affine of the field mean over the reference crop.
+
+    The mean is evaluated on a 64 x 64 lattice of the crop (pixel centres from the
+    first to the last pixel); ``mask_xy_um`` restricts the lattice to tissue. With
+    fewer than 16 lattice points inside the mask the whole lattice is used.
+
+    Args:
+        field: The field (reference full um to moving full um).
+        crop_reference: The effective reference crop, full-frame level-0 px.
+        reference_pixel_size_um: Reference level-0 pixel size.
+        moving_pixel_size_um: Moving level-0 pixel size.
+        mask_xy_um: Maps ``(M, 2)`` reference full um to a boolean ``(M,)`` (True
+            inside the tissue), or None for no mask.
+
+    Returns:
+        The ``(3, 3)`` moving full px to reference full px matrix
+        ``S_r^-1 T^-1 S_m``, with ``T`` the fitted reference-to-moving um map.
+    """
+    xs = np.linspace(crop_reference.x0, crop_reference.x1 - 1, _AFFINE_LATTICE)
+    ys = np.linspace(crop_reference.y0, crop_reference.y1 - 1, _AFFINE_LATTICE)
+    grid_x, grid_y = np.meshgrid(xs, ys)
+    reference_um = (
+        np.column_stack([grid_x.ravel(), grid_y.ravel()]) * reference_pixel_size_um
+    )
+    if mask_xy_um is not None:
+        inside = np.asarray(mask_xy_um(reference_um), dtype=bool)
+        if int(inside.sum()) >= _MIN_AFFINE_POINTS:
+            reference_um = reference_um[inside]
+        else:
+            logger.warning(
+                "best affine: only %d lattice points in the tissue mask; using the "
+                "whole crop",
+                int(inside.sum()),
+            )
+    moving_um = np.asarray(field.mean(reference_um), dtype=float)
+    # Centred before the solve: the positions are tens of millimetres.
+    centre_reference = reference_um.mean(axis=0)
+    centre_moving = moving_um.mean(axis=0)
+    design = np.column_stack(
+        [reference_um - centre_reference, np.ones(len(reference_um))]
+    )
+    coefficients, *_ = np.linalg.lstsq(design, moving_um - centre_moving, rcond=None)
+    linear = coefficients[:2].T
+    offset = centre_moving - linear @ centre_reference
+    reference_to_moving = np.eye(3)
+    reference_to_moving[:2, :2] = linear
+    reference_to_moving[:2, 2] = offset
+    return np.asarray(
+        np.linalg.inv(_scale_matrix(reference_pixel_size_um))
+        @ np.linalg.inv(reference_to_moving)
+        @ _scale_matrix(moving_pixel_size_um)
+    )
+
+
+def _grid_to_reference(factor: int) -> np.ndarray:
+    """Working px to reference crop level-0 px: node 0 sits one node before the crop."""
+    shift = (factor - 1) / 2.0 - factor
+    return np.array(
+        [[factor, 0.0, shift], [0.0, factor, shift], [0.0, 0.0, 1.0]], dtype=float
+    )
+
+
+def field_flow(
+    field: LandmarkField,
+    *,
+    crop_reference: CropRect,
+    crop_moving: CropRect,
+    reference_pixel_size_um: float,
+    moving_pixel_size_um: float,
+    base_matrix_crop: np.ndarray,
+    grid_um: float,
+) -> FieldFlow:
+    """Sample the field as a pull flow for ``pull_points_through_registration``.
+
+    The grid has ``f = max(1, round(grid_um / p_r))`` reference px per node and
+    ``ceil(H / f) + 2`` by ``ceil(W / f) + 2`` nodes, node 0 one node before the
+    crop, so every crop pixel lies strictly inside the grid (the pull samples the
+    flow with zero outside it). At node ``w`` the flow holds
+    ``d = W^-1 M m - w`` with ``m`` the field's moving crop px of the node, so the
+    pull of the node returns ``m`` exactly.
+
+    Args:
+        field: The field (reference full um to moving full um).
+        crop_reference: Effective reference crop (full-frame level-0 px).
+        crop_moving: Effective moving crop (full-frame level-0 px).
+        reference_pixel_size_um: Reference level-0 pixel size.
+        moving_pixel_size_um: Moving level-0 pixel size.
+        base_matrix_crop: ``(3, 3)`` moving crop px to reference crop px base affine.
+        grid_um: Wanted node spacing in um.
+
+    Returns:
+        The flow, its grid matrix, the factor and the largest displacement.
+    """
+    factor = max(1, round(grid_um / reference_pixel_size_um))
+    height, width = crop_reference.height(), crop_reference.width()
+    shape = (math.ceil(height / factor) + 2, math.ceil(width / factor) + 2)
+    working_to_reference = _grid_to_reference(factor)
+    rows, columns = np.indices(shape, dtype=float)
+    nodes = np.column_stack([columns.ravel(), rows.ravel()])
+    reference_crop = (
+        nodes @ working_to_reference[:2, :2].T + working_to_reference[:2, 2]
+    )
+    origin_reference = np.array([crop_reference.x0, crop_reference.y0], dtype=float)
+    origin_moving = np.array([crop_moving.x0, crop_moving.y0], dtype=float)
+    reference_um = _reference_um(
+        reference_crop, origin_reference, reference_pixel_size_um
+    )
+    moving_crop = (
+        np.asarray(field.mean(reference_um), dtype=float) / moving_pixel_size_um
+        - origin_moving
+    )
+    base = np.asarray(base_matrix_crop, dtype=float)
+    target = np.linalg.inv(working_to_reference) @ base
+    q = moving_crop @ target[:2, :2].T + target[:2, 2]
+    displacement = q - nodes
+    flow = np.stack(
+        [displacement[:, 1].reshape(shape), displacement[:, 0].reshape(shape)]
+    ).astype(np.float32)
+    max_um = float(
+        np.max(np.linalg.norm(displacement, axis=1)) * factor * reference_pixel_size_um
+    )
+    return FieldFlow(
+        flow_yx=flow,
+        working_to_reference=working_to_reference,
+        factor=int(factor),
+        max_displacement_um=max_um,
+    )
+
+
+def _reference_um(
+    crop_xy: np.ndarray, origin_xy: np.ndarray, pixel_size_um: float
+) -> np.ndarray:
+    """Reference full-frame um of crop-frame level-0 px: ``p (r + o)``."""
+    return np.asarray(pixel_size_um * (np.asarray(crop_xy, dtype=float) + origin_xy))
+
+
+def field_sd_grid(
+    field: LandmarkField,
+    *,
+    crop_reference: CropRect,
+    reference_pixel_size_um: float,
+    grid_um: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """The posterior SD per axis on a coarse grid of the reference crop.
+
+    The grid follows the flow grid convention (node 0 one node before the crop,
+    ``ceil(H / g) + 2`` by ``ceil(W / g) + 2`` nodes with ``g = max(1,
+    round(grid_um / p_r))``).
+
+    Args:
+        field: The field.
+        crop_reference: Effective reference crop.
+        reference_pixel_size_um: Reference level-0 pixel size.
+        grid_um: Wanted node spacing in um.
+
+    Returns:
+        ``(sd_um, working_to_reference)``: float32 ``(h, w)`` SD per axis and the
+        ``(3, 3)`` grid matrix to reference crop level-0 px.
+    """
+    factor = max(1, round(grid_um / reference_pixel_size_um))
+    shape = (
+        math.ceil(crop_reference.height() / factor) + 2,
+        math.ceil(crop_reference.width() / factor) + 2,
+    )
+    matrix = _grid_to_reference(factor)
+    rows, columns = np.indices(shape, dtype=float)
+    nodes = np.column_stack([columns.ravel(), rows.ravel()])
+    reference_crop = nodes @ matrix[:2, :2].T + matrix[:2, 2]
+    origin = np.array([crop_reference.x0, crop_reference.y0], dtype=float)
+    positions = _reference_um(reference_crop, origin, reference_pixel_size_um)
+    sd = np.asarray(field.sd_um(positions), dtype=np.float32).reshape(shape)
+    return sd, matrix
+
+
+def tissue_mask_function(
+    representation: Representation,
+) -> Callable[[np.ndarray], np.ndarray]:
+    """Return a tissue lookup of a representation, for ``best_affine``.
+
+    Args:
+        representation: The representation of the reference image.
+
+    Returns:
+        A function from ``(M, 2)`` reference full um to a boolean ``(M,)``: the
+        nearest working pixel is tissue (False outside the image).
+    """
+    tissue = representation.tissue
+    height, width = tissue.shape
+
+    def inside(xy_um: np.ndarray) -> np.ndarray:
+        nearest = np.rint(representation.um_to_px(np.asarray(xy_um, dtype=float)))
+        column = nearest[:, 0].astype(int)
+        row = nearest[:, 1].astype(int)
+        valid = (column >= 0) & (column < width) & (row >= 0) & (row < height)
+        result = np.zeros(len(nearest), dtype=bool)
+        result[valid] = tissue[row[valid], column[valid]]
+        return result
+
+    return inside
+
+
+def candidate_sd_summary(
+    field: LandmarkField,
+    *,
+    store: StoreAttrs,
+    roles: ChannelRoles | None,
+    crops: Mapping[str, CropRect],
+) -> tuple[dict[str, float] | None, RoleImages]:
+    """Median, p90 and max of the field SD over the suggestion candidate centres.
+
+    The centres are the shared tissue of the coarse images on a 100 um lattice
+    (``target_weight_map``), as in the landmark check.
+
+    Args:
+        field: The field.
+        store: Attrs of the prepared store.
+        roles: Channel roles, or None to use the registration channels.
+        crops: Effective crops by ``reference`` and ``moving``.
+
+    Returns:
+        ``(statistics, coarse reference images)``; the statistics are None when
+        there are no candidates.
+    """
+    coarse = coarse_role_images(
+        store, roles, crops=crops, pixel_size_um=COARSE_PIXEL_SIZE_UM
+    )
+    targets = target_weight_map(
+        coarse["reference"], coarse["moving"], pull_um=field.mean
+    )
+    centres = np.asarray(targets.centres_um, dtype=float)
+    if not len(centres):
+        return None, coarse["reference"]
+    sd = field.sd_um(centres)
+    summary = {
+        "median": float(np.median(sd)),
+        "p90": float(np.percentile(sd, 90)),
+        "max": float(np.max(sd)),
+    }
+    return summary, coarse["reference"]

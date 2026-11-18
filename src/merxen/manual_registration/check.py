@@ -27,6 +27,7 @@ import numpy as np
 from merxen.io.spatialdata_io import spatialdata_write_lock
 from merxen.manual_registration.config import ManualRegistrationCheckConfig
 from merxen.manual_registration.field_fit import (
+    COARSE_PIXEL_SIZE_UM,
     FieldFitReport,
     SuggestionRecord,
     build_landmark_field,
@@ -65,8 +66,6 @@ from merxen.manual_registration.schema import (
 )
 
 logger = logging.getLogger(__name__)
-
-COARSE_PIXEL_SIZE_UM = 22.0
 
 
 class StaleLabellingError(ValueError):
