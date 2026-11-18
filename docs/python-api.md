@@ -321,9 +321,11 @@ Standalone manual landmark registration of an image pair
 
 - `config` — pydantic models: `ManualRegistrationPrepareConfig`,
   `ManualRegistrationImageInput`, `ManualRegistrationSettings`,
-  `ManualRegistrationRunConfig`, `ManualRegistrationCompareConfig`.
+  `ManualRegistrationRunConfig`, `ManualRegistrationCheckConfig`,
+  `ManualRegistrationCompareConfig`.
 - `schema` — root-attribute contract shared with the viewer (`STORE_ATTR`,
-  `LABELLING_ATTR`, `RESULT_ATTR`), canonical JSON and digests, `read_root_attrs`.
+  `LABELLING_ATTR`, `RESULT_ATTR`, `CHECK_ATTR` with `parse_check_attrs`), canonical
+  JSON and digests, `read_root_attrs`.
 - `geometry` — pure matrices: coarse transform, crops, `apply_matrix_xy`.
 - `landmark_fit` — robust similarity fit with outlier and reflection checks.
 - `prepare` — `run_manual_registration_prepare`: convert/normalise images, write
@@ -337,6 +339,15 @@ Standalone manual landmark registration of an image pair
   `make_field_phantom` (point-observation field phantom).
 - `landmark_field` — robust Student-t GP displacement field: `fit_landmark_field`, LOO
   p-values, SD maps, `suggest_landmarks`, C1 JSON (`to_dict`/`from_dict`).
+- `image_evidence` — channel roles (`resolve_channel_roles`), band-pass
+  representations, the per-click image check (`check_clicks`) and tissue-window
+  observations (`tissue_window_observations`).
+- `field_fit` — the robust field of a pair: `validate_field_settings`,
+  `build_landmark_field`, `classify_pairs` (the pair classes of the check),
+  `check_payload`.
+- `field_report` — `write_field_figure`: the figure of the landmark check.
+- `check` — `run_check` (the landmark check, `merxen manual-registration-check`),
+  `read_labelling_file`, `write_check_attr`.
 
 ## `merxen.mask_image_quantification`
 

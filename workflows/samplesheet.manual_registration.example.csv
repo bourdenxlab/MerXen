@@ -1,3 +1,4 @@
-id,reference_image,moving_image,presets,registration_settings
-LCM1,/path/to/slide_reference.czi,/path/to/slide_moving.czi,same_section;serial_section,same_section:matrix_scale_tolerance=0.05
-HD1,/path/to/morphology_focus_dapi.ome.tif,/path/to/post_xenium_if.ome.tif,same_section,
+id,reference_image,moving_image,presets,registration_settings,channel_roles
+LCM1,/path/to/slide_reference.czi,/path/to/slide_moving.czi,same_section;serial_section,same_section:matrix_scale_tolerance=0.05,
+HD1,/path/to/morphology_focus_dapi.ome.tif,/path/to/post_xenium_if.ome.tif,same_section,,
+LCM2,/path/to/cortex_reference.czi,/path/to/cortex_moving.czi,cortex_serial,,at8=AF568;map2=AF647;dapi=DAPI

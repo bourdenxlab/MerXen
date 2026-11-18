@@ -14,6 +14,10 @@ and say in the pull request which caches it invalidates and why.
 
 Changes made so far:
 
+- M1 (cortex serial registration, WP3a) added the pins of MANUAL_REGISTRATION_CHECK
+  (``modules/manual_registration.nf``), the standalone landmark check; a new
+  process, so no completed task is invalidated, and no existing pin changed (the
+  PREPARE, REGISTER and COMPARE script and stub texts are byte-identical).
 - v1.0.2 security fix: ``ALIGN`` (``modules/alignment.nf``) exports
   ``PYTORCH_CUDA_ALLOC_CONF`` only when ``alignment_pytorch_cuda_alloc_conf``
   is set. Unset, it rendered the literal ``null``, on which torch 2.14 (the
@@ -176,18 +180,18 @@ def test_main_nf_defines_no_process() -> None:
 
 
 def test_pinned_inventory(pinned: dict[str, str]) -> None:
-    """Today's inventory: 67 ``script:`` and 18 ``stub:`` sections.
+    """Today's inventory: 68 ``script:`` and 19 ``stub:`` sections.
 
     AT-9 added the three ATERA ProSeg processes, RCA added annotation processes,
     AT-8 added the streaming MECR reference, and AT-7 added
     ATERA_CELLPOSE_SEGMENT and ATERA_PROSEG_PLAN_CELLPOSE. The stock-comparison
     process adds one more script, and PCISEQ_COMPUTE_BATCHED one script and
     one stub. PREPARE_HITL_VIEWER adds one CPU preparation script;
-    no existing pin changed.
+    MANUAL_REGISTRATION_CHECK one script and one stub; no existing pin changed.
     """
     labels = [key.rsplit("::", 1)[1] for key in pinned]
-    assert labels.count("script") == 67
-    assert labels.count("stub") == 18
+    assert labels.count("script") == 68
+    assert labels.count("stub") == 19
     assert {key for key in pinned if key.endswith("::stub")} == {
         f"workflows/modules/pciseq.nf::{name}::stub"
         for name in (
@@ -202,6 +206,7 @@ def test_pinned_inventory(pinned: dict[str, str]) -> None:
         for name in (
             "MANUAL_REGISTRATION_PREPARE",
             "MANUAL_REGISTRATION_REGISTER",
+            "MANUAL_REGISTRATION_CHECK",
             "MANUAL_REGISTRATION_COMPARE",
         )
     } | {

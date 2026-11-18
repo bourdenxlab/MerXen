@@ -254,10 +254,12 @@ sits. Cellpose acts as a prior for ProSeg's MCMC sampler. Details in
 
 ## Standalone workflows
 
-Two further Nextflow scripts live next to `main.nf` and are **not** stages of it:
-`workflows/manual_registration_prepare.nf` and
-`workflows/manual_registration_register.nf` (manual landmark registration of an
-image pair, with a human labelling step in the napari viewer between them; see
+Three further Nextflow scripts live next to `main.nf` and are **not** stages of it:
+`workflows/manual_registration_prepare.nf`,
+`workflows/manual_registration_register.nf` and
+`workflows/manual_registration_check.nf` (manual landmark registration of an
+image pair, with a human labelling step in the napari viewer between them, and a
+landmark check of that labelling for the `cortex_serial` preset; see
 [Manual landmark registration](stages/manual-registration.md)). They sit in
 `workflows/` so that they inherit `nextflow.config`, the execution profiles, the
 site configs and `workflows/lib/`, and they share the `VIEWER_CACHE` module with

@@ -8,7 +8,7 @@ import java.nio.file.Paths
 
 /*
  * Samplesheet reader and config emitter of the standalone manual-registration
- * workflows (workflows/manual_registration_{prepare,register}.nf;
+ * workflows (workflows/manual_registration_{prepare,register,check}.nf;
  * docs/stages/manual-registration.md).
  *
  * One samplesheet (one row per image pair) feeds both workflows. This class
@@ -26,7 +26,7 @@ import java.nio.file.Paths
 class ManualRegistrationSheet {
 
     static final String ID_PATTERN = '^[A-Za-z0-9][A-Za-z0-9_.-]*$'
-    static final List<String> PRESETS = ["same_section", "serial_section"].asImmutable()
+    static final List<String> PRESETS = ["same_section", "serial_section", "cortex_serial"].asImmutable()
     static final List<String> REQUIRED_COLUMNS = ["id", "reference_image", "moving_image"].asImmutable()
     static final List<String> ALLOWED_COLUMNS = [
         "id", "reference_image", "moving_image",
@@ -34,8 +34,10 @@ class ManualRegistrationSheet {
         "reference_channel_names", "moving_channel_names",
         "reference_registration_channel", "moving_registration_channel",
         "reference_pixel_size_um", "moving_pixel_size_um",
-        "presets", "registration_settings", "run_label", "prepared_store",
+        "presets", "registration_settings", "run_label", "prepared_store", "channel_roles",
     ].asImmutable()
+    static final List<String> CHANNEL_ROLES = ["at8", "map2", "dapi"].asImmutable()
+    static final String CHANNEL_ROLES_EXAMPLE = "at8=AF568;map2=AF647;dapi=DAPI"
     static final List<String> IMAGE_EXTENSIONS = [".czi", ".ome.tif", ".ome.tiff", ".tif", ".tiff"].asImmutable()
     static final List<String> FORBIDDEN_SETTINGS = ["reference_pixel_size_um", "reference_channel"].asImmutable()
     // = sorted(set(ManualRegistrationSettings.model_fields) - FORBIDDEN_OVERRIDES); a test keeps them equal.
@@ -44,6 +46,19 @@ class ManualRegistrationSheet {
         "chunk_size",
         "crop_min_size_px",
         "crop_snap_px",
+        "field_grid_um",
+        "field_image_check",
+        "field_kernel",
+        "field_model",
+        "field_outlier_p",
+        "field_sd_grid_um",
+        "field_student_t_nu",
+        "field_trust_confirmed_clicks",
+        "field_window_min_spacing_um",
+        "field_window_noise_floor_um",
+        "field_window_observations",
+        "field_window_search_um",
+        "field_window_step_um",
         "landmark_max_outlier_fraction",
         "landmark_min_pairs",
         "landmark_min_spread_ratio",
@@ -53,6 +68,7 @@ class ManualRegistrationSheet {
         "landmark_outlier_policy",
         "landmark_reflection_check_ratio",
         "landmarks_outside_crop",
+        "materialize",
         "matrix_scale_tolerance",
         "max_refinement_rotation_deg",
         "max_refinement_scale_change",
@@ -81,6 +97,7 @@ class ManualRegistrationSheet {
         "nucleus_qc",
         "nucleus_qc_pixel_size_um",
         "nucleus_qc_window_um",
+        "preview_pixel_size_um",
         "refine_affine",
         "refinement_min_correlation_gain",
         "refinement_min_window_quality",
@@ -99,7 +116,7 @@ class ManualRegistrationSheet {
     static final String STORE_ATTR = "merxen_manual_registration_store"
     static final String LABELLING_ATTR = "merxen_manual_registration"
 
-    static final String PRESET_LIST = "same_section, serial_section"
+    static final String PRESET_LIST = "same_section, serial_section, cortex_serial"
 
     // ------------------------------------------------------------------
     // Small helpers
@@ -396,6 +413,35 @@ class ManualRegistrationSheet {
         return result
     }
 
+    /** Boolean setting `key` in force for one run (same precedence as effectiveInt). */
+    static boolean effectiveFlag(Map row, String preset, Map params, String key, boolean defaultValue) {
+        boolean result = defaultValue
+        List<String> sources = [
+            (params?.manual_registration_settings ?: "").toString(),
+            (row?.registration_settings ?: "").toString(),
+        ]
+        for (String text : sources) {
+            List<Map> items = settingsItems(text)
+            for (boolean prefixed : [false, true]) {
+                for (Map item : items) {
+                    if (item.malformed || item.key != key) {
+                        continue
+                    }
+                    boolean isPrefixed = item.preset != null
+                    if (isPrefixed != prefixed || (isPrefixed && item.preset != preset)) {
+                        continue
+                    }
+                    try {
+                        result = flag(item.value)
+                    } catch (IllegalArgumentException ignored) {
+                        // a malformed value is reported by the settings check
+                    }
+                }
+            }
+        }
+        return result
+    }
+
     /** landmark_min_pairs in force for one run (default 8). */
     static Integer effectiveMinPairs(Map row, String preset, Map params) {
         return effectiveInt(row, preset, params, "landmark_min_pairs", MIN_LANDMARK_PAIRS)
@@ -404,6 +450,104 @@ class ManualRegistrationSheet {
     /** landmark_min_used_pairs in force for one run (default 6). */
     static Integer effectiveMinUsedPairs(Map row, String preset, Map params) {
         return effectiveInt(row, preset, params, "landmark_min_used_pairs", MIN_USED_PAIRS)
+    }
+
+    // ------------------------------------------------------------------
+    // Channel roles (contract C6: "[scope:]role=channel;...")
+    // ------------------------------------------------------------------
+
+    /**
+     * Syntax and role-name errors of a channel_roles text (the channel names are checked against the
+     * prepared store by Python); errors are collected, not thrown.
+     */
+    static List<String> channelRolesErrors(String text) {
+        List<String> errors = []
+        Set<String> seen = new HashSet<String>()
+        for (String raw : (text ?: "").split(";", -1)) {
+            String item = raw.trim()
+            if (item == "") {
+                continue
+            }
+            int eq = item.indexOf("=")
+            if (eq < 0) {
+                errors.add("channel_roles: item '${item}': expected [reference:|moving:]role=channel".toString())
+                continue
+            }
+            String left = item.substring(0, eq).trim()
+            String channel = item.substring(eq + 1).trim()
+            String scope = null
+            String role = left
+            int colon = left.indexOf(":")
+            if (colon >= 0) {
+                scope = left.substring(0, colon).trim()
+                role = left.substring(colon + 1).trim()
+                if (!(scope in ["reference", "moving"])) {
+                    errors.add("channel_roles: item '${item}': scope '${scope}' must be reference or moving".toString())
+                    continue
+                }
+            }
+            if (!(role in CHANNEL_ROLES)) {
+                errors.add("channel_roles: item '${item}': unknown role '${role}' (roles: ${CHANNEL_ROLES.join(', ')})".toString())
+                continue
+            }
+            if (channel == "" || channel.contains("=") || channel.contains(":")) {
+                errors.add("channel_roles: item '${item}': the channel must be a name without ';', '=' or ':'".toString())
+                continue
+            }
+            if (!seen.add("${scope ?: 'both'}|${role}".toString())) {
+                errors.add("channel_roles: role '${role}' is given twice (${scope ?: 'unscoped'})".toString())
+            }
+        }
+        return errors
+    }
+
+    /** Roles of CHANNEL_ROLES that a well-formed channel_roles text leaves unresolved for an image. */
+    static List<String> missingRoles(String text) {
+        Map<String, Set<String>> given = [reference: new HashSet<String>(), moving: new HashSet<String>()]
+        for (String raw : (text ?: "").split(";", -1)) {
+            String item = raw.trim()
+            int eq = item.indexOf("=")
+            if (eq < 0) {
+                continue
+            }
+            String left = item.substring(0, eq).trim()
+            int colon = left.indexOf(":")
+            String scope = colon >= 0 ? left.substring(0, colon).trim() : null
+            String role = colon >= 0 ? left.substring(colon + 1).trim() : left
+            for (String image : ["reference", "moving"]) {
+                if (scope == null || scope == image) {
+                    given[image].add(role)
+                }
+            }
+        }
+        return CHANNEL_ROLES.findAll { String role -> !(role in given.reference) || !(role in given.moving) }
+    }
+
+    /** The error of a blank or incomplete channel_roles for a cortex_serial run, or null. */
+    static String cortexRolesError(String text) {
+        if (!(text ?: "").trim()) {
+            return "preset cortex_serial needs channel_roles (at8, map2, dapi), e.g. ${CHANNEL_ROLES_EXAMPLE}".toString()
+        }
+        List<String> missing = missingRoles(text)
+        if (missing) {
+            return "preset cortex_serial needs channel_roles for ${missing.join(', ')} (all of at8, map2, dapi), e.g. ${CHANNEL_ROLES_EXAMPLE}".toString()
+        }
+        return null
+    }
+
+    /**
+     * The error of a non-blank but incomplete channel_roles for any preset, or null. Python resolves
+     * all three roles whenever the text is non-blank (resolve_store_roles), whatever the preset.
+     */
+    static String incompleteRolesError(String text) {
+        if (!(text ?: "").trim()) {
+            return null
+        }
+        List<String> missing = missingRoles(text)
+        if (missing) {
+            return "channel_roles gives no channel for ${missing.join(', ')} (a non-blank text needs all of at8, map2, dapi), e.g. ${CHANNEL_ROLES_EXAMPLE}".toString()
+        }
+        return null
     }
 
     // ------------------------------------------------------------------
@@ -444,7 +588,7 @@ class ManualRegistrationSheet {
      *
      * @param sheet the samplesheet file
      * @param params the run's params (outdir, manual_registration_*)
-     * @param mode "prepare" or "register"
+     * @param mode "prepare", "register" or "check"
      * @return [rows: normalised rows, errors: all error messages, warnings: all warnings]
      */
     static Map parse(Path sheet, Map params, String mode) {
@@ -694,6 +838,18 @@ class ManualRegistrationSheet {
         String settings = (r.registration_settings ?: "").trim()
         rowErrors.addAll(settingsErrors(settings, "registration_settings"))
 
+        String channelRoles = (r.channel_roles ?: "").trim()
+        rowErrors.addAll(channelRolesErrors(channelRoles))
+        // A check takes its preset from the params (checkPreflight), not from the row's presets.
+        if (mode != "check" && !channelRolesErrors(channelRoles)) {
+            String rolesError = ("cortex_serial" in presets)
+                ? cortexRolesError(channelRoles)
+                : incompleteRolesError(channelRoles)
+            if (rolesError != null) {
+                rowErrors.add(rolesError)
+            }
+        }
+
         String runLabel = r.run_label ?: ""
         if (runLabel != "" && !(runLabel ==~ ID_PATTERN)) {
             rowErrors.add("run_label '${runLabel}' must match ${ID_PATTERN}".toString())
@@ -708,7 +864,7 @@ class ManualRegistrationSheet {
         if (storeValue != "") {
             try {
                 String resolved = resolveInput(sheet, storeValue).toString()
-                if (mode == "register") {
+                if (mode == "register" || mode == "check") {
                     preparedStore = resolved
                 } else if (resolved != defaultStore) {
                     warnings.add(
@@ -733,6 +889,7 @@ class ManualRegistrationSheet {
             registration_settings: settings,
             run_label: runLabel != "" ? runLabel : null,
             prepared_store: preparedStore,
+            channel_roles: channelRoles,
         ]
     }
 
@@ -805,81 +962,91 @@ class ManualRegistrationSheet {
         return state
     }
 
+    /**
+     * Errors of one row's prepared store and landmark counts for the given presets. A draft
+     * labelling is an error unless allowDraft (the landmark check also runs on a draft).
+     */
+    static List<String> storeErrors(Map row, Map params, List<String> presets, boolean allowDraft) {
+        List<String> errors = []
+        String id = row.id
+        String p = row.prepared_store
+        // The settings model needs landmark_min_used_pairs <= landmark_min_pairs, whatever the store holds.
+        for (String preset : presets) {
+            int minPairs = effectiveMinPairs(row, preset, params)
+            int minUsed = effectiveMinUsedPairs(row, preset, params)
+            if (minPairs < minUsed) {
+                errors.add(
+                    ("${id} (preset ${preset}): landmark_min_pairs (${minPairs}) is below landmark_min_used_pairs " +
+                    "(${minUsed}); landmark_min_used_pairs must not exceed landmark_min_pairs, so lower both " +
+                    "together (landmark_min_used_pairs is ${MIN_USED_PAIRS} by default)").toString()
+                )
+            }
+        }
+        Map s = storeState(p)
+        if (!s.exists) {
+            errors.add(
+                "${id}: prepared store not found: ${p}; run workflows/manual_registration_prepare.nf with this samplesheet and --outdir first".toString()
+            )
+            return errors
+        }
+        if (s.error) {
+            errors.add("${id}: cannot read the root attributes of ${p}: ${s.error}".toString())
+            return errors
+        }
+        if (s.schemaVersion instanceof Number && s.schemaVersion > SCHEMA_VERSION) {
+            errors.add("${id}: ${p} was written by a newer MerXen/viewer (schema_version ${s.schemaVersion} > 1); update".toString())
+            return errors
+        }
+        if (s.labellingSchemaVersion instanceof Number && s.labellingSchemaVersion > SCHEMA_VERSION) {
+            errors.add(
+                "${id}: ${p} was written by a newer MerXen/viewer (schema_version ${s.labellingSchemaVersion} > 1); update".toString()
+            )
+            return errors
+        }
+        if (s.kind == "result") {
+            errors.add("${id}: ${p} is a result store, not a prepared store; set prepared_store to the ${id}_prepared.zarr store".toString())
+            return errors
+        }
+        if (s.kind != "prepared") {
+            errors.add(
+                "${id}: ${p} is not a prepared manual-registration store (${STORE_ATTR}.kind = ${s.kind ?: 'missing'})".toString()
+            )
+            return errors
+        }
+        if (s.datasetName != id) {
+            String belongs = s.datasetName ? "belongs to dataset ${s.datasetName}" : "records no dataset name"
+            errors.add("${id}: ${p} ${belongs}; prepared_store must be this id's store".toString())
+            return errors
+        }
+        if (s.status == null) {
+            errors.add(
+                ("${id}: no landmarks saved in ${p}; open it in the viewer (Dataset loader > Manual Registration > " +
+                "Load image data), place the landmark pairs and press Finish labelling").toString()
+            )
+            return errors
+        }
+        if (s.status == "draft" && !allowDraft) {
+            errors.add("${id}: the landmarks in ${p} are a draft; open it in the viewer and press Finish labelling".toString())
+            return errors
+        }
+        if (s.status != "finished" && s.status != "draft") {
+            errors.add("${id}: unknown labelling status '${s.status}' in ${p}".toString())
+            return errors
+        }
+        for (String preset : presets) {
+            int minPairs = effectiveMinPairs(row, preset, params)
+            if (s.nEnabledPairs < minPairs) {
+                errors.add("${id} (preset ${preset}): ${s.nEnabledPairs} enabled landmark pairs in ${p}, at least ${minPairs} are needed".toString())
+            }
+        }
+        return errors
+    }
+
     /** Errors that stop the register workflow before any task: store state, landmark counts, run ids. */
     static List<String> registerPreflight(List<Map> rows, Map params) {
         List<String> errors = []
         for (Map row : rows) {
-            String id = row.id
-            String p = row.prepared_store
-            // The settings model needs landmark_min_used_pairs <= landmark_min_pairs, whatever the store holds.
-            for (String preset : (List<String>) row.presets) {
-                int minPairs = effectiveMinPairs(row, preset, params)
-                int minUsed = effectiveMinUsedPairs(row, preset, params)
-                if (minPairs < minUsed) {
-                    errors.add(
-                        ("${id} (preset ${preset}): landmark_min_pairs (${minPairs}) is below landmark_min_used_pairs " +
-                        "(${minUsed}); landmark_min_used_pairs must not exceed landmark_min_pairs, so lower both " +
-                        "together (landmark_min_used_pairs is ${MIN_USED_PAIRS} by default)").toString()
-                    )
-                }
-            }
-            Map s = storeState(p)
-            if (!s.exists) {
-                errors.add(
-                    "${id}: prepared store not found: ${p}; run workflows/manual_registration_prepare.nf with this samplesheet and --outdir first".toString()
-                )
-                continue
-            }
-            if (s.error) {
-                errors.add("${id}: cannot read the root attributes of ${p}: ${s.error}".toString())
-                continue
-            }
-            if (s.schemaVersion instanceof Number && s.schemaVersion > SCHEMA_VERSION) {
-                errors.add("${id}: ${p} was written by a newer MerXen/viewer (schema_version ${s.schemaVersion} > 1); update".toString())
-                continue
-            }
-            if (s.labellingSchemaVersion instanceof Number && s.labellingSchemaVersion > SCHEMA_VERSION) {
-                errors.add(
-                    "${id}: ${p} was written by a newer MerXen/viewer (schema_version ${s.labellingSchemaVersion} > 1); update".toString()
-                )
-                continue
-            }
-            if (s.kind == "result") {
-                errors.add("${id}: ${p} is a result store, not a prepared store; set prepared_store to the ${id}_prepared.zarr store".toString())
-                continue
-            }
-            if (s.kind != "prepared") {
-                errors.add(
-                    "${id}: ${p} is not a prepared manual-registration store (${STORE_ATTR}.kind = ${s.kind ?: 'missing'})".toString()
-                )
-                continue
-            }
-            if (s.datasetName != id) {
-                String belongs = s.datasetName ? "belongs to dataset ${s.datasetName}" : "records no dataset name"
-                errors.add("${id}: ${p} ${belongs}; prepared_store must be this id's store".toString())
-                continue
-            }
-            if (s.status == null) {
-                errors.add(
-                    ("${id}: no landmarks saved in ${p}; open it in the viewer (Dataset loader > Manual Registration > " +
-                    "Load image data), place the landmark pairs and press Finish labelling").toString()
-                )
-                continue
-            }
-            if (s.status == "draft") {
-                errors.add("${id}: the landmarks in ${p} are a draft; open it in the viewer and press Finish labelling".toString())
-                continue
-            }
-            if (s.status != "finished") {
-                errors.add("${id}: unknown labelling status '${s.status}' in ${p}".toString())
-                continue
-            }
-            for (String preset : (List<String>) row.presets) {
-                int minPairs = effectiveMinPairs(row, preset, params)
-                if (s.nEnabledPairs < minPairs) {
-                    errors.add("${id} (preset ${preset}): ${s.nEnabledPairs} enabled landmark pairs in ${p}, at least ${minPairs} are needed".toString())
-                }
-            }
+            errors.addAll(storeErrors(row, params, (List<String>) row.presets, false))
         }
         Map<String, Integer> runRows = [:]
         for (Map row : rows) {
@@ -916,6 +1083,83 @@ class ManualRegistrationSheet {
             }
         }
         return runs
+    }
+
+    // ------------------------------------------------------------------
+    // Landmark check (workflows/manual_registration_check.nf)
+    // ------------------------------------------------------------------
+
+    /** The preset of the landmark check (--manual_registration_check_preset). */
+    static String checkPreset(Map params) {
+        String text = (params?.manual_registration_check_preset ?: "cortex_serial").toString().trim()
+        return text ?: "cortex_serial"
+    }
+
+    static String checkDir(Map params, String id) {
+        return "${outdirAbs(params)}/${id}/check".toString()
+    }
+
+    static String checkJsonPath(Map params, String id, String preset) {
+        return "${checkDir(params, id)}/${id}_${preset}_check.json".toString()
+    }
+
+    /**
+     * Errors that stop the check workflow before any task. A draft labelling is allowed. The check
+     * takes its preset from --manual_registration_check_preset; the cortex_serial preset needs the
+     * channel_roles of the row (the image check and tissue windows read those channels).
+     */
+    static List<String> checkPreflight(List<Map> rows, Map params) {
+        List<String> errors = []
+        String preset = checkPreset(params)
+        if (!(preset in PRESETS)) {
+            errors.add("--manual_registration_check_preset: unknown preset '${preset}' (allowed: ${PRESET_LIST})".toString())
+            return errors
+        }
+        try {
+            flag(params?.manual_registration_check_write_attr)
+        } catch (IllegalArgumentException ignored) {
+            errors.add("--manual_registration_check_write_attr must be true or false (got '${params?.manual_registration_check_write_attr}')".toString())
+        }
+        Object suggestions = params?.manual_registration_check_suggestions
+        if (suggestions != null && !(suggestions.toString() ==~ '^[0-9]{1,3}$' && Integer.parseInt(suggestions.toString()) <= 200)) {
+            errors.add("--manual_registration_check_suggestions must be an integer from 0 to 200 (got '${suggestions}')".toString())
+        }
+        for (Map row : rows) {
+            errors.addAll(storeErrors(row, params, [preset], true))
+            boolean needsImages = effectiveFlag(row, preset, params, "field_image_check", true) ||
+                effectiveFlag(row, preset, params, "field_window_observations", preset == "cortex_serial")
+            if (preset == "cortex_serial") {
+                String rolesError = cortexRolesError(row.channel_roles as String)
+                if (rolesError != null && !channelRolesErrors(row.channel_roles as String)) {
+                    errors.add("${row.id}: ${rolesError}".toString())
+                }
+            } else if (needsImages && !((row.channel_roles ?: "") as String).trim()) {
+                errors.add(
+                    "${row.id}: the image check needs channel_roles (e.g. ${CHANNEL_ROLES_EXAMPLE}) or the settings field_image_check=false;field_window_observations=false".toString()
+                )
+            } else if (!channelRolesErrors(row.channel_roles as String)) {
+                String rolesError = incompleteRolesError(row.channel_roles as String)
+                if (rolesError != null) {
+                    errors.add("${row.id}: ${rolesError}".toString())
+                }
+            }
+        }
+        return errors
+    }
+
+    /** One map per row, in row order. */
+    static List<Map> plannedChecks(List<Map> rows, Map params) {
+        String preset = checkPreset(params)
+        return rows.collect { Map row ->
+            [
+                check_id: "${row.id}_${preset}".toString(),
+                id: row.id,
+                preset: preset,
+                check_dir: checkDir(params, row.id.toString()),
+                check_json: checkJsonPath(params, row.id.toString(), preset),
+                config_json: checkConfigJson(row, params),
+            ]
+        }
     }
 
     // ------------------------------------------------------------------
@@ -959,9 +1203,30 @@ class ManualRegistrationSheet {
             output_dir: "register_out",
             global_settings: (params.manual_registration_settings ?: "").toString().trim(),
             row_settings: row.registration_settings ?: "",
+            channel_roles: row.channel_roles ?: "",
             force: flag(params.manual_registration_force_register),
         ]
         return JsonOutput.prettyPrint(JsonOutput.toJson(registerConfig))
+    }
+
+    static String checkConfigJson(Map row, Map params) {
+        Object suggestions = params.manual_registration_check_suggestions
+        def checkConfig = [
+            dataset_name: row.id,
+            preset: checkPreset(params),
+            prepared_store_path: row.prepared_store,
+            labelling_path: null,
+            output_dir: checkDir(params, row.id.toString()),
+            task_output_dir: "check_out",
+            global_settings: (params.manual_registration_settings ?: "").toString().trim(),
+            row_settings: row.registration_settings ?: "",
+            channel_roles: row.channel_roles ?: "",
+            image_check: null,
+            windows: null,
+            write_attr: params.manual_registration_check_write_attr == null ? true : flag(params.manual_registration_check_write_attr),
+            n_suggestions: suggestions == null ? 20 : Integer.parseInt(suggestions.toString()),
+        ]
+        return JsonOutput.prettyPrint(JsonOutput.toJson(checkConfig))
     }
 
     static String viewerCacheConfigJson(Map row, Map params) {

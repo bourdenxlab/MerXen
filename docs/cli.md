@@ -8,7 +8,9 @@ correspond to exactly one Nextflow process, take a single `--config
 in [src/merxen/config.py](../src/merxen/config.py) (the manual-registration
 models are in
 [src/merxen/manual_registration/config.py](../src/merxen/manual_registration/config.py));
-`convert-czi` and `manual-registration-fit` are ad-hoc tools without a process.
+`convert-czi` and `manual-registration-fit` are ad-hoc tools without a process;
+`manual-registration-check` has the standalone workflow
+`workflows/manual_registration_check.nf`.
 
 Examples name samples by their aliases (HD1, MS1, ...; see
 [sample aliases](local-configuration.md#sample-aliases)) and host locations by `.env`
@@ -58,6 +60,9 @@ Commands:
                      Register the moving image from the saved landmarks
   manual-registration-fit
                      Fit the saved landmarks and print what register would flag
+  manual-registration-check
+                     Check the saved landmarks of a pair and suggest the next
+                     clicks
   manual-registration-compare
                      Compare several manual-registration runs of one pair
   analysis-gene-set  Build the analysis gene set of a panel (joined on...
@@ -588,11 +593,58 @@ merxen manual-registration-fit --store prepared.zarr --preset serial_section [--
 | Option | Description |
 |--------|-------------|
 | `--store DIR` | Prepared store holding the labelling. |
-| `--preset {same_section,serial_section}` | Preset whose landmark settings apply. |
+| `--preset {same_section,serial_section,cortex_serial}` | Preset whose landmark settings apply. |
 | `--settings TEXT` | Overrides, as the samplesheet's `registration_settings`. |
 | `--json FILE` | Also write the fit as JSON. |
 
 Details: [Manual landmark registration](stages/manual-registration.md).
+
+---
+
+## `merxen manual-registration-check`
+
+Check the landmarks of a pair, for example while labelling a cortex pair: fit a
+robust landmark field, check every click against the AT8, MAP2 and DAPI images,
+classify every pair (ok, kept: image confirms, check, likely misclick, excluded,
+off) and suggest the next clicks. It checks the store's own labelling, or an
+uploaded labelling file with `--labelling` (the labelling is made on another
+machine, see
+[Checking landmarks labelled on another machine](stages/manual-registration.md#checking-landmarks-labelled-on-another-machine)).
+It writes `<dataset>_<preset>_check.json` and a figure to `--out-dir`; for the
+store's own labelling it also writes the check as the store's root attribute
+`merxen_manual_registration_check` unless `--no-write-attr` is given.
+
+```bash
+merxen manual-registration-check --store prepared.zarr \
+    --channel-roles 'at8=AF568;map2=AF647;dapi=DAPI' --out-dir check_out \
+    [--labelling uploaded_zarr.json] [--preset cortex_serial] [--settings "k=v;preset:k=v"] \
+    [--no-image-check] [--no-windows] [--no-write-attr] [--suggestions 20]
+merxen manual-registration-check --config check_config.json
+```
+
+Quote `--channel-roles`: the shell splits an unquoted value at each `;`.
+
+| Option | Description |
+|--------|-------------|
+| `--config PATH` | JSON validated against `ManualRegistrationCheckConfig`; excludes every other option. |
+| `--store DIR` | Prepared store (required without `--config`). |
+| `--labelling FILE` | An uploaded `zarr.json` or labelling JSON to check instead of the store's own labelling; no attribute is written. |
+| `--preset {same_section,serial_section,cortex_serial}` | Preset whose settings apply (default `cortex_serial`). The check always fits the robust field. |
+| `--settings TEXT` | Overrides, as the samplesheet's `registration_settings`. |
+| `--channel-roles TEXT` | Channel roles `[reference:\|moving:]role=channel;...` with the roles `at8`, `map2` and `dapi`. Needed for the image check and the tissue windows. |
+| `--out-dir DIR` | Folder of the check JSON and figure (required without `--config`). |
+| `--image-check / --no-image-check` | Check each click against the images (default: the setting `field_image_check`, true). |
+| `--windows / --no-windows` | Add tissue-window observations (default: the setting `field_window_observations`, true for `cortex_serial`). |
+| `--no-write-attr` | Do not write the check attribute into the store. |
+| `--suggestions N` | Number of suggested next clicks (default 20). |
+
+Output: a table of every pair (id, enabled, class, verdict, leave-one-out residual,
+p and weight, the rigid residual), a summary line, the suggestions and the output
+paths. Exit codes: 0 ok, 1 error (unusable landmarks, a missing role, a labelling
+file made on another preparation of the store), 3 stale (the labelling changed
+while the check ran: the JSON and figure are written, the attribute is not).
+
+Details: [Manual landmark registration](stages/manual-registration.md#checking-landmarks-labelled-on-another-machine).
 
 ---
 

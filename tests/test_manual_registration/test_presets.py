@@ -49,6 +49,18 @@ SERIAL_V1 = {
 }
 
 
+CORTEX_SERIAL_V1 = {
+    "matrix_scale_tolerance": 0.05,
+    "refine_affine": False,
+    "nonrigid_enabled": False,
+    "nucleus_qc": False,
+    "field_model": "robust_gp",
+    "field_window_observations": True,
+    "field_trust_confirmed_clicks": True,
+    "materialize": "preview",
+}
+
+
 def _resolve(preset: str, **kwargs: str) -> ManualRegistrationSettings:
     return resolve_settings(
         preset, reference_pixel_size_um=0.2125, reference_channel="DAPI", **kwargs
@@ -61,12 +73,55 @@ def test_preset_tables_are_pinned() -> None:
     assert PRESET_VERSIONS == {
         "same_section": "same_section_v2",
         "serial_section": "serial_section_v2",
+        "cortex_serial": "cortex_serial_v1",
     }
+    assert PRESETS["cortex_serial"] == CORTEX_SERIAL_V1
     fields = set(ManualRegistrationSettings.model_fields)
     assert set(PRESETS["serial_section"]) <= fields
     assert PRESETS["serial_section"] == SERIAL_V1
     assert "refinement_min_correlation_gain" not in PRESETS["serial_section"]
     assert {"reference_pixel_size_um", "reference_channel"} == FORBIDDEN_OVERRIDES
+
+
+def test_cortex_serial_resolves_to_the_field_settings() -> None:
+    settings = _resolve("cortex_serial")
+    assert settings.field_model == "robust_gp"
+    assert settings.field_window_observations is True
+    assert settings.field_trust_confirmed_clicks is True
+    assert settings.materialize == "preview"
+    assert settings.refine_affine is False
+    assert settings.nonrigid_enabled is False
+    assert settings.nucleus_qc is False
+    assert settings.matrix_scale_tolerance == 0.05
+    # The viewer's live similarity trimming stays in force.
+    assert settings.landmark_outlier_policy == "exclude"
+    assert settings.landmark_outlier_floor_um == 10.0
+    assert settings.landmark_outlier_k == 3.0
+    assert settings.landmark_max_outlier_fraction == 0.25
+
+
+def test_cortex_serial_overrides_use_the_preset_prefix() -> None:
+    row = (
+        "field_outlier_p=0.02;cortex_serial:field_window_step_um=150;"
+        "serial_section:field_kernel=single"
+    )
+    settings = _resolve("cortex_serial", row_settings=row)
+    assert settings.field_outlier_p == 0.02
+    assert settings.field_window_step_um == 150.0
+    assert settings.field_kernel == "auto"
+    other = _resolve("serial_section", row_settings=row)
+    assert other.field_kernel == "single"
+    assert other.field_window_step_um == 200.0
+    assert other.field_model == "similarity"
+
+
+def test_older_presets_keep_the_similarity_defaults() -> None:
+    for preset in ("same_section", "serial_section"):
+        settings = _resolve(preset)
+        assert settings.field_model == "similarity"
+        assert settings.materialize == "full"
+        assert settings.field_window_observations is False
+        assert settings.field_trust_confirmed_clicks is False
 
 
 def test_same_section_equals_register_images_defaults() -> None:

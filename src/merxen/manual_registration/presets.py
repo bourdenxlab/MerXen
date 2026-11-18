@@ -62,10 +62,24 @@ PRESETS: dict[str, dict[str, Any]] = {
         "landmark_outlier_floor_um": 30.0,
         "nucleus_qc": True,
     },
+    # Adjacent cortex sections: the robust landmark field replaces the similarity
+    # plus refinement chain (plan D4), so the DAPI refinement and TV-L1 are off. The
+    # default similarity trimming is kept: it is the viewer's live rigid fit.
+    "cortex_serial": {
+        "matrix_scale_tolerance": 0.05,
+        "refine_affine": False,
+        "nonrigid_enabled": False,
+        "nucleus_qc": False,
+        "field_model": "robust_gp",
+        "field_window_observations": True,
+        "field_trust_confirmed_clicks": True,
+        "materialize": "preview",
+    },
 }
 PRESET_VERSIONS: dict[str, str] = {
     "same_section": "same_section_v2",
     "serial_section": "serial_section_v2",
+    "cortex_serial": "cortex_serial_v1",
 }
 # Fixed by the samplesheet and the prepared store, never by a settings override.
 FORBIDDEN_OVERRIDES: frozenset[str] = frozenset(
@@ -150,7 +164,7 @@ def resolve_settings(
     channel always come from the prepared store.
 
     Args:
-        preset: ``same_section`` or ``serial_section``.
+        preset: ``same_section``, ``serial_section`` or ``cortex_serial``.
         reference_pixel_size_um: Reference level-0 pixel size of the store.
         reference_channel: Reference registration channel of the store.
         global_settings: Override text from the workflow params.

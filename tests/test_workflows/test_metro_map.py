@@ -49,6 +49,7 @@ OMITTED_PROCESSES = {
         [
             "MANUAL_REGISTRATION_PREPARE",
             "MANUAL_REGISTRATION_REGISTER",
+            "MANUAL_REGISTRATION_CHECK",
             "MANUAL_REGISTRATION_COMPARE",
         ],
         "standalone manual-registration workflow, "

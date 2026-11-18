@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import multiprocessing
 import os
@@ -28,6 +29,7 @@ from merxen.manual_registration.schema import (
     file_fingerprint,
     labelling_content_sha256,
     pair_colour,
+    parse_check_attrs,
     parse_labelling_attrs,
     parse_store_attrs,
     read_root_attrs,
@@ -42,6 +44,13 @@ GOLDEN_PATH = (
     / "manual_registration"
     / "golden_v1.json"
 )
+CHECK_EXAMPLE_PATH = GOLDEN_PATH.with_name("check_example_v1.json")
+# The C3 example with the A3 per-pair keys (em_exempt, confirm_strength). The
+# viewer repository pins the same bytes.
+CHECK_EXAMPLE_SHA256 = (
+    "26c72d59004770673f3e091273f52c962966106ba29b249c1bae49d3ad0ae0f3"
+)
+CHECK_EXAMPLE_BYTES = 3747
 LABELLING_DIGEST = (
     "sha256:f6b16674a10854ab06ff385a6a349ce325d874abf0e6c9d78e0a3b7683e328ad"
 )
@@ -533,3 +542,153 @@ def test_read_root_attrs_locked_waits_for_a_writer(tmp_path: Path) -> None:
                     process.join()
     assert holder.exitcode == 0
     assert reader.exitcode == 0
+
+
+# ---------------------------------------------------------------------------
+# The landmark check attribute (contract C3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def check_example() -> dict[str, Any]:
+    data: dict[str, Any] = json.loads(CHECK_EXAMPLE_PATH.read_text(encoding="utf-8"))
+    return data
+
+
+def test_check_constants() -> None:
+    assert schema.CHECK_ATTR == "merxen_manual_registration_check"
+    assert schema.CHECK_SCHEMA == "merxen.manual_registration.check"
+    assert schema.CHECK_VERDICTS == (
+        "confirmed",
+        "contradicted",
+        "ridge",
+        "inconclusive",
+        "not_checked",
+    )
+    assert schema.CHECK_CLASSES == (
+        "ok",
+        "kept_confirmed",
+        "check",
+        "likely_misclick",
+        "excluded",
+        "disabled",
+    )
+
+
+def test_check_example_is_pinned_and_canonical() -> None:
+    raw = CHECK_EXAMPLE_PATH.read_bytes()
+    assert len(raw) == CHECK_EXAMPLE_BYTES
+    assert hashlib.sha256(raw).hexdigest() == CHECK_EXAMPLE_SHA256
+    obj = json.loads(raw)
+    assert raw.decode("ascii") == canonical_json(obj) + "\n"
+
+
+def test_parse_check_attrs_accepts_the_example(check_example: dict[str, Any]) -> None:
+    check = parse_check_attrs(check_example)
+    assert check.schema_ == schema.CHECK_SCHEMA
+    assert check.labelling_source == "store"
+    assert check.field.n_windows == 12
+    assert check.field.loo_um_clicks_only is not None
+    assert check.pairs["3"].rigid_loo_um is None
+    assert check.pairs["3"].clicks_only is not None
+    assert check.pairs["4"].snap_moving_xy_px == (41210.5, 20117.25)
+    assert check.pairs["5"].clicks_only is not None
+    assert check.pairs["5"].clicks_only.weight is None
+    assert check.pairs["1"].pair_class == "ok"
+    assert check.pairs["1"].em_exempt is True
+    assert check.pairs["1"].confirm_strength == "strong"
+    assert check.pairs["2"].confirm_strength == "weak"
+    assert check.pairs["4"].confirm_strength is None
+    assert [s.rank for s in check.suggestions] == [1, 2]
+    assert check.outputs["json"] == "SYN1_cortex_serial_check.json"
+
+
+def test_parse_check_attrs_accepts_a_field_without_a_second_pass(
+    check_example: dict[str, Any],
+) -> None:
+    check_example["field"]["loo_um_clicks_only"] = None
+    check_example["field"]["sd_um"] = None
+    for pair in check_example["pairs"].values():
+        pair["clicks_only"] = None
+    check = parse_check_attrs(check_example)
+    assert check.field.loo_um_clicks_only is None
+    assert check.pairs["2"].clicks_only is None
+
+
+def test_parse_check_attrs_ignores_details_and_unknown_keys(
+    check_example: dict[str, Any],
+) -> None:
+    check_example["details"] = {"anything": [1, 2, 3]}
+    check_example["later_key"] = 1
+    check_example["pairs"]["1"]["later_pair_key"] = 2
+    assert parse_check_attrs(check_example).dataset_name == "SYN1"
+
+
+def test_parse_check_attrs_tolerates_a_file_without_the_trust_keys(
+    check_example: dict[str, Any],
+) -> None:
+    for pair in check_example["pairs"].values():
+        del pair["em_exempt"]
+        del pair["confirm_strength"]
+    check = parse_check_attrs(check_example)
+    assert check.pairs["1"].em_exempt is False
+    assert check.pairs["1"].confirm_strength is None
+
+
+def _with(check: dict[str, Any], path: tuple[str, ...], value: Any) -> dict[str, Any]:
+    node = check
+    for key in path[:-1]:
+        node = node[key]
+    node[path[-1]] = value
+    return check
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("pairs", "1", "verdict"), "maybe"),
+        (("pairs", "1", "class"), "fine"),
+        (("pairs", "1", "loo_um"), float("nan")),
+        (("pairs", "1", "p_value"), float("inf")),
+        (("pairs", "1", "loo_vector_moving_um"), [1.0, float("nan")]),
+        (("pairs", "1", "confirm_strength"), "medium"),
+        (("field", "loo_um", "median"), float("nan")),
+        (("field", "class_counts"), {"fine": 1}),
+        (("labelling_source"), "elsewhere"),
+        (("labelling_status"), "final"),
+        (("status"), "partial"),
+        (("labelling_content_sha256"), "sha1:abc"),
+        (("schema"), "merxen.manual_registration.other"),
+    ],
+)
+def test_parse_check_attrs_rejects_bad_values(
+    check_example: dict[str, Any], path: Any, value: Any
+) -> None:
+    keys = (path,) if isinstance(path, str) else path
+    with pytest.raises(ValueError, match=r"."):
+        parse_check_attrs(_with(check_example, keys, value))
+
+
+def test_parse_check_attrs_rejects_a_missing_loo_and_a_bad_pair_key(
+    check_example: dict[str, Any],
+) -> None:
+    broken = copy.deepcopy(check_example)
+    del broken["pairs"]["1"]["loo_um"]
+    with pytest.raises(ValidationError, match="loo_um"):
+        parse_check_attrs(broken)
+    for key in ("one", "1.5", "-1", " 1", "١"):
+        renamed = copy.deepcopy(check_example)
+        renamed["pairs"][key] = renamed["pairs"].pop("1")
+        with pytest.raises(ValidationError, match="decimal"):
+            parse_check_attrs(renamed)
+
+
+def test_parse_check_attrs_refuses_newer_schema_versions(
+    check_example: dict[str, Any],
+) -> None:
+    check_example["schema_version"] = 2
+    with pytest.raises(UnsupportedSchemaVersionError):
+        parse_check_attrs(check_example)
+    check_example["schema_version"] = 0
+    with pytest.raises(ValueError, match="positive integer"):
+        parse_check_attrs(check_example)

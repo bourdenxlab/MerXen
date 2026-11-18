@@ -29,6 +29,7 @@ import resource
 import shutil
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -62,6 +63,7 @@ from merxen.io.spatialdata_io import (
 )
 from merxen.io.spatialdata_schema import stamp_merxen_schema
 from merxen.manual_registration.config import (
+    FIELD_SETTINGS_KEYS,
     ManualRegistrationRunConfig,
     ManualRegistrationSettings,
 )
@@ -74,6 +76,11 @@ from merxen.manual_registration.geometry import (
     snap_crop,
     wrap_deg,
 )
+from merxen.manual_registration.image_evidence import (
+    IMAGE_EVIDENCE_ALGORITHM,
+    ChannelRoles,
+)
+from merxen.manual_registration.landmark_field import FIELD_ALGORITHM
 from merxen.manual_registration.landmark_fit import (
     RobustFitOptions,
     RobustSimilarityFit,
@@ -472,7 +479,14 @@ def _read_prepared_store(
     dataset_name: str,
     check_fingerprints: bool,
     require_finished: bool,
+    labelling_payload: Mapping[str, Any] | None = None,
 ) -> tuple[StoreAttrs, LabellingAttrs, dict[str, Any], list[str]]:
+    """Read and validate a prepared store and a labelling (the store's own by default).
+
+    ``labelling_payload`` replaces the store's labelling attr in every check made
+    here (image pixel sizes and shapes, grid digest, content digest); the store's own
+    labelling may then be absent (an uploaded labelling file, the landmark check).
+    """
     pfx = f"[{run_id}]"
     path = Path(store_path).resolve()
     if not path.exists():
@@ -500,9 +514,11 @@ def _read_prepared_store(
     hint = (
         "open it in the viewer ▸ Manual Registration ▸ Finish labelling and run again"
     )
-    if LABELLING_ATTR not in attrs:
+    if labelling_payload is None and LABELLING_ATTR not in attrs:
         raise ValueError(f"{pfx} no landmarks in {path}; {hint}")
-    raw_labelling = attrs[LABELLING_ATTR]
+    raw_labelling = (
+        attrs[LABELLING_ATTR] if labelling_payload is None else labelling_payload
+    )
     try:
         labelling = parse_labelling_attrs(raw_labelling)
     except (UnsupportedSchemaVersionError, ValidationError) as exc:
@@ -597,6 +613,21 @@ def _validate_prepared_store(
 # ---------------------------------------------------------------------------
 
 
+def _provenance_settings(settings: ManualRegistrationSettings) -> dict[str, Any]:
+    """Dump the settings for the provenance digest.
+
+    The robust-field settings are left out at their defaults, so the digest of a
+    ``same_section`` or ``serial_section`` run is the one it had before the field
+    settings existed (plan D10) and the results written then are reused.
+    """
+    dumped = settings.model_dump(mode="json")
+    for key in FIELD_SETTINGS_KEYS:
+        default = ManualRegistrationSettings.model_fields[key].default
+        if dumped[key] == default:
+            del dumped[key]
+    return dumped
+
+
 def _provenance_digest(
     *,
     preset: str,
@@ -604,25 +635,29 @@ def _provenance_digest(
     settings: ManualRegistrationSettings,
     labelling_sha: str,
     store: StoreAttrs,
+    roles: ChannelRoles | None = None,
 ) -> str:
     """Digest of everything that determines a run's result (not the MerXen version)."""
     fingerprints = {}
     for role in ("reference", "moving"):
         record = store.images[role].ome_tiff
         fingerprints[role] = None if record is None else record.fingerprint
-    return canonical_sha256(
-        {
-            "schema_version": 1,
-            "preset": preset,
-            "preset_version": PRESET_VERSIONS[preset],
-            "run_label": run_label,
-            "settings": settings.model_dump(mode="json"),
-            "algorithm": ALGORITHM_BLOCK,
-            "labelling_content_sha256": labelling_sha,
-            "prepared_content_digest": store.content_digest,
-            "ome_tiff_fingerprints": fingerprints,
-        }
-    )
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "preset": preset,
+        "preset_version": PRESET_VERSIONS[preset],
+        "run_label": run_label,
+        "settings": _provenance_settings(settings),
+        "algorithm": dict(ALGORITHM_BLOCK),
+        "labelling_content_sha256": labelling_sha,
+        "prepared_content_digest": store.content_digest,
+        "ome_tiff_fingerprints": fingerprints,
+    }
+    if settings.field_model == "robust_gp":
+        payload["algorithm"]["landmark_field"] = FIELD_ALGORITHM
+        payload["algorithm"]["image_evidence"] = IMAGE_EVIDENCE_ALGORITHM
+        payload["channel_roles"] = None if roles is None else roles.to_dict()
+    return canonical_sha256(payload)
 
 
 def _plain_json(value: Any) -> Any:
@@ -1131,6 +1166,23 @@ def run_manual_registration(
         global_settings=config.global_settings,
         row_settings=config.row_settings,
     )
+    # Imported here: field_fit imports this module for the landmark fit.
+    from merxen.manual_registration.field_fit import (
+        resolve_store_roles,
+        validate_field_settings,
+    )
+
+    roles = resolve_store_roles(config.channel_roles, store)
+    validate_field_settings(
+        settings, preset=config.preset, roles=roles, run_id=run_id, purpose="register"
+    )
+    if settings.field_model == "robust_gp":
+        # Removed by the register path of the robust field (a later change).
+        raise ValueError(
+            f"{pfx} registration through the robust landmark field is not "
+            "implemented yet; run merxen manual-registration-check for the "
+            "landmark check"
+        )
     tuning = registration_tuning(settings)
 
     # Step 3: fit and crops.
@@ -1171,6 +1223,7 @@ def run_manual_registration(
         settings=settings,
         labelling_sha=labelling_sha,
         store=store,
+        roles=roles,
     )
     stored = _stored_result(final)
     if not force and stored is not None and _reusable(stored, digest):

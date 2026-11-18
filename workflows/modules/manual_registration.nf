@@ -1,5 +1,5 @@
 // Processes of the standalone manual landmark registration workflows
-// (workflows/manual_registration_{prepare,register}.nf; docs/stages/manual-registration.md).
+// (workflows/manual_registration_{prepare,register,check}.nf; docs/stages/manual-registration.md).
 // cache false: the Python commands keep their own provenance and skip unchanged work in seconds,
 // and the viewer edits the prepared store in place, which Nextflow's input hashing cannot see.
 // Nextflow publishes nothing: Python writes the durable outputs to the absolute paths in its config.
@@ -88,6 +88,46 @@ JSON
 ${register_config_json}
 JSON
     echo '{"status": "stub"}' > register_out/stub.json
+    """
+}
+
+process MANUAL_REGISTRATION_CHECK {
+    tag "${check_id}"
+    cache false
+
+    input:
+    tuple val(check_id), val(id), val(check_config_json)
+
+    output:
+    tuple val(check_id), val(id), path("check_out")
+
+    script:
+    """
+    set -euo pipefail
+    export OMP_NUM_THREADS="${task.cpus}"
+    export OPENBLAS_NUM_THREADS="${task.cpus}"
+    export MKL_NUM_THREADS="${task.cpus}"
+    export NUMEXPR_NUM_THREADS="${task.cpus}"
+    export NUMBA_NUM_THREADS="${task.cpus}"
+    export VECLIB_MAXIMUM_THREADS="${task.cpus}"
+    export BLIS_NUM_THREADS="${task.cpus}"
+    export DASK_NUM_WORKERS="${task.cpus}"
+    mkdir -p check_out
+
+    cat > check_config.json <<'JSON'
+${check_config_json}
+JSON
+
+    merxen manual-registration-check --config check_config.json
+    """
+
+    stub:
+    """
+    mkdir -p check_out
+    cat > check_config.json <<'JSON'
+${check_config_json}
+JSON
+    echo '{"status": "stub"}' > check_out/stub.json
     """
 }
 

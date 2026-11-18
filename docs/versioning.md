@@ -26,7 +26,7 @@ whose notes are its section of [CHANGELOG.md](../CHANGELOG.md).
 
 Every entry script records the version: `main.nf` and the standalone
 workflows (`manual_registration_prepare.nf`, `manual_registration_register.nf`,
-`pciseq_resume.nf`, `prepare_hitl_viewer.nf`), each into its own `--outdir`.
+`manual_registration_check.nf`, `pciseq_resume.nf`, `prepare_hitl_viewer.nf`), each into its own `--outdir`.
 The record also has `revision` and `commit_id` fields. They stay null, because
 the pipeline runs from a checkout: `nextflow run bourdenxlab/MerXen -r v1.2.0`
 does not work yet, since the entry scripts live in `workflows/`.

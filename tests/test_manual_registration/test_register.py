@@ -17,7 +17,10 @@ from merxen.image_registration import (
     registration_output_paths,
 )
 from merxen.manual_registration import register as register_module
-from merxen.manual_registration.config import ManualRegistrationSettings
+from merxen.manual_registration.config import (
+    ManualRegistrationRunConfig,
+    ManualRegistrationSettings,
+)
 from merxen.manual_registration.presets import resolve_settings
 from merxen.manual_registration.register import (
     LandmarkFitError,
@@ -34,6 +37,7 @@ from merxen.manual_registration.register import (
     _validate_prepared_store,
     fit_landmarks,
     fit_summary,
+    run_manual_registration,
 )
 from merxen.manual_registration.schema import (
     LABELLING_ATTR,
@@ -612,6 +616,163 @@ def test_provenance_digest_depends_on_its_inputs(
     assert digest(run_label="x") != base
     monkeypatch.setitem(register_module.PRESET_VERSIONS, "same_section", "v2")
     assert digest() != base
+
+
+# Digests computed on the commit before the field settings existed (a fixed
+# synthetic input: the A.2 labelling and store). They must not move: the older
+# presets' results stay valid after the upgrade (plan D10).
+PINNED_PROVENANCE_DIGESTS = {
+    "same_section": (
+        "sha256:7a96957247462bc5e0e685a7f95c919446646cc363c802eb687f7e822266c465"
+    ),
+    "serial_section": (
+        "sha256:717fec80e1f7ee6a6ee575e0ca19d2f7c6615142b96ba6b5ef77905537934f17"
+    ),
+}
+PINNED_PROVENANCE_DIGESTS_OVERRIDDEN = {
+    "same_section": (
+        "sha256:fbda9a608ee8132171031891f276ecd2fd5fc8dae6c7af55f1599b576d7b2fa7"
+    ),
+    "serial_section": (
+        "sha256:0436f758e7c0f895d35a8bb555b30325015e0aea331c8f04dfe0e7bea154be61"
+    ),
+}
+
+
+@pytest.mark.parametrize("preset", ["same_section", "serial_section"])
+def test_provenance_digest_of_the_older_presets_is_unchanged(preset: str) -> None:
+    sha = labelling_content_sha256(labelling_dict(a2_pairs(), A2_COARSE))
+    digest = _provenance_digest(
+        preset=preset,
+        run_label=None,
+        settings=_settings(preset),
+        labelling_sha=sha,
+        store=_store(),
+    )
+    assert digest == PINNED_PROVENANCE_DIGESTS[preset]
+    overridden = _provenance_digest(
+        preset=preset,
+        run_label="x",
+        settings=_settings(preset, "landmark_outlier_k=4"),
+        labelling_sha=sha,
+        store=_store(),
+    )
+    assert overridden == PINNED_PROVENANCE_DIGESTS_OVERRIDDEN[preset]
+
+
+def test_provenance_settings_drop_only_field_keys_at_their_defaults() -> None:
+    from merxen.manual_registration.config import FIELD_SETTINGS_KEYS
+    from merxen.manual_registration.register import _provenance_settings
+
+    plain = _provenance_settings(_settings("same_section"))
+    assert not set(plain) & set(FIELD_SETTINGS_KEYS)
+    changed = _provenance_settings(
+        _settings("same_section", "field_outlier_p=0.02;materialize=preview")
+    )
+    assert changed["field_outlier_p"] == 0.02
+    assert changed["materialize"] == "preview"
+    assert "field_kernel" not in changed
+
+
+def test_provenance_digest_of_a_field_run_sees_the_roles_and_settings() -> None:
+    from merxen.manual_registration.image_evidence import ChannelRoles
+
+    sha = labelling_content_sha256(labelling_dict(a2_pairs(), A2_COARSE))
+    settings = _settings("cortex_serial")
+    store = _store()
+
+    def digest(roles: ChannelRoles | None, settings: Any = settings) -> str:
+        return _provenance_digest(
+            preset="cortex_serial",
+            run_label=None,
+            settings=settings,
+            labelling_sha=sha,
+            store=store,
+            roles=roles,
+        )
+
+    one = ChannelRoles(
+        reference={"at8": "AF568", "map2": "AF647", "dapi": "DAPI"},
+        moving={"at8": "AF568", "map2": "AF647", "dapi": "DAPI"},
+    )
+    two = ChannelRoles(reference=one.reference, moving={**one.moving, "at8": "X"})
+    assert digest(one) == digest(one)
+    assert digest(one) != digest(two)
+    assert digest(one) != digest(None)
+    other = _settings("cortex_serial", "field_outlier_p=0.02")
+    assert digest(one, other) != digest(one)
+
+
+def _run_config(tmp_path: Path, **overrides: Any) -> ManualRegistrationRunConfig:
+    values: dict[str, Any] = {
+        "dataset_name": "SYN1",
+        "preset": "same_section",
+        "prepared_store_path": tmp_path / "SYN1_prepared.zarr",
+        "result_dir": tmp_path / "result",
+        "output_dir": tmp_path / "out",
+    }
+    values.update(overrides)
+    return ManualRegistrationRunConfig(**values)
+
+
+@pytest.fixture
+def read_store_stub(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make step 1 of register return the A.2 store and labelling (no images)."""
+    payload = labelling_dict(a2_pairs(), A2_COARSE)
+
+    def stub(*_args: Any, **_kwargs: Any) -> Any:
+        return _store(), parse_labelling_attrs(payload), payload, []
+
+    monkeypatch.setattr(register_module, "_read_prepared_store", stub)
+
+
+FIELD_OFF = "refine_affine=false;nonrigid_enabled=false;field_image_check=false"
+
+
+def test_register_refuses_a_robust_field_run_until_the_field_path_exists(
+    tmp_path: Path, read_store_stub: None
+) -> None:
+    config = _run_config(
+        tmp_path, row_settings=f"field_model=robust_gp;materialize=preview;{FIELD_OFF}"
+    )
+    with pytest.raises(ValueError, match="not implemented yet") as excinfo:
+        run_manual_registration(config)
+    assert "[SYN1_same_section]" in str(excinfo.value)
+    assert "manual-registration-check" in str(excinfo.value)
+    assert not any((tmp_path / "result").iterdir())
+
+
+@pytest.mark.parametrize(
+    ("row_settings", "message"),
+    [
+        ("materialize=preview", "only for robust-field runs"),
+        ("field_model=robust_gp;field_image_check=false", "skip the DAPI refinement"),
+    ],
+)
+def test_register_checks_the_cross_field_rules(
+    tmp_path: Path, read_store_stub: None, row_settings: str, message: str
+) -> None:
+    config = _run_config(tmp_path, row_settings=row_settings)
+    with pytest.raises(ValueError, match=message):
+        run_manual_registration(config)
+
+
+def test_register_cortex_serial_needs_channel_roles(
+    tmp_path: Path, read_store_stub: None
+) -> None:
+    config = _run_config(tmp_path, preset="cortex_serial")
+    with pytest.raises(ValueError, match="preset cortex_serial needs channel roles"):
+        run_manual_registration(config)
+
+
+def test_register_reports_a_bad_roles_text_before_anything_else(
+    tmp_path: Path, read_store_stub: None
+) -> None:
+    config = _run_config(
+        tmp_path, preset="cortex_serial", channel_roles="at8=AF568;map2=NOPE;dapi=DAPI"
+    )
+    with pytest.raises(ValueError, match="channel roles: channel 'NOPE'"):
+        run_manual_registration(config)
 
 
 def test_plain_json_and_publish(tmp_path: Path) -> None:
