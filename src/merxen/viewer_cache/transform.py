@@ -17,7 +17,6 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from merxen.enrichment.enrich import resolve_px_to_um_transform
 from merxen.platforms import platform_spec
 
 logger = logging.getLogger(__name__)
@@ -36,6 +35,11 @@ def resolve_mask_affine(
     transform file falls back to the viewer's isotropic default so the stage
     still produces a usable, viewer-consistent mask.
     """
+    # Imported here: merxen.enrichment.enrich pulls in Cellpose and PyTorch (about
+    # 0.7 GB), which the viewer cache and the manual registration never need
+    # otherwise.
+    from merxen.enrichment.enrich import resolve_px_to_um_transform
+
     platform = str(platform).upper()
     try:
         return resolve_px_to_um_transform(

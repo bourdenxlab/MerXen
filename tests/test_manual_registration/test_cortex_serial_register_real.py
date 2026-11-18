@@ -44,11 +44,14 @@ LCM2_PINNED_DIGEST = (
 )
 LANDMARKS_ONLY = "field_window_observations=false;field_image_check=false"
 NO_WINDOWS = "field_window_observations=false"
-# (wall minutes, peak GB) limits of the three settings.
+# (wall minutes, peak GB) limits of the three settings. The peaks are the measured
+# values of one process per setting (2.5, 7.1 and 7.9 GB, after the unneeded imports
+# of PyTorch, Cellpose and VALIS were removed) plus 25 % headroom; the plan's first
+# targets (2.5, 8 and 10 GB) were estimates.
 LIMITS = {
-    "landmarks_only": (6.0, 2.5),
-    "no_windows": (12.0, 8.0),
-    "default": (30.0, 10.0),
+    "landmarks_only": (6.0, 3.2),
+    "no_windows": (12.0, 8.9),
+    "default": (30.0, 9.9),
 }
 MAX_STORE_GB = 1.0
 

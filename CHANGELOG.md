@@ -26,6 +26,7 @@ users would notice). A release turns [Unreleased] into the release's section.
 ### Fixed
 
 - **Cortex serial registration: the click check no longer skips clicks at tissue edges.** The per-click image check required half of its window to be tissue (and 90 % covered by the other section), the gates of the tissue windows, so clicks on the tissue edge or near the pia were skipped as `no_tissue` although edges carry most of the signal two serial sections share. The click gates are now 20 % tissue and 60 % coverage, and the empirical null of the click check is drawn with the same gates; the tissue windows keep 50 % and 90 %. Edge clicks now get a verdict, so the class counts of a `cortex_serial` check can differ from those of the first M1 builds.
+- **Registration and viewer-cache runs no longer load Cellpose, PyTorch and VALIS.** Importing `merxen.viewer_cache` pulled in the enrichment module (Cellpose, PyTorch) and any `merxen.alignment` submodule the whole alignment pipeline (VALIS), so a manual-registration run started with about 1 GB resident and spent 6 seconds importing. The alignment package now loads its public names on first use and the viewer cache imports enrichment where it needs it: a landmarks-only `cortex_serial` run peaks at 2.3 to 2.5 GB instead of 2.9 GB and the no-windows run at 7.1 GB instead of 8.2 GB.
 
 ## [1.0.2] - 2026-11-16
 
