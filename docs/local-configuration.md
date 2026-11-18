@@ -269,6 +269,9 @@ start. A test that reads real data asks for a fixture:
   when the variable is unset, when its value lies under
   `MERXEN_REFUSED_PATH_PREFIX` (no test reads the failing disk), or when the
   path does not exist.
+- `real_path_module`: the same resolver for a module-scoped fixture, which
+  cannot request the function-scoped `real_path` (ScopeMismatch). It keeps the
+  variables for the module's fixtures and undoes them at its end.
 - `real_aliases`: re-enables the real alias table for one test; skips without
   one.
 - `real_env_file`: the real `.env`; skips without one.

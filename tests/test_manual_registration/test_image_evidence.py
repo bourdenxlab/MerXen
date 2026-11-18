@@ -563,6 +563,8 @@ def click_nulls(pair: _Pair) -> dict[tuple[str, float], ie.NullModel]:
             n_pairs=150,
             min_distance_um=2000.0,
             seed=0,
+            min_tissue_fraction=params.min_tissue_fraction,
+            min_valid_fraction=params.min_valid_fraction,
         )
         nulls.update({(name, window_um): model for name, model in built.items()})
     return nulls
@@ -725,6 +727,125 @@ def test_a_click_moved_120_um_is_contradicted_with_a_snap_at_the_truth(
         assert check.snap_moving_xy_um is not None
         assert np.hypot(*(check.snap_moving_xy_um - true_position)) <= 10.0
         assert check.strength is None
+
+
+def _edge_points(pair: _Pair, count: int, seed: int) -> np.ndarray:
+    """Reference um of points just outside the tissue (about 40-160 um from it).
+
+    Their 300 um window is 28-34 % tissue.
+    """
+    tissue = pair.reference.tissue
+    pixel = pair.reference.pixel_size_um
+    geometry = ie._geometry(300.0, ie.ClickCheckParams().search_um, pixel)
+    height, width = tissue.shape
+    margin = 3 * geometry.margin
+    rows, columns = np.nonzero(
+        ~ndimage.binary_erosion(~tissue, iterations=int(40 / pixel))
+        & ~tissue
+        & ndimage.binary_dilation(tissue, iterations=int(160 / pixel))
+    )
+    inside = (
+        (rows > margin)
+        & (rows < height - margin)
+        & (columns > margin)
+        & (columns < width - margin)
+    )
+    rows, columns = rows[inside], columns[inside]
+    fraction = ie._box_fraction(ie._box_sum_table(tissue), columns, rows, geometry.half)
+    chosen = np.nonzero((fraction > 0.28) & (fraction < 0.34))[0]
+    assert len(chosen) >= count
+    picked = np.random.default_rng(seed).choice(chosen, size=count, replace=False)
+    return pair.reference.px_to_um(np.stack([columns[picked], rows[picked]], axis=1))
+
+
+def test_check_clicks_draws_its_null_with_the_click_gates(
+    pair: _Pair, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gates: list[tuple[float, float]] = []
+    real_null_models = ie._null_models
+
+    def spy(*args: Any, **kwargs: Any) -> dict[str, ie.NullModel]:
+        gates.append((kwargs["min_tissue_fraction"], kwargs["min_valid_fraction"]))
+        return real_null_models(*args, **kwargs)
+
+    monkeypatch.setattr(ie, "_null_models", spy)
+    reference_um = _deep_tissue_points(pair, 1, seed=3)
+
+    ie.check_clicks(
+        pair.reference,
+        pair.moving,
+        pair_ids=[1],
+        reference_xy_um=reference_um,
+        moving_xy_um=pair.phantom.pull(reference_um),
+        predicted_moving_xy_um=pair.phantom.pull(reference_um),
+        pull_um=pair.phantom.pull,
+        params=ie.ClickCheckParams(null_pairs=20),
+    )
+
+    assert gates
+    assert set(gates) == {(0.2, 0.6)}
+
+
+def test_the_click_check_defaults_are_looser_than_the_window_gates() -> None:
+    clicks, windows = ie.ClickCheckParams(), ie.WindowParams()
+
+    assert (clicks.min_tissue_fraction, clicks.min_valid_fraction) == (0.2, 0.6)
+    assert (windows.min_tissue_fraction, windows.min_valid_fraction) == (0.5, 0.9)
+
+
+def test_a_click_at_a_tissue_edge_gets_a_verdict_not_no_tissue(
+    pair: _Pair, click_nulls: dict[tuple[str, float], ie.NullModel]
+) -> None:
+    reference_um = _edge_points(pair, 4, seed=7)
+    truth = pair.phantom.pull(reference_um)
+
+    checks = _check(pair, click_nulls, reference_um, truth)
+
+    # The 300 um window is about 30 % tissue: below the old gate of 0.5.
+    assert all(c.reason != "no_tissue" for c in checks)
+    assert all(len(c.estimates) > 0 for c in checks)
+    # The match must mean something: truthful edge clicks are confirmed, and the
+    # same clicks displaced by 80 um are not.
+    assert [c.verdict for c in checks] == ["confirmed"] * 4
+    displaced = _check(
+        pair,
+        click_nulls,
+        reference_um,
+        truth + 80.0 * np.array([0.8, 0.6]),
+        predicted_um=truth,
+    )
+    assert all(c.verdict != "confirmed" for c in displaced)
+    old_gate = ie.ClickCheckParams(min_tissue_fraction=0.5, min_valid_fraction=0.9)
+    skipped = ie.check_clicks(
+        pair.reference,
+        pair.moving,
+        pair_ids=[1, 2, 3, 4],
+        reference_xy_um=reference_um,
+        moving_xy_um=truth,
+        predicted_moving_xy_um=truth,
+        pull_um=pair.phantom.pull,
+        params=old_gate,
+        nulls=click_nulls,
+    )
+    assert [c.reason for c in skipped] == ["no_tissue"] * 4
+
+
+def test_a_click_in_empty_background_is_still_no_tissue(
+    pair: _Pair, click_nulls: dict[tuple[str, float], ie.NullModel]
+) -> None:
+    tissue = pair.reference.tissue
+    far = ndimage.distance_transform_edt(~tissue) * pair.reference.pixel_size_um
+    rows, columns = np.nonzero(far > 600.0)
+    keep = (rows > 300) & (rows < tissue.shape[0] - 300)
+    keep &= (columns > 300) & (columns < tissue.shape[1] - 300)
+    assert keep.any()
+    point = pair.reference.px_to_um(np.array([[columns[keep][0], rows[keep][0]]]))
+
+    (check,) = _check(pair, click_nulls, point, pair.phantom.pull(point))
+
+    assert check.verdict == "inconclusive"
+    assert check.reason == "no_tissue"
+    assert check.estimates == ()
 
 
 def test_a_click_outside_the_image_is_not_checked(

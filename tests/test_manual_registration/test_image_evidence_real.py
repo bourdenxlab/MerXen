@@ -29,6 +29,8 @@ from merxen.manual_registration.schema import (
     read_root_attrs,
 )
 
+from ._acceptance import Acceptance, nearest_confident_fused_um, seven_pair_report
+
 logger = logging.getLogger(__name__)
 
 # Digest of the labelling content of the LCM2 revision-2 snapshot (66 enabled pairs).
@@ -195,21 +197,58 @@ def test_lcm2_image_evidence_matches_the_planning_prototype(
     rss_gb = _peak_rss_gb()
     logger.info("total %.1f s, peak RSS %.2f GB", total_s, rss_gb)
 
-    expected_confirmed = sum(
-        verdicts[i].verdict == "confirmed" for i in CONFIRMED_EXPECTED if i in verdicts
-    )
-    assert expected_confirmed >= 4
-    for pair_id in (2, 3):
-        if pair_id in verdicts:
-            assert verdicts[pair_id].verdict != "contradicted"
+    # Every quantity is measured and logged before the first assertion.
+    click_moving = {pair_id: moving_um[row] for row, pair_id in enumerate(ids)}
+    image_verdicts = {
+        check.pair_id: (
+            check.verdict,
+            nearest_confident_fused_um(check.estimates, click_moving[check.pair_id]),
+        )
+        for check in checks
+    }
+    seven = seven_pair_report(image_verdicts, CONFIRMED_EXPECTED)
+    for row in seven.rows:
+        logger.info("image check item pair: %s", row)
     offsets = [c.image_offset_um for c in confirmed if c.image_offset_um is not None]
-    assert offsets and float(np.median(offsets)) <= 10.0
-    assert (len(confirmed) + len(contradicted)) / len(checks) >= 0.20
-
+    median_offset = float(np.median(offsets)) if offsets else float("inf")
+    decisive_fraction = (len(confirmed) + len(contradicted)) / max(len(checks), 1)
     by_size = summary["by_size"]
-    assert by_size["800"]["accepted_fraction"] >= 0.12
-    assert summary["n_thinned"] >= 120
-    assert 0.20 <= by_size["800"]["null_p99"] <= 0.35
-    assert summary["peak_sd_um"]["minor"]["median"] <= 15.0
-    assert total_s <= 20 * 60
-    assert rss_gb <= 10.0
+    n_not_contradicted = sum(
+        verdicts[i].verdict != "contradicted" for i in (2, 3) if i in verdicts
+    )
+
+    acceptance = Acceptance(logger, "LCM2 image evidence")
+    acceptance.holds(
+        f"none of pairs {CONFIRMED_EXPECTED} contradicted",
+        seven.n_contradicted == 0,
+        f"{seven.n_contradicted} contradicted",
+    )
+    acceptance.at_least(
+        f"pairs of {CONFIRMED_EXPECTED} with a confident fused estimate within "
+        f"{seven.near_um:g} um",
+        seven.n_near,
+        4,
+    )
+    acceptance.holds(
+        "pairs 2 and 3 not contradicted",
+        n_not_contradicted == sum(i in verdicts for i in (2, 3)),
+    )
+    acceptance.at_most("median confirmed offset", median_offset, 10.0, " um")
+    acceptance.at_least("confirmed or contradicted fraction", decisive_fraction, 0.20)
+    acceptance.at_least(
+        "800 um accepted fraction", by_size["800"]["accepted_fraction"], 0.12
+    )
+    acceptance.at_least("thinned windows", summary["n_thinned"], 120)
+    null_p99 = by_size["800"]["null_p99"]
+    acceptance.record(
+        "800 um null p99",
+        "missing" if null_p99 is None else f"{null_p99:.3g}",
+        "0.20 to 0.35",
+        null_p99 is not None and 0.20 <= null_p99 <= 0.35,
+    )
+    acceptance.at_most(
+        "median minor peak SD", summary["peak_sd_um"]["minor"]["median"], 15.0, " um"
+    )
+    acceptance.at_most("total time", total_s / 60.0, 20.0, " min")
+    acceptance.at_most("peak RSS", rss_gb, 10.0, " GB")
+    acceptance.finish()

@@ -21,6 +21,8 @@ from merxen.manual_registration import landmark_field as lf
 from merxen.manual_registration.landmark_fit import leave_one_out_residuals
 from merxen.manual_registration.schema import labelling_content_sha256
 
+from ._acceptance import Acceptance
+
 pytestmark = pytest.mark.slow
 
 logger = logging.getLogger(__name__)
@@ -112,61 +114,77 @@ def test_lcm2_clicks_only_field_on_the_real_labelling(
         field.hyperparameters.noise_um["click"],
         seconds,
     )
+    acceptance = Acceptance(logger, "LCM2 clicks-only field")
     if labelling_content_sha256(payload) != LCM2_PINNED_DIGEST:
-        assert median <= 0.6 * rigid_median
+        acceptance.at_most(
+            "LOO median relative to the similarity fit's", median / rigid_median, 0.6
+        )
+        acceptance.finish()
         return
 
-    assert median <= 45.0
-    assert p90 <= 105.0
-    assert seconds <= 30.0
+    # Every quantity is measured and logged before the first assertion.
     p_value = {
         int(i): float(p) for i, p in zip(observations.obs_id, loo.p_value, strict=True)
     }
-    for pair_id in (13, 71):
-        assert p_value[pair_id] < 0.01, pair_id
     row71 = _row(observations, 71)
-    assert field.weights[row71] < 0.15
-    assert p_value[71] < 1e-6
     unflagged = [pair for pair in SIMILARITY_FLAGGED if p_value[pair] >= 0.01]
     logger.info("similarity-flagged pairs not flagged by the field: %s", unflagged)
-    assert len(unflagged) >= 9
 
     everything = _clicks(payload, include_disabled=True)
     disabled = [
         pair["id"] for pair in payload["landmarks"]["pairs"] if not pair["enabled"]
     ]
-    for pair_id in GROSS_DISABLED:
-        assert pair_id in disabled
     pairs = {pair["id"]: pair for pair in payload["landmarks"]["pairs"]}
     reference_scale = payload["images"]["reference"]["pixel_size_um"]
     moving_scale = payload["images"]["moving"]["pixel_size_um"]
+    residuals: dict[int, tuple[float, float]] = {}
     for pair_id in (*GROSS_DISABLED, 17):
         pair = pairs[pair_id]
         residual = field.predict_residual(
             np.array(pair["reference_xy_px"]) * reference_scale,
             np.array(pair["moving_xy_px"]) * moving_scale,
         )
-        logger.info(
-            "disabled pair %d: |residual| %.0f um, p %.3g",
-            pair_id,
+        residuals[pair_id] = (
             float(residual.magnitude_reference_um[0]),
             float(residual.p_value[0]),
         )
-        if pair_id == 17:
-            assert residual.p_value[0] > 0.01
-        else:
-            assert residual.magnitude_reference_um[0] > 900.0
-            assert residual.p_value[0] < 1e-6
-
+        logger.info(
+            "disabled pair %d: |residual| %.0f um, p %.3g",
+            pair_id,
+            *residuals[pair_id],
+        )
     all_pairs = lf.fit_landmark_field(everything)
-    for pair_id in GROSS_DISABLED:
-        assert all_pairs.weights[_row(everything, pair_id)] < 0.05, pair_id
-    assert all_pairs.weights[_row(everything, 17)] > 0.5
+    all_weights = {
+        pair_id: float(all_pairs.weights[_row(everything, pair_id)])
+        for pair_id in (11, 12, 18, 20, 17)
+    }
     logger.info(
         "all %d pairs: weights 11 %.3f 12 %.3f 18 %.3f 20 %.3f, 17 %.3f",
         everything.n,
-        *(all_pairs.weights[_row(everything, i)] for i in (11, 12, 18, 20, 17)),
+        *all_weights.values(),
     )
+
+    acceptance.at_most("LOO median", median, 45.0, " um")
+    acceptance.at_most("LOO p90", p90, 105.0, " um")
+    acceptance.at_most("fit time", seconds, 30.0, " s")
+    for pair_id in (13, 71):
+        acceptance.at_most(f"pair {pair_id} p", p_value[pair_id], 0.01)
+    acceptance.at_most("pair 71 weight", float(field.weights[row71]), 0.15)
+    acceptance.at_most("pair 71 p", p_value[71], 1e-6)
+    acceptance.at_least("similarity-flagged pairs not flagged", len(unflagged), 9)
+    for pair_id in GROSS_DISABLED:
+        acceptance.holds(
+            f"pair {pair_id} disabled in the labelling", pair_id in disabled
+        )
+        acceptance.at_least(
+            f"pair {pair_id} |residual|", residuals[pair_id][0], 900.0, " um"
+        )
+        acceptance.at_most(f"pair {pair_id} residual p", residuals[pair_id][1], 1e-6)
+    acceptance.at_least("pair 17 residual p", residuals[17][1], 0.01)
+    for pair_id in GROSS_DISABLED:
+        acceptance.at_most(f"all-pairs weight of {pair_id}", all_weights[pair_id], 0.05)
+    acceptance.at_least("all-pairs weight of 17", all_weights[17], 0.5)
+    acceptance.finish()
 
 
 def test_lcm1_field_on_the_derived_landmarks(
@@ -185,11 +203,14 @@ def test_lcm1_field_on_the_derived_landmarks(
         rigid_median,
         field.hyperparameters.long_length_um,
     )
+    acceptance = Acceptance(logger, "LCM1 field")
     if labelling_content_sha256(payload) != LCM1_PINNED_DIGEST:
-        assert median <= 0.6 * rigid_median
+        acceptance.at_most(
+            "LOO median relative to the similarity fit's", median / rigid_median, 0.6
+        )
+        acceptance.finish()
         return
 
-    assert median <= 25.0
     if 16 in observations.obs_id:
         p_value = float(loo.p_value[_row(observations, 16)])
     else:
@@ -203,4 +224,6 @@ def test_lcm1_field_on_the_derived_landmarks(
             ).p_value[0]
         )
     logger.info("LCM1 pair 16 p-value %.3g", p_value)
-    assert p_value < 1e-4
+    acceptance.at_most("LOO median", median, 25.0, " um")
+    acceptance.at_most("pair 16 p", p_value, 1e-4)
+    acceptance.finish()

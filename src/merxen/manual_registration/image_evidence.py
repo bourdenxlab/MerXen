@@ -138,7 +138,9 @@ def summarise_scores(
 # Channel roles (contract C6)
 # ---------------------------------------------------------------------------
 
-IMAGE_EVIDENCE_ALGORITHM = "image_evidence_bp20_v1"
+# v2: the click check's gates became 0.2 / 0.6 (v1: 0.5 / 0.9), which changes verdicts;
+# the version is part of the register provenance digest, so v1 results are not reused.
+IMAGE_EVIDENCE_ALGORITHM = "image_evidence_bp20_v2"
 ROLES: tuple[str, ...] = ("at8", "map2", "dapi")
 WORKING_PIXEL_SIZE_UM = 2.76
 _SCOPES: tuple[str, ...] = ("reference", "moving")
@@ -1084,6 +1086,12 @@ def _check_same_grid(reference: Representation, moving: Representation) -> None:
 # ---------------------------------------------------------------------------
 
 
+# Gates of the tissue-window observations (and of their nulls). The per-click
+# check has its own, looser gates (``ClickCheckParams``).
+_WINDOW_MIN_TISSUE_FRACTION = 0.5
+_WINDOW_MIN_VALID_FRACTION = 0.9
+
+
 @dataclass(frozen=True)
 class NullModel:
     """Peak statistics of unrelated window pairs.
@@ -1117,6 +1125,8 @@ def _null_models(
     seed: int,
     exclusion_um: float = _DEFAULT_EXCLUSION_UM,
     workers: int | None = None,
+    min_tissue_fraction: float = _WINDOW_MIN_TISSUE_FRACTION,
+    min_valid_fraction: float = _WINDOW_MIN_VALID_FRACTION,
 ) -> dict[str, NullModel]:
     _check_same_grid(reference, moving)
     pixel = reference.pixel_size_um
@@ -1128,11 +1138,16 @@ def _null_models(
     inside = _inside((height, width), cx, cy, geometry.margin)
     cx, cy = cx[inside], cy[inside]
     ref_ok = (
-        _box_fraction(_box_sum_table(reference.tissue), cx, cy, geometry.half) >= 0.5
+        _box_fraction(_box_sum_table(reference.tissue), cx, cy, geometry.half)
+        >= min_tissue_fraction
     )
     mov_ok = (
-        _box_fraction(_box_sum_table(moving.tissue), cx, cy, geometry.half) >= 0.5
-    ) & (_box_fraction(_box_sum_table(moving.covered), cx, cy, geometry.margin) >= 0.9)
+        _box_fraction(_box_sum_table(moving.tissue), cx, cy, geometry.half)
+        >= min_tissue_fraction
+    ) & (
+        _box_fraction(_box_sum_table(moving.covered), cx, cy, geometry.margin)
+        >= min_valid_fraction
+    )
     ref_points = np.stack([cx[ref_ok], cy[ref_ok]], axis=1)
     mov_points = np.stack([cx[mov_ok], cy[mov_ok]], axis=1)
     rng = np.random.default_rng(seed)
@@ -1263,8 +1278,13 @@ class ClickCheckParams:
     agree_um: float = 25.0
     ridge_elongation: float = 2.0
     ridge_drop: float = 0.1
-    min_tissue_fraction: float = 0.5
-    min_valid_fraction: float = 0.9
+    # Looser than the tissue windows (0.5 / 0.9): edge and pia clicks carry most of
+    # the signal shared by serial sections. bp20 is not zeroed off tissue (only the
+    # orientation map is), so the background part of a mostly-background template
+    # carries section-independent texture; the null of these checks is drawn with
+    # the same gates and calibrates that contribution statistically.
+    min_tissue_fraction: float = 0.2
+    min_valid_fraction: float = 0.6
     null_pairs: int = 300
     seed: int = 0
 
@@ -1694,6 +1714,8 @@ def check_clicks(
                 min_distance_um=2000.0,
                 seed=params.seed,
                 workers=workers,
+                min_tissue_fraction=params.min_tissue_fraction,
+                min_valid_fraction=params.min_valid_fraction,
             )
             for name, model in built.items():
                 null_models.setdefault((name, window_um), model)
@@ -1877,6 +1899,8 @@ def tissue_window_observations(
             seed=params.seed,
             exclusion_um=params.exclusion_um,
             workers=params.workers,
+            min_tissue_fraction=params.min_tissue_fraction,
+            min_valid_fraction=params.min_valid_fraction,
         )["bp20"]
 
         def run(

@@ -173,14 +173,20 @@ weeks).
   6. With all 71 pairs fitted, pairs 11, 12, 18 and 20 get weights below 0.05 and pair 17 stays
      above 0.5.
   7. Image check:
-     - at least 4 of pairs 1, 2, 7, 8, 9, 14 and 23 are confirmed;
+     - none of pairs 1, 2, 7, 8, 9, 14 and 23 is contradicted, and at least 4 of them have a
+       confident fused estimate within 25 µm of the click (revised after the first M1
+       builds: the earlier wording came from a different method, and an edge click is
+       rarely confirmed outright);
      - the median image offset of confirmed clicks is ≤ 10 µm;
      - at least 20 % of enabled clicks get a verdict (confirmed or contradicted).
   8. Register with `cortex_serial` and a preview:
-     - with the defaults (image check and tissue windows): ≤ 30 min and ≤ 10 GB peak memory;
-     - without tissue windows: ≤ 12 min and ≤ 8 GB;
+     - with the defaults (image check and tissue windows): ≤ 30 min and ≤ 9.9 GB peak memory;
+     - without tissue windows: ≤ 12 min and ≤ 8.9 GB;
      - without tissue windows and without the image check (landmarks only): ≤ 6 min and
-       ≤ 2.5 GB;
+       ≤ 3.2 GB;
+     - (the memory limits are the measured in-process peaks plus 25 %, revised after the
+       first M1 builds; the original 10, 8 and 2.5 GB were estimates. They are not measured
+       on the `merxen` command line, which still imports PyTorch and Cellpose;)
      - the result store is at most 1 GB and opens in a viewer built from the integration branch
        with the landmarks at their final positions.
   9. Synthetic phantom:
