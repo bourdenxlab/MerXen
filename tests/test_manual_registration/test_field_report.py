@@ -86,5 +86,38 @@ def test_unknown_figure_kinds_are_refused(
             store=store,
             crops={"reference": crop, "moving": crop},
             suggestions=[],
-            kind="register",  # type: ignore[arg-type]
+            kind="other",  # type: ignore[arg-type]
         )
+
+
+def test_the_register_figure_needs_the_base_affine_and_draws_the_extra_panels(
+    phantom: FieldPhantom, tmp_path: Path
+) -> None:
+    report, store = _report(phantom)
+    crop = CropRect(x0=0, y0=0, x1=11000, y1=8000)
+    kwargs = {
+        "report": report,
+        "store": store,
+        "crops": {"reference": crop, "moving": crop},
+        "suggestions": [],
+        "kind": "register",
+    }
+    with pytest.raises(ValueError, match="base_matrix_full"):
+        write_field_figure(tmp_path / "a.png", **kwargs)  # type: ignore[arg-type]
+    path = write_field_figure(
+        tmp_path / "register.png",
+        base_matrix_full=np.eye(3),
+        role_pearson={
+            "at8": {"coarse": 0.5, "landmark": 0.6, "affine": 0.6, "final": 0.7},
+            "map2": {"coarse": 0.4, "landmark": 0.5, "affine": 0.5, "final": 0.6},
+        },
+        **kwargs,  # type: ignore[arg-type]
+    )
+    assert path.stat().st_size > 10_000 and path.with_suffix(".pdf").exists()
+    # Without roles the Pearson panel says so instead of failing.
+    bare = write_field_figure(
+        tmp_path / "bare.png",
+        base_matrix_full=np.eye(3),
+        **kwargs,  # type: ignore[arg-type]
+    )
+    assert bare.exists()
