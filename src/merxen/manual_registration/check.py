@@ -286,9 +286,7 @@ def execute_check(
             labelling_payload=payload_in,
         )
 
-    # The suggestions and the sd_um summary always load the OME-TIFFs, so the
-    # fingerprints are always checked.
-    store, labelling, raw_labelling, warnings = read(True)
+    store, labelling, raw_labelling, warnings = read(False)
     if (
         file_store_attr is not None
         and file_store_attr.get("content_digest") != store.content_digest
@@ -334,6 +332,10 @@ def execute_check(
     )
 
     similarity = fit_landmarks(labelling, store, settings, run_id=run_id)
+    # The suggestions and the sd_um summary always load the OME-TIFFs, so the
+    # fingerprints are checked even for a landmarks-only run. This comes after
+    # the cheap validations so that their messages stay the first ones.
+    store, _labelling, _raw_labelling, _warnings = read(True)
     report, _context = build_landmark_field(
         similarity=similarity,
         store=store,
