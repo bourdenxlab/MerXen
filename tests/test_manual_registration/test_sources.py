@@ -198,7 +198,17 @@ def test_kept_level_factors_match_the_levels_of_pyramid_levels(
 
 @pytest.mark.parametrize(
     ("wanted", "expected"),
-    [(0.5, 0), (1.0, 0), (2.775, 1), (16.0, 4), (3.9, 1), (4.0, 2), (1000.0, 4)],
+    [
+        (0.5, 0),
+        (1.0, 0),
+        (2.775, 1),
+        (16.0, 4),
+        (3.9, 1),
+        (4.0, 2),
+        (1000.0, 4),
+        (5.5 / 0.345, 4),
+        (15.8, 3),
+    ],
 )
 def test_level_for_factor_takes_the_coarsest_level_not_coarser(
     wanted: float, expected: int

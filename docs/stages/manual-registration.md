@@ -114,7 +114,7 @@ reported, as the `landmark` stage and the `fit` block), then:
 4. Resample the moving image through the flow. `materialize` decides what is
    written: `preview` (the default for `cortex_serial`) the reference and the
    registered moving image at the coarsest pyramid level not coarser than
-   `preview_pixel_size_um` (5.5 µm: level factor 16 on a 0.345 µm scan), `full` the
+   `preview_pixel_size_um` (1 % tolerance; 5.5 µm: level factor 16 on a 0.345 µm scan), `full` the
    level-0 grid as for the other presets, `none` no result store at all (the summary
    JSON is the record, and an older result store of the run is removed).
 5. Compute the tissue QC on the registration channel and on each channel role,
@@ -552,7 +552,7 @@ is written to a temporary sibling and renamed into place only when complete.
 **Preview stores.** With `materialize=preview` the two elements are coarser: the
 reference is the pyramid level of the prepared OME-TIFF with factor `f` (the
 largest kept factor not above `preview_pixel_size_um` over the reference pixel
-size) cropped to the effective crop, and the moving image is resampled onto it. The
+size, with a 1 % tolerance) cropped to the effective crop, and the moving image is resampled onto it. The
 result store's attribute records this as `images.<role>.materialization`
 (`{"mode": "preview", "level_factor": f, "pixel_size_um": f p}`; a full store has
 `{"mode": "full", "level_factor": 1, ...}`, and no block means full). The image
@@ -711,7 +711,7 @@ and is the set of keys `registration_settings` can override. Defaults are the
 | `field_grid_um` | 11 | Node spacing of the pull flow of a field registration, in µm (rounded to whole reference pixels: 32 at 0.345 µm) |
 | `field_sd_grid_um` | 88 | Node spacing of the uncertainty grid in the flow file |
 | `materialize` | `full` (`preview` in `cortex_serial`) | What a field registration writes: `full` (level-0 grid), `preview` (a coarse pyramid level) or `none` (no result store) |
-| `preview_pixel_size_um` | 5.5 | Target pixel size of a preview store; the coarsest kept pyramid level not coarser than this (16 x 0.345 µm on a 0.345 µm scan) |
+| `preview_pixel_size_um` | 5.5 | Target pixel size of a preview store; the coarsest kept pyramid level not coarser than this, 1 % tolerance (16 x 0.345 µm on a 0.345 µm scan) |
 
 **Presets.** `same_section` is the defaults above. It differs from the
 `REGISTER_IMAGES` defaults in the non-rigid stage being on and in the correlation
