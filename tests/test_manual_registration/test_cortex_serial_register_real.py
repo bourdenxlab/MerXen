@@ -21,7 +21,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import pytest
 
 from merxen.manual_registration.check import execute_check
@@ -31,6 +30,8 @@ from merxen.manual_registration.config import (
 )
 from merxen.manual_registration.register import run_manual_registration
 from merxen.manual_registration.schema import labelling_content_sha256
+
+from ._acceptance import Acceptance
 
 pytestmark = pytest.mark.slow
 
@@ -71,8 +72,8 @@ def _store(real_path: Callable[[str], Path]) -> Path:
 
 
 @pytest.fixture(scope="module")
-def payload(real_path: Callable[[str], Path]) -> dict[str, Any]:
-    path = _evidence(real_path) / "cortex_serial" / "snapshots" / LCM2_SNAPSHOT
+def payload(real_path_module: Callable[[str], Path]) -> dict[str, Any]:
+    path = _evidence(real_path_module) / "cortex_serial" / "snapshots" / LCM2_SNAPSHOT
     if not path.is_file():
         pytest.skip(f"snapshot {LCM2_SNAPSHOT} is missing")
     document: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
@@ -119,13 +120,15 @@ def _check_run(
     outputs: dict[str, Path],
     summary: dict[str, Any],
     minutes: float,
+    acceptance: Acceptance,
 ) -> None:
+    """Log every measured number of one run, then record its acceptance items."""
     limit_minutes, limit_gb = LIMITS[name]
     peak = _peak_gb()
     store_gb = _directory_gb(outputs["result_store"])
     by_role = summary["tissue_qc"]["by_role"]
     logger.info(
-        "LCM2 register %s: %.1f min (limit %.0f), peak %.2f GB (limit %.1f), "
+        "LCM2 register %s: %.1f min (limit %.0f), peak %.2f GB (limit %.2f), "
         "store %.3f GB, field LOO median %.1f / p90 %.1f um, windows %d, "
         "flow grid factor %d, max displacement %.0f um, tissue Pearson final "
         "(at8 %.3f, map2 %.3f, dapi %.3f)",
@@ -144,22 +147,34 @@ def _check_run(
         by_role["map2"]["pearson"]["final"],
         by_role["dapi"]["pearson"]["final"],
     )
-    assert minutes <= limit_minutes
-    assert peak <= limit_gb
-    assert store_gb <= MAX_STORE_GB
-    assert summary["field"]["materialize"]["mode"] == "preview"
+    for role, record in sorted(by_role.items()):
+        logger.info("LCM2 register %s Pearson %s: %s", name, role, record["pearson"])
+    acceptance.at_most(f"{name} wall time", minutes, limit_minutes, " min")
+    acceptance.at_most(f"{name} peak RSS", peak, limit_gb, " GB")
+    acceptance.at_most(f"{name} result store", store_gb, MAX_STORE_GB, " GB")
+    acceptance.record(
+        f"{name} materialize mode",
+        summary["field"]["materialize"]["mode"],
+        "preview",
+        summary["field"]["materialize"]["mode"] == "preview",
+    )
     for role in ("at8", "map2"):
         pearson = by_role[role]["pearson"]
-        assert pearson["final"] >= pearson["landmark"], role
+        acceptance.at_least(
+            f"{name} {role} Pearson final minus landmark",
+            pearson["final"] - pearson["landmark"],
+            0.0,
+        )
 
 
 def test_landmarks_only_register_matches_the_landmarks_only_check(
     real_path: Callable[[str], Path], payload: dict[str, Any]
 ) -> None:
+    acceptance = Acceptance(logger, "LCM2 landmarks-only register")
     outputs, summary, minutes = _register(
         real_path, payload, "landmarks_only", LANDMARKS_ONLY
     )
-    _check_run("landmarks_only", outputs, summary, minutes)
+    _check_run("landmarks_only", outputs, summary, minutes, acceptance)
     check = execute_check(
         ManualRegistrationCheckConfig(
             dataset_name="LCM2",
@@ -174,7 +189,6 @@ def test_landmarks_only_register_matches_the_landmarks_only_check(
         ),
         labelling_payload=payload,
     )
-    assert summary["field"]["model_digest"] == check.report.field.digest
     register_loo = {
         record["id"]: record["residual_um"]["loo"]
         for record in summary["landmarks"]
@@ -185,22 +199,40 @@ def test_landmarks_only_register_matches_the_landmarks_only_check(
         for pair_id, record in check.payload["pairs"].items()
         if record["used"]
     }
-    assert register_loo.keys() == check_loo.keys()
     ids = sorted(register_loo)
-    np.testing.assert_allclose(
-        [register_loo[i] for i in ids], [check_loo[i] for i in ids], rtol=1e-6
+    same_ids = register_loo.keys() == check_loo.keys()
+    loo_difference = (
+        max(
+            abs(register_loo[i] - check_loo[i]) / max(abs(check_loo[i]), 1e-12)
+            for i in ids
+        )
+        if same_ids and ids
+        else float("inf")
     )
+    acceptance.record(
+        "model digest equals the check's",
+        summary["field"]["model_digest"],
+        check.report.field.digest,
+        summary["field"]["model_digest"] == check.report.field.digest,
+    )
+    acceptance.holds("same pairs used by register and check", same_ids)
+    acceptance.at_most("largest relative LOO difference", loo_difference, 1e-6)
+    acceptance.finish()
 
 
 def test_register_without_windows_stays_within_its_limits(
     real_path: Callable[[str], Path], payload: dict[str, Any]
 ) -> None:
+    acceptance = Acceptance(logger, "LCM2 no-windows register")
     outputs, summary, minutes = _register(real_path, payload, "no_windows", NO_WINDOWS)
-    _check_run("no_windows", outputs, summary, minutes)
+    _check_run("no_windows", outputs, summary, minutes, acceptance)
+    acceptance.finish()
 
 
 def test_default_register_stays_within_its_limits(
     real_path: Callable[[str], Path], payload: dict[str, Any]
 ) -> None:
+    acceptance = Acceptance(logger, "LCM2 default register")
     outputs, summary, minutes = _register(real_path, payload, "default", "")
-    _check_run("default", outputs, summary, minutes)
+    _check_run("default", outputs, summary, minutes, acceptance)
+    acceptance.finish()

@@ -98,16 +98,10 @@ def _no_private_files(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     privacy.clear_cache()
 
 
-@pytest.fixture
-def real_path(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], Path]:
-    """Factory: ``real_path("MERXEN_EVIDENCE_ROOT")`` -> Path, or skip.
-
-    Skips when the variable is unset (``.env``), when the value lies under the
-    refused prefix (``MERXEN_REFUSED_PATH_PREFIX``: no test reads the failing
-    disk) or when the path does not exist on this host. The variable is also
-    set for the test, because the code under test reads it through
-    ``merxen.local_config``.
-    """
+def _real_path_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[str], Path]:
+    """The resolver behind :func:`real_path` and :func:`real_path_module`."""
 
     def factory(name: str) -> Path:
         if _CAPTURE_ERROR:
@@ -126,6 +120,32 @@ def real_path(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], Path]:
         return path
 
     return factory
+
+
+@pytest.fixture
+def real_path(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], Path]:
+    """Factory: ``real_path("MERXEN_EVIDENCE_ROOT")`` -> Path, or skip.
+
+    Skips when the variable is unset (``.env``), when the value lies under the
+    refused prefix (``MERXEN_REFUSED_PATH_PREFIX``: no test reads the failing
+    disk) or when the path does not exist on this host. The variable is also
+    set for the test, because the code under test reads it through
+    ``merxen.local_config``.
+    """
+    return _real_path_factory(monkeypatch)
+
+
+@pytest.fixture(scope="module")
+def real_path_module() -> Iterator[Callable[[str], Path]]:
+    """:func:`real_path` for module-scoped fixtures (same skips).
+
+    A module-scoped fixture cannot request the function-scoped ``real_path``
+    (ScopeMismatch). The variables it sets stay for the module's fixtures and
+    are undone at the module's end; each test still hides them (the autouse
+    isolation) until it asks for ``real_path`` itself.
+    """
+    with pytest.MonkeyPatch.context() as module_patch:
+        yield _real_path_factory(module_patch)
 
 
 @pytest.fixture

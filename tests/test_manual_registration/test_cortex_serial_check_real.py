@@ -28,6 +28,8 @@ from merxen.manual_registration.landmark_field import (
 )
 from merxen.manual_registration.schema import labelling_content_sha256
 
+from ._acceptance import Acceptance, seven_pair_report
+
 pytestmark = pytest.mark.slow
 
 logger = logging.getLogger(__name__)
@@ -187,77 +189,126 @@ def _block_held_out_clicks_um(field: LandmarkField) -> np.ndarray:
 
 
 @pytest.fixture(scope="module")
-def lcm2_payload(real_path: Callable[[str], Path]) -> dict[str, Any]:
-    return _snapshot(real_path, LCM2_SNAPSHOT, LCM2_PINNED_DIGEST)
+def lcm2_payload(real_path_module: Callable[[str], Path]) -> dict[str, Any]:
+    return _snapshot(real_path_module, LCM2_SNAPSHOT, LCM2_PINNED_DIGEST)
 
 
 @pytest.fixture(scope="module")
-def lcm2(real_path: Callable[[str], Path], lcm2_payload: dict[str, Any]) -> CheckRun:
+def lcm2(
+    real_path_module: Callable[[str], Path], lcm2_payload: dict[str, Any]
+) -> CheckRun:
     """The default check (image check and windows on, strong confirmations trusted)."""
     return execute_check(
-        _config(real_path, "LCM2", "lcm2_default"), labelling_payload=lcm2_payload
+        _config(real_path_module, "LCM2", "lcm2_default"),
+        labelling_payload=lcm2_payload,
     )
 
 
 def test_lcm2_check_meets_the_m1_acceptance(lcm2: CheckRun) -> None:
     field = lcm2.payload["field"]
     report = lcm2.report
+    pairs = lcm2.payload["pairs"]
+    peak_gb = _peak_gb()
     logger.info("LCM2 field: %s", json.dumps(field, sort_keys=True))
-    logger.info("LCM2 timings: %s peak %.1f GB", report.timings_s, _peak_gb())
+    logger.info("LCM2 timings: %s peak %.1f GB", report.timings_s, peak_gb)
+    for name, value in sorted(field["class_counts"].items()):
+        logger.info("class %s: %d", name, value)
 
-    # 1. The clicks alone.
+    # Everything is measured and logged before the first assertion.
     clicks_only = field["loo_um_clicks_only"]
-    assert clicks_only is not None
-    assert clicks_only["median"] <= 45.0
-    assert clicks_only["p90"] <= 105.0
-    # 2. With the windows.
-    assert field["n_windows"] > 0
-    assert field["loo_um"]["median"] <= 38.0
-    # 3. The misclicks the clicks alone expose.
-    for pair_id in (13, 71):
-        pair = _pair(lcm2, pair_id)
-        assert pair["clicks_only"]["p_value"] < 0.01, pair_id
-        assert pair["class"] in {"likely_misclick", "check"}, (pair_id, pair["class"])
-    assert _pair(lcm2, 71)["clicks_only"]["weight"] < 0.15
-    # 4. Pairs the image confirms.
-    for pair_id in (2, 3):
-        assert _pair(lcm2, pair_id)["class"] != "likely_misclick", pair_id
-    # 5. The rigid fit's flags.
-    flagged = sorted(
-        int(key) for key, pair in lcm2.payload["pairs"].items() if pair["rigid_outlier"]
-    )
-    assert flagged == list(RIGID_FLAGGED)
+    flagged = sorted(int(key) for key, pair in pairs.items() if pair["rigid_outlier"])
     fine = [
         pair_id
         for pair_id in RIGID_FLAGGED
         if _pair(lcm2, pair_id)["class"] in {"ok", "kept_confirmed"}
     ]
-    logger.info("rigid-flagged pairs that are ok or kept: %s", fine)
-    assert len(fine) >= 9
-    # 7. The image check.
-    verdicts = {key: pair["verdict"] for key, pair in lcm2.payload["pairs"].items()}
-    confirmed = [i for i in IMAGE_CONFIRMED_EXPECTED if verdicts[str(i)] == "confirmed"]
-    logger.info("confirmed of %s: %s", IMAGE_CONFIRMED_EXPECTED, confirmed)
-    assert len(confirmed) >= 4
+    image_verdicts = {
+        int(key): (pair["verdict"], pair["image_offset_um"])
+        for key, pair in pairs.items()
+    }
+    seven = seven_pair_report(image_verdicts, IMAGE_CONFIRMED_EXPECTED)
+    for row in seven.rows:
+        logger.info("image check item pair: %s", row)
     offsets = [
         pair["image_offset_um"]
-        for pair in lcm2.payload["pairs"].values()
+        for pair in pairs.values()
         if pair["verdict"] == "confirmed" and pair["image_offset_um"] is not None
     ]
-    assert float(np.median(offsets)) <= 10.0
-    enabled = sum(1 for pair in lcm2.payload["pairs"].values() if pair["enabled"])
+    enabled = sum(1 for pair in pairs.values() if pair["enabled"])
     decisive = sum(
         1
-        for pair in lcm2.payload["pairs"].values()
+        for pair in pairs.values()
         if pair["enabled"] and pair["verdict"] in {"confirmed", "contradicted", "ridge"}
     )
     logger.info("decisive verdicts: %d of %d enabled pairs", decisive, enabled)
-    assert decisive >= 0.2 * enabled
+
+    acceptance = Acceptance(logger, "LCM2 check")
+    # 1. The clicks alone.
+    acceptance.holds("clicks-only field present", clicks_only is not None)
+    if clicks_only is not None:
+        acceptance.at_most("clicks-only LOO median", clicks_only["median"], 45.0, " um")
+        acceptance.at_most("clicks-only LOO p90", clicks_only["p90"], 105.0, " um")
+    # 2. With the windows.
+    acceptance.at_least("windows", field["n_windows"], 1)
+    acceptance.at_most(
+        "LOO median with windows", field["loo_um"]["median"], 38.0, " um"
+    )
+    # 3. The misclicks the clicks alone expose.
+    for pair_id in (13, 71):
+        pair = _pair(lcm2, pair_id)
+        acceptance.at_most(
+            f"pair {pair_id} clicks-only p", pair["clicks_only"]["p_value"], 0.01
+        )
+        acceptance.record(
+            f"pair {pair_id} class",
+            pair["class"],
+            "likely_misclick or check",
+            pair["class"] in {"likely_misclick", "check"},
+        )
+    acceptance.at_most(
+        "pair 71 clicks-only weight", _pair(lcm2, 71)["clicks_only"]["weight"], 0.15
+    )
+    # 4. Pairs the image confirms.
+    for pair_id in (2, 3):
+        acceptance.record(
+            f"pair {pair_id} class",
+            _pair(lcm2, pair_id)["class"],
+            "not likely_misclick",
+            _pair(lcm2, pair_id)["class"] != "likely_misclick",
+        )
+    # 5. The rigid fit's flags.
+    acceptance.record(
+        "rigid-flagged pairs",
+        flagged,
+        str(list(RIGID_FLAGGED)),
+        flagged == list(RIGID_FLAGGED),
+    )
+    acceptance.at_least("rigid-flagged pairs that are ok or kept", len(fine), 9)
+    # 7. The image check.
+    acceptance.holds(
+        f"none of pairs {IMAGE_CONFIRMED_EXPECTED} contradicted",
+        seven.n_contradicted == 0,
+        f"{seven.n_contradicted} contradicted",
+    )
+    acceptance.at_least(
+        f"pairs of {IMAGE_CONFIRMED_EXPECTED} with a confident fused estimate "
+        f"within {seven.near_um:g} um",
+        seven.n_near,
+        4,
+    )
+    acceptance.at_most(
+        "median confirmed offset",
+        float(np.median(offsets)) if offsets else float("inf"),
+        10.0,
+        " um",
+    )
+    acceptance.at_least("decisive verdicts", decisive, 0.2 * enabled)
     # Cost.
-    assert report.timings_s["total"] <= MAX_MINUTES * 60.0
-    assert _peak_gb() <= MAX_PEAK_GB
-    for name, value in sorted(lcm2.payload["field"]["class_counts"].items()):
-        logger.info("class %s: %d", name, value)
+    acceptance.at_most(
+        "check time", report.timings_s["total"] / 60.0, MAX_MINUTES, " min"
+    )
+    acceptance.at_most("peak RSS", peak_gb, MAX_PEAK_GB, " GB")
+    acceptance.finish()
 
 
 def test_lcm2_trusting_confirmed_clicks_helps_the_strong_ones(
@@ -273,6 +324,7 @@ def test_lcm2_trusting_confirmed_clicks_helps_the_strong_ones(
         labelling_payload=lcm2_payload,
     )
     summary: dict[str, dict[str, float]] = {}
+    missing: list[str] = []
     for label, run in (("on", lcm2), ("off", off)):
         report = run.report
         observations = report.field.observations
@@ -289,7 +341,9 @@ def test_lcm2_trusting_confirmed_clicks_helps_the_strong_ones(
             for i, strength in enumerate(report.confirm_strength)
             if strength == "strong" and int(report.pair_ids[i]) in row_of
         ]
-        assert strong_ids, "no strong confirmation: nothing to compare"
+        if not strong_ids:
+            missing.append(label)
+            continue
         residuals = [float(in_sample[row_of[i]]) for i in strong_ids]
         named = {
             i: round(float(in_sample[row_of[i]]), 1)
@@ -318,11 +372,25 @@ def test_lcm2_trusting_confirmed_clicks_helps_the_strong_ones(
             summary[label]["window_holdout_median"],
             summary[label]["block_holdout_median"],
         )
-    assert summary["on"]["strong_in_sample_median"] <= 30.0
-    assert (
-        summary["on"]["window_holdout_median"]
-        <= summary["off"]["window_holdout_median"] + 3.0
+    acceptance = Acceptance(logger, "LCM2 A3")
+    acceptance.holds(
+        "strong confirmations to compare", not missing, f"none in runs {missing}"
     )
+    if not missing:
+        acceptance.at_most(
+            "trust-on in-sample residual median of strong clicks",
+            summary["on"]["strong_in_sample_median"],
+            30.0,
+            " um",
+        )
+        acceptance.at_most(
+            "trust-on held-out window median minus trust-off",
+            summary["on"]["window_holdout_median"]
+            - summary["off"]["window_holdout_median"],
+            3.0,
+            " um",
+        )
+    acceptance.finish()
 
 
 def test_lcm2_with_every_pair_enabled_exposes_the_gross_pairs(
@@ -346,9 +414,11 @@ def test_lcm2_with_every_pair_enabled_exposes_the_gross_pairs(
         pair_id: _pair(run, pair_id)["weight"] for pair_id in (*GROSS_DISABLED, 17)
     }
     logger.info("all 71 pairs enabled, weights: %s", weights)
+    acceptance = Acceptance(logger, "LCM2 all pairs enabled")
     for pair_id in GROSS_DISABLED:
-        assert weights[pair_id] < 0.05, pair_id
-    assert weights[17] > 0.5
+        acceptance.at_most(f"pair {pair_id} weight", weights[pair_id], 0.05)
+    acceptance.at_least("pair 17 weight", weights[17], 0.5)
+    acceptance.finish()
 
 
 def test_lcm2_uploaded_file_and_snapshot_give_the_same_check(
@@ -374,10 +444,20 @@ def test_lcm2_uploaded_file_and_snapshot_give_the_same_check(
         _config(real_path, "LCM2", "lcm2_snapshot_lm", **kwargs),
         labelling_payload=lcm2_payload,
     )
+    acceptance = Acceptance(logger, "LCM2 uploaded file")
     for key in ("pairs", "field", "suggestions"):
-        assert from_file.payload[key] == from_snapshot.payload[key], key
-    assert from_file.payload["labelling_source"] == "file"
-    assert from_file.attr_written is False
+        acceptance.holds(
+            f"{key} equal to the snapshot's",
+            from_file.payload[key] == from_snapshot.payload[key],
+        )
+    acceptance.record(
+        "labelling source",
+        from_file.payload["labelling_source"],
+        "file",
+        from_file.payload["labelling_source"] == "file",
+    )
+    acceptance.holds("attr not written", from_file.attr_written is False)
+    acceptance.finish()
 
 
 def test_lcm1_check_on_the_first_revision(
@@ -390,5 +470,12 @@ def test_lcm1_check_on_the_first_revision(
     field = run.payload["field"]
     logger.info("LCM1 field: %s", json.dumps(field, sort_keys=True))
     logger.info("LCM1 timings: %s", run.report.timings_s)
-    assert field["loo_um"]["median"] <= 25.0
-    assert _pair(run, 16)["class"] != "ok"
+    acceptance = Acceptance(logger, "LCM1 check")
+    acceptance.at_most("LOO median", field["loo_um"]["median"], 25.0, " um")
+    acceptance.record(
+        "pair 16 class",
+        _pair(run, 16)["class"],
+        "not ok",
+        _pair(run, 16)["class"] != "ok",
+    )
+    acceptance.finish()
