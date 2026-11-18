@@ -1,6 +1,6 @@
 #!/usr/bin/env nextflow
 // Manual landmark registration, step 2 of 2: for every samplesheet row and preset, fit the landmarks the
-// viewer saved, refine and write the registered result store; compare the runs of one pair
+// viewer saved, register and write the result store and files; compare the runs of one pair
 // (docs/stages/manual-registration.md).
 nextflow.enable.dsl = 2
 
@@ -42,7 +42,7 @@ workflow {
         channel.fromList(runs.collect { run -> tuple(run.run_id, run.id, run.config_json) })
     )
     registered_ch.subscribe { runId, _id, _out ->
-        log.info("[${runId}] result store: ${runsById[runId].result_store}")
+        log.info("[${runId}] result directory: ${runsById[runId].run_dir}")
     }
     compare_inputs_ch = registered_ch
         .map { runId, id, _out -> tuple(id, runsById[runId].summary_path) }

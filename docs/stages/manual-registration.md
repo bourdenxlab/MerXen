@@ -41,9 +41,9 @@ order and the metro map do not know about them.
 
 **Three presets.** The register workflow runs every row once per preset. The
 presets differ in the length scale they trust (`cortex_serial` is for adjacent
-cortex sections stained for AT8, MAP2 and DAPI; the landmark check works now and
-registration through its landmark field follows in the next change, so a
-`cortex_serial` register run stops with "not implemented yet" for the time being):
+cortex sections stained for AT8, MAP2 and DAPI; its landmarks are checked by
+`merxen manual-registration-check` and registered through the robust landmark
+field, see "Registration through the landmark field" below):
 
 - `same_section`: both images show the same cells (a post-Xenium IF image and
   the Xenium DAPI of the same section). Refinement and the optical flow work at
@@ -91,6 +91,36 @@ and reason are reported), and the comparison table puts the runs side by side.
    Pearson correlation, residuals and optional nucleus-scale QC.
 6. Write the result store, the matrices, the landmark table, the summary and the
    QC figure.
+
+**Registration through the landmark field** (`cortex_serial`, or any run with
+`field_model=robust_gp`). Steps 1 to 3 are the same (the similarity fit is still
+reported, as the `landmark` stage and the `fit` block), then:
+
+1. Fit the robust field to the enabled landmarks with the image check and, when
+   `field_window_observations` is on, tissue windows (the same fit as the landmark
+   check, so a `landmarks-only` run reproduces the check's field to rounding). The
+   classes of every pair (`ok`, `kept_confirmed`, `check`, `likely_misclick`,
+   `excluded`, `disabled`) are recorded; nothing is disabled or deleted.
+2. Take the least-squares affine of the field mean over the reference crop's tissue
+   (64 x 64 lattice) as the **base affine**; `<run_id>_final_matrix.csv` holds it,
+   without the field's non-affine part.
+3. Sample the field as a pull flow on a grid of about `field_grid_um` (11 µm: 32
+   reference pixels at 0.345 µm): node 0 sits one node before the crop, so every
+   crop pixel lies inside the grid and the flow is never replaced by the bare
+   affine. The flow is the format the registration core's pull and push functions
+   read, so the landmarks are pushed through it exactly like the TV-L1 flow.
+4. Resample the moving image through the flow. `materialize` decides what is
+   written: `preview` (the default for `cortex_serial`) the reference and the
+   registered moving image at the coarsest pyramid level not coarser than
+   `preview_pixel_size_um` (5.5 µm: level factor 16 on a 0.345 µm scan), `full` the
+   level-0 grid as for the other presets, `none` no result store at all (the summary
+   JSON is the record, and an older result store of the run is removed).
+5. Compute the tissue QC on the registration channel and on each channel role,
+   write the field figure, the model and flow files and the summary.
+
+The preview store is for checking the registration and for the viewer; `full` is
+the level-0 grid that analysis needs (the milestone's validation table records the
+time and memory of each).
 
 ## Inputs and samplesheet
 
@@ -417,6 +447,9 @@ through Nextflow):
 <id>/registered/<run_name>/<run_id>_landmarks.csv
 <id>/registered/<run_name>/<run_id>_manual_registration_summary.json
 <id>/registered/<run_name>/<run_id>_tissue_qc.png (+ .pdf)
+<id>/registered/<run_name>/<run_id>_landmark_field.json             # robust-field runs: the fitted model (contract C1)
+<id>/registered/<run_name>/<run_id>_field_flow.npz                  # robust-field runs: the pull flow and the uncertainty grid
+<id>/registered/<run_name>/<run_id>_field_qc.png (+ .pdf)           # robust-field runs: the field figure
 <id>/registered/<run_name>/qc/<run_id lower>_moving_registered_{registration_qc.png,registration_qc.pdf,registration_local_shifts.csv,nonrigid_flow.npz,nonrigid_qc.png,nonrigid_qc.pdf}   # only the files the run wrote, see "Core QC files"
 <id>/registered/<id>_run_comparison.{json,csv,png}
 <outdir>/nextflow/{report,timeline,trace}*
@@ -454,7 +487,9 @@ leftover from a run that died between the two renames is removed by the next
 successful run.
 
 **Matrix CSVs** (`<run_id>_landmark_matrix.csv` = robust similarity,
-`<run_id>_final_matrix.csv` = refined affine **without** the flow): 3 lines of 3
+`<run_id>_final_matrix.csv` = refined affine **without** the flow; for a robust-field
+run the base affine, the least-squares affine of the field, without the field's
+non-affine part): 3 lines of 3
 comma-separated values, no header, `%.17g`, written by `write_alignment_matrix`
 and re-read with `load_alignment_matrix`. Both are in the **full, uncropped**
 level-0 pixel frames of both images and map moving to reference.
@@ -464,7 +499,15 @@ level-0 pixel frames of both images and map moving to reference.
 reference_y_px, moving_x_px, moving_y_px, landmark_x_px, landmark_y_px,
 affine_x_px, affine_y_px, final_x_px, final_y_px, residual_landmark_um,
 residual_loo_um, residual_affine_um, residual_final_um, final_includes_flow,
-push_converged`. The stage positions are in full reference px; floats `%.6g`.
+push_converged, field_weight, field_p_value, field_verdict, field_class`. The stage
+positions are in full reference px; floats `%.6g`. The four `field_*` columns are
+empty for similarity runs (and for results written before they existed). For a
+robust-field run `used_in_fit` means the pair is an observation of the field,
+`outlier` that its class is `likely_misclick`, `residual_loo_um` is the field's
+leave-one-out residual, `affine` uses the base affine and `final` is the pair
+pushed through the flow; `field_weight` is the final field's Student-t weight,
+`field_p_value` its leave-one-out p-value at unit weight, `field_verdict` the image
+check's verdict and `field_class` the class.
 
 **Comparison CSV** (`<id>_run_comparison.csv`), one row per run:
 `run_id, preset, run_label, fit_n_enabled, fit_n_used, fit_rms_um,
@@ -475,13 +518,49 @@ jacobian_min, jacobian_max, tissue_pearson_coarse, tissue_pearson_landmark,
 tissue_pearson_affine, tissue_pearson_final, used_median_landmark_um,
 used_median_affine_um, used_median_final_um, held_out_median_landmark_um,
 held_out_median_affine_um, held_out_median_final_um, nucleus_qc_median_um,
-nucleus_qc_pearson, wall_time_s, peak_rss_gb`.
+nucleus_qc_pearson, wall_time_s, peak_rss_gb, field_model, field_loo_median_um,
+field_loo_p90_um, field_n_check, field_n_likely_misclick, field_n_windows,
+materialize_mode`. The `field_*` columns come from the summary's `field` block and
+are empty for similarity runs; `materialize_mode` is `full` for them and for results
+written before the field existed, and `full`, `preview` or `none` for a robust-field
+run.
+
+**Robust-field files** (`<run_id>_landmark_field.json`, `<run_id>_field_flow.npz`).
+The JSON is the fitted model (`merxen.manual_registration.landmark_field`, version 1:
+trend, kernel, noise, observations with their classes and weights, the digest);
+`LandmarkField.from_dict` rebuilds it and must reproduce the digest. The NPZ holds
+`flow_yx` (float32, `(2, h, w)`, pull displacement in working pixels),
+`working_to_reference` (working pixel to reference crop level-0 pixel),
+`base_matrix_crop` and `base_matrix_full` (moving to reference), the crop origins
+(`reference_origin_xy`, `moving_origin_xy`), `sd_um` (the field's posterior SD per
+axis on a grid of `field_sd_grid_um`, 88 µm by default) with its own
+`sd_working_to_reference`, `algorithm` and `model_digest`. The pull of a reference
+crop point `r` is
+`pull_points_through_registration(r, final_matrix=base_matrix_crop, flow_yx=flow_yx, working_to_reference=working_to_reference)`,
+in moving crop pixels. The summary's `field` block records the hyperparameters, the
+leave-one-out statistics (final, clicks only, rigid), the class and verdict counts,
+the flow (`grid_factor`, `shape_yx`, `max_displacement_um`) and `materialize`.
 
 **Result store placement.** The result store's images are on the **cropped
 reference level-0 grid**; their `global` transformation is an `Affine` with the
 reference pixel size and the crop origin, so `global` is micrometres of the full
 reference frame and landmarks stored in full reference pixels line up. The store
 is written to a temporary sibling and renamed into place only when complete.
+
+**Preview stores.** With `materialize=preview` the two elements are coarser: the
+reference is the pyramid level of the prepared OME-TIFF with factor `f` (the
+largest kept factor not above `preview_pixel_size_um` over the reference pixel
+size) cropped to the effective crop, and the moving image is resampled onto it. The
+result store's attribute records this as `images.<role>.materialization`
+(`{"mode": "preview", "level_factor": f, "pixel_size_um": f p}`; a full store has
+`{"mode": "full", "level_factor": 1, ...}`, and no block means full). The image
+record keeps the reference level-0 pixel size `p` and the crop in full-frame level-0
+pixels; `shape_yx` is the element's own shape. An element pixel (row `i`, column
+`j`) has its centre at crop-frame level-0 pixel `(j f + (f-1)/2, i f + (f-1)/2)`,
+and its SpatialData transform is `[[f p, 0, p x0], [0, f p, p y0], [0, 0, 1]]`
+(SpatialData's corner convention). **A viewer must read `materialization` to place
+a preview store: the released viewers up to 0.5.2 ignore it and misplace the
+elements.** Use `materialize=full` for those viewers.
 
 **Feeding the main pipeline.** The final matrix can serve as the
 `alignment_matrix` of an `xenium_registered_images_csv` row (see
@@ -514,6 +593,19 @@ matrix; the main pipeline applies its own refinement.
   correlation before is `refinement_qc.before.pearson_log_registration_channel`.
   The flow reports confident fraction, Pearson before and
   after, displacement and Jacobian statistics.
+- **Field figure** (`<run_id>_field_qc.png`, robust-field runs): the reference
+  tissue with every pair coloured by class and its leave-one-out vector (x5), the
+  field's posterior SD, the non-affine displacement (the field mean minus the base
+  affine, in moving µm, over the reference crop; where it is large the flow does
+  work a rigid or affine registration cannot), histograms of the leave-one-out
+  residuals (final field, clicks only, rigid), the pairs that are not `ok` with
+  their p and weight, and the tissue Pearson of each channel role at each stage.
+- **Tissue QC per channel role** (`tissue_qc.by_role`, robust-field runs with
+  channel roles): the same band-passed correlation as below for each of AT8, MAP2
+  and DAPI (`{role: {channel, moving_channel, pearson, mask_fraction}}`). The
+  registration-channel values stay in `tissue_qc.pearson`. The final value should be
+  at least the landmark value for every role; a role that falls says the field moved
+  that stain's structure away.
 - **Tissue Pearson per stage** (`tissue_qc.pearson`: coarse, landmark, affine,
   final): correlation of band-passed tissue-scale intensity. The working image
   is the coarsest pyramid level that is not coarser than `tissue_qc_pixel_size_um`
@@ -614,7 +706,10 @@ and is the set of keys `registration_settings` can override. Defaults are the
 | `field_window_step_um`, `field_window_search_um`, `field_window_min_spacing_um` | 200, 300, 400 | Window lattice step, search radius and minimum spacing of accepted windows |
 | `field_window_noise_floor_um` | 15 | Lower bound of the window noise (per axis) |
 | `field_trust_confirmed_clicks` | false (true in `cortex_serial`) | Keep strongly image-confirmed clicks at full weight |
-| `field_grid_um`, `field_sd_grid_um`, `materialize`, `preview_pixel_size_um` | 11, 88, `full`, 5.5 | Flow grid, uncertainty grid and result-store resolution of a field registration; they take effect with the register path of the robust field (the next change) |
+| `field_grid_um` | 11 | Node spacing of the pull flow of a field registration, in µm (rounded to whole reference pixels: 32 at 0.345 µm) |
+| `field_sd_grid_um` | 88 | Node spacing of the uncertainty grid in the flow file |
+| `materialize` | `full` (`preview` in `cortex_serial`) | What a field registration writes: `full` (level-0 grid), `preview` (a coarse pyramid level) or `none` (no result store) |
+| `preview_pixel_size_um` | 5.5 | Target pixel size of a preview store; the coarsest kept pyramid level not coarser than this (16 x 0.345 µm on a 0.345 µm scan) |
 
 **Presets.** `same_section` is the defaults above. It differs from the
 `REGISTER_IMAGES` defaults in the non-rigid stage being on and in the correlation
@@ -656,11 +751,12 @@ settings out at their defaults, so their results stay valid after the upgrade.
 | Function | Module | Purpose |
 |---|---|---|
 | `run_manual_registration_prepare(config)` | `merxen.manual_registration.prepare` | Convert/normalise both images and write the prepared store |
-| `run_manual_registration(config)` | `merxen.manual_registration.register` | One (pair, preset) run |
+| `run_manual_registration(config, *, force_rerun=False, labelling_payload=None)` | `merxen.manual_registration.register` | One (pair, preset) run; `labelling_payload` (a raw finished labelling) is for validation only, the CLI and Nextflow never set it |
 | `fit_landmarks(...)` | `merxen.manual_registration.register` | Landmark fit of a prepared store's labelling (also `manual-registration-fit`); it calls `robust_similarity(...)` of `merxen.manual_registration.landmark_fit` |
 | `compare_runs(config)` | `merxen.manual_registration.compare` | Comparison CSV, JSON and figure |
 | `run_check(config, *, labelling_payload=None)` | `merxen.manual_registration.check` | The landmark check: check JSON, figure and attribute (`manual-registration-check`); `read_labelling_file`, `write_check_attr` |
 | `build_landmark_field(...)`, `classify_pairs(...)`, `check_payload(...)`, `validate_field_settings(...)` | `merxen.manual_registration.field_fit` | The robust field of a pair with image evidence, the C7 classes and the check report |
+| `best_affine(...)`, `field_flow(...)`, `field_sd_grid(...)` | `merxen.manual_registration.field_fit` | The field's base affine, its pull flow and its uncertainty grid (register) |
 | `fit_landmark_field(...)`, `suggest_landmarks(...)` | `merxen.manual_registration.landmark_field` | The robust Student-t field and the next-click suggestions |
 | `check_clicks(...)`, `tissue_window_observations(...)`, `resolve_channel_roles(...)` | `merxen.manual_registration.image_evidence` | The image check, tissue windows and channel roles |
 | `make_synthetic_pair`, `simulate_landmark_pairs`, `inject_labelling` | `merxen.manual_registration.simulate` | Synthetic pairs and viewer-compatible labelling for tests |
@@ -939,3 +1035,12 @@ images, and strips of edge artefact (duplicated or bright tiles) run along the t
 snapped inward to 64 px. They trim the empty frame but leave those strips inside; a
 crop drawn by hand in the viewer, as intended for real use, can exclude them (not
 measured here). The LCM1 results above therefore include the artefacts.
+
+### M1: registration through the landmark field (`cortex_serial`)
+
+To be filled from `$MERXEN_EVIDENCE_ROOT/manual_registration/cortex_serial/`
+after the milestone's validation runs. Aliases only.
+
+| Run | Settings | Wall time | Peak memory | Store size | Field LOO median / p90 (µm) | Tissue Pearson final (AT8 / MAP2 / DAPI) |
+|---|---|---|---|---|---|---|
+| | | | | | | |
