@@ -2,8 +2,8 @@
 
 One pair is rendered with a 40 um / 3 mm warp (the field recovers it, a similarity
 cannot) and labelled with one gross misclick; the reference crop is cut so that the
-preview store has a non-zero SpatialData offset. The runs: ``preview`` (the preset
-default, windows off), ``none``, ``full`` and with tissue windows.
+preview store has a non-zero SpatialData offset. The runs: ``preview`` (windows
+off; the preset default is ``full``), ``none``, ``full`` and with tissue windows.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import spatialdata as sd
+import zarr
 from scipy.ndimage import gaussian_filter, map_coordinates
 from spatialdata.transformations import get_transformation
 
@@ -152,7 +153,7 @@ def _config(
         "result_dir": result,
         "output_dir": out,
         "channel_roles": ROLES,
-        "row_settings": "field_window_observations=false",
+        "row_settings": "field_window_observations=false;materialize=preview",
     }
     values.update(overrides)
     return ManualRegistrationRunConfig(**values)
@@ -394,7 +395,9 @@ def test_a_changed_field_setting_registers_again(
         prepared,
         base / "other_result",
         base / "out3",
-        row_settings="field_window_observations=false;field_outlier_p=0.02",
+        row_settings=(
+            "field_window_observations=false;materialize=preview;field_outlier_p=0.02"
+        ),
     )
     summary_other = _summary(run_manual_registration(config))
     assert summary_other["provenance_digest"] != summary["provenance_digest"]
@@ -520,8 +523,26 @@ def test_full_materialization_agrees_with_the_preview(
     assert parsed.images["moving"].materialization.level_factor == 1
     images = sd.read_zarr(outputs["result_store"], selection=("images",)).images
     for key in ("reference", "moving_registered"):
-        # The viewer pyramids of both elements (the comparison overview reads them).
-        assert derived_image_pyramid_cache_key(key, 4) in images
+        # The viewer pyramids of both elements (the comparison overview reads them)
+        # hold the block means of the stored elements, not of the all-zero
+        # placeholder the warp leaves in memory.
+        cache = derived_image_pyramid_cache_key(key, 4)
+        assert cache in images
+        base = _base_array(_element(outputs["result_store"], key))
+        level = np.asarray(
+            zarr.open_array(outputs["result_store"] / "images" / cache / "s0")
+        )
+        channels, height, width = base.shape
+        height, width = height // 4 * 4, width // 4 * 4
+        expected = (
+            base[:, :height, :width]
+            .astype(np.float64)
+            .reshape(channels, height // 4, 4, width // 4, 4)
+            .mean(axis=(2, 4))
+        )
+        assert level.shape == expected.shape
+        assert level.max() > 0
+        np.testing.assert_allclose(level, np.rint(expected), atol=1)
     full = _base_array(_element(outputs["result_store"], "moving_registered"))
     assert full.shape[1:] == (CROP.height(), CROP.width())
     matrix = get_transformation(
@@ -566,7 +587,7 @@ def test_windows_enter_the_registered_field(
         tmp_path / "out",
         row_settings=(
             "field_window_observations=true;field_window_step_um=150;"
-            "field_window_search_um=150"
+            "field_window_search_um=150;materialize=preview"
         ),
     )
     summary = _summary(run_manual_registration(config))

@@ -2134,6 +2134,10 @@ def _run_field_registration(
                     interpolation="bilinear",
                     fill_value=0.0,
                 )
+                # materialize_warped_image writes the tiles straight into the
+                # zarr array and leaves an all-zero placeholder in ``sdata``;
+                # the pyramids must be built from the stored element.
+                sdata = sd.read_zarr(tmp, selection=("images",))
                 build_image_pyramids_in_store(
                     sdata,
                     tmp,

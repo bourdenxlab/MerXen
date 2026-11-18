@@ -54,6 +54,10 @@ def materialize_warped_image(
     The source is fetched lazily only over the interpolation footprint required
     by each destination tile. Scale 0 is allocated first and written directly,
     avoiding a full destination image in memory.
+
+    The element left in ``sdata_obj`` is the all-zero placeholder written before
+    the tiles: read the result back from ``zarr_path`` (for example to build its
+    viewer pyramid), never from ``sdata_obj``.
     """
     if interpolation != "bilinear":
         raise ValueError(f"Unsupported image interpolation: {interpolation!r}")
