@@ -131,6 +131,58 @@ def test_csv_columns_rows_and_values(two_runs: tuple[Path, list[Path]]) -> None:
     assert rows[0]["wall_time_s"] == "12.5"
 
 
+def _field_summary(run_id: str, mode: str) -> dict[str, Any]:
+    summary = _summary(run_id, "cortex_serial", nucleus=False, tissue=0.8)
+    summary["field"] = {
+        "model": "robust_gp",
+        "loo_um": {"median": 33.5, "p90": 97.25, "max": 183.0},
+        "class_counts": {"check": 4, "likely_misclick": 2, "ok": 60},
+        "n_windows": 120,
+        "materialize": {"mode": mode, "level_factor": 16, "pixel_size_um": 5.52},
+    }
+    return summary
+
+
+def test_field_columns_come_from_the_field_block(tmp_path: Path) -> None:
+    paths = _write(
+        tmp_path,
+        _field_summary("SYN1_cortex_serial", "preview"),
+        _summary("SYN1_same_section", "same_section", nucleus=False, tissue=0.5),
+    )
+    outputs = compare_runs(_config(tmp_path, paths))
+    rows = {
+        row["run_id"]: row
+        for row in csv.DictReader(outputs["comparison_csv"].read_text().splitlines())
+    }
+    field = rows["SYN1_cortex_serial"]
+    assert field["field_model"] == "robust_gp"
+    assert field["field_loo_median_um"] == "33.5"
+    assert field["field_loo_p90_um"] == "97.25"
+    assert field["field_n_check"] == "4"
+    assert field["field_n_likely_misclick"] == "2"
+    assert field["field_n_windows"] == "120"
+    assert field["materialize_mode"] == "preview"
+
+
+def test_a_summary_without_a_field_key_reads_as_a_full_similarity_run() -> None:
+    # Results written before the robust field existed keep their files.
+    row = comparison_row(
+        _summary("SYN1_same_section", "same_section", nucleus=False, tissue=0.5)
+    )
+    assert row["materialize_mode"] == "full"
+    for column in (
+        "field_model",
+        "field_loo_median_um",
+        "field_loo_p90_um",
+        "field_n_check",
+        "field_n_likely_misclick",
+        "field_n_windows",
+    ):
+        assert row[column] is None
+    nothing = comparison_row({"run_id": "SYN1_same_section", "field": None})
+    assert nothing["materialize_mode"] == "full" and nothing["field_model"] is None
+
+
 def test_json_and_figures_in_both_directories(
     two_runs: tuple[Path, list[Path]],
 ) -> None:
@@ -181,4 +233,4 @@ def test_csv_columns_are_the_documented_headers() -> None:
     # Spelled-out strings (master design 3.8), not the constants under test.
     assert ",".join(COMPARISON_COLUMNS) == COMPARISON_CSV_HEADER
     assert ",".join(LANDMARK_CSV_COLUMNS) == LANDMARKS_CSV_HEADER
-    assert len(COMPARISON_COLUMNS) == 32 and len(LANDMARK_CSV_COLUMNS) == 22
+    assert len(COMPARISON_COLUMNS) == 39 and len(LANDMARK_CSV_COLUMNS) == 26

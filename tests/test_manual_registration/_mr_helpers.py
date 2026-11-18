@@ -46,7 +46,9 @@ COMPARISON_CSV_HEADER = (
     "tissue_pearson_affine,tissue_pearson_final,used_median_landmark_um,"
     "used_median_affine_um,used_median_final_um,held_out_median_landmark_um,"
     "held_out_median_affine_um,held_out_median_final_um,nucleus_qc_median_um,"
-    "nucleus_qc_pearson,wall_time_s,peak_rss_gb"
+    "nucleus_qc_pearson,wall_time_s,peak_rss_gb,field_model,field_loo_median_um,"
+    "field_loo_p90_um,field_n_check,field_n_likely_misclick,field_n_windows,"
+    "materialize_mode"
 )
 
 # Appendix A.2 of the design: a 10-pair robust-fit example with a planted outlier.
