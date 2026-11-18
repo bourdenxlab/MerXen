@@ -71,6 +71,7 @@ def _classify(
     w1: float | None = None,
     enabled: bool = True,
     observed: bool = True,
+    outlier_p: float = 0.01,
 ) -> str:
     result = classify_pairs(
         enabled=np.array([enabled]),
@@ -80,7 +81,7 @@ def _classify(
         clicks_only_p_value=np.array([p if p1 is None else p1]),
         clicks_only_weight=np.array([w if w1 is None else w1]),
         verdict=[verdict],
-        outlier_p=0.01,
+        outlier_p=outlier_p,
     )
     return result[0]
 
@@ -135,6 +136,14 @@ def test_flagged_pairs(verdict: str, expected: str) -> None:
 )
 def test_unflagged_pairs(verdict: str, expected: str) -> None:
     assert _classify(verdict=verdict, p=0.2) == expected
+
+
+def test_the_outlier_threshold_is_the_setting() -> None:
+    assert _classify(verdict="not_checked", p=0.02) == "ok"
+    assert _classify(verdict="not_checked", p=0.02, outlier_p=0.05) == "check"
+    assert _classify(verdict="contradicted", p=0.02, outlier_p=0.05) == (
+        "likely_misclick"
+    )
 
 
 def test_the_boundaries_are_strict() -> None:
@@ -814,6 +823,33 @@ def test_check_payload_without_a_second_pass(phantom: FieldPhantom) -> None:
     assert check.dataset_name == store.dataset_name
     assert check.labelling_source == "store"
     assert "details" not in payload
+
+
+def test_field_outlier_p_setting_reaches_the_classes_and_the_payload(
+    phantom: FieldPhantom,
+) -> None:
+    def build(row_settings: str) -> dict[str, Any]:
+        similarity, store, labelling, settings = _inputs(
+            phantom, row_settings=row_settings
+        )
+        report, _ = build_landmark_field(
+            similarity=similarity,
+            store=store,
+            settings=settings,
+            roles=None,
+            crops={},
+            image_check=False,
+            windows=False,
+            run_id="X_p",
+        )
+        return _payload(report, store, labelling, settings)
+
+    default = build("")
+    loose = build("field_outlier_p=0.49")
+
+    assert default["field"]["outlier_p"] == 0.01
+    assert loose["field"]["outlier_p"] == 0.49
+    assert loose["field"]["class_counts"]["ok"] < default["field"]["class_counts"]["ok"]
 
 
 def test_check_payload_with_a_second_pass_and_details(
