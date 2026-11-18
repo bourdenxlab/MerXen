@@ -190,6 +190,14 @@ def write_merscope_spatialdata(
             mosaic_images=False,
         )
 
+    _add_missing_merscope_transcripts(
+        sdata,
+        path=input_path,
+        z_layers=z_layers,
+        region_name=build_config.region_name,
+        slide_name=build_config.slide_name,
+    )
+
     for key in list(sdata.images.keys()):
         del sdata.images[key]
     # The bead-removal argument is passed only when it is on, so that the
@@ -988,6 +996,56 @@ def _add_merscope_cell_polygons(
     sdata.shapes[f"{slide}_{vizgen_region}_polygons"] = _get_polygons(
         boundaries_path, transform
     )
+
+
+def _add_missing_merscope_transcripts(
+    sdata: SpatialData,
+    *,
+    path: Path,
+    z_layers: list[int],
+    region_name: str | None,
+    slide_name: str | None,
+) -> None:
+    """Import supplied transcripts when the preferred reader omits them.
+
+    Args:
+        sdata: Reader result to complete without replacing existing points.
+        path: Raw export folder containing CSV or Parquet transcripts.
+        z_layers: Selected image planes, forwarded without loading images.
+        region_name: Optional region name used for the transcript element key.
+        slide_name: Optional slide name used for the transcript element key.
+
+    Raises:
+        ValueError: Transcript files are present but neither reader imports them.
+    """
+    supplied = any(
+        (path / name).exists()
+        for name in (
+            MerscopeKeys.TRANSCRIPTS_FILE_PARQUET,
+            MerscopeKeys.TRANSCRIPTS_FILE_CSV,
+        )
+    )
+    if not supplied or sdata.points:
+        return
+    # Some spatialdata-io versions warn and return a partial store when only
+    # Parquet is available. Recover before spending time projecting the images.
+    logger.warning(
+        "[MERSCOPE] Reader omitted supplied transcripts; using the local reader"
+    )
+    recovered = read_merscope_spatialdata_local(
+        path=path,
+        z_layers=z_layers,
+        region_name=region_name,
+        slide_name=slide_name,
+        cells_boundaries=False,
+        cells_table=False,
+        mosaic_images=False,
+    )
+    if not recovered.points:
+        raise ValueError(
+            "[MERSCOPE] Supplied transcript files did not produce transcript points"
+        )
+    sdata.points.update(recovered.points)
 
 
 def _region_and_slide_names(
