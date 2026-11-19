@@ -12,7 +12,9 @@ Model (all in micrometres; reference full-frame input, moving full-frame output)
   Matern 5/2 components, shared by both axes.
 * Each observation ``i`` has a class ``g`` (``click``, ``window``, ...), a unit
   determinant shape ``C_i`` and a fixed covariance ``F_i``; its noise is
-  ``(sigma_g^2 C_i + F_i) / w_i`` with a Student-t EM weight ``w_i``.
+  ``(sigma_g^2 C_i + F_i) / w_i`` with a Student-t EM weight ``w_i``. ``F_i`` is a
+  window's peak-region covariance, or the along-axis covariance of a click on an
+  elongated vessel profile (``axis_covariance``), and zero for other clicks.
 * Hyperparameters maximise the REML likelihood (analytic gradient, L-BFGS-B from a
   fixed start grid). The weights come from a robust affine initialisation and EM.
 * Closed-form leave-one-out residuals (Dubrule) give chi-square(2) p-values
@@ -40,7 +42,11 @@ logger = logging.getLogger(__name__)
 
 FIELD_SCHEMA = "merxen.manual_registration.landmark_field"
 FIELD_SCHEMA_VERSION = 1
-FIELD_ALGORITHM = "robust_gp_matern52_v1"
+# v2: a click on an elongated vessel profile carries a fixed noise covariance along
+# the profile's axis (``axis_covariance``) and is never EM-exempt; the model and the
+# payload are those of v1, so v1 payloads stay readable.
+FIELD_ALGORITHM = "robust_gp_matern52_v2"
+_READABLE_FIELD_ALGORITHMS = ("robust_gp_matern52_v1", FIELD_ALGORITHM)
 TREND_SCALE_UM = 10000.0
 JITTER_UM2 = 1e-6
 MAX_SHAPE_ANISOTROPY = 16.0
@@ -113,6 +119,39 @@ def ridge_shape(
     return ratio * outer + (np.eye(2) - outer) / ratio
 
 
+def axis_covariance(
+    direction_xy: Sequence[float] | np.ndarray, sd_um: float
+) -> np.ndarray:
+    """Return the fixed covariance ``sd^2 u u'`` of noise along one axis only.
+
+    Added to a click's isotropic noise ``sigma^2 I`` it leaves the SD across the
+    axis at ``sigma`` and raises it along the axis to ``sqrt(sigma^2 + sd^2)``: the
+    noise of a click on an elongated profile that translates along its own axis
+    between the sections.
+
+    Args:
+        direction_xy: The axis in the moving frame (need not be unit).
+        sd_um: SD along the axis, micrometres (zero gives a zero matrix).
+
+    Returns:
+        A ``(2, 2)`` symmetric positive semi-definite matrix in um^2.
+
+    Raises:
+        ValueError: If the direction is zero or not finite, or the SD is negative
+            or not finite.
+    """
+    direction = np.asarray(direction_xy, dtype=float).reshape(-1)
+    if direction.shape != (2,) or not np.all(np.isfinite(direction)):
+        raise ValueError("axis direction must be two finite numbers")
+    length = float(np.hypot(direction[0], direction[1]))
+    if length == 0.0:
+        raise ValueError("axis direction must not be zero")
+    if not (math.isfinite(sd_um) and sd_um >= 0.0):
+        raise ValueError("axis SD must be finite and not negative")
+    unit = direction / length
+    return np.asarray(sd_um**2 * np.outer(unit, unit), dtype=float)
+
+
 def normalise_shape(cov: np.ndarray) -> np.ndarray:
     """Scale covariance matrices ``(..., 2, 2)`` to determinant 1.
 
@@ -151,7 +190,8 @@ class FieldObservations:
         reference_xy_um: ``(N, 2)`` reference full-frame positions.
         moving_xy_um: ``(N, 2)`` observed moving full-frame positions.
         shape_cov: ``(N, 2, 2)`` det-1 noise shapes in the moving frame.
-        fixed_cov_um2: ``(N, 2, 2)`` fixed noise covariances (zero for clicks).
+        fixed_cov_um2: ``(N, 2, 2)`` fixed noise covariances (zero for clicks off
+            vessel profiles).
         obs_class: ``(N,)`` class names.
         obs_id: ``(N,)`` pair ids for clicks, running indices for other classes.
         em_exempt: ``(N,)`` True keeps the Student-t weight at 1.
@@ -1363,8 +1403,12 @@ class LandmarkField:
 def _check_payload_constants(payload: Mapping[str, Any]) -> None:
     """Reject a payload whose fixed model constants differ from this version's."""
     expected_frame = {"input": "reference_full_um", "output": "moving_full_um"}
+    if payload["algorithm"] not in _READABLE_FIELD_ALGORITHMS:
+        raise ValueError(
+            f"unsupported algorithm {payload['algorithm']!r}; this version reads "
+            f"{list(_READABLE_FIELD_ALGORITHMS)!r}"
+        )
     checks = (
-        ("algorithm", payload["algorithm"], FIELD_ALGORITHM),
         ("kernel.family", payload["kernel"]["family"], "matern52"),
         ("frame", payload["frame"], expected_frame),
         ("jitter_um2", payload["jitter_um2"], JITTER_UM2),

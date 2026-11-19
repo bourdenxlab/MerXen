@@ -210,7 +210,7 @@ def test_run_check_writes_a_valid_current_attribute(
     assert len(check.suggestions) == 6
     assert all(s.sd_um > 0.0 for s in check.suggestions)
     assert check.field.n_windows == 0
-    assert check.algorithm["image_evidence"] == "image_evidence_bp20_v2"
+    assert check.algorithm["image_evidence"] == "image_evidence_bp20_v3"
     assert sum(check.field.verdict_counts.values()) == 26
     # The two disabled pairs are not checked; a click near an image edge may not be.
     assert 2 <= check.field.verdict_counts["not_checked"] <= 8
@@ -501,7 +501,7 @@ def test_windows_enter_the_field(
     windows = document["details"]["windows"]
     assert windows is not None and windows["n_candidates"] > 0
     assert document["field"]["n_windows"] == windows["n_accepted_windows"]
-    assert document["algorithm"]["image_evidence"] == "image_evidence_bp20_v2"
+    assert document["algorithm"]["image_evidence"] == "image_evidence_bp20_v3"
     if document["field"]["n_windows"]:
         classes = document["details"]["field_model"]["observations"]["class"]
         assert classes.count("window") == document["field"]["n_windows"]

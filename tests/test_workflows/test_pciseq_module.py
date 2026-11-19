@@ -60,7 +60,9 @@ def _run_nextflow(tmp_path: Path, *arguments: str) -> subprocess.CompletedProces
         capture_output=True,
         text=True,
         check=False,
-        timeout=120,
+        # A stub run takes ~15 s alone but can take over two minutes on a CI runner
+        # shared with the golden-config Nextflow tests; 300 s as in the mender tests.
+        timeout=300,
     )
 
 

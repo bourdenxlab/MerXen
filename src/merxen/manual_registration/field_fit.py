@@ -30,6 +30,7 @@ from merxen.manual_registration.image_evidence import (
     ChannelRoles,
     ClickCheck,
     Representation,
+    RepresentationParams,
     RoleImages,
     WindowObservations,
     WindowParams,
@@ -49,6 +50,7 @@ from merxen.manual_registration.landmark_field import (
     LandmarkField,
     PointResidual,
     Suggestion,
+    axis_covariance,
     fit_landmark_field,
     ridge_shape,
 )
@@ -202,8 +204,9 @@ class FieldFitReport:
     Attributes:
         similarity: The robust similarity fit (``register.fit_landmarks``).
         field: The final field.
-        clicks_only: The pass-1 field (the same object as ``field`` without a second
-            pass).
+        clicks_only: The clicks-only field: pass 1, refitted with the along-vessel
+            noise when clicks sit on elongated vessel profiles (the same object as
+            ``field`` without a second pass). The warp prior is always pass 1.
         has_second_pass: Whether image evidence changed the field.
         pair_ids: Pair ids.
         observed: Pair is a click observation of the field.
@@ -212,15 +215,17 @@ class FieldFitReport:
         loo_vector_moving_um: ``(P, 2)`` the same residual vector, moving um.
         p_value: Final field p-value at unit weight.
         weight: Final field weight, NaN when not observed.
-        clicks_only_loo_reference_um: As ``loo_reference_um`` for pass 1.
-        clicks_only_p_value: As ``p_value`` for pass 1.
-        clicks_only_weight: As ``weight`` for pass 1.
+        clicks_only_loo_reference_um: As ``loo_reference_um`` for ``clicks_only``.
+        clicks_only_p_value: As ``p_value`` for ``clicks_only``.
+        clicks_only_weight: As ``weight`` for ``clicks_only``.
         verdict: Image verdict per pair (``not_checked`` without an image check).
         pair_class: Class per pair (contract C7).
         checks: Image checks by pair id.
         windows: The window observations, or None.
         em_exempt: Observation exempted from the Student-t weight (A3).
         confirm_strength: ``strong``/``weak`` for a confirmed verdict, else None.
+        vessel_profile: The click sits on an elongated vessel profile (its noise
+            is anisotropic and it is never exempt).
         warnings: Warnings of the fit.
         timings_s: Seconds per step.
     """
@@ -244,6 +249,7 @@ class FieldFitReport:
     windows: WindowObservations | None
     em_exempt: np.ndarray
     confirm_strength: tuple[str | None, ...]
+    vessel_profile: np.ndarray
     warnings: tuple[str, ...]
     timings_s: dict[str, float]
 
@@ -269,6 +275,13 @@ def field_options(settings: ManualRegistrationSettings) -> FieldOptions:
             "window": (settings.field_window_noise_floor_um, 100.0),
         },
     )
+
+
+def representation_params(
+    settings: ManualRegistrationSettings,
+) -> RepresentationParams:
+    """Return the image representation parameters of the settings."""
+    return RepresentationParams(vessel_mask=settings.field_vessel_mask)
 
 
 def window_params(settings: ManualRegistrationSettings) -> WindowParams:
@@ -344,11 +357,17 @@ def build_landmark_field(
 ) -> tuple[FieldFitReport, ImageContext | None]:
     """Fit the robust landmark field with image evidence and classify every pair.
 
-    Pass 1 fits the clicks alone. When roles are given and the image check or the
-    windows are on, the moving images are warped by the pass-1 mean, every click is
-    checked, and tissue windows are matched. Pass 2 then refits with ridge shapes,
-    the windows and (setting ``field_trust_confirmed_clicks``) EM-exempt strong
-    confirmations; without any such evidence pass 2 is pass 1.
+    Pass 1 fits the clicks alone (the warp prior). When roles are given and the
+    image check or the windows are on, the moving images are warped by the pass-1
+    mean, every click is checked, and tissue windows are matched (setting
+    ``field_vessel_mask``: with the elongated vessel profiles masked). Pass 2
+    refits with ridge shapes, the along-axis noise of clicks on elongated vessel
+    profiles (setting ``field_vessel_click_along_sd_um``), the windows and (setting
+    ``field_trust_confirmed_clicks``) EM-exempt strong confirmations; a click on an
+    elongated vessel profile is never exempt, since a vessel's position along its
+    axis changes between the sections. Without any such evidence pass 2 is pass 1.
+    The clicks-only field the classes use is pass 1 refitted with the along-vessel
+    noise when there is any.
 
     Args:
         similarity: The robust similarity fit of the same labelling.
@@ -408,13 +427,14 @@ def build_landmark_field(
         assert roles is not None
         started = time.perf_counter()
         images = load_role_images(store, roles, crops=crops)
-        reference_rep = compute_representation(images["reference"])
+        rep_params = representation_params(settings)
+        reference_rep = compute_representation(images["reference"], rep_params)
         _elapsed(timings, "reference_images", started)
         started = time.perf_counter()
         warped = warp_role_images(
             images["moving"], reference=images["reference"], pull_um=pass1.mean
         )
-        moving_rep = compute_representation(warped)
+        moving_rep = compute_representation(warped, rep_params)
         _elapsed(timings, "moving_warp", started)
         context = ImageContext(
             roles=roles,
@@ -447,7 +467,7 @@ def build_landmark_field(
             )
             _elapsed(timings, "tissue_windows", started)
 
-    # Pass 2: ridge shapes, windows and trusted confirmations.
+    # Pass 2: ridge shapes, vessel-profile noise, windows and trusted confirmations.
     verdict = tuple(
         checks[int(i)].verdict if int(i) in checks else "not_checked" for i in ids
     )
@@ -459,12 +479,20 @@ def build_landmark_field(
     )
     click_ids = ids[fit_index]
     shape = np.broadcast_to(np.eye(2), (n_clicks, 2, 2)).copy()
+    fixed = np.zeros((n_clicks, 2, 2))
     exempt_clicks = np.zeros(n_clicks, dtype=bool)
+    profile_clicks = np.zeros(n_clicks, dtype=bool)
     has_ridge = False
+    along_sd = settings.field_vessel_click_along_sd_um
     for row, pair_id in enumerate(click_ids):
         check = checks.get(int(pair_id))
         if check is None:
             continue
+        if check.on_elongated_profile:
+            assert check.profile is not None
+            profile_clicks[row] = True
+            if along_sd > 0.0:
+                fixed[row] = axis_covariance(check.profile.axis_moving_xy, along_sd)
         if check.verdict == "ridge" and check.ridge_direction_moving_xy is not None:
             shape[row] = ridge_shape(check.ridge_direction_moving_xy)
             has_ridge = True
@@ -472,10 +500,13 @@ def build_landmark_field(
             settings.field_trust_confirmed_clicks
             and check.verdict == "confirmed"
             and check.strength == "strong"
+            and not profile_clicks[row]
         ):
             exempt_clicks[row] = True
     n_windows = 0 if window_set is None else len(window_set.reference_xy_um)
-    has_second_pass = has_ridge or n_windows > 0 or bool(exempt_clicks.any())
+    has_second_pass = (
+        has_ridge or n_windows > 0 or bool(exempt_clicks.any()) or bool(fixed.any())
+    )
     if has_second_pass:
         classes = (
             "confirmed" if exempt_clicks.sum() >= MIN_CONFIRMED_FOR_CLASS else "click"
@@ -484,7 +515,7 @@ def build_landmark_field(
             reference_xy_um=reference_um[fit_index],
             moving_xy_um=moving_um[fit_index],
             shape_cov=shape,
-            fixed_cov_um2=np.zeros((n_clicks, 2, 2)),
+            fixed_cov_um2=fixed,
             obs_class=tuple(classes if exempt else "click" for exempt in exempt_clicks),
             obs_id=click_ids,
             em_exempt=exempt_clicks,
@@ -507,8 +538,28 @@ def build_landmark_field(
     else:
         final = pass1
 
+    # The clicks alone, each with its own noise: a click on an elongated vessel
+    # profile keeps its along-vessel noise here too, so an offset along the vessel
+    # (a moving profile, not a misclick) does not flag it. Windows, ridge shapes and
+    # exemptions stay out, so they still cannot hide a misclick.
+    clicks_only = pass1
+    if fixed.any():
+        started = time.perf_counter()
+        clicks_only = fit_landmark_field(
+            FieldObservations(
+                reference_xy_um=reference_um[fit_index],
+                moving_xy_um=moving_um[fit_index],
+                shape_cov=np.broadcast_to(np.eye(2), (n_clicks, 2, 2)).copy(),
+                fixed_cov_um2=fixed,
+                obs_class=("click",) * n_clicks,
+                obs_id=click_ids,
+            ),
+            options,
+        )
+        _elapsed(timings, "clicks_only_vessel_fit", started)
+
     magnitude1, _vector1, p_value1, weight1 = _per_pair(
-        pass1,
+        clicks_only,
         reference_um=reference_um,
         moving_um=moving_um,
         observation_index=observation_index,
@@ -548,10 +599,12 @@ def build_landmark_field(
         )
     exempt_pairs = np.zeros(len(pairs), dtype=bool)
     exempt_pairs[fit_index] = exempt_clicks
+    profile_pairs = np.zeros(len(pairs), dtype=bool)
+    profile_pairs[fit_index] = profile_clicks
     report = FieldFitReport(
         similarity=similarity,
         field=final,
-        clicks_only=pass1,
+        clicks_only=clicks_only,
         has_second_pass=has_second_pass,
         pair_ids=ids,
         observed=observed,
@@ -568,6 +621,7 @@ def build_landmark_field(
         windows=window_set,
         em_exempt=exempt_pairs,
         confirm_strength=strength,
+        vessel_profile=profile_pairs,
         warnings=tuple(warnings),
         timings_s=timings,
     )
@@ -806,6 +860,7 @@ def check_payload(
             "class": report.pair_class[i],
             "em_exempt": bool(report.em_exempt[i]),
             "confirm_strength": report.confirm_strength[i],
+            "vessel_profile": bool(report.vessel_profile[i]),
         }
     image_evidence = bool(report.checks) or report.windows is not None
     payload: dict[str, Any] = {
@@ -859,14 +914,28 @@ def check_payload(
 def details_payload(report: FieldFitReport) -> dict[str, Any]:
     """Return the ``details`` block of the check JSON (not part of the attribute).
 
-    Holds the per-click image estimates, the window summary and candidate counts,
-    the C1 model of the final field, the pass-1 hyperparameters, the timings and
-    the warnings.
+    Holds the per-click image estimates and vessel profiles, the window summary and
+    candidate counts, the C1 model of the final field, the pass-1 hyperparameters,
+    the timings and the warnings.
     """
     estimates: dict[str, Any] = {}
     for pair_id, check in sorted(report.checks.items()):
+        profile = check.profile
         estimates[str(pair_id)] = {
             "reason": check.reason,
+            "profile": (
+                None
+                if profile is None
+                else {
+                    "elongated": bool(profile.elongated),
+                    "masked": bool(profile.masked),
+                    "elongation": float(profile.elongation),
+                    "length_um": float(profile.length_um),
+                    "width_um": float(profile.width_um),
+                    "area_um2": float(profile.area_um2),
+                    "axis_moving_xy": [float(v) for v in profile.axis_moving_xy],
+                }
+            ),
             "elongation": None if check.elongation is None else float(check.elongation),
             "prediction_offset_um": (
                 None

@@ -44,6 +44,8 @@ FIELD_SETTINGS_KEYS: tuple[str, ...] = (
     "field_window_min_spacing_um",
     "field_window_noise_floor_um",
     "field_trust_confirmed_clicks",
+    "field_vessel_mask",
+    "field_vessel_click_along_sd_um",
     "field_grid_um",
     "field_sd_grid_um",
     "materialize",
@@ -165,7 +167,10 @@ class ManualRegistrationSettings(RegistrationSettings):
     ``preview_pixel_size_um`` drive the register path of robust-field runs (the flow
     grid, the uncertainty grid and the resolution of the result store).
     ``field_kernel`` ``auto`` fits one Matern component to clicks alone and two once
-    tissue windows are added.
+    tissue windows are added. ``field_vessel_mask`` removes elongated vessel profiles
+    (lumen, wall and perivascular space) from the image evidence;
+    ``field_vessel_click_along_sd_um`` is the extra noise SD along the axis of an
+    elongated vessel profile that a click sits on (0 leaves such clicks isotropic).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -208,6 +213,8 @@ class ManualRegistrationSettings(RegistrationSettings):
     field_window_min_spacing_um: float = Field(default=400.0, ge=0.0)
     field_window_noise_floor_um: float = Field(default=15.0, gt=0.0)
     field_trust_confirmed_clicks: bool = False
+    field_vessel_mask: bool = True
+    field_vessel_click_along_sd_um: float = Field(default=45.0, ge=0.0, le=1000.0)
     field_grid_um: float = Field(default=11.0, gt=0.0)
     field_sd_grid_um: float = Field(default=88.0, gt=0.0)
     materialize: Literal["none", "preview", "full"] = "full"

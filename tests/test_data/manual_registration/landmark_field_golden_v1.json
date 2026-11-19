@@ -1,5 +1,5 @@
 {
- "algorithm": "robust_gp_matern52_v1",
+ "algorithm": "robust_gp_matern52_v2",
  "constants": {
   "JITTER_UM2": 1e-06,
   "MAX_SHAPE_ANISOTROPY": 16.0,
@@ -1325,7 +1325,7 @@
    ]
   },
   "outputs": {
-   "digest": "sha256:c7e1c67368ab433b85a8e925bd27267742a8e68d6adaf6ddb4ad2d7a663f5ba0",
+   "digest": "sha256:1e97882655c6607f1e5ced4adb2e3dc419bb30e6c35f53f3a90aec74f3950ca7",
    "extra_points": {
     "covariance_um2": [
      [
@@ -2318,8 +2318,8 @@
    ],
    "objective": 239.00428397326783,
    "payload": {
-    "algorithm": "robust_gp_matern52_v1",
-    "digest": "sha256:c7e1c67368ab433b85a8e925bd27267742a8e68d6adaf6ddb4ad2d7a663f5ba0",
+    "algorithm": "robust_gp_matern52_v2",
+    "digest": "sha256:1e97882655c6607f1e5ced4adb2e3dc419bb30e6c35f53f3a90aec74f3950ca7",
     "fit": {
      "converged": true,
      "em_iterations": 0,

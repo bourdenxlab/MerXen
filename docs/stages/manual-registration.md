@@ -357,14 +357,17 @@ again".
    leave-one-out residual and p-value of every click.
 2. Warp the moving images by that field, check each click against the images
    (the verdict) and find tissue windows (displacements of tissue-scale structure,
-   calibrated against an empirical null).
+   calibrated against an empirical null). Elongated vessel profiles are masked out
+   of both (see **Vessel profiles** below).
 3. Refit with the evidence: windows as extra observations (two components), a ridge
    click (the image only fixes it along one direction) with an elongated noise
-   shape, and, with `field_trust_confirmed_clicks` (on for `cortex_serial`), clicks
-   the image strongly confirms kept at full weight.
+   shape, a click on an elongated vessel profile with extra noise along the vessel,
+   and, with `field_trust_confirmed_clicks` (on for `cortex_serial`), clicks the
+   image strongly confirms kept at full weight (never a click on an elongated vessel
+   profile).
 4. Classify every pair from the **lower p and weight of the two fields** (the clicks
-   alone and the final field), so the windows cannot hide a misclick the clicks
-   alone expose, and suggest the next clicks where the field is most uncertain
+   alone, each with its own noise, and the final field), so the windows cannot hide
+   a misclick the clicks alone expose, and suggest the next clicks where the field is most uncertain
    (grey matter weighs more than white matter).
 
 **Verdicts** (per click): `confirmed` (the image puts the structure where the click
@@ -375,6 +378,40 @@ A click is matched only where its 300 and 600 µm windows are at least 20 % tiss
 a tissue edge or near the pia carry most of the signal two serial sections share, and
 the empirical null of the click check is drawn with the same gates. A click with no
 usable window stays `inconclusive` (reason `no_tissue` or `outside_coverage`).
+
+**Vessel profiles.** An obliquely cut vessel shows as an elongated profile (lumen,
+wall and perivascular space) that moves along its own axis from one serial section
+to the next, while the tissue around it follows the field. A click on the end of such
+a profile is therefore precise across the vessel (about 6 µm on LCM1) but not along
+it: on the LCM1 revision-3 labelling the residuals of clicks on elongated profiles
+had an RMS of 45 µm along the vessel against 9 µm across it, and the tissue 100 to
+400 µm around twelve flagged vessel-end clicks followed the field, not the click.
+Matching the vessel itself would confirm such a click. So, with `field_vessel_mask`
+(on by default), the image evidence leaves these profiles out:
+
+- *Non-neuropil* pixels are MAP2-poor (below half-way from the glass level to the
+  local MAP2 level, or below 80 % of the way and AT8-dark), or bright in both AT8 and
+  DAPI (erythrocytes and vessel walls autofluoresce; tangles are not DAPI-bright).
+- Their components (holes of the tissue mask included) are vessel profiles when
+  they cover 150 to 30 000 µm², are at least twice as long as wide and at least
+  40 µm long, and do not run along the tissue edge. Larger components are gaps and
+  tears and stay in. The profiles are dilated by 10 µm (wall and perivascular space).
+- The masked pixels never feed the band-pass and orientation filters (normalised
+  convolution), and every correlation (click check, tissue windows and their nulls)
+  is a masked normalised cross-correlation over the pixels valid in both sections.
+
+Each click's check also records the profile under it (within 15 µm; its axis from
+the profile's shape within 200 µm of the click). A click on an elongated, masked
+profile gets a fixed noise covariance along the vessel's axis
+(`field_vessel_click_along_sd_um`, 45 µm by default, so its SD along the vessel is
+about 48 µm and across it the usual click noise) and is never kept at full weight.
+The clicks-only field that the classes compare against carries the same
+along-vessel noise, so a vessel-end click is not flagged for an offset along its
+vessel; an offset across the vessel, or one far beyond the vessel noise (more than
+about 140 µm along it), still is. Such a click is often `contradicted`, with a snap
+position on the tissue: a stable landmark near it is worth more than the vessel end,
+but the field no longer needs it moved. Round vessel profiles (vessels cut across) are stable landmarks and are not
+masked.
 
 **Classes and what to do.** p\* and w\* are the lower p-value and weight of the two
 fields. A pair is *gross* when p\* < 1e-6 or w\* < 0.05, and *flagged* when
@@ -393,8 +430,9 @@ Nothing is disabled or deleted automatically.
 
 **Outputs.** In `--out-dir`: `<dataset>_<preset>_check.json` (the check report of
 the `merxen.manual_registration.check` schema, plus a `details` block with the
-per-click image estimates, the window summary, the fitted field model, the timings
-and the warnings) and `<dataset>_<preset>_check.png` (with a PDF twin: the clicks by
+per-click image estimates and vessel profiles, the window summary, the fitted field
+model, the timings and the warnings; each pair's `vessel_profile` says whether its
+click sits on an elongated vessel profile) and `<dataset>_<preset>_check.png` (with a PDF twin: the clicks by
 class with their leave-one-out vectors, the field's uncertainty with the windows and
 the suggestions, the residual histograms, and a table of the pairs that are not
 `ok`). On the store's own labelling the check is also written as the prepared store's
@@ -714,7 +752,9 @@ and is the set of keys `registration_settings` can override. Defaults are the
 | `field_window_observations` | false (true in `cortex_serial`) | Add tissue-window observations (needs channel roles) |
 | `field_window_step_um`, `field_window_search_um`, `field_window_min_spacing_um` | 200, 300, 400 | Window lattice step, search radius and minimum spacing of accepted windows |
 | `field_window_noise_floor_um` | 15 | Lower bound of the window noise (per axis) |
-| `field_trust_confirmed_clicks` | false (true in `cortex_serial`) | Keep strongly image-confirmed clicks at full weight |
+| `field_trust_confirmed_clicks` | false (true in `cortex_serial`) | Keep strongly image-confirmed clicks at full weight (never a click on an elongated vessel profile) |
+| `field_vessel_mask` | true | Leave elongated vessel profiles out of the image evidence (normalised convolution and masked NCC) |
+| `field_vessel_click_along_sd_um` | 45 | Extra noise SD along the vessel of a click on an elongated vessel profile, in µm (0: none) |
 | `field_grid_um` | 11 | Node spacing of the pull flow of a field registration, in µm (rounded to whole reference pixels: 32 at 0.345 µm) |
 | `field_sd_grid_um` | 88 | Node spacing of the uncertainty grid in the flow file |
 | `materialize` | `full` | What a field registration writes: `full` (level-0 grid), `preview` (a coarse pyramid level) or `none` (no result store) |
@@ -769,7 +809,7 @@ settings out at their defaults, so their results stay valid after the upgrade.
 | `build_landmark_field(...)`, `classify_pairs(...)`, `check_payload(...)`, `validate_field_settings(...)` | `merxen.manual_registration.field_fit` | The robust field of a pair with image evidence, the C7 classes and the check report |
 | `best_affine(...)`, `field_flow(...)`, `field_sd_grid(...)` | `merxen.manual_registration.field_fit` | The field's base affine, its pull flow and its uncertainty grid (register) |
 | `fit_landmark_field(...)`, `suggest_landmarks(...)` | `merxen.manual_registration.landmark_field` | The robust Student-t field and the next-click suggestions |
-| `check_clicks(...)`, `tissue_window_observations(...)`, `resolve_channel_roles(...)` | `merxen.manual_registration.image_evidence` | The image check, tissue windows and channel roles |
+| `check_clicks(...)`, `click_profile(...)`, `tissue_window_observations(...)`, `masked_ncc_map(...)`, `resolve_channel_roles(...)` | `merxen.manual_registration.image_evidence` | The image check, vessel profiles, tissue windows, masked correlation and channel roles |
 | `make_synthetic_pair`, `simulate_landmark_pairs`, `inject_labelling` | `merxen.manual_registration.simulate` | Synthetic pairs and viewer-compatible labelling for tests |
 | `run_read_czi_info`, `run_convert_czi_scene` | `merxen.io.czi` | CZI runtime bridge |
 | `write_pyramidal_ome_tiff(...)` | `merxen.io.ome_tiff_writer` | Streamed pyramidal OME-TIFF writer |
@@ -1055,3 +1095,53 @@ after the milestone's validation runs. Aliases only.
 | Run | Settings | Wall time | Peak memory | Store size | Field LOO median / p90 (µm) | Tissue Pearson final (AT8 / MAP2 / DAPI) |
 |---|---|---|---|---|---|---|
 | | | | | | | |
+
+### Vessel-end clicks (`cortex_serial`, LCM1 revision 3)
+
+The check of the LCM1 revision-3 labelling (121 pairs), run from its snapshot
+before and after the vessel mask and the along-vessel click noise (image evidence
+`image_evidence_bp20_v2` → `_v3`, landmark field `robust_gp_matern52_v1` → `_v2`).
+The evidence behind the change is under
+`$MERXEN_EVIDENCE_ROOT/manual_registration/cortex_serial/lcm1_vessel_end_test_rev3/`.
+
+| | Before | After |
+|---|---|---|
+| Classes ok / kept_confirmed / check / likely_misclick | 105 / 1 / 13 / 2 | 111 / 0 / 7 / 3 |
+| Verdicts confirmed / contradicted / ridge / inconclusive | 74 / 0 / 14 / 33 | 42 / 1 / 11 / 67 |
+| Clicks kept at full weight (exempt) | 59 | 23 |
+| Clicks on an elongated vessel profile | | 41 |
+| LOO median / p90 / max, final field (µm) | 18.3 / 54.4 / 116.7 | 17.9 / 56.1 / 118.4 |
+| LOO median / p90 / max, clicks only (µm) | 18.3 / 54.0 / 120.2 | 17.8 / 56.5 / 121.9 |
+| Click noise σ (µm) | 15.8 | 10.4 |
+| Check time (image check, windows, total; s; one run each on a shared host) | 10, 45, 320 | 24, 116, 574 |
+
+- The vessel-end clicks the image check confirmed before (pairs 14, 53 and 81,
+  strong and exempt) are no longer confirmed or exempt; their final-field p-values
+  rose from 0.0006, 0.0008 and 8e-8 to 0.17, 0.20 and 0.035, so they no longer bend
+  the field, and all three are `ok`: their offsets lie along their vessels. So are
+  the other vessel-end pairs the flagged review found (31, 51, 58, 61, 102, 109,
+  112).
+- 34 confirmations were lost: 22 on clicks that sit on elongated vessel profiles, 12
+  on clicks next to masked vessels (most on round or oval vessels), whose windows
+  drew most of their match from the vessels; the confirmations that stayed lost
+  0.01 of their peak correlation.
+- With fewer exempt clicks and the vessel-end residuals explained by the
+  along-vessel noise, the click noise fits tighter (σ 15.8 to 10.4 µm). Five pairs
+  that were `ok` are now `check` (18, 39, 40, 42 and 96), and two non-vessel pairs
+  that were `check` are now `likely_misclick`: 12 (torn tissue, where the tissue
+  200 to 400 µm around follows the field) and 5 (a pial site).
+- Pair 91 (a vessel in a perivascular channel, where the tissue 100 to 400 µm around
+  follows the field) is now `contradicted` and `likely_misclick`, with a snap
+  position on the tissue; pair 51 (an obliquely cut vessel end) is now `ok`: the
+  along-vessel noise explains its residual.
+- Two of the twelve flagged vessel-end pairs (30 and 80) are not found as vessel
+  profiles at 2.76 µm (their vessels merge with neighbouring dark channels); they
+  keep isotropic noise.
+- Pair 50 (a round vessel in a gap where the tissue follows the click) is now `ok`
+  (`inconclusive`, as before): the vessel-end clicks near it no longer pull the
+  field, and its leave-one-out residual fell from 31.5 to 19.4 µm.
+- On LCM2 (revision 2) the confirmations that remain are tissue matches: the median
+  offset of confirmed clicks rose from 8.4 to 10.2 µm, so the M1 bar moved from 10 to
+  12 µm (plan D11). Held-out errors fell (12 held-out windows: median 46.1 to 37.3 µm;
+  block hold-out: 60.9 to 55.1 µm), and the strong confirmations fell from 20 to 7, so
+  keeping them at full weight no longer changes the field there.

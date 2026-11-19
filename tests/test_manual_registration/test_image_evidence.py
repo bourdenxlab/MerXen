@@ -249,19 +249,27 @@ def test_band_has_unit_robust_sd_over_tissue() -> None:
 
     assert representation.bands.shape == (3, 512, 512)
     assert representation.bands.dtype == np.float32
+    # The scale is taken over the tissue the vessel mask leaves (a few dark,
+    # elongated dips of the random structure look like vessels).
+    valid = representation.tissue
+    if representation.valid is not None:
+        valid = valid & representation.valid
+    assert valid.sum() > 0.95 * representation.tissue.sum()
     for band in representation.bands:
-        values = band[representation.tissue]
+        values = band[valid]
         mad = np.median(np.abs(values - np.median(values)))
         assert 1.4826 * mad == pytest.approx(1.0, abs=1e-3)
     assert 0.3 < representation.tissue.mean() < 0.6
 
 
 def test_soma_mask_replaces_small_bright_blobs_and_keeps_broad_structure() -> None:
-    clean = ie.compute_representation(_small_role_images(seed=4))
+    # The vessel mask is off: it would mask different dark dips in each image.
+    plain = ie.RepresentationParams(vessel_mask=False)
+    clean = ie.compute_representation(_small_role_images(seed=4), plain)
     bright = _small_role_images(seed=4, soma_amplitude=1.0)
-    masked = ie.compute_representation(bright)
+    masked = ie.compute_representation(bright, plain)
     unmasked = ie.compute_representation(
-        bright, ie.RepresentationParams(soma_mask=False)
+        bright, ie.RepresentationParams(soma_mask=False, vessel_mask=False)
     )
 
     interior = ndimage.binary_erosion(clean.tissue, iterations=40)
@@ -337,6 +345,228 @@ def test_ncc_map_with_identical_channels_equals_the_single_channel_map() -> None
     assert single[30, 40] == pytest.approx(1.0, abs=1e-4)
     with pytest.raises(ValueError, match="at most 4"):
         ie.ncc_map(np.zeros((5, 4, 4), np.float32), np.zeros((5, 8, 8), np.float32))
+
+
+def test_masked_ncc_equals_ncc_where_nothing_is_masked() -> None:
+    rng = np.random.default_rng(1)
+    search = ndimage.gaussian_filter(
+        rng.normal(size=(3, 140, 150)), (0.0, 3.0, 3.0)
+    ).astype(np.float32)
+    template = search[:, 30:70, 40:90].copy()
+    search_valid = np.ones((140, 150), dtype=bool)
+    # One masked corner pixel forces the masked path; it only touches the last shift.
+    search_valid[-1, -1] = False
+
+    plain = ie.ncc_map(template, search)
+    masked = ie.masked_ncc_map(
+        template, np.ones((40, 50), dtype=bool), search, search_valid
+    )
+    fast = ie.masked_ncc_map(
+        template, np.ones((40, 50), dtype=bool), search, np.ones_like(search_valid)
+    )
+
+    assert masked.shape == plain.shape and masked.dtype == np.float32
+    untouched = np.ones(plain.shape, dtype=bool)
+    untouched[-1, -1] = False
+    assert masked[untouched] == pytest.approx(plain[untouched], abs=1e-4)
+    assert masked[30, 40] == pytest.approx(1.0, abs=1e-4)
+    np.testing.assert_array_equal(fast, plain)
+
+
+def _line(
+    shape: tuple[int, int], start: tuple[float, float], end: tuple[float, float]
+) -> np.ndarray:
+    """A Gaussian line segment of 2 px sigma (a vessel profile)."""
+    rows, columns = np.mgrid[: shape[0], : shape[1]].astype(float)
+    a, b = np.array(start), np.array(end)
+    direction = b - a
+    t = np.clip(
+        ((columns - a[0]) * direction[0] + (rows - a[1]) * direction[1])
+        / (direction @ direction),
+        0.0,
+        1.0,
+    )
+    distance2 = (columns - a[0] - t * direction[0]) ** 2 + (
+        rows - a[1] - t * direction[1]
+    ) ** 2
+    return np.asarray(np.exp(-distance2 / 8.0), dtype=np.float32)
+
+
+def test_masked_ncc_follows_the_tissue_when_a_strong_vessel_is_masked() -> None:
+    rng = np.random.default_rng(2)
+    tissue = ndimage.gaussian_filter(rng.normal(size=(200, 200)), 3.0)
+    tissue = (tissue / tissue.std()).astype(np.float32)
+    shape = tissue.shape
+    # The vessel moves 12 px along its own axis; the tissue does not move.
+    reference_vessel = _line(shape, (80.0, 90.0), (120.0, 110.0))
+    moving_vessel = _line(shape, (90.7, 95.4), (130.7, 115.4))
+    reference = tissue + 20.0 * reference_vessel
+    moving = tissue + 20.0 * moving_vessel
+    template = reference[None, 60:140, 60:140]
+    reference_valid = (reference_vessel < 0.02)[60:140, 60:140]
+    moving_valid = moving_vessel < 0.02
+
+    plain = ie.ncc_map(template, moving[None])
+    masked = ie.masked_ncc_map(template, reference_valid, moving[None], moving_valid)
+
+    # The template sits at (60, 60): the plain match follows the vessel, the
+    # masked one the tissue.
+    plain_peak = np.unravel_index(int(np.argmax(plain)), plain.shape)
+    masked_peak = np.unravel_index(int(np.argmax(masked)), masked.shape)
+    assert np.hypot(plain_peak[0] - 65, plain_peak[1] - 71) <= 2.0
+    assert masked_peak == (60, 60)
+    assert masked.max() > 0.95
+
+
+def test_masked_ncc_of_a_mostly_masked_template_scores_minus_one() -> None:
+    rng = np.random.default_rng(3)
+    search = rng.normal(size=(2, 60, 60)).astype(np.float32)
+    template = search[:, 10:30, 10:30].copy()
+    template_valid = np.zeros((20, 20), dtype=bool)
+    template_valid[:8, :8] = True  # 16 % valid
+
+    scores = ie.masked_ncc_map(
+        template, template_valid, search, np.ones((60, 60), dtype=bool)
+    )
+
+    assert scores.shape == (41, 41)
+    assert (scores == -1.0).all()
+    with pytest.raises(ValueError, match="valid masks"):
+        ie.masked_ncc_map(template, template_valid[:5], search, search[0] > 0)
+
+
+def test_masked_pixels_never_feed_the_bands_or_the_orientation() -> None:
+    images = _small_role_images(seed=6)
+    params = ie.RepresentationParams()
+    covered, tissue, _ = ie._masks(images, params, min_sigma_px=0.0)
+    valid = np.ones(images.shape_yx, dtype=bool)
+    valid[200:240, 180:300] = False  # inside the tissue disc
+    altered = ie.RoleImages(
+        images={
+            role: np.where(valid, image, image * 5.0).astype(np.float32)
+            for role, image in images.images.items()
+        },
+        to_level0=images.to_level0,
+        pixel_size_um=images.pixel_size_um,
+        level0_pixel_size_um=images.level0_pixel_size_um,
+    )
+
+    # AT8 is left out: its soma mask takes a quantile over all of the tissue.
+    for role in ("map2", "dapi"):
+        before = ie._band(images, role, params, covered, tissue, valid)
+        after = ie._band(altered, role, params, covered, tissue, valid)
+        np.testing.assert_array_equal(before[valid], after[valid])
+        assert not before[~valid].any()
+        unmasked = ie._band(altered, role, params, covered, tissue)
+        assert not np.array_equal(unmasked[valid], before[valid])
+    orientation = [
+        ie._orientation(source.images["map2"], tissue, params, 2.76, valid)
+        for source in (images, altered)
+    ]
+    np.testing.assert_array_equal(orientation[0], orientation[1])
+    assert not orientation[0][:, ~valid].any()
+
+
+def _vessel_role_images(*, vessel_angle_deg: float = 30.0) -> ie.RoleImages:
+    """A tissue disc with weak neuropil texture, one vessel and one round lumen.
+
+    The vessel is 250 um long and 30 um wide (FWHM) and centred at (180, 256) px;
+    the round lumen (40 um) sits at (340, 256) px. Both are MAP2- and AT8-dark.
+    """
+    size = 512
+    rng = np.random.default_rng(11)
+    rows, columns = np.mgrid[:size, :size].astype(np.float32)
+    tissue = ((columns - 256) ** 2 + (rows - 256) ** 2 < 230**2).astype(np.float32)
+    angle = math.radians(vessel_angle_deg)
+    half = 0.5 * 250.0 / 2.76 * np.array([math.cos(angle), math.sin(angle)])
+    centre = np.array([180.0, 256.0])
+    sigma = 30.0 / 2.355 / 2.76
+    a, b = centre - half, centre + half
+    direction = b - a
+    t = np.clip(
+        ((columns - a[0]) * direction[0] + (rows - a[1]) * direction[1])
+        / (direction @ direction),
+        0.0,
+        1.0,
+    )
+    distance2 = (columns - a[0] - t * direction[0]) ** 2 + (
+        rows - a[1] - t * direction[1]
+    ) ** 2
+    vessel = np.exp(-distance2 / (2 * sigma**2))
+    lumen = np.exp(
+        -((columns - 340.0) ** 2 + (rows - 256.0) ** 2)
+        / (2 * (40.0 / 2.355 / 2.76) ** 2)
+    )
+    dark = vessel + lumen
+    log_glass, log_tissue = math.log(60.0), math.log(500.0)
+    images = {}
+    for role, weight in (("at8", -1.2), ("map2", -2.0), ("dapi", -0.3)):
+        texture = ndimage.gaussian_filter(rng.normal(size=(size, size)), 5.0)
+        texture = 0.15 * texture / texture.std()
+        log_image = log_glass + (log_tissue - log_glass) * tissue
+        log_image = log_image + tissue * (texture + weight * dark)
+        noise = rng.normal(0.0, 0.05, (size, size))
+        images[role] = np.exp(log_image + noise).astype(np.float32)
+    return ie.RoleImages(
+        images=images,
+        to_level0=np.eye(3),
+        pixel_size_um=2.76,
+        level0_pixel_size_um=2.76,
+    )
+
+
+def test_the_vessel_mask_takes_elongated_profiles_and_leaves_round_lumens() -> None:
+    images = _vessel_role_images()
+    masked = ie.compute_representation(images)
+    unmasked = ie.compute_representation(
+        images, ie.RepresentationParams(vessel_mask=False)
+    )
+
+    assert masked.structure is not None and masked.vessel is not None
+    # Both lumens are non-neuropil structure; only the elongated one is masked,
+    # with its wall and perivascular space (the 10 um dilation).
+    assert masked.structure[256, 180] and masked.structure[256, 340]
+    assert masked.vessel[256, 180] and not masked.vessel[256, 340]
+    normal = np.array([-math.sin(math.radians(30.0)), math.cos(math.radians(30.0))])
+    beyond = np.round(np.array([180.0, 256.0]) + (15.0 + 8.0) / 2.76 * normal)
+    assert masked.vessel[int(beyond[1]), int(beyond[0])]
+    assert masked.valid is not None
+    np.testing.assert_array_equal(masked.valid, ~masked.vessel)
+    assert not masked.bands[:, masked.vessel].any()
+    # Without the mask the profiles are still found but nothing is masked.
+    assert unmasked.valid is None
+    np.testing.assert_array_equal(unmasked.vessel, masked.vessel)
+    assert unmasked.bands[:, masked.vessel].any()
+    assert masked.vessel[masked.tissue].mean() < 0.05
+
+
+@pytest.mark.parametrize("angle_deg", [0.0, 30.0, 120.0])
+def test_the_click_profile_gives_the_axis_of_the_vessel_under_the_click(
+    angle_deg: float,
+) -> None:
+    representation = ie.compute_representation(
+        _vessel_role_images(vessel_angle_deg=angle_deg)
+    )
+    axis = np.array(
+        [math.cos(math.radians(angle_deg)), math.sin(math.radians(angle_deg))]
+    )
+    end_px = np.array([180.0, 256.0]) + 0.5 * 250.0 / 2.76 * axis
+    rotation = np.array([[0.0, -1.0], [1.0, 0.0]])  # a 90 degree pull Jacobian
+
+    profile = ie.click_profile(representation, end_px * 2.76, rotation)
+
+    assert profile is not None and profile.elongated and profile.masked
+    assert profile.elongation >= 2.0 and 200.0 < profile.length_um < 400.0
+    assert abs(float(profile.axis_reference_xy @ axis)) > 0.99
+    assert abs(float(profile.axis_moving_xy @ (rotation @ axis))) > 0.99
+
+    def at(point_px: tuple[float, float]) -> ie.ClickProfile | None:
+        return ie.click_profile(representation, np.array(point_px) * 2.76, np.eye(2))
+
+    lumen = at((340.0, 256.0))
+    assert lumen is not None and not lumen.elongated and not lumen.masked
+    assert at((256.0, 400.0)) is None  # plain neuropil
+    assert at((-20.0, 10.0)) is None  # outside the image
 
 
 # ---------------------------------------------------------------------------
@@ -993,6 +1223,91 @@ def test_a_click_in_a_featureless_region_is_inconclusive(
 
     assert check.verdict == "inconclusive"
     assert check.snap_moving_xy_um is None
+
+
+# An obliquely cut vessel: its profile lies 70 um further along its own axis in the
+# moving section, while the tissue (a weak shared texture, nothing else) follows the
+# warp, as around the LCM1 vessel-end clicks.
+_VESSEL_START_UM = np.array([2600.0, 2700.0])
+_VESSEL_AXIS = np.array([math.cos(math.radians(30.0)), math.sin(math.radians(30.0))])
+_VESSEL_LENGTH_UM = 220.0
+_VESSEL_SHIFT_UM = 70.0
+
+
+@pytest.fixture(scope="module")
+def vessel_phantom() -> Phantom:
+    end = _VESSEL_START_UM + _VESSEL_LENGTH_UM * _VESSEL_AXIS
+    shift = _VESSEL_SHIFT_UM * _VESSEL_AXIS
+    return make_phantom(
+        5,
+        n_tubes=0,
+        n_ellipses=0,
+        texture_scale=0.15,
+        reference_vessels_um=[(*_VESSEL_START_UM, *end, 30.0)],
+        moving_vessels_um=[(*(_VESSEL_START_UM + shift), *(end + shift), 30.0)],
+    )
+
+
+def _vessel_end_check(
+    phantom: Phantom, *, vessel_mask: bool
+) -> tuple[ie.ClickCheck, np.ndarray, np.ndarray]:
+    """Check a click on the vessel's end; return it with the click and the truth."""
+    params = ie.RepresentationParams(vessel_mask=vessel_mask)
+    reference = ie.compute_representation(phantom.reference, params)
+    warped = ie.warp_role_images(
+        phantom.moving, reference=phantom.reference, pull_um=phantom.pull
+    )
+    moving = ie.compute_representation(warped, params)
+    end = _VESSEL_START_UM + _VESSEL_LENGTH_UM * _VESSEL_AXIS
+    click = phantom.pull(end + _VESSEL_SHIFT_UM * _VESSEL_AXIS)
+    truth = phantom.pull(end)
+    (check,) = ie.check_clicks(
+        reference,
+        moving,
+        pair_ids=[1],
+        reference_xy_um=[end],
+        moving_xy_um=[click],
+        predicted_moving_xy_um=[truth],
+        pull_um=phantom.pull,
+    )
+    return check, click, truth
+
+
+def test_without_the_mask_the_vessel_confirms_a_click_on_its_end(
+    vessel_phantom: Phantom,
+) -> None:
+    check, click, truth = _vessel_end_check(vessel_phantom, vessel_mask=False)
+
+    # The failure the mask removes: the shifted vessel matches itself.
+    assert np.linalg.norm(click - truth) > 60.0
+    assert check.verdict == "confirmed" and check.strength == "strong"
+    assert check.image_moving_xy_um is not None
+    assert np.linalg.norm(check.image_moving_xy_um - truth) > 40.0
+    assert check.on_elongated_profile
+
+
+def test_with_the_mask_a_vessel_end_click_follows_the_tissue(
+    vessel_phantom: Phantom,
+) -> None:
+    check, click, truth = _vessel_end_check(vessel_phantom, vessel_mask=True)
+
+    assert check.verdict == "contradicted"
+    assert check.snap_moving_xy_um is not None
+    assert np.linalg.norm(check.snap_moving_xy_um - truth) < 5.0
+    fused = [e for e in check.estimates if e.representation == "fused" and e.confident]
+    assert fused
+    assert all(np.linalg.norm(e.image_moving_xy_um - truth) < 5.0 for e in fused)
+    # The click sits on an elongated profile whose moving-frame axis is the
+    # vessel's axis through the warp.
+    profile = check.profile
+    assert profile is not None and profile.elongated and profile.masked
+    end = _VESSEL_START_UM + _VESSEL_LENGTH_UM * _VESSEL_AXIS
+    step = 5.0
+    expected = vessel_phantom.pull(end + step * _VESSEL_AXIS) - vessel_phantom.pull(
+        end - step * _VESSEL_AXIS
+    )
+    expected = expected / np.hypot(*expected)
+    assert abs(float(profile.axis_moving_xy @ expected)) > math.cos(math.radians(8))
 
 
 # The verdict rules on hand-made estimates (amendment A2).
