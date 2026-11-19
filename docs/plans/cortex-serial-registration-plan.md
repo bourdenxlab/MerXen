@@ -1,7 +1,7 @@
 # Cortex serial-section registration for AT8 pair identification
 
-> **Status:** revision 2, 2026-11-17. M0 (feasibility) is done. M1 is being built on the
-> integration branch named below. Decisions D1-D10 are settled.
+> **Status:** revision 3, 2026-11-19. M0 (feasibility) is done. M1 is being built on the
+> integration branch named below. Decisions D1-D11 are settled.
 
 This plan extends [manual landmark registration](manual-registration-plan.md)
 ([stage docs](../stages/manual-registration.md)) to adjacent human cortex sections. The
@@ -29,6 +29,7 @@ gets an alias once the user adds it to `.aliases.tsv`. Locations are `.env` vari
 | D8 | The technician says the LCM1 and LCM2 sections were directly adjacent; M0 contradicts this. The user is preparing a new pair recorded as directly adjacent. M0b repeats the M0 tests on it after M1 and decides whether M2 (identity) is built. |
 | D9 | The landmarks are labelled on another machine than the one that runs MerXen. The check therefore also runs on an uploaded labelling file and returns a JSON file that the viewer loads, so the user never copies a store's root attributes back and forth. |
 | D10 | M1 leaves existing `same_section` and `serial_section` results valid: settings that M1 adds are left out of the provenance digest while they hold their defaults, so those runs are not re-registered. |
+| D11 | The image evidence masks elongated vessel profiles, and a click on one gets noise along the vessel and is never kept at full weight (user decision, 2026-11-19): an obliquely cut vessel moves along its own axis between the sections while the tissue follows the field. The full mask is kept although it removes much of the evidence (LCM1 confirmations 74 to 42), because held-out errors on LCM2 fell (windows 46 to 37 µm, blocks 61 to 55 µm); the confirmed-offset bar of item 7 becomes 12 µm. |
 
 ## What M0 found (2026-11-17)
 
@@ -177,7 +178,9 @@ weeks).
        confident fused estimate within 25 µm of the click (revised after the first M1
        builds: the earlier wording came from a different method, and an edge click is
        rarely confirmed outright);
-     - the median image offset of confirmed clicks is ≤ 10 µm;
+     - the median image offset of confirmed clicks is ≤ 12 µm (revised with D11 from 10 µm:
+       with vessels masked, the confirmations that remain are tissue matches, 10.2 µm on
+       LCM2 against 8.4 µm when vessels could confirm themselves);
      - at least 20 % of enabled clicks get a verdict (confirmed or contradicted).
   8. Register with `cortex_serial` and a preview:
      - with the defaults (image check and tissue windows): ≤ 30 min and ≤ 9.9 GB peak memory;

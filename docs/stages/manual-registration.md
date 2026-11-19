@@ -1133,3 +1133,8 @@ The evidence behind the change is under
 - Pair 50 (a round vessel in a gap where the tissue follows the click) stays
   `check` and `inconclusive`, as before; its leave-one-out residual fell from 31.5 to
   19.4 µm.
+- On LCM2 (revision 2) the confirmations that remain are tissue matches: the median
+  offset of confirmed clicks rose from 8.4 to 10.2 µm, so the M1 bar moved from 10 to
+  12 µm (plan D11). Held-out errors fell (12 held-out windows: median 46.1 to 37.3 µm;
+  block hold-out: 60.9 to 55.1 µm), and the strong confirmations fell from 20 to 7, so
+  keeping them at full weight no longer changes the field there.
