@@ -204,8 +204,9 @@ class FieldFitReport:
     Attributes:
         similarity: The robust similarity fit (``register.fit_landmarks``).
         field: The final field.
-        clicks_only: The pass-1 field (the same object as ``field`` without a second
-            pass).
+        clicks_only: The clicks-only field: pass 1, refitted with the along-vessel
+            noise when clicks sit on elongated vessel profiles (the same object as
+            ``field`` without a second pass). The warp prior is always pass 1.
         has_second_pass: Whether image evidence changed the field.
         pair_ids: Pair ids.
         observed: Pair is a click observation of the field.
@@ -214,9 +215,9 @@ class FieldFitReport:
         loo_vector_moving_um: ``(P, 2)`` the same residual vector, moving um.
         p_value: Final field p-value at unit weight.
         weight: Final field weight, NaN when not observed.
-        clicks_only_loo_reference_um: As ``loo_reference_um`` for pass 1.
-        clicks_only_p_value: As ``p_value`` for pass 1.
-        clicks_only_weight: As ``weight`` for pass 1.
+        clicks_only_loo_reference_um: As ``loo_reference_um`` for ``clicks_only``.
+        clicks_only_p_value: As ``p_value`` for ``clicks_only``.
+        clicks_only_weight: As ``weight`` for ``clicks_only``.
         verdict: Image verdict per pair (``not_checked`` without an image check).
         pair_class: Class per pair (contract C7).
         checks: Image checks by pair id.
@@ -356,15 +357,17 @@ def build_landmark_field(
 ) -> tuple[FieldFitReport, ImageContext | None]:
     """Fit the robust landmark field with image evidence and classify every pair.
 
-    Pass 1 fits the clicks alone. When roles are given and the image check or the
-    windows are on, the moving images are warped by the pass-1 mean, every click is
-    checked, and tissue windows are matched (setting ``field_vessel_mask``: with the
-    elongated vessel profiles masked). Pass 2 then refits with ridge shapes, the
-    along-axis noise of clicks on elongated vessel profiles (setting
-    ``field_vessel_click_along_sd_um``), the windows and (setting
+    Pass 1 fits the clicks alone (the warp prior). When roles are given and the
+    image check or the windows are on, the moving images are warped by the pass-1
+    mean, every click is checked, and tissue windows are matched (setting
+    ``field_vessel_mask``: with the elongated vessel profiles masked). Pass 2
+    refits with ridge shapes, the along-axis noise of clicks on elongated vessel
+    profiles (setting ``field_vessel_click_along_sd_um``), the windows and (setting
     ``field_trust_confirmed_clicks``) EM-exempt strong confirmations; a click on an
     elongated vessel profile is never exempt, since a vessel's position along its
     axis changes between the sections. Without any such evidence pass 2 is pass 1.
+    The clicks-only field the classes use is pass 1 refitted with the along-vessel
+    noise when there is any.
 
     Args:
         similarity: The robust similarity fit of the same labelling.
@@ -535,8 +538,28 @@ def build_landmark_field(
     else:
         final = pass1
 
+    # The clicks alone, each with its own noise: a click on an elongated vessel
+    # profile keeps its along-vessel noise here too, so an offset along the vessel
+    # (a moving profile, not a misclick) does not flag it. Windows, ridge shapes and
+    # exemptions stay out, so they still cannot hide a misclick.
+    clicks_only = pass1
+    if fixed.any():
+        started = time.perf_counter()
+        clicks_only = fit_landmark_field(
+            FieldObservations(
+                reference_xy_um=reference_um[fit_index],
+                moving_xy_um=moving_um[fit_index],
+                shape_cov=np.broadcast_to(np.eye(2), (n_clicks, 2, 2)).copy(),
+                fixed_cov_um2=fixed,
+                obs_class=("click",) * n_clicks,
+                obs_id=click_ids,
+            ),
+            options,
+        )
+        _elapsed(timings, "clicks_only_vessel_fit", started)
+
     magnitude1, _vector1, p_value1, weight1 = _per_pair(
-        pass1,
+        clicks_only,
         reference_um=reference_um,
         moving_um=moving_um,
         observation_index=observation_index,
@@ -581,7 +604,7 @@ def build_landmark_field(
     report = FieldFitReport(
         similarity=similarity,
         field=final,
-        clicks_only=pass1,
+        clicks_only=clicks_only,
         has_second_pass=has_second_pass,
         pair_ids=ids,
         observed=observed,

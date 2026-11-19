@@ -714,6 +714,48 @@ def test_vessel_profile_clicks_get_along_axis_noise_and_are_never_exempt(
     np.testing.assert_allclose(obs.shape_cov[0], np.eye(2))
 
 
+def test_the_clicks_only_field_keeps_the_vessel_noise_but_not_the_rest(
+    phantom: FieldPhantom, fake_images: SimpleNamespace
+) -> None:
+    plain, *_ = _build(phantom, image_check=True, windows=False)
+    # The click the clicks alone fit worst (among those not gross) sits on a
+    # vessel whose axis is its own residual: its offset is a moving profile.
+    residual = plain.clicks_only.loo().residual_um
+    clean = [i for i, kind in enumerate(phantom.kind) if kind != "gross"]
+    index = max(clean, key=lambda i: float(np.hypot(*residual[i])))
+    axis = tuple(float(v) for v in residual[index])
+    fake_images.checks = {
+        index + 1: _click_check(
+            index + 1, "confirmed", strength="strong", profile=_profile(axis)
+        ),
+        1: _click_check(1, "confirmed", strength="strong"),
+        2: _click_check(2, "ridge", direction=(1.0, 0.0)),
+    }
+    report, context, *_ = _build(phantom, image_check=True, windows=False)
+
+    clicks_only = report.clicks_only.observations
+    assert report.clicks_only is not report.field
+    np.testing.assert_allclose(
+        clicks_only.fixed_cov_um2[index], report.field.observations.fixed_cov_um2[index]
+    )
+    assert clicks_only.fixed_cov_um2[index].any()
+    # No ridge shape, exemption or confirmed class: those stay in the final field.
+    np.testing.assert_allclose(
+        clicks_only.shape_cov, np.broadcast_to(np.eye(2), clicks_only.shape_cov.shape)
+    )
+    assert not clicks_only.em_exempt.any()
+    assert set(clicks_only.obs_class) == {"click"}
+    assert report.em_exempt[0] and not report.em_exempt[index]
+    # The offset along the vessel no longer looks like a misclick.
+    assert report.clicks_only_p_value[index] > plain.clicks_only_p_value[index]
+    # The warp prior is still the plain clicks-only fit.
+    assert context is not None
+    probe = np.array([[1000.0, 2000.0]])
+    np.testing.assert_allclose(
+        context.pull_um(probe), plain.clicks_only.mean(probe), atol=1e-9
+    )
+
+
 def test_the_along_axis_sd_setting_scales_the_vessel_noise_and_zero_turns_it_off(
     phantom: FieldPhantom, fake_images: SimpleNamespace
 ) -> None:

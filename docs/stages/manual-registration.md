@@ -366,8 +366,8 @@ again".
    image strongly confirms kept at full weight (never a click on an elongated vessel
    profile).
 4. Classify every pair from the **lower p and weight of the two fields** (the clicks
-   alone and the final field), so the windows cannot hide a misclick the clicks
-   alone expose, and suggest the next clicks where the field is most uncertain
+   alone, each with its own noise, and the final field), so the windows cannot hide
+   a misclick the clicks alone expose, and suggest the next clicks where the field is most uncertain
    (grey matter weighs more than white matter).
 
 **Verdicts** (per click): `confirmed` (the image puts the structure where the click
@@ -405,10 +405,12 @@ the profile's shape within 200 µm of the click). A click on an elongated, maske
 profile gets a fixed noise covariance along the vessel's axis
 (`field_vessel_click_along_sd_um`, 45 µm by default, so its SD along the vessel is
 about 48 µm and across it the usual click noise) and is never kept at full weight.
-The class rules are unchanged: since the clicks-only field has no vessel noise, a
-vessel-end click far from where the tissue puts it is still flagged; it is often
-`contradicted` now, with a snap position on the tissue, which is the place to move
-it to. Round vessel profiles (vessels cut across) are stable landmarks and are not
+The clicks-only field that the classes compare against carries the same
+along-vessel noise, so a vessel-end click is not flagged for an offset along its
+vessel; an offset across the vessel, or one far beyond the vessel noise (more than
+about 140 µm along it), still is. Such a click is often `contradicted`, with a snap
+position on the tissue: a stable landmark near it is worth more than the vessel end,
+but the field no longer needs it moved. Round vessel profiles (vessels cut across) are stable landmarks and are not
 masked.
 
 **Classes and what to do.** p\* and w\* are the lower p-value and weight of the two
