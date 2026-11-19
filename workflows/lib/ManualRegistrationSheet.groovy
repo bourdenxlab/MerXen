@@ -54,6 +54,8 @@ class ManualRegistrationSheet {
         "field_sd_grid_um",
         "field_student_t_nu",
         "field_trust_confirmed_clicks",
+        "field_vessel_click_along_sd_um",
+        "field_vessel_mask",
         "field_window_min_spacing_um",
         "field_window_noise_floor_um",
         "field_window_observations",
