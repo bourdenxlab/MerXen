@@ -1106,25 +1106,30 @@ The evidence behind the change is under
 
 | | Before | After |
 |---|---|---|
-| Classes ok / kept_confirmed / check / likely_misclick | 105 / 1 / 13 / 2 | 101 / 0 / 15 / 5 |
+| Classes ok / kept_confirmed / check / likely_misclick | 105 / 1 / 13 / 2 | 111 / 0 / 7 / 3 |
 | Verdicts confirmed / contradicted / ridge / inconclusive | 74 / 0 / 14 / 33 | 42 / 1 / 11 / 67 |
 | Clicks kept at full weight (exempt) | 59 | 23 |
 | Clicks on an elongated vessel profile | | 41 |
 | LOO median / p90 / max, final field (µm) | 18.3 / 54.4 / 116.7 | 17.9 / 56.1 / 118.4 |
+| LOO median / p90 / max, clicks only (µm) | 18.3 / 54.0 / 120.2 | 17.8 / 56.5 / 121.9 |
 | Click noise σ (µm) | 15.8 | 10.4 |
 | Check time (image check, windows, total; s; one run each on a shared host) | 10, 45, 320 | 24, 116, 574 |
 
 - The vessel-end clicks the image check confirmed before (pairs 14, 53 and 81,
   strong and exempt) are no longer confirmed or exempt; their final-field p-values
   rose from 0.0006, 0.0008 and 8e-8 to 0.17, 0.20 and 0.035, so they no longer bend
-  the field. 14 and 81 are now `likely_misclick` (gross in the clicks-only field and
-  not confirmed), 53 `check`.
+  the field, and all three are `ok`: their offsets lie along their vessels. So are
+  the other vessel-end pairs the flagged review found (31, 51, 58, 61, 102, 109,
+  112).
 - 34 confirmations were lost: 22 on clicks that sit on elongated vessel profiles, 12
   on clicks next to masked vessels (most on round or oval vessels), whose windows
   drew most of their match from the vessels; the confirmations that stayed lost
-  0.01 of their peak correlation. With fewer exempt clicks and the vessel-end
-  residuals explained by the along-vessel noise, the click noise fits tighter, and
-  five pairs that were `ok` are now `check` (18, 39, 40, 42 and 96).
+  0.01 of their peak correlation.
+- With fewer exempt clicks and the vessel-end residuals explained by the
+  along-vessel noise, the click noise fits tighter (σ 15.8 to 10.4 µm). Five pairs
+  that were `ok` are now `check` (18, 39, 40, 42 and 96), and two non-vessel pairs
+  that were `check` are now `likely_misclick`: 12 (torn tissue, where the tissue
+  200 to 400 µm around follows the field) and 5 (a pial site).
 - Pair 91 (a vessel in a perivascular channel, where the tissue 100 to 400 µm around
   follows the field) is now `contradicted` and `likely_misclick`, with a snap
   position on the tissue; pair 51 (an obliquely cut vessel end) is now `ok`: the
@@ -1132,9 +1137,9 @@ The evidence behind the change is under
 - Two of the twelve flagged vessel-end pairs (30 and 80) are not found as vessel
   profiles at 2.76 µm (their vessels merge with neighbouring dark channels); they
   keep isotropic noise.
-- Pair 50 (a round vessel in a gap where the tissue follows the click) stays
-  `check` and `inconclusive`, as before; its leave-one-out residual fell from 31.5 to
-  19.4 µm.
+- Pair 50 (a round vessel in a gap where the tissue follows the click) is now `ok`
+  (`inconclusive`, as before): the vessel-end clicks near it no longer pull the
+  field, and its leave-one-out residual fell from 31.5 to 19.4 µm.
 - On LCM2 (revision 2) the confirmations that remain are tissue matches: the median
   offset of confirmed clicks rose from 8.4 to 10.2 µm, so the M1 bar moved from 10 to
   12 µm (plan D11). Held-out errors fell (12 held-out windows: median 46.1 to 37.3 µm;
