@@ -507,6 +507,11 @@ with.
   checkout's with `MERXEN_ENV_FILE` and the site-config variables
   ([discovery](local-configuration.md#discovery-checkouts-worktrees-and-code-exports)).
 
+The [workstation scheduling plan](plans/workstation-task-scheduling-plan.md)
+records a proposed fix for GPU-lock waiters reserving CPU/RAM and delaying
+ready ProSeg tasks, plus early release of completed analysis groups. It is
+documentation only; implementation and changes to existing runs are deferred.
+
 ## Robust cell-type annotation work
 
 The effort planned in

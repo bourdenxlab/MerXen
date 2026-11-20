@@ -14,6 +14,10 @@ users would notice). A release turns [Unreleased] into the release's section.
 
 ## [Unreleased]
 
+### Added
+
+- **Scheduling plan.** Document the proposed overlap of CPU analysis with GPU segmentation, avoidable resource/grouping barriers, and maintenance resume safeguards. This is a plan only; runtime behavior is unchanged ([plan](docs/plans/workstation-task-scheduling-plan.md)).
+
 ## [1.1.1] - 2026-11-18
 
 ### Fixed
