@@ -70,7 +70,7 @@
   "workflows/modules/segmentation.nf::CELLPOSE_SEGMENT::script": "f9fa20883111364417ddc272cd02e1a4c0102de7eb5f5c2265088ec14bfd6e95",
   "workflows/modules/segmentation.nf::PROSEG_SEGMENT::script": "7eb2e1f94a7ab601ab2ac197187d2c3d546a15c707033a465486d62b9ad412eb",
   "workflows/modules/spatial_gene_analysis.nf::SPATIAL_GENE_ANALYSIS::script": "8ea4a99b5a541ff558d44bf5f21d1b17bb564a66d59ed43d505a2b770df0919b",
-  "workflows/modules/spatialdata_build.nf::BUILD_SPATIALDATA::script": "ad87aae07e5e6dc55dde91eede1e8e42d373f0a50b92fa74ccac50399a6f5935",
+  "workflows/modules/spatialdata_build.nf::BUILD_SPATIALDATA::script": "77d58d970c7b31366eff0732401fa094c2b689bc4ed425ffe160c3215af10382",
   "workflows/modules/viewer_cache.nf::VIEWER_CACHE::script": "b73804d72318eb607b6965501fbaeae989fccae02854a0d73f5b2accf8223aff",
   "workflows/modules/visualization.nf::VISUALIZE::script": "fe9580e307429e89f0745833afd786dd86df070d8aee339bdcb9de5180890f80",
   "workflows/prepare_hitl_viewer.nf::PREPARE_HITL_VIEWER::script": "194fa2dbc9904ac059d1f8508edccf5fca4269fbeab4cd1fc9d8db176c65ce62",

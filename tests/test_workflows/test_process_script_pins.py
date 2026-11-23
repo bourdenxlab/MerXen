@@ -14,6 +14,10 @@ and say in the pull request which caches it invalidates and why.
 
 Changes made so far:
 
+- Windowed MERSCOPE projection with per-chunk read-back changes the
+  BUILD_SPATIALDATA script version once, invalidating existing build task caches.
+  Other process script pins are unchanged.
+
 - v1.0.2 security fix: ``ALIGN`` (``modules/alignment.nf``) exports
   ``PYTORCH_CUDA_ALLOC_CONF`` only when ``alignment_pytorch_cuda_alloc_conf``
   is set. Unset, it rendered the literal ``null``, on which torch 2.14 (the
