@@ -36,6 +36,7 @@
   "workflows/modules/gaston.nf::GASTON_POSTPROCESS::script": "5976bfd660ce623ab4f8be476b364e023a357b56e66e3f0283e1ac4e3b8b04e1",
   "workflows/modules/gaston.nf::GASTON_PREPARE::script": "1e4c2511845645ecd31815385f654d7da4f9137163be45fc74c3786091c79419",
   "workflows/modules/gaston.nf::GASTON_TRAIN::script": "5a33046ba94d914a1cd8cc942b269a7a6250c575e976d68afbcc6c2f9f6aee53",
+  "workflows/modules/manual_alignment.nf::MANUAL_ALIGN::script": "57bb5ae73dee4b92d516668d219dc8324cf90d62972f714915b10dc761dbc555",
   "workflows/modules/manual_registration.nf::MANUAL_REGISTRATION_CHECK::script": "8588cc267b3de2c58b9df923cc2589de1fdd04cf3737eac53e51bb4e7f29b53b",
   "workflows/modules/manual_registration.nf::MANUAL_REGISTRATION_CHECK::stub": "4cf1f77c5fe78c13a09575f8da88b5fae18f0c44df685ef3f2d98ca2b6ecde68",
   "workflows/modules/manual_registration.nf::MANUAL_REGISTRATION_COMPARE::script": "251225cf736f371150d256df95e72ae7660ebff5c2353082d47514080e29145f",

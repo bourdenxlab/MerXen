@@ -33,6 +33,38 @@ def align_command(config_path: Path) -> None:
         click.echo(f"- {key}: {value}")
 
 
+@click.command(name="prepare-paired-landmarks")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    required=True,
+)
+@click.option(
+    "--output-store", type=click.Path(path_type=Path, file_okay=False), required=True
+)
+@click.option(
+    "--target-pixel-size-um",
+    type=click.FloatRange(min=0, min_open=True),
+    default=0.5,
+    show_default=True,
+)
+def prepare_paired_landmarks_command(
+    config_path: Path, output_store: Path, target_pixel_size_um: float
+) -> None:
+    """Create a DAPI-only image pair for the manual registration viewer."""
+    from merxen.alignment.landmark_prepare import prepare_paired_landmark_store
+
+    cfg = load_config_from_json(config_path, AlignmentConfig)
+    assert isinstance(cfg, AlignmentConfig)
+    result = prepare_paired_landmark_store(
+        cfg, output_store, target_pixel_size_um=target_pixel_size_um
+    )
+    click.echo(
+        f"Open in Dataset loader > Manual Registration > Load image data: {result}"
+    )
+
+
 @click.command(name="materialize-alignment")
 @click.option(
     "--config",
@@ -84,7 +116,9 @@ def alignment_qc_command(config_path: Path) -> None:
 @click.command(name="check-alignment-deps")
 @click.option(
     "--backend",
-    type=click.Choice(["valis", "legacy_spateo"], case_sensitive=False),
+    type=click.Choice(
+        ["valis", "legacy_spateo", "manual_landmarks"], case_sensitive=False
+    ),
     default="valis",
     show_default=True,
 )

@@ -1,5 +1,9 @@
 # Manual landmark registration
 
+The standalone workflows below retain their full image-evidence/check suite.
+For DAPI-only Xenium/MERSCOPE landmarks used as an optional `main.nf` alignment
+backend, see [paired manual registration](paired-manual-registration.md).
+
 Registers two images of **adjacent or identical tissue sections** by hand-placed
 landmarks, then refines the result automatically. It is meant for pairs the
 automatic pipelines cannot align, for example a Zeiss slide scan of a serial

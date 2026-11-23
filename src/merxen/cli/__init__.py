@@ -13,6 +13,7 @@ from merxen.cli.run_alignment import (
     alignment_qc_command,
     check_alignment_deps_command,
     materialize_alignment_command,
+    prepare_paired_landmarks_command,
 )
 from merxen.cli.run_analysis_gene_set import analysis_gene_set_command
 from merxen.cli.run_analysis_layer_validation import (
@@ -126,6 +127,7 @@ main.add_command(mask_image_quantification_command)
 main.add_command(validate_analysis_layer_command)
 main.add_command(qc_command)
 main.add_command(align_command)
+main.add_command(prepare_paired_landmarks_command)
 main.add_command(materialize_alignment_command)
 main.add_command(alignment_qc_command)
 main.add_command(check_alignment_deps_command)

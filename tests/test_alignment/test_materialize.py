@@ -496,6 +496,46 @@ def test_materializer_writes_aligned_vectors_tables_labels_image_and_manifest(
 
 
 @pytest.mark.integration
+def test_manual_backend_replaces_aligned_outputs_and_keeps_native_data(
+    materialized_pair: _MaterializedPair,
+) -> None:
+    """A different manual transform refreshes vectors and viewer rasters in place."""
+    pair = materialized_pair
+    before = sd.read_zarr(pair.merscope_path)
+    original_points = before.points["transcripts"].compute()
+    original_shapes = before.shapes["cells"].geometry.copy()
+    original_counts = before.tables["table_cells"].X.toarray().copy()
+    before.attrs["manual_tissue_annotations"] = {"keep": "unchanged"}
+    write_spatialdata_metadata(before, write_attrs=True)
+    bundle = ValisTransformBundle.load(pair.output_dir / "transform_chain.json")
+    translation = np.eye(3)
+    translation[0, 2] = 2
+    replace(bundle, global_matrix=translation).save(pair.output_dir)
+    cfg = pair.config.model_copy(update={"backend": "manual_landmarks"})
+
+    assert materialize_alignment(cfg)["status"] == "complete"
+
+    after = sd.read_zarr(pair.merscope_path)
+    pd.testing.assert_frame_equal(
+        after.points["transcripts"].compute(), original_points
+    )
+    assert after.shapes["cells"].geometry.equals(original_shapes)
+    np.testing.assert_array_equal(
+        after.tables["table_cells"].X.toarray(), original_counts
+    )
+    np.testing.assert_allclose(
+        after.points["transcripts_aligned_nonrigid"]["x"].compute(),
+        original_points["x"] + 2,
+    )
+    assert after.attrs["manual_tissue_annotations"] == {"keep": "unchanged"}
+    assert (
+        after.attrs[ALIGNMENT_MANIFEST_ATTR]["transform"]["backend"]
+        == "manual_landmarks"
+    )
+    assert after.attrs[ALIGNMENT_MANIFEST_ATTR]["complete"]
+
+
+@pytest.mark.integration
 def test_materializer_completes_an_interrupted_manifest(
     materialized_pair: _MaterializedPair,
 ) -> None:

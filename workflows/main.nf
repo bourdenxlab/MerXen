@@ -19,6 +19,7 @@ include {
 } from "./modules/distance_from_object"
 include { VALIDATE_ANALYSIS_LAYER; QC } from "./modules/qc"
 include { ALIGN; MATERIALIZE_ALIGNMENT; ALIGN_QC } from "./modules/alignment"
+include { MANUAL_ALIGN } from "./modules/manual_alignment"
 include { COMPARE } from "./modules/comparison"
 include { VISUALIZE } from "./modules/visualization"
 include { SPATIAL_GENE_ANALYSIS } from "./modules/spatial_gene_analysis"
@@ -1850,6 +1851,15 @@ def appendCorticalDepthPreflightChecks(errors, row, settings, _params) {
 }
 
 def appendAlignmentAnnotationPreflightChecks(errors, row, settings, params) {
+    if (settings.run_align && params.alignment_backend == "manual_landmarks") {
+        def store = settings.alignment_manual_store
+        def landmarks = settings.alignment_manual_landmarks
+        if (!store || !normalizedPath(store).toFile().isDirectory()) {
+            errors << "Manual alignment ${settings.pair_id}: prepared DAPI store not found; set alignment_manual_store or --alignment_manual_root"
+        }
+        appendPreflightFileCheck(errors, landmarks, "Manual alignment ${settings.pair_id} finished landmarks JSON")
+        return
+    }
     if (
         !settings.run_align ||
         params.alignment_backend.toString().trim().toLowerCase() != "valis"
@@ -3854,6 +3864,14 @@ def rowSampleSettings(row, params) {
                 alignmentTissueAnnotationPath(row, "XENIUM")
             ),
         ],
+        alignment_manual_store: optionalNormalizedPathString(
+            chooseField(row, ["alignment_manual_store"]) ?:
+                (params.alignment_manual_root ? "${params.alignment_manual_root}/${pairId}/${pairId}_prepared.zarr" : null)
+        ),
+        alignment_manual_landmarks: optionalNormalizedPathString(
+            chooseField(row, ["alignment_manual_landmarks"]) ?:
+                (params.alignment_manual_root ? "${params.alignment_manual_root}/${pairId}/landmarks.json" : null)
+        ),
         spatial_gene_analysis_enabled: spatialGeneAnalysisEnabled,
         spatial_gene_analysis_transcript_analysis_enabled: (
             spatialGeneAnalysisEnabled && spatialGeneTranscriptAnalysisEnabled
@@ -5832,7 +5850,19 @@ workflow {
             )
         }
 
-    alignment_registration_results_ch = ALIGN(align_inputs_ch)
+    // Manual and automatic registration share the materialization and downstream
+    // contract. Keep ALIGN's existing script byte-identical for cached runs.
+    manual_align_inputs_ch = paired_zarrs_ch
+        .filter { _pairId, _merscopePath, _xeniumPath, settings ->
+            settings.run_align && params.alignment_backend == "manual_landmarks"
+        }
+        .map { pairId, merscopePath, xeniumPath, settings ->
+            tuple(pairId, merscopePath, xeniumPath,
+                file(settings.alignment_manual_store), file(settings.alignment_manual_landmarks))
+        }
+    alignment_registration_results_ch = ALIGN(
+        align_inputs_ch.filter { params.alignment_backend != "manual_landmarks" }
+    ).mix(MANUAL_ALIGN(manual_align_inputs_ch))
     alignment_task_results_ch = MATERIALIZE_ALIGNMENT(alignment_registration_results_ch)
         .map { pairId, merscopePath, xeniumPath, alignOut, _materializationSummary ->
             tuple(

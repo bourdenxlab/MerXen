@@ -1790,6 +1790,21 @@ class AlignmentMaterializationConfig(BaseModel):
     roundtrip_sample_spacing: int = Field(default=256, ge=1)
 
 
+class ManualAlignmentConfig(BaseModel):
+    """Landmark package and controls for paired serial-section registration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    prepared_store: Path | None = None
+    labelling_path: Path | None = None
+    settings: str = ""
+    grid_spacing_um: float = Field(default=11.0, gt=0)
+    inverse_tolerance_um: float = Field(default=0.5, gt=0)
+    inverse_iterations: int = Field(default=100, ge=1)
+    minimum_jacobian: float = Field(default=0.2, gt=0)
+    maximum_jacobian: float = Field(default=5.0, gt=0)
+
+
 class AlignmentConfig(BaseModel):
     """Configuration for paired DAPI alignment with a legacy Spateo option."""
 
@@ -1797,7 +1812,7 @@ class AlignmentConfig(BaseModel):
     merscope_zarr_path: Path
     xenium_zarr_path: Path
     output_dir: Path
-    backend: Literal["valis", "legacy_spateo"] = "valis"
+    backend: Literal["valis", "legacy_spateo", "manual_landmarks"] = "valis"
     fixed_platform: Literal["XENIUM", "MERSCOPE"] = "XENIUM"
     moving_platform: Literal["XENIUM", "MERSCOPE"] = "MERSCOPE"
     write_aligned_zarrs: bool = True
@@ -1806,6 +1821,7 @@ class AlignmentConfig(BaseModel):
     valis: ValisAlignmentConfig = ValisAlignmentConfig()
     legacy_spateo: LegacySpateoAlignmentConfig = LegacySpateoAlignmentConfig()
     materialization: AlignmentMaterializationConfig = AlignmentMaterializationConfig()
+    manual: ManualAlignmentConfig = ManualAlignmentConfig()
 
     @model_validator(mode="before")
     @classmethod
@@ -1822,6 +1838,15 @@ class AlignmentConfig(BaseModel):
     def _validate_platform_pair(self: AlignmentConfig) -> AlignmentConfig:
         if self.fixed_platform == self.moving_platform:
             raise ValueError("fixed_platform and moving_platform must differ")
+        if self.backend == "manual_landmarks":
+            if self.fixed_platform != "XENIUM" or self.moving_platform != "MERSCOPE":
+                raise ValueError(
+                    "manual_landmarks requires fixed XENIUM and moving MERSCOPE"
+                )
+            if self.manual.minimum_jacobian >= self.manual.maximum_jacobian:
+                raise ValueError(
+                    "manual minimum_jacobian must be below maximum_jacobian"
+                )
         if self.backend == "legacy_spateo" and (
             self.fixed_platform != "XENIUM" or self.moving_platform != "MERSCOPE"
         ):
