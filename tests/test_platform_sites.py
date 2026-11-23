@@ -237,6 +237,10 @@ REASONS: dict[str, dict[str, str]] = {
         "src/merxen/alignment/frames.py": (
             "image preference list with a Xenium MIP fallback (pairing roles)"
         ),
+        "src/merxen/alignment/landmark_prepare.py": (
+            "paired landmark packages require Xenium fixed and MERSCOPE moving; "
+            "the standalone serial-section tool remains platform independent"
+        ),
         "src/merxen/alignment/manifest.py": "pairing role: moving platform",
         "src/merxen/alignment/materialize.py": "pairing roles (XENIUM fixed)",
         "src/merxen/alignment/pipeline.py": "pairing roles (XENIUM fixed)",
@@ -507,6 +511,9 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
             'if str(platform or "").strip().upper() != "MERSCOPE":',
         ),
         "src/merxen/alignment/frames.py": ('if platform == "MERSCOPE"',),
+        "src/merxen/alignment/landmark_prepare.py": (
+            'if config.fixed_platform != "XENIUM" or config.moving_platform != "MERSCOPE":',  # noqa: E501
+        ),
         "src/merxen/alignment/manifest.py": (
             'if str(result.metadata.get("moving_platform", "MERSCOPE")) == "MERSCOPE"',
         ),
@@ -524,6 +531,7 @@ PINNED: dict[str, dict[str, tuple[str, ...]]] = {
             'if platform.upper() == "MERSCOPE" and aligned_region in sdata_obj.shapes:',
         ),
         "src/merxen/config.py": (
+            'if self.fixed_platform != "XENIUM" or self.moving_platform != "MERSCOPE":',
             'self.fixed_platform != "XENIUM" or self.moving_platform != "MERSCOPE"',
         ),
         "src/merxen/distance_from_object/pipeline.py": (
