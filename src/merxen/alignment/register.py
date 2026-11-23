@@ -41,6 +41,10 @@ def register_pair(
 ) -> TransformResult:
     """Register a paired section with VALIS by default or legacy Spateo."""
     cfg = _coerce_alignment_config(config)
+    if cfg.backend == "manual_landmarks":
+        from merxen.alignment.manual import register_manual_pair
+
+        return register_manual_pair(merscope_sdata, xenium_sdata, cfg)
     if cfg.backend == "legacy_spateo" or spateo_runner is not None:
         from merxen.alignment.legacy_spateo import register_pair as legacy_register
 

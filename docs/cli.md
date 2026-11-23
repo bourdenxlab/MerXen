@@ -19,6 +19,16 @@ ids, so give the real pair id (`.aliases.tsv`) where an example shows an alias.
 
 `merxen --version` prints the installed MerXen release ([versioning](versioning.md)).
 
+`merxen prepare-paired-landmarks --config <AlignmentConfig.json> --output-store
+<pair>_prepared.zarr [--target-pixel-size-um 0.5]` exports the native Xenium and
+MERSCOPE DAPI images with pyramids for landmark placement. The optional paired
+backend is selected with `backend=manual_landmarks` in `merxen align`;
+`manual.prepared_store` and `manual.labelling_path` identify its package and
+uploaded viewer JSON. See [paired manual registration](stages/paired-manual-registration.md)
+for the complete transfer and bounded-refresh workflow. The standalone
+`manual-registration-check` / `manual-registration-register` commands keep their
+full AT8/MAP2 checks.
+
 ```
 $ merxen --help
 Usage: merxen [OPTIONS] COMMAND [ARGS]...

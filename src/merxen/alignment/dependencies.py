@@ -20,6 +20,18 @@ def check_alignment_dependencies(
 ) -> AlignmentDependencyStatus:
     """Return whether the requested alignment backend imports are available."""
     normalized = str(backend).strip().lower()
+    if normalized == "manual_landmarks":
+        try:
+            from merxen.manual_registration.landmark_field import (  # noqa: F401
+                fit_landmark_field,
+            )
+        except ImportError as exc:
+            return AlignmentDependencyStatus(
+                ok=False, message=f"Manual landmark dependencies unavailable: {exc}"
+            )
+        return AlignmentDependencyStatus(
+            ok=True, message="Manual landmark dependencies are importable."
+        )
     if normalized == "legacy_spateo":
         return _check_legacy_spateo_dependencies()
     if normalized != "valis":

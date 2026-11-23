@@ -1,5 +1,9 @@
 # Section alignment
 
+For an alternative using hand-placed DAPI landmarks and the cortex robust field,
+see [paired manual registration](paired-manual-registration.md). The full
+standalone AT8/MAP2 manual-registration suite remains available separately.
+
 > **Status: optional stage; VALIS is the default backend.** Enable it globally
 > with `--analysis_mode paired --enable_alignment true`, or per paired
 > samplesheet row with `enable_alignment=true`.

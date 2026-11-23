@@ -14,6 +14,10 @@ and say in the pull request which caches it invalidates and why.
 
 Changes made so far:
 
+- Paired manual alignment adds MANUAL_ALIGN in modules/manual_alignment.nf.
+  Existing ALIGN, MATERIALIZE_ALIGNMENT and standalone registration process
+  scripts are unchanged, so no existing process pin is invalidated.
+
 - M1 (cortex serial registration, WP3a) added the pins of MANUAL_REGISTRATION_CHECK
   (``modules/manual_registration.nf``), the standalone landmark check; a new
   process, so no completed task is invalidated, and no existing pin changed (the
@@ -180,17 +184,18 @@ def test_main_nf_defines_no_process() -> None:
 
 
 def test_pinned_inventory(pinned: dict[str, str]) -> None:
-    """Today's inventory: 68 ``script:`` and 19 ``stub:`` sections.
+    """Today's inventory: 69 ``script:`` and 19 ``stub:`` sections.
 
     AT-9 added the three ATERA ProSeg processes, RCA added annotation processes,
     AT-8 added the streaming MECR reference, and AT-7 added
     ATERA_CELLPOSE_SEGMENT and ATERA_PROSEG_PLAN_CELLPOSE. The stock-comparison
     process adds one more script, and PCISEQ_COMPUTE_BATCHED one script and
     one stub. PREPARE_HITL_VIEWER adds one CPU preparation script;
-    MANUAL_REGISTRATION_CHECK one script and one stub; no existing pin changed.
+    MANUAL_REGISTRATION_CHECK one script and one stub; MANUAL_ALIGN one script.
+    No existing pin changed.
     """
     labels = [key.rsplit("::", 1)[1] for key in pinned]
-    assert labels.count("script") == 68
+    assert labels.count("script") == 69
     assert labels.count("stub") == 19
     assert {key for key in pinned if key.endswith("::stub")} == {
         f"workflows/modules/pciseq.nf::{name}::stub"

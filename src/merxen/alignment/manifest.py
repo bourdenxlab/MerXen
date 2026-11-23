@@ -154,7 +154,7 @@ def initialize_alignment_manifest(
         moving_platform=config.moving_platform,
         coordinate_system=(
             config.valis.coordinate_system_name
-            if config.backend == "valis"
+            if config.backend in {"valis", "manual_landmarks"}
             else "merxen_xenium"
         ),
         transform_payload=transform_payload,

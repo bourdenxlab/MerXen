@@ -79,7 +79,11 @@ def run_alignment_pipeline(config: AlignmentConfig) -> dict[str, Path]:
             "parameters": (
                 cfg.valis.model_dump(mode="json")
                 if cfg.backend == "valis"
-                else cfg.legacy_spateo.model_dump(mode="json")
+                else (
+                    cfg.manual.model_dump(mode="json")
+                    if cfg.backend == "manual_landmarks"
+                    else cfg.legacy_spateo.model_dump(mode="json")
+                )
             ),
             "dependency_versions": dependency_versions,
         }

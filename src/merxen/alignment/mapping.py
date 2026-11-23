@@ -145,7 +145,7 @@ def load_alignment_mapper(
         platform=config.fixed_platform,
     )
 
-    if config.backend == "valis":
+    if config.backend in {"valis", "manual_landmarks"}:
         bundle = _load_valis_bundle(config, moving_sdata)
         if not np.allclose(
             bundle.moving_dataset_to_image,
@@ -172,7 +172,7 @@ def load_alignment_mapper(
                 "Non-rigid raster materialization requires the VALIS backward field"
             )
         return AlignmentCoordinateMapper(
-            backend="valis",
+            backend=config.backend,
             selected_mode=bundle.selected_mode,
             moving_dataset_to_image_matrix=np.asarray(
                 moving_dataset_to_image,

@@ -62,6 +62,7 @@ OMITTED_PROCESSES = {
 
 # Stations that stand for more than one process, or for none at all.
 STATION_ALIASES = {
+    "align": {"ALIGN", "MANUAL_ALIGN"},
     "clustering_squidpy": {
         "CLUSTERING_SQUIDPY_PREPARE",
         "CLUSTERING_SQUIDPY_COMPUTE",
