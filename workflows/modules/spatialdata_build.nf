@@ -28,6 +28,7 @@ process BUILD_SPATIALDATA {
 ${build_config_json}
 JSON
 
+    # Image build v2: verified, windowed MERSCOPE max projection.
     merxen build-spatialdata --config build_config.json ${forceFlag}
     """
 }

@@ -14,6 +14,10 @@ users would notice). A release turns [Unreleased] into the release's section.
 
 ## [Unreleased]
 
+### Fixed
+
+- Build MERSCOPE raw-TIFF projections in bounded spatial windows, write each final maximum once, and verify every uncorrected chunk before publishing. Contiguous BigTIFF planes use read-only memory maps; compressed/tiled planes use tifffile's Zarr windows, avoiding whole-slide PIMS reads. Existing damaged image builds and image-derived segmentation must be regenerated. The `BUILD_SPATIALDATA` script version changes once to invalidate old build task caches; other process scripts and segmentation parameters are unchanged.
+
 ### Added
 
 - **Scheduling plan.** Document the proposed overlap of CPU analysis with GPU segmentation, avoidable resource/grouping barriers, and maintenance resume safeguards. This is a plan only; runtime behavior is unchanged ([plan](docs/plans/workstation-task-scheduling-plan.md)).

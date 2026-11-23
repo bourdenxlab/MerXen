@@ -18,9 +18,11 @@ import geopandas
 import numpy as np
 import pandas as pd
 import shapely
+import tifffile
 import xarray
 import zarr
 from dask import array as da
+from dask.base import tokenize
 from dask_image.imread import imread
 from shapely.geometry import MultiPolygon, Polygon
 from spatialdata import SpatialData
@@ -232,6 +234,10 @@ def write_merscope_spatialdata(
             ),
             **_bead_backend_kwargs(projection.bead_removal),
         )
+        sdata.attrs[IMAGE_PREPROCESSING_ATTR]["plain_projection"] = {
+            "algorithm": "windowed_max_v2",
+            "readback": "every_uncorrected_chunk",
+        }
         write_spatialdata_zarr(sdata, output_path, overwrite=True)
         _copy_merscope_sidecars(
             input_path=input_path,
@@ -774,10 +780,12 @@ def _project_channel_iteratively(
     projection_path: Path,
     shape: tuple[int, int],
 ) -> None:
-    """Max-project the z planes of one stain into its channel of the store.
+    """Max-project one spatial chunk at a time and verify each stored chunk.
 
-    One plane is held at a time: the first plane is stored, then every further
-    plane is maximised against the stored result.
+    Keep the source independent of the destination: a lazy read/modify/write
+    graph against the same Zarr is unnecessary and can publish incomplete
+    projections without an exception. TIFF sources are windowed, so neither a
+    whole mosaic nor a stack of z planes is materialized in memory.
     """
     height, width = shape
     logger.info(
@@ -786,56 +794,88 @@ def _project_channel_iteratively(
         channel_index + 1,
         n_channels,
     )
-    current = _open_merscope_channel_plane_array(
-        images_dir=images_dir,
-        stain=stain,
-        z_layer=z_layers[0],
-        chunks=chunks,
-    )
-    _store_projection_channel(
-        current,
-        projection_store,
-        channel_index=channel_index,
-        shape=(height, width),
-    )
-    del current
-
-    for z_layer in z_layers[1:]:
-        previous = da.from_zarr(projection_path)[channel_index, :, :]
-        plane = _open_merscope_channel_plane_array(
+    planes = [
+        _open_merscope_channel_plane_array(
             images_dir=images_dir,
             stain=stain,
             z_layer=z_layer,
             chunks=chunks,
         )
-        projected = da.maximum(previous, plane)
-        _store_projection_channel(
-            projected,
-            projection_store,
-            channel_index=channel_index,
-            shape=(height, width),
-        )
-        del previous, plane, projected
-        force_release(note=(f"[MERSCOPE] after projecting channel={stain} z={z_layer}"))
+        for z_layer in z_layers
+    ]
+    for z_layer, plane in zip(z_layers, planes, strict=True):
+        if tuple(plane.shape) != (height, width):
+            raise ValueError(
+                f"{stain} z={z_layer} shape {plane.shape} "
+                f"differs from {(height, width)}"
+            )
+        if np.dtype(plane.dtype) != np.dtype(projection_store.dtype):
+            raise ValueError(f"{stain} z={z_layer} dtype differs from the projection")
+    chunk_y, chunk_x = chunks
+    total = -(-height // chunk_y) * -(-width // chunk_x)
+    completed = 0
+    for y0 in range(0, height, chunk_y):
+        for x0 in range(0, width, chunk_x):
+            region = (
+                slice(y0, min(height, y0 + chunk_y)),
+                slice(x0, min(width, x0 + chunk_x)),
+            )
+            projected = np.array(
+                planes[0][region].compute(scheduler="single-threaded"), copy=True
+            )
+            for plane in planes[1:]:
+                np.maximum(
+                    projected,
+                    plane[region].compute(scheduler="single-threaded"),
+                    out=projected,
+                )
+            target_region = (channel_index, *region)
+            projection_store[target_region] = projected
+            if not np.array_equal(
+                np.asarray(projection_store[target_region]), projected
+            ):
+                raise OSError(
+                    f"MERSCOPE {stain} projection read-back differs at ({y0}, {x0}); "
+                    "refusing damaged imagery"
+                )
+            completed += 1
+            if completed % 50 == 0 or completed == total:
+                logger.info(
+                    "[MERSCOPE] %s projection: %d/%d chunks verified",
+                    stain,
+                    completed,
+                    total,
+                )
+    del planes
+    force_release(note=f"[MERSCOPE] after projecting channel={stain}")
 
 
-def _store_projection_channel(
-    source: da.Array,
-    projection_store: Any,
-    *,
-    channel_index: int,
-    shape: tuple[int, int],
-) -> None:
-    """Store one projected channel into the projection zarr."""
-    source_3d = source.reshape((1, int(shape[0]), int(shape[1])))
-    da.store(
-        source_3d,
-        projection_store,
-        regions=(slice(channel_index, channel_index + 1), slice(None), slice(None)),
-        compute=True,
-        lock=True,
-        scheduler="single-threaded",
-    )
+class _TiffPlaneSource:
+    """Window reader with independent handles and no full-frame PIMS fallback."""
+
+    ndim = 2
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        with tifffile.TiffFile(path) as image:
+            series = image.series[0]
+            if len(series.shape) != 2:
+                raise ValueError(
+                    f"Expected one 2D TIFF plane, got {series.shape}: {path}"
+                )
+            self.shape = tuple(int(n) for n in series.shape)
+            self.dtype = np.dtype(series.dtype)
+            page = series.pages[0] if len(series.pages) == 1 else None
+            self.is_memmappable = page is not None and page.is_memmappable
+
+    def __getitem__(self, region: tuple[slice, slice]) -> np.ndarray:
+        if self.is_memmappable:
+            # Copy only the requested window. Passing the memmap directly to
+            # da.from_array can itself copy the entire multi-gigabyte input.
+            mapped = tifffile.memmap(self.path, mode="r")
+            return np.array(mapped[region], copy=True)
+        with tifffile.TiffFile(self.path) as image, image.aszarr() as store:
+            return np.asarray(zarr.open_array(store, mode="r")[region])
 
 
 def _open_merscope_channel_plane_array(
@@ -850,27 +890,22 @@ def _open_merscope_channel_plane_array(
     if not tif_path.exists():
         raise FileNotFoundError(f"Missing MERSCOPE image plane: {tif_path}")
 
-    try:
-        import rioxarray
-    except ModuleNotFoundError:
-        arr = imread(tif_path).squeeze()
-        return cast(da.Array, da.asarray(arr).rechunk(chunks))
-
-    from rasterio.errors import NotGeoreferencedWarning
-
-    warnings.simplefilter("ignore", category=NotGeoreferencedWarning)
-    data = (
-        rioxarray.open_rasterio(
-            tif_path,
-            chunks=(1, int(chunks[0]), int(chunks[1])),
-        )
-        .reset_coords("spatial_ref", drop=True)
-        .data
+    source = _TiffPlaneSource(tif_path)
+    stat = tif_path.stat()
+    name = "merscope-tiff-" + tokenize(
+        str(tif_path.resolve()), stat.st_size, stat.st_mtime_ns, chunks
     )
-    arr = da.asarray(data).squeeze()
-    if arr.ndim != 2:
-        raise ValueError(f"Expected 2D MERSCOPE plane, got shape={arr.shape}")
-    return cast(da.Array, arr.rechunk(chunks))
+    return cast(
+        da.Array,
+        da.from_array(
+            source,
+            chunks=chunks,
+            name=name,
+            asarray=False,
+            fancy=False,
+            meta=np.empty((0, 0), dtype=source.dtype),
+        ),
+    )
 
 
 def discover_merscope_z_layers(path: Path) -> list[int]:
