@@ -38,6 +38,7 @@ process MANUAL_ALIGN {
     def configJson = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(config))
     """
     set -euo pipefail
+    export PYTHONPATH="${projectDir}/../src:\${PYTHONPATH:-}"
     export OMP_NUM_THREADS="${task.cpus}"
     export OPENBLAS_NUM_THREADS="${task.cpus}"
     export MKL_NUM_THREADS="${task.cpus}"

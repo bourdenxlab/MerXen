@@ -91,6 +91,7 @@ launch/work directory, the existing results root and a sheet containing only
 the pairs being fixed. Keep the original run's other settings:
 
 ```bash
+export PYTHONPATH="$MERXEN_CODE_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 nextflow run "$MERXEN_CODE_ROOT/workflows/main.nf" -profile conda \
   -params-file "$MERXEN_EVIDENCE_ROOT/paired_landmarks/runtime.params.json" \
   --samplesheet "$MERXEN_EVIDENCE_ROOT/paired_landmarks/pairs.csv" \
@@ -102,6 +103,8 @@ nextflow run "$MERXEN_CODE_ROOT/workflows/main.nf" -profile conda \
 ```
 
 Use the site's usual profile/site config in place of `conda` where appropriate.
+The source export must head `PYTHONPATH` for every task, including the existing
+materializer, even when reusing a runtime installed from another checkout.
 Remove row-level stage overrides, which take precedence over the command.
 Stop an older run that could write these same stores **before applying** the
 new transform. Retain its pinned source and work cache.
