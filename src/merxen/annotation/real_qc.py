@@ -27,8 +27,9 @@ Checks added by M3c (plan §8.8 table; §8.3 v7.5, v7.9; §8.10):
   (nucleus-expansion) segmentation, where simulation over-predicts coverage
   by +.16 to +.22 whatever the efficiency model (``5k_real/sim/REPORT.txt``
   §7). Each row records the dataset gate level before QC and whether that
-  gate left the level unattempted (``gate_blocked``, M13 C15): there the
-  warning still fires and says the shortfall is the gate's.
+  gate would leave the level unattempted (``gate_blocked``, M13 C15; advisory
+  since label table version 2, when the labels are kept): there the warning
+  says so.
 * ``nonneuronal_high_depth_flags`` -- the report-only per-cell
   ``flag_nonneuronal_high_depth``: a non-neuronal cell at >= 1,000 counts
   whose (level, class, bin) was emitted on its own ensemble verdict and is
@@ -244,9 +245,10 @@ COVERAGE_PROFILE_TEXT: Final = (
 # The warning is kept (dropping it would be a loosening, CHECK K6 rule 4) and
 # says so; whether such levels are judged at all is the user's call.
 COVERAGE_GATE_BLOCKED_TEXT: Final = (
-    " The dataset gate before QC is {gate_level}, which does not attempt "
-    "{level}: no cell can be confident there, so this shortfall is the gate's, "
-    "not evidence that the simulation over-predicts {cls}."
+    " The dataset gate before QC is {gate_level}, which an enforced gate would "
+    "not attempt at {level}; the gate is advisory since label table version 2, "
+    "so the coverage is measured on the kept labels (their strict statuses are "
+    "not_attempted_gate)."
 )
 NONNEURONAL_TREND_TEXT: Final = (
     "real {level} coverage of cells called {cls} falls above {limit:,} counts "
@@ -1012,7 +1014,7 @@ def coverage_vs_simulation(
                 if math.isfinite(float(row["profile_coverage"]))
                 else "",
                 gate=COVERAGE_GATE_BLOCKED_TEXT.format(
-                    gate_level=gate_level, level=row["level"], cls=row["class"]
+                    gate_level=gate_level, level=row["level"]
                 )
                 if row["gate_blocked"] is True
                 else "",

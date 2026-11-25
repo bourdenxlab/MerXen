@@ -2107,21 +2107,20 @@ def test_cli_annotate_takes_min_counts_from_the_clustering_config(
     assert "differs from the clustering config's min_counts 10" in result.output
 
 
-def _refuse(panel_dir: Path) -> None:
+def _refuse(panel_dir: Path, *, unmappable: bool = True) -> None:
     path = panel_dir / REQUIRED_BUNDLES_FILE
     required = RequiredBundles.model_validate_json(path.read_text())
-    refused = required.model_copy(
-        update={
-            "status": "refused",
-            "reasons": ["gene-ID resolution 0.40 < 0.95"],
-            "bundles": [],
-            "n_required": 0,
-        }
-    )
+    update: dict[str, Any] = {
+        "status": "refused",
+        "reasons": ["intersection: gene-ID resolution 0.40 < 0.95"],
+    }
+    if unmappable:
+        update.update(unmappable=["intersection"], bundles=[], n_required=0)
+    refused = required.model_copy(update=update)
     path.write_text(json.dumps(refused.model_dump(mode="json")))
 
 
-def test_cli_annotate_records_a_refused_panel_without_mapping(
+def test_cli_annotate_records_an_unmappable_panel_without_mapping(
     tmp_path: Path, fake_mmc: FakeMmc
 ) -> None:
     prepared, config = _prepared_dir(tmp_path / "inputs")
@@ -2134,18 +2133,48 @@ def test_cli_annotate_records_a_refused_panel_without_mapping(
     )
 
     assert result.exit_code == 0, result.output
+    assert "unmappable (intersection: no resolved gene)" in result.output
     manifest = load_map_manifest(output / MAP_MANIFEST_NAME)
     assert manifest.panel_status == "refused"
-    assert manifest.panel_reasons == ["gene-ID resolution 0.40 < 0.95"]
+    assert manifest.panel_reasons == ["intersection: gene-ID resolution 0.40 < 0.95"]
+    assert manifest.unmappable_panels == ["intersection"]
     assert manifest.samples == {}
     assert manifest.min_counts == 10
     assert fake_mmc.calls == []
-    # Without --allow-refused-panel (standalone use) a refused panel fails.
+    # Without --allow-refused-panel (standalone use) an unmappable panel fails.
     arguments = _pipeline_arguments(prepared, config, panel_dir, [], tmp_path / "x")
     arguments.remove("--allow-refused-panel")
     refused = CliRunner().invoke(cli_main, arguments)
     assert refused.exit_code != 0
-    assert "was refused" in refused.output
+    assert "has nothing to map" in refused.output
+
+
+def test_cli_annotate_maps_a_refused_panel_with_bundles(
+    tmp_path: Path, fake_mmc: FakeMmc
+) -> None:
+    # Always-label plan, M2: a refused panel with resolved genes keeps its
+    # bundles and is mapped (with or without --allow-refused-panel); the
+    # refusal is recorded on the manifest and on every sample.
+    prepared, config = _prepared_dir(tmp_path / "inputs")
+    panel_dir, panel = _panel_dir(tmp_path / "panel")
+    refs = _bundle_refs(tmp_path / "refs", _human_bundles(fake_mmc, panel))
+    _refuse(panel_dir, unmappable=False)
+    output = tmp_path / "annotation_map_out"
+    arguments = _pipeline_arguments(prepared, config, panel_dir, refs, output)
+    arguments.remove("--allow-refused-panel")
+
+    result = CliRunner().invoke(cli_main, arguments)
+
+    assert result.exit_code == 0, result.output
+    assert "mapped anyway, trust refused (advisory)" in result.output
+    manifest = load_map_manifest(output / MAP_MANIFEST_NAME)
+    assert manifest.panel_status == "refused"
+    assert manifest.panel_reasons == ["intersection: gene-ID resolution 0.40 < 0.95"]
+    assert manifest.unmappable_panels == []
+    for record in manifest.samples.values():
+        assert record.panel_status == "refused"
+        assert set(record.runs) == {"whb_frontal_supc_clus", "seaad_mr_panel"}
+    assert fake_mmc.calls
 
 
 # --------------------------------------------------------------------------
@@ -2446,6 +2475,21 @@ def test_a_sample_without_any_run_is_an_error_unless_its_panel_was_refused(
         "whb_frontal_supc_clus",
         "seaad_mr_panel",
     }
+    # Always-label plan, M2: a refused platform panel with a run is mapped,
+    # its refusal recorded on the sample.
+    mapped = annotate_map(
+        samples,
+        runs,
+        config,
+        output_dir=tmp_path / "out3",
+        pair_id="PX",
+        segmentation="s",
+        refused_platforms=["XENIUM"],
+    )
+    assert mapped.panel_status == "ok"
+    assert mapped.samples["PX_XENIUM"].panel_status == "refused"
+    assert mapped.samples["PX_XENIUM"].runs
+    assert mapped.samples["PX_MERSCOPE"].panel_status == "ok"
 
 
 def test_refused_platforms_reads_the_panel_reasons() -> None:

@@ -215,11 +215,14 @@ def test_both_sections_record_the_pair_cross_platform_scope(
         )
         scope = recorded_cross_platform(clustered.uns)
         assert scope is not None
-        assert scope.statistics_level == "broad_only"
-        assert scope.allows("broad") and not scope.allows("supercluster")
+        # Advisory since label table version 2: made, and tagged.
+        assert scope.statistics_level == "full"
+        assert scope.advisory_level == "broad_only"
+        assert scope.allows_strict("broad")
+        assert not scope.allows_strict("supercluster")
         assert clustered.uns[HIERARCHICAL_UNS_KEY][
             "cross_platform_statistics_level"
-        ] == ("broad_only")
+        ] == ("full")
         manifest = json.loads(
             (
                 computed["output"]

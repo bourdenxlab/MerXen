@@ -253,6 +253,8 @@ New behaviour lives in new files. The three files GASTON also edits change only 
 
 ### 3.1 Process graph (map_first mode; legacy mode unchanged)
 
+> **Superseded by [annotation-always-label-plan.md](annotation-always-label-plan.md) (label table version 2):** in part. A refused panel is mapped on the genes that resolve and keeps its labels (only a panel with no resolved gene is `unmappable`), and a failed or broad-only dataset gate no longer leaves the hierarchy, MENDER or the cross-platform statistics without labels.
+
 ```
 analysis_samples_ch (pair, seg, samples_json, settings)
  └► CLUSTERING_SQUIDPY_PREPARE           (unchanged script text; CPU, main env)
@@ -446,6 +448,8 @@ mender_unassigned_state_policy = "exclude_from_features"   // map_first only; le
 
 ### 4.1 Per-cell label table: `<sid>_celltype_labels.parquet`
 
+> **Superseded by [annotation-always-label-plan.md](annotation-always-label-plan.md) (label table version 2):** `ct_<L>_name` and its companions are filled wherever the engine called the cell; the table gains the dataset QC columns (`qc_dataset_level`, `qc_dataset_max_level`, `qc_dataset_warnings`, `qc_panel_trust`, `qc_<signal>`) and the strict view (`ct_<L>_status_strict`, `ct_final_level_strict`, `ct_final_name_strict`, `exclude_hard_strict`).
+
 One row per object in `<sid>_prepared.h5ad` (every segmented object). Column constants live in `src/merxen/annotation/schema.py` with `validate_label_table(df, species, h5ad_index=None)` (dtypes, categories, `cell_id` uniqueness, exact equality of `in_table` ids with the clustered H5AD index; R-eng). Categoricals as `category`, floats as float32.
 
 **Identity and QC:** `cell_id` (str; equals prepared / clustered `obs_names` and the zarr table id); `instance_id` (int64, from `uns.spatialdata_attrs.instance_key`); `pair_id`, `sample_id`, `platform`, `segmentation`, `species`, `anatomical_region`, `panel_hash` (category); `total_counts`, `n_genes` (int32, after control removal); `genes_per_count`; `in_table` (`total_counts ≥ min_counts`); `depth_bin` (largest grid value ≤ the cell's counts; grid per bundle, §3.7); `resolvability_extrapolated` (bool: deeper than the deepest grid bin with ≥ 50 test cells of its class, D_max, §8.3); `n_missing_panel_genes` (per sample, repeated).
@@ -477,6 +481,8 @@ One row per object in `<sid>_prepared.h5ad` (every segmented object). Column con
 
 ### 4.2 Status vocabulary (`CellStatus` StrEnum)
 
+> **Superseded by [annotation-always-label-plan.md](annotation-always-label-plan.md) (label table version 2):** `not_attempted_gate` is retired from `ct_<L>_status` and occurs only in the strict columns; the new status `unmappable` marks a cell with no reference call to resolve.
+
 | Status | Meaning |
 |---|---|
 | `confident` | Passed the resolvability, threshold, floor, gate and agreement rules at this level |
@@ -492,6 +498,8 @@ One row per object in `<sid>_prepared.h5ad` (every segmented object). Column con
 | `low_counts` | `total_counts < min_counts`; not mapped |
 
 ### 4.3 Flag columns (bool, with continuous companions; report-only unless stated)
+
+> **Superseded by [annotation-always-label-plan.md](annotation-always-label-plan.md) (label table version 2):** `exclude_hard` is cell-intrinsic (off-table, or implausible at every level); a failed gate, a refused panel or a failed registration check sets `exclude_hard_strict` instead.
 
 | Flag | Rule | Use |
 |---|---|---|
@@ -602,6 +610,8 @@ Rules apply to table cells; every level is also subject to the panel's resolvabi
 SEA thresholds are read from the SEA bundle (v1.1 derives them from its calibration table, so a new release updates them; R-rob). Each reference uses the panel genes it contains — WHB frontal 59,357, SEA-AD 36,601, WMB 32,285 genes, all Ensembl [H] — and the per-reference count is recorded (`n_query_genes_used`).
 
 ### 5.4 Floors and dataset gate
+
+> **Superseded by [annotation-always-label-plan.md](annotation-always-label-plan.md) (label table version 2):** the dataset gate part. The gate is advisory: its level sets `qc_dataset_level`, `qc_dataset_max_level` and the strict view, never a label. The floor algorithm is unchanged.
 
 **Floor algorithm** (`thresholds.derive_floors`; runs on the resolvability simulation in v1 and on the calibration simulation in v1.1): per (level, class, platform, panel family), the smallest grid depth with precision ≥ target (broad 0.90, supercluster 0.85; local isotonic rule, §8.3) and ≥ 50 test cells at that depth; with n < 50 inherit the other platform's floor where it has n ≥ 50, else the hard floor (`floor_source=default_low_n`). **Panels validated on real data** use the packaged real-derived floors below (`floor_source=real_e2`; simulated floors reported beside them). **Any other panel or platform** (Xenium 5K, custom Xenium v1, custom MERSCOPE, mouse on Xenium) gets max(maximum over known platforms and validated panels, the panel's simulated floor) per class and level, with `floor_source=unknown_panel` and a warning (R-rob; D-G3); families validated by simulation (OD-E1) keep the same max rule with `floor_source=simulation_validated` and no warning (§8.2).
 
@@ -762,10 +772,14 @@ The legacy 0.15 neuron-split round and fixed branch resolutions do not exist in 
 
 ### 7.5 Segmentation and data validity
 
+> **Superseded by [annotation-always-label-plan.md](annotation-always-label-plan.md) (label table version 2):** the failed registration check no longer removes labels or sets `exclude_hard`; G1's fail rule only warns by default (`mouse_gate.g1_effect = warning`), and `gate_failed` lowers only the advisory level and the strict view.
+
 - **MS2:** original_seg only until M0a is fixed and re-run; `research/selfmap/runs2/REAL_ms2_*` and `research/ms2_mmc/*` (invalid proseg_hybrid) are invalid.
 - **Failed registration check** (M0a guard; MERSCOPE and Xenium, §8.6): annotation still runs; mouse gate `failed`; report banner; `exclude_hard` on every cell; with `qc_registration_strict=true` the QC stage fails instead.
 
 ### 7.6 Mouse dataset gate (`annotation/mouse_gate.py`; label-free signals)
+
+> **Superseded by [annotation-always-label-plan.md](annotation-always-label-plan.md) (label table version 2):** the mouse gate is advisory: its level, reason tokens and G1-G5 values are written per cell (`qc_*`) and enforced only in the strict view. G1's fail rule only warns by default (`mouse_gate.g1_effect`).
 
 | Signal | Source | Failed if | Warning if |
 |---|---|---|---|
@@ -951,6 +965,8 @@ Seeded validated families (`validation_basis = real_data`): human set a (296-gen
 - **Storage and caching:** PREP time 24 h; bundles in the large store (on the storage RAID), keyed by `build_hash` (which includes the declared-panel `panel_hash`); the family's reference markers are **kept** (mapping needs only query markers, but a dataset missing some panel genes then needs only a query-marker rebuild, ~20–60 min, §3.3); resolvability inside the bundle, reused by every dataset of the family; `annotation-store list` groups by family. The precomputes already hold all genes (WHB frontal 59,357; SEA-AD 36,601; WMB means 32,285) [H], so no reference rebuild is needed; only the mouse marker precompute is re-extracted per panel.
 
 ### 8.8 Validation before a panel is trusted (OD-E1 / OD-E9, decided 2026-09-26: simulation only)
+
+> **Superseded by [annotation-always-label-plan.md](annotation-always-label-plan.md) (label table version 2):** the effects of real-data QC on labels. A gate cap or a withheld level lowers only the advisory dataset level (`qc_dataset_level`, `qc_dataset_max_level`) and the strict view, never a label; withheld pair statistics become an advisory restriction; `real_qc.registration_g1_effect` defaults to `warning`.
 
 **Decision.** New panels are validated **only by in-silico simulation from the Allen references**: no public dataset validates a panel, promotes a family or enters a gate. rev2's validation candidates (the 10x 5K mouse brain hemisphere, the Vizgen MERFISH Mouse Brain Receptor Map, Zenodo 14606776 Xenium DLPFC, the 10x Xenium Human Brain Preview, HMBA-MERSCOPE-H22.30.001) are not used for validation, and the `--from-vendor-cells` input is dropped from v1 (§17). No public human-brain 5K dataset exists (`$A/5k_real/DOWNLOAD_REPORT.txt` §5, a web search [L]), and none is needed for validation: simulation from WHB covers it. The MERFISH-638850 download (OD-C8) serves only the mouse AP-axis rule (M6b). *Amended 2026-09-28 (OD-E1, user decision 1; D-G9):* public vendor data may supply simulation **inputs** — per-gene factor tables and per-class depth profiles — stored with provenance (source URL, sha256, licence note, XOA / segmentation version, deriving script; §4.7). They never promote trust, and real data, public or in-house, stay downgrade-only. Phase 1 used 25 small vendor files of five datasets (224 MB; `$MERXEN_PUBLIC_VALIDATION_ROOT/MANIFEST.tsv`; your approval of 2026-09-28); the only further download approved is the 5K mouse `transcripts.parquet` (2.30 GB; OD-E16), for phase 1b (per-gene assigned fractions, which separate assignment loss from chemistry, and a first G1 check; `$A/5k_real/phase1b/`). Nothing else is approved: no v1 or lung transcripts, morphology images, outs bundles or Ensembl GTF.
 

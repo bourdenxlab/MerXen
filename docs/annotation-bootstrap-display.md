@@ -90,7 +90,8 @@ from the whole-panel route:
 - `resolution_status` is the label-table status, from the map-first
   vocabulary: `confident`, `low_confidence`, `below_floor`, `not_resolvable`,
   `method_disagree`, `single_method`, `implausible`, `parent_unresolved`,
-  `not_attempted_gate`, `not_applicable`, `low_counts`. Whole-panel stores
+  `unmappable`, `not_applicable`, `low_counts` (`not_attempted_gate` only in
+  label tables before version 2). Whole-panel stores
   hold their own resolution statuses (`accepted_existing_atlas_policy`, ...).
 
 The viewer code is not in this repository; a viewer that colours accepted

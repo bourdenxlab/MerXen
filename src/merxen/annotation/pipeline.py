@@ -1377,8 +1377,11 @@ class MapSampleRecord(_MapModel):
         n_resolved_features: Features with an Ensembl ID.
         controls_removed: Control features removed, per reason.
         panel_status: ``"refused"`` when the sample's own panel was refused
-            (a ``per_platform`` pair can refuse one platform's panel), so it
-            has no run.
+            (a ``per_platform`` pair can refuse one platform's panel, an
+            ``intersection`` or ``single_sample`` panel refuses every
+            sample). Since the always-label plan (M2) such a sample is still
+            mapped when its panel has a resolved gene; it has no run only
+            when its panel has none (unmappable).
         runs: MMC runs by run id.
         mouse_regions: The mouse region step (inferred divisions, drop list,
             pruned re-map; ``None`` for human and unmapped samples).
@@ -1425,9 +1428,14 @@ class MapManifest(_MapModel):
         mouse_region_step: The mouse region step's rule (``MOUSE_REGION_STEP``;
             ``None`` for human).
         panel_status: ``required_bundles.json`` status: ``"refused"`` when
-            no panel can be annotated, so nothing was mapped (RESOLVE writes
-            statuses only; plan §3.3 step 2).
-        panel_reasons: Why the panel was refused.
+            no annotation panel is trusted. Advisory since the always-label
+            plan (M2): a refused panel with a resolved gene is mapped, and
+            RESOLVE sets the primary's trust to ``refused``.
+        panel_reasons: Why panels were refused (also with status ``"ok"``
+            when one platform panel of a ``per_platform`` pair was).
+        unmappable_panels: Annotation panels with no resolved gene, so
+            nothing was mapped on them (RESOLVE writes the status
+            ``unmappable``).
         provisional_rules: What the provisional labels apply.
         thresholds: The raw thresholds the provisional labels used.
         wall_time_s: Wall time of the MAP call.
@@ -1447,6 +1455,7 @@ class MapManifest(_MapModel):
     mouse_region_step: str | None = None
     panel_status: Literal["ok", "refused"] = "ok"
     panel_reasons: list[str] = Field(default_factory=list)
+    unmappable_panels: list[str] = Field(default_factory=list)
     provisional_rules: str = PROVISIONAL_RULES
     thresholds: dict[str, Any] = Field(default_factory=dict)
     wall_time_s: float | None = None
@@ -2103,6 +2112,8 @@ def annotate_map(
     find_subset_bundle: SubsetBundleFinder | None = None,
     region_shares: RegionShareBundle | None = None,
     section_regions: Mapping[str, str] | None = None,
+    panel_status: Literal["ok", "refused"] = "ok",
+    panel_reasons: Sequence[str] = (),
 ) -> MapManifest:
     """Run the MAP step for the samples of one pair x segmentation.
 
@@ -2125,8 +2136,11 @@ def annotate_map(
             with a warning (``load_published_manifest``).
         write_provisional: Write the provisional ``ct_*`` parquet.
         refused_platforms: Platforms whose own panel was refused
-            (``refused_platforms``); their samples are recorded without runs.
-            Any other sample that no run applies to is an error.
+            (``refused_platforms``); their samples are recorded with
+            ``panel_status="refused"``, mapped when a run applies (a refused
+            panel with a resolved gene, always-label plan M2) and without
+            runs otherwise. Any other sample that no run applies to is an
+            error.
         find_subset_bundle: Returns the store's bundle of a reference on a
             subset panel hash, or ``None`` (``store_subset_bundle_finder``);
             without it every needed subset bundle is only requested.
@@ -2135,6 +2149,11 @@ def annotate_map(
         section_regions: ``mouse_section_regions`` per sample id (the
             samplesheet column); a sample without one takes the config's
             ``mouse_section_regions``. Mouse only.
+        panel_status: ``required_bundles.json`` status, recorded in the
+            manifest; ``"refused"`` marks every sample's panel refused (no
+            annotation panel is trusted), which RESOLVE turns into the
+            primary's trust ``refused`` (M2).
+        panel_reasons: ``required_bundles.json`` reasons, recorded.
 
     Returns:
         The manifest (also written to ``<output_dir>/map_manifest.json``).
@@ -2161,6 +2180,8 @@ def annotate_map(
         published = load_published_manifest(reuse_from)
         published_dir = Path(reuse_from) if published is not None else None
     refused = {platform.upper() for platform in refused_platforms}
+    if panel_status == "refused":
+        refused |= {sample.platform.upper() for sample in samples}
     manifest = MapManifest(
         pair_id=pair_id,
         segmentation=segmentation,
@@ -2172,8 +2193,19 @@ def annotate_map(
         n_processors=processes,
         min_counts=min_counts,
         mouse_region_step=_mouse_region_step_label(config),
+        panel_status=panel_status,
+        panel_reasons=list(panel_reasons),
         thresholds=config.thresholds.model_dump(mode="json"),
     )
+    if refused:
+        logger.warning(
+            "%s %s: panel refused for %s, mapped anyway on the genes that "
+            "resolve (trust refused, advisory): %s",
+            pair_id,
+            segmentation,
+            ", ".join(sorted(refused)),
+            "; ".join(panel_reasons) or "no reason recorded",
+        )
     requests = _section_region_requests(
         [sample.sample_id for sample in samples],
         config,
@@ -2274,7 +2306,8 @@ def _map_sample(
     if not applicable:
         if panel_refused:
             logger.warning(
-                "%s: the %s panel was refused; the sample is not mapped",
+                "%s: the %s panel has no resolved gene (unmappable); the "
+                "sample is not mapped",
                 sample.sample_id,
                 sample.platform,
             )
@@ -3434,25 +3467,33 @@ def load_required(
 ) -> RequiredBundles:
     """Read ``required_bundles.json`` of an ``ANNOTATE_PANEL`` output.
 
+    A refused panel with bundles is returned either way: since the
+    always-label plan (M2) it is mapped on the genes that resolve and the
+    refusal is advisory. Only a panel with nothing to map (no annotation
+    bundle: no resolved gene) needs ``allow_refused``.
+
     Args:
         panel_dir: The directory.
-        allow_refused: Return a refused panel instead of raising (pipeline
-            runs, which record the refusal with ``write_refused_manifest``).
+        allow_refused: Return a panel with nothing to map instead of raising
+            (pipeline runs, which record it with ``write_refused_manifest``).
 
     Returns:
         The required bundles.
 
     Raises:
-        MapError: If the directory has none, or the panel was refused and
-            ``allow_refused`` is false.
+        MapError: If the directory has none, or the panel has nothing to map
+            and ``allow_refused`` is false.
     """
     path = Path(panel_dir) / REQUIRED_BUNDLES_FILE
     if not path.is_file():
         raise MapError(f"{path} is missing (run merxen annotation-panel first)")
     required = RequiredBundles.model_validate_json(path.read_text(encoding="utf-8"))
-    if required.status != "ok" and not allow_refused:
+    if not required.has_annotation_bundle() and not allow_refused:
         raise MapError(
-            f"the panel of {required.pair_id} {required.segmentation} was refused: "
+            f"the panel of {required.pair_id} {required.segmentation} has nothing "
+            "to map (unmappable: "
+            + (", ".join(required.unmappable) or "no annotation bundle")
+            + "): "
             + "; ".join(required.reasons)
         )
     return required
@@ -3485,14 +3526,16 @@ def write_refused_manifest(
     segmentation: str | None,
     n_processors: int | None = None,
 ) -> MapManifest:
-    """Record a refused panel: ``map_manifest.json`` without any run.
+    """Record a panel with nothing to map: ``map_manifest.json`` without runs.
 
-    A refused panel is a data-quality outcome, not an infrastructure error
-    (plan §3.1 failure semantics): MAP maps nothing and writes this manifest,
-    and RESOLVE (M4) writes statuses only.
+    An unmappable panel (no resolved gene, so no annotation bundle) is a
+    data-quality outcome, not an infrastructure error (plan §3.1 failure
+    semantics): MAP maps nothing and writes this manifest, and RESOLVE writes
+    the status ``unmappable``. Since the always-label plan (M2) a refused
+    panel with a resolved gene has bundles and is mapped instead.
 
     Args:
-        required: The refused ``required_bundles.json``.
+        required: The ``required_bundles.json`` without annotation bundle.
         config: The annotation config, coupled to the clustering
             ``min_counts``.
         output_dir: ``annotation_map_out``.
@@ -3504,12 +3547,12 @@ def write_refused_manifest(
         The written manifest.
 
     Raises:
-        MapError: If the panel was not refused.
+        MapError: If the panel has an annotation bundle (it is mapped).
     """
     from merxen.annotation.mapmycells_engine import installed_ctm_version
 
-    if required.status != "refused":
-        raise MapError("write_refused_manifest needs a refused panel")
+    if required.has_annotation_bundle():
+        raise MapError("write_refused_manifest needs a panel with nothing to map")
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     manifest = MapManifest(
@@ -3525,12 +3568,13 @@ def write_refused_manifest(
         mouse_region_step=_mouse_region_step_label(config),
         panel_status="refused",
         panel_reasons=list(required.reasons),
+        unmappable_panels=list(required.unmappable),
         thresholds=config.thresholds.model_dump(mode="json"),
         wall_time_s=0.0,
     )
     manifest.write(output / MAP_MANIFEST_NAME)
     logger.warning(
-        "%s %s: panel refused, nothing mapped: %s",
+        "%s %s: panel unmappable (no resolved gene), nothing mapped: %s",
         manifest.pair_id,
         manifest.segmentation,
         "; ".join(required.reasons) or "no reason recorded",
@@ -4297,15 +4341,25 @@ def sample_panel_provenance(
 
 
 def refused_trust(
-    reference_id: str, species: Species, panel_hash: str, reasons: Sequence[str]
+    reference_id: str,
+    species: Species,
+    panel_hash: str,
+    reasons: Sequence[str],
+    *,
+    code: str = "panel_refused",
 ) -> TrustDecision:
-    """Return a refused primary trust decision (MAP skipped a refused panel).
+    """Return a refused primary trust decision (no primary run).
+
+    Since the always-label plan (M2) MAP maps a refused panel that has a
+    resolved gene, so this applies to an unmappable panel (no resolved gene,
+    ``code="panel_unmappable"``) or a MAP output without a primary run.
 
     Args:
         reference_id: The primary reference.
         species: Species.
         panel_hash: The sample's declared panel hash.
         reasons: The panel's refusal reasons.
+        code: The reasons' code.
 
     Returns:
         The decision (state ``refused``).
@@ -4319,14 +4373,129 @@ def refused_trust(
         panel_hash=panel_hash,
         state="refused",
         reasons=tuple(
-            TrustReason(code="panel_refused", detail=str(reason))
+            TrustReason(code=code, detail=str(reason))
             for reason in (reasons or ["the panel was refused before mapping"])
         ),
     )
 
 
+def sample_panel_refusals(record: MapSampleRecord, manifest: MapManifest) -> list[str]:
+    """Return the refusal reasons of a sample's own panel.
+
+    ``required_bundles.json`` records each refused panel as
+    ``"<name>: <reason>"``; a ``per_platform`` platform panel is named after
+    its platform, so a sample keeps the reasons of its platform when there
+    are any, and every reason otherwise (intersection or single-sample
+    panels).
+
+    Args:
+        record: The sample's ``map_manifest.json`` record.
+        manifest: The MAP manifest.
+
+    Returns:
+        The reasons (empty when the sample's panel was not refused).
+    """
+    if record.panel_status != "refused":
+        return []
+    reasons = list(manifest.panel_reasons)
+    own = [
+        reason
+        for reason in reasons
+        if reason.split(":", 1)[0].strip().upper() == record.platform.upper()
+    ]
+    return own or reasons or [f"the {record.platform} panel was refused"]
+
+
+def primary_trust_without_run(
+    reference_id: str,
+    species: Species,
+    record: MapSampleRecord,
+    manifest: MapManifest,
+) -> TrustDecision:
+    """Return the primary trust of a sample MAP did not map (M2).
+
+    Args:
+        reference_id: The primary reference.
+        species: Species.
+        record: The sample's record (a placeholder for an unmapped pair).
+        manifest: The MAP manifest.
+
+    Returns:
+        ``refused_trust`` with ``panel_unmappable`` reasons when the panel had
+        no resolved gene, else ``panel_refused`` ones.
+    """
+    reasons = sample_panel_refusals(record, manifest) or list(manifest.panel_reasons)
+    unmappable = set(manifest.unmappable_panels)
+    platform_panels = {"merscope", "xenium"}
+    # A per_platform pair names its platform panels after the platform; any
+    # other unmappable annotation panel is the sample's only one.
+    own = record.platform.lower() in unmappable or bool(unmappable - platform_panels)
+    if unmappable and own:
+        names = ", ".join(sorted(unmappable))
+        return refused_trust(
+            reference_id,
+            species,
+            record.declared_panel_hash,
+            [f"no resolved gene on panel {names}: nothing mapped", *reasons],
+            code="panel_unmappable",
+        )
+    return refused_trust(
+        reference_id,
+        species,
+        record.declared_panel_hash,
+        reasons or [f"sample panel status {record.panel_status}: no primary run"],
+    )
+
+
+def with_panel_refusal(
+    trust: TrustDecision, record: MapSampleRecord, manifest: MapManifest
+) -> TrustDecision:
+    """Return a mapped primary's trust, ``refused`` when its panel was.
+
+    Always-label plan, M2: a refused panel is mapped on the genes that
+    resolve, and RESOLVE keeps its labels, but the primary's trust must stay
+    ``refused`` (the advisory gate fails with ``panel_refused`` and the
+    strict view blocks every level) even where the run's diagnostics alone
+    would give the family's trust (e.g. without the panel report's gene-ID
+    diagnostics).
+
+    It applies over a ``trust_overrides`` decision too: a replay of a
+    refused panel's sample must not regain the family's trust.
+
+    Args:
+        trust: The run's decision (``trust_for_run`` or an override).
+        record: The sample's ``map_manifest.json`` record.
+        manifest: The MAP manifest.
+
+    Returns:
+        ``trust`` itself, or a copy with state ``refused`` and a
+        ``panel_refused`` reason per refusal.
+    """
+    from merxen.annotation.diagnostics import TrustReason
+
+    refusals = sample_panel_refusals(record, manifest)
+    if not refusals or trust.state == "refused":
+        return trust
+    # As trust_state: only a validated decision carries a validation basis
+    # and the simulation level records.
+    return trust.model_copy(
+        update={
+            "state": "refused",
+            "validation_basis": None,
+            "level_records": (),
+            "reasons": (
+                *trust.reasons,
+                *(
+                    TrustReason(code="panel_refused", detail=reason)
+                    for reason in refusals
+                ),
+            ),
+        }
+    )
+
+
 def refused_sample_record(loaded: LoadedSample, fingerprint: str) -> MapSampleRecord:
-    """Return the manifest record of a sample MAP skipped (refused panel).
+    """Return the manifest record of a sample MAP skipped (unmappable panel).
 
     Args:
         loaded: The sample's counts.
@@ -5083,18 +5252,20 @@ def pair_has_both_platforms(platforms: Iterable[str]) -> bool:
 
 
 def qc_lowers_resolution(effects: QcEffects, gate_level: str) -> bool:
-    """Whether QC effects change what ``resolve_human`` decides.
+    """Whether QC effects change what an enforced ``resolve_human`` decides.
 
     A gate cap more severe than the QC-free gate level or a withheld level
-    needs the second pass; warnings, report-only outcomes and withheld pair
-    statistics only change the gate's reasons or the pair record.
+    changes the strict pass (the ``*_strict`` columns) and the advisory
+    ``qc_dataset_max_level``; warnings, report-only outcomes and withheld
+    pair statistics only change the gate's reasons or the pair record. The
+    labels themselves never change (label table version 2).
 
     Args:
         effects: The dataset's QC effects.
         gate_level: The QC-free run's gate level.
 
     Returns:
-        Whether the second pass is needed.
+        Whether the strict pass differs from the QC-free one.
     """
     from merxen.annotation.real_qc import gate_severity
 
@@ -5102,6 +5273,33 @@ def qc_lowers_resolution(effects: QcEffects, gate_level: str) -> bool:
         return True
     cap = effects.gate_cap
     return cap is not None and gate_severity(cap) > gate_severity(gate_level)
+
+
+def strict_summary(strict: HumanResolution | MouseResolution) -> dict[str, Any]:
+    """Return the resolve summary's ``strict`` block (label table version 2).
+
+    What the dataset gate, panel trust and real-data QC would have left had
+    they been enforced (the ``*_strict`` columns): the advisory level, the
+    deepest level they support and the strict final levels of table cells.
+
+    Args:
+        strict: The strict pass (``enforce_dataset_gate``).
+
+    Returns:
+        ``qc_dataset_level``, ``qc_dataset_max_level`` and
+        ``final_level_counts``.
+    """
+    table = strict.in_table
+    values, counts = np.unique(
+        np.asarray(strict.final_level[table], dtype=str), return_counts=True
+    )
+    return {
+        "qc_dataset_level": str(strict.gate.level),
+        "qc_dataset_max_level": str(strict.max_level),
+        "final_level_counts": {
+            str(value): int(count) for value, count in zip(values, counts, strict=True)
+        },
+    }
 
 
 def human_marker_referee_signal(
@@ -5686,22 +5884,26 @@ def resolve_human_sample(
     trust: TrustDecision | None
     secondary_trust: TrustDecision | None = None
     if primary is None:
-        trust = overrides.get(primary_id) or refused_trust(
-            primary_id,
-            species,
-            record.declared_panel_hash,
-            manifest.panel_reasons
-            or [f"sample panel status {record.panel_status}: no primary run"],
+        trust = overrides.get(primary_id) or primary_trust_without_run(
+            primary_id, species, record, manifest
         )
     else:
         panel = panels.get(str(primary.record.panel_hash))
-        trust = overrides.get(primary.record.reference_id) or trust_for_run(
-            primary, panel, config, panel_report=panel_report
+        trust = with_panel_refusal(
+            overrides.get(primary.record.reference_id)
+            or trust_for_run(primary, panel, config, panel_report=panel_report),
+            record,
+            manifest,
         )
     if secondary is not None:
         panel = panels.get(str(secondary.record.panel_hash))
-        secondary_trust = overrides.get(secondary.record.reference_id) or trust_for_run(
-            secondary, panel, config, panel_report=panel_report
+        # A refused panel refuses the SEA-AD second vote too (M2): its calls
+        # are mapped and written (mmc_seaad_*) but stay out of the vote (O4).
+        secondary_trust = with_panel_refusal(
+            overrides.get(secondary.record.reference_id)
+            or trust_for_run(secondary, panel, config, panel_report=panel_report),
+            record,
+            manifest,
         )
     elif overrides.get("seaad_mr_panel") is not None:
         secondary_trust = overrides["seaad_mr_panel"]
@@ -5868,13 +6070,14 @@ def resolve_human_sample(
 
     # Real-data QC (plan §8.8; M13 C15): every check is computed on the
     # QC-free resolution above (the run pre-registration NR1 compares with).
-    # Its lowering effects are then applied in a second pass (a gate cap
-    # before the leaf levels read the gate, a withheld level not emitted for
-    # the dataset), with the flags recomputed; warnings only join the gate.
-    # Paired concordance is scored by the pair step, once both sections are
-    # resolved.
+    # Since label table version 2 its effects never remove a label: a gate
+    # cap and a withheld level only lower the advisory gate and
+    # ``qc_dataset_max_level``, and are applied to the statuses in the strict
+    # pass below (the ``*_strict`` columns). Paired concordance is scored by
+    # the pair step, once both sections are resolved.
     is_paired = bool(paired)
     qc_result: RealQcResult | None = None
+    effects: QcEffects | None = None
     if config.real_qc.enabled:
         from merxen.annotation.real_qc import apply_qc_to_gate, real_data_qc
 
@@ -5905,11 +6108,13 @@ def resolve_human_sample(
                 f"{sample_id}: a real-data QC trust downgrade "
                 f"({effects.trust_cap}) is not wired into RESOLVE"
             )
-        if qc_lowers_resolution(effects, resolution.gate.level):
-            resolution = cs.resolve_human(inputs.calls, replace(settings, qc=effects))
-            flag_set = flags_of(resolution)
-        else:
-            resolution.gate = apply_qc_to_gate(resolution.gate, effects)
+        resolution.gate = apply_qc_to_gate(resolution.gate, effects)
+    strict = cs.resolve_human(
+        inputs.calls, replace(settings, qc=effects, enforce_dataset_gate=True)
+    )
+    # The labels do not change with QC; the advisory level and the deepest
+    # level the dataset supports take it in (the strict pass computes both).
+    resolution.max_level = strict.max_level
 
     # Soft composition (§5.5).
     soft_rows = (
@@ -6042,6 +6247,8 @@ def resolve_human_sample(
         **flag_set.columns,
         Columns.FLAG_NONNEURONAL_HIGH_DEPTH: version_7.flag,
         **soft_broad_columns(soft_rows, table_rows, n_objects),
+        **cs.strict_columns(strict),
+        **cs.dataset_qc_columns(resolution, trust=trust),
     }
     frame = pd.DataFrame(data, index=pd.RangeIndex(n_objects))
     engine_frames = []
@@ -6074,6 +6281,7 @@ def resolve_human_sample(
 
     # Provenance (§4.6).
     summary = resolution.summary()
+    summary["strict"] = strict_summary(strict)
     references: dict[str, ReferenceProvenance] = {}
     for item in (primary, secondary):
         if item is None:
@@ -6505,8 +6713,9 @@ def annotate_resolve(
             if item is not None
         ]
     elif manifest.panel_status == "refused" and given:
-        # A refused panel: MAP mapped nothing and recorded no sample, so
-        # RESOLVE writes statuses only for the given inputs (§3.1).
+        # An unmappable panel (no resolved gene; M2): MAP mapped nothing and
+        # recorded no sample, so RESOLVE writes the status unmappable for the
+        # given inputs (§3.1).
         inputs = [
             sample
             for sample in given.values()
@@ -6516,7 +6725,7 @@ def annotate_resolve(
     else:
         raise ResolveError(
             f"{root / MAP_MANIFEST_NAME} has no sample to resolve"
-            + (" (a refused panel needs the prepared inputs)" if not given else "")
+            + (" (an unmappable panel needs the prepared inputs)" if not given else "")
         )
     if mouse and require_registration:
         missing = sorted(
@@ -6757,6 +6966,10 @@ def annotate_resolve(
             "species": manifest.species,
             "map_manifest_sha256": file_sha256(map_manifest_path),
             "panel_status": manifest.panel_status,
+            # Always-label plan, M2: refusals are advisory (refused panels
+            # are mapped); an unmappable panel is the one case without labels.
+            "panel_reasons": list(manifest.panel_reasons),
+            "unmappable_panels": list(manifest.unmappable_panels),
             "panel_mode": panel_mode,
             "thresholds": config.thresholds.model_dump(mode="json"),
             "flags_config": config.flags.model_dump(mode="json"),

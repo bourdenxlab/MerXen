@@ -55,7 +55,7 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
@@ -76,6 +76,7 @@ from merxen.annotation.pipeline import (
     current_merxen_version,
     engine_columns,
     masked_objects,
+    primary_trust_without_run,
     real_qc_bundle_facts,
     real_qc_emitted_levels,
     real_qc_gene_complexity,
@@ -83,15 +84,16 @@ from merxen.annotation.pipeline import (
     real_qc_version_7_signals,
     record_real_qc,
     reference_provenance,
-    refused_trust,
     resolvability_provenance,
     resolve_threshold_values,
     round_share,
     run_for_role,
     sample_panel_provenance,
+    strict_summary,
     trust_for_run,
     version_7_outputs,
     vocab_lookup,
+    with_panel_refusal,
 )
 from merxen.annotation.schema import Columns, safe_token
 from merxen.annotation.vocab import (
@@ -874,17 +876,18 @@ def resolve_mouse_sample(
         )
     trust: TrustDecision | None
     if primary is None:
-        trust = overrides.get(primary_id) or refused_trust(
-            primary_id,
-            species,
-            record.declared_panel_hash,
-            manifest.panel_reasons
-            or [f"sample panel status {record.panel_status}: no primary run"],
+        trust = overrides.get(primary_id) or primary_trust_without_run(
+            primary_id, species, record, manifest
         )
     else:
+        # Always-label plan, M2: a refused panel is mapped; its trust stays
+        # refused (advisory: labels kept, strict view blocked).
         panel = panels.get(str(primary.record.panel_hash))
-        trust = overrides.get(primary.record.reference_id) or trust_for_run(
-            primary, panel, config, panel_report=panel_report
+        trust = with_panel_refusal(
+            overrides.get(primary.record.reference_id)
+            or trust_for_run(primary, panel, config, panel_report=panel_report),
+            record,
+            manifest,
         )
     inputs = mouse_calls_from_runs(
         loaded, primary, allow_fine_levels=config.thresholds.allow_fine_levels
@@ -1048,6 +1051,11 @@ def resolve_mouse_sample(
             "the mouse gate level cannot depend on the validated share"
         )
     gate = resolution.gate = final_gate
+    # The strict pass (label table version 2): the gate and a refused primary
+    # enforced as before, written as the ``*_strict`` columns only.
+    strict = cs.resolve_mouse(
+        inputs.calls, replace(settings, enforce_dataset_gate=True), final_gate
+    )
 
     # 4. Flags (§4.3).
     coherence = region_incoherent(
@@ -1206,6 +1214,8 @@ def resolve_mouse_sample(
         **flag_set.columns,
         Columns.FLAG_NONNEURONAL_HIGH_DEPTH: version_7.flag,
         **soft_class_columns(soft, table_rows, n_objects, class_names),
+        **cs.strict_columns(strict),
+        **cs.dataset_qc_columns(resolution, trust=trust),
     }
     frame = pd.DataFrame(data, index=pd.RangeIndex(n_objects))
     obs = pd.Index(loaded.obs_names.astype(str))
@@ -1250,6 +1260,7 @@ def resolve_mouse_sample(
 
     # Provenance (§4.6).
     summary = resolution.summary()
+    summary["strict"] = strict_summary(strict)
     references = {}
     resolvability = {}
     if primary is not None:

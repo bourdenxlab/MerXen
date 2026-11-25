@@ -275,7 +275,8 @@ def test_cortical_depth_reads_map_first_labels_and_gate(tmp_path: Path) -> None:
     assert annotations is not None
     broad = set(annotations["broad_class"].astype(str))
     assert {OLIGODENDROCYTE_LINEAGE, UNASSIGNED_LABEL} <= broad
-    assert set(annotations["subcluster_label"].astype(str)) == {UNRESOLVED_LABEL}
+    # The broad_only gate is advisory: the leaves are kept.
+    assert set(annotations["subcluster_label"].astype(str)) - {UNRESOLVED_LABEL}
 
     cells = _depth_cells(clustered).join(annotations)
     frame = _depth_violin_frame(

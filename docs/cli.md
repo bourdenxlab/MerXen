@@ -1002,7 +1002,7 @@ merxen annotate --species mouse \
 | `--declared-ids-file KEY=PATH` | Per sample id or platform, a panel file (e.g. the Xenium `gene_panel.json`) whose native gene IDs complete the declared features a clustered H5AD's `min_cells` filter dropped from `var`, so its declared panel hash is the prepared H5AD's; without it those features are resolved by symbol and listed as `declared_ids_incomplete`. |
 | `--platforms`, `--no-provisional` | Map only these platforms; skip the provisional labels. |
 | `--require-bundle-refs` | Map only the bundles given with `--bundle-ref` / `--bundle`; a missing one fails instead of being looked up in the store (what the pipeline task passes: it maps exactly the bundles `ANNOTATE_REFERENCE_PREP` resolved). A needed subset bundle is then only recorded as `requested`, never looked up in `--store`. The `wmb_region_share` ref is read by the mouse region step only (never mapped onto); a human run accepts and ignores it. |
-| `--allow-refused-panel` | For a refused panel (`required_bundles.json` status `refused`), write `map_manifest.json` with `panel_status: refused`, its reasons and no runs, and exit 0 (pipeline runs: RESOLVE then writes statuses only). Without it a refused panel is an error. |
+| `--allow-refused-panel` | For an unmappable panel (no resolved gene, so no bundle), write `map_manifest.json` with no runs and the unmappable panels, and exit 0 (pipeline runs: RESOLVE then writes the status `unmappable`). Without it such a panel is an error. A refused panel with a resolved gene is mapped either way, its refusal recorded (`panel_status: refused`; RESOLVE sets the primary's trust to `refused`, advisory). |
 | `--mouse-section-regions VALUE` | Mouse: `auto`, `none` or `;`-separated CCF divisions for every sample, or `SAMPLE_ID=VALUE` (repeatable). Default: each sample's `mouse_section_regions` in `--clustering-config` (the samplesheet column), else the annotation config's (`auto`). The region step needs the `wmb_region_share` bundle (`--bundle wmb_region_share=DIR`, its `--bundle-ref`, or the store) unless every sample is `none` ([Mouse region step](stages/annotation.md#mouse-region-step-m6)). |
 
 MapMyCells runs as a subprocess of `merxen.analysis.mapmycells_entrypoint`
@@ -1037,8 +1037,10 @@ pipeline task (which passes `--prepared-dir`, `--clustering-config`,
 `--no-alignment-lookup`). It reads each sample's counts from the
 manifest's inputs (or `--prepared-dir`), checks them against the sample
 fingerprint MAP recorded, applies resolvability-gated emission reweighted to
-the dataset's soft composition, the floors, the dataset gate, the
-degraded-mode consensus and the flags, and writes under `--out`. `--out`
+the dataset's soft composition, the floors, the dataset gate (advisory:
+recorded in the `qc_*` columns and enforced only in the `*_strict` columns,
+label table version 2), the degraded-mode consensus and the flags, and
+writes under `--out`. `--out`
 (and `--run-record`) never lie in a results tree: not in the MAP output or
 the panel directory, not below the results root of an input, of a published
 MAP output (`<root>/<pair>/<seg>/annotation_map/annotation_map_out`) or of a
@@ -1092,7 +1094,7 @@ merxen annotate-resolve \
 | `--alignment-dir DIR` | The pair's `align_out` (shared tissue mask); default `<results>/<pair>/alignment/align_out` of the inputs' results tree, when present. |
 | `--no-alignment-lookup` | Never take that default: the mask comes only from `--alignment-dir` (a pipeline task gets it from ALIGN's channel, never from a published file ALIGN may still be writing). |
 | `--annotation-config PATH`, `--species` | `AnnotationConfig` JSON; the species defaults to the manifest's (mouse: the M6 mouse rules and gate). |
-| `--registration-qc SID=PATH` | Registration G1: the QC stage's `*_registration_qc.json` or `*_qc_summary.csv` of the sample's segmentation (repeatable; a bare `PATH` for a single-sample MAP output). Mouse: gate G1; without a check G1 is not evaluated and the gate warns, and a pipeline task (`--require-bundle-refs`) refuses a mouse sample without one unless `--no-registration-qc` is given. Human: the real-data QC's registration G1 (its fail rule fails the dataset gate, `real_qc.registration_g1_effect`, since 2026-10-07; `warning` keeps it warn-only); without a check it is `not_evaluable`. |
+| `--registration-qc SID=PATH` | Registration G1: the QC stage's `*_registration_qc.json` or `*_qc_summary.csv` of the sample's segmentation (repeatable; a bare `PATH` for a single-sample MAP output). Mouse: gate G1; without a check G1 is not evaluated and the gate warns, and a pipeline task (`--require-bundle-refs`) refuses a mouse sample without one unless `--no-registration-qc` is given. Human: the real-data QC's registration G1 (its fail rule warns, `real_qc.registration_g1_effect = warning`, the default since 2026-11-24; `gate_failed` fails the dataset gate); without a check it is `not_evaluable`. Mouse G1's fail rule also only warns by default (`mouse_gate.g1_effect`). |
 | `--registration-qc-dir DIR` | Registration G1 (mouse and human, as above): a QC stage output directory (repeatable); a sample without `--registration-qc` takes `<sample_id lower-case>_registration_qc.json` found under it (else `_qc_summary.csv` with registration columns). Two matches of one name are an error. |
 | `--no-registration-qc` | Mouse: resolve without the registration check (G1 not evaluated; the gate warns). Goes without `--registration-qc` and `--registration-qc-dir`. |
 | `--mouse-g4-sections LIST` | Mouse gate G4: comma-separated MERFISH-638850 sections (e.g. `C57BL6J-638850.31,C57BL6J-638850.32,C57BL6J-638850.33` for hippocampal / thalamic levels like MS1 and MS2) whose pooled class shares are the composition window; default none (G4 not evaluated until M6b's AP estimate). |

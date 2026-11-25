@@ -1076,7 +1076,14 @@ def _add_m5_cases(
     refused_panel = panels / "refused_panel"
     refused_panel.mkdir(parents=True)
     (refused_panel / "required_bundles.json").write_text(
-        json.dumps({"status": "refused", "reasons": ["too few genes"], "bundles": []})
+        json.dumps(
+            {
+                "status": "refused",
+                "reasons": ["too few genes"],
+                "unmappable": ["intersection"],
+                "bundles": [],
+            }
+        )
     )
     ok_panel = panels / "ok_panel"
     ok_panel.mkdir()
@@ -1634,7 +1641,11 @@ def test_groovy_completion_summary(groovy_results: dict[str, dict[str, Any]]) ->
         "  failed annotations (no label tables; see the failed tasks above): M1:reseg"
         in summary.splitlines()
     )
-    assert "  refused panels: none" in summary.splitlines()
+    assert "  refused panels (labels kept, untrusted): none" in summary.splitlines()
+    assert (
+        "  unmappable panels (no resolved gene; nothing mapped, status unmappable): "
+        "none"
+    ) in summary.splitlines()
     assert (
         "  registration checks from published QC outputs "
         "(QC stage not run in this launch): none"
@@ -1854,6 +1865,8 @@ def test_groovy_run_record_lists_stopped_branches_and_panels(
     assert info["failed_annotations"] == ["P3:reseg"]
     assert info["failed_hierarchies"] == ["P4:reseg"]
     assert info["refused_panels"] == ["P1:proseg_hybrid (too few genes)"]
+    # Always-label plan, M2: a panel without any resolved gene is unmappable.
+    assert info["unmappable_panels"] == ["P1:proseg_hybrid (intersection)"]
     assert info["provisional_panels"] == ["P2:proseg_hybrid P2_MERSCOPE"]
     assert info["broad_only_panels"] == []
     # P5 (as HD2): RESOLVE records full from the panel; the broad-only

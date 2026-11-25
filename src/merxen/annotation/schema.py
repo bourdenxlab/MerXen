@@ -33,7 +33,10 @@ from merxen.annotation.vocab import (
 
 logger = logging.getLogger(__name__)
 
-LABEL_TABLE_VERSION: Final = 1
+# Version 2 (always-label plan, docs/plans/annotation-always-label-plan.md):
+# labels are kept whatever the dataset gate, panel trust or real-data QC say;
+# the gate's outcome moves to the ``*_strict`` and ``qc_*`` columns.
+LABEL_TABLE_VERSION: Final = 2
 LABEL_TABLE_SUFFIX: Final = "_celltype_labels.parquet"
 # Parquet schema-metadata key under which RESOLVE stores the provenance JSON
 # of a label table (read back by the map_first hierarchy and the report).
@@ -78,15 +81,20 @@ class CellStatus(StrEnum):
     NOT_ATTEMPTED_GATE = "not_attempted_gate"
     NOT_APPLICABLE = "not_applicable"
     LOW_COUNTS = "low_counts"
+    UNMAPPABLE = "unmappable"
 
 
 # Statuses whose level carries no assigned name (§4.1: null if not applicable
-# or not attempted).
+# or not attempted). ``not_attempted_gate`` occurs only in the
+# ``ct_<L>_status_strict`` columns since label table version 2;
+# ``unmappable``: the sample has no primary-reference call at all (the panel
+# shares no gene with the reference, or the primary was not mapped).
 NAMELESS_STATUSES: Final[frozenset[str]] = frozenset(
     {
         CellStatus.LOW_COUNTS,
         CellStatus.NOT_APPLICABLE,
         CellStatus.NOT_ATTEMPTED_GATE,
+        CellStatus.UNMAPPABLE,
     }
 )
 
@@ -258,6 +266,20 @@ class Columns:
     EXCLUDE_HARD: Final = "exclude_hard"
     DISCOVERY_CAUTION: Final = "discovery_caution"
 
+    # The strict view (label table version 2): what the dataset gate, panel
+    # trust and real-data QC would have left (the version-1 meaning).
+    STRICT_SUFFIX: Final = "_strict"
+    CT_FINAL_LEVEL_STRICT: Final = "ct_final_level_strict"
+    CT_FINAL_NAME_STRICT: Final = "ct_final_name_strict"
+    EXCLUDE_HARD_STRICT: Final = "exclude_hard_strict"
+
+    # Dataset-level QC, constant within a dataset (label table version 2).
+    QC_DATASET_LEVEL: Final = "qc_dataset_level"
+    QC_DATASET_MAX_LEVEL: Final = "qc_dataset_max_level"
+    QC_DATASET_WARNINGS: Final = "qc_dataset_warnings"
+    QC_PANEL_TRUST: Final = "qc_panel_trust"
+    QC_PREFIX: Final = "qc_"
+
     SOFT_BROAD_PREFIX: Final = "soft_broad_"
     SOFT_CLASS_PREFIX: Final = "soft_class_"
     SOFT_BROAD_UNALLOCATED: Final = "soft_broad_unallocated"
@@ -281,6 +303,45 @@ class Columns:
         if field not in LEVEL_FIELDS:
             raise ValueError(f"field must be one of {LEVEL_FIELDS}, got {field!r}")
         return f"ct_{level}_{field}"
+
+    @staticmethod
+    def strict_status(level: str) -> str:
+        """Return a level's strict status column, e.g. ``ct_broad_status_strict``.
+
+        Args:
+            level: Annotation level, e.g. ``"broad"``.
+
+        Returns:
+            ``f"ct_{level}_status_strict"``.
+        """
+        return f"ct_{level}_status{Columns.STRICT_SUFFIX}"
+
+
+# The numeric dataset signals written per cell (``qc_<key>``), per species:
+# the human dataset gate's inputs and the mouse gate's G1-G5 signals
+# (``mouse_gate.MouseGateSignals.values``).
+QC_SIGNAL_KEYS: Final[dict[str, tuple[str, ...]]] = {
+    "human": ("frac_ge30", "broad_coverage_table", "broad_coverage_segmented"),
+    "mouse": (
+        "g1_density_ratio",
+        "g1_shift_um",
+        "g2_marker_consistency",
+        "g3_implausible_share",
+        "g4_astro_epen_points",
+        "g4_immune_points",
+        "g5_spillover_rate",
+    ),
+}
+# ``qc_panel_trust`` values: the trust state, with the validation basis for a
+# validated panel; ``unknown`` when no trust decision was made.
+QC_PANEL_TRUST_VALUES: Final[tuple[str, ...]] = (
+    "validated_real",
+    "validated_simulation",
+    "provisional",
+    "broad_only",
+    "refused",
+    "unknown",
+)
 
 
 ColumnKind = Literal[
@@ -307,6 +368,8 @@ class ColumnSpec:
         categories: Allowed values, or ``None`` for any value.
         value_range: Inclusive ``(low, high)`` for numeric columns, NaN
             allowed when ``nullable``.
+        optional: Checked when present, not required (a column added in a
+            later label table version; an older table still validates).
     """
 
     name: str
@@ -314,6 +377,7 @@ class ColumnSpec:
     nullable: bool = False
     categories: tuple[str, ...] | None = None
     value_range: tuple[float, float] | None = None
+    optional: bool = False
 
 
 def branch_categories(species: Species) -> tuple[str, ...]:
@@ -494,7 +558,54 @@ def column_specs(
             ColumnSpec(Columns.REGION_COHERENCE, "float32", True, value_range=score),
             ColumnSpec(Columns.FLAG_ASTRO_LOWCOUNT, "bool"),
         ]
-    return {spec.name: spec for spec in [*identity, *per_level, *final, *flags]}
+    statuses = tuple(status.value for status in CellStatus)
+    strict = [
+        *(
+            ColumnSpec(
+                Columns.strict_status(level),
+                "category",
+                categories=statuses,
+                optional=True,
+            )
+            for level in levels
+        ),
+        ColumnSpec(
+            Columns.CT_FINAL_LEVEL_STRICT,
+            "category",
+            categories=FINAL_LEVELS[species],
+            optional=True,
+        ),
+        ColumnSpec(Columns.CT_FINAL_NAME_STRICT, "category", optional=True),
+        ColumnSpec(Columns.EXCLUDE_HARD_STRICT, "bool", optional=True),
+    ]
+    dataset_qc = [
+        ColumnSpec(
+            Columns.QC_DATASET_LEVEL, "category", categories=GATE_LEVELS, optional=True
+        ),
+        ColumnSpec(
+            Columns.QC_DATASET_MAX_LEVEL,
+            "category",
+            categories=FINAL_LEVELS[species],
+            optional=True,
+        ),
+        ColumnSpec(Columns.QC_DATASET_WARNINGS, "category", optional=True),
+        ColumnSpec(
+            Columns.QC_PANEL_TRUST,
+            "category",
+            categories=QC_PANEL_TRUST_VALUES,
+            optional=True,
+        ),
+        *(
+            ColumnSpec(
+                f"{Columns.QC_PREFIX}{key}", "float32", nullable=True, optional=True
+            )
+            for key in QC_SIGNAL_KEYS[species]
+        ),
+    ]
+    return {
+        spec.name: spec
+        for spec in [*identity, *per_level, *final, *flags, *strict, *dataset_qc]
+    }
 
 
 class LabelTableError(ValueError):
@@ -594,7 +705,7 @@ def _consistency_problems(
         if bool((nameless & named).any()):
             problems.append(
                 f"{level}: a name is set where the status is "
-                "low_counts / not_applicable / not_attempted_gate"
+                "low_counts / not_applicable / not_attempted_gate / unmappable"
             )
     final_level = df[Columns.CT_FINAL_LEVEL].astype(str).to_numpy()
     final_name = df[Columns.CT_FINAL_NAME].astype(str).to_numpy()
@@ -711,7 +822,9 @@ def validate_label_table(
     missing = [
         name
         for name in specs
-        if name not in df.columns and name not in OPTIONAL_CONTRACT_COLUMNS
+        if name not in df.columns
+        and name not in OPTIONAL_CONTRACT_COLUMNS
+        and not specs[name].optional
     ]
     if missing:
         problems.append(f"missing columns {missing}")

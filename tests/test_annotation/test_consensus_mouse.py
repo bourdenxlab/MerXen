@@ -90,6 +90,7 @@ def resolve(
     class_min_corr: float | None = None,
     trust_state: str = "validated_real",
     thresholds: AnnotationThresholds | None = None,
+    enforce: bool = False,
 ) -> cs.MouseResolution:
     trust = make_trust(trust_state, species="mouse")
     limits = thresholds or AnnotationThresholds()
@@ -111,6 +112,7 @@ def resolve(
         trust=trust,
         class_min_corr=class_min_corr,
         allow_fine_levels=limits.allow_fine_levels,
+        enforce_dataset_gate=enforce,
     )
     return cs.resolve_mouse(calls_of(cells), settings, verdict or gate())
 
@@ -205,12 +207,48 @@ def test_class_correlation_floor_is_a_low_confidence_check(
     assert floored.summary()["class_min_corr"] == 0.40
 
 
-def test_failed_gate_blocks_every_level_and_excludes_every_cell(
+def failed_gate() -> Any:
+    """A mouse gate verdict that fails on G2 (marker consistency 0.5)."""
+    failed = gate(
+        referee=MarkerReferee(
+            consistency=0.5, n_pseudo_confident=500, n_cells=600, markers={}
+        )
+    )
+    assert failed.level == "failed"
+    return failed
+
+
+def test_failed_gate_keeps_every_label(make_trust: MakeTrust) -> None:
+    """Always label: the failed gate is recorded, every level is resolved."""
+    result = resolve([Cell(), ASTRO, Cell(counts=5)], make_trust, verdict=failed_gate())
+    assert not result.enforced
+    assert statuses(result, 0) == {
+        "broad": "confident",
+        "class": "confident",
+        "nt": "confident",
+        "subclass": "confident",
+    }
+    assert statuses(result, 1)["subclass"] == "confident"
+    assert statuses(result, 2)["class"] == "low_counts"
+    assert result.final_level.tolist() == ["subclass", "subclass", "none"]
+    assert result.final_name.tolist()[:2] == ["007 L2/3 IT CTX Glut", "319 Astro-TE NN"]
+    # exclude_hard is cell-intrinsic: only the off-table cell.
+    assert result.flags[Columns.EXCLUDE_HARD].tolist() == [False, False, True]
+    assert result.gate.level == "failed"
+    assert result.max_level == "none"
+    assert result.summary()["gate"]["level"] == "failed"
+
+
+def test_failed_gate_blocks_every_level_and_excludes_every_cell_in_the_strict_pass(
     make_trust: MakeTrust,
 ) -> None:
-    failed = gate(registration=RegistrationSignal(density_ratio=1.2, shift_um=114.0))
-    assert failed.level == "failed"
-    result = resolve([Cell(), ASTRO, Cell(counts=5)], make_trust, verdict=failed)
+    result = resolve(
+        [Cell(), ASTRO, Cell(counts=5)],
+        make_trust,
+        verdict=failed_gate(),
+        enforce=True,
+    )
+    assert result.enforced
     for index in (0, 1):
         assert set(statuses(result, index).values()) == {"not_attempted_gate"}
     assert statuses(result, 2)["class"] == "low_counts"
@@ -219,25 +257,94 @@ def test_failed_gate_blocks_every_level_and_excludes_every_cell(
     assert result.summary()["gate"]["level"] == "failed"
 
 
-def test_broad_only_trust_blocks_the_leaf(make_trust: MakeTrust) -> None:
-    verdict = evaluate_mouse_gate(
+def broad_only_verdict(make_trust: MakeTrust) -> Any:
+    """A mouse gate verdict capped at broad_only by the panel's trust."""
+    return evaluate_mouse_gate(
         MouseGateSignals(registration=RegistrationSignal(2.9, 0.0)),
         MouseGateConfig(),
         trust=make_trust("broad_only", species="mouse"),
     )
+
+
+def test_broad_only_trust_keeps_the_leaf(make_trust: MakeTrust) -> None:
+    """Always label: a broad-only panel's subclass calls are kept."""
+    verdict = broad_only_verdict(make_trust)
     result = resolve([Cell()], make_trust, verdict=verdict, trust_state="broad_only")
+    assert result.gate.level == "broad_only"
+    assert result.max_level == "nt"
+    assert statuses(result)["class"] == "confident"
+    assert statuses(result)["subclass"] == "confident"
+    assert result.levels["subclass"].name[0] == "007 L2/3 IT CTX Glut"
+    assert result.final_level.tolist() == ["subclass"]
+
+
+def test_broad_only_trust_blocks_the_leaf_in_the_strict_pass(
+    make_trust: MakeTrust,
+) -> None:
+    verdict = broad_only_verdict(make_trust)
+    result = resolve(
+        [Cell()], make_trust, verdict=verdict, trust_state="broad_only", enforce=True
+    )
     assert statuses(result)["class"] == "confident"
     assert statuses(result)["subclass"] == "not_attempted_gate"
     assert result.final_level.tolist() == ["nt"]
 
 
 def test_no_call_and_refused_primary(make_trust: MakeTrust) -> None:
+    """A cell without a call is low confidence; a refused primary keeps its calls."""
     result = resolve([Cell(cls=None, broad=None, nt=None, subclass=None)], make_trust)
     assert statuses(result)["broad"] == "low_confidence"
     assert result.consensus_tier.tolist() == [-1]
     refused = resolve([Cell()], make_trust, trust_state="refused")
+    assert statuses(refused)["class"] == CellStatus.CONFIDENT.value
+    assert refused.final_level.tolist() == ["subclass"]
+    assert refused.consensus_tier.tolist() == [1]
+    assert refused.max_level == "none"
+
+
+def test_a_refused_primary_is_not_attempted_in_the_strict_pass(
+    make_trust: MakeTrust,
+) -> None:
+    refused = resolve([Cell()], make_trust, trust_state="refused", enforce=True)
     assert statuses(refused)["class"] == CellStatus.NOT_ATTEMPTED_GATE.value
     assert refused.consensus_tier.tolist() == [-1]
+
+
+@pytest.mark.parametrize(
+    ("enforce", "expected"),
+    [(False, CellStatus.UNMAPPABLE), (True, CellStatus.NOT_ATTEMPTED_GATE)],
+    ids=["lenient", "strict"],
+)
+def test_without_primary_calls_table_cells_are_unmappable(
+    make_trust: MakeTrust, enforce: bool, expected: CellStatus
+) -> None:
+    """No WMB call at all: ``unmappable`` (strict: ``not_attempted_gate``)."""
+    base = calls_of([Cell(), Cell(counts=5)])
+    calls = cs.MouseCalls(
+        total_counts=base.total_counts, in_table=base.in_table, wmb=None
+    )
+    trust = make_trust("validated_real", species="mouse")
+    limits = AnnotationThresholds()
+    emission = th.EmissionPlan(species="mouse", thresholds=limits, trust=trust)
+    floors = th.FloorPlan.build(
+        species="mouse", platform="MERSCOPE", hard_floor=10, trust=trust
+    )
+    settings = cs.MouseResolveSettings(
+        platform="MERSCOPE",
+        min_counts=10,
+        emission=emission,
+        floors=floors,
+        thresholds=limits,
+        trust=trust,
+        enforce_dataset_gate=enforce,
+    )
+    result = cs.resolve_mouse(calls, settings, gate())
+    assert set(statuses(result, 0).values()) == {expected.value}
+    assert all(values.name[0] is None for values in result.levels.values())
+    assert statuses(result, 1)["class"] == "low_counts"
+    assert result.final_level.tolist() == ["none", "none"]
+    assert result.consensus_tier.tolist() == [-1, -1]
+    assert result.max_level == "none"
 
 
 def test_supertype_is_report_only(make_trust: MakeTrust) -> None:
@@ -471,6 +578,7 @@ def random_mouse_calls(rng: np.random.Generator, n: int) -> cs.MouseCalls:
     )
 
 
+@pytest.mark.parametrize("enforce", [False, True], ids=["lenient", "strict"])
 @pytest.mark.parametrize("seed", [0, 1, 2])
 @pytest.mark.parametrize("constraint", PROMOTION_CONSTRAINTS)
 def test_promotion_by_simulation_never_changes_what_resolve_mouse_emits(
@@ -478,13 +586,16 @@ def test_promotion_by_simulation_never_changes_what_resolve_mouse_emits(
     make_decisions: Callable[..., Any],
     constraint: str,
     seed: int,
+    enforce: bool,
 ) -> None:
     """Provisional -> simulation-validated trust: only validation marks change.
 
     The trust decisions come from ``trust_state`` before and after a gate-P
     PR lists the family; the gate verdict, the class correlation floor
     (``mouse_resolve.class_corr_floor``), the emission plan and the floors
-    are derived from each the way mouse RESOLVE derives them.
+    are derived from each the way mouse RESOLVE derives them. This holds in
+    the always-label pass and in the strict pass; only the strict pass
+    blocks the leaf of a broad-only dataset.
     """
     from merxen.annotation.config import AnnotationConfig
     from merxen.annotation.mouse_resolve import class_corr_floor
@@ -538,6 +649,7 @@ def test_promotion_by_simulation_never_changes_what_resolve_mouse_emits(
             trust=trust,
             class_min_corr=corr_floor,
             allow_fine_levels=True,
+            enforce_dataset_gate=enforce,
         )
         verdict = evaluate_mouse_gate(signals, MouseGateConfig(), trust=trust)
         results.append(cs.resolve_mouse(calls, settings, verdict))
@@ -565,7 +677,38 @@ def test_promotion_by_simulation_never_changes_what_resolve_mouse_emits(
         assert before.gate.warning_reasons == after.gate.warning_reasons
     if constraint in ("no_self_map", "broad_only"):
         assert after.gate.level == "broad_only"
-        assert set(after.levels["subclass"].status[table]) <= {
-            "not_attempted_gate",
-            "low_counts",
-        }
+        leaf = set(after.levels["subclass"].status[table])
+        if enforce:
+            assert leaf <= {"not_attempted_gate", "low_counts"}
+        else:
+            assert "not_attempted_gate" not in leaf
+            assert "confident" in leaf
+
+
+def test_mouse_dataset_qc_columns_write_the_gate_signals(
+    make_trust: MakeTrust,
+) -> None:
+    """The mouse G1-G5 signals become ``qc_<signal>`` columns (label table v2)."""
+    trust = make_trust("validated_real", species="mouse")
+    result = resolve([Cell(), ASTRO], make_trust, verdict=failed_gate())
+    columns = cs.dataset_qc_columns(result, trust=trust)
+    assert set(columns[Columns.QC_DATASET_LEVEL].astype(str)) == {"failed"}
+    assert set(columns[Columns.QC_DATASET_MAX_LEVEL].astype(str)) == {"none"}
+    warnings = str(columns[Columns.QC_DATASET_WARNINGS][0])
+    assert any(token.endswith("_fail") for token in warnings.split(";"))
+    assert set(columns[Columns.QC_PANEL_TRUST].astype(str)) == {"validated_real"}
+    consistency = columns["qc_g2_marker_consistency"]
+    assert consistency.dtype == np.float32
+    assert consistency.tolist() == pytest.approx([0.5, 0.5])
+    assert columns["qc_g1_density_ratio"].tolist() == pytest.approx([2.9, 2.9])
+    assert np.isnan(columns["qc_g4_immune_points"]).all()
+
+
+def test_mouse_strict_columns_follow_the_strict_pass(make_trust: MakeTrust) -> None:
+    strict = resolve([Cell(), ASTRO], make_trust, verdict=failed_gate(), enforce=True)
+    columns = cs.strict_columns(strict)
+    assert set(columns[Columns.strict_status("subclass")].astype(str)) == {
+        "not_attempted_gate"
+    }
+    assert set(columns[Columns.CT_FINAL_LEVEL_STRICT].astype(str)) == {"none"}
+    assert columns[Columns.EXCLUDE_HARD_STRICT].all()

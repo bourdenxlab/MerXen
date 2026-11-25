@@ -80,10 +80,10 @@ def _good(**changes: Any) -> MouseGateSignals:
 TRUTH_TABLE: list[tuple[str, dict[str, Any], str, bool, dict[str, str]]] = [
     ("all pass", {}, "full", False, {}),
     (
-        "G1 ratio below 1.5 fails",
+        "G1 ratio below 1.5 trips the fail rule and only warns",
         {"registration": RegistrationSignal(density_ratio=1.19, shift_um=0.0)},
-        "failed",
-        False,
+        "full",
+        True,
         {"g1": "fail"},
     ),
     (
@@ -101,17 +101,17 @@ TRUTH_TABLE: list[tuple[str, dict[str, Any], str, bool, dict[str, str]]] = [
         {"g1": "warn"},
     ),
     (
-        "G1 shift above 5 um fails",
+        "G1 shift above 5 um trips the fail rule and only warns",
         {"registration": RegistrationSignal(density_ratio=2.9, shift_um=114.1)},
-        "failed",
-        False,
+        "full",
+        True,
         {"g1": "fail"},
     ),
     (
-        "G1 shift just above 5 um fails",
+        "G1 shift just above 5 um trips the fail rule and only warns",
         {"registration": RegistrationSignal(density_ratio=2.9, shift_um=6.0)},
-        "failed",
-        False,
+        "full",
+        True,
         {"g1": "fail"},
     ),
     (
@@ -262,12 +262,12 @@ TRUTH_TABLE: list[tuple[str, dict[str, Any], str, bool, dict[str, str]]] = [
         {"g3": "not_evaluated"},
     ),
     (
-        "invalid MS2 proseg_hybrid: G1 fails with a G4 warning",
+        "invalid MS2 proseg_hybrid: G1 trips and warns with a G4 warning",
         {
             "registration": RegistrationSignal(density_ratio=1.33, shift_um=114.1),
             "astro_epen_points": 16.9,
         },
-        "failed",
+        "full",
         True,
         {"g1": "fail", "g4": "warn"},
     ),
@@ -314,11 +314,37 @@ def test_mouse_gate_trust_caps_the_level_and_warns(
     assert any(reason.startswith("panel_provisional") for reason in provisional.reasons)
     # A failing signal is never lifted by trust.
     failed = evaluate_mouse_gate(
-        _good(registration=RegistrationSignal(density_ratio=1.0, shift_um=0.0)),
+        _good(referee=_referee(0.5)),
         CONFIG,
         trust=make_trust("validated_real", species="mouse"),
     )
     assert failed.level == "failed"
+
+
+@pytest.mark.parametrize(
+    "registration",
+    [
+        RegistrationSignal(density_ratio=1.24, shift_um=0.0),
+        RegistrationSignal(density_ratio=2.9, shift_um=114.1),
+    ],
+    ids=["sparse ratio", "shift"],
+)
+def test_mouse_gate_g1_effect_gate_failed_fails_the_dataset(
+    registration: RegistrationSignal,
+) -> None:
+    signals = _good(registration=registration)
+    warn_only = evaluate_mouse_gate(signals, CONFIG)
+    assert warn_only.level == "full" and warn_only.warning
+    assert any(
+        reason.startswith("g1_registration:") and "warn-only" in reason
+        for reason in warn_only.warning_reasons
+    )
+    strict = evaluate_mouse_gate(
+        signals, CONFIG.model_copy(update={"g1_effect": "gate_failed"})
+    )
+    assert strict.level == "failed"
+    assert strict.signal_status["g1"] == "fail"
+    assert any(reason.startswith("g1_registration:") for reason in strict.level_reasons)
 
 
 def _simulation_trust(make_trust: Callable[..., Any]) -> Any:

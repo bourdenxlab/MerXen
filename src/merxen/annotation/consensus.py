@@ -64,6 +64,15 @@ below 60 counts in the WHB-only mode (recorded). The likelihood-typer rows
 exist for the truth table only: by OD-B8 (decided 2026-09-27) no v1 or v1.1
 production path enables the LL vote.
 
+**Always label** (docs/plans/annotation-always-label-plan.md): by default
+no dataset-level condition removes a label. The dataset gate, the primary's
+trust state and real-data QC are evaluated and recorded (``gate``,
+``max_level``), but every level is resolved from the cell's own evidence;
+only a sample with no primary call at all leaves its table cells
+``unmappable``. ``enforce_dataset_gate`` on the settings applies them as
+before (label table version 1): the pipeline runs that pass too and writes
+it as the ``*_strict`` columns (``strict_columns``).
+
 When several checks fail, the status is the first in this order:
 ``low_counts`` > ``not_attempted_gate`` > ``not_applicable`` >
 ``implausible`` > ``parent_unresolved`` > ``below_floor`` >
@@ -77,6 +86,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final
@@ -96,7 +106,10 @@ from merxen.annotation.real_qc import (
     qc_withheld_levels,
 )
 from merxen.annotation.schema import (
+    GATE_LEVELS,
     NAMELESS_STATUSES,
+    QC_PANEL_TRUST_VALUES,
+    QC_SIGNAL_KEYS,
     CellStatus,
     Columns,
     meets_threshold,
@@ -145,6 +158,7 @@ _NOT_ATTEMPTED: Final[frozenset[str]] = frozenset(
         CellStatus.NOT_ATTEMPTED_GATE,
         CellStatus.NOT_APPLICABLE,
         CellStatus.PARENT_UNRESOLVED,
+        CellStatus.UNMAPPABLE,
     }
 )
 # LL labels that count as neurons (§5.3: "LL OtherNeuron counts as Neurons").
@@ -513,7 +527,13 @@ class HumanResolveSettings:
             cells become ``not_resolvable``), and the QC warning and level
             reasons join the gate's. The emission plan, the floor plan, the
             thresholds and trust are not touched. ``None``: no QC (the
-            QC-free run of pre-registration NR1).
+            QC-free run of pre-registration NR1). Without
+            ``enforce_dataset_gate`` only the gate cap and the warnings are
+            recorded (the advisory gate and ``max_level``).
+        enforce_dataset_gate: Apply the dataset gate, a refused primary and
+            real-data QC to the statuses (``not_attempted_gate``, withheld
+            levels, ``exclude_hard``), as label table version 1 did: the
+            strict pass. ``False`` (default): they are recorded only.
     """
 
     platform: str
@@ -531,6 +551,7 @@ class HumanResolveSettings:
     n_segmented: int | None = None
     allow_table_below_min_counts: bool = False
     qc: QcEffects | None = None
+    enforce_dataset_gate: bool = False
 
     def __post_init__(self) -> None:
         """Refuse QC effects ``resolve_human`` cannot apply.
@@ -672,6 +693,9 @@ class HumanResolution:
         emissions: The emission of every level (provenance).
         in_table: Table cells.
         floor_warnings: Levels whose floors follow the unknown-panel rule.
+        max_level: The deepest chain level the dataset's QC supports
+            (``dataset_max_level``; ``qc_dataset_max_level``).
+        enforced: The strict pass (``enforce_dataset_gate``).
     """
 
     levels: dict[str, LevelResult]
@@ -687,6 +711,8 @@ class HumanResolution:
     emissions: dict[str, LevelEmission]
     in_table: np.ndarray
     floor_warnings: list[str] = field(default_factory=list)
+    max_level: str = "supercluster"
+    enforced: bool = False
 
     def status(self, level: str) -> np.ndarray:
         """Return one level's statuses."""
@@ -1232,7 +1258,10 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
             int(below_min.sum()),
             settings.min_counts,
         )
+    enforce = settings.enforce_dataset_gate
     primary_refused = settings.trust is not None and settings.trust.state == "refused"
+    # A refused SEA-AD second vote stays out of the vote in both passes (plan
+    # O4); a refused primary keeps its calls unless the gate is enforced.
     sea_refused = (
         settings.secondary_trust is not None
         and settings.secondary_trust.state == "refused"
@@ -1243,7 +1272,7 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
             "The likelihood-typer vote is enabled; OD-B8 keeps it off in v1.1"
         )
     mode = degraded_mode(
-        whb=calls.whb is not None and not primary_refused,
+        whb=calls.whb is not None and not (enforce and primary_refused),
         sea=calls.sea is not None and not sea_refused,
         ll=use_ll,
     )
@@ -1283,7 +1312,7 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
     withheld = qc_withheld_levels(settings.qc, "human")
 
     def qc_emitted(level: str, em: LevelEmission) -> np.ndarray:
-        if level in withheld:
+        if enforce and level in withheld:
             return np.zeros(n, dtype=bool)
         return np.asarray(em.emitted, dtype=bool)
 
@@ -1406,7 +1435,8 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
     # (never raises it; ``real_qc.apply_qc_to_gate``).
     if settings.qc is not None:
         gate_first = apply_qc_to_gate(gate_first, settings.qc)
-    leaf_gated = np.full(n, not gate_first.attempts_leaf, dtype=bool) & table
+    leaf_gated = np.full(n, enforce and not gate_first.attempts_leaf, dtype=bool)
+    leaf_gated &= table
 
     # 4. Supercluster
     em = supercluster_em
@@ -1440,9 +1470,13 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
     builder = _StatusBuilder(n)
     builder.fail(low_counts, CellStatus.LOW_COUNTS)
     sea = calls.sea if use_sea else None
-    builder.fail(
-        np.full(n, sea is None, dtype=bool) | leaf_gated, CellStatus.NOT_ATTEMPTED_GATE
-    )
+    # No SEA-AD calls (not mapped, refused or disabled): ``unmappable``;
+    # the strict pass keeps version 1's ``not_attempted_gate``.
+    no_sea = np.full(n, sea is None, dtype=bool)
+    if enforce:
+        builder.fail(no_sea | leaf_gated, CellStatus.NOT_ATTEMPTED_GATE)
+    else:
+        builder.fail(no_sea, CellStatus.UNMAPPABLE)
     sea_names = sea.subclass.name if sea is not None else np.full(n, None, dtype=object)
     builder.fail(
         np.array([value is None for value in sea_names]), CellStatus.LOW_CONFIDENCE
@@ -1501,18 +1535,15 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
             extrapolated=em.extrapolated,
         )
 
-    # Statuses only without the primary, and nothing attempted when the gate
-    # fails (§4.2 not_attempted_gate; exclude_hard, §4.3).
-    blocked = table & (
-        np.full(n, not mode.primary_available, dtype=bool)
-        | np.full(n, gate_first.level == "failed", dtype=bool)
+    # Statuses only without the primary (``unmappable``; enforced:
+    # ``not_attempted_gate``, as when the gate fails; §4.2, exclude_hard §4.3).
+    blocked = _blocked(
+        table,
+        primary_available=mode.primary_available,
+        gate_failed=enforce and gate_first.level == "failed",
     )
     if blocked.any():
-        for result in levels.values():
-            result.status[blocked] = CellStatus.NOT_ATTEMPTED_GATE.value
-            result.name[blocked] = None
-            result.runner_up[blocked] = None
-            result.extrapolated[blocked] = False
+        _block(levels, blocked, enforce=enforce)
         cop_suppressed = cop_suppressed & ~blocked
 
     # ct_<L>_validated (§4.1) and the simulation-family gate warning.
@@ -1561,7 +1592,7 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
     if not mode.primary_available:
         tier[:] = TIER_NONE_INFORMATIVE
 
-    flags = _human_flags(chain, table, cop_suppressed, gate.level)
+    flags = _human_flags(chain, table, cop_suppressed, gate.level if enforce else None)
     extrapolated = np.logical_or.reduce(
         [result.extrapolated & result.confident for result in chain.values()]
     )
@@ -1579,9 +1610,17 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
         emissions=emissions,
         in_table=table,
         floor_warnings=floors.warnings(),
+        max_level=dataset_max_level(
+            "human",
+            gate.level,
+            primary_available=calls.whb is not None and not primary_refused,
+            withheld=withheld,
+        ),
+        enforced=enforce,
     )
     logger.info(
-        "resolve_human: mode %s, gate %s%s; confident share of %d table cells: %s",
+        "resolve_human%s: mode %s, gate %s%s; confident share of %d table cells: %s",
+        " (strict)" if enforce else "",
         mode.name,
         gate.level,
         " + warning" if gate.warning else "",
@@ -1595,14 +1634,88 @@ def resolve_human(calls: HumanCalls, settings: HumanResolveSettings) -> HumanRes
     return resolution
 
 
+def _blocked(
+    table: np.ndarray, *, primary_available: bool, gate_failed: bool
+) -> np.ndarray:
+    """Return the table cells no level is resolved for.
+
+    Args:
+        table: Table cells.
+        primary_available: The primary reference's calls are used.
+        gate_failed: The dataset gate failed and is enforced.
+
+    Returns:
+        Table cells when the primary is missing or an enforced gate failed.
+    """
+    return table & (not primary_available or gate_failed)
+
+
+def _block(
+    levels: Mapping[str, LevelResult], blocked: np.ndarray, *, enforce: bool
+) -> None:
+    """Blank the blocked cells at every level (in place).
+
+    Args:
+        levels: The level results.
+        blocked: Cells to blank.
+        enforce: The strict pass (``not_attempted_gate``); else
+            ``unmappable`` (no primary call to resolve).
+    """
+    status = (
+        CellStatus.NOT_ATTEMPTED_GATE.value if enforce else CellStatus.UNMAPPABLE.value
+    )
+    for result in levels.values():
+        result.status[blocked] = status
+        result.name[blocked] = None
+        result.runner_up[blocked] = None
+        result.extrapolated[blocked] = False
+
+
+def dataset_max_level(
+    species: str,
+    gate_level: str,
+    *,
+    primary_available: bool,
+    withheld: frozenset[str] | set[str] = frozenset(),
+) -> str:
+    """Return the deepest chain level the dataset's QC supports.
+
+    The level an enforced gate would let a cell reach (``qc_dataset_max_level``):
+    ``none`` when the gate failed or the primary is refused or missing; the
+    level above the leaf when the gate is ``broad_only``; above the first
+    withheld chain level (real-data QC); else the leaf.
+
+    Args:
+        species: ``"human"`` or ``"mouse"``.
+        gate_level: The (advisory) gate level.
+        primary_available: The primary is mapped and not refused.
+        withheld: Levels real-data QC withholds.
+
+    Returns:
+        A ``FINAL_LEVELS[species]`` value.
+    """
+    chain = FINAL_LEVELS[species]
+    if gate_level == "failed" or not primary_available:
+        return chain[0]
+    deepest = len(chain) - 1
+    if gate_level != "full":
+        deepest -= 1
+    for rank, level in enumerate(chain[1:], start=1):
+        if level in withheld:
+            deepest = min(deepest, rank - 1)
+            break
+    return chain[deepest]
+
+
 def _deepest_and_exclude(
-    chain: Mapping[str, LevelResult], table: np.ndarray, gate_level: str
+    chain: Mapping[str, LevelResult], table: np.ndarray, gate_level: str | None
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return each object's deepest attempted status and ``exclude_hard`` (§4.3).
 
     ``exclude_hard``: off-table objects, objects whose every level is
     ``implausible``, ``not_applicable`` or ``not_attempted_gate`` with at
-    least one ``implausible``, and every object when the gate failed.
+    least one ``implausible``, and every object when an enforced gate failed
+    (``gate_level`` is ``None`` when the gate is not enforced).
     """
     n = len(table)
     deepest = np.full(n, None, dtype=object)
@@ -1629,7 +1742,7 @@ def _human_flags(
     chain: Mapping[str, LevelResult],
     table: np.ndarray,
     cop_suppressed: np.ndarray,
-    gate_level: str,
+    gate_level: str | None,
 ) -> dict[str, np.ndarray]:
     """Return the status-mirroring flags and ``exclude_hard`` (§4.3)."""
     deepest, exclude_hard = _deepest_and_exclude(chain, table, gate_level)
@@ -1738,6 +1851,8 @@ class MouseResolveSettings:
             to real-data-validated families, §7.3).
         allow_fine_levels: Report the supertype level (OD-E4).
         allow_table_below_min_counts: As ``HumanResolveSettings``.
+        enforce_dataset_gate: As ``HumanResolveSettings``: the gate's level
+            and a refused primary block levels (the strict pass).
     """
 
     platform: str
@@ -1749,6 +1864,7 @@ class MouseResolveSettings:
     class_min_corr: float | None = None
     allow_fine_levels: bool = False
     allow_table_below_min_counts: bool = False
+    enforce_dataset_gate: bool = False
 
 
 @dataclass
@@ -1773,6 +1889,8 @@ class MouseResolution:
         in_table: Table cells.
         class_min_corr: The class correlation floor applied, if any.
         floor_warnings: Levels whose floors follow the unknown-panel rule.
+        max_level: As ``HumanResolution``.
+        enforced: As ``HumanResolution``.
     """
 
     levels: dict[str, LevelResult]
@@ -1787,6 +1905,8 @@ class MouseResolution:
     in_table: np.ndarray
     class_min_corr: float | None = None
     floor_warnings: list[str] = field(default_factory=list)
+    max_level: str = "subclass"
+    enforced: bool = False
 
     def status(self, level: str) -> np.ndarray:
         """Return one level's statuses."""
@@ -1896,9 +2016,11 @@ def resolve_mouse(
     (``MouseCalls.marker_unsupported``) is ``not_resolvable`` at its level.
 
     The gate (``mouse_gate.evaluate_mouse_gate``, label-free, computed
-    before the statuses) makes every level ``not_attempted_gate`` when
-    ``failed`` and the leaf levels when ``broad_only``. The status
-    precedence is the human one (module docstring).
+    before the statuses) is recorded; with ``enforce_dataset_gate`` it
+    makes every level ``not_attempted_gate`` when ``failed`` and the leaf
+    levels when ``broad_only`` (the strict pass). Without primary calls the
+    table cells are ``unmappable``. The status precedence is the human one
+    (module docstring).
 
     Args:
         calls: Per-object calls (every segmented object).
@@ -1922,8 +2044,9 @@ def resolve_mouse(
             int(below_min.sum()),
             settings.min_counts,
         )
+    enforce = settings.enforce_dataset_gate
     primary_refused = settings.trust is not None and settings.trust.state == "refused"
-    wmb = None if primary_refused else calls.wmb
+    wmb = None if enforce and primary_refused else calls.wmb
     class_name, class_raw, class_scores = _call_parts(
         None if wmb is None else wmb.klass, n
     )
@@ -2047,7 +2170,7 @@ def resolve_mouse(
     )
     nt_applicable = levels["nt"].status != CellStatus.NOT_APPLICABLE.value
     leaf_parent = np.where(nt_applicable, levels["nt"].confident, class_confident)
-    leaf_gated = np.full(n, not gate.attempts_leaf, dtype=bool) & table
+    leaf_gated = np.full(n, enforce and not gate.attempts_leaf, dtype=bool) & table
 
     # 4. Subclass.
     em = emit("subclass")
@@ -2116,17 +2239,15 @@ def resolve_mouse(
             extrapolated=em.extrapolated,
         )
 
-    # Nothing attempted without the primary or when the gate fails (§7.5).
-    blocked = table & (
-        np.full(n, wmb is None, dtype=bool)
-        | np.full(n, gate.level == "failed", dtype=bool)
+    # Nothing resolved without the primary, nor when an enforced gate fails
+    # (§7.5).
+    blocked = _blocked(
+        table,
+        primary_available=wmb is not None,
+        gate_failed=enforce and gate.level == "failed",
     )
     if blocked.any():
-        for result in levels.values():
-            result.status[blocked] = CellStatus.NOT_ATTEMPTED_GATE.value
-            result.name[blocked] = None
-            result.runner_up[blocked] = None
-            result.extrapolated[blocked] = False
+        _block(levels, blocked, enforce=enforce)
     if settings.trust is not None:
         for level, result in levels.items():
             result.validated = settings.trust.validated_mask(
@@ -2141,7 +2262,7 @@ def resolve_mouse(
     tier = np.where(informative, 1, TIER_NONE_INFORMATIVE).astype(np.int8)
     if wmb is None:
         tier[:] = TIER_NONE_INFORMATIVE
-    flags = _mouse_flags(chain, table, gate.level)
+    flags = _mouse_flags(chain, table, gate.level if enforce else None)
     extrapolated = np.logical_or.reduce(
         [result.extrapolated & result.confident for result in chain.values()]
     )
@@ -2158,10 +2279,17 @@ def resolve_mouse(
         in_table=table,
         class_min_corr=settings.class_min_corr,
         floor_warnings=floors.warnings(),
+        max_level=dataset_max_level(
+            "mouse",
+            gate.level,
+            primary_available=calls.wmb is not None and not primary_refused,
+        ),
+        enforced=enforce,
     )
     logger.info(
-        "resolve_mouse: gate %s%s; region-implausible class %d; confident share of "
-        "%d table cells: %s",
+        "resolve_mouse%s: gate %s%s; region-implausible class %d; confident share "
+        "of %d table cells: %s",
+        " (strict)" if enforce else "",
         gate.level,
         " + warning" if gate.warning else "",
         int((levels["class"].status == CellStatus.IMPLAUSIBLE.value).sum()),
@@ -2176,7 +2304,7 @@ def resolve_mouse(
 
 
 def _mouse_flags(
-    chain: Mapping[str, LevelResult], table: np.ndarray, gate_level: str
+    chain: Mapping[str, LevelResult], table: np.ndarray, gate_level: str | None
 ) -> dict[str, np.ndarray]:
     """Return the status-mirroring flags and ``exclude_hard`` of mouse (§4.3)."""
     deepest, exclude_hard = _deepest_and_exclude(chain, table, gate_level)
@@ -2187,3 +2315,149 @@ def _mouse_flags(
         Columns.FLAG_IMPLAUSIBLE: deepest == CellStatus.IMPLAUSIBLE.value,
         Columns.EXCLUDE_HARD: np.asarray(exclude_hard, dtype=bool),
     }
+
+
+# --------------------------------------------------------------------------
+# The strict view and the dataset QC columns (label table version 2)
+
+
+def strict_columns(strict: HumanResolution | MouseResolution) -> dict[str, Any]:
+    """Return the ``*_strict`` label-table columns of a strict pass.
+
+    Args:
+        strict: The resolution with ``enforce_dataset_gate`` (and, for human,
+            the real-data QC effects).
+
+    Returns:
+        ``ct_<L>_status_strict`` per level, ``ct_final_level_strict``,
+        ``ct_final_name_strict`` and ``exclude_hard_strict``.
+
+    Raises:
+        ValueError: If the resolution is not a strict pass.
+    """
+    if not strict.enforced:
+        raise ValueError("strict_columns needs a resolution with enforce_dataset_gate")
+    species = "human" if isinstance(strict, HumanResolution) else "mouse"
+    categories = [status.value for status in CellStatus]
+    columns: dict[str, Any] = {
+        Columns.strict_status(level): pd.Categorical(
+            result.status, categories=categories
+        )
+        for level, result in strict.levels.items()
+    }
+    columns[Columns.CT_FINAL_LEVEL_STRICT] = pd.Categorical(
+        strict.final_level, categories=list(FINAL_LEVELS[species])
+    )
+    columns[Columns.CT_FINAL_NAME_STRICT] = pd.Categorical(strict.final_name)
+    columns[Columns.EXCLUDE_HARD_STRICT] = np.asarray(
+        strict.flags[Columns.EXCLUDE_HARD], dtype=bool
+    )
+    return columns
+
+
+_TOKEN_PATTERN: Final = re.compile(r"[^a-z0-9]+")
+
+
+def reason_token(reason: str) -> str:
+    """Return the token of a gate reason (``code: detail`` -> ``code``).
+
+    Args:
+        reason: A gate level or warning reason.
+
+    Returns:
+        The reason's code in lower snake case, e.g. ``g1_registration``.
+    """
+    code = str(reason).split(":", 1)[0].strip().lower()
+    return _TOKEN_PATTERN.sub("_", code).strip("_") or "unspecified"
+
+
+def dataset_warning_tokens(
+    gate: GateVerdict | MouseGateVerdict, extra: Sequence[str] = ()
+) -> str:
+    """Return ``qc_dataset_warnings``: every gate reason as a token.
+
+    A reason that lowers the advisory level ends in ``_fail``; a warning
+    reason ends in ``_warn``. Tokens are sorted, unique and ``;``-joined.
+
+    Args:
+        gate: The (advisory) gate verdict.
+        extra: Further tokens (e.g. real-data QC effects).
+
+    Returns:
+        The joined tokens; empty when the dataset is clean.
+    """
+    tokens = {f"{reason_token(reason)}_fail" for reason in gate.level_reasons}
+    tokens |= {f"{reason_token(reason)}_warn" for reason in gate.warning_reasons}
+    tokens |= {str(token) for token in extra if str(token)}
+    return ";".join(sorted(tokens))
+
+
+def panel_trust_value(trust: TrustDecision | None) -> str:
+    """Return ``qc_panel_trust``: the trust state, with the validation basis.
+
+    Args:
+        trust: The primary's trust decision, if any.
+
+    Returns:
+        ``validated_real``, ``validated_simulation``, ``provisional``,
+        ``broad_only``, ``refused`` or ``unknown``.
+    """
+    if trust is None:
+        return "unknown"
+    if trust.state == "validated":
+        if trust.validation_basis == "simulation":
+            return "validated_simulation"
+        return "validated_real"
+    return str(trust.state)
+
+
+def dataset_qc_columns(
+    resolution: HumanResolution | MouseResolution,
+    *,
+    trust: TrustDecision | None,
+    extra_warnings: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Return the ``qc_*`` dataset columns (one value for every object).
+
+    Args:
+        resolution: The resolution whose (advisory) gate and ``max_level``
+            are written.
+        trust: The primary's trust decision.
+        extra_warnings: Further ``qc_dataset_warnings`` tokens.
+
+    Returns:
+        ``qc_dataset_level``, ``qc_dataset_max_level``,
+        ``qc_dataset_warnings``, ``qc_panel_trust`` and ``qc_<signal>`` per
+        ``QC_SIGNAL_KEYS`` of the species.
+    """
+    n = len(resolution.in_table)
+    gate = resolution.gate
+    if isinstance(resolution, HumanResolution):
+        species = "human"
+        signals: dict[str, float | None] = {
+            "frac_ge30": gate.frac_ge30,  # type: ignore[union-attr]
+            "broad_coverage_table": gate.broad_coverage_table,  # type: ignore[union-attr]
+            "broad_coverage_segmented": gate.broad_coverage_segmented,  # type: ignore[union-attr]
+        }
+    else:
+        species = "mouse"
+        signals = dict(gate.signals.values())  # type: ignore[union-attr]
+    columns: dict[str, Any] = {
+        Columns.QC_DATASET_LEVEL: pd.Categorical(
+            [gate.level] * n, categories=list(GATE_LEVELS)
+        ),
+        Columns.QC_DATASET_MAX_LEVEL: pd.Categorical(
+            [resolution.max_level] * n, categories=list(FINAL_LEVELS[species])
+        ),
+        Columns.QC_DATASET_WARNINGS: pd.Categorical(
+            [dataset_warning_tokens(gate, extra_warnings)] * n
+        ),
+        Columns.QC_PANEL_TRUST: pd.Categorical(
+            [panel_trust_value(trust)] * n, categories=list(QC_PANEL_TRUST_VALUES)
+        ),
+    }
+    for key in QC_SIGNAL_KEYS[species]:
+        value = signals.get(key)
+        number = math.nan if value is None else float(value)
+        columns[f"{Columns.QC_PREFIX}{key}"] = np.full(n, number, dtype=np.float32)
+    return columns

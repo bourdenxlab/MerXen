@@ -37,11 +37,15 @@ class AnnotationSettings {
     static final Map<String, String> SUMMARY_ITEMS = [
         failed_annotations: "failed annotations (no label tables; see the failed tasks above)",
         failed_hierarchies: "failed hierarchies (label tables, no COMPUTE_CPU output)",
-        refused_panels: "refused panels",
-        broad_only_panels: "broad-only panels",
+        refused_panels: "refused panels (labels kept, untrusted)",
+        unmappable_panels: "unmappable panels (no resolved gene; nothing mapped, status unmappable)",
+        broad_only_panels: "broad-only panels (leaf labels kept, advisory)",
         provisional_panels: "provisional panels",
-        restricted_dataset_gates: "broad-only or failed dataset gates",
-        cross_platform_restricted: "restricted cross-platform statistics",
+        restricted_dataset_gates: (
+            "datasets with QC warnings: broad-only or failed dataset gates " +
+            "(labels kept; see the qc_* and *_strict columns)"
+        ),
+        cross_platform_restricted: "cross-platform statistics with an advisory restriction",
         mender_skipped: "MENDER skipped (no assigned cell state)",
         failed_reports: "annotation reports not built (see the failed tasks above)",
         failed_report_items: "annotation report items failed (see the report)",
@@ -387,6 +391,51 @@ class AnnotationSettings {
             annotationSettings.get("annotation_mode_mapmycells_stage") == AnnotationDefaults.LEGACY &&
             stopStage?.toString() == "mapmycells"
         )
+    }
+
+    /**
+     * Return the stages a row really runs, for the launch log.
+     *
+     * The row settings' selected_stages keeps mapmycells when the map_first
+     * rule above skips it, because the settings map is part of task hashes
+     * (VALIDATE_ANALYSIS_LAYER, QC) and changing it would rerun those tasks
+     * under -resume. The log line must not list a stage that never runs.
+     *
+     * @param settings Row settings from rowSampleSettings.
+     * @return selected_stages without mapmycells when it does not run.
+     */
+    static List<String> loggedStages(Map settings) {
+        return (settings.selected_stages as List<String>).findAll { stage ->
+            stage != "mapmycells" || settings.run_mapmycells
+        }
+    }
+
+    /**
+     * Return the warning for a map_first row that names mapmycells but skips it.
+     *
+     * A row that starts or stops at mapmycells asked for the stage; when the
+     * map_first rule skips it the run would otherwise say nothing.
+     *
+     * @param settings Row settings from rowSampleSettings.
+     * @return The warning text, or null when there is nothing to say.
+     */
+    static String mapMyCellsSkipWarning(Map settings) {
+        def named = (
+            settings.start_stage?.toString() == "mapmycells" ||
+            settings.stop_stage?.toString() == "mapmycells"
+        )
+        if (!named || settings.run_mapmycells || !isMapFirst(settings)) {
+            return null
+        }
+        return (
+            "Sample ${settings.pair_id}: the standalone mapmycells stage does not run in " +
+            "map_first annotation (annotation_mode_mapmycells_stage=" +
+            "${settings.annotation_mode_mapmycells_stage}); the run still clusters and " +
+            "annotates, and the annotation's own MapMyCells calls are in annotation_map/ " +
+            "and the mmc_* columns of the label table. Set " +
+            "--annotation_mode_mapmycells_stage legacy and stop at mapmycells to run " +
+            "the standalone stage as well."
+        ).toString()
     }
 
     // Published clustering directory of a legacy table (FINALIZE's publishDir).

@@ -48,13 +48,13 @@ GENERIC_V7_NOTE: Final = (
 )
 BANNER_TEXT: Final[dict[str, str]] = {
     "refused": (
-        "REFUSED panel: MapMyCells was not run for the primary reference; every "
-        "table cell is not_attempted_gate and the dataset gate is failed "
-        "(panel_refused)."
+        "REFUSED panel: its labels are kept but untrusted; the advisory dataset "
+        "gate is failed (panel_refused) and the strict view leaves every table "
+        "cell not_attempted_gate (exclude_hard_strict)."
     ),
     "broad_only": (
-        "BROAD-ONLY panel: the leaf level is not resolvable on this panel; leaves "
-        "are unresolved (subcluster_status not_resolvable_panel)."
+        "BROAD-ONLY panel: the leaf level is not validated on this panel; leaf "
+        "labels are kept and advisory (qc_dataset_max_level is above the leaf)."
     ),
     "provisional": (
         "PROVISIONAL panel: its family is not validated; emission uses the "
@@ -70,10 +70,13 @@ REGION_BANNER_TEXT: Final = (
     "every label is provisional."
 )
 GATE_BANNER_TEXT: Final[dict[str, str]] = {
-    "failed": "Dataset gate FAILED: every cell is exclude_hard ({reasons}).",
+    "failed": (
+        "Dataset gate FAILED (advisory): labels are kept; the strict view sets "
+        "exclude_hard_strict on every cell ({reasons})."
+    ),
     "broad_only": (
-        "Dataset gate BROAD-ONLY: supercluster and SEA-AD subclass are "
-        "not_attempted_gate ({reasons})."
+        "Dataset gate BROAD-ONLY (advisory): leaf labels are kept; their strict "
+        "statuses are not_attempted_gate ({reasons})."
     ),
 }
 

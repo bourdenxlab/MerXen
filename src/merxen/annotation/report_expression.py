@@ -335,7 +335,14 @@ def item_reference_expectation(
         matrix, gene_ids, found = loaded
         gate = ((sample.summary.get("resolution") or {}).get("gate") or {}).get("level")
         level, profiles, order, labels = leaf, leaf_profiles, [], np.array([])
-        if leaf_profiles is not None and gate in (None, "full"):
+        # The gate is advisory since label table version 2: the leaf level is
+        # drawn whatever it says (and noted below when it is not full).
+        if gate not in (None, "full"):
+            item.notes.append(
+                f"{sample.sample_id}: dataset gate {gate} (advisory; leaf labels "
+                "are kept, their strict statuses are not_attempted_gate)"
+            )
+        if leaf_profiles is not None:
             labels = np.where(
                 confident(table, leaf),
                 names_array(table, Columns.level(leaf, "name")),
@@ -347,8 +354,7 @@ def item_reference_expectation(
                 options.max_dotplot_labels,
             )
         if not order and fallback_profiles is not None:
-            # The leaf level is not emitted (gate not full, or no confident
-            # leaf label): the confident broad labels, whose catches (P2RY12
+            # No confident leaf label: the confident broad labels, whose catches (P2RY12
             # in Microglia, astrocyte spill into neurons) are broad-level.
             level, profiles = fallback, fallback_profiles
             labels = np.where(
@@ -950,7 +956,8 @@ def item_cross_platform(
     scope = _scope(inputs)
     basis = cross_platform_basis(scope)
     item.notes.append(
-        f"cross-platform scope: {scope.statistics_level} (flag {scope.flag}; "
+        f"cross-platform scope: {scope.statistics_level} (advisory "
+        f"{scope.advisory_level or scope.statistics_level}; flag {scope.flag}; "
         f"reasons {', '.join(scope.reasons) or 'none'}); panel mode "
         f"{scope.panel_mode or 'unknown'}; headline run {basis.prefix} "
         f"({basis.variant}; RESOLVE jsd_purpose {scope.jsd_purpose or 'unknown'}, "

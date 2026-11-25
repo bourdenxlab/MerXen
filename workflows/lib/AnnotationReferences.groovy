@@ -39,6 +39,13 @@ class AnnotationReferences {
     static final String DEFAULT_STORE_DIR = "annotation_references"
     static final String PREPARED_SOURCE = "prepared"
     static final String GENE_LIST_SOURCE = "gene_list"
+    // Version of what ANNOTATE_PANEL writes for unchanged inputs, carried in
+    // every panel spec: the task hash cannot see Python code, so a bump
+    // re-runs the PANEL tasks once under -resume. Their outputs for an
+    // unaffected panel are byte-identical, so MAP (cache "deep") stays
+    // cached there. 2: always-label plan M2, a refused panel with a resolved
+    // gene gets its bundles and is mapped.
+    static final int PANEL_RULES_VERSION = 2
 
     // CLUSTERING_SQUIDPY_ANNOTATE_MAP: output directory (published under
     // <outdir>/<pair>/<seg>/annotation_map/), staged-input directory,
@@ -404,6 +411,7 @@ class AnnotationReferences {
             source: GENE_LIST_SOURCE,
             gene_list: geneListName,
             platforms: (platforms ?: []).collect { platform -> platform.toString().toUpperCase() },
+            panel_rules: PANEL_RULES_VERSION,
         ]
     }
 
@@ -435,6 +443,7 @@ class AnnotationReferences {
             clustering_config: clusteringConfigName,
             prepared_dir: preparedDirName,
             require_shared_tissue_mask: requireMask,
+            panel_rules: PANEL_RULES_VERSION,
         ]
         if (maskNames && maskNames.size() == 2) {
             spec.shared_tissue_mask = maskNames[0].toString()
@@ -693,10 +702,12 @@ class AnnotationReferences {
     /**
      * Return the merxen annotate arguments of one MAP task.
      *
-     * The task maps only the bundles PREP resolved (--require-bundle-refs),
-     * takes min_counts and the sample platforms from the clustering config,
-     * and records a refused panel instead of failing (--allow-refused-panel;
-     * RESOLVE then writes statuses only).
+     * The task maps only the bundles PREP resolved (--require-bundle-refs)
+     * and takes min_counts and the sample platforms from the clustering
+     * config. A refused panel with a resolved gene has bundles and is mapped
+     * like any other (always-label plan, M2); an unmappable one (no resolved
+     * gene, no bundle) is recorded instead of failing (--allow-refused-panel;
+     * RESOLVE then writes the status unmappable).
      *
      * @param pairId Pair id.
      * @param segmentation Segmentation.

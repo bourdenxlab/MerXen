@@ -97,16 +97,19 @@ def test_a_broad_only_dataset_restricts_a_same_panel_pair_to_broad() -> None:
     )
 
     assert scope.resolve_statistics_level == "full"
-    assert scope.statistics_level == "broad_only"
+    # Advisory since label table version 2: every statement is made, tagged.
+    assert scope.statistics_level == "full"
+    assert scope.advisory_level == "broad_only"
     assert scope.flag is True
     assert scope.reasons == ("dataset_gate:P1_MERSCOPE:broad_only",)
-    assert not scope.allows("supercluster")
-    assert not scope.allows("nt")
-    assert scope.allows("broad") and scope.allows("lineage")
+    assert scope.allows("supercluster")
+    assert not scope.allows_strict("supercluster")
+    assert not scope.allows_strict("nt")
+    assert scope.allows_strict("broad") and scope.allows_strict("lineage")
     assert scope.allows_kind("soft")
 
 
-def test_a_failed_dataset_gate_allows_no_statement() -> None:
+def test_a_failed_dataset_gate_makes_the_advisory_level_none() -> None:
     scope = scope_from_resolve_summary(
         _summary(
             PER_PLATFORM | {"statistics_level": "broad_only", "flag": True},
@@ -114,13 +117,14 @@ def test_a_failed_dataset_gate_allows_no_statement() -> None:
         )
     )
 
-    assert scope.statistics_level == "none"
+    assert scope.statistics_level == "full"
+    assert scope.advisory_level == "none"
     assert scope.reasons == (
         "dataset_gate:P1_MERSCOPE:failed",
         "dataset_gate:P1_XENIUM:broad_only",
     )
-    assert not scope.allows("broad")
-    assert not scope.allows_kind("soft")
+    assert scope.allows("broad") and not scope.allows_strict("broad")
+    assert scope.allows_kind("soft")
 
 
 def test_gates_never_widen_the_panel_level() -> None:
@@ -165,7 +169,7 @@ def test_an_unknown_gate_level_is_refused() -> None:
         dataset_gate_levels(_summary(SAME_PANEL, {"P1_MERSCOPE": "partial"}))
 
 
-def test_broad_only_pair_restricts_statements_to_broad_levels() -> None:
+def test_broad_only_pair_restricts_its_advisory_level_to_broad() -> None:
     """A per_platform pair with a small intersection compares broad levels only."""
     scope = scope_from_resolve_summary(
         _summary(
@@ -182,9 +186,12 @@ def test_broad_only_pair_restricts_statements_to_broad_levels() -> None:
 
     assert scope.flag is True
     assert scope.reasons == ("intersection_genes:80<100",)
-    assert scope.allows("broad") and scope.allows("lineage")
-    assert not scope.allows("supercluster")
-    assert not scope.allows("nt")
+    assert scope.statistics_level == "full"
+    assert scope.advisory_level == "broad_only"
+    assert scope.allows("supercluster")
+    assert scope.allows_strict("broad") and scope.allows_strict("lineage")
+    assert not scope.allows_strict("supercluster")
+    assert not scope.allows_strict("nt")
 
 
 def test_no_intersection_run_allows_no_statement() -> None:

@@ -15,7 +15,10 @@ from merxen.annotation.schema import (
     LABEL_TABLE_VERSION,
     LEVEL_FIELDS,
     LEVELS,
+    NAMELESS_STATUSES,
     OPTIONAL_CONTRACT_COLUMNS,
+    QC_PANEL_TRUST_VALUES,
+    QC_SIGNAL_KEYS,
     REPORT_ONLY_LEVELS,
     CellStatus,
     Columns,
@@ -71,6 +74,7 @@ def test_cell_status_matches_plan_vocabulary() -> None:
         "not_attempted_gate",
         "not_applicable",
         "low_counts",
+        "unmappable",
     ]
     assert CellStatus("confident") is CellStatus.CONFIDENT
     assert CellStatus.CONFIDENT == "confident"
@@ -86,7 +90,7 @@ def test_final_level_covers_both_species_orders() -> None:
 
 
 def test_label_table_version_and_filename() -> None:
-    assert LABEL_TABLE_VERSION == 1
+    assert LABEL_TABLE_VERSION == 2
     assert label_table_filename("HD1_MERSCOPE") == (
         "HD1_MERSCOPE_celltype_labels.parquet"
     )
@@ -131,6 +135,64 @@ def test_column_specs_cover_the_plan_columns() -> None:
     assert human[Columns.CT_CONSENSUS_TIER].kind == "int8"
     with pytest.raises(ValueError, match="species"):
         column_specs("rat")  # type: ignore[arg-type]
+
+
+def test_unmappable_is_a_nameless_status() -> None:
+    assert CellStatus.UNMAPPABLE in NAMELESS_STATUSES
+    assert CellStatus.NOT_ATTEMPTED_GATE in NAMELESS_STATUSES
+    assert CellStatus.CONFIDENT not in NAMELESS_STATUSES
+
+
+def test_strict_status_column_name() -> None:
+    assert Columns.strict_status("broad") == "ct_broad_status_strict"
+    assert Columns.strict_status("subclass").endswith(Columns.STRICT_SUFFIX)
+
+
+@pytest.mark.parametrize("species", ["human", "mouse"])
+def test_strict_and_dataset_qc_columns_are_optional_specs(species: str) -> None:
+    """Label table version 2 columns are checked when present, never required."""
+    specs = column_specs(species)  # type: ignore[arg-type]
+    added = [
+        *(Columns.strict_status(level) for level in LEVELS[species]),
+        Columns.CT_FINAL_LEVEL_STRICT,
+        Columns.CT_FINAL_NAME_STRICT,
+        Columns.EXCLUDE_HARD_STRICT,
+        Columns.QC_DATASET_LEVEL,
+        Columns.QC_DATASET_MAX_LEVEL,
+        Columns.QC_DATASET_WARNINGS,
+        Columns.QC_PANEL_TRUST,
+        *(f"{Columns.QC_PREFIX}{key}" for key in QC_SIGNAL_KEYS[species]),
+    ]
+    for name in added:
+        assert specs[name].optional, name
+    assert not specs[Columns.CT_FINAL_LEVEL].optional
+    assert specs[Columns.QC_PANEL_TRUST].categories == QC_PANEL_TRUST_VALUES
+    assert specs[Columns.CT_FINAL_LEVEL_STRICT].categories == FINAL_LEVELS[species]
+    strict_status = specs[Columns.strict_status(LEVELS[species][0])]
+    assert strict_status.categories is not None
+    assert "not_attempted_gate" in strict_status.categories
+
+
+def test_a_table_without_the_version_2_columns_still_validates(
+    make_label_table: TableFactory,
+) -> None:
+    table = make_label_table("mouse")
+    version_2 = [
+        name
+        for name, spec in column_specs("mouse").items()
+        if spec.optional and name in table.columns
+    ]
+    trimmed = table.drop(columns=version_2)
+    validate_label_table(trimmed, "mouse", h5ad_index=_table_ids(trimmed))
+
+
+def test_a_wrong_dataset_qc_level_is_reported(make_label_table: TableFactory) -> None:
+    table = make_label_table("human")
+    table[Columns.QC_DATASET_LEVEL] = pd.Categorical(
+        ["partial"] * len(table), categories=["partial"]
+    )
+    problems = _problems(table, "human")
+    assert any(Columns.QC_DATASET_LEVEL in problem for problem in problems)
 
 
 def test_branch_leaf_and_soft_vocabularies() -> None:

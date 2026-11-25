@@ -408,12 +408,12 @@ def test_composition_reports_the_cop_part_of_opc_and_the_sink_prone_nodes(
     assert opc["share"].iloc[0] == pytest.approx(39 / 100)
     others = composition[composition["category"] != "Oligodendrocyte precursors"]
     assert others["cop_derived_share"].isna().all()
-    # Leaf-level rows of the broad-only sample are withheld for comparison.
+    # Leaf-level rows of the broad-only sample are marked advisory.
     leaf = composition[composition["level"] == "supercluster"]
     status = leaf.groupby("sample_id")["comparison_status"].unique()
-    assert list(status["S_MERSCOPE"]) == ["withheld_for_comparison"]
+    assert list(status["S_MERSCOPE"]) == ["advisory_gate_not_full"]
     assert list(status["S_XENIUM"]) == ["comparable"]
-    assert any("withheld for comparison" in note for note in item.notes)
+    assert any("not full (advisory)" in note for note in item.notes)
     sinks = pd.read_csv(
         tmp_path / "out" / "tables" / "item02_composition__sinks_implausible.csv"
     )

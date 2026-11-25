@@ -494,7 +494,9 @@ def test_a_mouse_panel_under_species_human_refuses_every_panel(
     # The case-insensitive fallback resolved all 60 to human IDs.
     assert declared["n_genes"] == 60
     assert result.required.status == "refused"
-    assert result.required.n_required == 0
+    # Always-label plan, M2: the refused panel is still mapped on its 60
+    # resolved genes; only a panel without any resolved gene has no bundle.
+    assert result.required.n_required > 0 and result.required.unmappable == []
     report = json.loads((tmp_path / "out" / PANEL_REPORT_FILE).read_text())
     assert report["gene_id_sources"]["gene_tables"]["mouse"]["n_symbols"] == 60
 
@@ -1257,7 +1259,13 @@ def test_auto_mode_keeps_the_valid_platform_when_one_panel_is_refused(
     }
     assert refused["xenium"] is None
     assert refused["merscope"] and refused["intersection"]
-    assert {bundle.panel_name for bundle in result.required.bundles} == {"xenium"}
+    # Always-label plan, M2: the refused panels keep their bundles (mapped,
+    # trust refused); the pair's status follows the trusted xenium panel.
+    assert {bundle.panel_name for bundle in result.required.bundles} == {
+        "xenium",
+        "merscope",
+        "intersection",
+    }
 
 
 def test_intersection_is_set_a_including_h2ax(tmp_path: Path) -> None:
@@ -1868,7 +1876,9 @@ def test_single_platform_mouse_sample(tmp_path: Path) -> None:
     assert panel.panel_family.family_id.startswith("mouse_merscope_")
 
 
-def test_too_small_panels_are_refused_without_bundles(tmp_path: Path) -> None:
+def test_too_small_panels_are_refused_but_keep_their_bundles(tmp_path: Path) -> None:
+    # Always-label plan, M2: fewer resolved genes than min_mapped_genes is
+    # recorded as a refusal, and the panel is still mapped on its genes.
     result = compute_panel(
         make_pair(tmp_path, n_shared=20),
         "human",
@@ -1877,8 +1887,50 @@ def test_too_small_panels_are_refused_without_bundles(tmp_path: Path) -> None:
         clustering_config=clustering_config(),
     )
     assert result.required.status == "refused"
-    assert result.required.bundles == [] and result.required.n_required == 0
+    assert result.required.n_required == len(result.required.bundles) > 0
+    assert result.required.has_annotation_bundle()
+    assert result.required.unmappable == []
     assert result.report["annotation_panels"]["intersection"]["refused"]
+    # The unmappable fields are left out when no panel is unmappable, so the
+    # files of every other panel keep their bytes (MAP stays cached).
+    written = json.loads((tmp_path / "out" / REQUIRED_BUNDLES_FILE).read_text())
+    assert "unmappable" not in written
+    report = json.loads((tmp_path / "out" / PANEL_REPORT_FILE).read_text())
+    assert "unmappable_panels" not in report
+    assert "unmappable" not in report["annotation_panels"]["intersection"]
+
+
+def test_a_panel_without_any_resolved_gene_is_unmappable(tmp_path: Path) -> None:
+    path = tmp_path / "genes.csv"
+    pd.DataFrame({"gene": [f"Notagene{i}" for i in range(60)]}).to_csv(
+        path, index=False
+    )
+    result = panel_from_gene_list(path, "human", output_dir=tmp_path / "out")
+    assert result.required.status == "refused"
+    assert result.required.unmappable == ["gene_list"]
+    assert result.required.bundles == [] and result.required.n_required == 0
+    assert not result.required.has_annotation_bundle()
+    written = json.loads((tmp_path / "out" / REQUIRED_BUNDLES_FILE).read_text())
+    assert written["unmappable"] == ["gene_list"]
+    report = json.loads((tmp_path / "out" / PANEL_REPORT_FILE).read_text())
+    assert report["unmappable_panels"] == ["gene_list"]
+    assert report["annotation_panels"]["gene_list"]["unmappable"] is True
+
+
+def test_a_refused_gene_list_with_resolved_genes_keeps_its_bundles(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "genes.csv"
+    pd.DataFrame(
+        {"gene": shared_symbols()[:20], "ensembl_id": shared_ids()[:20]}
+    ).to_csv(path, index=False)
+    result = panel_from_gene_list(path, "human", output_dir=tmp_path / "out")
+    assert result.required.status == "refused"  # 20 < min_mapped_genes
+    assert result.required.unmappable == []
+    assert [b.reference_id for b in result.required.bundles] == [
+        "whb_frontal_supc_clus",
+        "seaad_mr_panel",
+    ]
 
 
 def test_required_bundles_ignore_resolvability_references(tmp_path: Path) -> None:

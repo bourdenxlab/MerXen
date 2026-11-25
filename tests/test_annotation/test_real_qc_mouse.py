@@ -144,8 +144,9 @@ def test_the_mouse_gate_records_g1_to_g5_in_the_provenance() -> None:
     verdict = mouse_gate(
         registration=RegistrationSignal(density_ratio=1.2, shift_um=0.0)
     )
+    # G1's fail rule trips but only warns (mouse_gate.g1_effect = warning).
     assert qc.gate_outcomes(verdict) == {
-        "dataset_gate": "fail",
+        "dataset_gate": "warn",
         "registration_g1": "fail",
         "marker_consistency": "pass",
         "g3_implausibility": "pass",

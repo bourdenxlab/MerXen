@@ -34,7 +34,6 @@ from merxen.annotation.report import (
 from merxen.annotation.report_depth import SQUARE_TILE_CI
 from merxen.annotation.report_inputs import ReportSources, discover_sources
 from merxen.annotation.report_model import AcceptanceMetrics, ReportOptions
-from merxen.annotation.vocab import HUMAN_BROAD_CLASSES
 from merxen.cli import main as cli_main
 
 from .conftest import FakeMmc
@@ -690,7 +689,7 @@ def test_cli_reads_the_pipelines_staged_layout(
         assert document["datasets"][sample.sample_id]["cortical_depth"] is False
 
 
-def test_a_broad_only_scope_withholds_supercluster_statistics(
+def test_a_broad_only_scope_keeps_supercluster_statistics_as_advisory(
     tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
 ) -> None:
     setup = _resolved(tmp_path / "run", fake_mmc, make_trust)
@@ -707,14 +706,14 @@ def test_a_broad_only_scope_withholds_supercluster_statistics(
         strict=True,
         make_figures=False,
     )
-    (withheld,) = result.metrics.find(
+    (supercluster,) = result.metrics.find(
         "report", "supercluster_jsd", region="whole_section"
     )
-    assert withheld.status == "withheld" and withheld.value is None
+    assert supercluster.status == "measured" and supercluster.value is not None
     (h1,) = result.metrics.find("H1", "broad_jsd", region="whole_section")
     assert h1.status == "measured" and h1.value is not None
     item = next(item for item in result.items if item.number == 7)
-    assert any("broad_only" in note for note in item.notes)
+    assert any("advisory broad_only" in note for note in item.notes)
 
 
 def _add_setc_runs(setup: Setup) -> None:
@@ -885,15 +884,17 @@ def test_a_broad_only_dataset_gets_a_broad_level_dotplot(
         figures / "item04_reference_expectation_dotplot_merscope.csv"
     )
     xenium = pd.read_csv(figures / "item04_reference_expectation_dotplot_xenium.csv")
-    assert set(merscope["level"]) == {"broad"}
-    assert set(merscope["label"]) <= set(HUMAN_BROAD_CLASSES)
+    # The gate is advisory: the leaf level is drawn for both sections.
+    assert set(merscope["level"]) == {"supercluster"}
     assert merscope["ref_fraction"].notna().all()
     assert set(xenium["level"]) == {"supercluster"}
     records = result.metrics.find("report", "pseudobulk_centroid_r")
     levels = {record.sample_id: record.level for record in records}
-    assert levels == {"PX_MERSCOPE": "broad", "PX_XENIUM": "supercluster"}
+    assert levels == {"PX_MERSCOPE": "supercluster", "PX_XENIUM": "supercluster"}
     item = next(item for item in result.items if item.number == 4)
-    assert any("PX_MERSCOPE: the supercluster level" in note for note in item.notes)
+    assert any(
+        "PX_MERSCOPE: dataset gate broad_only (advisory" in note for note in item.notes
+    )
 
 
 def test_h2_and_h13_come_from_the_label_table_and_the_clustered_ids(

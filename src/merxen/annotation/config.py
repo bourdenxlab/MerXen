@@ -852,6 +852,10 @@ class MouseGateConfig(_AnnotationModel):
         g1_density_ratio_warn: G1 warns below this density ratio.
         g1_shift_fail_um: G1 fails above this shift against the platform's
             own segmentation.
+        g1_effect: What G1's fail rule does: ``warning`` (the default since
+            2026-11-24: the gate records the signal and warns, and the
+            level stays) or ``gate_failed`` (the dataset gate fails, every
+            cell ``not_attempted_gate`` and ``exclude_hard``).
         g2_marker_consistency_fail: G2 fails below this consistency.
         g2_marker_consistency_warn: G2 warns below this consistency.
         g3_implausible_warn: G3 warns above this pre-pruning implausible share.
@@ -881,6 +885,7 @@ class MouseGateConfig(_AnnotationModel):
     g1_density_ratio_fail: float = Field(default=1.5, gt=0.0)
     g1_density_ratio_warn: float = Field(default=2.0, gt=0.0)
     g1_shift_fail_um: float = Field(default=5.0, gt=0.0)
+    g1_effect: Literal["warning", "gate_failed"] = "warning"
     g2_marker_consistency_fail: float = 0.70
     g2_marker_consistency_warn: float = 0.80
     g3_implausible_warn: float = 0.03
@@ -1010,12 +1015,13 @@ class AnnotationRealQcConfig(_AnnotationModel):
             does (§8.8; M0a's guard with §7.6's rules, read from
             ``mouse_gate``): ``gate_failed`` (§8.8's effect: the dataset
             gate fails, every cell ``not_attempted_gate`` and
-            ``exclude_hard``), the default since the user's ruling C2 of
-            2026-10-07 (pre-registration §23.19: the set a regression, M13
-            C17, showed no false G1 failure; a tightening), or ``warning``
-            (warn-only, decision D23 (b) of 2026-10-06, the M13 setting
-            until then). §7.6's warning rule (density ratio below
-            ``g1_density_ratio_warn``) is a warning under either setting.
+            ``exclude_hard``; the default from the user's ruling C2 of
+            2026-10-07, pre-registration §23.19, until 2026-11-24), or
+            ``warning`` (warn-only, decision D23 (b) of 2026-10-06; the
+            default again since 2026-11-24, when a sparse mouse dataset
+            tripped the ratio with no shift and lost every label). §7.6's
+            warning rule (density ratio below ``g1_density_ratio_warn``) is a
+            warning under either setting.
         coverage_warn_margin: M3c (user decision 4): warn per (level, called
             class) when the real confident share is below the class-depth
             prediction at the dataset's own per-class depth by more than
@@ -1052,7 +1058,7 @@ class AnnotationRealQcConfig(_AnnotationModel):
     seeded_families_warn_only_until_gate: dict[Species, SpeciesGateState] = Field(
         default_factory=_pending_species_gates
     )
-    registration_g1_effect: Literal["warning", "gate_failed"] = "gate_failed"
+    registration_g1_effect: Literal["warning", "gate_failed"] = "warning"
     coverage_warn_margin: float = 0.10
     coverage_min_cells: int = Field(default=200, ge=1)
     factor_remeasure_min_r: float = 0.9

@@ -17,9 +17,10 @@ import java.util.concurrent.ConcurrentSkipListSet
  * channel subscriptions in map_first runs only, which pair x segmentation
  * entered clustering, which got label tables and which got a hierarchy;
  * AnnotationSettings.completionSummary lists the branches that stopped, the
- * refused and provisional panels, the broad-only and failed dataset gates,
- * the pairs whose cross-platform statistics are restricted (by the panels or
- * by a dataset gate, as merxen.clustering.cross_platform scopes them) and
+ * refused, unmappable and provisional panels, the broad-only and failed dataset gates,
+ * the pairs whose cross-platform statistics carry an advisory restriction
+ * (by the panels or by a dataset gate, as merxen.clustering.cross_platform
+ * scopes them; since label table version 2 they are computed and tagged) and
  * the samples whose MENDER run was skipped for want of an assigned cell
  * state, the branches whose annotation report (M7) was not built or
  * recorded failed items, and where each branch's registration checks came
@@ -42,6 +43,10 @@ class AnnotationRunRecord {
     private static final Set<String> LABELLED = new ConcurrentSkipListSet<String>()
     private static final Set<String> COMPUTED = new ConcurrentSkipListSet<String>()
     private static final Set<String> REFUSED_PANELS = new ConcurrentSkipListSet<String>()
+    // Branches with an unmappable panel (no resolved gene, so nothing mapped
+    // and the status unmappable; always-label plan M2). Since M2 a refused
+    // panel with a resolved gene is mapped and listed as refused only.
+    private static final Set<String> UNMAPPABLE_PANELS = new ConcurrentSkipListSet<String>()
     // Branches whose panel ANNOTATE_PANEL refused: their samples' refused
     // trust states are not listed again.
     private static final Set<String> REFUSED_BRANCHES = new ConcurrentSkipListSet<String>()
@@ -86,7 +91,7 @@ class AnnotationRunRecord {
     /** Forget everything (tests; one run per JVM otherwise). */
     static void reset() {
         [
-            EXPECTED, LABELLED, COMPUTED, REFUSED_PANELS, REFUSED_BRANCHES, CROSS_PLATFORM,
+            EXPECTED, LABELLED, COMPUTED, REFUSED_PANELS, UNMAPPABLE_PANELS, REFUSED_BRANCHES, CROSS_PLATFORM,
             DATASET_GATES, MENDER_SKIPPED, REPORT_EXPECTED, REPORTED, REPORT_FAILED_ITEMS,
         ].each { Set values ->
             values.clear()
@@ -124,6 +129,10 @@ class AnnotationRunRecord {
         if (required?.status == "refused") {
             REFUSED_BRANCHES << key
             REFUSED_PANELS << "${key}${reasonText(required.reasons)}".toString()
+        }
+        def unmappable = ((required?.unmappable ?: []) as List).collect { name -> name.toString() }
+        if (unmappable) {
+            UNMAPPABLE_PANELS << "${key}${reasonText(unmappable)}".toString()
         }
         def summary = readJson(asPath(resolveDir).resolve(AnnotationReferences.resolveSummaryFile(pairId)))
         if (summary == null) {
@@ -173,10 +182,12 @@ class AnnotationRunRecord {
     }
 
     /**
-     * Return a pair's cross-platform scope as merxen.clustering.cross_platform
-     * builds it: RESOLVE's pair.cross_platform with the dataset gates folded
-     * in (a broad_only gate caps the level at broad_only, a failed gate sets
-     * none, each with reason dataset_gate:<sample>:<level>).
+     * Return a pair's advisory cross-platform scope as
+     * merxen.clustering.cross_platform builds its advisory_level: RESOLVE's
+     * pair.cross_platform with the dataset gates folded in (a broad_only gate
+     * caps the level at broad_only, a failed gate sets none, each with reason
+     * dataset_gate:<sample>:<level>). Advisory since label table version 2:
+     * the statistics are computed and tagged with it.
      *
      * @param summary The parsed pair summary.
      * @return [statistics_level, reasons], or null without a pair record.
@@ -292,6 +303,7 @@ class AnnotationRunRecord {
      *
      * @return failed_annotations (entered clustering, no label tables),
      *     failed_hierarchies (label tables, no hierarchy), refused_panels,
+     *     unmappable_panels (branches with a panel without any resolved gene),
      *     broad_only_panels, provisional_panels (pair:segmentation sample),
      *     restricted_dataset_gates (samples whose gate is broad_only or
      *     failed), cross_platform_restricted (pairs whose cross-platform
@@ -311,6 +323,7 @@ class AnnotationRunRecord {
             failed_annotations: (EXPECTED - LABELLED).sort(),
             failed_hierarchies: (LABELLED - COMPUTED).sort(),
             refused_panels: ((REFUSED_PANELS as List) + trustList("refused")).sort(),
+            unmappable_panels: (UNMAPPABLE_PANELS as List).sort(),
             broad_only_panels: trustList("broad_only"),
             provisional_panels: trustList("provisional"),
             restricted_dataset_gates: (DATASET_GATES as List).sort(),

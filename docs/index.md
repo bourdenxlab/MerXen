@@ -39,6 +39,9 @@ converge at alignment; dashed stations are governed by a parameter. See
 - [Cell-type annotation overview](annotation-overview.md) — what the map-first
   annotation does, its outputs, how panels are trusted, and the exact rule
   behind each cell-type level.
+- [Filtering cells by confidence](annotation-filtering.md) — choosing the
+  cells and label level an analysis trusts from the per-cell statuses, the
+  dataset QC columns and the strict view.
 
 ### Pipeline stages
 - [SpatialData build](stages/spatialdata-build.md)

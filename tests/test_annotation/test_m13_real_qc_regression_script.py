@@ -397,12 +397,12 @@ def test_variant_configs_are_annotation_configs(script: ModuleType) -> None:
         "species": "human",
         "real_qc": script.C17_REAL_QC,
     }
-    # C2 moved G1's default, C3 (b) NR7's matching, and C1 (b) gave the
-    # new-panel family the class comparator; C17 ran with none of them (the
-    # node default is unchanged).
+    # C3 (b) moved NR7's matching and C1 (b) gave the new-panel family the
+    # class comparator; C17 ran with neither (the node default is unchanged).
+    # C2 had moved G1's default to gate_failed; it is warning again since
+    # 2026-11-24, C17's setting.
     assert _changed(script, "qc", base=None) == {
         "marker_referee_comparator_by_family": {},
-        "registration_g1_effect": "warning",
         "gene_complexity_matching": "lower_edge",
     }
     assert AnnotationConfig.model_validate(script.variant_config("qc")) == C17_CONFIG

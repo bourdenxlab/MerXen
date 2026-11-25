@@ -758,8 +758,10 @@ def _bundle_overrides(values: tuple[str, ...]) -> dict[str, Path]:
 @click.option(
     "--allow-refused-panel",
     is_flag=True,
-    help="For a refused panel, write map_manifest.json without runs and exit "
-    "0 instead of failing (pipeline runs: RESOLVE writes statuses only).",
+    help="For an unmappable panel (no resolved gene, so no bundle), write "
+    "map_manifest.json without runs and exit 0 instead of failing (pipeline "
+    "runs: RESOLVE writes the status unmappable). A refused panel with a "
+    "resolved gene is mapped either way, its refusal recorded.",
 )
 @click.option(
     "--declared-ids-file",
@@ -1033,7 +1035,9 @@ def _annotate(
             declared_id_files=id_files,
         )
     required = load_required(panel_dir, allow_refused=allow_refused_panel)
-    if required.status == "refused":
+    # Always-label plan, M2: a refused panel is mapped on the genes that
+    # resolve; only a panel without any (no annotation bundle) maps nothing.
+    if not required.has_annotation_bundle():
         manifest = write_refused_manifest(
             required,
             config,
@@ -1044,10 +1048,17 @@ def _annotate(
         )
         click.echo(
             f"annotate: panel of {manifest.pair_id} {manifest.segmentation} "
-            f"refused, nothing mapped ({'; '.join(manifest.panel_reasons)}) "
-            f"-> {output_dir}"
+            f"unmappable ({', '.join(manifest.unmappable_panels) or 'no bundle'}: "
+            "no resolved gene), nothing mapped "
+            f"({'; '.join(manifest.panel_reasons)}) -> {output_dir}"
         )
         return
+    if required.reasons:
+        click.echo(
+            f"annotate: refused panel(s) of {pair_id or required.pair_id} "
+            f"{segmentation or required.segmentation} mapped anyway, trust "
+            "refused (advisory): " + "; ".join(required.reasons)
+        )
     reference_ids = (
         [item.strip() for item in references.split(",") if item.strip()]
         if references
@@ -1138,6 +1149,8 @@ def _annotate(
         reuse_from=reuse_from or output_dir,
         write_provisional=write_provisional,
         refused_platforms=refused_platforms(required),
+        panel_status=required.status,
+        panel_reasons=required.reasons,
         # A pipeline task (--require-bundle-refs) maps only the bundles PREP
         # resolved and Nextflow staged: a subset bundle it lacks stays a
         # recorded request, never a store lookup behind -resume's back.
@@ -1770,6 +1783,17 @@ def _annotate_resolve(
         f"annotate-resolve: {len(result.samples)} sample(s) in "
         f"{result.run['wall_time_s']:.0f} s -> {result.summary_path}"
     )
+    unmappable = result.summary.get("unmappable_panels") or []
+    if unmappable:
+        click.echo(
+            f"- unmappable panel(s) {', '.join(unmappable)}: no resolved gene, "
+            "nothing mapped; table cells have the status unmappable"
+        )
+    elif result.summary.get("panel_reasons"):
+        click.echo(
+            "- refused panel(s), labels kept (trust refused, advisory): "
+            + "; ".join(result.summary["panel_reasons"])
+        )
     for sample_id, sample in result.samples.items():
         gate = sample.summary["resolution"]["gate"]
         levels = sample.summary["resolution"]["levels"]

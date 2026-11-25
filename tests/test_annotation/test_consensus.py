@@ -149,6 +149,7 @@ class Setup:
     n_segmented: int | None = None
     fine_seed_stability: dict[str, float] | None = None
     region: str = "frontal_cortex"
+    enforce_dataset_gate: bool = False
 
     def settings(self) -> cs.HumanResolveSettings:
         emission = th.EmissionPlan(
@@ -181,6 +182,7 @@ class Setup:
             use_likelihood_vote=self.use_likelihood_vote,
             n_segmented=self.n_segmented,
             region=self.region,
+            enforce_dataset_gate=self.enforce_dataset_gate,
         )
 
 
@@ -223,11 +225,21 @@ def expected_mode(whb: bool, sea: bool, ll: bool) -> str:
 
 
 def expected_vote(
-    mode: str, *, below60: bool, sea: str, ll: str, allow_single: bool
+    mode: str,
+    *,
+    below60: bool,
+    sea: str,
+    ll: str,
+    allow_single: bool,
+    enforce: bool = False,
 ) -> str:
-    """Expected lineage status of a plausible, confident WHB call."""
+    """Expected lineage status of a plausible, confident WHB call.
+
+    Without the primary nothing is resolved: ``unmappable`` (always label),
+    ``not_attempted_gate`` in the strict pass.
+    """
     if mode == "primary_missing":
-        return "not_attempted_gate"
+        return "not_attempted_gate" if enforce else "unmappable"
     sea_agrees = sea.startswith("agree")
     sea_vetoes = sea == "differ_confident"
     ll_agrees = ll == "agree"
@@ -279,23 +291,36 @@ def truth_table_cells() -> list[tuple[int, str, str, Cell]]:
     return cells
 
 
+@pytest.mark.parametrize("enforce", [False, True], ids=["lenient", "strict"])
 @pytest.mark.parametrize(
     ("whb", "sea", "ll", "allow_single"),
     list(itertools.product((True, False), repeat=4)),
 )
 def test_degraded_mode_truth_table_is_exhaustive(
-    whb: bool, sea: bool, ll: bool, allow_single: bool
+    whb: bool, sea: bool, ll: bool, allow_single: bool, enforce: bool
 ) -> None:
+    """Every §5.3 row, in the always-label pass and in the strict pass.
+
+    The rows with the primary agree in both passes; without the primary the
+    table cells are ``unmappable`` (lenient) or ``not_attempted_gate`` with
+    ``exclude_hard`` on every cell (strict).
+    """
     table = truth_table_cells()
     result = resolve(
         [cell for *_, cell in table],
-        Setup(allow_single_method=allow_single, use_likelihood_vote=ll),
+        Setup(
+            allow_single_method=allow_single,
+            use_likelihood_vote=ll,
+            enforce_dataset_gate=enforce,
+        ),
         whb=whb,
         sea=sea,
         ll=ll,
     )
     mode = expected_mode(whb, sea, ll)
+    nameless = "not_attempted_gate" if enforce else "unmappable"
     assert result.mode.name == mode
+    assert result.enforced is enforce
     assert result.mode is cs.degraded_mode(whb=whb, sea=sea, ll=ll)
     assert result.single_method_override is (mode == "whb_only" and allow_single)
     for index, (depth, sea_outcome, ll_outcome, _cell) in enumerate(table):
@@ -305,15 +330,18 @@ def test_degraded_mode_truth_table_is_exhaustive(
             sea=sea_outcome if sea else "none",
             ll=ll_outcome if ll else "none",
             allow_single=allow_single,
+            enforce=enforce,
         )
         got = statuses(result, index)
-        case = (mode, depth, sea_outcome, ll_outcome, allow_single)
+        case = (mode, depth, sea_outcome, ll_outcome, allow_single, enforce)
         assert got["lineage"] == want, case
         if want == "confident":
             assert got["broad"] == "confident", case
             assert result.final_level[index] == "supercluster", case
-        elif want == "not_attempted_gate":
-            assert set(got.values()) == {"not_attempted_gate"}, case
+        elif want == nameless:
+            assert set(got.values()) == {nameless}, case
+            assert result.levels["broad"].name[index] is None, case
+            assert result.final_level[index] == "none", case
         else:
             assert got["broad"] == "parent_unresolved", case
             assert result.final_level[index] == "none", case
@@ -322,11 +350,21 @@ def test_degraded_mode_truth_table_is_exhaustive(
         )
         assert result.consensus_tier[index] == tier, case
         assert result.consensus_tier[index] <= result.mode.max_tier
-        if not sea or mode == "primary_missing":
-            assert got["seaad_subclass"] == "not_attempted_gate", case
+        if mode == "primary_missing" or not sea:
+            # No SEA-AD subclass call to resolve: the same nameless status.
+            assert got["seaad_subclass"] == nameless, case
+            assert result.levels["seaad_subclass"].name[index] is None, case
+        if not enforce:
+            assert "not_attempted_gate" not in got.values(), case
     if mode == "primary_missing":
+        # The gate is computed either way (advisory without enforcement).
         assert result.gate.level == "failed"
-        assert result.flags[Columns.EXCLUDE_HARD].all()
+        assert result.max_level == "none"
+        exclude_hard = result.flags[Columns.EXCLUDE_HARD]
+        if enforce:
+            assert exclude_hard.all()
+        else:
+            assert not exclude_hard.any()
 
 
 def test_the_truth_table_rows_are_the_plan_rows() -> None:
@@ -348,26 +386,62 @@ def test_the_truth_table_rows_are_the_plan_rows() -> None:
     assert table["whb_sea"].to_json()["missing_status"] is None
 
 
+@pytest.mark.parametrize(
+    ("enforce", "seaad_status"),
+    [(False, "unmappable"), (True, "not_attempted_gate")],
+    ids=["lenient", "strict"],
+)
 def test_a_refused_second_vote_is_the_single_method_mode(
-    make_trust: MakeTrust,
+    make_trust: MakeTrust, enforce: bool, seaad_status: str
 ) -> None:
+    """A refused SEA-AD stays out of the vote in both passes (plan O4).
+
+    Its subclass level is ``unmappable`` (always label) or
+    ``not_attempted_gate`` (strict pass).
+    """
     result = resolve(
         [Cell(EXC, counts=30), Cell(EXC, counts=100)],
         Setup(
             trust=make_trust("validated_real"),
             secondary_trust=make_trust("refused", role="secondary"),
+            enforce_dataset_gate=enforce,
         ),
     )
     assert result.mode.name == "whb_only"
     assert statuses(result, 0)["lineage"] == "single_method"
     assert statuses(result, 1)["lineage"] == "confident"
-    assert statuses(result, 1)["seaad_subclass"] == "not_attempted_gate"
+    assert statuses(result, 1)["seaad_subclass"] == seaad_status
+    assert result.levels["seaad_subclass"].name[1] is None
     assert result.consensus_tier[1] == 1
 
 
-def test_a_refused_primary_leaves_statuses_only(make_trust: MakeTrust) -> None:
+def test_a_refused_primary_keeps_its_calls(make_trust: MakeTrust) -> None:
+    """Always label: a refused primary is recorded, its labels are kept."""
     result = resolve(
         [Cell(EXC), Cell(ASTRO, counts=4)], Setup(trust=make_trust("refused"))
+    )
+    assert result.mode.name == "whb_sea"
+    assert not result.enforced
+    assert result.gate.level == "failed"
+    assert any(r.startswith("panel_refused") for r in result.gate.level_reasons)
+    assert result.max_level == "none"
+    assert statuses(result, 0)["supercluster"] == "confident"
+    assert "not_attempted_gate" not in statuses(result, 0).values()
+    assert set(statuses(result, 1).values()) == {"low_counts"}
+    assert result.levels["broad"].name[0] is not None
+    assert result.final_level[0] == "supercluster"
+    assert result.final_name[0] == EXC
+    exclude_hard = result.flags[Columns.EXCLUDE_HARD]
+    assert not exclude_hard[0]
+    assert exclude_hard[1]  # off-table (below min_counts): cell-intrinsic
+
+
+def test_a_refused_primary_leaves_statuses_only_in_the_strict_pass(
+    make_trust: MakeTrust,
+) -> None:
+    result = resolve(
+        [Cell(EXC), Cell(ASTRO, counts=4)],
+        Setup(trust=make_trust("refused"), enforce_dataset_gate=True),
     )
     assert result.mode.name == "primary_missing"
     assert result.gate.level == "failed"
@@ -727,22 +801,31 @@ def test_the_whb_cluster_is_never_a_final_label(
     assert statuses(stable)["cluster"] == "confident"
     assert stable.final_level[0] == "supercluster"
     assert "cluster" not in cs.HUMAN_CHAIN
-    # A broad-only dataset attempts no level below broad (§5.4), the
-    # report-only cluster included, even when it is stable and resolvable.
-    broad_only = resolve(
-        cells,
-        Setup(
-            trust=make_trust("broad_only"),
-            thresholds=enabled,
-            decisions=make_decisions(),
-            meta=human_level_meta,
-            fine_seed_stability={"cluster": 0.0},
-        ),
-    )
-    assert broad_only.gate.level == "broad_only"
-    assert statuses(broad_only)["broad"] == "confident"
-    assert statuses(broad_only)["cluster"] == "not_attempted_gate"
-    assert broad_only.levels["cluster"].name[0] is None
+    # A broad-only dataset: the report-only cluster is resolved (always
+    # label) but never final; the strict pass attempts no level below broad
+    # (§5.4), the cluster included, even when it is stable and resolvable.
+    for enforce in (False, True):
+        broad_only = resolve(
+            cells,
+            Setup(
+                trust=make_trust("broad_only"),
+                thresholds=enabled,
+                decisions=make_decisions(),
+                meta=human_level_meta,
+                fine_seed_stability={"cluster": 0.0},
+                enforce_dataset_gate=enforce,
+            ),
+        )
+        assert broad_only.gate.level == "broad_only"
+        assert statuses(broad_only)["broad"] == "confident"
+        assert broad_only.final_level[0] != "cluster"
+        if enforce:
+            assert statuses(broad_only)["cluster"] == "not_attempted_gate"
+            assert broad_only.levels["cluster"].name[0] is None
+        else:
+            assert statuses(broad_only)["cluster"] == "confident"
+            assert broad_only.levels["cluster"].name[0] == "C1"
+            assert broad_only.final_level[0] == "supercluster"
 
 
 # --------------------------------------------------------------------------
@@ -824,9 +907,33 @@ def test_reweighting_changes_emission_through_the_decisions(
     assert statuses(after)["broad"] == "not_resolvable"
 
 
-def test_a_broad_only_gate_blocks_only_the_leaf_levels(make_trust: MakeTrust) -> None:
+def test_a_broad_only_gate_keeps_the_leaf_levels(make_trust: MakeTrust) -> None:
+    """Always label: a broad-only gate is advisory; the leaf levels are named."""
     shallow = [Cell(ASTRO, counts=20) for _ in range(80)]
     result = resolve(shallow, Setup(trust=make_trust("validated_real")), fillers=20)
+    assert result.gate.level == "broad_only"
+    assert result.max_level == "nt"
+    for index in (0, 80):
+        assert "not_attempted_gate" not in statuses(result, index).values()
+    assert statuses(result, 80)["supercluster"] == "confident"
+    assert result.levels["supercluster"].name[80] == ASTRO
+    assert (result.final_level[80:] == "supercluster").all()
+    assert not result.flags[Columns.EXCLUDE_HARD].any()
+    capped = resolve([Cell(EXC)], Setup(trust=make_trust("broad_only")))
+    assert capped.gate.level == "broad_only"
+    assert statuses(capped)["supercluster"] == "confident"
+    assert capped.final_name[0] == EXC
+
+
+def test_a_broad_only_gate_blocks_only_the_leaf_levels_in_the_strict_pass(
+    make_trust: MakeTrust,
+) -> None:
+    shallow = [Cell(ASTRO, counts=20) for _ in range(80)]
+    result = resolve(
+        shallow,
+        Setup(trust=make_trust("validated_real"), enforce_dataset_gate=True),
+        fillers=20,
+    )
     assert result.gate.level == "broad_only"
     assert statuses(result)["broad"] == "confident"
     assert statuses(result)["supercluster"] == "not_attempted_gate"
@@ -834,7 +941,9 @@ def test_a_broad_only_gate_blocks_only_the_leaf_levels(make_trust: MakeTrust) ->
     assert result.levels["supercluster"].name[0] is None
     assert result.final_level[0] == "broad"
     assert (result.final_level[80:] == "broad").all()
-    capped = resolve([Cell(EXC)], Setup(trust=make_trust("broad_only")))
+    capped = resolve(
+        [Cell(EXC)], Setup(trust=make_trust("broad_only"), enforce_dataset_gate=True)
+    )
     assert capped.gate.level == "broad_only"
     assert statuses(capped)["supercluster"] == "not_attempted_gate"
 
@@ -904,10 +1013,26 @@ def test_the_segmented_share_uses_the_gate_denominator() -> None:
     assert unknown["confident_share_segmented"] == pytest.approx(n_broad / 23)
 
 
-def test_a_failed_gate_attempts_nothing() -> None:
+def test_a_failed_gate_keeps_every_label() -> None:
+    """Always label: a failed gate is recorded; no level is blocked."""
     weak = [Cell(EXC, counts=100, broad_raw=0.5) for _ in range(90)]
     result = resolve(weak, fillers=10)
     assert result.gate.level == "failed"
+    assert result.max_level == "none"
+    seen = {str(value) for r in result.levels.values() for value in r.status}
+    assert "not_attempted_gate" not in seen
+    assert statuses(result, 95)["supercluster"] == "confident"
+    assert result.levels["supercluster"].name[95] == ASTRO
+    assert statuses(result, 0)["broad"] == "low_confidence"
+    assert (result.final_level[90:] == "supercluster").all()
+    assert not result.flags[Columns.EXCLUDE_HARD].any()
+
+
+def test_a_failed_gate_attempts_nothing_in_the_strict_pass() -> None:
+    weak = [Cell(EXC, counts=100, broad_raw=0.5) for _ in range(90)]
+    result = resolve(weak, Setup(enforce_dataset_gate=True), fillers=10)
+    assert result.gate.level == "failed"
+    assert result.enforced
     assert set(statuses(result, 95).values()) == {"not_attempted_gate"}
     assert result.flags[Columns.EXCLUDE_HARD].all()
     assert (result.final_level == "none").all()
@@ -989,12 +1114,35 @@ def test_every_cell_status_is_reachable(
         [Cell(EXC, counts=30)],
         Setup(trust=make_trust("validated_real")),
         sea=False,
-    )  # single_method; not_attempted_gate (seaad_subclass)
-    seen = set()
-    for result in (with_sea, without_sea):
-        for values in result.levels.values():
-            seen |= {str(value) for value in values.status}
-    assert seen == {status.value for status in CellStatus}
+    )  # single_method; unmappable (seaad_subclass)
+    without_whb = resolve([Cell(EXC)], whb=False)  # unmappable
+    strict_without_whb = resolve(
+        [Cell(EXC)], Setup(enforce_dataset_gate=True), whb=False
+    )  # not_attempted_gate (strict pass)
+    strict_without_sea = resolve(
+        [Cell(EXC, counts=30)],
+        Setup(trust=make_trust("validated_real"), enforce_dataset_gate=True),
+        sea=False,
+    )  # not_attempted_gate (seaad_subclass, strict pass)
+
+    def seen_in(*results: cs.HumanResolution) -> set[str]:
+        return {
+            str(value)
+            for result in results
+            for values in result.levels.values()
+            for value in values.status
+        }
+
+    lenient = seen_in(with_sea, without_sea, without_whb)
+    strict = seen_in(strict_without_whb, strict_without_sea)
+    assert lenient | strict == {status.value for status in CellStatus}
+    # Always label: not_attempted_gate is a strict-pass status only.
+    assert "not_attempted_gate" not in lenient
+    assert lenient == {status.value for status in CellStatus} - {"not_attempted_gate"}
+    assert "unmappable" in lenient and "unmappable" not in strict
+    assert statuses(without_sea)["seaad_subclass"] == "unmappable"
+    assert set(statuses(strict_without_whb).values()) == {"not_attempted_gate"}
+    assert statuses(strict_without_sea)["seaad_subclass"] == "not_attempted_gate"
     assert statuses(with_sea, 3)["supercluster"] == "below_floor"
     assert statuses(with_sea, 4)["broad"] == "not_resolvable"
 
@@ -1282,6 +1430,7 @@ def promotion_decisions(make_decisions: MakeDecisions) -> pd.DataFrame:
     return make_decisions(overrides=provisional | validated)
 
 
+@pytest.mark.parametrize("enforce", [False, True], ids=["lenient", "strict"])
 @pytest.mark.parametrize("seed", [0, 1, 2])
 @pytest.mark.parametrize("constraint", PROMOTION_CONSTRAINTS)
 def test_promotion_by_simulation_never_changes_what_resolve_human_emits(
@@ -1290,12 +1439,15 @@ def test_promotion_by_simulation_never_changes_what_resolve_human_emits(
     human_level_meta: list[LevelMeta],
     constraint: str,
     seed: int,
+    enforce: bool,
 ) -> None:
     """Provisional -> simulation-validated trust: only validation marks change.
 
     Both trust decisions come from ``trust_state`` on the same panel and
     bundle, before and after a gate-P PR lists the family; only
-    ``ct_<L>_validated``, the banner and the gate warning may differ.
+    ``ct_<L>_validated``, the banner and the gate warning may differ. This
+    holds in the always-label pass and in the strict pass; only the strict
+    pass blocks the leaf of a broad-only dataset.
     """
     rng = np.random.default_rng(seed)
     cells = random_cells(rng, 300)
@@ -1315,6 +1467,7 @@ def test_promotion_by_simulation_never_changes_what_resolve_human_emits(
             thresholds=thresholds,
             n_segmented=len(calls) + 40,
             fine_seed_stability={"cluster": 0.0} if has_tables else None,
+            enforce_dataset_gate=enforce,
         )
         results.append(cs.resolve_human(calls, setup.settings()))
     before, after = results
@@ -1341,6 +1494,208 @@ def test_promotion_by_simulation_never_changes_what_resolve_human_emits(
         assert before.floor_warnings == after.floor_warnings
     if constraint in ("no_self_map", "broad_only"):
         assert after_trust.state == "broad_only" and after.gate.level == "broad_only"
-        assert set(after.levels["supercluster"].status[after.in_table]) <= {
-            "not_attempted_gate"
-        }
+        leaf = after.levels["supercluster"].status[after.in_table]
+        if enforce:
+            assert set(leaf) <= {"not_attempted_gate"}
+        else:
+            assert "not_attempted_gate" not in set(leaf)
+            assert (leaf == "confident").any()
+
+
+# --------------------------------------------------------------------------
+# Always label: the strict view and the dataset QC columns (label table v2)
+
+
+def human_gate(
+    level: str = "full",
+    *,
+    level_reasons: tuple[str, ...] = (),
+    warning_reasons: tuple[str, ...] = (),
+) -> th.GateVerdict:
+    """Build a human gate verdict with the given level and reasons."""
+    return th.GateVerdict(
+        level=level,  # type: ignore[arg-type]
+        warning=bool(warning_reasons),
+        level_reasons=level_reasons,
+        warning_reasons=warning_reasons,
+        frac_ge30=1.0,
+        broad_coverage_table=1.0,
+        broad_coverage_segmented=float("nan"),
+        n_table=10,
+    )
+
+
+@pytest.mark.parametrize(
+    ("reason", "token"),
+    [
+        ("broad_coverage_table: 0.100 < 0.25 (of 100 cells)", "broad_coverage_table"),
+        ("unvalidated_share:lineage 0.4 > 0.1", "unvalidated_share"),
+        ("G1 Registration: density ratio 1.2", "g1_registration"),
+        ("panel-refused", "panel_refused"),
+        ("", "unspecified"),
+        (": no code", "unspecified"),
+    ],
+)
+def test_reason_token_keeps_the_code_in_lower_snake_case(
+    reason: str, token: str
+) -> None:
+    assert cs.reason_token(reason) == token
+
+
+def test_dataset_warning_tokens_mark_fail_and_warn_reasons() -> None:
+    verdict = human_gate(
+        "failed",
+        level_reasons=("broad_coverage_table: 0.1 < 0.25", "frac_ge30: A = 0.2"),
+        warning_reasons=("broad_coverage_segmented: 0.1 < 0.15",),
+    )
+    tokens = cs.dataset_warning_tokens(
+        verdict, extra=("qc_marker_consistency_cap", "", "frac_ge30_fail")
+    )
+    assert tokens == (
+        "broad_coverage_segmented_warn;broad_coverage_table_fail;"
+        "frac_ge30_fail;qc_marker_consistency_cap"
+    )
+
+
+def test_dataset_warning_tokens_are_empty_for_a_clean_dataset() -> None:
+    assert cs.dataset_warning_tokens(human_gate()) == ""
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        ("validated_real", "validated_real"),
+        ("validated_simulation", "validated_simulation"),
+        ("provisional", "provisional"),
+        ("broad_only", "broad_only"),
+        ("refused", "refused"),
+    ],
+)
+def test_panel_trust_value_names_the_state_and_validation_basis(
+    make_trust: MakeTrust, state: str, expected: str
+) -> None:
+    assert cs.panel_trust_value(make_trust(state)) == expected
+
+
+def test_panel_trust_value_without_a_decision_is_unknown() -> None:
+    assert cs.panel_trust_value(None) == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("species", "gate_level", "primary_available", "withheld", "expected"),
+    [
+        ("human", "full", True, frozenset(), "supercluster"),
+        ("human", "broad_only", True, frozenset(), "nt"),
+        ("human", "failed", True, frozenset(), "none"),
+        ("human", "full", False, frozenset(), "none"),
+        ("human", "full", True, frozenset({"supercluster"}), "nt"),
+        ("human", "full", True, frozenset({"broad", "supercluster"}), "lineage"),
+        ("human", "broad_only", True, frozenset({"broad"}), "lineage"),
+        ("human", "full", True, frozenset({"lineage"}), "none"),
+        ("human", "full", True, frozenset({"seaad_subclass"}), "supercluster"),
+        ("mouse", "full", True, frozenset(), "subclass"),
+        ("mouse", "broad_only", True, frozenset(), "nt"),
+        ("mouse", "failed", True, frozenset(), "none"),
+        ("mouse", "full", False, frozenset(), "none"),
+    ],
+)
+def test_dataset_max_level_is_the_deepest_level_an_enforced_gate_allows(
+    species: str,
+    gate_level: str,
+    primary_available: bool,
+    withheld: frozenset[str],
+    expected: str,
+) -> None:
+    got = cs.dataset_max_level(
+        species, gate_level, primary_available=primary_available, withheld=withheld
+    )
+    assert got == expected
+
+
+def test_strict_columns_need_a_strict_pass() -> None:
+    with pytest.raises(ValueError, match="enforce_dataset_gate"):
+        cs.strict_columns(resolve([Cell(EXC)]))
+
+
+def test_strict_columns_carry_the_old_outcome_of_a_failed_gate() -> None:
+    weak = [Cell(EXC, counts=100, broad_raw=0.5) for _ in range(90)]
+    lenient = resolve(weak, fillers=10)
+    strict = resolve(weak, Setup(enforce_dataset_gate=True), fillers=10)
+    columns = cs.strict_columns(strict)
+    assert set(columns) == {
+        *(Columns.strict_status(level) for level in strict.levels),
+        Columns.CT_FINAL_LEVEL_STRICT,
+        Columns.CT_FINAL_NAME_STRICT,
+        Columns.EXCLUDE_HARD_STRICT,
+    }
+    for level in strict.levels:
+        values = columns[Columns.strict_status(level)]
+        assert isinstance(values.dtype, pd.CategoricalDtype)
+        assert set(values.astype(str)) == {"not_attempted_gate"}, level
+    assert set(columns[Columns.CT_FINAL_LEVEL_STRICT].astype(str)) == {"none"}
+    assert columns[Columns.EXCLUDE_HARD_STRICT].all()
+    # The lenient labels are untouched by the strict view.
+    assert (lenient.final_level[90:] == "supercluster").all()
+    assert not lenient.flags[Columns.EXCLUDE_HARD].any()
+
+
+def test_strict_columns_cap_a_broad_only_dataset_below_the_leaf(
+    make_trust: MakeTrust,
+) -> None:
+    cells = [Cell(EXC), Cell(ASTRO)]
+    strict = resolve(
+        cells,
+        Setup(trust=make_trust("broad_only"), enforce_dataset_gate=True),
+        fillers=0,
+    )
+    columns = cs.strict_columns(strict)
+    assert list(columns[Columns.CT_FINAL_LEVEL_STRICT].astype(str)) == ["nt", "broad"]
+    assert (
+        list(columns[Columns.strict_status("supercluster")].astype(str))
+        == ["not_attempted_gate"] * 2
+    )
+    assert columns[Columns.strict_status("broad")][0] == "confident"
+    assert not columns[Columns.EXCLUDE_HARD_STRICT].any()
+
+
+def test_dataset_qc_columns_repeat_the_advisory_gate_on_every_cell(
+    make_trust: MakeTrust,
+) -> None:
+    weak = [Cell(EXC, counts=100, broad_raw=0.5) for _ in range(90)]
+    trust = make_trust("validated_real")
+    result = resolve(weak, Setup(trust=trust), fillers=10)
+    columns = cs.dataset_qc_columns(
+        result, trust=trust, extra_warnings=("qc_marker_consistency_cap",)
+    )
+    n = len(result.in_table)
+    assert set(columns) == {
+        Columns.QC_DATASET_LEVEL,
+        Columns.QC_DATASET_MAX_LEVEL,
+        Columns.QC_DATASET_WARNINGS,
+        Columns.QC_PANEL_TRUST,
+        "qc_frac_ge30",
+        "qc_broad_coverage_table",
+        "qc_broad_coverage_segmented",
+    }
+    assert all(len(values) == n for values in columns.values())
+    assert set(columns[Columns.QC_DATASET_LEVEL].astype(str)) == {"failed"}
+    assert set(columns[Columns.QC_DATASET_MAX_LEVEL].astype(str)) == {"none"}
+    assert set(columns[Columns.QC_DATASET_WARNINGS].astype(str)) == {
+        "broad_coverage_segmented_warn;broad_coverage_table_fail;"
+        "qc_marker_consistency_cap"
+    }
+    assert set(columns[Columns.QC_PANEL_TRUST].astype(str)) == {"validated_real"}
+    coverage = columns["qc_broad_coverage_table"]
+    assert coverage.dtype == np.float32
+    assert coverage == pytest.approx(np.full(n, result.gate.broad_coverage_table))
+
+
+def test_dataset_qc_columns_of_a_clean_dataset_have_no_warnings(
+    make_trust: MakeTrust,
+) -> None:
+    result = resolve([Cell(EXC)], Setup(trust=make_trust("validated_real")))
+    columns = cs.dataset_qc_columns(result, trust=None)
+    assert set(columns[Columns.QC_DATASET_LEVEL].astype(str)) == {"full"}
+    assert set(columns[Columns.QC_DATASET_MAX_LEVEL].astype(str)) == {"supercluster"}
+    assert set(columns[Columns.QC_DATASET_WARNINGS].astype(str)) == {""}
+    assert set(columns[Columns.QC_PANEL_TRUST].astype(str)) == {"unknown"}

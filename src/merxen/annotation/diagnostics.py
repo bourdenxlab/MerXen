@@ -1723,7 +1723,12 @@ class TrustDecision(_DiagModel):
 
     @property
     def map_skipped(self) -> bool:
-        """Return whether MAP skips this reference (refused)."""
+        """Return whether the state is ``refused``.
+
+        Named for the behaviour before the always-label plan (M2), when MAP
+        skipped a refused panel; MAP now maps it whenever a gene resolves,
+        and only an unmappable panel (no resolved gene) has no run.
+        """
         return self.state == "refused"
 
     @property

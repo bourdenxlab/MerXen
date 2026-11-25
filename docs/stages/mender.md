@@ -88,18 +88,28 @@ add no state to any neighbourhood); legacy tables keep every state as a
 feature. The MENDER manifests record the policy, the excluded states, the
 dataset gate, the panel trust and the pair's cross-platform scope
 ([Map-first clustering runs](annotation.md#map-first-clustering-runs-m5)).
+Since label table version 2 the gate and the trust are advisory: MENDER runs
+on every dataset with assigned states and records them beside its results
+instead of skipping ([always-label
+plan](../plans/annotation-always-label-plan.md)).
 
 They also record `cross_platform_comparable` and its reasons: niches may be
 compared across platforms (or datasets) only when both runs use
 `--mender_cell_state_key ct_mender_state` (plan §4.9) and the pair's scope
-allows its branch-level states (`full`). The default `hierarchical_cluster`
-follows each dataset's gate and resolvability (HD2 MERSCOPE, broad-only,
-has 11 branch-level states where its Xenium partner has 20 leaves), so its
-niches are recorded as not comparable (`state_key:hierarchical_cluster`);
-cross-platform niche comparison needs a `ct_mender_state` run.
+allows its branch-level states (its `statistics_level`, `full` unless there
+is nothing to compare). The default `hierarchical_cluster` follows each
+dataset's leaves and resolvability, so its niches are recorded as not
+comparable (`state_key:hierarchical_cluster`); cross-platform niche
+comparison needs a `ct_mender_state` run. A dataset-gate or panel
+restriction of the pair (e.g. HD2, whose MERSCOPE side is broad-only) no
+longer makes the niches incomparable; it is listed in
+`cross_platform_advisory_reasons` (the advisory level and the scope's
+reasons), so a user can leave such pairs out.
 
 When every state of a `map_first` table is unassigned under
-`exclude_from_features` (a refused panel or a failed gate), there is no
+`exclude_from_features` (a panel nothing could be mapped with, whose cells
+are `unmappable`; since label table version 2 a refused panel or a failed
+gate keeps its labels), there is no
 neighbourhood feature: MENDER_PREPARE records
 `status: skipped_no_assigned_state` with its reasons, MENDER_COMPUTE and
 MENDER_FINALIZE write their manifests without domains, MENDER_IMPORT writes
