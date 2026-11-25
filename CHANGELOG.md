@@ -24,6 +24,7 @@ users would notice). A release turns [Unreleased] into the release's section.
 - **The strict view.** `ct_<level>_status_strict`, `ct_final_level_strict`, `ct_final_name_strict` and `exclude_hard_strict` hold exactly what the enforced gate, panel trust and QC would have left (the label table version 1 meaning), and the resolve summary gains a `strict` block per sample.
 - **`merxen.annotation.filtering.select_cells`.** One call picks the cells to analyse at a label level: by status, by whether the dataset's QC supports that level, by dataset warning tokens, by per-cell flags, or in the strict view ([filtering cells by confidence](docs/annotation-filtering.md)).
 - **Status `unmappable`.** A cell with no reference call at all (no primary mapping for the sample; at `seaad_subclass`, no SEA-AD mapping) has this status instead of `not_attempted_gate`.
+- **Scheduling plan.** Document the proposed overlap of CPU analysis with GPU segmentation, avoidable resource/grouping barriers, and maintenance resume safeguards. This is a plan only; runtime behavior is unchanged ([plan](docs/plans/workstation-task-scheduling-plan.md)).
 
 ### Changed
 
@@ -38,6 +39,12 @@ users would notice). A release turns [Unreleased] into the release's section.
 ### Upgrading
 
 - **Reading labels written by this release:** `ct_<level>_name` is now filled where it used to be empty, `ct_<level>_status` no longer says `not_attempted_gate`, and `exclude_hard` no longer follows the dataset gate. To reproduce an analysis made on an earlier release, read `ct_<level>_status_strict`, `ct_final_level_strict`, `ct_final_name_strict` and `exclude_hard_strict` instead (or `select_cells(..., strict=True)`). Label tables written before this release still validate and are read as before.
+
+## [1.1.1] - 2026-11-18
+
+### Fixed
+
+- **MERSCOPE transcript import.** Raw-folder builds now import supplied Parquet or CSV transcripts with the local reader if the preferred reader returns a store without points. Existing imported points are preserved. Still-missing imports fail before image projection, and unreadable required transcripts fail the build instead of being skipped, preventing an incomplete image-only store from reaching segmentation.
 
 ## [1.1.0] - 2026-11-18
 
@@ -304,7 +311,8 @@ was set, mostly the reference-based cell-type annotation.
 - The protocol and the user's decisions are in `docs/acceptance/annotation-v1-preregistration.md` §18–§20.
 - The mouse acceptance (gate M) is scored on MS1 and MS2 under the protocol of pre-registration §25, with the user's review decisions in §25.4. The re-score with the section-time exception gives 67 PASS and 7 FAIL (excepted), with no open problem; the user's review of the two original_seg reports (U9) is pending.
 
-[Unreleased]: https://github.com/bourdenxlab/MerXen/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/bourdenxlab/MerXen/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/bourdenxlab/MerXen/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/bourdenxlab/MerXen/compare/v1.0.2...v1.1.0
 [1.0.2]: https://github.com/bourdenxlab/MerXen/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/bourdenxlab/MerXen/compare/v1.0.0...v1.0.1
