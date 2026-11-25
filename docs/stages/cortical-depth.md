@@ -213,6 +213,11 @@ Its `broad_class` vocabulary includes `Oligodendrocyte lineage` and
 `Mixed/Unknown` (the latter gets no violin), and the QC summary records the
 dataset gate, panel trust and cross-platform scope of the labels
 ([Map-first clustering runs](annotation.md#map-first-clustering-runs-m5)).
+Since label table version 2 the gate and the trust are advisory: the labels
+of every dataset reach the depth outputs (`broad_class`, `subcluster_label`).
+The `qc_*` and `*_strict` columns stay in the clustered table's `obs`; join
+them by cell id to filter a depth analysis
+([Filtering cells by confidence](../annotation-filtering.md)).
 
 The stage updates the source `latest_spatialdata.zarr` in place by default.
 Set `--cortical_depth_write_spatialdata_table false` to write sidecars and QC

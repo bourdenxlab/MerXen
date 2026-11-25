@@ -755,8 +755,18 @@ def test_registration_g1_follows_the_configured_effect(make_trust: MakeTrust) ->
     )
     assert warn.provenance().outcomes["registration_g1"] == "warn"
     assert warn.apply_to_gate(human_gate()).level == "full"
-    # The default since the user's ruling C2 of 2026-10-07: §8.8's effect.
-    hard = qc.real_data_qc(signals, trust, AnnotationConfig(species="human"))
+    # warn-only is the default again since 2026-11-24.
+    default = qc.real_data_qc(signals, trust, AnnotationConfig(species="human"))
+    assert default.provenance().outcomes["registration_g1"] == "warn"
+    # §8.8's effect, the default from the user's ruling C2 of 2026-10-07.
+    hard = qc.real_data_qc(
+        signals,
+        trust,
+        AnnotationConfig(
+            species="human",
+            real_qc=AnnotationRealQcConfig(registration_g1_effect="gate_failed"),
+        ),
+    )
     assert hard.provenance().outcomes["registration_g1"] == "fail"
     assert hard.apply_to_gate(human_gate()).level == "failed"
 
@@ -1126,8 +1136,8 @@ def test_the_species_gate_record_defaults_to_pending() -> None:
         "mouse": "pending",
     }
     assert config.seeded_warn_only("human") and config.seeded_warn_only("mouse")
-    # The user's ruling C2 of 2026-10-07 (pre-registration §23.19).
-    assert config.registration_g1_effect == "gate_failed"
+    # warn-only since 2026-11-24 (gate_failed from the ruling C2 of 2026-10-07).
+    assert config.registration_g1_effect == "warning"
     partial = AnnotationRealQcConfig(
         seeded_families_warn_only_until_gate={"mouse": "merged"}
     )

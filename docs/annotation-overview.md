@@ -77,7 +77,7 @@ composition distance between platforms fell to about 0.13 / 0.14 (HD1 /
 HD2), with 0.3–0.6% of calls to implausible types (plan §0). These numbers
 are evidence quoted from the plan, not recomputed here.
 
-The design rests on five principles:
+The design rests on six principles:
 
 1. **Per-cell, not per-cluster.** No cluster majority overrides a cell's own
    call.
@@ -91,7 +91,14 @@ The design rests on five principles:
    stricter targets and carries a banner.
 5. **Real data can only downgrade.** Checks on the real dataset (marker
    consistency, registration, cross-platform concordance and others) can
-   lower or withhold output, never raise trust.
+   lower the dataset's recorded level or warn, never raise trust.
+6. **Always label; record the dataset's QC per cell.** Since label table
+   version 2 no dataset-level condition (the dataset gate, the panel's trust
+   state, real-data QC) removes a label. What they found is written into
+   every cell's row (`qc_*` columns), and the answer an enforced gate would
+   have given is kept in the `*_strict` columns, so a user filters to the
+   cells and the level they trust ([Filtering cells by
+   confidence](annotation-filtering.md)).
 
 ### 1.2 The flow
 
@@ -151,24 +158,31 @@ All paths are under the run's `outdir` unless stated
 **What goes into the SpatialData table.** `obs` gets every `ct_*` column
 (per level: `name`, `raw`, `conf`, `corr`, `runner_up`, `margin`, `status`,
 `validated`; plus `ct_final_level`, `ct_final_name`, `ct_consensus_tier`,
-`ct_branch`, `ct_leaf`, `ct_mender_state`), every `flag_*` column with its
-continuous companion (`contamination_score`, `ood_z`, …), `exclude_hard`,
-`discovery_caution` and `depth_bin`. The legacy-compatible columns are filled
+`ct_branch`, `ct_leaf`, `ct_mender_state`; and the strict view
+`ct_<level>_status_strict`, `ct_final_level_strict`, `ct_final_name_strict`),
+every `flag_*` column with its continuous companion (`contamination_score`,
+`ood_z`, …), the dataset QC columns `qc_*`, `exclude_hard` and
+`exclude_hard_strict`, `discovery_caution` and `depth_bin`. The legacy-compatible columns are filled
 from the labels: `broad_class`, `broad_atlas_label`, `neuron_split_label`,
 `subcluster_label`, `subcluster_status`, `hierarchical_cluster`. The QC
 Leiden is in `leiden` / `leiden_broad`. The soft composition vectors
 (`soft_*`), the raw engine columns (`mmc_*`) and the likelihood columns
 (`ll_*`) stay in the parquet only.
 Provenance is in `uns["merxen_annotation_json"]` and
-`uns["merxen_hierarchical_clustering"]` (mode, suffix, gate level, panel
-trust, cross-platform scope).
+`uns["merxen_hierarchical_clustering"]` (mode, suffix, advisory gate level,
+panel trust, `leaves_advisory_broad_only`, cross-platform scope).
 
 **Which column to use.** For a cell type, use `ct_final_name` (the deepest
 confident level), or `ct_<level>_name` **only where** `ct_<level>_status ==
 "confident"`: the name column also holds the candidate name of cells that
 failed a check (it is null only for `low_counts`, `not_applicable` and
-`not_attempted_gate`). Use `exclude_hard` to drop objects, and
-`discovery_caution` for sensitivity analyses.
+`unmappable`). Use `exclude_hard` to drop objects, and
+`discovery_caution` for sensitivity analyses. These columns describe the
+cell's own evidence only. Whether the dataset as a whole supports a level is
+in `qc_dataset_max_level`, `qc_dataset_warnings` and `qc_panel_trust`; to
+reproduce label table version 1 (an enforced dataset gate), read the
+`*_strict` columns instead. [Filtering cells by
+confidence](annotation-filtering.md) gives recipes.
 
 ### 1.4 Species at a glance
 
@@ -181,7 +195,7 @@ failed a check (it is null only for `low_counts`, `not_applicable` and
 | Default thresholds | 0.73 (lineage, broad, NT), 0.69 (supercluster) | 0.90 (broad, class, NT), 0.80 (subclass) |
 | Region handling | A fixed list of superclusters implausible in frontal cortex; `frontal_cortex` is validated, `hippocampus` is provisional (only the sinks are implausible) | Divisions present in the section are inferred from confident neurons; implausible nodes are dropped and those cells re-mapped |
 | Dataset gate | Label-based: share of cells ≥ 30 counts, confident broad coverage | Label-free signals G1–G5 (registration, marker referee, implausibility, composition, spill-over) |
-| Real-data QC | Yes (downgrade-only) | Yes, warn-only: records outcomes, changes nothing (M13b) |
+| Real-data QC | Yes (downgrade-only; since label table version 2 it lowers only the recorded dataset level and the strict view) | Yes, warn-only: records outcomes, changes nothing (M13b) |
 | Default mode | `map_first` (since M8) | `map_first` (since M9); sections estimated at AP < 6.0 mm carry the MO11 banner |
 | MAP processes | 6 | 4 (the count gate M measured, pre-registration §25.1) |
 
@@ -197,8 +211,8 @@ reference, and has four states (`diagnostics.trust_state`):
 |---|---|---|
 | `validated` | The family is listed in `validated_panels.csv`. Today: the human 296/297-gene set a and its 264/265-gene set c (both platforms, up to supercluster), and the mouse MS1 (500 genes) and MS2 (815 genes) MERSCOPE panels (up to subclass). All are validated on real data. | Pre-registered default thresholds, packaged count floors, `ct_<L>_validated = true` on confident labels up to the validated level. |
 | `provisional` | Any other panel that passes the checks (custom panels, Xenium Prime 5K, the new-panel human MERSCOPE family, HD4's 268-gene MERSCOPE panel). | Stricter precision targets, thresholds that can only rise, floors that take the maximum of every known and simulated floor, a report banner and a dataset-gate warning. Labels are still emitted where the simulation allows. |
-| `broad_only` | The simulation finds the leaf resolvable for fewer than half of the classes at every depth up to 250 counts; or a non-validated panel has no self-map (fail-safe). | The leaf level (supercluster / subclass) is never attempted. |
-| `refused` | The gene list fails ID resolution (< 95% resolved), is the wrong species, has fewer than 50 genes in the reference or fewer than 10 root markers, or the simulation finds broad unresolvable at every depth up to 250 counts. | Primary reference: nothing is labelled, the dataset gate is `failed` (`panel_refused`) and every cell is `exclude_hard`. Secondary (SEA-AD): not mapped, and RESOLVE runs in the degraded `whb_only` mode (cells below 60 counts become `single_method`). |
+| `broad_only` | The simulation finds the leaf resolvable for fewer than half of the classes at every depth up to 250 counts; or a non-validated panel has no self-map (fail-safe). | The leaf level (supercluster / subclass) is resolved like any other level, but advisory: `qc_panel_trust = broad_only`, the advisory dataset gate is `broad_only` (`panel_broad_only`) and `qc_dataset_max_level` stops at the level above the leaf. The strict view (`ct_<leaf>_status_strict`) leaves the leaf `not_attempted_gate`. |
+| `refused` | The gene list fails ID resolution (< 95% resolved), is the wrong species, has fewer than 50 genes in the reference or fewer than 10 root markers, or the simulation finds broad unresolvable at every depth up to 250 counts. | Primary reference: MapMyCells still maps the panel on whatever genes resolve, and RESOLVE keeps the labels with `qc_panel_trust = refused`, the advisory gate `failed` (`panel_refused`) and `qc_dataset_max_level = none`; the strict view makes every table cell `not_attempted_gate` and `exclude_hard_strict`. Only a panel with no resolved gene is not mapped: its table cells are `unmappable` at every level and the run summary says so. Secondary (SEA-AD): its calls are written (`mmc_seaad_*`) but kept out of the vote, so RESOLVE runs in the degraded `whb_only` mode (cells below 60 counts become `single_method`) and the SEA-AD subclass is `unmappable`. |
 
 **Gate P** is how a provisional family could become validated without real
 ground truth. It is a stand-alone simulation programme (`merxen
@@ -215,20 +229,29 @@ family was scored and did not pass (lineage failed the 1% excluded-call
 criterion in 7 of 8 ensemble members), so it stays provisional. Gate P for
 mouse is not available yet.
 
-Two more safeguards act per dataset, whatever the panel:
+Two more checks act per dataset, whatever the panel. Since label table
+version 2 both are **advisory**: they never remove a label, and what they
+find is written into every cell's row (the `qc_*` columns, constant within a
+dataset) and into the strict view (the `*_strict` columns, what an enforced
+gate would have left):
 
 - **The dataset gate** (`full` / `broad_only` / `failed`, plus a warning
-  flag) decides whether the leaf levels (`broad_only`) or every level
-  (`failed`) are left unattempted on this section.
+  flag) is recorded as `qc_dataset_level`; `qc_dataset_max_level` is the
+  deepest chain level it supports (the leaf when `full`, the level above the
+  leaf when `broad_only`, `none` when `failed`). An enforced gate (label
+  table version 1, now the strict view) left the leaf levels (`broad_only`)
+  or every level (`failed`) unattempted.
 - **Real-data QC** (human) checks the section against expectations that need
   no labels: marker consistency, registration, cross-platform concordance,
-  flag rates, gene complexity versus simulation and others. It can only cap
-  the gate, withhold a level or warn. On the seeded real-data family
-  (set a) the marker, concordance, flag-rate, gene-complexity and prefilter
-  checks only warn until gate H merges into `main`; the registration check
-  can still fail the gate. Mouse sections run the same QC warn-only
-  ([2.6](#mouse-real-data-qc-warn-only)): it records the mouse gate's G1–G5
-  and the other checks, and changes nothing.
+  flag rates, gene complexity versus simulation and others. It can only
+  lower the advisory gate, mark a level as withheld (which lowers
+  `qc_dataset_max_level` and the strict view) or warn. On the seeded
+  real-data family (set a) the marker, concordance, flag-rate,
+  gene-complexity and prefilter checks only warn until gate H merges into
+  `main`. Registration G1's fail rule only warns by default
+  (`real_qc.registration_g1_effect = warning`). Mouse sections run the same
+  QC warn-only ([2.6](#mouse-real-data-qc-warn-only)): it records the mouse
+  gate's G1–G5 and the other checks, and changes nothing.
 
 ### 1.6 Module map
 
@@ -319,6 +342,7 @@ others). They are not pipeline stages.
 | RESOLVE and the rules | [Resolving](stages/annotation.md#resolving-merxen-annotate-resolve-m4), [Human rules](stages/annotation.md#human-rules-v1-consensusresolve_human-52), [Mouse rules](stages/annotation.md#mouse-rules-v1-consensusresolve_mouse-73-m6); plan §5, §7 |
 | Pipeline wiring, table keys, MENDER | [Map-first clustering runs](stages/annotation.md#map-first-clustering-runs-m5), [Pipeline processes](stages/annotation.md#pipeline-processes) |
 | Label-table columns | [Label table schema](outputs.md#label-table-schema-sid_celltype_labelsparquet) |
+| Filtering cells by confidence (cell statuses, dataset QC, strict view) | [Filtering cells by confidence](annotation-filtering.md) |
 | Report | [Annotation report](stages/annotation.md#annotation-report-merxen-annotation-report-m7) |
 | Parameters | [Configuration](configuration.md) |
 | Acceptance thresholds and results | [Pre-registration](acceptance/annotation-v1-preregistration.md) §9 (thresholds), §15, §18–§20 (human acceptance), §21–§22 (version 7), §23 (new-panel family) |
@@ -537,18 +561,49 @@ at broad and NT) and 50 at subclass, for every WMB class.
 
 #### The dataset gate
 
-Computed per section before the leaf level is attempted
-(`thresholds.dataset_gate` for human, `mouse_gate.evaluate_mouse_gate` for
-mouse). The worst condition wins:
+Computed per section (`thresholds.dataset_gate` for human,
+`mouse_gate.evaluate_mouse_gate` for mouse). The worst condition wins, and
+the level is one of `failed`, `broad_only` or `full`. A separate **warning
+flag** never lowers the level (e.g. a provisional panel). The human and
+mouse conditions are given in the species sections.
 
-- `failed`: every level of every table cell becomes `not_attempted_gate`
-  and `exclude_hard`.
-- `broad_only`: the leaf level (and the secondary and fine levels) become
-  `not_attempted_gate`; coarser levels are unaffected.
-- `full`: everything is attempted.
+**The gate is advisory** (label table version 2,
+[always-label plan](plans/annotation-always-label-plan.md)). It removes no
+label: every level is resolved from the cell's own evidence, whatever the
+gate, the panel's trust state or real-data QC say. RESOLVE writes the
+gate's outcome into every row of the label table (and the clustered
+table's `obs`), with the same value for every cell of one sample and
+segmentation:
 
-A separate **warning flag** never lowers the level (e.g. a provisional
-panel). The human and mouse conditions are given in the species sections.
+| Column | Content |
+|---|---|
+| `qc_dataset_level` | The advisory gate level (`full`, `broad_only`, `failed`), real-data QC's gate cap included. |
+| `qc_dataset_max_level` | The deepest chain level the dataset's QC supports (`consensus.dataset_max_level`): the leaf when the gate is `full`; the level above the leaf (`nt`) when it is `broad_only`; the level above a chain level real-data QC withholds; `none` when the gate failed or the primary reference is refused or missing. |
+| `qc_dataset_warnings` | Every gate reason as a token, sorted and `;`-joined: the reason's code in snake case plus `_fail` for a reason that lowers the level and `_warn` for a warning reason, e.g. `frac_ge30_fail`, `panel_refused_fail`, `panel_provisional_warn`, `g1_registration_warn`, `g2_marker_referee_fail`, `real_qc_marker_consistency_fail`. Empty when the dataset is clean. |
+| `qc_panel_trust` | The primary panel's trust state, with the validation basis of a validated panel: `validated_real`, `validated_simulation`, `provisional`, `broad_only`, `refused`, or `unknown` without a trust decision. |
+| `qc_<signal>` | The numeric gate signals, so a user can apply their own cut-off. Human: `qc_frac_ge30`, `qc_broad_coverage_table`, `qc_broad_coverage_segmented`. Mouse: `qc_g1_density_ratio`, `qc_g1_shift_um`, `qc_g2_marker_consistency`, `qc_g3_implausible_share`, `qc_g4_astro_epen_points`, `qc_g4_immune_points`, `qc_g5_spillover_rate`. NaN where the signal was not evaluated. |
+
+RESOLVE also runs a **strict pass**, the version-1 rules with the gate, a
+refused primary and real-data QC enforced (`enforce_dataset_gate`), and
+writes it as the **strict view**:
+
+- `ct_<level>_status_strict`: `not_attempted_gate` at every level of every
+  table cell when the gate failed (or the primary is refused), at the leaf
+  level (and the secondary and fine levels) when it is `broad_only`, and
+  `not_resolvable` at a level real-data QC withholds (`parent_unresolved`
+  below it); else the status of the enforced resolution.
+- `ct_final_level_strict`, `ct_final_name_strict`: the deepest confident
+  level of the strict statuses.
+- `exclude_hard_strict`: `exclude_hard`, or every cell when the gate failed.
+
+The strict view holds the statuses, final label and exclusion a version-1
+label table had, so analyses that relied on the enforced gate read these
+columns
+([Filtering cells by confidence](annotation-filtering.md)). Each sample's
+entry in the resolve summary gets a `strict` block (`qc_dataset_level`,
+`qc_dataset_max_level` and the strict `final_level_counts` of table cells).
+The new columns are optional in the label-table contract, so a version-1
+table still validates.
 
 #### Status precedence
 
@@ -562,18 +617,24 @@ per level; each level section below lists it exactly.
 |---|---|---|
 | `confident` | Every check passed. Only these cells carry the level's label. | the label |
 | `low_counts` | Not a table cell (`total_counts < min_counts`). Set at every level. | null |
-| `not_attempted_gate` | The dataset gate (`broad_only` for the leaf, `failed` for everything), a refused or missing primary reference, or a missing secondary (SEA-AD subclass) stopped the level. | null |
+| `unmappable` | There is no reference call to resolve: the sample has no primary-reference run (every level), or, for the SEA-AD subclass, SEA-AD is missing, refused or disabled. Not `exclude_hard`; `ct_final_level` is `none`. | null |
 | `not_applicable` | The level does not apply to the call: NT for a non-neuronal call. | null |
 | `implausible` | Human: the called WHB supercluster is a sink or implausible for the region. Mouse: the broad name is outside the vocabulary, or the cell's original call was removed by region pruning and the re-map is not confident. | candidate |
 | `parent_unresolved` | The parent level is not confident (the chain must be contiguous). | candidate |
 | `below_floor` | `total_counts` is below the class × level (× platform) floor. | candidate |
-| `not_resolvable` | The self-map does not emit this (level, class, depth bin) for this dataset, or real-data QC withheld the level, or (mouse) the node has no supporting markers. | candidate |
+| `not_resolvable` | The self-map does not emit this (level, class, depth bin) for this dataset, or (mouse) the node has no supporting markers. (In the strict view also a level real-data QC withholds.) | candidate |
 | `low_confidence` | No call, or the probability is below the applied threshold, or (human broad) the COP rule failed at ≥ 120 counts. | candidate |
 | `method_disagree` | Human: SEA-AD did not agree below 60 counts, or confidently called another class from 60 counts; SEA-AD subclass: SEA-AD's class differs from the WHB broad class. | candidate |
 | `single_method` | Human: below 60 counts with no usable SEA-AD run (degraded mode `whb_only`), unless `annotation_allow_single_method` is set. | candidate |
 
 "Candidate" means `ct_<level>_name` still shows what the mapper called, for
 inspection; it is not a label.
+
+`not_attempted_gate` (the dataset gate, a refused primary or a missing
+secondary stopped the level) is retired from `ct_<level>_status` since label
+table version 2. It occurs only in the strict view, `ct_<level>_status_strict`
+([The dataset gate](#the-dataset-gate)), where it takes `unmappable`'s place
+in the precedence.
 
 ### 2.3 Human levels
 
@@ -642,8 +703,9 @@ probability ≥ 0.68 (`seaad_broad`).
   different lineage / class.
 - If SEA-AD is missing or refused (mode `whb_only`), cells below 60 counts
   are `single_method` (unless `annotation_allow_single_method`), and cells
-  from 60 counts pass. If WHB is missing or refused, every table cell is
-  `not_attempted_gate`.
+  from 60 counts pass. If the sample has no WHB run, every table cell is
+  `unmappable`. A refused WHB panel is still mapped and keeps its calls (the strict view makes every table cell
+  `not_attempted_gate`).
 - The SEA-AD bundle's own self-map (a 7-class level at 0.68) only sets its
   trust state; it does not gate WHB levels.
 
@@ -707,21 +769,25 @@ gave no supercluster.
 #### Human dataset gate
 
 Computed on the table cells after broad and before the leaf
-(`thresholds.dataset_gate`):
+(`thresholds.dataset_gate`); the level is advisory and written to the `qc_*`
+columns and the strict view:
 
-| Condition | Effect |
+| Condition | Advisory level |
 |---|---|
 | Confident broad coverage of table cells < 0.25 | `failed` |
 | Primary panel trust `refused` | `failed` (`panel_refused`) |
 | A = share of table cells with ≥ 30 counts < 0.30 | `broad_only` |
 | Primary panel trust `broad_only` | `broad_only` (`panel_broad_only`) |
-| Real-data QC gate cap (marker consistency < 0.70 → `broad_only`; registration G1 fail → `failed`) | lowers only |
+| Real-data QC gate cap (marker consistency < 0.70 → `broad_only`; registration G1 fail → `failed` only with `real_qc.registration_g1_effect = gate_failed`) | lowers only |
 | Confident broad / all segmented objects < 0.15 | warning |
 | Provisional primary panel | warning (and banner) |
 | A simulation-validated family with > 10% of confident labels outside its validated region at a chain level | warning |
 
 For example, HD2 and HD4 MERSCOPE are `broad_only` because fewer than
-30% of their table cells reach 30 counts (plan D-C3).
+30% of their table cells reach 30 counts (plan D-C3). The level is advisory
+([The dataset gate](#the-dataset-gate)): their supercluster labels are kept,
+with `qc_dataset_level = broad_only`, `qc_dataset_max_level = nt` and the
+token `frac_ge30_fail` in `qc_dataset_warnings`.
 
 #### Supercluster (the leaf)
 
@@ -733,10 +799,11 @@ For example, HD2 and HD4 MERSCOPE are `broad_only` because fewer than
   30).
 - **Parent**: NT confident for neurons, broad confident otherwise. (Plan
   §5.2 asked only for broad; requiring NT keeps the chain contiguous.)
-- **Gate**: not attempted unless the gate is `full`.
-- **Check order**: `low_counts` → `not_attempted_gate` → `low_confidence`
-  (no call) → `implausible` → `parent_unresolved` → `below_floor` →
-  `not_resolvable` → `low_confidence`.
+- **Gate**: resolved whatever the advisory gate says; the strict view
+  makes it `not_attempted_gate` unless the gate is `full`.
+- **Check order**: `low_counts` → `low_confidence` (no call) →
+  `implausible` → `parent_unresolved` → `below_floor` → `not_resolvable` →
+  `low_confidence` (strict view: `not_attempted_gate` after `low_counts`).
 
 #### SEA-AD subclass (secondary name)
 
@@ -752,10 +819,11 @@ reference.
   of the cell's WHB floor class.
 - **Parent**: WHB broad confident; SEA-AD's 7-class label must equal the WHB
   broad class (its `method_disagree`).
-- **Check order**: `low_counts` → `not_attempted_gate` (SEA-AD not used, or
-  gate not `full`) → `low_confidence` (no SEA-AD subclass) →
+- **Check order**: `low_counts` → `unmappable` (SEA-AD missing, refused or
+  disabled) → `low_confidence` (no SEA-AD subclass) →
   `parent_unresolved` → `below_floor` → `not_resolvable` → `low_confidence`
-  → `method_disagree`.
+  → `method_disagree`. The strict view has `not_attempted_gate` in
+  `unmappable`'s place, also when the gate is not `full`.
 
 #### WHB cluster (fine level, opt-in)
 
@@ -770,19 +838,21 @@ order as for supercluster.
 
 After a first, QC-free resolution, `real_qc.real_data_qc` scores the section
 (details in [Real-data QC in RESOLVE](stages/annotation.md#real-data-qc-in-resolve-m13)).
-If a check caps the gate lower than it was, or withholds a level, RESOLVE
-runs again with that effect: a withheld level becomes `not_resolvable`. The
+Its effects never change a label (label table version 2). A gate cap lowers
+the advisory gate (`qc_dataset_level`, with a `real_qc_<check>_fail` token);
+a withheld level lowers `qc_dataset_max_level` to the level above it; both
+apply to the strict pass, where a withheld level is `not_resolvable`. The
 checks include marker consistency (warn < 0.75, cap `broad_only` < 0.70),
-registration G1 (fail when the density ratio < 1.5 or the shift > 5 µm →
-gate `failed`), paired cross-platform concordance (soft broad JSD > 0.20 →
-supercluster-level pair statistics withheld; labels unchanged), flag rates,
-gene complexity and, for version-7 bundles, coverage versus the simulation's
-prediction. On set a (a seeded real-data family) the marker, concordance,
-flag-rate, gene-complexity and prefilter checks only warn until the human
-species gate (gate H) merges into `main`; G1 can still fail the gate (as in
-[1.5](#15-how-far-to-trust-a-panel)). Checks that need inputs RESOLVE
-does not have (no registration file, no prefilter) are recorded
-`not_evaluable`.
+registration G1 (its fail rule, density ratio < 1.5 or shift > 5 µm, warns
+by default and caps the gate at `failed` only with
+`real_qc.registration_g1_effect = gate_failed`), paired cross-platform
+concordance (soft broad JSD > 0.20 → an advisory restriction of the
+supercluster-level pair statistics), flag rates, gene complexity and, for
+version-7 bundles, coverage versus the simulation's prediction. On set a (a
+seeded real-data family) the marker, concordance, flag-rate,
+gene-complexity and prefilter checks only warn until the human species gate
+(gate H) merges into `main`. Checks that need inputs RESOLVE does not have
+(no registration file, no prefilter) are recorded `not_evaluable`.
 
 ### 2.4 Human final label, hierarchy, tier and flags
 
@@ -790,17 +860,21 @@ does not have (no registration file, no prefilter) are recorded
   deepest confident level along lineage → broad → NT → supercluster; `none` /
   `Mixed/Unknown` when no level is confident. Because each level requires
   its parent, the confident levels always form a contiguous chain from
-  lineage.
+  lineage. It follows the cell's own statuses only; `ct_final_level_strict`
+  / `ct_final_name_strict` are the same capped by an enforced gate
+  ([The dataset gate](#the-dataset-gate)).
 - **`ct_branch`** (`pipeline.human_branch_columns`): the confident broad
   class, with neurons split into `Neurons/Excitatory`,
   `Neurons/Inhibitory` or `Neurons/unresolved`. A cell confident only at
   lineage gets `Neurons/unresolved` or `Oligodendrocyte lineage/unresolved`
   (other lineages give `Mixed/Unknown`).
-- **`ct_leaf`**: the confident supercluster, else `unresolved`. In the
-  clustered table every leaf is `unresolved` when the gate is `broad_only` or
-  `failed` or the panel is `broad_only` / `refused`, and on `Mixed/Unknown`
-  branches. `hierarchical_cluster = "<branch>:<leaf>"`; `ct_mender_state =
-  ct_branch`.
+- **`ct_leaf`**: the confident supercluster, else `unresolved`, and
+  `unresolved` on `Mixed/Unknown` branches. The dataset gate and the panel
+  trust are advisory in the hierarchy too: a `broad_only` / `failed` gate or
+  a `broad_only` / `refused` panel keeps its leaves, and the clustered
+  table's `uns` records `leaves_advisory_broad_only` (only a version-1 label
+  table's per-cell `not_attempted_gate` still leaves a leaf `unresolved`).
+  `hierarchical_cluster = "<branch>:<leaf>"`; `ct_mender_state = ct_branch`.
 - **`ct_consensus_tier`**: agreement of the informative methods at the 7
   classes. WHB is informative when it has a plausible call with broad
   probability ≥ 0.73; SEA-AD when confident (≥ 0.68). Tier 2 = both agree,
@@ -812,11 +886,12 @@ does not have (no registration file, no prefilter) are recorded
   provisional family).
 - **Status-mirroring flags**: `flag_low_counts`, and `flag_below_floor`,
   `flag_method_disagree`, `flag_implausible` when the deepest attempted chain
-  status (ignoring `low_counts`, `not_attempted_gate`, `not_applicable`,
+  status (ignoring `low_counts`, `unmappable`, `not_applicable`,
   `parent_unresolved`) is that status.
-- **`exclude_hard`**: outside the table; or every chain status is
-  `implausible` / `not_applicable` / `not_attempted_gate` with at least one
-  `implausible`; or the gate failed.
+- **`exclude_hard`**: cell-intrinsic only: outside the table, or every chain
+  status is `implausible` / `not_applicable` with at least one `implausible`.
+  The dataset gate no longer sets it; `exclude_hard_strict` adds every cell
+  of a dataset whose gate failed.
 - **Report-only flags** (`flags.py`; never change a status):
   `flag_contaminated` (counts on the class's negative genes against a
   dataset-fitted null), `flag_diffuse_profile`, `flag_ood` (robust z of
@@ -859,15 +934,18 @@ confident at broad, so the gate is `full` with no warning.
 | Lineage | table ✓; call ✓; plausible ✓; floor 10 ✓; (lineage, Exc, 60) emitted ✓; 0.99 ≥ 0.73 ✓; 85 ≥ 60, so SEA-AD can only veto, and it says Neurons ✓ | `confident`, Neurons |
 | Broad | parent ✓; Neurons is one of the 7 ✓; broad floor Exc Xenium 10 ✓; emitted ✓; 0.99 ≥ 0.73 ✓; not COP; no veto ✓ | `confident`, Neurons |
 | NT | lineage Neurons, so applicable ✓; parent ✓; floor 10 ✓; emitted ✓; 0.96 ≥ 0.73 ✓ | `confident`, Excitatory |
-| Supercluster | gate `full` ✓; parent NT ✓; floor 10 ✓; (supercluster, Exc, 60) emitted ✓; 0.81 ≥ 0.69 ✓ | `confident`, Deep-layer intratelencephalic |
-| SEA-AD subclass | SEA-AD used, gate `full` ✓; WHB broad ✓; floor 10 ✓; emitted ✓; 0.58 ≥ 0.45 (from 60) ✓; SEA-AD class Neurons = WHB broad ✓ | `confident`, L5 IT |
+| Supercluster | parent NT ✓; floor 10 ✓; (supercluster, Exc, 60) emitted ✓; 0.81 ≥ 0.69 ✓ | `confident`, Deep-layer intratelencephalic |
+| SEA-AD subclass | SEA-AD used ✓; WHB broad ✓; floor 10 ✓; emitted ✓; 0.58 ≥ 0.45 (from 60) ✓; SEA-AD class Neurons = WHB broad ✓ | `confident`, L5 IT |
 
 **Result.** `ct_final_level = supercluster`, `ct_final_name = Deep-layer
 intratelencephalic`; `ct_branch = Neurons/Excitatory`, `ct_leaf =
 Deep-layer intratelencephalic`, `hierarchical_cluster =
 "Neurons/Excitatory:Deep-layer intratelencephalic"`;
 `ct_consensus_tier = 2` (WHB 0.99 ≥ 0.73 and SEA-AD 0.97 ≥ 0.68 agree);
-`ct_<L>_validated` true at all four chain levels.
+`ct_<L>_validated` true at all four chain levels. The dataset columns read
+`qc_dataset_level = full`, `qc_dataset_max_level = supercluster`, empty
+`qc_dataset_warnings`, `qc_panel_trust = validated_real`; the strict view
+equals the statuses above.
 
 **What changes if…**
 
@@ -883,8 +961,12 @@ Deep-layer intratelencephalic`, `hierarchical_cluster =
   fails: supercluster is `low_confidence`, `ct_final_name = Excitatory` (NT),
   `ct_leaf = unresolved`. Every `ct_<L>_validated` is false and the gate
   carries the `panel_provisional` warning.
-- **…the section were `broad_only`** (A < 0.30). Supercluster and SEA-AD
-  subclass are `not_attempted_gate`; the cell ends at NT.
+- **…the section were `broad_only`** (A < 0.30). Nothing changes for the
+  cell: supercluster stays `confident` and `ct_final_name` is its
+  supercluster. The row records `qc_dataset_level = broad_only`,
+  `qc_dataset_max_level = nt` and `frac_ge30_fail`; in the strict view
+  supercluster and SEA-AD subclass are `not_attempted_gate` and
+  `ct_final_level_strict = nt`.
 - **…WHB had called COP** at 85 counts (with SEA-AD saying Oligodendrocytes:
   its Neurons call at 0.97 would veto the Oligodendrocyte lineage from 60
   counts). 85 < 120, so the COP rule fails unless SEA-AD confidently says
@@ -941,7 +1023,7 @@ Mouse plausibility depends on where the section is, so MAP infers it
 | Broad | Neurons, Astrocytes/Ependymal, Oligodendrocyte lineage, OEC, Vascular cells, Microglia | class bp + same-broad runner-ups | 0.90 or max(0.90, t\*) | class floor, 20 | – | `low_counts` → `low_confidence` (no call) → `implausible` (broad name outside the 6) → `below_floor` → `not_resolvable` → `low_confidence` |
 | Class | 34 WMB classes (e.g. `01 IT-ET Glut`) | class bp | 0.90 or max(0.90, t\*) | 20 | broad | `low_counts` → `low_confidence` (no call) → `parent_unresolved` → `below_floor` → `not_resolvable` (not emitted, or a marker-unsupported node) → `low_confidence` (bp; then `avg_correlation` if a floor is configured, none by default). Then: a cell whose class was region-dropped and is not confident after re-map → `implausible` |
 | NT | Excitatory, Inhibitory, Other (neurons only) | class bp + same-NT runner-ups | 0.90 or max(0.90, t\*) | class floor, 20 | class | `low_counts` → `low_confidence` → `not_applicable` → `implausible` (region-dropped class) → `parent_unresolved` → `below_floor` → `not_resolvable` → `low_confidence` |
-| Subclass (leaf) | WMB subclasses | subclass bp | 0.80 or max(0.80, t\*) | 50 (≥ 60 when not validated) | NT for neurons, else class | `low_counts` → `not_attempted_gate` (gate not `full`) → `low_confidence` (no call) → `implausible` → `parent_unresolved` → `below_floor` → `not_resolvable` (also marker-unsupported) → `low_confidence`. Then: a re-mapped cell that ends `below_floor`, `not_resolvable` or `low_confidence` → `implausible` |
+| Subclass (leaf) | WMB subclasses | subclass bp | 0.80 or max(0.80, t\*) | 50 (≥ 60 when not validated) | NT for neurons, else class | `low_counts` → (strict view only: `not_attempted_gate` when the gate is not `full`) → `low_confidence` (no call) → `implausible` → `parent_unresolved` → `below_floor` → `not_resolvable` (also marker-unsupported) → `low_confidence`. Then: a re-mapped cell that ends `below_floor`, `not_resolvable` or `low_confidence` → `implausible` |
 | Supertype (opt-in, report-only) | WMB supertypes | bp | 0.80 or max(0.80, t\*) | subclass floor | subclass | as subclass; see the caveat below |
 
 Emission, the version-7 ensemble, the composition reweighting and the
@@ -953,7 +1035,7 @@ subclass.
 
 | Signal | Fails the gate when | Warns when |
 |---|---|---|
-| G1 registration (the QC stage's check; required in pipeline runs) | density ratio < 1.5 or shift > 5 µm | ratio < 2.0, or no check |
+| G1 registration (the QC stage's check; required in pipeline runs) | only with `mouse_gate.g1_effect = gate_failed`: density ratio < 1.5 or shift > 5 µm | ratio < 2.0, or no check; by default (`g1_effect = warning`) also ratio < 1.5 or shift > 5 µm, which then set G1's signal status to `fail` without lowering the level |
 | G2 marker referee (marker-derived pseudo-labels vs class calls) | consistency < 0.70 | < 0.80, or < 200 pseudo-labelled cells |
 | G3 implausibility (share of table cells whose *unpruned* subclass has < 25% of its MERFISH cells in the present divisions; subclasses with ≥ 20 MERFISH cells, never-drop classes excluded) | – | > 3% |
 | G4 composition vs a MERFISH window (the AP estimate's section and its ± 1 neighbours, or `g4_window_sections`) | – | Astro-Epen off by > 5 points or Immune by > 1 point (not evaluated when there is no window: no estimate, because the region-share bundle has no section composition or too few neurons are confident, or `g4_ap_estimate` is off) |
@@ -965,6 +1047,20 @@ gate is evaluated again so that a simulation-validated family warns when
 > 10% of confident chain labels fall outside its validated region (the level
 cannot change). Unlike human, no coverage signal can fail or restrict the
 mouse gate.
+
+As for human, the mouse gate is advisory ([The dataset
+gate](#the-dataset-gate)): every level is resolved whatever its level, and a
+refused primary keeps its calls. The level, the
+deepest level it supports, the reason tokens (e.g. `g1_registration_warn`,
+`g2_marker_referee_fail`, `g4_composition_warn`), the panel trust and the
+signals G1–G5 (`qc_g1_density_ratio`, `qc_g1_shift_um`,
+`qc_g2_marker_consistency`, `qc_g3_implausible_share`,
+`qc_g4_astro_epen_points`, `qc_g4_immune_points`, `qc_g5_spillover_rate`)
+are written per cell; the strict pass (`resolve_mouse` with
+`enforce_dataset_gate`) gives the `*_strict` columns. A sparse section
+whose cells barely stand out from the background, for example, trips G1's
+ratio without any shift: it keeps every label, and its G1 values and
+`g1_registration_warn` are in each row.
 
 #### Mouse real-data QC (warn-only)
 
@@ -985,10 +1081,14 @@ added.
 #### Mouse final label and hierarchy
 
 `ct_final_*` is the deepest confident level of broad → class → NT →
-subclass. `ct_branch = ct_mender_state` = the confident class (else
+subclass, by the cell's own statuses (`ct_final_*_strict`: capped by an
+enforced gate). `ct_branch = ct_mender_state` = the confident class (else
 `Mixed/Unknown`), `ct_leaf` = the confident subclass (else `unresolved`). In
 the hierarchy, a class branch with fewer than 50 table cells loses its
-leaves. Mouse-only report flags: `flag_microglial_spillover` (on by default
+leaves; the gate and the panel trust do not remove leaves (advisory, as for
+human). `exclude_hard` is cell-intrinsic (off-table, or implausible at every
+level it was called); `exclude_hard_strict` adds every cell of a failed
+gate. Mouse-only report flags: `flag_microglial_spillover` (on by default
 for mouse), `flag_region_incoherent`, `flag_astro_lowcount` (Astro-Epen
 below 100 counts).
 

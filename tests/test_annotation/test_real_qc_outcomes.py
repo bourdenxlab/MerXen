@@ -72,6 +72,21 @@ CATALOGUE: tuple[qc.QcOutcome, ...] = (
 )
 
 
+Statuses = tuple[dict[str, np.ndarray], dict[str, np.ndarray]]
+
+
+def assert_same_labels(actual: Statuses, expected: Statuses) -> None:
+    """Assert two resolutions' statuses and names are equal at every level.
+
+    Always label: a lower (advisory) gate keeps every label of the lenient
+    pass; only the strict pass applies it.
+    """
+    assert set(actual[0]) == set(expected[0])
+    for level, values in expected[0].items():
+        assert list(actual[0][level]) == list(values), level
+        assert list(actual[1][level]) == list(expected[1][level]), level
+
+
 def combinations() -> Iterable[tuple[qc.QcOutcome, ...]]:
     """Yield every combination of catalogue outcomes (the power set)."""
     for size in range(len(CATALOGUE) + 1):
@@ -410,11 +425,20 @@ def test_the_combinators_take_no_plan() -> None:
 def test_a_gate_cap_gives_the_statuses_of_resolve_at_that_gate(
     make_trust: MakeTrust, gate: AnnotationGate, cap: str
 ) -> None:
-    settings = human.Setup(trust=make_trust("validated_real")).settings()
+    """The cap predicts the strict pass at that gate; the lenient pass labels."""
+    settings = dataclasses.replace(
+        human.Setup(trust=make_trust("validated_real")).settings(),
+        enforce_dataset_gate=True,
+    )
     calls = human.calls_of(human_cells())
     free = cs.resolve_human(calls, settings)
     gated = cs.resolve_human(calls, dataclasses.replace(settings, gate=gate))
     assert free.gate.level == "full" and gated.gate.level == cap
+    lenient = cs.resolve_human(
+        calls, dataclasses.replace(settings, gate=gate, enforce_dataset_gate=False)
+    )
+    assert lenient.gate.level == cap
+    assert_same_labels(statuses_of(lenient), statuses_of(free))
     expected = statuses_of(gated)
     after = qc.apply_qc_to_statuses(
         *statuses_of(free),
@@ -481,11 +505,14 @@ def test_a_withheld_level_gives_the_confident_sets_of_resolve(
 def test_a_gate_cap_gives_the_statuses_of_mouse_resolve(
     make_trust: MakeTrust, cap: str
 ) -> None:
+    """The cap predicts the strict pass at the capped gate; lenient labels."""
     cells = [mouse.Cell(), mouse.ASTRO, mouse.Cell(counts=5)]
     verdict = mouse_gate()
-    free = mouse.resolve(cells, make_trust, verdict=verdict)
+    free = mouse.resolve(cells, make_trust, verdict=verdict, enforce=True)
     capped = qc.apply_qc_to_gate(verdict, [outcome("gate_cap", gate_cap=cap)])
-    gated = mouse.resolve(cells, make_trust, verdict=capped)
+    gated = mouse.resolve(cells, make_trust, verdict=capped, enforce=True)
+    lenient = mouse.resolve(cells, make_trust, verdict=capped)
+    assert_same_labels(statuses_of(lenient), statuses_of(free))
     expected = statuses_of(gated)
     after = qc.apply_qc_to_statuses(
         *statuses_of(free),
@@ -773,8 +800,9 @@ def test_the_mouse_gate_records_g1_to_g5_as_its_own_checks() -> None:
         t2_share=0.05,
         spillover_rate=None,
     )
+    # G1's fail rule trips but only warns (mouse_gate.g1_effect = warning).
     assert qc.gate_outcomes(failed) == {
-        "dataset_gate": "fail",
+        "dataset_gate": "warn",
         "registration_g1": "fail",
         "marker_consistency": "not_evaluable",
         "g3_implausibility": "warn",

@@ -168,8 +168,9 @@ process CLUSTERING_SQUIDPY_ANNOTATE_MAP {
     // map_spec: AnnotationReferences.mapSpec(annotation_panel_out) (species,
     // panel status, panel size); bundle_refs: the bundle_ref.json of every
     // bundle the pair x segmentation's required_bundles.json lists, released
-    // by ANNOTATION_BUNDLES once the last one is ready (none for a refused
-    // panel).
+    // by ANNOTATION_BUNDLES once the last one is ready (none for an
+    // unmappable panel; a refused panel with a resolved gene has bundles and
+    // waits for them like any other, always-label plan M2).
     tuple val(pair_id),
         val(segmentation),
         val(map_spec),

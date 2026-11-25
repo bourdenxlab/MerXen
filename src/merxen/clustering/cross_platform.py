@@ -11,13 +11,17 @@ cross-platform statistics and at which level (``pair.cross_platform``):
   (``broad_only``, flagged), and without an intersection run there are none
   (``none``).
 
-RESOLVE builds that record from the panels alone. The scope a consumer
-applies also folds in each sample's dataset gate
-(``samples[<id>].resolution.gate.level``, plan §5.4): a ``broad_only``
-dataset is excluded from supercluster-level cross-platform statistics, so
-it caps the pair at ``broad_only`` (flagged, reason
-``dataset_gate:<sample>:broad_only``), and a ``failed`` gate allows no
-cross-platform statement (``none``, reason ``dataset_gate:<sample>:failed``).
+RESOLVE builds that record from the panels alone. The scope also folds in
+each sample's dataset gate (``samples[<id>].resolution.gate.level``, plan
+§5.4): a ``broad_only`` gate restricts the pair to ``broad_only`` (flagged,
+reason ``dataset_gate:<sample>:broad_only``) and a ``failed`` gate to
+``none`` (reason ``dataset_gate:<sample>:failed``).
+
+Since label table version 2 (always-label plan) these restrictions are
+advisory: they make ``advisory_level`` (with ``reasons`` as what restricts
+it) and the flag, and every statement is made, tagged with them.
+``statistics_level`` is ``none`` only when there is nothing to compare (no
+pair record, no intersection run, no primary run); else ``full``.
 RESOLVE's ``kinds`` / ``omitted_kinds`` say which composition kinds its pair
 statistics compare: a ``per_platform`` pair compares its ``_xpanel`` runs
 without the confident-only kind, which RESOLVE does not resolve.
@@ -90,6 +94,9 @@ class CrossPlatformScope:
             panels, before the dataset gates were folded in (``None``
             without a pair record).
         dataset_gates: ``(sample id, gate level)`` of each sample, sorted.
+        advisory_level: The level the panels and the dataset gates support
+            (what an enforced scope would allow; ``None``: as
+            ``statistics_level``). ``reasons`` say what restricts it.
     """
 
     statistics_level: str
@@ -103,6 +110,7 @@ class CrossPlatformScope:
     omitted_kinds: tuple[str, ...] = field(default_factory=tuple)
     resolve_statistics_level: str | None = None
     dataset_gates: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    advisory_level: str | None = None
 
     def __post_init__(self: CrossPlatformScope) -> None:
         """Check the level.
@@ -110,7 +118,11 @@ class CrossPlatformScope:
         Raises:
             ValueError: On an unknown ``statistics_level``.
         """
-        for level in (self.statistics_level, self.resolve_statistics_level):
+        for level in (
+            self.statistics_level,
+            self.resolve_statistics_level,
+            self.advisory_level,
+        ):
             if level is not None and level not in STATISTICS_LEVELS:
                 raise ValueError(
                     f"cross-platform statistics_level must be one of "
@@ -128,11 +140,19 @@ class CrossPlatformScope:
             ``True`` for any level when ``full``, for the broad class and
             lineage when ``broad_only``, never when ``none``.
         """
-        if self.statistics_level == "full":
-            return True
-        if self.statistics_level == "broad_only":
-            return str(level) in BROAD_STATEMENT_LEVELS
-        return False
+        return _level_allows(self.statistics_level, level)
+
+    def allows_strict(self: CrossPlatformScope, level: str) -> bool:
+        """Return whether the advisory (enforced) scope allows ``level``.
+
+        Args:
+            level: A label level.
+
+        Returns:
+            ``allows`` on ``advisory_level`` (``statistics_level`` when
+            unset): what the scope allowed before label table version 2.
+        """
+        return _level_allows(self.advisory_level or self.statistics_level, level)
 
     def allows_kind(self: CrossPlatformScope, kind: str) -> bool:
         """Return whether a composition kind may be compared across platforms.
@@ -190,7 +210,16 @@ class CrossPlatformScope:
                 payload.get("resolve_statistics_level")
             ),
             dataset_gates=_gate_pairs(payload.get("dataset_gates")),
+            advisory_level=_text_or_none(payload.get("advisory_level")),
         )
+
+
+def _level_allows(statistics_level: str, level: str) -> bool:
+    if statistics_level == "full":
+        return True
+    if statistics_level == "broad_only":
+        return str(level) in BROAD_STATEMENT_LEVELS
+    return False
 
 
 def _text_or_none(value: Any) -> str | None:
@@ -269,11 +298,13 @@ def scope_from_resolve_summary(summary: Mapping[str, Any]) -> CrossPlatformScope
         summary: A parsed ``<pair>_resolve_summary.json``.
 
     Returns:
-        The scope of ``summary["pair"]["cross_platform"]`` with the samples'
-        dataset gates folded in: any ``broad_only`` gate caps the level at
-        ``broad_only`` and any ``failed`` gate sets ``none``, each flagged
-        with reason ``dataset_gate:<sample>:<level>`` (plan §5.4). ``none``
-        with reason ``no_pair_record`` when the pair has no such record (a
+        The scope of ``summary["pair"]["cross_platform"]``: ``full`` unless
+        RESOLVE recorded ``none`` (nothing to compare). Its
+        ``advisory_level`` folds in the samples' dataset gates: any
+        ``broad_only`` gate caps it at ``broad_only`` and any ``failed``
+        gate sets ``none``, each flagged with reason
+        ``dataset_gate:<sample>:<level>`` (plan §5.4). ``none`` with reason
+        ``no_pair_record`` when the pair has no such record (a
         single-platform sample, or a pair with one platform resolved).
     """
     gates = dataset_gate_levels(summary)
@@ -306,8 +337,13 @@ def scope_from_resolve_summary(summary: Mapping[str, Any]) -> CrossPlatformScope
         level = _capped_level(level, cap)
         flag = True
         reasons.append(f"{DATASET_GATE_REASON}:{sample_id}:{gate_level}")
+    # Advisory since label table version 2: every statement is made unless
+    # there is nothing to compare.
+    advisory = level
+    level = "none" if recorded == "none" else "full"
     return CrossPlatformScope(
         statistics_level=level,
+        advisory_level=advisory,
         flag=flag,
         reasons=tuple(reasons),
         panel_mode=_text_or_none(record.get("panel_mode")),

@@ -125,8 +125,8 @@ def test_coverage_rows_record_the_gate_level_and_whether_it_blocks_them(
 ) -> None:
     """A level the gate before QC left unattempted is marked (C15 review F2).
 
-    Its real coverage is 0 by the gate, so the warning (kept: the rule is
-    unchanged) says the shortfall is the gate's, not the simulation's.
+    The warning (kept: the rule is unchanged) says that an enforced gate would
+    not attempt the level; the gate is advisory since label table version 2.
     """
     levels = ["broad", "supercluster", "cluster"]
     if species == "mouse":

@@ -241,6 +241,7 @@ def test_a_failed_g1_is_recorded_from_the_gate_not_reapplied(
         tmp_path / "resolve",
         make_trust,
         registration={SID: RegistrationSignal(density_ratio=1.1, shift_um=0.0)},
+        config=_config(g1_effect="gate_failed"),
     )
     sample = result.samples[SID]
     block = sample.summary["real_qc"]

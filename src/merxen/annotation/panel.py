@@ -600,8 +600,16 @@ class RequiredBundles(_PanelModel):
         segmentation: Segmentation.
         species: Species.
         panel_mode: Resolved panel mode.
-        status: ``"ok"``, or ``"refused"`` when no panel can be annotated.
+        status: ``"ok"``, or ``"refused"`` when no annotation panel is
+            trusted (each one is refused: gene-ID resolution or fewer
+            resolved genes than ``min_mapped_genes``). Advisory since the
+            always-label plan (M2): a refused panel with at least one
+            resolved gene still has its bundles and is mapped; RESOLVE sets
+            the primary's trust to ``refused``.
         reasons: Why panels were refused.
+        unmappable: Annotation panels with no resolved gene: the only panels
+            without a bundle (nothing can be mapped; RESOLVE writes the
+            status ``unmappable``).
         bundles: The required bundles, one per distinct key.
         n_required: ``len(bundles)``, the MAP ``groupKey`` size.
     """
@@ -613,8 +621,13 @@ class RequiredBundles(_PanelModel):
     panel_mode: PanelMode
     status: Literal["ok", "refused"]
     reasons: list[str] = Field(default_factory=list)
+    unmappable: list[str] = Field(default_factory=list)
     bundles: list[RequiredBundle]
     n_required: int
+
+    def has_annotation_bundle(self) -> bool:
+        """Return whether any bundle annotates a panel (something to map)."""
+        return any(bundle.has_use("annotation") for bundle in self.bundles)
 
     @model_validator(mode="after")
     def _check_count(self: RequiredBundles) -> RequiredBundles:
@@ -2762,7 +2775,7 @@ def required_bundles(
     segmentation: str | None = None,
     xplat_sensitivity: str = "geneset_c",
     xplat_sensitivity_segmentations: Sequence[str] = ("proseg_hybrid",),
-    refused_panels: Sequence[str] = (),
+    unmappable_panels: Sequence[str] = (),
 ) -> list[RequiredBundle]:
     """Return the bundles one pair x segmentation needs (plan §3.1, §8.5).
 
@@ -2786,13 +2799,15 @@ def required_bundles(
         segmentation: The segmentation (for the set-c segmentation filter).
         xplat_sensitivity: ``off`` disables the set-c bundle.
         xplat_sensitivity_segmentations: Segmentations with set-c runs.
-        refused_panels: Panel names that get no bundle.
+        unmappable_panels: Panel names that get no bundle: those with no
+            resolved gene. A refused panel with resolved genes keeps its
+            bundles (always-label plan, M2: refusal is advisory).
 
     Returns:
         Distinct bundles (one per key) in a stable order; a bundle serving
         several purposes lists each in ``uses``.
     """
-    refused = set(refused_panels)
+    unmappable = set(unmappable_panels)
     if panel_mode == "intersection":
         annotation_names = ["intersection"]
     elif panel_mode == "per_platform":
@@ -2820,7 +2835,7 @@ def required_bundles(
         spec: AnnotationReferenceSpec, purpose: BundlePurpose, name: str | None
     ) -> None:
         panel_file = panels.get(name) if name is not None else None
-        if name is not None and (panel_file is None or name in refused):
+        if name is not None and (panel_file is None or name in unmappable):
             return
         bundle = RequiredBundle(
             reference_id=spec.reference_id,
@@ -3068,6 +3083,23 @@ def _resolved_by(panel: DeclaredPanel, source: str) -> dict[str, str]:
         for feature in panel.resolution.features
         if feature.gene_id is not None and feature.source == source
     }
+
+
+def _unmappable_panels(built: Mapping[str, AnnotationPanel]) -> list[str]:
+    """Annotation panels with no resolved gene: nothing can be mapped on them."""
+    return sorted(name for name, panel in built.items() if panel.n_genes == 0)
+
+
+def _annotation_panel_names(bundles: Sequence[RequiredBundle]) -> list[str]:
+    """The annotation panels that got a bundle (``purpose == "annotation"``)."""
+    return sorted(
+        {
+            str(use.panel_name)
+            for bundle in bundles
+            for use in bundle.uses
+            if use.purpose == "annotation" and use.panel_name is not None
+        }
+    )
 
 
 def _panel_refusals(
@@ -3334,6 +3366,11 @@ def compute_panel(
         name: PanelFile(panel=panel, file_name=_panel_file_name(name, mode))
         for name, panel in built.items()
     }
+    # Always-label plan, M2: a refused panel is still mapped on the genes
+    # that resolve (the refusal is recorded and RESOLVE turns it into the
+    # primary's trust ``refused``); only a panel without any resolved gene
+    # gets no bundle.
+    unmappable = _unmappable_panels(built)
     bundles = required_bundles(
         panel_file_map,
         references=config.references,
@@ -3342,12 +3379,15 @@ def compute_panel(
         segmentation=segmentation,
         xplat_sensitivity=config.xplat_sensitivity,
         xplat_sensitivity_segmentations=config.xplat_sensitivity_segmentations,
-        refused_panels=list(refused),
+        unmappable_panels=unmappable,
     )
-    annotation_names = [b.panel_name for b in bundles if b.purpose == "annotation"]
-    status: Literal["ok", "refused"] = "ok" if annotation_names else "refused"
+    annotation_names = _annotation_panel_names(bundles)
+    status: Literal["ok", "refused"] = (
+        "ok" if any(name not in refused for name in annotation_names) else "refused"
+    )
     reasons = [f"{name}: {reason}" for name, reason in sorted(refused.items())]
-    if status == "refused":
+    if not any(bundle.has_use("annotation") for bundle in bundles):
+        # Nothing to annotate: no panel-independent bundle either.
         bundles = []
     required = RequiredBundles(
         pair_id=pair_id,
@@ -3356,6 +3396,7 @@ def compute_panel(
         panel_mode=mode,
         status=status,
         reasons=reasons,
+        unmappable=unmappable,
         bundles=bundles,
         n_required=len(bundles),
     )
@@ -3394,10 +3435,12 @@ def compute_panel(
                     else item.panel.panel_family.model_dump(mode="json")
                 ),
                 "refused": refused.get(name),
+                "unmappable": name in unmappable,
                 "family_validation": _family_validation(item.panel, validated),
             }
             for name, item in panel_file_map.items()
         },
+        "unmappable_panels": unmappable,
         "validated_panels": validated.describe(),
         "intersection_only_in": _only_in(declared) if len(declared) == 2 else {},
         "xplat_broad_only": (
@@ -3460,6 +3503,22 @@ def _only_in(panels: Sequence[DeclaredPanel]) -> dict[str, list[str]]:
     }
 
 
+def _without_empty_unmappable(report: dict[str, Any]) -> dict[str, Any]:
+    """Return the panel report without unmappable fields when none applies."""
+    if report.get("unmappable_panels"):
+        return report
+    trimmed = {
+        key: value for key, value in report.items() if key != "unmappable_panels"
+    }
+    if "annotation_panels" not in report:
+        return trimmed
+    trimmed["annotation_panels"] = {
+        name: {key: value for key, value in entry.items() if key != "unmappable"}
+        for name, entry in (report.get("annotation_panels") or {}).items()
+    }
+    return trimmed
+
+
 def _write_panel_outputs(
     output_dir: Path,
     report: dict[str, Any],
@@ -3470,14 +3529,32 @@ def _write_panel_outputs(
     paths: dict[str, Path] = {}
     for name, item in panel_file_map.items():
         paths[name] = item.panel.write(output_dir / item.file_name)
+    # The unmappable fields (always-label plan, M2) are written only when a
+    # panel is unmappable, so the files of every other panel stay byte-for-
+    # byte what they were and MAP (cache "deep" on this directory) stays
+    # cached under -resume.
+    report = _without_empty_unmappable(report)
     report_path = output_dir / PANEL_REPORT_FILE
     report_path.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     paths["report"] = report_path
     required_path = output_dir / REQUIRED_BUNDLES_FILE
     required_path.write_text(
-        json.dumps(required.model_dump(mode="json"), indent=2) + "\n"
+        json.dumps(
+            required.model_dump(
+                mode="json", exclude=None if required.unmappable else {"unmappable"}
+            ),
+            indent=2,
+        )
+        + "\n"
     )
     paths["required"] = required_path
+    if required.reasons:
+        logger.warning(
+            "Refused panel(s), mapped on the genes that resolve unless "
+            "unmappable (%s): %s",
+            ", ".join(required.unmappable) or "none unmappable",
+            "; ".join(required.reasons),
+        )
     logger.info(
         "Panel mode %s; %d annotation panel(s); %d required bundle(s) -> %s",
         report["panel_mode"],
@@ -3559,6 +3636,9 @@ def panel_from_gene_list(
         refused["gene_list"] = f"declared panel refused ({declared.refusal_text()})"
     elif panel.n_genes < panel_config.min_mapped_genes:
         refused["gene_list"] = f"{panel.n_genes} resolved genes < min_mapped_genes"
+    # Always-label plan, M2: a refused gene list still gets its bundles when a
+    # gene resolves, as a map_first pair of that panel is mapped anyway.
+    unmappable = ["gene_list"] if panel.n_genes == 0 else []
     panel_file_map = {"gene_list": PanelFile(panel=panel, file_name=PANEL_GENES_FILE)}
     # A gene list of the seeded set-a family also gets its curated set c, so a
     # prepare-only run builds every bundle a map_first pair of the family
@@ -3588,10 +3668,12 @@ def panel_from_gene_list(
         segmentation=segmentation,
         xplat_sensitivity=config.xplat_sensitivity,
         xplat_sensitivity_segmentations=config.xplat_sensitivity_segmentations,
-        refused_panels=list(refused),
+        unmappable_panels=unmappable,
     )
     status: Literal["ok", "refused"] = "refused" if refused else "ok"
     reasons = [f"{name}: {reason}" for name, reason in refused.items()]
+    if unmappable:
+        bundles = []
     required = RequiredBundles(
         pair_id=pair_id,
         segmentation=segmentation,
@@ -3599,8 +3681,9 @@ def panel_from_gene_list(
         panel_mode="single_sample",
         status=status,
         reasons=reasons,
-        bundles=[] if refused else bundles,
-        n_required=0 if refused else len(bundles),
+        unmappable=unmappable,
+        bundles=bundles,
+        n_required=len(bundles),
     )
     report = {
         "schema_version": PANEL_SCHEMA_VERSION,
@@ -3629,10 +3712,12 @@ def panel_from_gene_list(
                     else item.panel.panel_family.model_dump(mode="json")
                 ),
                 "refused": refused.get("gene_list"),
+                "unmappable": name in unmappable,
                 "family_validation": _family_validation(item.panel, validated),
             }
             for name, item in panel_file_map.items()
         },
+        "unmappable_panels": unmappable,
         "validated_panels": validated.describe(),
         "setc": None if setc_report is None else setc_report.model_dump(mode="json"),
         "setc_skipped": None

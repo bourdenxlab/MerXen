@@ -996,6 +996,11 @@ def _composition_rows(
     return rows
 
 
+# comparison_status of a leaf-level share whose dataset gate is not full: the
+# share is kept and compared (label table version 2), the gate is advisory.
+ADVISORY_LEAF_STATUS: Final = "advisory_gate_not_full"
+
+
 def _gate_level(sample: SampleData) -> str:
     gate = (sample.summary.get("resolution") or {}).get("gate") or {}
     return str(gate.get("level"))
@@ -1226,7 +1231,7 @@ def item_composition(
                     counts >= DEPTH_STRATUM_MIN_COUNTS, cop_mass, 0.0
                 )
         leaf_status = (
-            "comparable" if _gate_level(sample) == "full" else "withheld_for_comparison"
+            "comparable" if _gate_level(sample) == "full" else ADVISORY_LEAF_STATUS
         )
         for region, keep in regions.items():
             for kind, matrix in kinds.items():
@@ -1596,7 +1601,7 @@ def item_composition(
             fine_plot["platform"].astype(str) + " " + fine_plot["kind"].astype(str)
         )
         fine_plot["not_comparable"] = (
-            fine_plot["comparison_status"] == "withheld_for_comparison"
+            fine_plot["comparison_status"] == ADVISORY_LEAF_STATUS
         )
         writer.figure(
             item,
@@ -1611,13 +1616,14 @@ def item_composition(
                 ylabel="share of mass",
                 title="Leaf-level composition (top 25)",
                 hatched="not_comparable",
-                hatched_label="not_attempted_gate: not comparable",
+                hatched_label="dataset gate not full (advisory)",
             ),
             fine_plot,
             "Soft and confident composition at the leaf level (supercluster / "
             "subclass). Hatched: a sample whose dataset gate is not full "
-            "(comparison_status withheld_for_comparison); its leaf-level shares "
-            "are not compared across platforms (plan §5.4).",
+            f"(comparison_status {ADVISORY_LEAF_STATUS}); its leaf-level shares "
+            "are drawn and compared, but an enforced gate would withhold them "
+            "(plan §5.4; advisory since label table version 2).",
         )
         withheld = sorted(
             set(fine.loc[fine["comparison_status"] != "comparable", "sample_id"])
@@ -1626,8 +1632,8 @@ def item_composition(
             item.notes.append(
                 "Leaf-level composition of "
                 + ", ".join(withheld)
-                + " is withheld for comparison (dataset gate not full): drawn "
-                "hatched, not comparable with the other platform."
+                + " rests on a dataset gate that is not full (advisory): drawn "
+                "hatched; an enforced gate would withhold it from comparison."
             )
     writer.table(item, "composition", composition)
     writer.table(item, "mixed_unknown_reasons", pd.DataFrame(reason_rows))

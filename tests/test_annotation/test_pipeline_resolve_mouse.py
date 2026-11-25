@@ -227,6 +227,48 @@ def test_mouse_resolve_writes_valid_labels_gate_and_region_columns(
     assert summary["samples"][SID]["class_corr_floor"]["value"] is None
 
 
+def test_a_refused_mouse_panel_is_mapped_and_keeps_its_labels(
+    tmp_path: Path, mouse_setup: dict[str, Any], make_trust: MakeTrust
+) -> None:
+    # Always-label plan, M2: a refused panel is mapped; RESOLVE keeps the
+    # labels and turns the refusal into the primary's trust refused.
+    _add_profiles(mouse_setup["bundle"].path)
+    map_dir = tmp_path / "map"
+    map_mouse(mouse_setup, map_dir)
+    manifest = load_map_manifest(map_dir / MAP_MANIFEST_NAME)
+    reasons = ["sample: 30 resolved genes < min_mapped_genes 50"]
+    manifest.model_copy(
+        update={
+            "panel_status": "refused",
+            "panel_reasons": reasons,
+            "samples": {
+                sid: record.model_copy(update={"panel_status": "refused"})
+                for sid, record in manifest.samples.items()
+            },
+        }
+    ).write(map_dir / MAP_MANIFEST_NAME)
+
+    result = _resolve(
+        mouse_setup,
+        map_dir,
+        tmp_path / "resolve",
+        make_trust,
+        registration={SID: PASSING},
+    )
+
+    sample = result.samples[SID]
+    labels, _ = read_label_table(sample.labels_path)
+    table = labels["in_table"].to_numpy(bool)
+    assert "confident" in set(labels.loc[table, "ct_class_status"].astype(str))
+    assert (labels["qc_panel_trust"].astype(str) == "refused").all()
+    assert (labels["qc_dataset_level"].astype(str) == "failed").all()
+    strict = labels.loc[table, "ct_class_status_strict"].astype(str)
+    assert set(strict) == {"not_attempted_gate"}
+    assert sample.summary["trust"]["state"] == "refused"
+    codes = {item["code"] for item in sample.summary["trust"]["reasons"]}
+    assert "panel_refused" in codes
+
+
 def test_mouse_resolve_fails_the_gate_on_a_misregistered_section(
     tmp_path: Path, mouse_setup: dict[str, Any], make_trust: MakeTrust
 ) -> None:
@@ -235,20 +277,51 @@ def test_mouse_resolve_fails_the_gate_on_a_misregistered_section(
     map_mouse(mouse_setup, map_dir)
     bad = RegistrationSignal(density_ratio=1.19, shift_um=114.1)
 
+    # By default G1 only warns and the section keeps its labels.
+    kept = _resolve(
+        mouse_setup, map_dir, tmp_path / "kept", make_trust, registration={SID: bad}
+    )
+    kept_gate = kept.samples[SID].summary["mouse_gate"]
+    assert kept_gate["level"] == "full" and kept_gate["warning"]
+    assert kept_gate["signal_status"]["g1"] == "fail"
+    assert not kept.samples[SID].labels["exclude_hard"].all()
+
     result = _resolve(
-        mouse_setup, map_dir, tmp_path / "resolve", make_trust, registration={SID: bad}
+        mouse_setup,
+        map_dir,
+        tmp_path / "resolve",
+        make_trust,
+        registration={SID: bad},
+        config=_config(g1_effect="gate_failed"),
     )
 
+    # The failed gate is advisory: the labels are the warning run's, and the
+    # strict view and the dataset QC columns carry the failure.
     labels = result.samples[SID].labels
+    kept_labels = kept.samples[SID].labels
     table = labels["in_table"].to_numpy(bool)
     for level in ("broad", "class", "nt", "subclass"):
-        assert set(labels.loc[table, f"ct_{level}_status"].astype(str)) == {
+        status = f"ct_{level}_status"
+        assert list(labels[status]) == list(kept_labels[status]), level
+        assert "not_attempted_gate" not in set(labels[status].astype(str))
+        assert set(labels.loc[table, f"{status}_strict"].astype(str)) == {
             "not_attempted_gate"
         }
-    assert labels["exclude_hard"].all()
+    assert labels.loc[table, "ct_broad_name"].notna().all()
+    assert not labels["exclude_hard"].all()
+    assert labels["exclude_hard_strict"].all()
+    assert set(labels["ct_final_level_strict"].astype(str)) == {"none"}
+    assert set(labels["qc_dataset_level"]) == {"failed"}
+    assert set(kept_labels["qc_dataset_level"]) == {"full"}
+    assert set(labels["qc_dataset_max_level"]) == {"none"}
+    (warnings,) = set(labels["qc_dataset_warnings"])
+    assert "g1_registration_fail" in warnings.split(";")
     gate = result.samples[SID].summary["mouse_gate"]
     assert gate["level"] == "failed"
     assert gate["level_reasons"][0].startswith("g1_registration")
+    strict = result.samples[SID].summary["resolution"]["strict"]
+    assert strict["qc_dataset_level"] == "failed"
+    assert set(strict["final_level_counts"]) == {"none"}
 
 
 def test_mouse_resolve_applies_the_corr_floor_to_validated_families_only(
@@ -339,11 +412,16 @@ def test_annotate_resolve_cli_reads_the_registration_check(
     )
 
     assert result.exit_code == 0, result.output
-    assert "gate failed" in result.output
+    # G1's fail rule trips at 1.3 but only warns (mouse_gate.g1_effect).
+    assert "gate failed" not in result.output
     summary = json.loads(
         next((tmp_path / "out").glob("*_resolve_summary.json")).read_text()
     )
-    assert summary["samples"][SID]["mouse_gate"]["signals"]["g1_density_ratio"] == 1.3
+    mouse_gate = summary["samples"][SID]["mouse_gate"]
+    assert mouse_gate["signals"]["g1_density_ratio"] == 1.3
+    assert mouse_gate["signal_status"]["g1"] == "fail"
+    reasons = mouse_gate["warning_reasons"]
+    assert any(reason.startswith("g1_registration:") for reason in reasons)
 
     unknown = CliRunner().invoke(
         cli_main,
@@ -939,8 +1017,10 @@ def test_promotion_by_simulation_never_changes_the_mouse_label_table(
 
     The trust decisions come from ``trust_state`` on the section's panel,
     before and after a gate-P PR lists its family (plan §8.2, §14). The
-    label tables agree on every column except ``ct_<L>_validated``, and the
-    gate level, its reasons and the class correlation floor agree.
+    label tables agree on every column except ``ct_<L>_validated`` and the
+    trust-derived dataset QC columns (``qc_panel_trust`` and the warning
+    tokens a provisional trust adds), and the gate level, its reasons and the
+    class correlation floor agree.
     """
     _add_profiles(mouse_setup["bundle"].path)
     map_dir = tmp_path / "map"
@@ -973,8 +1053,12 @@ def test_promotion_by_simulation_never_changes_the_mouse_label_table(
         column for column in before.labels.columns if column.endswith("_validated")
     ]
     assert validated
+    # The trust-derived dataset QC columns follow the trust state (the
+    # provisional banner's warning token goes with the promotion).
+    trust_columns = ["qc_panel_trust", "qc_dataset_warnings"]
     pd.testing.assert_frame_equal(
-        before.labels.drop(columns=validated), after.labels.drop(columns=validated)
+        before.labels.drop(columns=[*validated, *trust_columns]),
+        after.labels.drop(columns=[*validated, *trust_columns]),
     )
     for key in ("level", "level_reasons"):
         assert before.summary["mouse_gate"][key] == after.summary["mouse_gate"][key]
@@ -987,13 +1071,22 @@ def test_promotion_by_simulation_never_changes_the_mouse_label_table(
         before_trust.state,
         after_trust.state,
     ]
+    before_tokens = set(before.labels["qc_dataset_warnings"].iloc[0].split(";"))
+    after_tokens = set(after.labels["qc_dataset_warnings"].iloc[0].split(";"))
     if constraint == "resolvable":
         assert (before_trust.state, after_trust.state) == ("provisional", "validated")
         assert panels[0].banner and not panels[1].banner
+        assert set(before.labels["qc_panel_trust"]) == {"provisional"}
+        assert set(after.labels["qc_panel_trust"]) == {"validated_simulation"}
+        assert "panel_provisional_warn" in before_tokens - after_tokens
     else:
         assert before_trust.state == after_trust.state
         assert not after.labels[validated].to_numpy(bool).any()
         assert panels[0].banner and panels[1].banner
+        assert list(before.labels["qc_panel_trust"]) == list(
+            after.labels["qc_panel_trust"]
+        )
+        assert before_tokens == after_tokens
 
 
 PROMOTED_DIGESTS: dict[str, str] = {

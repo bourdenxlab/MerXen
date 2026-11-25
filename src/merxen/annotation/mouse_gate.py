@@ -7,10 +7,13 @@ gate's form (§5.4): a **level** (``full``, ``broad_only``, ``failed``) and a
 separate **warning flag** with reasons.
 
 - **G1 registration** (M0a ``segmentation_registration_check``: the QC
-  stage's ``*_registration_qc.json`` or ``*_qc_summary.csv``): failed if
-  the density ratio < 1.5 or the shift against the platform's own
-  segmentation > 5 µm; warning if the ratio < 2.0, or no check was given,
-  or the check skipped.
+  stage's ``*_registration_qc.json`` or ``*_qc_summary.csv``): its fail
+  rule trips when the density ratio < 1.5 or the shift against the
+  platform's own segmentation > 5 µm, and by default
+  (``mouse_gate.g1_effect = warning``) only warns: a sparse dataset whose
+  cells barely stand out from the background trips the ratio without any
+  misregistration. ``g1_effect = gate_failed`` restores the failed level.
+  Warning if the ratio < 2.0, or no check was given, or the check skipped.
 - **G2 marker referee** (class-group marker consistency over
   marker-pseudo-confident cells, marker sets derived per panel): failed
   < 0.70; warning < 0.80 or not evaluable.
@@ -852,7 +855,14 @@ def evaluate_mouse_gate(
                 f"shift {shift:.1f} um > {config.g1_shift_fail_um} um against the "
                 "platform segmentation"
             )
-        if failed:
+        if failed and config.g1_effect == "warning":
+            status["g1"] = SignalStatus.FAIL.value
+            warnings.append(
+                "g1_registration: "
+                + "; ".join(failed)
+                + " (warn-only, mouse_gate.g1_effect = warning)"
+            )
+        elif failed:
             status["g1"] = SignalStatus.FAIL.value
             level = _worse(level, "failed")
             level_reasons.append("g1_registration: " + "; ".join(failed))

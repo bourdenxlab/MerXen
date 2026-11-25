@@ -28,7 +28,7 @@ from merxen.annotation import real_qc as qc
 from merxen.annotation.config import AnnotationConfig, AnnotationGate
 from merxen.annotation.pipeline import read_label_table
 from merxen.annotation.resolvability import LevelMeta
-from merxen.annotation.schema import CellStatus, Columns
+from merxen.annotation.schema import NAMELESS_STATUSES, CellStatus, Columns
 
 from . import test_consensus as human
 from .conftest import FakeMmc, assert_same_emission
@@ -67,33 +67,61 @@ def _free_and_applied(
     settings: cs.HumanResolveSettings,
     outcomes: list[qc.QcOutcome],
     calls: cs.HumanCalls | None = None,
+    *,
+    enforce: bool = False,
 ) -> tuple[cs.HumanResolution, cs.HumanResolution, qc.QcEffects]:
+    """Return the QC-free and the QC-applied resolution, and the effects.
+
+    ``enforce`` resolves both with ``enforce_dataset_gate`` (the strict pass
+    RESOLVE writes as the ``*_strict`` columns); else both are lenient.
+    """
     calls = calls if calls is not None else human.calls_of(human_cells())
     effects = qc.qc_effects(outcomes)
+    settings = dataclasses.replace(settings, enforce_dataset_gate=enforce)
     free = cs.resolve_human(calls, settings)
     applied = cs.resolve_human(calls, dataclasses.replace(settings, qc=effects))
     return free, applied, effects
+
+
+def assert_labels_kept(free: cs.HumanResolution, applied: cs.HumanResolution) -> None:
+    """Assert the lenient QC-applied pass keeps every QC-free label.
+
+    Always label: real-data QC only lowers the advisory gate and
+    ``max_level``; statuses, names and ``exclude_hard`` are the QC-free run's.
+    """
+    assert not free.enforced and not applied.enforced
+    for level, result in free.levels.items():
+        assert list(applied.levels[level].status) == list(result.status), level
+        assert list(applied.levels[level].name) == list(result.name), level
+    assert np.array_equal(
+        applied.flags[Columns.EXCLUDE_HARD], free.flags[Columns.EXCLUDE_HARD]
+    )
 
 
 @pytest.mark.parametrize("cap", ["broad_only", "failed"])
 def test_a_qc_gate_cap_is_applied_in_the_pass(make_trust: MakeTrust, cap: str) -> None:
     """The cap lowers the gate before the leaf levels read it (NR1).
 
-    The statuses are those ``apply_qc_to_statuses`` predicts, the gate names
-    the check, and the emission records are the QC-free run's.
+    In the strict pass the statuses are those ``apply_qc_to_statuses``
+    predicts, the gate names the check, and the emission records are the
+    QC-free run's. The lenient pass keeps every label and records the cap in
+    the advisory gate and ``max_level`` only.
     """
     settings = human.Setup(trust=make_trust("provisional")).settings()
-    free, applied, effects = _free_and_applied(
-        settings,
-        [
-            outcome(
-                "gate_cap",
-                gate_cap=cap,
-                check="marker_consistency",
-                message="consistency 0.5",
-            )
-        ],
-    )
+    outcomes = [
+        outcome(
+            "gate_cap",
+            gate_cap=cap,
+            check="marker_consistency",
+            message="consistency 0.5",
+        )
+    ]
+    lenient_free, lenient, _ = _free_and_applied(settings, outcomes)
+    assert lenient.gate.level == cap
+    assert lenient.max_level == ("nt" if cap == "broad_only" else "none")
+    assert lenient_free.max_level == "supercluster"
+    assert_labels_kept(lenient_free, lenient)
+    free, applied, effects = _free_and_applied(settings, outcomes, enforce=True)
     assert free.gate.level == "full"
     assert applied.gate.level == cap
     assert any(
@@ -152,11 +180,12 @@ def test_a_withheld_level_is_not_emitted_for_the_dataset(
     make_decisions: MakeDecisions,
     human_level_meta: list[LevelMeta],
 ) -> None:
-    """A withheld level's confident cells become not_resolvable in the pass.
+    """A withheld level's confident cells become not_resolvable in the strict pass.
 
     Its derived level (SEA-AD subclass reads the supercluster table) goes
     with it, the confident sets are those ``apply_qc_to_statuses`` predicts,
-    and the emission records stay the QC-free run's.
+    and the emission records stay the QC-free run's. The lenient pass keeps
+    every label.
     """
     settings = human.Setup(
         trust=make_trust("validated_real"),
@@ -164,10 +193,11 @@ def test_a_withheld_level_is_not_emitted_for_the_dataset(
         meta=human_level_meta,
     ).settings()
     for withheld in ("nt", "supercluster"):
-        free, applied, effects = _free_and_applied(
-            settings,
-            [outcome("withhold_level", level=withheld, check="prefilter_spotcheck")],
-        )
+        outcomes = [
+            outcome("withhold_level", level=withheld, check="prefilter_spotcheck")
+        ]
+        assert_labels_kept(*_free_and_applied(settings, outcomes)[:2])
+        free, applied, effects = _free_and_applied(settings, outcomes, enforce=True)
         assert free.levels[withheld].confident.any()
         assert not applied.levels[withheld].confident.any()
         assert set(
@@ -202,7 +232,8 @@ def test_a_level_and_its_parent_withheld_give_the_statuses_of_the_pass(
     supercluster, whose NT is withheld too, becomes ``parent_unresolved``;
     a non-neuron's (its parent is broad) and the SEA-AD subclass (it reads
     the supercluster table, its parent is broad) ``not_resolvable``. Every
-    cell the QC-free run made confident takes the status of the pass.
+    cell the QC-free run made confident takes the status of the strict pass;
+    the lenient pass keeps every label.
     """
     rng = np.random.default_rng(5)
     calls = human.calls_of([*human.random_cells(rng, 120), *human_cells()])
@@ -217,7 +248,10 @@ def test_a_level_and_its_parent_withheld_give_the_statuses_of_the_pass(
     ]
     for cap in (None, "broad_only"):
         capped = [outcome("gate_cap", gate_cap=cap)] if cap is not None else []
-        free, applied, effects = _free_and_applied(settings, [*held, *capped], calls)
+        assert_labels_kept(*_free_and_applied(settings, [*held, *capped], calls)[:2])
+        free, applied, effects = _free_and_applied(
+            settings, [*held, *capped], calls, enforce=True
+        )
         expected = qc.apply_qc_to_statuses(
             *statuses_of(free), effects, in_table=free.in_table, species="human"
         )
@@ -252,8 +286,9 @@ def test_every_effect_combination_only_lowers_in_the_pass(
 
     Gate caps (none, broad_only, failed) x withheld levels (none, nt,
     supercluster, both) x a warning: the gate never rises, the confident sets
-    only shrink and keep their names, the gate level is the worse of the
-    QC-free level and the cap, and the emission records never change.
+    of the strict pass only shrink and keep their names, the gate level is
+    the worse of the QC-free level and the cap, and the emission records
+    never change. The lenient pass keeps every label.
     """
     rng = np.random.default_rng(3)
     calls = human.calls_of([*human.random_cells(rng, 120), *[human.FILLER] * 40])
@@ -263,6 +298,8 @@ def test_every_effect_combination_only_lowers_in_the_pass(
             decisions=make_decisions(),
             meta=human_level_meta,
         ).settings()
+        lenient_free = cs.resolve_human(calls, settings)
+        settings = dataclasses.replace(settings, enforce_dataset_gate=True)
         free = cs.resolve_human(calls, settings)
         before = statuses_of(free)
         caps: tuple[str | None, ...] = (None, "broad_only", "failed")
@@ -280,6 +317,12 @@ def test_every_effect_combination_only_lowers_in_the_pass(
             ]
             effects = qc.qc_effects(outcomes)
             applied = cs.resolve_human(calls, dataclasses.replace(settings, qc=effects))
+            lenient = cs.resolve_human(
+                calls,
+                dataclasses.replace(settings, qc=effects, enforce_dataset_gate=False),
+            )
+            assert_labels_kept(lenient_free, lenient)
+            assert lenient.gate.level == applied.gate.level, (cap, held)
             for level, status in before[0].items():
                 was = status == CONFIDENT
                 now = applied.levels[level].status == CONFIDENT
@@ -828,22 +871,66 @@ def _tables(result: pl.ResolveResult, sample_id: str) -> tuple[pd.DataFrame, Any
     return read_label_table(result.samples[sample_id].labels_path)
 
 
+def is_dataset_qc_column(column: str) -> bool:
+    """Whether a label-table column carries the dataset QC (version 2).
+
+    The ``qc_*`` dataset columns and the ``*_strict`` view are the only ones
+    real-data QC may change; every label column is the QC-free run's.
+    """
+    return column.startswith(Columns.QC_PREFIX) or column.endswith(
+        Columns.STRICT_SUFFIX
+    )
+
+
+def label_columns(labels: pd.DataFrame) -> pd.DataFrame:
+    """Return a label table without its dataset QC columns."""
+    return labels[[column for column in labels if not is_dataset_qc_column(column)]]
+
+
+def strict_view(labels: pd.DataFrame) -> pd.DataFrame:
+    """Return a label table whose level statuses are its strict ones.
+
+    Each ``ct_<L>_status`` takes ``ct_<L>_status_strict``, and a name is
+    blanked where that status carries none, so the table reads as RESOLVE
+    wrote it before label table version 2 (what NR1 compares).
+    """
+    view = label_columns(labels).copy()
+    for column in labels:
+        if not column.endswith(Columns.STRICT_SUFFIX) or not column.startswith("ct_"):
+            continue
+        status_column = column.removesuffix(Columns.STRICT_SUFFIX)
+        if not status_column.endswith("_status"):
+            continue
+        name_column = status_column.removesuffix("_status") + "_name"
+        status = labels[column].astype(str)
+        view[status_column] = status.to_numpy()
+        if name_column in view:
+            nameless = status.isin({str(item) for item in NAMELESS_STATUSES})
+            names = view[name_column].astype(object)
+            view[name_column] = names.where(~nameless.to_numpy(), None)
+    return view
+
+
 def _assert_nr1(
     free: pl.ResolveResult, applied: pl.ResolveResult
 ) -> dict[str, list[str]]:
     """Return NR1's violations per sample (QC-free vs QC-applied run).
 
-    As C18 compares them: the label tables, the provenance, the resolve
-    summary's gate records and the applied run's QC effects.
+    As C18 compares them: the strict view of the label tables (the label
+    columns themselves must be equal: always label), the provenance, the
+    resolve summary's gate records and the applied run's QC effects.
     """
     problems = {}
     for sample_id in free.samples:
         free_labels, free_prov = _tables(free, sample_id)
         applied_labels, applied_prov = _tables(applied, sample_id)
+        pd.testing.assert_frame_equal(
+            label_columns(free_labels), label_columns(applied_labels)
+        )
         applied_summary = applied.samples[sample_id].summary
         problems[sample_id] = qc.downgrade_only_violations(
-            free_labels,
-            applied_labels,
+            strict_view(free_labels),
+            strict_view(applied_labels),
             species="human",
             free_provenance=free_prov,
             applied_provenance=applied_prov,
@@ -913,12 +1000,16 @@ def test_the_qc_free_run_records_the_qc_as_disabled(
         _, provenance = _tables(free, sample_id)
         assert provenance.panel is not None
         assert provenance.panel.real_data_qc is None
-    # NR1 on a run whose QC lowers nothing: identical labels and records.
+    # NR1 on a run whose QC lowers nothing: identical labels and records;
+    # the QC's warnings join the dataset's warning tokens only.
     assert _assert_nr1(free, applied) == {sample: [] for sample in free.samples}
     for sample_id in free.samples:
         free_labels, _ = _tables(free, sample_id)
         applied_labels, _ = _tables(applied, sample_id)
-        pd.testing.assert_frame_equal(free_labels, applied_labels)
+        pd.testing.assert_frame_equal(
+            free_labels.drop(columns=Columns.QC_DATASET_WARNINGS),
+            applied_labels.drop(columns=Columns.QC_DATASET_WARNINGS),
+        )
 
 
 def _low_referee(value: float) -> Callable[..., qc.MarkerConsistencySignal]:
@@ -936,7 +1027,11 @@ def test_a_low_marker_referee_caps_a_new_family_and_nr1_holds(
     make_trust: MakeTrust,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Below 0.70 the gate is broad_only (D18 (a)); NR1 holds against QC-free."""
+    """Below 0.70 the advisory gate is broad_only (D18 (a)); NR1 holds.
+
+    The labels are the QC-free run's; the cap shows in the dataset QC
+    columns and in the strict view, whose leaf level is unattempted.
+    """
     setup = _setup(tmp_path, fake_mmc)
     free = _run(setup, make_trust, "free", enabled=False)
     monkeypatch.setattr(pl, "human_marker_referee_signal", _low_referee(0.5))
@@ -959,11 +1054,28 @@ def test_a_low_marker_referee_caps_a_new_family_and_nr1_holds(
         assert provenance.panel is not None and free_prov.panel is not None
         assert provenance.panel.panel_trust == free_prov.panel.panel_trust
         table = labels[Columns.IN_TABLE].to_numpy(bool)
-        leaf = labels[Columns.level("supercluster", "status")].astype(str)
-        assert set(leaf[table]) == {"not_attempted_gate"}
-        for level in ("lineage", "broad", "nt"):
+        leaf = Columns.level("supercluster", "status")
+        assert set(labels[Columns.strict_status("supercluster")][table]) == {
+            "not_attempted_gate"
+        }
+        assert "not_attempted_gate" not in set(labels[leaf].astype(str))
+        assert labels[Columns.level("supercluster", "name")][table].notna().any()
+        for level in ("lineage", "broad", "nt", "supercluster"):
             column = Columns.level(level, "status")
             assert list(labels[column]) == list(free_labels[column])
+        for level in ("lineage", "broad", "nt"):
+            assert list(labels[Columns.strict_status(level)]) == list(
+                free_labels[Columns.strict_status(level)]
+            )
+        assert set(labels[Columns.QC_DATASET_LEVEL]) == {"broad_only"}
+        assert set(free_labels[Columns.QC_DATASET_LEVEL]) == {"full"}
+        assert set(labels[Columns.QC_DATASET_MAX_LEVEL]) == {"nt"}
+        assert set(free_labels[Columns.QC_DATASET_MAX_LEVEL]) == {"supercluster"}
+        (warnings,) = set(labels[Columns.QC_DATASET_WARNINGS])
+        assert "real_qc_marker_consistency_fail" in warnings.split(";")
+        assert "supercluster" not in set(
+            labels[Columns.CT_FINAL_LEVEL_STRICT][table].astype(str)
+        )
     # Trust and every margin are unchanged: the threshold records are equal.
     for sample_id in applied.samples:
         _, provenance = _tables(applied, sample_id)
@@ -996,7 +1108,16 @@ def test_a_seeded_family_only_warns_on_a_low_referee(
         assert record["downgrades"] == []
         labels, provenance = _tables(applied, sample_id)
         free_labels, _ = _tables(free, sample_id)
-        pd.testing.assert_frame_equal(labels, free_labels)
+        # A warning joins the dataset's warning tokens only.
+        pd.testing.assert_frame_equal(
+            labels.drop(columns=Columns.QC_DATASET_WARNINGS),
+            free_labels.drop(columns=Columns.QC_DATASET_WARNINGS),
+        )
+        (warnings,) = set(labels[Columns.QC_DATASET_WARNINGS])
+        assert any(
+            token.startswith("real_qc_marker_consistency") and token.endswith("_warn")
+            for token in warnings.split(";")
+        )
         assert provenance.panel is not None
         assert provenance.panel.real_data_qc is not None
         assert provenance.panel.real_data_qc.warn_only is True
@@ -1166,14 +1287,18 @@ def test_paired_concordance_withholds_the_pairs_supercluster_statistics(
         ]
         note = qc.WARN_ONLY_NOTE.format(species="human")
         assert (note in reason) is seeded
+    # Every statement is made (always label); the withheld supercluster
+    # statistics show in the advisory (strict) scope.
+    assert scope.allows("supercluster")
     if seeded:
         assert record["statistics_level"] == "full"
         assert pl.PAIRED_CONCORDANCE_REASON not in record["reasons"]
-        assert scope.allows("supercluster")
+        assert scope.allows_strict("supercluster")
     else:
         assert record["statistics_level"] == "broad_only" and record["flag"]
         assert pl.PAIRED_CONCORDANCE_REASON in record["reasons"]
-        assert scope.allows("broad") and not scope.allows("supercluster")
+        assert scope.allows_strict("broad")
+        assert not scope.allows_strict("supercluster")
 
 
 def test_an_unpaired_section_records_paired_concordance_not_applicable(
@@ -1214,7 +1339,12 @@ def test_an_unpaired_section_records_paired_concordance_not_applicable(
 def test_registration_g1_follows_its_configured_effect_in_resolve(
     tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust, effect: str
 ) -> None:
-    """NR9 (D23 (b)): warn-only by default; gate_failed fails the dataset."""
+    """NR9 (D23 (b)): warn-only by default; gate_failed fails the dataset.
+
+    A failed dataset keeps its labels (and the flags read from them); the
+    failure shows in the advisory gate, the dataset QC columns and the
+    strict view.
+    """
     from merxen.annotation.mouse_gate import RegistrationSignal
 
     setup = _setup(tmp_path, fake_mmc)
@@ -1232,27 +1362,44 @@ def test_registration_g1_follows_its_configured_effect_in_resolve(
     gate = sample.summary["resolution"]["gate"]
     labels, _ = _tables(applied, "PX_MERSCOPE")
     free_labels, _ = _tables(free, "PX_MERSCOPE")
+    (warnings,) = set(labels[Columns.QC_DATASET_WARNINGS])
     if effect == "warning":
         assert record["per_check"]["registration_g1"] == "warn"
         assert gate["level"] == "full"
-        pd.testing.assert_frame_equal(labels, free_labels)
+        pd.testing.assert_frame_equal(
+            labels.drop(columns=Columns.QC_DATASET_WARNINGS),
+            free_labels.drop(columns=Columns.QC_DATASET_WARNINGS),
+        )
+        assert any(
+            token.startswith("real_qc_registration_g1") and token.endswith("_warn")
+            for token in warnings.split(";")
+        )
     else:
         assert record["per_check"]["registration_g1"] == "fail"
         assert gate["level"] == "failed"
         table = labels[Columns.IN_TABLE].to_numpy(bool)
         for level in ("lineage", "broad", "nt", "supercluster"):
-            status = labels[Columns.level(level, "status")].astype(str)
-            assert set(status[table]) == {"not_attempted_gate"}
-        assert labels[Columns.EXCLUDE_HARD][table].all()
-        # The flags are recomputed on the second pass: their rates' basis is
-        # the confident broad calls, of which a failed gate leaves none.
+            column = Columns.level(level, "status")
+            assert list(labels[column]) == list(free_labels[column])
+            strict = labels[Columns.strict_status(level)].astype(str)
+            assert set(strict[table]) == {"not_attempted_gate"}
+        assert labels[Columns.level("broad", "name")][table].notna().all()
+        assert list(labels[Columns.EXCLUDE_HARD]) == list(
+            free_labels[Columns.EXCLUDE_HARD]
+        )
+        assert not labels[Columns.EXCLUDE_HARD][table].all()
+        assert labels[Columns.EXCLUDE_HARD_STRICT].all()
+        assert set(labels[Columns.QC_DATASET_LEVEL]) == {"failed"}
+        assert set(labels[Columns.QC_DATASET_MAX_LEVEL]) == {"none"}
+        assert set(labels[Columns.CT_FINAL_LEVEL_STRICT].astype(str)) == {"none"}
+        assert "real_qc_registration_g1_fail" in warnings.split(";")
+        assert sample.summary["resolution"]["strict"]["qc_dataset_level"] == "failed"
+        # The flags read the cells' own labels, which the gate no longer
+        # removes: their rates' basis is the QC-free run's.
         free_strata = free.samples["PX_MERSCOPE"].summary["flags"]["strata"]
         strata = sample.summary["flags"]["strata"]
         assert any(stratum["n_basis"] > 0 for stratum in free_strata)
-        assert strata and all(stratum["n_basis"] == 0 for stratum in strata)
-        _, provenance = _tables(applied, "PX_MERSCOPE")
-        assert provenance.flags is not None
-        assert not provenance.flags.realised_rates
+        assert strata == free_strata
     other = applied.samples["PX_XENIUM"].summary["real_qc"]["per_check"]
     assert other["registration_g1"] == "not_evaluable"
     assert _assert_nr1(free, applied) == {sample: [] for sample in free.samples}
@@ -1425,9 +1572,10 @@ def test_a_withheld_level_in_resolve_is_not_emitted_and_nr1_holds(
     """A withhold outcome (the prefilter spot check's effect) in RESOLVE.
 
     RESOLVE has no spot-check input yet, so the outcome is planted on the QC
-    result. The second pass withholds supercluster and the SEA-AD subclass
+    result. The strict pass withholds supercluster and the SEA-AD subclass
     that reads its table, the levels above keep their statuses, the gate keeps
-    its level and names the check among its warnings, and NR1 holds.
+    its level and names the check among its warnings, and NR1 holds. The
+    labels are the QC-free run's.
     """
     setup = _setup(tmp_path, fake_mmc)
     free = _run(setup, make_trust, "free", enabled=False)
@@ -1461,14 +1609,17 @@ def test_a_withheld_level_in_resolve_is_not_emitted_and_nr1_holds(
         labels, _ = _tables(applied, sample_id)
         free_labels, _ = _tables(free, sample_id)
         for level in ("supercluster", "seaad_subclass"):
-            column = Columns.level(level, "status")
+            column = Columns.strict_status(level)
             was = free_labels[column].astype(str).to_numpy() == CONFIDENT
             now = labels[column].astype(str).to_numpy()
             assert was.any(), level
             assert set(now[was]) == {CellStatus.NOT_RESOLVABLE.value}, level
+            label = Columns.level(level, "status")
+            assert list(labels[label]) == list(free_labels[label])
         for level in ("lineage", "broad", "nt"):
-            column = Columns.level(level, "status")
+            column = Columns.strict_status(level)
             assert list(labels[column]) == list(free_labels[column])
+        assert set(labels[Columns.QC_DATASET_MAX_LEVEL]) == {"nt"}
 
 
 def _label_confident(labels: pd.DataFrame, level: str, table: np.ndarray) -> np.ndarray:
@@ -1617,11 +1768,12 @@ def test_coverage_rows_record_the_gate_that_blocks_their_level(
 ) -> None:
     """NR8 under a ``broad_only`` gate before QC (C15 review F2).
 
-    The gate leaves the leaf levels unattempted, so their real coverage is 0
-    by the gate, not by the simulation. Each coverage row records the gate
-    level and whether it blocks the row's level, and a warning at a blocked
-    level says the shortfall is the gate's. The warning rule is unchanged:
-    dropping those warnings would be a loosening (CHECK K6 rule 4).
+    Each coverage row records the (advisory) gate level and whether an
+    enforced gate would block the row's level, and a warning at a blocked
+    level says so. The warning rule is unchanged: dropping those warnings
+    would be a loosening (CHECK K6 rule 4). Since label table version 2 the
+    gate no longer removes the leaf labels, so the leaf levels' real coverage
+    is the cells' own, not 0 by the gate.
     """
     from .test_resolve_v7 import _human_v7_config, write_human_tables
 
@@ -1644,14 +1796,14 @@ def test_coverage_rows_record_the_gate_that_blocks_their_level(
             level in blocked_levels for level in coverage["level"]
         ]
         blocked_rows = coverage[coverage["gate_blocked"].astype(bool)]
-        assert len(blocked_rows) and (blocked_rows["real_coverage"] == 0).all()
+        assert len(blocked_rows) and (blocked_rows["real_coverage"] > 0).any()
         for item in record["outcomes"]:
             if item["check"] != "coverage_vs_simulation" or not item["fired"]:
                 continue
             blocked = item["level"] in blocked_levels
             assert item["details"]["gate_level"] == "broad_only"
             assert item["details"]["gate_blocked"] is blocked
-            assert ("this shortfall is the gate's" in item["message"]) is blocked
+            assert ("an enforced gate would not attempt" in item["message"]) is blocked
             assert ("dataset gate before QC is broad_only" in item["message"]) is (
                 blocked
             )
@@ -1879,7 +2031,7 @@ def test_nr1_holds_on_a_version_7_bundle_with_a_gate_cap(
         assert sample.summary["resolution"]["gate"]["level"] == "broad_only"
         labels, provenance = _tables(applied, sample_id)
         free_labels, free_prov = _tables(free, sample_id)
-        column = Columns.level("supercluster", "status")
+        column = Columns.strict_status("supercluster")
         lowered |= bool(
             (
                 (free_labels[column].astype(str) == CONFIDENT)

@@ -9,9 +9,11 @@
  * released as soon as its last bundle is ready: pairs with different panels,
  * set-c panels (3 bundles for a same-panel human pair on proseg_hybrid) or
  * per_platform pairs (5 bundles) never wait for each other's bundles. A
- * pair x segmentation whose panels are refused (no bundle) is released at
- * once with no refs; one whose PREP failed is dropped, as any failed task
- * drops its branch under errorStrategy "ignore".
+ * refused panel with a resolved gene has its bundles like any other
+ * (always-label plan, M2); a pair x segmentation whose panels are
+ * unmappable (no resolved gene, no bundle) is released at once with no refs;
+ * one whose PREP failed is dropped, as any failed task drops its branch
+ * under errorStrategy "ignore".
  *
  * Entry points:
  * - ANNOTATION_PREPARE_ONLY: --annotation_prepare_only (main.nf hook H10),
@@ -61,7 +63,8 @@ workflow ANNOTATION_BUNDLES {
             tuple(branchKey.toString(), bundleKeys, bundleRefs)
         }
 
-    // Refused panels need no bundle: release those branches at once.
+    // Unmappable panels (no resolved gene) have no bundle: release those
+    // branches at once.
     without_bundles_ch = required_ch
         .filter { _pairId, _segmentation, _panelDir, required -> !required.bundles }
         .map { pairId, segmentation, _panelDir, _required ->

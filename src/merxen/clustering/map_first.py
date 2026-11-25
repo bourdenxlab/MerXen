@@ -9,9 +9,12 @@ resolutions (D-H1, OD-B1):
   cells confident only at lineage, ``Mixed/Unknown``; mouse: WMB class);
 - **leaf** = ``ct_leaf`` (the confident WHB supercluster / WMB subclass,
   else ``unresolved``). Human branches under ``min_branch_cells`` keep their
-  leaves; mouse classes under it get ``unresolved`` leaves. Broad-only
-  datasets (gate ``broad_only`` / ``failed``) and ``broad_only`` /
-  ``refused`` panels have ``unresolved`` leaves only;
+  leaves; mouse classes under it get ``unresolved`` leaves. Since label
+  table version 2 the dataset gate and the panel trust are advisory: a
+  ``broad_only`` / ``failed`` gate or a ``broad_only`` / ``refused`` panel
+  keeps its leaves, and is recorded in ``uns`` and the ``qc_*`` columns
+  (only a version-1 table's per-cell ``not_attempted_gate`` leaves a cell
+  ``unresolved``);
 - ``hierarchical_cluster`` = ``"<branch>:<leaf>"``: categorical, never null,
   one value per (branch, leaf) pair.
 
@@ -139,7 +142,8 @@ NEURON_SPLIT_LABELS: Final[tuple[str, ...]] = (
     UNRESOLVED_LABEL,
     NOT_NEURON,
 )
-# A gate level or panel trust state under which no leaf may be emitted.
+# A gate level or panel trust state under which an enforced gate would emit
+# no leaf (advisory since label table version 2: ``would_suppress_leaves``).
 LEAF_SUPPRESSING_GATE_LEVELS: Final[frozenset[str]] = frozenset(
     {"broad_only", "failed"}
 )
@@ -147,10 +151,10 @@ LEAF_SUPPRESSING_PANEL_TRUST: Final[frozenset[str]] = frozenset(
     {"broad_only", "refused"}
 )
 UNASSIGNED_BRANCH_SUFFIX: Final = f"/{UNRESOLVED_LABEL}"
-# Label-table columns copied into ``obs`` besides ``ct_*`` and ``flag_*``
-# (§4.5: flags and their continuous companions, exclude_hard,
-# discovery_caution, depth_bin). Nothing else is copied, so ``soft_*``,
-# ``mmc_*`` and ``ll_*`` stay in the parquet.
+# Label-table columns copied into ``obs`` besides ``ct_*``, ``flag_*`` and
+# ``qc_*`` (§4.5: flags and their continuous companions, exclude_hard and its
+# strict view, discovery_caution, depth_bin). Nothing else is copied, so
+# ``soft_*``, ``mmc_*`` and ``ll_*`` stay in the parquet.
 OBS_COMPANION_COLUMNS: Final[tuple[str, ...]] = (
     Columns.CONTAMINATION_SCORE,
     Columns.NEG_COUNTS,
@@ -160,6 +164,7 @@ OBS_COMPANION_COLUMNS: Final[tuple[str, ...]] = (
     Columns.MICROGLIA_STAT,
     Columns.MICROGLIA_WEIGHT,
     Columns.EXCLUDE_HARD,
+    Columns.EXCLUDE_HARD_STRICT,
     Columns.DISCOVERY_CAUTION,
     Columns.DEPTH_BIN,
 )
@@ -466,7 +471,10 @@ def load_label_inputs(
 
 @dataclass(frozen=True)
 class LeafGate:
-    """Dataset-level reasons that leave a section without leaves.
+    """The dataset gate and panel trust of a section (advisory).
+
+    Since label table version 2 they never remove a leaf; they are recorded
+    in ``uns`` (``gate_level``, ``panel_trust``, ``leaves_advisory_broad_only``).
 
     Attributes:
         gate_level: Dataset gate level (``full`` / ``broad_only`` /
@@ -482,8 +490,8 @@ class LeafGate:
     reasons: tuple[str, ...] = ()
 
     @property
-    def suppresses_leaves(self) -> bool:
-        """Return whether the gate or the panel trust forbids leaves."""
+    def would_suppress_leaves(self) -> bool:
+        """Return whether an enforced gate or panel trust would forbid leaves."""
         return (self.gate_level in LEAF_SUPPRESSING_GATE_LEVELS) or (
             self.panel_trust in LEAF_SUPPRESSING_PANEL_TRUST
         )
@@ -697,9 +705,8 @@ def build_hierarchy_columns(
     Args:
         labels: Label-table rows of the table cells (``in_table``), in the
             order of the section's ``obs``; the index is kept.
-        gate: Dataset gate and panel trust; ``broad_only`` / ``failed``
-            gates and ``broad_only`` / ``refused`` panels force every leaf
-            to ``unresolved``.
+        gate: Dataset gate and panel trust, advisory: logged and recorded,
+            leaves are kept (label table version 2).
         min_branch_cells: Branch size below which mouse classes lose their
             leaves (human branches keep them; §6.2).
         root_markers: Root markers of the primary lookup
@@ -736,11 +743,17 @@ def build_hierarchy_columns(
     )
     resolved = leaf != UNRESOLVED_LABEL
 
-    # Dataset-level suppression: the gate or the panel trust, or RESOLVE's
-    # per-cell record of it (not_attempted_gate at the leaf level).
+    # Dataset-level suppression: only a version-1 label table's per-cell
+    # record (not_attempted_gate at the leaf level). The gate and the panel
+    # trust are advisory since version 2 (always-label plan).
     gate_rows = leaf_status == CellStatus.NOT_ATTEMPTED_GATE.value
-    if leaf_gate.suppresses_leaves:
-        gate_rows = np.ones(n_cells, dtype=bool)
+    if leaf_gate.would_suppress_leaves:
+        logger.info(
+            "Gate %s, panel trust %s: an enforced gate would leave no leaves; "
+            "leaves are kept (advisory, see the qc_* columns)",
+            leaf_gate.gate_level,
+            leaf_gate.panel_trust,
+        )
     n_suppressed = int((gate_rows & resolved).sum())
     if n_suppressed:
         logger.warning(
@@ -898,9 +911,11 @@ def build_hierarchy_columns(
 def label_obs_columns(columns: Iterable[str]) -> list[str]:
     """Return the label-table columns that go into the clustered ``obs``.
 
-    §4.5: all ``ct_*`` (never ``soft_*``), the ``flag_*`` columns and their
-    continuous companions, ``exclude_hard``, ``discovery_caution`` and
-    ``depth_bin``. ``mmc_*`` and ``ll_*`` stay in the parquet.
+    §4.5: all ``ct_*`` (never ``soft_*``; with the ``*_strict`` statuses),
+    the ``flag_*`` columns and their continuous companions, the dataset
+    ``qc_*`` columns, ``exclude_hard`` and ``exclude_hard_strict``,
+    ``discovery_caution`` and ``depth_bin``. ``mmc_*`` and ``ll_*`` stay in
+    the parquet.
 
     Args:
         columns: Label-table columns, in table order.
@@ -914,6 +929,7 @@ def label_obs_columns(columns: Iterable[str]) -> list[str]:
         if (
             name.startswith("ct_")
             or name.startswith("flag_")
+            or name.startswith(Columns.QC_PREFIX)
             or name in OBS_COMPANION_COLUMNS
         ):
             selected.append(name)
@@ -1277,7 +1293,8 @@ def _record_uns(
             "gate_level": gate.gate_level or MISSING_TEXT,
             "gate_warning": bool(gate.gate_warning),
             "panel_trust": gate.panel_trust or MISSING_TEXT,
-            "leaves_suppressed": bool(gate.suppresses_leaves),
+            "leaves_suppressed": bool(hierarchy.n_leaves_suppressed_gate),
+            "leaves_advisory_broad_only": bool(gate.would_suppress_leaves),
             "n_branches": int(summary["n_branches"]),
             "n_leaves": int(summary["n_leaves"]),
             "n_hierarchical_clusters": int(summary["n_hierarchical_clusters"]),

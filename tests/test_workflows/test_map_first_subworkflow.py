@@ -12,13 +12,15 @@ installed, a harness runs ``CLUSTERING_MAP_FIRST`` with ``-stub-run`` (PREP,
 MAP, RESOLVE and COMPUTE_CPU write stub outputs; ANNOTATE_PANEL runs for real
 on synthetic prepared H5ADs, or, for the fixture branches, a fake ``merxen
 annotation-panel`` writes hand-written ``required_bundles.json`` files:
-same-panel set c, ``per_platform``, mouse, refused, a failing and a slow
+same-panel set c, ``per_platform``, mouse, unmappable, a failing and a slow
 PREP, a large panel) and checks that:
 
 * MAP starts for a pair x segmentation only after every PREP it needs has
   completed, and never waits for another branch's bundles;
 * MAP receives exactly the bundle refs its ``required_bundles.json`` lists
-  (none for a refused panel), and a failed PREP drops only its branches;
+  (none for an unmappable panel; a refused panel with resolved genes waits
+  for its bundles like any other, always-label plan M2), and a failed PREP
+  drops only its branches;
 * RESOLVE runs once per pair x segmentation, after its own MAP, on that
   MAP's output, the same bundle refs, the pair's ALIGN files and the
   branch's registration checks from the QC stage (read with
@@ -36,12 +38,12 @@ PREP, a large panel) and checks that:
   re-runs every RESOLVE and no MAP or ANNOTATE_PANEL, and COMPUTE_CPU, whose
   staged labels changed; a RESOLVE re-run with byte-identical outputs leaves
   COMPUTE_CPU cached;
-* the end-of-run summary (hook H6) lists the branch whose PREP failed and the
-  refused panels.
+* the end-of-run summary (hook H6) lists the branch whose PREP failed, the
+  refused panels and the unmappable one.
 
 A second run executes the real MAP and RESOLVE scripts (no ``-stub-run``)
 with a fake ``merxen`` that records their command lines and environments;
-for the refused panel both run the real commands (slow). ``main.nf`` calls
+for the unmappable panel both run the real commands (slow). ``main.nf`` calls
 ``CLUSTERING_MAP_FIRST`` only in map_first runs (hook H5).
 """
 
@@ -115,7 +117,8 @@ FIXTURE_BRANCHES: dict[
         ("seaad_mr_panel", "human", "secondary", "annotation", "x", 480),
         ("whb_frontal_supc_clus", "human", "primary", "intersection_xpanel", "i", 300),
     ],
-    # A refused panel: no bundle; MAP runs at once and records the refusal.
+    # An unmappable panel (no resolved gene): no bundle; MAP runs at once and
+    # records it (always-label plan, M2).
     ("F4", "proseg_hybrid"): [],
     # A mouse section: the WMB panel bundle and the panel-independent shares.
     ("F5", "original_seg"): [
@@ -291,7 +294,8 @@ def _write_fixture_panels(root: Path) -> Path:
                     "status": "ok" if bundles else "refused",
                     "reasons": []
                     if bundles
-                    else ["intersection: 12 resolved genes < 50"],
+                    else ["intersection: 0 resolved genes < 50"],
+                    "unmappable": [] if bundles else ["intersection"],
                     "bundles": entries,
                     "n_required": len(entries),
                 }
@@ -304,8 +308,8 @@ FAKE_MERXEN = """#!__PYTHON__
 # Test double. annotation-panel: copy the fixture panel of a fixture branch,
 # else run the real command. annotate / annotate-resolve (real MAP and
 # RESOLVE scripts only): record the command line and environment; run the
-# real command for a refused panel (MAP writes the refusal, RESOLVE the
-# statuses) and write a minimal output otherwise.
+# real command for an unmappable panel (MAP records it, RESOLVE writes the
+# status unmappable) and write a minimal output otherwise.
 # annotation-reference-prep (real PREP script only): write a bundle ref.
 import json
 import os
@@ -374,7 +378,7 @@ elif command in ("annotate", "annotate-resolve"):
     required = json.loads(
         (Path(value("--panel-dir")) / "required_bundles.json").read_text()
     )
-    if required["status"] != "refused":
+    if required["bundles"]:
         out = Path(value("--out"))
         out.mkdir(parents=True)
         name = "map_manifest.json" if command == "annotate" else "fake_summary.json"
@@ -820,6 +824,9 @@ def _refs(paths: list[str]) -> list[tuple[str, str | None]]:
 EXPECTED_BRANCHES = {
     branch for branch in FIXTURE_BRANCHES if branch != ("F7", "proseg_hybrid")
 } | set(REAL_BRANCHES)
+# Branches whose required_bundles.json status is refused: F4 (unmappable, no
+# bundle) and PFEW (30 genes < min_mapped_genes, mapped since M2).
+REFUSED_PANEL_BRANCHES = {("F4", "proseg_hybrid"), ("PFEW", "proseg_hybrid")}
 
 
 # --------------------------------------------------------------------------
@@ -901,29 +908,45 @@ def test_map_receives_exactly_its_bundle_refs(harness: dict[str, Any]) -> None:
     assert len(maps[("F3", "proseg_hybrid")]["refs"]) == 5
     assert len(maps[("F5", "original_seg")]["refs"]) == 2
     assert len(maps[("PSAME", "proseg_hybrid")]["refs"]) == 2
+    # Always-label plan, M2: PFEW's refused panel waits for its bundles too.
+    assert len(maps[("PFEW", "proseg_hybrid")]["refs"]) == 2
 
 
 @pytest.mark.nextflow
 @needs_nextflow
-def test_a_refused_panel_is_mapped_at_once_without_bundles(
+def test_an_unmappable_panel_is_mapped_at_once_without_bundles(
     harness: dict[str, Any],
 ) -> None:
     maps = {(row["pair_id"], row["segmentation"]): row for row in harness["maps"]}
-    for branch in (("F4", "proseg_hybrid"), ("PFEW", "proseg_hybrid")):
-        assert maps[branch]["refs"] == []
-        manifest = json.loads(
-            (Path(maps[branch]["map_dir"]) / "map_manifest.json").read_text()
-        )
-        assert manifest["panel_status"] == "refused"
-        assert manifest["panel_reasons"]
-    # The real ANNOTATE_PANEL refused PFEW's 30-gene panel (< min_mapped_genes).
-    assert "min_mapped_genes" in " ".join(
-        json.loads(
-            (
-                Path(maps[("PFEW", "proseg_hybrid")]["map_dir"]) / "map_manifest.json"
-            ).read_text()
-        )["panel_reasons"]
+    branch = ("F4", "proseg_hybrid")
+    assert maps[branch]["refs"] == []
+    manifest = json.loads(
+        (Path(maps[branch]["map_dir"]) / "map_manifest.json").read_text()
     )
+    assert manifest["panel_status"] == "refused"
+    assert manifest["panel_reasons"]
+
+
+@pytest.mark.nextflow
+@needs_nextflow
+def test_a_refused_panel_with_resolved_genes_gets_its_bundles(
+    harness: dict[str, Any],
+) -> None:
+    """Always-label plan, M2: the refusal is recorded, the panel is mapped."""
+    maps = {(row["pair_id"], row["segmentation"]): row for row in harness["maps"]}
+    branch = ("PFEW", "proseg_hybrid")
+    assert _refs(maps[branch]["refs"]) == _branch_bundles(harness, branch)
+    assert {reference_id for reference_id, _ in _branch_bundles(harness, branch)} == {
+        "whb_frontal_supc_clus",
+        "seaad_mr_panel",
+    }
+    manifest = json.loads(
+        (Path(maps[branch]["map_dir"]) / "map_manifest.json").read_text()
+    )
+    assert manifest["panel_status"] == "refused"
+    # The real ANNOTATE_PANEL refused PFEW's 30-gene panel (< min_mapped_genes).
+    assert "min_mapped_genes" in " ".join(manifest["panel_reasons"])
+    assert manifest["n_required"] == 2
 
 
 @pytest.mark.nextflow
@@ -1079,7 +1102,9 @@ def test_resolve_reads_its_own_map_output_and_bundle_refs(
         if registered:
             option = arguments.index("--registration-qc-dir")
             assert arguments[option + 1] == "resolve_inputs/registration_qc"
-        assert summary["panel_status"] == ("refused" if not expected else "ok")
+        assert summary["panel_status"] == (
+            "refused" if branch in REFUSED_PANEL_BRANCHES else "ok"
+        )
         config = AnnotationConfig.model_validate_json(
             (output / "annotation_config.json").read_text()
         )
@@ -1340,8 +1365,12 @@ def test_end_of_run_summary_lists_the_failed_pair_and_refused_panels(
     failed = lines["failed annotations (no label tables; see the failed tasks above)"]
     assert failed == "F7:proseg_hybrid"
     assert lines["failed hierarchies (label tables, no COMPUTE_CPU output)"] == "none"
-    refused = lines["refused panels"]
+    refused = lines["refused panels (labels kept, untrusted)"]
     assert "F4:proseg_hybrid" in refused and "PFEW:proseg_hybrid" in refused
+    unmappable = lines[
+        "unmappable panels (no resolved gene; nothing mapped, status unmappable)"
+    ]
+    assert unmappable == "F4:proseg_hybrid (intersection)"
 
 
 # --------------------------------------------------------------------------
@@ -1984,13 +2013,13 @@ def test_map_first_registration_falls_back_to_the_published_checks(
 @pytest.mark.nextflow
 @needs_nextflow
 def test_map_runs_the_real_script_with_the_pipeline_arguments(tmp_path: Path) -> None:
-    """Without -stub-run: ctm check, env, arguments, reuse and a real refusal.
+    """Without -stub-run: ctm check, env, arguments, reuse and an unmappable panel.
 
     A fake ``merxen`` writes fixture panels and bundle refs and records what
-    ``annotate`` and ``annotate-resolve`` receive; for the refused panel it
-    runs the real ``merxen annotate``, which writes the refusal without
-    mapping, and the real ``merxen annotate-resolve``, which writes the
-    statuses of every object.
+    ``annotate`` and ``annotate-resolve`` receive; for the unmappable panel
+    it runs the real ``merxen annotate``, which records it without mapping,
+    and the real ``merxen annotate-resolve``, which writes the status
+    unmappable of every table cell.
     """
     fixtures = _write_fixture_panels(tmp_path)
     env = _fake_merxen_env(tmp_path, fixtures)
@@ -2083,13 +2112,14 @@ def test_map_runs_the_real_script_with_the_pipeline_arguments(tmp_path: Path) ->
         "wmb_panel",
         "wmb_region_share",
     ]
-    # The refused panel ran the real command: a refusal manifest, no mapping.
+    # The unmappable panel ran the real command: a manifest, no mapping.
     refused = json.loads(
         (
             Path(maps[("F4", "proseg_hybrid")]["map_dir"]) / "map_manifest.json"
         ).read_text()
     )
     assert refused["panel_status"] == "refused"
+    assert refused["unmappable_panels"] == ["intersection"]
     assert refused["samples"] == {}
     assert refused["min_counts"] == 10
     assert records[("F4", "proseg_hybrid")]["refs"] == []
@@ -2160,10 +2190,12 @@ def test_map_runs_the_real_script_with_the_pipeline_arguments(tmp_path: Path) ->
             (Path(labels[branch]["resolve_dir"]) / "annotation_config.json").read_text()
         )
         assert config.species == ("mouse" if branch[0] == "F5" else "human")
-    # The refused panel ran the real RESOLVE: statuses only, gate failed.
+    # The unmappable panel ran the real RESOLVE: statuses unmappable, the
+    # advisory gate failed, and the run did not fail.
     refused_out = Path(labels[("F4", "proseg_hybrid")]["resolve_dir"])
     summary = json.loads((refused_out / "F4_resolve_summary.json").read_text())
     assert summary["panel_status"] == "refused"
+    assert summary["unmappable_panels"] == ["intersection"]
     assert set(summary["samples"]) == {"F4_MERSCOPE", "F4_XENIUM"}
     for sample_id, sample in summary["samples"].items():
         assert sample["resolution"]["gate"]["level"] == "failed", sample_id

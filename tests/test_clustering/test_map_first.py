@@ -293,9 +293,10 @@ def _broad_only_section(species: str, *, gate_level: str = "broad_only") -> Sect
 
 @pytest.mark.parametrize("species", ["human", "mouse"])
 @pytest.mark.parametrize("gate_level", ["broad_only", "failed"])
-def test_broad_only_datasets_have_unresolved_leaves(
+def test_version_1_broad_only_tables_have_unresolved_leaves(
     species: str, gate_level: str, tmp_path: Path
 ) -> None:
+    """A version-1 table's per-cell not_attempted_gate still leaves no leaf."""
     section = _broad_only_section(species, gate_level=gate_level)
     clustered, result = _run(section, tmp_path)
     obs = clustered.obs
@@ -303,50 +304,55 @@ def test_broad_only_datasets_have_unresolved_leaves(
     assert obs[HIERARCHICAL_CLUSTER_KEY].astype(str).str.endswith(":unresolved").all()
     statuses = set(obs[SUBCLUSTER_STATUS_KEY].astype(str))
     assert statuses == {"dataset_broad_only", "unassigned"}
-    assert result.hierarchy.gate.suppresses_leaves
+    assert result.hierarchy.gate.would_suppress_leaves
     uns = clustered.uns[HIERARCHICAL_UNS_KEY]
     assert uns["gate_level"] == gate_level
-    assert bool(uns["leaves_suppressed"]) is True
+    assert bool(uns["leaves_advisory_broad_only"]) is True
     assert uns["n_leaves"] == 0
 
 
 @pytest.mark.parametrize("species", ["human", "mouse"])
-def test_broad_only_gate_suppresses_leaves_even_if_the_parquet_has_them(
+def test_a_broad_only_gate_keeps_the_leaves_of_the_parquet(
     species: str, tmp_path: Path
 ) -> None:
+    """The dataset gate is advisory since label table version 2."""
     section = make_section(species)
     gate = make_provenance(species, gate_level="broad_only")
     clustered, result = _run(section, tmp_path, provenance=gate)
-    assert (clustered.obs[SUBCLUSTER_LABEL_KEY].astype(str) == UNRESOLVED_LABEL).all()
-    confident_leaves = int(
-        (section.labels[Columns.CT_LEAF].astype(str) != UNRESOLVED_LABEL).sum()
+    leaves = clustered.obs[SUBCLUSTER_LABEL_KEY].astype(str)
+    assert (leaves != UNRESOLVED_LABEL).any()
+    assert result.hierarchy.n_leaves_suppressed_gate == 0
+    assert result.hierarchy.gate.would_suppress_leaves
+    uns = clustered.uns[HIERARCHICAL_UNS_KEY]
+    assert bool(uns["leaves_suppressed"]) is False
+    assert bool(uns["leaves_advisory_broad_only"]) is True
+    assert "dataset_broad_only" not in set(
+        clustered.obs[SUBCLUSTER_STATUS_KEY].astype(str)
     )
-    assert result.hierarchy.n_leaves_suppressed_gate == confident_leaves > 0
 
 
 @pytest.mark.parametrize("trust", ["broad_only", "refused"])
 @pytest.mark.parametrize("species", ["human", "mouse"])
-def test_broad_only_and_refused_panels_have_unresolved_leaves(
+def test_broad_only_and_refused_panels_keep_their_leaves(
     species: str, trust: str, tmp_path: Path
 ) -> None:
+    """The panel trust is advisory since label table version 2."""
     section = make_section(species)
     panel = make_provenance(species, panel_trust=trust)
     clustered, result = _run(section, tmp_path, provenance=panel)
     obs = clustered.obs
-    assert (obs[SUBCLUSTER_LABEL_KEY].astype(str) == UNRESOLVED_LABEL).all()
-    assert set(obs[SUBCLUSTER_STATUS_KEY].astype(str)) <= {
-        "dataset_broad_only",
-        "unassigned",
-    }
+    assert (obs[SUBCLUSTER_LABEL_KEY].astype(str) != UNRESOLVED_LABEL).any()
+    assert "dataset_broad_only" not in set(obs[SUBCLUSTER_STATUS_KEY].astype(str))
     assert clustered.uns[HIERARCHICAL_UNS_KEY]["panel_trust"] == trust
     assert result.hierarchy.gate.panel_trust == trust
+    assert result.hierarchy.gate.would_suppress_leaves
 
 
 def test_provisional_panels_and_full_gates_keep_leaves(tmp_path: Path) -> None:
     section = make_section("human")
     provisional = make_provenance("human", panel_trust="provisional")
     clustered, result = _run(section, tmp_path, provenance=provisional)
-    assert not result.hierarchy.gate.suppresses_leaves
+    assert not result.hierarchy.gate.would_suppress_leaves
     assert (clustered.obs[SUBCLUSTER_LABEL_KEY].astype(str) != UNRESOLVED_LABEL).any()
 
 
@@ -634,10 +640,12 @@ def test_gate_from_provenance_takes_the_stricter_level() -> None:
     assert gate.gate_level == "broad_only"
     assert gate.gate_warning is True
     assert gate.reasons == ("frac_ge30: A < 0.3",)
-    assert gate.suppresses_leaves
-    assert not LeafGate.from_provenance(None).suppresses_leaves
-    assert not LeafGate(gate_level="full", panel_trust="provisional").suppresses_leaves
-    assert LeafGate(gate_level="full", panel_trust="refused").suppresses_leaves
+    assert gate.would_suppress_leaves
+    assert not LeafGate.from_provenance(None).would_suppress_leaves
+    assert not LeafGate(
+        gate_level="full", panel_trust="provisional"
+    ).would_suppress_leaves
+    assert LeafGate(gate_level="full", panel_trust="refused").would_suppress_leaves
 
 
 @pytest.mark.parametrize(
@@ -701,7 +709,9 @@ def test_load_label_inputs_reads_the_resolve_outputs(tmp_path: Path) -> None:
         plots=False,
         stability=False,
     )
-    assert (clustered.obs[SUBCLUSTER_LABEL_KEY].astype(str) == UNRESOLVED_LABEL).all()
+    # The manifest's broad_only gate is advisory: the leaves are kept.
+    assert (clustered.obs[SUBCLUSTER_LABEL_KEY].astype(str) != UNRESOLVED_LABEL).any()
+    assert clustered.uns[HIERARCHICAL_UNS_KEY]["gate_level"] == "broad_only"
 
 
 def test_mouse_hierarchy_uses_class_branches() -> None:

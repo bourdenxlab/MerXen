@@ -39,7 +39,12 @@ from merxen.annotation.pipeline import (
     annotate_resolve,
     read_label_table,
 )
-from merxen.annotation.schema import CellStatus, Columns, validate_label_table
+from merxen.annotation.schema import (
+    LABEL_TABLE_VERSION,
+    CellStatus,
+    Columns,
+    validate_label_table,
+)
 
 from .conftest import MOUSE_SID, FakeMmc, map_mouse
 from .test_pipeline_resolve import _config as _human_config
@@ -1165,11 +1170,81 @@ def _with_golden_release(record: dict[str, Any]) -> dict[str, Any]:
     return {**record, "merxen_version": GOLDEN_MERXEN_VERSION}
 
 
+# Label table version 2 (always-label plan) adds the dataset QC columns and
+# the strict view to the label table, the strict block to each sample's
+# resolve summary, and bumps the label-table version the provenance and the
+# summaries record. The digests are of version 1: these additions are left
+# out and the version is reset. The scenarios' gates are full, so the labels
+# themselves are unchanged and their strict view equals them
+# (``_assert_strict_view_is_the_labels``).
+# M2 of the plan adds the pair summary's ``panel_reasons`` and
+# ``unmappable_panels`` (refused panels are mapped).
+LABEL_TABLE_V2_SUMMARY_KEYS: frozenset[str] = frozenset(
+    {"strict", "panel_reasons", "unmappable_panels"}
+)
+
+
+def _is_label_table_v2_column(column: str) -> bool:
+    """Whether a label-table column is one label table version 2 adds."""
+    return column.startswith(Columns.QC_PREFIX) or column.endswith(
+        Columns.STRICT_SUFFIX
+    )
+
+
+def _without_label_table_v2(payload: Any) -> Any:
+    """Return a JSON payload as label table version 1 wrote it."""
+    if isinstance(payload, Mapping):
+        record: dict[str, Any] = {}
+        for key, value in payload.items():
+            if key in LABEL_TABLE_V2_SUMMARY_KEYS:
+                continue
+            if key == "label_table_version" and value == LABEL_TABLE_VERSION:
+                value = 1
+            record[key] = _without_label_table_v2(value)
+        return record
+    if isinstance(payload, list):
+        return [_without_label_table_v2(value) for value in payload]
+    return payload
+
+
+def _assert_strict_view_is_the_labels(labels: pd.DataFrame, gate_level: str) -> None:
+    """Assert a label table's strict view equals its labels (an unblocking gate).
+
+    Args:
+        labels: A version-2 label table.
+        gate_level: The sample's (advisory) gate level from its summary.
+    """
+    levels = [
+        column.removeprefix("ct_").removesuffix("_status_strict")
+        for column in labels
+        if column.startswith("ct_") and column.endswith("_status_strict")
+    ]
+    assert levels
+    for level in levels:
+        status = Columns.level(level, "status")
+        assert list(labels[Columns.strict_status(level)].astype(str)) == list(
+            labels[status].astype(str)
+        ), level
+    for strict, column in (
+        (Columns.CT_FINAL_LEVEL_STRICT, Columns.CT_FINAL_LEVEL),
+        (Columns.CT_FINAL_NAME_STRICT, Columns.CT_FINAL_NAME),
+        (Columns.EXCLUDE_HARD_STRICT, Columns.EXCLUDE_HARD),
+    ):
+        assert list(labels[strict].astype(object)) == list(
+            labels[column].astype(object)
+        ), column
+    assert set(labels[Columns.QC_DATASET_LEVEL].astype(str)) == {gate_level}
+
+
 def _v6_digests(result: ResolveResult, root: Path) -> dict[str, str]:
     """Return the digests of a RESOLVE result that version 6 must keep."""
 
     def scrub(payload: Any) -> str:
-        text = json.dumps(_without_volatile(payload), sort_keys=True, default=str)
+        text = json.dumps(
+            _without_volatile(_without_label_table_v2(payload)),
+            sort_keys=True,
+            default=str,
+        )
         return text.replace(str(root), "<tmp>")
 
     digests: dict[str, str] = {}
@@ -1177,6 +1252,9 @@ def _v6_digests(result: ResolveResult, root: Path) -> dict[str, str]:
         sample = result.samples[sample_id]
         labels, provenance = read_label_table(sample.labels_path)
         labels = labels.drop(columns=[NEW_FLAG_COLUMN], errors="ignore")
+        labels = labels.drop(
+            columns=[column for column in labels if _is_label_table_v2_column(column)]
+        )
         digests[f"{sample_id}/labels"] = _digest(_canonical_table(labels))
         digests[f"{sample_id}/provenance"] = _digest(
             scrub(
@@ -1277,6 +1355,14 @@ def test_version_6_resolve_outputs_are_unchanged_but_for_the_null_flag(
     assert Columns.FLAG_NONNEURONAL_HIGH_DEPTH == NEW_FLAG_COLUMN
     for sample_id, sample in result.samples.items():
         labels, provenance = read_label_table(sample.labels_path)
+        gate = (
+            sample.summary["mouse_gate"]
+            if scenario.startswith("mouse")
+            else sample.summary["resolution"]["gate"]
+        )
+        gate_level = gate["level"]
+        assert gate_level == "full"
+        _assert_strict_view_is_the_labels(labels, gate_level)
         flag = labels[Columns.FLAG_NONNEURONAL_HIGH_DEPTH]
         assert str(flag.dtype) == "boolean" and flag.isna().all()
         assert "resolvability_v7" not in sample.summary
@@ -1311,6 +1397,9 @@ def test_version_6_resolve_outputs_are_unchanged_but_for_the_null_flag(
         assert sample.summary["real_qc"]["effects"]["gate_cap"] is None
         labels, _ = read_label_table(sample.labels_path)
         labels = labels.drop(columns=[NEW_FLAG_COLUMN])
+        labels = labels.drop(
+            columns=[column for column in labels if _is_label_table_v2_column(column)]
+        )
         golden = V6_GOLDEN[scenario][f"{sample_id}/labels"]
         assert _digest(_canonical_table(labels)) == golden
 

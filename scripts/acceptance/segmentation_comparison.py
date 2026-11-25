@@ -231,6 +231,7 @@ STATUSES: Final[tuple[str, ...]] = (
     "method_disagree",
     "not_attempted_gate",
     "not_applicable",
+    "unmappable",
 )
 CONFIDENT: Final = "confident"
 # The table-cell threshold (clustering min_counts; MAP's in_table).
@@ -603,12 +604,40 @@ def locations_from(args: argparse.Namespace) -> Locations:
     )
 
 
+STRICT_SUFFIX: Final = "_strict"
+
+
 def read_labels(path: Path, columns: Sequence[str] | None = None) -> pd.DataFrame:
-    """Read a label table (``cell_id`` as str)."""
+    """Read a label table (``cell_id`` as str) in its strict view.
+
+    The comparison replicates results scored under the enforced dataset gate
+    (label table version 1). A version-2 table keeps every label and holds
+    that outcome in its ``*_strict`` columns, so each ``<column>_strict``
+    replaces ``<column>`` (``ct_<L>_status``, ``ct_final_level``,
+    ``ct_final_name``, ``exclude_hard``); a version-1 table is read as is.
+
+    Args:
+        path: The label table.
+        columns: Columns to read (their strict variants are added when the
+            table has them); ``None`` reads every column.
+
+    Returns:
+        The labels.
+    """
     import pyarrow.parquet as pq
 
-    frame = pq.read_table(path, columns=None if columns is None else list(columns))
-    labels = frame.to_pandas()
+    present = set(pq.read_schema(path).names)
+    wanted = None
+    if columns is not None:
+        wanted = list(columns) + [
+            f"{name}{STRICT_SUFFIX}"
+            for name in columns
+            if f"{name}{STRICT_SUFFIX}" in present
+        ]
+    labels = pq.read_table(path, columns=wanted).to_pandas()
+    for name in [str(column) for column in labels.columns]:
+        if name.endswith(STRICT_SUFFIX):
+            labels[name.removesuffix(STRICT_SUFFIX)] = labels.pop(name)
     labels["cell_id"] = labels["cell_id"].astype(str)
     return labels
 

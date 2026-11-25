@@ -8,9 +8,12 @@
  * segmentation's own n_required. CLUSTERING_SQUIDPY_ANNOTATE_MAP therefore
  * starts as soon as the last bundle its required_bundles.json lists is
  * ready: pairs with different panels, set c or per_platform panels never
- * wait for each other, a refused panel is mapped at once with no bundle
- * (MAP records the refusal), and a pair x segmentation whose PREP failed is
- * dropped, as any failed task drops its branch under errorStrategy "ignore".
+ * wait for each other, a refused panel with a resolved gene waits for its
+ * bundles and is mapped like any other (always-label plan, M2: the refusal
+ * is recorded and RESOLVE sets the trust refused), an unmappable panel (no
+ * resolved gene) is released at once with no bundle (MAP records it), and a
+ * pair x segmentation whose PREP failed is dropped, as any failed task drops
+ * its branch under errorStrategy "ignore".
  *
  * CLUSTERING_ANNOTATE (M4) runs CLUSTERING_SQUIDPY_ANNOTATE_RESOLVE on each
  * pair x segmentation once its own MAP has finished (plan §3.4), with the

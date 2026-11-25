@@ -358,14 +358,35 @@ def test_niches_are_comparable_across_platforms_only_on_the_mender_state() -> No
     assert cross_platform_comparability(hierarchical, full) == {
         "cross_platform_comparable": False,
         "cross_platform_comparable_reasons": ["state_key:hierarchical_cluster"],
+        "cross_platform_advisory_reasons": [],
     }
     assert cross_platform_comparability(mender_state, full) == {
         "cross_platform_comparable": True,
         "cross_platform_comparable_reasons": [],
+        "cross_platform_advisory_reasons": [],
     }
+    # A version-1 scope that restricts the pair keeps it incomparable.
     assert cross_platform_comparability(mender_state, broad)[
         "cross_platform_comparable_reasons"
     ] == ["cross_platform:broad_only"]
+    # An advisory restriction (label table version 2) keeps the niches
+    # comparable and records why an enforced scope would not.
+    advisory = {
+        "cross_platform": {
+            "statistics_level": "full",
+            "advisory_level": "broad_only",
+            "flag": True,
+            "reasons": ["dataset_gate:S1:broad_only"],
+        }
+    }
+    assert cross_platform_comparability(mender_state, advisory) == {
+        "cross_platform_comparable": True,
+        "cross_platform_comparable_reasons": [],
+        "cross_platform_advisory_reasons": [
+            "cross_platform:broad_only",
+            "dataset_gate:S1:broad_only",
+        ],
+    }
     assert cross_platform_comparability(mender_state, None)[
         "cross_platform_comparable_reasons"
     ] == ["cross_platform:no_record"]

@@ -3165,7 +3165,7 @@ def runPreflightChecks(row, settings, params) {
     if (errors) {
         throw new IllegalArgumentException(
             "Preflight checks failed for sample ${settings.pair_id} " +
-            "(selected stages: ${settings.selected_stages.join(' -> ')}):\n" +
+            "(selected stages: ${AnnotationSettings.loggedStages(settings).join(' -> ')}):\n" +
             errors.collect { errorMessage -> " - ${errorMessage}" }.join("\n")
         )
     }
@@ -4357,10 +4357,14 @@ workflow {
             "required clustering segmentations=" +
             "${settings.required_clustering_segmentations.join(', ')}; " +
             "GASTON segmentations=${settings.gaston_segmentations.join(', ')}; " +
-            "selected stages=${settings.selected_stages.join(' -> ')}"
+            "selected stages=${AnnotationSettings.loggedStages(settings).join(' -> ')}"
         )
         settings.setting_notes.each { note ->
             log.info("Sample ${settings.pair_id}: ${note}")
+        }
+        def mapMyCellsSkipWarning = AnnotationSettings.mapMyCellsSkipWarning(settings)
+        if (mapMyCellsSkipWarning) {
+            log.warn(mapMyCellsSkipWarning)
         }
         tuple(settings.pair_id, row, settings)
     }

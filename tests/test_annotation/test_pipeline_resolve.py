@@ -804,37 +804,90 @@ def test_the_panel_provenance_without_the_panel_file_keeps_the_trust_fields(
         assert stored is not None and stored.panel == record
 
 
-def test_a_refused_panel_writes_statuses_only(
+def test_a_refused_panel_is_mapped_and_keeps_its_labels(
     tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
 ) -> None:
+    # Always-label plan, M2: MAP maps a refused panel on the genes that
+    # resolve; RESOLVE keeps the labels, the primary's trust is refused (even
+    # over the family's validated trust) and the strict view blocks them.
     setup = _setup(tmp_path, fake_mmc)
     manifest = pl.load_map_manifest(setup.map_dir / MAP_MANIFEST_NAME)
+    reasons = ["intersection: declared merscope panel refused (species_mismatch)"]
     refused = manifest.model_copy(
         update={
-            "samples": {},
             "panel_status": "refused",
-            "panel_reasons": ["intersection: species_mismatch"],
+            "panel_reasons": reasons,
+            "samples": {
+                sample_id: record.model_copy(update={"panel_status": "refused"})
+                for sample_id, record in manifest.samples.items()
+            },
         }
     )
     refused.write(setup.map_dir / MAP_MANIFEST_NAME)
+    result = _resolve(setup, make_trust, "refused_out")
+    assert result.summary["panel_reasons"] == reasons
+    assert result.summary["unmappable_panels"] == []
+    for sample in result.samples.values():
+        labels = sample.labels
+        table = labels[Columns.IN_TABLE].to_numpy(bool)
+        broad = labels[Columns.level("broad", "status")].astype(str)[table]
+        assert CellStatus.CONFIDENT.value in set(broad)
+        assert labels.loc[table, Columns.level("broad", "name")].notna().any()
+        assert (labels[Columns.QC_PANEL_TRUST].astype(str) == "refused").all()
+        assert (labels[Columns.QC_DATASET_LEVEL].astype(str) == "failed").all()
+        for level in ("lineage", "broad", "nt", "supercluster"):
+            strict = labels[Columns.strict_status(level)].astype(str)[table]
+            assert set(strict) == {CellStatus.NOT_ATTEMPTED_GATE.value}, level
+        # The refused SEA-AD second vote is written but stays out of the vote.
+        assert labels.loc[table, "mmc_seaad_Subclass_name"].notna().all()
+        assert sample.summary["trust"]["state"] == "refused"
+        codes = {item["code"] for item in sample.summary["trust"]["reasons"]}
+        assert "panel_refused" in codes
+        assert sample.summary["resolution"]["gate"]["level"] == "failed"
+        assert sample.provenance.panel is not None
+        assert sample.provenance.panel.panel_trust == "refused"
+        assert sample.provenance.consensus is not None
+        # The refused SEA-AD second vote leaves WHB alone in the vote.
+        assert sample.provenance.consensus.degraded_mode == "whb_only"
+
+
+def test_an_unmappable_panel_writes_unmappable_statuses(
+    tmp_path: Path, fake_mmc: FakeMmc, make_trust: MakeTrust
+) -> None:
+    # A panel with no resolved gene is the one case without labels (M2): MAP
+    # mapped nothing and RESOLVE writes the status unmappable without failing.
+    setup = _setup(tmp_path, fake_mmc)
+    manifest = pl.load_map_manifest(setup.map_dir / MAP_MANIFEST_NAME)
+    unmappable = manifest.model_copy(
+        update={
+            "samples": {},
+            "panel_status": "refused",
+            "panel_reasons": ["intersection: 0 resolved genes < min_mapped_genes 50"],
+            "unmappable_panels": ["intersection"],
+        }
+    )
+    unmappable.write(setup.map_dir / MAP_MANIFEST_NAME)
     with pytest.raises(ResolveError, match="prepared inputs"):
         annotate_resolve(setup.map_dir, setup.config, output_dir=tmp_path / "x")
     result = annotate_resolve(
         setup.map_dir,
         setup.config,
-        output_dir=tmp_path / "refused_out",
+        output_dir=tmp_path / "unmappable_out",
         samples=setup.samples,
         n_bootstrap=10,
     )
+    assert result.summary["unmappable_panels"] == ["intersection"]
     for sample in result.samples.values():
         labels = sample.labels
         table = labels[Columns.IN_TABLE].to_numpy(bool)
         for level in ("lineage", "broad", "nt", "supercluster", "seaad_subclass"):
             status = labels[Columns.level(level, "status")].astype(str)
-            assert set(status[table]) == {CellStatus.NOT_ATTEMPTED_GATE.value}
-        assert labels[Columns.EXCLUDE_HARD].all()
+            assert set(status[table]) == {CellStatus.UNMAPPABLE.value}, level
         assert (labels[Columns.CT_FINAL_LEVEL].astype(str) == "none").all()
+        assert (labels[Columns.QC_PANEL_TRUST].astype(str) == "refused").all()
         assert sample.summary["resolution"]["gate"]["level"] == "failed"
+        codes = {item["code"] for item in sample.summary["trust"]["reasons"]}
+        assert codes == {"panel_unmappable"}
         assert sample.provenance.panel is not None
         assert sample.provenance.panel.panel_trust == "refused"
         assert sample.provenance.consensus is not None

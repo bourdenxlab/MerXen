@@ -46,8 +46,10 @@ EXCLUDE_FROM_FEATURES_POLICY: Final = "exclude_from_features"
 # neighbourhood feature. Written only under "exclude_from_features", so legacy
 # portable tables are unchanged; mender_compute.IN_FEATURES_COLUMN mirrors it.
 IN_FEATURES_COLUMN: Final = "in_features"
-# Status of a map_first MENDER run whose states are all unassigned (a refused
-# panel, a failed gate): a data-quality outcome, not an error (plan §3.1).
+# Status of a map_first MENDER run whose states are all unassigned (a panel
+# nothing could be mapped with; since label table version 2 a refused panel
+# or a failed gate keeps its labels): a data-quality outcome, not an error
+# (plan §3.1).
 # PREPARE records it, COMPUTE / FINALIZE / IMPORT write documented outputs
 # without domains and import nothing; mender_compute.SKIPPED_STATUS and
 # AnnotationRunRecord.MENDER_SKIPPED_STATUS mirror it.
@@ -228,7 +230,7 @@ def skip_reasons(
     """Return why a MENDER run has no feature to compute niches from.
 
     Under ``exclude_from_features`` a table whose states are all unassigned
-    (a refused panel or a failed gate labels every cell ``Mixed/Unknown``)
+    (an unmappable panel labels every cell ``Mixed/Unknown``)
     leaves MENDER without a neighbourhood feature. That is a data-quality
     outcome, so the run is recorded as ``skipped_no_assigned_state`` with
     documented outputs instead of failing (plan §3.1).
@@ -271,9 +273,13 @@ def cross_platform_comparability(
         annotation: ``downstream_annotation_summary`` of the clustered table.
 
     Returns:
-        ``cross_platform_comparable`` and ``cross_platform_comparable_reasons``.
+        ``cross_platform_comparable`` and ``cross_platform_comparable_reasons``,
+        and ``cross_platform_advisory_reasons``: what restricts the pair's
+        advisory scope at the state level (label table version 2: the dataset
+        gates and panel restrictions no longer make a pair incomparable).
     """
     reasons: list[str] = []
+    advisory: list[str] = []
     if config.cell_state_key != CROSS_DATASET_STATE_KEY:
         reasons.append(f"state_key:{config.cell_state_key}")
     payload = None if annotation is None else annotation.get("cross_platform")
@@ -283,9 +289,15 @@ def cross_platform_comparability(
         scope = CrossPlatformScope.from_dict(payload)
         if not scope.allows(CROSS_DATASET_STATE_LEVEL):
             reasons.append(f"cross_platform:{scope.statistics_level}")
+        if not scope.allows_strict(CROSS_DATASET_STATE_LEVEL):
+            advisory = [
+                f"cross_platform:{scope.advisory_level or scope.statistics_level}",
+                *(str(reason) for reason in scope.reasons),
+            ]
     return {
         "cross_platform_comparable": not reasons,
         "cross_platform_comparable_reasons": reasons,
+        "cross_platform_advisory_reasons": advisory,
     }
 
 
